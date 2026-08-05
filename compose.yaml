@@ -1,0 +1,21 @@
+services:
+  # Production-style: build the static bundle, serve via nginx
+  web:
+    build: .
+    ports:
+      - "8090:80"
+
+  # Dev with HMR: docker compose up dev
+  dev:
+    image: node:26-alpine
+    profiles: [dev]
+    working_dir: /app
+    volumes:
+      - .:/app
+      - node_modules:/app/node_modules
+    command: sh -c "npm ci && npm run dev -- --host 0.0.0.0"
+    ports:
+      - "5173:5173"
+
+volumes:
+  node_modules:

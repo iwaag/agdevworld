@@ -1,0 +1,98 @@
+export type ClusterStatus = 'converged' | 'converging' | 'drifting' | 'unknown'
+
+interface DriftTargetRef {
+  kind: string
+  slug?: string | null
+  name?: string | null
+  id?: string | null
+}
+
+interface DriftDiff {
+  code: string
+}
+
+interface DriftTarget {
+  target: DriftTargetRef
+  status: ClusterStatus
+  diffs: DriftDiff[]
+}
+
+export interface DriftEnvelope {
+  schema: 'nctl.drift.v1'
+  ok: boolean
+  data: {
+    targets: DriftTarget[]
+    summary: Record<string, number>
+  }
+}
+
+export interface NodePanelModel {
+  id: string
+  name: string
+  status: ClusterStatus
+}
+
+const NOT_CONFIRMED_CODES = new Set([
+  'missing_actual_node',
+  'realized_device_missing',
+  'no_realized_object',
+  'waiting_for_manual_initial_access',
+])
+
+function isObject(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object'
+}
+
+function isClusterStatus(value: unknown): value is ClusterStatus {
+  return ['converged', 'converging', 'drifting', 'unknown'].includes(String(value))
+}
+
+export function parseDriftEnvelope(value: unknown): DriftEnvelope {
+  if (!isObject(value) || value.schema !== 'nctl.drift.v1' || typeof value.ok !== 'boolean') {
+    throw new Error('Cluster snapshot is not an nctl.drift.v1 envelope')
+  }
+  if (!isObject(value.data) || !Array.isArray(value.data.targets) || !isObject(value.data.summary)) {
+    throw new Error('Cluster snapshot data is malformed')
+  }
+
+  for (const entry of value.data.targets) {
+    if (
+      !isObject(entry) ||
+      !isObject(entry.target) ||
+      typeof entry.target.kind !== 'string' ||
+      !isClusterStatus(entry.status) ||
+      !Array.isArray(entry.diffs) ||
+      !entry.diffs.every((diff) => isObject(diff) && typeof diff.code === 'string')
+    ) {
+      throw new Error('Cluster snapshot contains a malformed target')
+    }
+  }
+
+  return value as unknown as DriftEnvelope
+}
+
+export function filterExistingNodes(envelope: DriftEnvelope): NodePanelModel[] {
+  return envelope.data.targets
+    .filter(
+      (entry) =>
+        entry.target.kind === 'node' &&
+        !entry.diffs.some((diff) => NOT_CONFIRMED_CODES.has(diff.code)),
+    )
+    .map((entry, index) => ({
+      id: entry.target.id ?? entry.target.slug ?? `node-${index}`,
+      name: entry.target.slug ?? entry.target.name ?? entry.target.id ?? `node-${index + 1}`,
+      status: entry.status,
+    }))
+}
+
+async function fetchSnapshot(url: string): Promise<Response> {
+  return fetch(url, { cache: 'no-store' })
+}
+
+export async function loadExistingNodes(): Promise<NodePanelModel[]> {
+  let response = await fetchSnapshot('/cluster/state.json')
+  if (response.status === 404) response = await fetchSnapshot('/state.sample.json')
+  if (!response.ok) throw new Error(`Unable to load cluster snapshot (HTTP ${response.status})`)
+
+  return filterExistingNodes(parseDriftEnvelope(await response.json()))
+}

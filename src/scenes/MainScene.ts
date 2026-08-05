@@ -1,9 +1,11 @@
 import Phaser from 'phaser'
+import { loadExistingNodes, type NodePanelModel } from '../clusterState'
 
 export class MainScene extends Phaser.Scene {
   private title!: Phaser.GameObjects.Text
   private button!: Phaser.GameObjects.Text
   private pushCount = 0
+  private nodes: NodePanelModel[] = []
 
   constructor() {
     super('main')
@@ -41,6 +43,18 @@ export class MainScene extends Phaser.Scene {
 
     this.layout(this.scale.width, this.scale.height)
     this.scale.on('resize', (size: Phaser.Structs.Size) => this.layout(size.width, size.height))
+    void this.loadClusterSnapshot()
+  }
+
+  private async loadClusterSnapshot() {
+    try {
+      this.nodes = await loadExistingNodes()
+      this.title.setText(`agdev · ${this.nodes.length} nodes`)
+    } catch (error) {
+      console.error(error)
+      this.title.setText('agdev · cluster unavailable')
+    }
+    this.layout(this.scale.width, this.scale.height)
   }
 
   private layout(width: number, height: number) {

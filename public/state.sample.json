@@ -1,0 +1,97 @@
+{
+  "schema": "nctl.drift.v1",
+  "generated_at": "2026-08-05T00:00:00Z",
+  "ok": true,
+  "data": {
+    "generated_at": "2026-08-05T00:00:00Z",
+    "summary": {
+      "converged": 2,
+      "converging": 1,
+      "drifting": 1,
+      "unknown": 2
+    },
+    "severity_summary": {
+      "error": 2,
+      "warning": 1,
+      "info": 1
+    },
+    "targets": [
+      {
+        "target": { "kind": "node", "slug": "node-alpha", "name": "Node Alpha", "id": "sample-node-1" },
+        "status": "converged",
+        "diffs": []
+      },
+      {
+        "target": { "kind": "node", "slug": "node-beta", "name": "Node Beta", "id": "sample-node-2" },
+        "status": "converging",
+        "diffs": [
+          {
+            "target": { "kind": "node", "slug": "node-beta", "name": "Node Beta", "id": "sample-node-2" },
+            "code": "operation_running",
+            "severity": "info",
+            "message": "A sample reconciliation is in progress."
+          }
+        ]
+      },
+      {
+        "target": { "kind": "node", "slug": "node-gamma", "name": "Node Gamma", "id": "sample-node-3" },
+        "status": "drifting",
+        "diffs": [
+          {
+            "target": { "kind": "node", "slug": "node-gamma", "name": "Node Gamma", "id": "sample-node-3" },
+            "code": "hostname_mismatch",
+            "severity": "warning",
+            "message": "Sample desired and actual hostnames differ."
+          }
+        ]
+      },
+      {
+        "target": { "kind": "node", "slug": "node-delta", "name": "Node Delta", "id": "sample-node-4" },
+        "status": "unknown",
+        "diffs": [
+          {
+            "target": { "kind": "node", "slug": "node-delta", "name": "Node Delta", "id": "sample-node-4" },
+            "code": "observation_stale",
+            "severity": "error",
+            "message": "The sample observation is stale."
+          }
+        ]
+      },
+      {
+        "target": { "kind": "node", "slug": "node-missing", "name": "Node Missing", "id": "sample-node-5" },
+        "status": "unknown",
+        "diffs": [
+          {
+            "target": { "kind": "node", "slug": "node-missing", "name": "Node Missing", "id": "sample-node-5" },
+            "code": "missing_actual_node",
+            "severity": "error",
+            "message": "No sample actual node exists."
+          }
+        ]
+      },
+      {
+        "target": { "kind": "node", "slug": "node-awaiting", "name": "Node Awaiting Access", "id": "sample-node-6" },
+        "status": "converged",
+        "diffs": [
+          {
+            "target": { "kind": "node", "slug": "node-awaiting", "name": "Node Awaiting Access", "id": "sample-node-6" },
+            "code": "waiting_for_manual_initial_access",
+            "severity": "info",
+            "message": "The sample guest awaits initial access and observation."
+          }
+        ]
+      },
+      {
+        "target": { "kind": "service", "slug": "sample-service", "name": "Sample Service", "id": "sample-service-1" },
+        "status": "converged",
+        "diffs": []
+      }
+    ],
+    "sources": {
+      "fetched_at": "2026-08-05T00:00:00Z",
+      "observed_dump_count": 4,
+      "observed_errors": []
+    }
+  },
+  "errors": []
+}

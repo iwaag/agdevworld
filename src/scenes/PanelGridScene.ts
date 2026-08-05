@@ -17,6 +17,9 @@ export interface PanelRow {
   name: string
   status: PanelRowStatus
   detail?: string
+  // Opaque source record (drift target, workspace row, …) carried through so
+  // selection handlers get the full data, not the flattened display fields.
+  payload?: unknown
 }
 
 export interface PanelGridConfig {
@@ -28,6 +31,7 @@ export interface PanelGridConfig {
   footer: string
   switchTo?: { key: string; label: string }
   loadRows: () => Promise<PanelRow[]>
+  onSelect?: (row: PanelRow) => void
 }
 
 interface PanelView {
@@ -159,6 +163,16 @@ export class PanelGridScene extends Phaser.Scene {
     const floatLayer = this.add.container(0, 0, [shadow, chrome, nameText, statusText])
     floatLayer.angle = index % 2 === 0 ? -0.7 : 0.7
     const anchor = this.add.container(0, 0, [floatLayer])
+
+    // The hit area lives on the static anchor, not the tweened floatLayer, so
+    // clicks land even while the panel floats.
+    anchor
+      .setInteractive({
+        hitArea: new Phaser.Geom.Rectangle(-PANEL_WIDTH / 2, -PANEL_HEIGHT / 2, PANEL_WIDTH, PANEL_HEIGHT),
+        hitAreaCallback: Phaser.Geom.Rectangle.Contains,
+        useHandCursor: true,
+      })
+      .on('pointerup', () => this.config.onSelect?.(row))
 
     this.tweens.add({
       targets: floatLayer,

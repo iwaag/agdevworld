@@ -33,17 +33,19 @@ build runs that production build itself, so a successful `docker compose up
 
 ## Cluster snapshot handling
 
-`public/cluster/state.json` (drift) and `public/cluster/workspaces.json`
-(workspaces) are the local, ignored live cluster snapshots. The frontend uses
-them when present and falls back to `public/state.sample.json` /
-`public/workspaces.sample.json` otherwise. Refresh both through the read-only
-cluster-agent workflow:
+`public/cluster/state.json` (drift), `public/cluster/workspaces.json`
+(workspaces), and `public/cluster/actual.json` (per-node detail incl.
+`facts_raw` hardware facts, from `nctl actual --json --detail`) are the
+local, ignored live cluster snapshots. The frontend uses them when present
+and falls back to `public/state.sample.json` / `public/workspaces.sample.json`
+/ `public/actual.sample.json` otherwise. Refresh all three through the
+read-only cluster-agent workflow:
 
 ```sh
 CAGENT_URL=https://localhost:8789 npm run cluster:fetch
 ```
 
-Do not commit the downloaded state or any cagent credential. The Docker build
+Do not commit any downloaded snapshot or any cagent credential. The Docker build
 copies files in `public/` into its local image; therefore a live snapshot is
 included in that local image when present at build time. Temporarily move the
 snapshot out of `public/cluster/` before rebuilding if a sample-only image is

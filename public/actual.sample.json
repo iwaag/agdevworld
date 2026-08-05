@@ -1,0 +1,60 @@
+{
+  "schema": "nctl.actual.v2",
+  "generated_at": "2026-08-05T00:00:00Z",
+  "ok": true,
+  "data": {
+    "detail_level": "raw",
+    "devices": [
+      {
+        "id": "sample-device-1",
+        "name": "node-alpha",
+        "serial": "SAMPLE-0001",
+        "platform": "linux",
+        "facts": {
+          "observed_system": "Ubuntu 24.04",
+          "local_ip": "192.168.0.11",
+          "collected_at": "2026-08-05T00:00:00Z"
+        },
+        "facts_raw": {
+          "cpu": { "model": "Sample Ryzen 9 9950X 16-Core Processor" },
+          "memory": { "total_gb": 123.41 },
+          "gpu": {
+            "detected": true,
+            "count": 1,
+            "memory_gb": 48.0,
+            "gpus": [
+              { "name": "Sample Quadro RTX 8000", "vendor": "NVIDIA", "memory_gb": 48.0, "source": "nvidia-smi" }
+            ]
+          },
+          "services": {
+            "docker": {
+              "containers": [
+                { "id": "aaaaaaaaaaaa", "name": "sample-web", "state": "running" },
+                { "id": "bbbbbbbbbbbb", "name": "sample-batch", "state": "exited" }
+              ]
+            }
+          }
+        }
+      },
+      {
+        "id": "sample-device-2",
+        "name": "node-beta",
+        "serial": null,
+        "platform": "linux",
+        "facts": {
+          "observed_system": "Debian 13",
+          "local_ip": "192.168.0.12",
+          "collected_at": "2026-08-05T00:00:00Z"
+        },
+        "facts_raw": {
+          "cpu": { "model": "Sample Celeron J4125" },
+          "memory": { "total_gb": 7.6 },
+          "gpu": { "detected": false, "count": 0, "gpus": [] }
+        }
+      }
+    ],
+    "clusters": [],
+    "read_errors": []
+  },
+  "errors": []
+}

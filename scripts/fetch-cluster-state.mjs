@@ -26,6 +26,13 @@ const ARTIFACTS = [
     defaultOutput: resolve(SCRIPT_DIR, '../public/cluster/workspaces.json'),
     validate: validateWorkspacesEnvelope,
   },
+  {
+    command: 'nctl actual --json --detail',
+    schema: 'nctl.actual.v2',
+    outputEnv: 'CLUSTER_ACTUAL_OUTPUT',
+    defaultOutput: resolve(SCRIPT_DIR, '../public/cluster/actual.json'),
+    validate: validateActualEnvelope,
+  },
 ]
 
 function artifactPrompt(command) {
@@ -148,6 +155,20 @@ function validateWorkspacesEnvelope(value) {
     typeof value.data.summary !== 'object'
   ) {
     throw new Error('Downloaded artifact is not a valid nctl.workspaces.v1 envelope')
+  }
+}
+
+function validateActualEnvelope(value) {
+  if (
+    value === null ||
+    typeof value !== 'object' ||
+    value.schema !== 'nctl.actual.v2' ||
+    typeof value.ok !== 'boolean' ||
+    value.data === null ||
+    typeof value.data !== 'object' ||
+    !Array.isArray(value.data.devices)
+  ) {
+    throw new Error('Downloaded artifact is not a valid nctl.actual.v2 envelope')
   }
 }
 

@@ -73,7 +73,17 @@ export function extractAssistantActions(reply: string): { text: string; actions:
   return { text, actions }
 }
 
-export function initChatPanel(getContext: () => string, onAction?: (action: AssistantAction) => void): void {
+export interface ChatPanelHandle {
+  // Programmatically send a question as if the user typed it: it appears in
+  // the history and goes through the same /api/chat seam. Ignored while a
+  // request is already in flight.
+  ask: (question: string) => void
+}
+
+export function initChatPanel(
+  getContext: () => string,
+  onAction?: (action: AssistantAction) => void,
+): ChatPanelHandle {
   const style = document.createElement('style')
   style.textContent = PANEL_CSS
   document.head.append(style)
@@ -154,4 +164,12 @@ export function initChatPanel(getContext: () => string, onAction?: (action: Assi
       form.requestSubmit()
     }
   })
+
+  return {
+    ask(question: string) {
+      const trimmed = question.trim()
+      if (trimmed === '' || sendButton.disabled) return
+      void send(trimmed)
+    },
+  }
 }

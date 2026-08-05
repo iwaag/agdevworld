@@ -91,7 +91,13 @@ async function fetchSnapshot(url: string): Promise<Response> {
 
 export async function loadExistingNodes(): Promise<NodePanelModel[]> {
   let response = await fetchSnapshot('/cluster/state.json')
-  if (response.status === 404) response = await fetchSnapshot('/state.sample.json')
+  // Vite's development history fallback returns index.html with HTTP 200 for
+  // a missing public file. Treat that HTML response like a normal 404 while
+  // keeping malformed JSON snapshots visible as errors.
+  const contentType = response.headers.get('content-type') ?? ''
+  if (response.status === 404 || (response.ok && !contentType.includes('application/json'))) {
+    response = await fetchSnapshot('/state.sample.json')
+  }
   if (!response.ok) throw new Error(`Unable to load cluster snapshot (HTTP ${response.status})`)
 
   return filterExistingNodes(parseDriftEnvelope(await response.json()))

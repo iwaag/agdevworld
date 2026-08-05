@@ -43,7 +43,37 @@ const PANEL_CSS = `
 #chat-send:disabled { background: #33405a; color: #777a91; cursor: default; }
 `
 
-export function initChatPanel(getContext: () => string): void {
+export interface AssistantAction {
+  action: string
+  [key: string]: unknown
+}
+
+// Pull action JSON objects like {"action":"switch_view","view":"nodes"} out of
+// a reply. Deliberately forgiving: small local models mangle formats, so the
+// object is accepted anywhere in the text (fenced or inline); anything that
+// fails to parse stays visible. Empty code fences left behind are removed.
+export function extractAssistantActions(reply: string): { text: string; actions: AssistantAction[] } {
+  const actions: AssistantAction[] = []
+  let text = reply.replace(/\{[^{}]*"action"\s*:\s*"[^"]*"[^{}]*\}/g, (match) => {
+    try {
+      const parsed: unknown = JSON.parse(match)
+      if (parsed !== null && typeof parsed === 'object' && typeof (parsed as AssistantAction).action === 'string') {
+        actions.push(parsed as AssistantAction)
+        return ''
+      }
+    } catch {
+      // fall through: keep unparsable text visible
+    }
+    return match
+  })
+  text = text
+    .replace(/```[a-zA-Z]*\s*```/g, '')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim()
+  return { text, actions }
+}
+
+export function initChatPanel(getContext: () => string, onAction?: (action: AssistantAction) => void): void {
   const style = document.createElement('style')
   style.textContent = PANEL_CSS
   document.head.append(style)
@@ -96,8 +126,10 @@ export function initChatPanel(getContext: () => string): void {
         return
       }
       history.push({ role: 'assistant', content: data.reply })
+      const { text, actions } = extractAssistantActions(data.reply)
+      for (const action of actions) onAction?.(action)
       pending.className = 'chat-msg assistant'
-      pending.textContent = data.reply
+      pending.textContent = text !== '' ? text : 'OK.'
       messagesEl.scrollTop = messagesEl.scrollHeight
     } catch {
       history.pop()

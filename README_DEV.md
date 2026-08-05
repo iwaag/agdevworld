@@ -33,9 +33,11 @@ build runs that production build itself, so a successful `docker compose up
 
 ## Cluster snapshot handling
 
-`public/cluster/state.json` is the local, ignored live cluster snapshot. The
-frontend uses it when present and falls back to `public/state.sample.json`
-otherwise. Refresh it through the read-only cluster-agent workflow:
+`public/cluster/state.json` (drift) and `public/cluster/workspaces.json`
+(workspaces) are the local, ignored live cluster snapshots. The frontend uses
+them when present and falls back to `public/state.sample.json` /
+`public/workspaces.sample.json` otherwise. Refresh both through the read-only
+cluster-agent workflow:
 
 ```sh
 CAGENT_URL=https://localhost:8789 npm run cluster:fetch

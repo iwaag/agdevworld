@@ -1,16 +1,33 @@
 import Phaser from 'phaser'
-import { loadExistingNodes, type ClusterStatus, type NodePanelModel } from '../clusterState'
+import { switchView } from '../viewSwitcher'
 
 const PANEL_WIDTH = 252
 const PANEL_HEIGHT = 84
 const COLUMN_GAP = 34
 const ROW_GAP = 34
 
-const STATUS_STYLE: Record<ClusterStatus, { emoji: string; color: number; label: string }> = {
-  converged: { emoji: '✅', color: 0x67e8a5, label: 'CONVERGED' },
-  converging: { emoji: '🔄', color: 0x70c7ff, label: 'CONVERGING' },
-  drifting: { emoji: '⚠️', color: 0xffc56d, label: 'DRIFTING' },
-  unknown: { emoji: '❓', color: 0xb7b5d8, label: 'UNKNOWN' },
+export interface PanelRowStatus {
+  emoji: string
+  color: number
+  label: string
+}
+
+export interface PanelRow {
+  id: string
+  name: string
+  status: PanelRowStatus
+  detail?: string
+}
+
+export interface PanelGridConfig {
+  key: string
+  title: string
+  loadingText: string
+  unavailableText: string
+  subtitle: (count: number) => string
+  footer: string
+  switchTo?: { key: string; label: string }
+  loadRows: () => Promise<PanelRow[]>
 }
 
 interface PanelView {
@@ -18,17 +35,20 @@ interface PanelView {
   floatLayer: Phaser.GameObjects.Container
 }
 
-export class MainScene extends Phaser.Scene {
+export class PanelGridScene extends Phaser.Scene {
+  private readonly config: PanelGridConfig
   private backdrop!: Phaser.GameObjects.Rectangle
   private hazeLeft!: Phaser.GameObjects.Arc
   private hazeRight!: Phaser.GameObjects.Arc
   private title!: Phaser.GameObjects.Text
   private subtitle!: Phaser.GameObjects.Text
   private footer!: Phaser.GameObjects.Text
+  private switchLabel?: Phaser.GameObjects.Text
   private panels: PanelView[] = []
 
-  constructor() {
-    super('main')
+  constructor(config: PanelGridConfig) {
+    super(config.key)
+    this.config = config
   }
 
   create() {
@@ -37,7 +57,7 @@ export class MainScene extends Phaser.Scene {
     this.hazeRight = this.add.circle(0, 0, 300, 0x42275f, 0.18)
 
     this.title = this.add
-      .text(0, 0, 'cluster / now', {
+      .text(0, 0, this.config.title, {
         fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
         fontSize: '13px',
         color: '#70c7ff',
@@ -46,7 +66,7 @@ export class MainScene extends Phaser.Scene {
       .setOrigin(0.5)
 
     this.subtitle = this.add
-      .text(0, 0, 'listening for a cluster snapshot…', {
+      .text(0, 0, this.config.loadingText, {
         fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif',
         fontSize: '25px',
         color: '#f4f1ff',
@@ -55,7 +75,7 @@ export class MainScene extends Phaser.Scene {
       .setOrigin(0.5)
 
     this.footer = this.add
-      .text(0, 0, 'desired nodes with confirmed actual state', {
+      .text(0, 0, this.config.footer, {
         fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
         fontSize: '11px',
         color: '#777a91',
@@ -63,31 +83,51 @@ export class MainScene extends Phaser.Scene {
       })
       .setOrigin(0.5)
 
+    if (this.config.switchTo) {
+      const target = this.config.switchTo
+      this.switchLabel = this.add
+        .text(0, 0, `⇄ ${target.label}`, {
+          fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
+          fontSize: '12px',
+          color: '#70c7ff',
+          letterSpacing: 2,
+        })
+        .setOrigin(0, 0.5)
+        .setInteractive({ useHandCursor: true })
+        .on('pointerup', () => switchView(target.key))
+      // Keyboard fallback for testing; ignored while typing in the chat panel.
+      this.input.keyboard?.on('keydown-V', () => {
+        const active = document.activeElement
+        if (active instanceof HTMLTextAreaElement || active instanceof HTMLInputElement) return
+        switchView(target.key)
+      })
+    }
+
     this.layout(this.scale.width, this.scale.height)
     this.scale.on('resize', (size: Phaser.Structs.Size) => this.layout(size.width, size.height))
-    void this.loadClusterSnapshot()
+    void this.loadSnapshot()
   }
 
-  private async loadClusterSnapshot() {
+  private async loadSnapshot() {
     try {
-      const nodes = await loadExistingNodes()
-      this.createPanels(nodes)
-      this.subtitle.setText(`${nodes.length} nodes are present`)
+      const rows = await this.config.loadRows()
+      this.createPanels(rows)
+      this.subtitle.setText(this.config.subtitle(rows.length))
     } catch (error) {
       console.error(error)
-      this.subtitle.setText('cluster snapshot unavailable')
+      this.subtitle.setText(this.config.unavailableText)
       this.footer.setText(error instanceof Error ? error.message : 'unknown snapshot error')
     }
     this.layout(this.scale.width, this.scale.height)
   }
 
-  private createPanels(nodes: NodePanelModel[]) {
+  private createPanels(rows: PanelRow[]) {
     for (const panel of this.panels) panel.anchor.destroy(true)
-    this.panels = nodes.map((node, index) => this.createPanel(node, index))
+    this.panels = rows.map((row, index) => this.createPanel(row, index))
   }
 
-  private createPanel(node: NodePanelModel, index: number): PanelView {
-    const style = STATUS_STYLE[node.status]
+  private createPanel(row: PanelRow, index: number): PanelView {
+    const style = row.status
     const shadow = this.add.graphics()
     shadow.fillStyle(0x000000, 0.28)
     shadow.fillRoundedRect(-PANEL_WIDTH / 2 + 5, -PANEL_HEIGHT / 2 + 7, PANEL_WIDTH, PANEL_HEIGHT, 22)
@@ -100,7 +140,7 @@ export class MainScene extends Phaser.Scene {
     chrome.fillStyle(style.color, 0.85)
     chrome.fillCircle(-PANEL_WIDTH / 2 + 20, 0, 3)
 
-    const nodeText = this.add.text(-PANEL_WIDTH / 2 + 35, -23, `${style.emoji}  ${node.name}`, {
+    const nameText = this.add.text(-PANEL_WIDTH / 2 + 35, -23, `${style.emoji}  ${row.name}`, {
       fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif',
       fontSize: '19px',
       color: '#f7f5ff',
@@ -108,14 +148,15 @@ export class MainScene extends Phaser.Scene {
       fixedWidth: PANEL_WIDTH - 50,
     })
 
-    const statusText = this.add.text(-PANEL_WIDTH / 2 + 67, 10, style.label, {
+    const statusLine = row.detail ? `${style.label} · ${row.detail}` : style.label
+    const statusText = this.add.text(-PANEL_WIDTH / 2 + 67, 10, statusLine, {
       fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
       fontSize: '10px',
       color: `#${style.color.toString(16).padStart(6, '0')}`,
       letterSpacing: 2,
     })
 
-    const floatLayer = this.add.container(0, 0, [shadow, chrome, nodeText, statusText])
+    const floatLayer = this.add.container(0, 0, [shadow, chrome, nameText, statusText])
     floatLayer.angle = index % 2 === 0 ? -0.7 : 0.7
     const anchor = this.add.container(0, 0, [floatLayer])
 
@@ -148,6 +189,7 @@ export class MainScene extends Phaser.Scene {
     this.title?.setPosition(width / 2, Math.max(36, height * 0.07))
     this.subtitle?.setPosition(width / 2, Math.max(76, height * 0.13))
     this.footer?.setPosition(width / 2, height - 28)
+    this.switchLabel?.setPosition(20, Math.max(36, height * 0.07))
 
     if (this.panels.length === 0) return
 

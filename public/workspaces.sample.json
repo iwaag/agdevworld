@@ -1,0 +1,54 @@
+{
+  "schema": "nctl.workspaces.v1",
+  "generated_at": "2026-08-05T00:00:00+00:00",
+  "ok": true,
+  "data": {
+    "generated_at": "2026-08-05T00:00:00+00:00",
+    "rows": [
+      {
+        "slug": "agdevworld",
+        "name": "agdevworld",
+        "node": "agstudio",
+        "desired_presence": "present",
+        "presence": "present",
+        "identity": "match",
+        "identity_reason": null,
+        "activity_class": "active_development",
+        "activity_reasons": { "dirty_files": 4, "ahead_of_origin": 2 },
+        "freshness": "fresh",
+        "checked_at": "2026-08-04T23:30:00+00:00",
+        "gap_codes": []
+      },
+      {
+        "slug": "nctl",
+        "name": "nctl",
+        "node": "agstudio",
+        "desired_presence": "present",
+        "presence": "present",
+        "identity": "match",
+        "identity_reason": null,
+        "activity_class": "behind_origin",
+        "activity_reasons": { "behind_origin": 3 },
+        "freshness": "fresh",
+        "checked_at": "2026-08-04T23:30:00+00:00",
+        "gap_codes": []
+      },
+      {
+        "slug": "nauto",
+        "name": "nauto",
+        "node": "agbox",
+        "desired_presence": "present",
+        "presence": "present",
+        "identity": "unknown",
+        "identity_reason": "no remote configured",
+        "activity_class": "idle",
+        "activity_reasons": {},
+        "freshness": "stale",
+        "checked_at": "2026-08-01T10:00:00+00:00",
+        "gap_codes": ["workspace_observation_stale"]
+      }
+    ],
+    "summary": { "active_development": 1, "behind_origin": 1, "idle": 1 }
+  },
+  "errors": []
+}

@@ -28,7 +28,7 @@ export interface DriftEnvelope {
   }
 }
 
-export interface NodePanelModel {
+export interface TargetPanelModel {
   id: string
   name: string
   status: ClusterStatus
@@ -73,16 +73,16 @@ export function parseDriftEnvelope(value: unknown): DriftEnvelope {
   return value as unknown as DriftEnvelope
 }
 
-export function filterExistingNodes(envelope: DriftEnvelope): NodePanelModel[] {
+export function filterExistingTargets(envelope: DriftEnvelope, kind: string): TargetPanelModel[] {
   return envelope.data.targets
     .filter(
       (entry) =>
-        entry.target.kind === 'node' &&
+        entry.target.kind === kind &&
         !entry.diffs.some((diff) => NOT_CONFIRMED_CODES.has(diff.code)),
     )
     .map((entry, index) => ({
-      id: entry.target.id ?? entry.target.slug ?? `node-${index}`,
-      name: entry.target.slug ?? entry.target.name ?? entry.target.id ?? `node-${index + 1}`,
+      id: entry.target.id ?? entry.target.slug ?? `${kind}-${index}`,
+      name: entry.target.slug ?? entry.target.name ?? entry.target.id ?? `${kind}-${index + 1}`,
       status: entry.status,
     }))
 }
@@ -91,22 +91,87 @@ async function fetchSnapshot(url: string): Promise<Response> {
   return fetch(url, { cache: 'no-store' })
 }
 
-export async function loadDriftEnvelope(): Promise<DriftEnvelope> {
-  let response = await fetchSnapshot('/cluster/state.json')
+async function loadSnapshotJson(primaryUrl: string, sampleUrl: string): Promise<unknown> {
+  let response = await fetchSnapshot(primaryUrl)
   // Vite's development history fallback returns index.html with HTTP 200 for
   // a missing public file. Treat that HTML response like a normal 404 while
   // keeping malformed JSON snapshots visible as errors.
   const contentType = response.headers.get('content-type') ?? ''
   if (response.status === 404 || (response.ok && !contentType.includes('application/json'))) {
-    response = await fetchSnapshot('/state.sample.json')
+    response = await fetchSnapshot(sampleUrl)
   }
   if (!response.ok) throw new Error(`Unable to load cluster snapshot (HTTP ${response.status})`)
 
-  return parseDriftEnvelope(await response.json())
+  return response.json()
 }
 
-export async function loadExistingNodes(): Promise<NodePanelModel[]> {
-  return filterExistingNodes(await loadDriftEnvelope())
+export async function loadDriftEnvelope(): Promise<DriftEnvelope> {
+  return parseDriftEnvelope(await loadSnapshotJson('/cluster/state.json', '/state.sample.json'))
+}
+
+export async function loadExistingNodes(): Promise<TargetPanelModel[]> {
+  return filterExistingTargets(await loadDriftEnvelope(), 'node')
+}
+
+// --- Workspaces (nctl.workspaces.v1) ---
+
+export interface WorkspaceRow {
+  slug: string
+  name: string
+  node: string
+  desired_presence: string
+  presence: string
+  identity: string
+  identity_reason?: string | null
+  activity_class?: string | null
+  activity_reasons?: Record<string, unknown>
+  freshness: string
+  checked_at?: string | null
+  gap_codes: string[]
+}
+
+export interface WorkspacesEnvelope {
+  schema: 'nctl.workspaces.v1'
+  ok: boolean
+  data: {
+    generated_at?: string
+    rows: WorkspaceRow[]
+    summary: Record<string, number>
+  }
+}
+
+export function parseWorkspacesEnvelope(value: unknown): WorkspacesEnvelope {
+  if (!isObject(value) || value.schema !== 'nctl.workspaces.v1' || typeof value.ok !== 'boolean') {
+    throw new Error('Workspace snapshot is not an nctl.workspaces.v1 envelope')
+  }
+  if (!isObject(value.data) || !Array.isArray(value.data.rows) || !isObject(value.data.summary)) {
+    throw new Error('Workspace snapshot data is malformed')
+  }
+
+  for (const row of value.data.rows) {
+    if (
+      !isObject(row) ||
+      typeof row.slug !== 'string' ||
+      typeof row.name !== 'string' ||
+      typeof row.node !== 'string' ||
+      typeof row.presence !== 'string' ||
+      !Array.isArray(row.gap_codes)
+    ) {
+      throw new Error('Workspace snapshot contains a malformed row')
+    }
+  }
+
+  return value as unknown as WorkspacesEnvelope
+}
+
+export async function loadWorkspacesEnvelope(): Promise<WorkspacesEnvelope> {
+  return parseWorkspacesEnvelope(
+    await loadSnapshotJson('/cluster/workspaces.json', '/workspaces.sample.json'),
+  )
+}
+
+export async function loadWorkspaceRows(): Promise<WorkspaceRow[]> {
+  return (await loadWorkspacesEnvelope()).data.rows
 }
 
 // Compact plain-text summary for the assistant. Deliberately not the raw

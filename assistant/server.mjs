@@ -11,13 +11,22 @@
 import { createServer } from 'node:http'
 
 const PORT = Number(process.env.PORT ?? 8091)
-const OLLAMA_URL = (process.env.OLLAMA_URL ?? 'http://host.docker.internal:11434').replace(/\/$/, '')
-const OLLAMA_MODEL = process.env.OLLAMA_MODEL ?? 'glm-4.7-flash:latest'
 
+// Role and action protocol are engine-agnostic; keep them above the ollama
+// configuration below.
 const ROLE_PROMPT =
   'You are the assistant inside agdevworld, an immersive development interface. ' +
-  'Answer questions about the cluster nodes described below, concisely and in plain text. ' +
-  'If the answer is not in the cluster summary, say you do not know.'
+  'Answer questions about the cluster described below, concisely and in plain text. ' +
+  'If the answer is not in the cluster summary, say you do not know.\n\n' +
+  'You can also control the screen. There are two views: "nodes" (cluster nodes) and ' +
+  '"workspaces" (development workspaces). When the user asks to see, show, or switch to a view, ' +
+  'include this exact JSON object on its own line in your reply: ' +
+  '{"action":"switch_view","view":"nodes"} or {"action":"switch_view","view":"workspaces"} ' +
+  'and add one short confirming sentence. Do not include the JSON object unless the user asked ' +
+  'to change the view, and never mention or explain the JSON itself.'
+
+const OLLAMA_URL = (process.env.OLLAMA_URL ?? 'http://host.docker.internal:11434').replace(/\/$/, '')
+const OLLAMA_MODEL = process.env.OLLAMA_MODEL ?? 'glm-4.7-flash:latest'
 
 function isValidMessage(value) {
   return (

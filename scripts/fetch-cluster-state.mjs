@@ -6,11 +6,31 @@ import http from 'node:http'
 import https from 'node:https'
 
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url))
-const DEFAULT_OUTPUT = resolve(SCRIPT_DIR, '../public/cluster/state.json')
 const DEFAULT_TOKEN_FILE = resolve(homedir(), '.local/state/cagent/human_token')
-const PROMPT =
-  'Please run `nctl drift --json`, save the output as a file, upload it with `nctl upload`, and reply with only the download URL.'
 const TERMINAL_STATES = new Set(['completed', 'failed', 'cancelled', 'interrupted'])
+
+// One cagent request per artifact: sequential requests are simpler and more
+// robust than teaching cagent to zip multiple files into one upload.
+const ARTIFACTS = [
+  {
+    command: 'nctl drift --json',
+    schema: 'nctl.drift.v1',
+    outputEnv: 'CLUSTER_STATE_OUTPUT',
+    defaultOutput: resolve(SCRIPT_DIR, '../public/cluster/state.json'),
+    validate: validateDriftEnvelope,
+  },
+  {
+    command: 'nctl workspaces --json',
+    schema: 'nctl.workspaces.v1',
+    outputEnv: 'CLUSTER_WORKSPACES_OUTPUT',
+    defaultOutput: resolve(SCRIPT_DIR, '../public/cluster/workspaces.json'),
+    validate: validateWorkspacesEnvelope,
+  },
+]
+
+function artifactPrompt(command) {
+  return `Please run \`${command}\`, save the output as a file, upload it with \`nctl upload\`, and reply with only the download URL.`
+}
 
 function positiveInteger(name, fallback) {
   const raw = process.env[name]
@@ -115,30 +135,37 @@ function validateDriftEnvelope(value) {
   }
 }
 
+function validateWorkspacesEnvelope(value) {
+  if (
+    value === null ||
+    typeof value !== 'object' ||
+    value.schema !== 'nctl.workspaces.v1' ||
+    typeof value.ok !== 'boolean' ||
+    value.data === null ||
+    typeof value.data !== 'object' ||
+    !Array.isArray(value.data.rows) ||
+    value.data.summary === null ||
+    typeof value.data.summary !== 'object'
+  ) {
+    throw new Error('Downloaded artifact is not a valid nctl.workspaces.v1 envelope')
+  }
+}
+
 function extractDownloadUrl(responseText) {
   const match = responseText.match(/https?:\/\/[^\s<>"']+/u)
   if (!match) throw new Error('Completed cagent response did not contain a download URL')
   return new URL(match[0].replace(/[),.\]}]+$/u, ''))
 }
 
-async function main() {
-  const baseUrlValue = process.env.CAGENT_URL?.trim()
-  if (!baseUrlValue) throw new Error('CAGENT_URL is required (for example, https://agstudio:8789)')
-
-  const baseUrl = new URL(baseUrlValue.endsWith('/') ? baseUrlValue : `${baseUrlValue}/`)
-  const token = await loadToken()
-  const authHeaders = {
-    Authorization: `Bearer ${token}`,
-    'Content-Type': 'application/json',
-  }
+async function fetchArtifact(baseUrl, authHeaders, artifact) {
   const created = await requestJson(new URL('requests', baseUrl), {
     method: 'POST',
     headers: authHeaders,
-    body: JSON.stringify({ message: PROMPT }),
+    body: JSON.stringify({ message: artifactPrompt(artifact.command) }),
   })
   if (!created.request_id) throw new Error('cagent did not return a request_id')
 
-  console.log(`Submitted cagent request ${created.request_id}`)
+  console.log(`Submitted cagent request ${created.request_id} (${artifact.command})`)
   const deadline = Date.now() + positiveInteger('CAGENT_DEADLINE_SECONDS', 360) * 1000
   const pollMilliseconds = positiveInteger('CAGENT_POLL_SECONDS', 8) * 1000
   let result = created
@@ -163,9 +190,9 @@ async function main() {
   } catch {
     throw new Error('Downloaded artifact is not JSON')
   }
-  validateDriftEnvelope(envelope)
+  artifact.validate(envelope)
 
-  const output = resolve(process.env.CLUSTER_STATE_OUTPUT ?? DEFAULT_OUTPUT)
+  const output = resolve(process.env[artifact.outputEnv] ?? artifact.defaultOutput)
   const temporaryOutput = `${output}.tmp`
   await mkdir(dirname(output), { recursive: true })
   try {
@@ -176,6 +203,21 @@ async function main() {
     throw error
   }
   console.log(`Saved validated ${envelope.schema} snapshot to ${output}`)
+}
+
+async function main() {
+  const baseUrlValue = process.env.CAGENT_URL?.trim()
+  if (!baseUrlValue) throw new Error('CAGENT_URL is required (for example, https://agstudio:8789)')
+
+  const baseUrl = new URL(baseUrlValue.endsWith('/') ? baseUrlValue : `${baseUrlValue}/`)
+  const token = await loadToken()
+  const authHeaders = {
+    Authorization: `Bearer ${token}`,
+    'Content-Type': 'application/json',
+  }
+  for (const artifact of ARTIFACTS) {
+    await fetchArtifact(baseUrl, authHeaders, artifact)
+  }
 }
 
 main().catch((error) => {

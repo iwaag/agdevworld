@@ -5,6 +5,17 @@ services:
     ports:
       - "8090:80"
 
+  # Server-side chat assistant: browser -> (nginx|vite proxy) -> assistant -> ollama
+  assistant:
+    build: ./assistant
+    environment:
+      OLLAMA_URL: ${OLLAMA_URL:-http://host.docker.internal:11434}
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-glm-4.7-flash:latest}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    ports:
+      - "8091:8091"
+
   # Dev with HMR: docker compose up dev
   dev:
     image: node:26-alpine

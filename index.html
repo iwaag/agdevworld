@@ -7,7 +7,8 @@
     <title>agdevworld</title>
     <style>
       html, body { margin: 0; padding: 0; height: 100%; background: #0d0f14; overflow: hidden; }
-      #app { width: 100%; height: 100%; }
+      /* Leave room on the right for the chat panel overlay (see chatPanel.ts). */
+      #app { position: absolute; inset: 0 340px 0 0; }
     </style>
   </head>
   <body>

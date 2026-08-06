@@ -28,6 +28,10 @@ const ROLE_PROMPT =
 const OLLAMA_URL = (process.env.OLLAMA_URL ?? 'http://host.docker.internal:11434').replace(/\/$/, '')
 const OLLAMA_MODEL = process.env.OLLAMA_MODEL ?? 'glm-4.7-flash:latest'
 
+// agforge request service (see agforge/README_DEV.md for the contract).
+// Real endpoint values belong in env / compose, never committed defaults.
+const AGFORGE_URL = (process.env.AGFORGE_URL ?? 'http://host.docker.internal:8092').replace(/\/$/, '')
+
 function isValidMessage(value) {
   return (
     value !== null &&
@@ -111,8 +115,42 @@ async function handleChat(req, res) {
   return sendJson(res, 200, { reply })
 }
 
+// Same-origin passthrough so the browser can reach the agforge request
+// service without CORS: /api/forge/<rest> -> AGFORGE_URL/api/<rest>.
+async function handleForge(req, res) {
+  const rest = req.url.slice('/api/forge'.length)
+  const target = `${AGFORGE_URL}/api${rest}`
+  let upstream
+  try {
+    upstream = await fetch(target, {
+      method: req.method,
+      headers: { 'content-type': req.headers['content-type'] ?? 'application/json' },
+      body: req.method === 'GET' || req.method === 'HEAD' ? undefined : await readBody(req),
+    })
+  } catch (error) {
+    console.error('agforge unreachable:', error)
+    return sendJson(res, 502, {
+      error: 'forge_offline',
+      detail: `The agforge service at ${AGFORGE_URL} is unreachable.`,
+    })
+  }
+  const body = Buffer.from(await upstream.arrayBuffer())
+  res.writeHead(upstream.status, {
+    'content-type': upstream.headers.get('content-type') ?? 'application/json; charset=utf-8',
+    'content-length': body.byteLength,
+  })
+  res.end(body)
+}
+
 const server = createServer((req, res) => {
   if (req.method === 'GET' && req.url === '/healthz') return sendJson(res, 200, { ok: true })
+  if (req.url?.startsWith('/api/forge/')) {
+    handleForge(req, res).catch((error) => {
+      console.error('unhandled forge passthrough error:', error)
+      sendJson(res, 500, { error: 'internal_error', detail: 'Unexpected passthrough failure.' })
+    })
+    return
+  }
   if (req.method === 'POST' && req.url === '/api/chat') {
     handleChat(req, res).catch((error) => {
       console.error('unhandled chat error:', error)

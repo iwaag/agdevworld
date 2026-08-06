@@ -11,6 +11,7 @@ services:
     environment:
       OLLAMA_URL: ${OLLAMA_URL:-http://host.docker.internal:11434}
       OLLAMA_MODEL: ${OLLAMA_MODEL:-glm-4.7-flash:latest}
+      AGFORGE_URL: ${AGFORGE_URL:-http://host.docker.internal:8092}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     ports:

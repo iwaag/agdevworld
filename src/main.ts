@@ -42,6 +42,12 @@ const chat = initChatPanel(
   (action) => {
     // Unknown actions are ignored silently; the protocol may grow.
     if (action.action === 'switch_view' && typeof action.view === 'string') switchView(action.view)
+    if (action.action === 'generate_image') {
+      // Missing/mangled desire falls back to the latest user message inside
+      // the chat panel (small local models sometimes break the JSON string).
+      const desire = typeof action.desire === 'string' && action.desire.trim() !== '' ? action.desire : undefined
+      chat.generateImage(desire)
+    }
   },
 )
 

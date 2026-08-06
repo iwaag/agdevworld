@@ -23,7 +23,13 @@ const ROLE_PROMPT =
   'include this exact JSON object on its own line in your reply: ' +
   '{"action":"switch_view","view":"nodes"} or {"action":"switch_view","view":"workspaces"} ' +
   'and add one short confirming sentence. Do not include the JSON object unless the user asked ' +
-  'to change the view, and never mention or explain the JSON itself.'
+  'to change the view, and never mention or explain the JSON itself.\n\n' +
+  'You can also generate images. When the user asks you to draw, paint, create, or generate a ' +
+  'picture or image, include this exact JSON object on its own line in your reply: ' +
+  '{"action":"generate_image","desire":"<short English image prompt>"} ' +
+  'where the desire describes what to draw, on a single line, using no double quotes, braces, or ' +
+  'backslashes inside it. Add one short sentence saying the image is being generated. Do not ' +
+  'include this object unless the user asked for an image, and never mention or explain the JSON.'
 
 const OLLAMA_URL = (process.env.OLLAMA_URL ?? 'http://host.docker.internal:11434').replace(/\/$/, '')
 const OLLAMA_MODEL = process.env.OLLAMA_MODEL ?? 'glm-4.7-flash:latest'

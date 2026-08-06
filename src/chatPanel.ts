@@ -29,6 +29,8 @@ const PANEL_CSS = `
 .chat-msg.pending { color: #777a91; font-style: italic; }
 .chat-msg.error { align-self: stretch; background: #2a1520; border: 1px solid #5f2740;
   color: #ffb3c8; }
+.chat-msg.image { padding: 4px; }
+.chat-msg.image img { max-width: 100%; border-radius: 9px; display: block; cursor: zoom-in; }
 #chat-form { display: flex; gap: 8px; padding: 12px 14px; border-top: 1px solid #1c2130; }
 #chat-input {
   flex: 1; resize: none; border-radius: 10px; border: 1px solid #262b3d;
@@ -78,6 +80,11 @@ export interface ChatPanelHandle {
   // the history and goes through the same /api/chat seam. Ignored while a
   // request is already in flight.
   ask: (question: string) => void
+  // Kick off an image generation through the agforge passthrough and show it
+  // as a bubble. Runs fully detached from the send flow — chat stays usable
+  // while the image generates. With no desire given, the latest user message
+  // is used (fallback for models that mangle the action JSON).
+  generateImage: (desire?: string) => void
 }
 
 export function initChatPanel(
@@ -151,6 +158,67 @@ export function initChatPanel(
     }
   }
 
+  const POLL_INTERVAL_MS = 3000
+  const POLL_DEADLINE_MS = 10 * 60 * 1000
+
+  async function generateImage(desireArg?: string) {
+    const desire =
+      desireArg ?? [...history].reverse().find((message) => message.role === 'user')?.content ?? ''
+    if (desire.trim() === '') return
+    const bubble = addBubble('assistant pending', 'generating image…')
+    try {
+      const created = await fetch('/api/forge/requests', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ desire }),
+      })
+      const createdData: unknown = await created.json().catch(() => null)
+      const requestId = (createdData as { request_id?: unknown } | null)?.request_id
+      if (!created.ok || typeof requestId !== 'string') {
+        throw new Error(
+          (createdData as { detail?: string } | null)?.detail ?? `request failed (HTTP ${created.status})`,
+        )
+      }
+      const deadline = Date.now() + POLL_DEADLINE_MS
+      for (;;) {
+        if (Date.now() > deadline) throw new Error('generation timed out')
+        await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS))
+        const polled = await fetch(`/api/forge/requests/${requestId}`)
+        const job = (await polled.json().catch(() => null)) as {
+          status?: string
+          detail?: string
+          artifacts?: { kind?: string; url?: string }[]
+        } | null
+        if (!polled.ok || typeof job?.status !== 'string') {
+          throw new Error(job?.detail ?? `poll failed (HTTP ${polled.status})`)
+        }
+        if (job.status === 'working') continue
+        if (job.status !== 'done') throw new Error(job.detail ?? 'generation failed')
+        const url = job.artifacts?.find((artifact) => artifact?.kind === 'image')?.url
+        if (typeof url !== 'string') throw new Error('result contains no image artifact')
+        bubble.className = 'chat-msg assistant image'
+        bubble.textContent = ''
+        const img = document.createElement('img')
+        img.src = url
+        img.alt = desire
+        img.addEventListener('load', () => {
+          messagesEl.scrollTop = messagesEl.scrollHeight
+        })
+        img.addEventListener('error', () => {
+          bubble.className = 'chat-msg error'
+          bubble.textContent =
+            'image generated, but its download URL could not be loaded from this browser.'
+        })
+        img.addEventListener('click', () => window.open(url, '_blank'))
+        bubble.append(img)
+        return
+      }
+    } catch (error) {
+      bubble.className = 'chat-msg error'
+      bubble.textContent = `image generation failed — ${error instanceof Error ? error.message : String(error)}`
+    }
+  }
+
   form.addEventListener('submit', (event) => {
     event.preventDefault()
     const question = input.value.trim()
@@ -170,6 +238,9 @@ export function initChatPanel(
       const trimmed = question.trim()
       if (trimmed === '' || sendButton.disabled) return
       void send(trimmed)
+    },
+    generateImage(desire?: string) {
+      void generateImage(desire)
     },
   }
 }

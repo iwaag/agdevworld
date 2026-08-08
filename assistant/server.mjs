@@ -38,6 +38,39 @@ const OLLAMA_MODEL = process.env.OLLAMA_MODEL ?? 'glm-4.7-flash:latest'
 // Real endpoint values belong in env / compose, never committed defaults.
 const AGFORGE_URL = (process.env.AGFORGE_URL ?? 'http://host.docker.internal:8092').replace(/\/$/, '')
 
+// autolab nodes (agautolab/agent/gateway.py, `autolab.monitor.v1`).
+// AUTOLAB_NODES="<name>=<url>,<name>=<url>"; the committed default is the
+// local node only, real cluster hostnames come from env like every other
+// endpoint here.
+const AUTOLAB_NODES = parseNodes(
+  // `||`, not `??`: compose passes an empty string when the operator has not
+  // set one, and an empty string must mean "use the default", not "no nodes".
+  process.env.AUTOLAB_NODES || 'agstudio=http://host.docker.internal:8791',
+)
+
+// The one place constraint 1 of the ex1 plan is enforced: raw evidence is
+// summarized on the node it lives on, and nothing but the summary text crosses
+// into agdevworld. Blocking the path here means no caller — page, assistant or
+// curl — can reach around it.
+const EVIDENCE_PATH = /(^|\/)evidence(\/|$)/
+
+function parseNodes(spec) {
+  const nodes = new Map()
+  for (const entry of spec.split(',')) {
+    const trimmed = entry.trim()
+    if (trimmed === '') continue
+    const at = trimmed.indexOf('=')
+    const name = at === -1 ? '' : trimmed.slice(0, at).trim()
+    const url = at === -1 ? '' : trimmed.slice(at + 1).trim().replace(/\/$/, '')
+    if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(name) || !/^https?:\/\//.test(url)) {
+      console.warn(`ignoring malformed AUTOLAB_NODES entry: ${trimmed}`)
+      continue
+    }
+    nodes.set(name, url)
+  }
+  return nodes
+}
+
 function isValidMessage(value) {
   return (
     value !== null &&
@@ -148,11 +181,89 @@ async function handleForge(req, res) {
   res.end(body)
 }
 
+// GET /api/autolab/nodes -> the configured nodes and whether each answers.
+// A node being down is normal (agautolab1 often is), so reachability is part
+// of the answer rather than an error.
+async function handleAutolabNodes(res) {
+  const nodes = await Promise.all(
+    [...AUTOLAB_NODES.entries()].map(async ([name, url]) => {
+      try {
+        const probe = await fetch(`${url}/healthz`, { signal: AbortSignal.timeout(2000) })
+        return { name, reachable: probe.ok, status: probe.status }
+      } catch (error) {
+        return { name, reachable: false, detail: String(error.cause?.code ?? error.name) }
+      }
+    }),
+  )
+  return sendJson(res, 200, { kind: 'autolab.nodes.v1', nodes })
+}
+
+// Same-origin passthrough to one node's gateway, the handleForge template:
+// /api/autolab/<node>/<rest> -> <node url>/<rest>.
+async function handleAutolab(req, res) {
+  const [pathname, query] = req.url.slice('/api/autolab'.length).split('?')
+  if (pathname === '/nodes' || pathname === '/nodes/') {
+    if (req.method !== 'GET') return sendJson(res, 405, { error: 'method_not_allowed' })
+    return handleAutolabNodes(res)
+  }
+  const [, node, ...rest] = pathname.split('/')
+  const path = `/${rest.join('/')}`
+  const url = AUTOLAB_NODES.get(node)
+  if (!url) {
+    return sendJson(res, 404, {
+      error: 'unknown_node',
+      detail: `No autolab node named "${node}" is configured.`,
+    })
+  }
+  if (EVIDENCE_PATH.test(path)) {
+    return sendJson(res, 403, {
+      error: 'evidence_not_proxied',
+      detail: 'Raw evidence stays on its node; ask for the iteration summary instead.',
+    })
+  }
+  const isSummarize = /\/summarize\//.test(path)
+  if (req.method !== 'GET' && !(req.method === 'POST' && isSummarize)) {
+    return sendJson(res, 405, {
+      error: 'method_not_allowed',
+      detail: 'Only GET, and POST to a summarize route, are proxied.',
+    })
+  }
+  const target = `${url}${path}${query ? `?${query}` : ''}`
+  let upstream
+  try {
+    upstream = await fetch(target, {
+      method: req.method,
+      headers: { 'content-type': req.headers['content-type'] ?? 'application/json' },
+      body: req.method === 'GET' ? undefined : await readBody(req),
+      signal: AbortSignal.timeout(10_000),
+    })
+  } catch (error) {
+    console.error(`autolab node ${node} unreachable:`, error)
+    return sendJson(res, 502, {
+      error: 'node_offline',
+      detail: `The autolab node "${node}" is unreachable.`,
+    })
+  }
+  const body = Buffer.from(await upstream.arrayBuffer())
+  res.writeHead(upstream.status, {
+    'content-type': upstream.headers.get('content-type') ?? 'application/json; charset=utf-8',
+    'content-length': body.byteLength,
+  })
+  res.end(body)
+}
+
 const server = createServer((req, res) => {
   if (req.method === 'GET' && req.url === '/healthz') return sendJson(res, 200, { ok: true })
   if (req.url?.startsWith('/api/forge/')) {
     handleForge(req, res).catch((error) => {
       console.error('unhandled forge passthrough error:', error)
+      sendJson(res, 500, { error: 'internal_error', detail: 'Unexpected passthrough failure.' })
+    })
+    return
+  }
+  if (req.url?.startsWith('/api/autolab/')) {
+    handleAutolab(req, res).catch((error) => {
+      console.error('unhandled autolab passthrough error:', error)
       sendJson(res, 500, { error: 'internal_error', detail: 'Unexpected passthrough failure.' })
     })
     return

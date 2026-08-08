@@ -50,3 +50,22 @@ copies files in `public/` into its local image; therefore a live snapshot is
 included in that local image when present at build time. Temporarily move the
 snapshot out of `public/cluster/` before rebuilding if a sample-only image is
 needed, then restore it afterward.
+
+## autolab passthrough
+
+The browser fetches same-origin only, so autolab gateways are reached through
+the assistant, the same way agforge is:
+
+- `GET /api/autolab/nodes` — the configured nodes and whether each answers
+  `/healthz` right now (a node being down is an answer, not an error).
+- `GET|POST /api/autolab/<node>/<rest>` — that node's gateway. GET is proxied
+  freely; POST only to `/jobs/<job>/summarize/<iter>`.
+- `/evidence/` paths are refused with `403 evidence_not_proxied`. Iteration
+  evidence is summarized on the node it lives on and only the summary text
+  crosses into agdevworld — that rule is enforced here, in one place.
+
+Nodes come from `AUTOLAB_NODES="<name>=<url>,<name>=<url>"`. The committed
+default is the local node only (`agstudio=http://host.docker.internal:8791`);
+real cluster hostnames go in `.env` (git-ignored) or the environment, like
+every other endpoint here. Compose passes an empty value through when unset,
+which means "use the default".

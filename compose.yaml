@@ -12,6 +12,9 @@ services:
       OLLAMA_URL: ${OLLAMA_URL:-http://host.docker.internal:11434}
       OLLAMA_MODEL: ${OLLAMA_MODEL:-glm-4.7-flash:latest}
       AGFORGE_URL: ${AGFORGE_URL:-http://host.docker.internal:8092}
+      # "<name>=<url>,..."; unset falls back to the local node only, so real
+      # cluster hostnames stay out of the repo.
+      AUTOLAB_NODES: ${AUTOLAB_NODES:-}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     ports:

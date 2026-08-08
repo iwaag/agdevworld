@@ -23,3 +23,6 @@ public/cluster/
 *.njsproj
 *.sln
 *.sw?
+
+# Local endpoint values (real hostnames stay out of the repo)
+.env

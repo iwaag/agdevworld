@@ -8,6 +8,7 @@ import {
   type DriftTarget,
   type WorkspaceRow,
 } from './clusterState'
+import { gateText, iterationText, moneyText, type AutolabJobRow } from './autolabState'
 import type { PanelSelection } from './views'
 
 const POPUP_CSS = `
@@ -114,7 +115,14 @@ function selectionKey(selection: PanelSelection): string {
     const t = selection.target.target
     return `nodes:${t.id ?? t.slug ?? t.name ?? 'unnamed'}`
   }
+  if (selection.view === 'autolab') return `autolab:${selection.node}/${selection.job.name}`
   return `workspaces:${selection.row.slug}`
+}
+
+function selectionPayload(selection: PanelSelection): unknown {
+  if (selection.view === 'nodes') return selection.target
+  if (selection.view === 'autolab') return selection.job
+  return selection.row
 }
 
 function el<K extends keyof HTMLElementTagNameMap>(
@@ -299,6 +307,34 @@ function renderWorkspace(row: WorkspaceRow): void {
   body!.append(section)
 }
 
+function renderJob(node: string, job: AutolabJobRow): void {
+  headerName.textContent = job.name
+  headerKind.textContent = `autolab job @ ${node}`
+  const status = job.not_started ? 'not started' : (job.status ?? 'unknown')
+  headerStatus.textContent = status.toUpperCase().replace(/_/g, ' ')
+  headerStatus.style.color = STATUS_COLOR[status] ?? '#b7b5d8'
+
+  const section = el('section')
+  section.append(el('h3', undefined, 'JOB'))
+  section.append(
+    kvList([
+      ['node', node],
+      ['status', status],
+      ['phase', job.phase],
+      ['iteration', iterationText(job)],
+      ['adapter', job.adapter],
+      ['no progress', job.consecutive_no_progress],
+      ['gates', gateText(job.last_gate_summary)],
+      ['failing gates', job.last_gate_summary?.failing?.join('; ')],
+      ['cost', moneyText(job.cost_usd)],
+      ['iterations on disk', job.iterations_on_disk],
+      ['job error', job.error],
+      ['state error', job.state_error],
+    ]),
+  )
+  body!.append(section)
+}
+
 export function showDetailPopup(selection: PanelSelection): void {
   const node = ensurePopup()
   const key = selectionKey(selection)
@@ -313,12 +349,13 @@ export function showDetailPopup(selection: PanelSelection): void {
 
   body!.replaceChildren()
   if (selection.view === 'nodes') renderNode(selection.target, selection.device)
+  else if (selection.view === 'autolab') renderJob(selection.node, selection.job)
   else renderWorkspace(selection.row)
 
   const rawSection = el('section')
   const raw = el('details')
   raw.append(el('summary', undefined, 'RAW JSON'))
-  raw.append(jsonPre(selection.view === 'nodes' ? selection.target : selection.row))
+  raw.append(jsonPre(selectionPayload(selection)))
   rawSection.append(raw)
   if (selection.view === 'nodes' && selection.device) {
     const rawFacts = el('details')

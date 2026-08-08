@@ -1,9 +1,10 @@
 import Phaser from 'phaser'
 import { PanelGridScene } from './scenes/PanelGridScene'
-import { nodesViewConfig, workspacesViewConfig, type PanelSelection } from './views'
+import { autolabViewConfig, nodesViewConfig, workspacesViewConfig, type PanelSelection } from './views'
 import { currentView, registerGame, switchView } from './viewSwitcher'
 import { initChatPanel } from './chatPanel'
 import { setAskHandler, showDetailPopup } from './detailPopup'
+import { summarizeJob } from './autolabState'
 import {
   loadActualDevices,
   loadDriftEnvelope,
@@ -52,6 +53,15 @@ const chat = initChatPanel(
 )
 
 setAskHandler((selection) => {
+  if (selection.view === 'autolab') {
+    // Row-level digest: the iteration drill-down attaches its own summary.
+    selectedDigest = `Details of the selected autolab job:\n${summarizeJob(selection.node, {
+      ...selection.job,
+      evidence: [],
+    })}`
+    chat.ask(`Explain the current state of autolab job ${selection.job.name} in plain language.`)
+    return
+  }
   if (selection.view === 'nodes') {
     const target = selection.target.target
     const name = target.slug ?? target.name ?? target.id ?? 'this node'
@@ -81,6 +91,7 @@ const game = new Phaser.Game({
   scene: [
     new PanelGridScene(nodesViewConfig(handleSelection)),
     new PanelGridScene(workspacesViewConfig(handleSelection)),
+    new PanelGridScene(autolabViewConfig(handleSelection)),
   ],
 })
 registerGame(game, 'nodes')

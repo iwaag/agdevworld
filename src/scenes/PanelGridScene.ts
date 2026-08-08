@@ -22,6 +22,19 @@ export interface PanelRow {
   payload?: unknown
 }
 
+// A small clickable label under the subtitle: the autolab view's node picker
+// and its refresh affordance. Views that do not need one simply omit `chips`.
+export interface PanelChip {
+  id: string
+  label: string
+  active?: boolean
+  onClick: () => void
+}
+
+export interface PanelGridApi {
+  reload: () => void
+}
+
 export interface PanelGridConfig {
   key: string
   title: string
@@ -32,6 +45,13 @@ export interface PanelGridConfig {
   switchTo?: { key: string; label: string }
   loadRows: () => Promise<PanelRow[]>
   onSelect?: (row: PanelRow) => void
+  // Read after every load, so a view that fetches extra context in loadRows()
+  // (the autolab mediator headline) can show it without changing loadRows.
+  headline?: () => string | undefined
+  chips?: () => PanelChip[]
+  // Handed the scene's reload seam on create, so a chip click or an assistant
+  // action can re-fetch without reaching into Phaser.
+  bind?: (api: PanelGridApi) => void
 }
 
 interface PanelView {
@@ -48,6 +68,8 @@ export class PanelGridScene extends Phaser.Scene {
   private subtitle!: Phaser.GameObjects.Text
   private footer!: Phaser.GameObjects.Text
   private switchLabel?: Phaser.GameObjects.Text
+  private headline?: Phaser.GameObjects.Text
+  private chips: Phaser.GameObjects.Text[] = []
   private panels: PanelView[] = []
 
   constructor(config: PanelGridConfig) {
@@ -75,6 +97,14 @@ export class PanelGridScene extends Phaser.Scene {
         fontSize: '25px',
         color: '#f4f1ff',
         fontStyle: 'bold',
+      })
+      .setOrigin(0.5)
+
+    this.headline = this.add
+      .text(0, 0, '', {
+        fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
+        fontSize: '11px',
+        color: '#9a9db5',
       })
       .setOrigin(0.5)
 
@@ -107,22 +137,50 @@ export class PanelGridScene extends Phaser.Scene {
       })
     }
 
+    this.config.bind?.({ reload: () => void this.loadSnapshot() })
     this.layout(this.scale.width, this.scale.height)
     this.scale.on('resize', (size: Phaser.Structs.Size) => this.layout(size.width, size.height))
     void this.loadSnapshot()
   }
 
   private async loadSnapshot() {
+    this.subtitle.setText(this.config.loadingText)
+    this.createPanels([])
+    this.createChips()
+    this.layout(this.scale.width, this.scale.height)
     try {
       const rows = await this.config.loadRows()
       this.createPanels(rows)
       this.subtitle.setText(this.config.subtitle(rows.length))
+      this.footer.setText(this.config.footer)
     } catch (error) {
       console.error(error)
       this.subtitle.setText(this.config.unavailableText)
       this.footer.setText(error instanceof Error ? error.message : 'unknown snapshot error')
     }
+    // Chips and headline are rebuilt after the load either way: a failed fetch
+    // still has to leave the node picker usable, or the view is a dead end.
+    this.createChips()
+    this.headline?.setText(this.config.headline?.() ?? '')
     this.layout(this.scale.width, this.scale.height)
+  }
+
+  private createChips() {
+    for (const chip of this.chips) chip.destroy()
+    this.chips = (this.config.chips?.() ?? []).map((chip) =>
+      this.add
+        .text(0, 0, chip.label, {
+          fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
+          fontSize: '12px',
+          color: chip.active ? '#0d0f14' : '#c3c7de',
+          backgroundColor: chip.active ? '#70c7ff' : '#1b2030',
+          padding: { x: 9, y: 4 },
+          letterSpacing: 1,
+        })
+        .setOrigin(0, 0.5)
+        .setInteractive({ useHandCursor: true })
+        .on('pointerup', chip.onClick),
+    )
   }
 
   private createPanels(rows: PanelRow[]) {
@@ -158,6 +216,9 @@ export class PanelGridScene extends Phaser.Scene {
       fontSize: '10px',
       color: `#${style.color.toString(16).padStart(6, '0')}`,
       letterSpacing: 2,
+      // autolab's status line (status · iteration · gates · cost) is longer
+      // than a cluster status word and used to run off the panel edge.
+      wordWrap: { width: PANEL_WIDTH - 82 },
     })
 
     const floatLayer = this.add.container(0, 0, [shadow, chrome, nameText, statusText])
@@ -205,10 +266,27 @@ export class PanelGridScene extends Phaser.Scene {
     this.footer?.setPosition(width / 2, height - 28)
     this.switchLabel?.setPosition(20, Math.max(36, height * 0.07))
 
+    const headlineY = Math.max(104, height * 0.185)
+    this.headline?.setPosition(width / 2, headlineY)
+    // Chips sit on one centered row below the headline; they push the grid
+    // down by exactly the space they occupy so the two never overlap.
+    let chipTop = 0
+    if (this.chips.length > 0) {
+      const gap = 8
+      const total = this.chips.reduce((sum, chip) => sum + chip.width + gap, -gap)
+      let x = (width - total) / 2
+      const y = headlineY + 24
+      for (const chip of this.chips) {
+        chip.setPosition(x, y)
+        x += chip.width + gap
+      }
+      chipTop = 34
+    }
+
     if (this.panels.length === 0) return
 
     const usableWidth = Math.max(1, width - 40)
-    const usableHeight = Math.max(1, height - 190)
+    const usableHeight = Math.max(1, height - 190 - chipTop)
     const maxColumns = Math.max(1, Math.floor((usableWidth + COLUMN_GAP) / (PANEL_WIDTH + COLUMN_GAP)))
     const columns = Math.min(this.panels.length, maxColumns, 4)
     const rows = Math.ceil(this.panels.length / columns)
@@ -218,7 +296,8 @@ export class PanelGridScene extends Phaser.Scene {
     const scaledCellWidth = (PANEL_WIDTH + COLUMN_GAP) * scale
     const scaledCellHeight = (PANEL_HEIGHT + ROW_GAP) * scale
     const scaledGridHeight = gridHeight * scale
-    const startY = 150 + Math.max(0, (usableHeight - scaledGridHeight) / 2) + (PANEL_HEIGHT * scale) / 2
+    const startY =
+      150 + chipTop + Math.max(0, (usableHeight - scaledGridHeight) / 2) + (PANEL_HEIGHT * scale) / 2
 
     this.panels.forEach(({ anchor, floatLayer }, index) => {
       const column = index % columns

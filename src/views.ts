@@ -12,6 +12,7 @@ import {
   loadAutolabNodes,
   loadAutolabStatus,
   statusHeadline,
+  type AutolabJobDetail,
   type AutolabJobRow,
   type AutolabNode,
   type AutolabStatus,
@@ -25,7 +26,15 @@ import type { PanelChip, PanelGridApi, PanelGridConfig, PanelRowStatus } from '.
 export type PanelSelection =
   | { view: 'nodes'; target: DriftTarget; device?: ActualDeviceModel }
   | { view: 'workspaces'; row: WorkspaceRow }
-  | { view: 'autolab'; node: string; job: AutolabJobRow }
+  // `detail` and `summary` are attached by the popup once the drill-down has
+  // loaded, so "ask the agent" carries what the user is actually looking at.
+  | {
+      view: 'autolab'
+      node: string
+      job: AutolabJobRow
+      detail?: AutolabJobDetail
+      summary?: { iter: string; text: string }
+    }
 
 const CLUSTER_STATUS_STYLE: Record<ClusterStatus, PanelRowStatus> = {
   converged: { emoji: '✅', color: 0x67e8a5, label: 'CONVERGED' },

@@ -54,12 +54,23 @@ const chat = initChatPanel(
 
 setAskHandler((selection) => {
   if (selection.view === 'autolab') {
-    // Row-level digest: the iteration drill-down attaches its own summary.
-    selectedDigest = `Details of the selected autolab job:\n${summarizeJob(selection.node, {
-      ...selection.job,
-      evidence: [],
-    })}`
-    chat.ask(`Explain the current state of autolab job ${selection.job.name} in plain language.`)
+    const detail = selection.detail ?? { ...selection.job, evidence: [] }
+    const digest = [`Details of the selected autolab job:\n${summarizeJob(selection.node, detail)}`]
+    // The iteration summary was written by a Claude agent on the node and is
+    // already prose. It goes into the context verbatim — the popup shows the
+    // same text unabridged, and the local model's job is only to answer
+    // questions about it, never to re-summarize it.
+    if (selection.summary) {
+      digest.push(
+        `Summary of iteration ${selection.summary.iter}, written on the node:\n${selection.summary.text}`,
+      )
+    }
+    selectedDigest = digest.join('\n\n')
+    chat.ask(
+      selection.summary
+        ? `What does iteration ${selection.summary.iter} of autolab job ${selection.job.name} tell us?`
+        : `Explain the current state of autolab job ${selection.job.name} in plain language.`,
+    )
     return
   }
   if (selection.view === 'nodes') {

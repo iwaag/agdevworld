@@ -51,6 +51,24 @@ included in that local image when present at build time. Temporarily move the
 snapshot out of `public/cluster/` before rebuilding if a sample-only image is
 needed, then restore it afterward.
 
+## autolab view
+
+The third view (`nodes → workspaces → autolab`, cycled with the ⇄ label, the
+V key, or "show me the autolab" in chat) shows one autolab node's jobs. A chip
+row picks the node (`●` reachable / `○` not) and refreshes; the line above it
+is the node's mediator headline (mission, driver state, cumulative cost).
+Clicking a job opens the detail popup with its `evidence/iter-NNNN` timeline,
+and each iteration has a `summary` button.
+
+That button is the only way iteration content reaches this app. It asks the
+node to summarize that iteration with its own one-shot Claude run
+(~$0.15, cached per iteration, one at a time per node) and renders the
+returned prose verbatim; "Ask agent about this iteration" hands the same text
+to the chat assistant. Raw evidence files are never fetched — see below.
+
+Data is fetched on view entry, on chip click, and while a summary is pending;
+there is no polling loop.
+
 ## autolab passthrough
 
 The browser fetches same-origin only, so autolab gateways are reached through

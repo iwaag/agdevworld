@@ -17,26 +17,23 @@ const ARTIFACTS = [
     schema: 'nctl.drift.v1',
     outputEnv: 'CLUSTER_STATE_OUTPUT',
     defaultOutput: resolve(SCRIPT_DIR, '../public/cluster/state.json'),
-    validate: validateDriftEnvelope,
   },
   {
     command: 'nctl workspaces --json',
     schema: 'nctl.workspaces.v1',
     outputEnv: 'CLUSTER_WORKSPACES_OUTPUT',
     defaultOutput: resolve(SCRIPT_DIR, '../public/cluster/workspaces.json'),
-    validate: validateWorkspacesEnvelope,
   },
   {
     command: 'nctl actual --json --detail',
     schema: 'nctl.actual.v2',
     outputEnv: 'CLUSTER_ACTUAL_OUTPUT',
     defaultOutput: resolve(SCRIPT_DIR, '../public/cluster/actual.json'),
-    validate: validateActualEnvelope,
   },
 ]
 
 function artifactPrompt(command) {
-  return `Please run \`${command}\`, save the output as a file, upload it with \`nctl upload\`, and reply with only the download URL.`
+  return `Please run \`${command}\`, save the output as a file, and upload it with \`nctl upload\`. This script reads the download URL out of your reply.`
 }
 
 function positiveInteger(name, fallback) {
@@ -126,56 +123,12 @@ async function requestJson(url, options) {
   }
 }
 
-function validateDriftEnvelope(value) {
-  if (
-    value === null ||
-    typeof value !== 'object' ||
-    value.schema !== 'nctl.drift.v1' ||
-    typeof value.ok !== 'boolean' ||
-    value.data === null ||
-    typeof value.data !== 'object' ||
-    !Array.isArray(value.data.targets) ||
-    value.data.summary === null ||
-    typeof value.data.summary !== 'object'
-  ) {
-    throw new Error('Downloaded artifact is not a valid nctl.drift.v1 envelope')
-  }
-}
-
-function validateWorkspacesEnvelope(value) {
-  if (
-    value === null ||
-    typeof value !== 'object' ||
-    value.schema !== 'nctl.workspaces.v1' ||
-    typeof value.ok !== 'boolean' ||
-    value.data === null ||
-    typeof value.data !== 'object' ||
-    !Array.isArray(value.data.rows) ||
-    value.data.summary === null ||
-    typeof value.data.summary !== 'object'
-  ) {
-    throw new Error('Downloaded artifact is not a valid nctl.workspaces.v1 envelope')
-  }
-}
-
-function validateActualEnvelope(value) {
-  if (
-    value === null ||
-    typeof value !== 'object' ||
-    value.schema !== 'nctl.actual.v2' ||
-    typeof value.ok !== 'boolean' ||
-    value.data === null ||
-    typeof value.data !== 'object' ||
-    !Array.isArray(value.data.devices)
-  ) {
-    throw new Error('Downloaded artifact is not a valid nctl.actual.v2 envelope')
-  }
-}
-
+// cagent answers in prose; take the last URL it mentions. Nothing tells it to
+// reply with the URL alone.
 function extractDownloadUrl(responseText) {
-  const match = responseText.match(/https?:\/\/[^\s<>"']+/u)
-  if (!match) throw new Error('Completed cagent response did not contain a download URL')
-  return new URL(match[0].replace(/[),.\]}]+$/u, ''))
+  const matches = responseText.match(/https?:\/\/[^\s<>"'`]+/gu)
+  if (!matches) throw new Error('The cagent reply contains no URL to download')
+  return new URL(matches[matches.length - 1].replace(/[),.\]}]+$/u, ''))
 }
 
 async function fetchArtifact(baseUrl, authHeaders, artifact) {
@@ -205,25 +158,20 @@ async function fetchArtifact(baseUrl, authHeaders, artifact) {
 
   const downloadUrl = extractDownloadUrl(result.response)
   const downloaded = await request(downloadUrl)
-  let envelope
-  try {
-    envelope = JSON.parse(downloaded.toString('utf8'))
-  } catch {
-    throw new Error('Downloaded artifact is not JSON')
-  }
-  artifact.validate(envelope)
-
+  const text = downloaded.toString('utf8')
+  // Where the file lands is this script's decision, not the reply's: a URL
+  // lifted out of prose chooses what is written, never where.
   const output = resolve(process.env[artifact.outputEnv] ?? artifact.defaultOutput)
   const temporaryOutput = `${output}.tmp`
   await mkdir(dirname(output), { recursive: true })
   try {
-    await writeFile(temporaryOutput, `${JSON.stringify(envelope, null, 2)}\n`, { mode: 0o600 })
+    await writeFile(temporaryOutput, text.endsWith('\n') ? text : `${text}\n`, { mode: 0o600 })
     await rename(temporaryOutput, output)
   } catch (error) {
     await unlink(temporaryOutput).catch(() => {})
     throw error
   }
-  console.log(`Saved validated ${envelope.schema} snapshot to ${output}`)
+  console.log(`Saved ${text.length} bytes from ${downloadUrl.pathname} to ${output}`)
 }
 
 async function main() {

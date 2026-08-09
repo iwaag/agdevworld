@@ -22,15 +22,6 @@ export interface DriftTarget {
   diffs: DriftDiff[]
 }
 
-export interface DriftEnvelope {
-  schema: 'nctl.drift.v1'
-  ok: boolean
-  data: {
-    targets: DriftTarget[]
-    summary: Record<string, number>
-  }
-}
-
 export interface TargetPanelModel {
   id: string
   name: string
@@ -51,36 +42,24 @@ function isObject(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object'
 }
 
-function isClusterStatus(value: unknown): value is ClusterStatus {
-  return ['converged', 'converging', 'drifting', 'unknown'].includes(String(value))
+// These readers exist so the panels can draw; they are not gatekeepers. An
+// envelope with an unfamiliar schema, a missing field or a target the code has
+// never seen yields whatever can be drawn, not an exception. The assistant
+// reads the same files itself and needs no permission from here.
+function targetsOf(value: unknown): DriftTarget[] {
+  const data = isObject(value) ? value.data : undefined
+  const targets = isObject(data) && Array.isArray(data.targets) ? data.targets : []
+  return targets.filter(isObject).map((entry) => ({
+    target: isObject(entry.target) ? (entry.target as unknown as DriftTargetRef) : { kind: 'unknown' },
+    status: (['converged', 'converging', 'drifting'].includes(String(entry.status))
+      ? entry.status
+      : 'unknown') as ClusterStatus,
+    diffs: Array.isArray(entry.diffs) ? entry.diffs.filter(isObject).map((diff) => diff as unknown as DriftDiff) : [],
+  }))
 }
 
-export function parseDriftEnvelope(value: unknown): DriftEnvelope {
-  if (!isObject(value) || value.schema !== 'nctl.drift.v1' || typeof value.ok !== 'boolean') {
-    throw new Error('Cluster snapshot is not an nctl.drift.v1 envelope')
-  }
-  if (!isObject(value.data) || !Array.isArray(value.data.targets) || !isObject(value.data.summary)) {
-    throw new Error('Cluster snapshot data is malformed')
-  }
-
-  for (const entry of value.data.targets) {
-    if (
-      !isObject(entry) ||
-      !isObject(entry.target) ||
-      typeof entry.target.kind !== 'string' ||
-      !isClusterStatus(entry.status) ||
-      !Array.isArray(entry.diffs) ||
-      !entry.diffs.every((diff) => isObject(diff) && typeof diff.code === 'string')
-    ) {
-      throw new Error('Cluster snapshot contains a malformed target')
-    }
-  }
-
-  return value as unknown as DriftEnvelope
-}
-
-export function filterExistingTargets(envelope: DriftEnvelope, kind: string): TargetPanelModel[] {
-  return envelope.data.targets
+export function filterExistingTargets(targets: DriftTarget[], kind: string): TargetPanelModel[] {
+  return targets
     .filter(
       (entry) =>
         entry.target.kind === kind &&
@@ -112,12 +91,11 @@ async function loadSnapshotJson(primaryUrl: string, sampleUrl: string): Promise<
   return response.json()
 }
 
-export async function loadDriftEnvelope(): Promise<DriftEnvelope> {
-  return parseDriftEnvelope(await loadSnapshotJson('/cluster/state.json', '/state.sample.json'))
-}
-
 export async function loadExistingNodes(): Promise<TargetPanelModel[]> {
-  return filterExistingTargets(await loadDriftEnvelope(), 'node')
+  return filterExistingTargets(
+    targetsOf(await loadSnapshotJson('/cluster/state.json', '/state.sample.json')),
+    'node',
+  )
 }
 
 // --- Workspaces (nctl.workspaces.v1) ---
@@ -137,48 +115,15 @@ export interface WorkspaceRow {
   gap_codes: string[]
 }
 
-export interface WorkspacesEnvelope {
-  schema: 'nctl.workspaces.v1'
-  ok: boolean
-  data: {
-    generated_at?: string
-    rows: WorkspaceRow[]
-    summary: Record<string, number>
-  }
-}
-
-export function parseWorkspacesEnvelope(value: unknown): WorkspacesEnvelope {
-  if (!isObject(value) || value.schema !== 'nctl.workspaces.v1' || typeof value.ok !== 'boolean') {
-    throw new Error('Workspace snapshot is not an nctl.workspaces.v1 envelope')
-  }
-  if (!isObject(value.data) || !Array.isArray(value.data.rows) || !isObject(value.data.summary)) {
-    throw new Error('Workspace snapshot data is malformed')
-  }
-
-  for (const row of value.data.rows) {
-    if (
-      !isObject(row) ||
-      typeof row.slug !== 'string' ||
-      typeof row.name !== 'string' ||
-      typeof row.node !== 'string' ||
-      typeof row.presence !== 'string' ||
-      !Array.isArray(row.gap_codes)
-    ) {
-      throw new Error('Workspace snapshot contains a malformed row')
-    }
-  }
-
-  return value as unknown as WorkspacesEnvelope
-}
-
-export async function loadWorkspacesEnvelope(): Promise<WorkspacesEnvelope> {
-  return parseWorkspacesEnvelope(
-    await loadSnapshotJson('/cluster/workspaces.json', '/workspaces.sample.json'),
-  )
-}
-
 export async function loadWorkspaceRows(): Promise<WorkspaceRow[]> {
-  return (await loadWorkspacesEnvelope()).data.rows
+  const value = await loadSnapshotJson('/cluster/workspaces.json', '/workspaces.sample.json')
+  const data = isObject(value) ? value.data : undefined
+  const rows = isObject(data) && Array.isArray(data.rows) ? data.rows : []
+  return rows.filter(isObject).map((row) => ({
+    ...row,
+    name: String(row.name ?? row.slug ?? 'unnamed'),
+    gap_codes: Array.isArray(row.gap_codes) ? row.gap_codes.map(String) : [],
+  })) as unknown as WorkspaceRow[]
 }
 
 // --- Actual devices (nctl.actual.v2, --detail adds facts_raw) ---
@@ -189,40 +134,18 @@ export interface ActualDeviceModel {
   serial?: string | null
   platform?: string | null
   facts: Record<string, unknown>
-  // Full nodeutils facts dict; present only in --detail snapshots. Display
-  // selectively — never feed this whole dict to the assistant.
+  // Full nodeutils facts dict; present only in --detail snapshots. The popup
+  // shows a few lines of it; the whole file is at /cluster/actual.json.
   facts_raw?: Record<string, unknown> | null
 }
 
-export interface ActualEnvelope {
-  schema: 'nctl.actual.v2'
-  ok: boolean
-  data: {
-    detail_level: string
-    devices: ActualDeviceModel[]
-    clusters?: unknown[]
-    read_errors?: unknown[]
-  }
-}
-
-export function parseActualEnvelope(value: unknown): ActualEnvelope {
-  if (!isObject(value) || value.schema !== 'nctl.actual.v2' || typeof value.ok !== 'boolean') {
-    throw new Error('Actual snapshot is not an nctl.actual.v2 envelope')
-  }
-  if (!isObject(value.data) || !Array.isArray(value.data.devices)) {
-    throw new Error('Actual snapshot data is malformed')
-  }
-  for (const device of value.data.devices) {
-    if (!isObject(device) || typeof device.id !== 'string' || typeof device.name !== 'string') {
-      throw new Error('Actual snapshot contains a malformed device')
-    }
-  }
-  return value as unknown as ActualEnvelope
-}
-
 export async function loadActualDevices(): Promise<ActualDeviceModel[]> {
-  return parseActualEnvelope(await loadSnapshotJson('/cluster/actual.json', '/actual.sample.json'))
-    .data.devices
+  const value = await loadSnapshotJson('/cluster/actual.json', '/actual.sample.json')
+  const data = isObject(value) ? value.data : undefined
+  const devices = isObject(data) && Array.isArray(data.devices) ? data.devices : []
+  return devices
+    .filter(isObject)
+    .map((device) => ({ ...device, name: String(device.name ?? '') })) as unknown as ActualDeviceModel[]
 }
 
 // Devices carry Nautobot names, which may be fully qualified
@@ -279,109 +202,4 @@ export function deviceHardwareFacts(device: ActualDeviceModel): Array<[string, s
     if (containers.length > 8) rows.push(['container', `… and ${containers.length - 8} more`])
   }
   return rows
-}
-
-// Compact plain-text summary for the assistant. Deliberately not the raw
-// JSON: the snapshot will grow and small local models degrade on large JSON
-// blobs. Unlike the panel, this includes ALL targets (even not-yet-confirmed
-// nodes) so the assistant can answer "why is X missing?".
-export function summarizeClusterContext(envelope: DriftEnvelope): string {
-  const counts = Object.entries(envelope.data.summary)
-    .map(([status, count]) => `${status}=${count}`)
-    .join(', ')
-
-  const lines = envelope.data.targets.map((entry) => {
-    const name = entry.target.slug ?? entry.target.name ?? entry.target.id ?? 'unnamed'
-    const diffs = entry.diffs
-      .map((diff) => {
-        const severity = diff.severity ? ` (${diff.severity})` : ''
-        const message = diff.message ? `: ${diff.message}` : ''
-        return `${diff.code}${severity}${message}`
-      })
-      .join('; ')
-    return `- ${entry.target.kind} ${name}: ${entry.status}${diffs ? ` — ${diffs}` : ''}`
-  })
-
-  return [`Status counts: ${counts}`, ...lines].join('\n')
-}
-
-// Compact digest of one node for the assistant. Same rule as above: never the
-// raw JSON — selected fields flattened to short plain-text lines.
-export function summarizeNode(target: DriftTarget, device?: ActualDeviceModel): string {
-  const name = target.target.slug ?? target.target.name ?? target.target.id ?? 'unnamed'
-  const lines = [`Node ${name}: status ${target.status}.`]
-
-  // A few hardware lines from the detail snapshot — selected fields only,
-  // never the whole facts_raw dict.
-  if (device) {
-    const facts = new Map<string, string[]>()
-    for (const [key, value] of deviceHardwareFacts(device)) {
-      facts.set(key, [...(facts.get(key) ?? []), value])
-    }
-    const hardware: string[] = []
-    if (facts.has('cpu')) hardware.push(`CPU ${facts.get('cpu')![0]}`)
-    if (facts.has('memory')) hardware.push(`memory ${facts.get('memory')![0]}`)
-    if (facts.has('gpu')) hardware.push(`GPU ${facts.get('gpu')!.join(' + ')}`)
-    if (hardware.length > 0) lines.push(`Hardware: ${hardware.join(', ')}.`)
-    if (facts.has('docker')) lines.push(`Docker: ${facts.get('docker')![0]}.`)
-  }
-
-  const summary = target.diffs.find((diff) => diff.code === 'intent_effect_summary')
-  const desired = isObject(summary?.desired) ? summary.desired : undefined
-  const node = isObject(desired?.node) ? desired.node : undefined
-  if (node) {
-    const role = node.role ? `, role ${String(node.role)}` : ''
-    lines.push(`Intent: lifecycle ${String(node.lifecycle)}, type ${String(node.node_type)}${role}.`)
-  }
-  if (Array.isArray(desired?.endpoints)) {
-    for (const endpoint of desired.endpoints) {
-      if (!isObject(endpoint)) continue
-      lines.push(
-        `Endpoint ${String(endpoint.name)}: ip ${String(endpoint.ip_address)}, dns ${String(endpoint.dns_name)}.`,
-      )
-    }
-  }
-  if (Array.isArray(desired?.placements)) {
-    for (const placement of desired.placements) {
-      if (!isObject(placement)) continue
-      lines.push(
-        `Service placement ${String(placement.service_slug ?? placement.instance_name)}: desired state ${String(placement.desired_state)}.`,
-      )
-    }
-  }
-  const actual = isObject(summary?.actual) ? summary.actual : undefined
-  const production = isObject(actual?.production) ? actual.production : undefined
-  if (production) {
-    const reasons = Array.isArray(production.reasons) && production.reasons.length > 0
-      ? ` (reasons: ${production.reasons.map(String).join(', ')})`
-      : ''
-    lines.push(`Production application: ${String(production.state)}${reasons}.`)
-  }
-
-  for (const diff of target.diffs) {
-    if (diff.code === 'intent_effect_summary') continue
-    const severity = diff.severity ? ` (${diff.severity})` : ''
-    const message = diff.message ? `: ${diff.message}` : ''
-    lines.push(`Diff ${diff.code}${severity}${message}.`)
-  }
-  return lines.join('\n')
-}
-
-// Same idea for a workspace row.
-export function summarizeWorkspace(row: WorkspaceRow): string {
-  const lines = [
-    `Workspace ${row.name} on node ${row.node}: presence ${row.presence} (desired ${row.desired_presence}), identity ${row.identity}.`,
-  ]
-  if (row.identity_reason) lines.push(`Identity reason: ${row.identity_reason}.`)
-  if (row.activity_class) {
-    const reasons = isObject(row.activity_reasons)
-      ? ` (${Object.entries(row.activity_reasons)
-          .map(([key, value]) => `${key}=${String(value)}`)
-          .join(', ')})`
-      : ''
-    lines.push(`Activity: ${row.activity_class}${reasons}.`)
-  }
-  lines.push(`Observation freshness: ${row.freshness}${row.checked_at ? `, checked at ${row.checked_at}` : ''}.`)
-  if (row.gap_codes.length > 0) lines.push(`Gap codes: ${row.gap_codes.join(', ')}.`)
-  return lines.join('\n')
 }

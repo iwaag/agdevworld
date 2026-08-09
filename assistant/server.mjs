@@ -1,16 +1,17 @@
 // Minimal assistant service for agdevworld.
 //
 // POST /api/chat
-//   { "messages": [{"role":"user"|"assistant","content":"..."}], "context": "<cluster summary text>" }
-//   -> { "reply": "..." }
+//   { "messages": [...], "context": "<what is on screen>" }
+//   -> { "reply": "...", "tool_calls": [...], "backend": "..." }
 // GET /api/guide -> GUIDE.md as text/plain
 //
-// Stateless: conversation history lives in the browser and is sent whole on
-// each request. This endpoint is the engine-agnostic seam: `handleChat` builds
-// the system prompt and hands (system, messages) to a backend, and only the
-// BACKENDS entries below know what engine answers.
+// Stateless: the conversation lives in the browser and is sent whole on each
+// request. Tool calls are answered the same way — the assistant asks, the
+// browser runs the call and posts the result back in the next message list.
+// Tools run in the browser because that is where the screen and the same-origin
+// paths are; this service stays a pure (system, messages, tools) -> reply seam.
 //
-// Backend selection (devpolicy/policy.md, Agent ≠ Model), same shape as
+// Backend selection (devpolicy/policy.md, Agent != Model), same shape as
 // agforge's AGFORGE_AGENT_BACKEND — process env, one default, unknown value is
 // an error rather than a silent fallback:
 //
@@ -48,35 +49,85 @@ async function readGuide() {
   }
 }
 
-// Role and action protocol are engine-agnostic; keep them above the ollama
-// configuration below.
-const ROLE_PROMPT =
-  'You are the assistant inside agdevworld, an immersive development interface. ' +
-  'Answer questions about the cluster described below, concisely and in plain text. ' +
-  'If the answer is not in the cluster summary, say you do not know.\n\n' +
-  'You can also control the screen. There are three views: "nodes" (cluster nodes), ' +
-  '"workspaces" (development workspaces), and "autolab" (agent-driven jobs running on the ' +
-  'autolab nodes). When the user asks to see, show, or switch to a view, include this exact ' +
-  'JSON object on its own line in your reply: {"action":"switch_view","view":"nodes"}, ' +
-  '{"action":"switch_view","view":"workspaces"} or {"action":"switch_view","view":"autolab"} ' +
-  'and add one short confirming sentence. Do not include the JSON object unless the user asked ' +
-  'to change the view, and never mention or explain the JSON itself.\n\n' +
-  'You can also generate images. When the user asks you to draw, paint, create, or generate a ' +
-  'picture or image, include this exact JSON object on its own line in your reply: ' +
-  '{"action":"generate_image","desire":"<short English image prompt>"} ' +
-  'where the desire describes what to draw, on a single line, using no double quotes, braces, or ' +
-  'backslashes inside it. Add one short sentence saying the image is being generated. Do not ' +
-  'include this object unless the user asked for an image, and never mention or explain the JSON.\n\n' +
-  'When the user asks what you can do, what you are, what something costs, or how long it takes, ' +
-  'answer from the capability card below. Quote its figures as they stand — tentative ranges and ' +
-  '"unknown" are correct answers, and you must never invent a price, a duration or a capability ' +
-  'the card does not claim.'
+// --- tools ------------------------------------------------------------------
+//
+// Declared here, executed in the browser. `fetch` is one tool rather than one
+// tool per endpoint on purpose: an enumerated tool per endpoint is the same
+// allowlist wearing a different hat. The paths below are facts; what is
+// actually reachable is decided by the passthrough at request time, and its
+// refusals reach the assistant verbatim.
+
+const TOOLS = [
+  {
+    name: 'fetch',
+    description:
+      'Fetch any same-origin path of this app. Returns the HTTP status, the content type and the body, raw.',
+    parameters: {
+      type: 'object',
+      properties: {
+        path: { type: 'string', description: 'Path starting with /' },
+        method: { type: 'string', description: 'GET (default) or POST' },
+        body: { type: 'string', description: 'Request body for POST, usually JSON' },
+      },
+      required: ['path'],
+    },
+  },
+  {
+    name: 'switch_view',
+    description: 'Show one of the views on screen.',
+    parameters: {
+      type: 'object',
+      properties: { view: { type: 'string', description: 'nodes, workspaces or autolab' } },
+      required: ['view'],
+    },
+  },
+  {
+    name: 'wait',
+    description: 'Pause before the next tool call, for something that takes time to finish.',
+    parameters: {
+      type: 'object',
+      properties: { seconds: { type: 'number' } },
+      required: ['seconds'],
+    },
+  },
+  {
+    name: 'show_image',
+    description: 'Put a picture in the conversation.',
+    parameters: {
+      type: 'object',
+      properties: { url: { type: 'string' } },
+      required: ['url'],
+    },
+  },
+]
+
+const ROLE_PROMPT = `You are the assistant inside agdevworld, an immersive development interface, and the human's conversational entrance to it.
+
+Tools: fetch(path, method, body), wait(seconds), switch_view(view), show_image(url).
+
+Paths reachable with fetch:
+- /cluster/state.json, /cluster/workspaces.json, /cluster/actual.json — the live cluster snapshots (nctl drift, workspaces, actual with hardware facts). When a live one is absent the samples are /state.sample.json, /workspaces.sample.json, /actual.sample.json.
+- /api/autolab/nodes — the autolab nodes this service is configured with, and whether each answers right now.
+- /api/autolab/<node>/jobs, /api/autolab/<node>/jobs/<job>, /api/autolab/<node>/status — one node's autolab gateway.
+- /api/autolab/<node>/jobs/<job>/summarize/<iter> — POST asks the node to summarize that iteration, GET reads the result; it takes about 15 seconds and may answer "pending".
+- /api/forge/requests — POST {"desire":"..."} starts an image generation on agforge; GET /api/forge/requests/<id> reads it back. It takes 20 to 105 seconds.
+- /api/guide — the capability card below, raw.
+
+The screen shows one view at a time: nodes, workspaces, autolab.
+
+Budget: up to 16 tool rounds per reply, and a single wait lasts at most 60 seconds. A fetch that does not answer within about 10 seconds comes back as a timeout. Whatever a path answers, including a refusal and its reason, is returned to you as it stands.`
 
 // --- backends ---------------------------------------------------------------
 //
-// A backend takes ({ system, messages }) and returns { reply, meta }. It throws
-// BackendError when it cannot answer; the caller turns that into a 502 and a
-// `failed` record carrying the backend's own words.
+// A backend takes ({ system, messages, tools }) and returns
+// { reply, tool_calls, meta }. It throws BackendError when it cannot answer;
+// the caller turns that into a 502 and a `failed` record carrying the
+// backend's own words.
+//
+// The wire message shape is neutral, and each backend translates it:
+//   { role: 'user' | 'assistant', content: string }
+//   { role: 'assistant', content: string, tool_calls: [{ id, name, arguments }] }
+//   { role: 'tool', tool_call_id, name, content: string }
 
 class BackendError extends Error {}
 
@@ -85,8 +136,8 @@ const OLLAMA_MODEL = process.env.OLLAMA_MODEL ?? 'glm-4.7-flash:latest'
 
 // Claude Opus 5 is the default rather than a cheaper tier on purpose: this is
 // the opt-in "strong backend" of the switch, and the cheap path is the ollama
-// default. Effort stays low — the assistant answers from a cluster snapshot
-// and a capability card, not from hard reasoning.
+// default. Effort stays low — the assistant answers from what it fetches and a
+// capability card, not from hard reasoning.
 // `||`, not `??`, throughout: compose passes an empty string for a variable the
 // operator has not set, and empty must mean "use the default" (the same trap
 // AUTOLAB_NODES documents below).
@@ -94,7 +145,25 @@ const CLAUDE_MODEL = process.env.CLAUDE_MODEL || 'claude-opus-5'
 const CLAUDE_EFFORT = process.env.CLAUDE_EFFORT || 'low'
 const CLAUDE_MAX_TOKENS = Number(process.env.CLAUDE_MAX_TOKENS || 4096)
 
-async function askOllama({ system, messages }) {
+function toOllamaMessages(messages) {
+  return messages.map((message) => {
+    if (message.role === 'tool') {
+      return { role: 'tool', content: message.content ?? '' }
+    }
+    if (Array.isArray(message.tool_calls) && message.tool_calls.length > 0) {
+      return {
+        role: 'assistant',
+        content: message.content ?? '',
+        tool_calls: message.tool_calls.map((call) => ({
+          function: { name: call.name, arguments: call.arguments ?? {} },
+        })),
+      }
+    }
+    return { role: message.role, content: message.content ?? '' }
+  })
+}
+
+async function askOllama({ system, messages, tools }) {
   let response
   try {
     response = await fetch(`${OLLAMA_URL}/api/chat`, {
@@ -103,7 +172,11 @@ async function askOllama({ system, messages }) {
       body: JSON.stringify({
         model: OLLAMA_MODEL,
         stream: false,
-        messages: [{ role: 'system', content: system }, ...messages],
+        tools: tools.map((tool) => ({
+          type: 'function',
+          function: { name: tool.name, description: tool.description, parameters: tool.parameters },
+        })),
+        messages: [{ role: 'system', content: system }, ...toOllamaMessages(messages)],
       }),
     })
   } catch (error) {
@@ -114,12 +187,20 @@ async function askOllama({ system, messages }) {
     throw new BackendError(`the language model returned HTTP ${response.status}: ${detail.slice(0, 400)}`)
   }
   const data = await response.json().catch(() => null)
-  const reply = data?.message?.content
-  if (typeof reply !== 'string' || reply.trim() === '') {
+  const message = data?.message
+  if (message === undefined || message === null) {
     throw new BackendError('the language model returned an unexpected shape')
   }
+  const calls = Array.isArray(message.tool_calls)
+    ? message.tool_calls.map((call, index) => ({
+        id: call.id ?? `call_${index}`,
+        name: call.function?.name ?? '',
+        arguments: call.function?.arguments ?? {},
+      }))
+    : []
   return {
-    reply,
+    reply: typeof message.content === 'string' ? message.content : '',
+    tool_calls: calls,
     meta: {
       model: OLLAMA_MODEL,
       // ollama reports tokens but never a price; never invent one.
@@ -148,7 +229,37 @@ async function getAnthropic() {
   return anthropicClient
 }
 
-async function askClaude({ system, messages }) {
+// Tool results are user-turn content blocks for this API, and turns must
+// alternate, so consecutive results merge into one message.
+function toClaudeMessages(messages) {
+  const out = []
+  for (const message of messages) {
+    if (message.role === 'tool') {
+      const block = {
+        type: 'tool_result',
+        tool_use_id: message.tool_call_id,
+        content: message.content ?? '',
+      }
+      const last = out[out.length - 1]
+      if (last?.role === 'user' && Array.isArray(last.content)) last.content.push(block)
+      else out.push({ role: 'user', content: [block] })
+      continue
+    }
+    if (Array.isArray(message.tool_calls) && message.tool_calls.length > 0) {
+      const blocks = []
+      if (message.content) blocks.push({ type: 'text', text: message.content })
+      for (const call of message.tool_calls) {
+        blocks.push({ type: 'tool_use', id: call.id, name: call.name, input: call.arguments ?? {} })
+      }
+      out.push({ role: 'assistant', content: blocks })
+      continue
+    }
+    out.push({ role: message.role, content: message.content ?? '' })
+  }
+  return out
+}
+
+async function askClaude({ system, messages, tools }) {
   const client = await getAnthropic()
   let response
   try {
@@ -157,7 +268,12 @@ async function askClaude({ system, messages }) {
       max_tokens: CLAUDE_MAX_TOKENS,
       output_config: { effort: CLAUDE_EFFORT },
       system,
-      messages,
+      tools: tools.map((tool) => ({
+        name: tool.name,
+        description: tool.description,
+        input_schema: tool.parameters,
+      })),
+      messages: toClaudeMessages(messages),
     })
   } catch (error) {
     throw new BackendError(`the claude backend failed: ${error?.message ?? error}`)
@@ -167,14 +283,21 @@ async function askClaude({ system, messages }) {
       `the claude backend declined the request (${response.stop_details?.category ?? 'no category'})`,
     )
   }
-  // Thinking blocks come first when the model thinks; only text is the reply.
+  // Thinking blocks come first when the model thinks; text is the reply and
+  // tool_use blocks are the calls.
   const reply = response.content
     .filter((block) => block.type === 'text')
     .map((block) => block.text)
     .join('')
-  if (reply.trim() === '') throw new BackendError('the claude backend produced no text')
+  const calls = response.content
+    .filter((block) => block.type === 'tool_use')
+    .map((block) => ({ id: block.id, name: block.name, arguments: block.input ?? {} }))
+  if (reply.trim() === '' && calls.length === 0) {
+    throw new BackendError('the claude backend produced no text')
+  }
   return {
     reply,
+    tool_calls: calls,
     meta: {
       model: response.model,
       // The Messages API reports tokens, not dollars — record what it says.
@@ -223,10 +346,10 @@ const AUTOLAB_NODES = parseNodes(
   process.env.AUTOLAB_NODES || 'agstudio=http://host.docker.internal:8791',
 )
 
-// The one place constraint 1 of the ex1 plan is enforced: raw evidence is
-// summarized on the node it lives on, and nothing but the summary text crosses
-// into agdevworld. Blocking the path here means no caller — page, assistant or
-// curl — can reach around it.
+// Safety device, not a wrongness guard: raw iteration evidence belongs to the
+// agautolab node that produced it. Blocking the path here means no caller —
+// page, assistant or curl — reaches around it. Nothing tells the assistant not
+// to try; the 403 and its reason are returned as the answer.
 const EVIDENCE_PATH = /(^|\/)evidence(\/|$)/
 
 function parseNodes(spec) {
@@ -247,12 +370,10 @@ function parseNodes(spec) {
 }
 
 function isValidMessage(value) {
-  return (
-    value !== null &&
-    typeof value === 'object' &&
-    (value.role === 'user' || value.role === 'assistant') &&
-    typeof value.content === 'string'
-  )
+  if (value === null || typeof value !== 'object') return false
+  if (value.role === 'tool') return typeof value.content === 'string'
+  if (value.role !== 'user' && value.role !== 'assistant') return false
+  return typeof value.content === 'string' || Array.isArray(value.tool_calls)
 }
 
 function readBody(req) {
@@ -285,22 +406,25 @@ async function handleChat(req, res) {
   if (!Array.isArray(messages) || messages.length === 0 || !messages.every(isValidMessage)) {
     return sendJson(res, 400, {
       error: 'bad_request',
-      detail: 'messages must be a non-empty array of {role: "user"|"assistant", content: string}.',
+      detail: 'messages must be a non-empty array of chat or tool messages.',
     })
   }
 
-  const cluster =
-    typeof context === 'string' && context.trim() !== ''
-      ? `Current cluster summary:\n${context}`
-      : 'No cluster summary is available right now.'
-  const system = `${ROLE_PROMPT}\n\n${cluster}\n\n=== CAPABILITY CARD ===\n${await readGuide()}`
+  const screen = typeof context === 'string' && context.trim() !== '' ? `\n\n${context}` : ''
+  const system = `${ROLE_PROMPT}${screen}\n\n=== CAPABILITY CARD ===\n${await readGuide()}`
 
-  const record = { id: randomUUID(), started: new Date().toISOString(), backend: null, outcome: 'failed' }
+  const record = {
+    id: randomUUID(),
+    started: new Date().toISOString(),
+    backend: null,
+    outcome: 'failed',
+    tool_rounds: messages.filter((message) => message.role === 'tool').length,
+  }
   const started = Date.now()
   let answer
   try {
     record.backend = chosenBackend()
-    answer = await BACKENDS[record.backend]({ system, messages })
+    answer = await BACKENDS[record.backend]({ system, messages, tools: TOOLS })
   } catch (error) {
     if (!(error instanceof BackendError)) throw error
     // The engine never spoke, so the free-text failure report the record policy
@@ -312,10 +436,15 @@ async function handleChat(req, res) {
   }
   Object.assign(record, answer.meta)
   record.backend_model = `${record.backend}/${answer.meta.model}`
+  record.tool_calls = answer.tool_calls.map((call) => call.name)
   record.outcome = 'done'
   record.duration_ms = Date.now() - started
   await recordRun(record)
-  return sendJson(res, 200, { reply: answer.reply, backend: record.backend_model })
+  return sendJson(res, 200, {
+    reply: answer.reply,
+    tool_calls: answer.tool_calls,
+    backend: record.backend_model,
+  })
 }
 
 // Same-origin passthrough so the browser can reach the agforge request
@@ -364,6 +493,12 @@ async function handleAutolabNodes(res) {
 
 // Same-origin passthrough to one node's gateway, the handleForge template:
 // /api/autolab/<node>/<rest> -> <node url>/<rest>.
+//
+// Two safety devices live here, both about reach rather than correctness: the
+// node list is finite (otherwise this is an unauthenticated relay into the
+// LAN), and nothing without an identity may change a node's state — the write
+// routes behind this proxy start missions and approve reviews. Both answer with
+// their own reason, which the assistant reads like any other result.
 async function handleAutolab(req, res) {
   const [pathname, query] = req.url.slice('/api/autolab'.length).split('?')
   if (pathname === '/nodes' || pathname === '/nodes/') {
@@ -376,20 +511,22 @@ async function handleAutolab(req, res) {
   if (!url) {
     return sendJson(res, 404, {
       error: 'unknown_node',
-      detail: `No autolab node named "${node}" is configured.`,
+      detail: `No autolab node named "${node}" is configured. Configured: ${[...AUTOLAB_NODES.keys()].join(', ') || 'none'}.`,
     })
   }
   if (EVIDENCE_PATH.test(path)) {
     return sendJson(res, 403, {
       error: 'evidence_not_proxied',
-      detail: 'Raw evidence stays on its node; ask for the iteration summary instead.',
+      detail: 'Raw evidence stays on the node that produced it; the iteration summary crosses instead.',
     })
   }
   const isSummarize = /\/summarize\//.test(path)
   if (req.method !== 'GET' && !(req.method === 'POST' && isSummarize)) {
     return sendJson(res, 405, {
       error: 'method_not_allowed',
-      detail: 'Only GET, and POST to a summarize route, are proxied.',
+      detail:
+        'This passthrough carries no identity, so it reads freely and writes only to a summarize route. ' +
+        'Anything that changes a node goes through the node itself with a token.',
     })
   }
   const target = `${url}${path}${query ? `?${query}` : ''}`

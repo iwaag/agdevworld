@@ -1,128 +1,57 @@
 # agdevworld Development Guide
 
-## Fast user-checkable web container
+## Commands
 
-Keep the production-style web container current whenever a user may want to
-inspect the application. In particular, rebuild it after a meaningful visual
-or behavior check and again when an implementation plan is complete. This
-keeps the latest app available at `http://localhost:8090` without asking the
-user to run a development command.
+- `npm run dev` — vite with HMR on :5173; `/api` is proxied to the assistant on :8091.
+- `npm run build` — `tsc && vite build`; the Docker build runs it too, so a successful image build is a compile check.
+- `docker compose up --build -d web` — production-style bundle behind nginx on :8090. Keep it current when a user may want to look.
+- `docker compose ps web` / `curl -I http://localhost:8090/` — confirm it came up.
+- `docker compose up --build -d assistant` — the chat service on :8091. `server.mjs` and `GUIDE.md` are COPYed in, so both need a rebuild unless bind-mounted.
+- `CAGENT_URL=https://localhost:8789 npm run cluster:fetch` — refresh the three cluster snapshots through cagent.
+- `docker compose logs assistant` — the container has no writable volume, so this is the run-record store (`assistant.run.v1`).
 
-From this directory, run:
+## Files
 
-```sh
-docker compose up --build -d web
-```
+- `src/main.ts` — wiring: scenes, the chat panel, the click-to-detail path.
+- `src/scenes/PanelGridScene.ts` — one config-driven grid scene, shared by all three views.
+- `src/views.ts` — the three view configs (`nodes`, `workspaces`, `autolab`).
+- `src/viewSwitcher.ts` — the single seam for changing the visible view.
+- `src/chatPanel.ts` — the chat overlay, and where the assistant's tools run.
+- `src/detailPopup.ts` — the detail overlay, incl. the per-iteration `summary` button.
+- `src/clusterState.ts` / `src/autolabState.ts` — snapshot and gateway reads for the panels.
+- `assistant/server.mjs` — the chat service and the agforge / autolab passthroughs.
+- `assistant/GUIDE.md` — the capability card, re-read per chat request.
+- `scripts/fetch-cluster-state.mjs` — snapshot refresh through cagent.
+- `public/cluster/*.json` — live snapshots, git-ignored; `public/*.sample.json` is the fallback. The Docker build copies whatever is in `public/` at build time, so move a live snapshot out first if a sample-only image is wanted.
 
-Confirm the container and its HTTP entrypoint afterward:
+## Assistant
 
-```sh
-docker compose ps web
-curl -I http://localhost:8090/
-```
-
-The matching development server, with Vite hot-module replacement, is:
-
-```sh
-npm run dev
-```
-
-Use `npm run build` before the container refresh when practical. The Docker
-build runs that production build itself, so a successful `docker compose up
---build -d web` is also a deployment-oriented compilation check.
-
-## Cluster snapshot handling
-
-`public/cluster/state.json` (drift), `public/cluster/workspaces.json`
-(workspaces), and `public/cluster/actual.json` (per-node detail incl.
-`facts_raw` hardware facts, from `nctl actual --json --detail`) are the
-local, ignored live cluster snapshots. The frontend uses them when present
-and falls back to `public/state.sample.json` / `public/workspaces.sample.json`
-/ `public/actual.sample.json` otherwise. Refresh all three through the
-read-only cluster-agent workflow:
-
-```sh
-CAGENT_URL=https://localhost:8789 npm run cluster:fetch
-```
-
-Do not commit any downloaded snapshot or any cagent credential. The Docker build
-copies files in `public/` into its local image; therefore a live snapshot is
-included in that local image when present at build time. Temporarily move the
-snapshot out of `public/cluster/` before rebuilding if a sample-only image is
-needed, then restore it afterward.
-
-## autolab view
-
-The third view (`nodes → workspaces → autolab`, cycled with the ⇄ label, the
-V key, or "show me the autolab" in chat) shows one autolab node's jobs. A chip
-row picks the node (`●` reachable / `○` not) and refreshes; the line above it
-is the node's mediator headline (mission, driver state, cumulative cost).
-Clicking a job opens the detail popup with its `evidence/iter-NNNN` timeline,
-and each iteration has a `summary` button.
-
-That button is the only way iteration content reaches this app. It asks the
-node to summarize that iteration with its own one-shot Claude run
-(~$0.15, cached per iteration, one at a time per node) and renders the
-returned prose verbatim; "Ask agent about this iteration" hands the same text
-to the chat assistant. Raw evidence files are never fetched — see below.
-
-Data is fetched on view entry, on chip click, and while a summary is pending;
-there is no polling loop.
-
-## Entrance guide
-
-`assistant/GUIDE.md` is the assistant's capability card (devpolicy/policy.md,
-*Entrance Guide*): what it can do, what it cannot, and what a chat, an image
-and an autolab summary cost. `assistant/server.mjs` reads it from disk on
-every `POST /api/chat` and appends it to the role prompt, so "what can you
-do?" and "what does that cost?" are answered from the card rather than from
-the model's imagination. `GET /api/guide` serves it raw.
-
-Reading per request (rather than at boot) is cagent's `llms.txt` pattern:
-editing the card changes the next answer without a restart. The file is
-COPYed into the assistant image, so a *container* still needs a rebuild
-unless it is bind-mounted.
-
-## Assistant backend (Agent ≠ Model)
-
-`assistant/server.mjs` has one seam: `handleChat` builds the system prompt and
-hands `(system, messages)` to a backend; only the `BACKENDS` entries know what
-engine answers. Same shape as agforge's `AGFORGE_AGENT_BACKEND` — one default,
-and an unknown value is an error rather than a silent fallback.
+`POST /api/chat` takes the whole conversation and answers with prose, tool
+calls, or both; the browser runs the tools and posts the results back. The
+service is stateless and engine-agnostic — `handleChat` builds the system
+prompt and hands `(system, messages, tools)` to a backend.
 
 | variable | default | meaning |
 |---|---|---|
-| `ASSISTANT_BACKEND` | `ollama` | `ollama` \| `claude` |
+| `ASSISTANT_BACKEND` | `ollama` | `ollama` \| `claude`; an unknown value is an error, never a silent fallback |
 | `OLLAMA_URL` / `OLLAMA_MODEL` | `host.docker.internal:11434` / `glm-4.7-flash:latest` | the local default |
 | `CLAUDE_MODEL` | `claude-opus-5` | model for the claude backend |
-| `CLAUDE_EFFORT` / `CLAUDE_MAX_TOKENS` | `low` / `4096` | the assistant answers from a snapshot and a card, not from hard reasoning |
-| `ANTHROPIC_API_KEY` | — | **required by the claude backend only**; put it in `.env` (git-ignored) or the environment, never a committed default |
+| `CLAUDE_EFFORT` / `CLAUDE_MAX_TOKENS` | `low` / `4096` | |
+| `ANTHROPIC_API_KEY` | — | required by the claude backend only; `.env` or the environment |
+| `AUTOLAB_NODES` | `agstudio=http://host.docker.internal:8791` | `"<name>=<url>,…"`; real hostnames belong in `.env` |
+| `AGFORGE_URL` | `http://host.docker.internal:8092` | agforge request service |
+| `ASSISTANT_RECORDS_DIR` | — | also write one run record file per run |
 
-The claude backend uses the official `@anthropic-ai/sdk` (the assistant image
-now runs `npm install`); the ollama default stays plain `fetch` and pulls in
-nothing. Compose passes both through, and empty means "use the default".
+Compose passes an empty string for anything the operator has not set, so the
+code reads env with `||`, never `??`.
 
-Every reply is recorded per `devpolicy/agent_records.md` as one JSON line on
-stdout (`kind: "assistant.run.v1"` — id, backend, backend_model, outcome,
-duration, tokens, and on failure the backend's verbatim words). The container
-has no writable volume, so `docker compose logs assistant` *is* the record
-store; set `ASSISTANT_RECORDS_DIR` to also write one file per run.
+## Safety devices
 
-## autolab passthrough
+Three guards in `assistant/server.mjs` and two in the browser. They differ in
+kind from instructions: they bound reach and resources, not correctness, and
+each answers with its own reason where the assistant can read it.
 
-The browser fetches same-origin only, so autolab gateways are reached through
-the assistant, the same way agforge is:
-
-- `GET /api/autolab/nodes` — the configured nodes and whether each answers
-  `/healthz` right now (a node being down is an answer, not an error).
-- `GET|POST /api/autolab/<node>/<rest>` — that node's gateway. GET is proxied
-  freely; POST only to `/jobs/<job>/summarize/<iter>`.
-- `/evidence/` paths are refused with `403 evidence_not_proxied`. Iteration
-  evidence is summarized on the node it lives on and only the summary text
-  crosses into agdevworld — that rule is enforced here, in one place.
-
-Nodes come from `AUTOLAB_NODES="<name>=<url>,<name>=<url>"`. The committed
-default is the local node only (`agstudio=http://host.docker.internal:8791`);
-real cluster hostnames go in `.env` (git-ignored) or the environment, like
-every other endpoint here. Compose passes an empty value through when unset,
-which means "use the default".
+- The autolab node list is finite — otherwise this is an unauthenticated relay into the LAN.
+- Writes to a node are refused (`405`) except a summarize route: `POST /mission` and the review transitions sit behind this passthrough, and it carries no identity. Introduce identity and this can go.
+- `/evidence/` answers `403` — raw evidence stays on the node that produced it.
+- 16 tool rounds per reply, a 60 s ceiling on one `wait`, and a 10 s fetch timeout in `chatPanel.ts`; 10 s upstream timeouts in the passthrough.

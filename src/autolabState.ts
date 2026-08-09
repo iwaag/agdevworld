@@ -1,13 +1,11 @@
 // autolab feed (agautolab/agent/gateway.py, envelope kind `autolab.monitor.v1`)
 // reached through the assistant passthrough at /api/autolab/.
 //
-// Same discipline as clusterState.ts: hand-written narrowing keyed on the
-// envelope's kind field, and plain-text digests — never raw JSON — for
-// anything handed to the assistant.
+// Same discipline as clusterState.ts: read what the panels need to draw, and
+// throw only when there is nothing to draw.
 //
-// Raw evidence files are deliberately not fetched here. An iteration's content
-// reaches this app only as the summary text produced on the node itself; the
-// passthrough refuses `/evidence/` paths outright.
+// The passthrough refuses `/evidence/` paths: raw evidence stays on the node
+// that produced it, and the iteration summary crosses instead.
 
 export interface AutolabNode {
   name: string
@@ -85,8 +83,6 @@ export interface AutolabSummary {
   summarizer?: { cost_usd?: number | null; num_turns?: number | null; duration_ms?: number | null }
 }
 
-const KIND = 'autolab.monitor.v1'
-
 function isObject(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object'
 }
@@ -114,11 +110,10 @@ async function getJson(url: string, init?: RequestInit): Promise<unknown> {
   return parsed
 }
 
-export function parseAutolabEnvelope(value: unknown, type: string): Record<string, unknown> {
-  if (!isObject(value) || value.kind !== KIND) {
-    throw new Error(`response is not an ${KIND} envelope`)
-  }
-  if (value.type !== type) throw new Error(`expected a "${type}" envelope, got "${String(value.type)}"`)
+// Reads the envelope; it does not police it. The `kind` and `type` fields are
+// how the gateway labels its answers, not a permission slip.
+export function readAutolabEnvelope(value: unknown): Record<string, unknown> {
+  if (!isObject(value)) throw new Error('the node answered with something that is not an object')
   return value
 }
 
@@ -134,25 +129,25 @@ export async function loadAutolabNodes(): Promise<AutolabNode[]> {
 }
 
 export async function loadAutolabJobs(node: string): Promise<AutolabJobRow[]> {
-  const envelope = parseAutolabEnvelope(await getJson(`/api/autolab/${node}/jobs`), 'jobs')
-  if (!Array.isArray(envelope.jobs)) throw new Error('job list is malformed')
+  const envelope = readAutolabEnvelope(await getJson(`/api/autolab/${node}/jobs`))
+  if (!Array.isArray(envelope.jobs)) throw new Error('the node listed no jobs field')
   return envelope.jobs.filter(isObject).map((job) => ({ ...job, name: String(job.name) })) as AutolabJobRow[]
 }
 
 export async function loadAutolabJob(node: string, job: string): Promise<AutolabJobDetail> {
-  const envelope = parseAutolabEnvelope(await getJson(`/api/autolab/${node}/jobs/${job}`), 'job')
+  const envelope = readAutolabEnvelope(await getJson(`/api/autolab/${node}/jobs/${job}`))
   const detail = envelope.job
-  if (!isObject(detail)) throw new Error('job detail is malformed')
+  if (!isObject(detail)) throw new Error('the node returned no job field')
   const evidence = Array.isArray(detail.evidence) ? detail.evidence.filter(isObject) : []
   return { ...detail, name: String(detail.name), evidence } as unknown as AutolabJobDetail
 }
 
 export async function loadAutolabStatus(node: string): Promise<AutolabStatus> {
-  return parseAutolabEnvelope(await getJson(`/api/autolab/${node}/status`), 'status') as AutolabStatus
+  return readAutolabEnvelope(await getJson(`/api/autolab/${node}/status`)) as AutolabStatus
 }
 
 function toSummary(value: unknown): AutolabSummary {
-  const envelope = parseAutolabEnvelope(value, 'summary')
+  const envelope = readAutolabEnvelope(value)
   return {
     job: String(envelope.job),
     iter: String(envelope.iter),
@@ -217,40 +212,4 @@ export function statusHeadline(node: string, status?: AutolabStatus, error?: str
   return [`${node}: ${head}`, driver, cost ? `mediator ${cost}` : undefined]
     .filter(Boolean)
     .join(' · ')
-}
-
-// Plain-text digest of one job for the assistant, same rule as clusterState:
-// selected fields as short lines, never the raw JSON.
-export function summarizeJob(node: string, job: AutolabJobDetail): string {
-  const lines = [
-    `Autolab job ${job.name} on node ${node}: status ${job.status ?? 'unknown'}` +
-      `${job.phase ? `, phase ${job.phase}` : ''}${job.terminal ? ' (terminal)' : ''}.`,
-  ]
-  if (job.not_started) lines.push('The job has not started yet — no state.json on disk.')
-  if (job.error) lines.push(`Job read error: ${job.error}.`)
-  if (job.state_error) lines.push(`Job state error: ${job.state_error}.`)
-  const progress = [iterationText(job), job.adapter ? `adapter ${job.adapter}` : undefined]
-    .filter(Boolean)
-    .join(', ')
-  if (progress) lines.push(`Progress: ${progress}.`)
-  const gates = job.last_gate_summary
-  if (gates && typeof gates.total === 'number') {
-    const failing = gates.failing?.length
-      ? ` Failing: ${gates.failing.join('; ')}.`
-      : ''
-    lines.push(`Gates: ${gates.total} total, passed=${String(gates.passed)}.${failing}`)
-  }
-  if (typeof job.cost_usd === 'number') lines.push(`Cost so far: $${job.cost_usd.toFixed(2)}.`)
-  lines.push(`Iterations on disk: ${job.evidence.length}.`)
-  for (const entry of job.evidence) {
-    const bits = [
-      typeof entry.exit_code === 'number' ? `exit ${entry.exit_code}` : undefined,
-      typeof entry.num_turns === 'number' ? `${entry.num_turns} turns` : undefined,
-      moneyText(entry.cost_usd),
-      entry.gates?.length ? `${entry.gates.filter((g) => g.exit_code === 0).length}/${entry.gates.length} gates passed` : undefined,
-      entry.summary === 'done' ? 'summary available' : undefined,
-    ].filter(Boolean)
-    lines.push(`- ${entry.iter}: ${bits.join(', ') || 'no adapter result recorded'}.`)
-  }
-  return lines.join('\n')
 }

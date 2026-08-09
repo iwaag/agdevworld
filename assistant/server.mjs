@@ -6,8 +6,23 @@
 // GET /api/guide -> GUIDE.md as text/plain
 //
 // Stateless: conversation history lives in the browser and is sent whole on
-// each request. This endpoint is the engine-agnostic seam — only the code
-// below this comment knows that ollama is the engine.
+// each request. This endpoint is the engine-agnostic seam: `handleChat` builds
+// the system prompt and hands (system, messages) to a backend, and only the
+// BACKENDS entries below know what engine answers.
+//
+// Backend selection (devpolicy/policy.md, Agent ≠ Model), same shape as
+// agforge's AGFORGE_AGENT_BACKEND — process env, one default, unknown value is
+// an error rather than a silent fallback:
+//
+//   ASSISTANT_BACKEND=ollama (default) | claude
+//   OLLAMA_URL / OLLAMA_MODEL      the local default
+//   CLAUDE_MODEL                   model for the claude backend
+//   ANTHROPIC_API_KEY              required by the claude backend only
+//
+// Every reply is recorded per devpolicy/agent_records.md as one JSON line on
+// stdout (`assistant.run.v1`) — the container has no writable volume, so its
+// log is the record store. ASSISTANT_RECORDS_DIR, when set, also writes one
+// file per run there.
 //
 // The assistant's entrance guide (devpolicy/policy.md) is GUIDE.md next to
 // this file, read from disk on every chat request and appended to the role
@@ -15,7 +30,8 @@
 // pattern: editing the card changes the next answer without a restart, and
 // with the file bind-mounted, without a rebuild either.
 
-import { readFile } from 'node:fs/promises'
+import { randomUUID } from 'node:crypto'
+import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { createServer } from 'node:http'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -56,8 +72,142 @@ const ROLE_PROMPT =
   '"unknown" are correct answers, and you must never invent a price, a duration or a capability ' +
   'the card does not claim.'
 
+// --- backends ---------------------------------------------------------------
+//
+// A backend takes ({ system, messages }) and returns { reply, meta }. It throws
+// BackendError when it cannot answer; the caller turns that into a 502 and a
+// `failed` record carrying the backend's own words.
+
+class BackendError extends Error {}
+
 const OLLAMA_URL = (process.env.OLLAMA_URL ?? 'http://host.docker.internal:11434').replace(/\/$/, '')
 const OLLAMA_MODEL = process.env.OLLAMA_MODEL ?? 'glm-4.7-flash:latest'
+
+// Claude Opus 5 is the default rather than a cheaper tier on purpose: this is
+// the opt-in "strong backend" of the switch, and the cheap path is the ollama
+// default. Effort stays low — the assistant answers from a cluster snapshot
+// and a capability card, not from hard reasoning.
+// `||`, not `??`, throughout: compose passes an empty string for a variable the
+// operator has not set, and empty must mean "use the default" (the same trap
+// AUTOLAB_NODES documents below).
+const CLAUDE_MODEL = process.env.CLAUDE_MODEL || 'claude-opus-5'
+const CLAUDE_EFFORT = process.env.CLAUDE_EFFORT || 'low'
+const CLAUDE_MAX_TOKENS = Number(process.env.CLAUDE_MAX_TOKENS || 4096)
+
+async function askOllama({ system, messages }) {
+  let response
+  try {
+    response = await fetch(`${OLLAMA_URL}/api/chat`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        model: OLLAMA_MODEL,
+        stream: false,
+        messages: [{ role: 'system', content: system }, ...messages],
+      }),
+    })
+  } catch (error) {
+    throw new BackendError(`the language model at ${OLLAMA_URL} is unreachable: ${error}`)
+  }
+  if (!response.ok) {
+    const detail = await response.text().catch(() => '')
+    throw new BackendError(`the language model returned HTTP ${response.status}: ${detail.slice(0, 400)}`)
+  }
+  const data = await response.json().catch(() => null)
+  const reply = data?.message?.content
+  if (typeof reply !== 'string' || reply.trim() === '') {
+    throw new BackendError('the language model returned an unexpected shape')
+  }
+  return {
+    reply,
+    meta: {
+      model: OLLAMA_MODEL,
+      // ollama reports tokens but never a price; never invent one.
+      cost_usd: null,
+      prompt_tokens: data.prompt_eval_count ?? null,
+      output_tokens: data.eval_count ?? null,
+    },
+  }
+}
+
+// Loaded lazily so the ollama default never pays for the import, and a missing
+// dependency only breaks the backend that needs it.
+let anthropicClient = null
+async function getAnthropic() {
+  if (anthropicClient) return anthropicClient
+  if (!process.env.ANTHROPIC_API_KEY) {
+    throw new BackendError('ANTHROPIC_API_KEY is not set in the assistant container')
+  }
+  let Anthropic
+  try {
+    ;({ default: Anthropic } = await import('@anthropic-ai/sdk'))
+  } catch (error) {
+    throw new BackendError(`the @anthropic-ai/sdk package is not installed: ${error}`)
+  }
+  anthropicClient = new Anthropic()
+  return anthropicClient
+}
+
+async function askClaude({ system, messages }) {
+  const client = await getAnthropic()
+  let response
+  try {
+    response = await client.messages.create({
+      model: CLAUDE_MODEL,
+      max_tokens: CLAUDE_MAX_TOKENS,
+      output_config: { effort: CLAUDE_EFFORT },
+      system,
+      messages,
+    })
+  } catch (error) {
+    throw new BackendError(`the claude backend failed: ${error?.message ?? error}`)
+  }
+  if (response.stop_reason === 'refusal') {
+    throw new BackendError(
+      `the claude backend declined the request (${response.stop_details?.category ?? 'no category'})`,
+    )
+  }
+  // Thinking blocks come first when the model thinks; only text is the reply.
+  const reply = response.content
+    .filter((block) => block.type === 'text')
+    .map((block) => block.text)
+    .join('')
+  if (reply.trim() === '') throw new BackendError('the claude backend produced no text')
+  return {
+    reply,
+    meta: {
+      model: response.model,
+      // The Messages API reports tokens, not dollars — record what it says.
+      cost_usd: null,
+      prompt_tokens: response.usage?.input_tokens ?? null,
+      output_tokens: response.usage?.output_tokens ?? null,
+      stop_reason: response.stop_reason,
+    },
+  }
+}
+
+const BACKENDS = { ollama: askOllama, claude: askClaude }
+
+function chosenBackend() {
+  const name = process.env.ASSISTANT_BACKEND || 'ollama'
+  if (!(name in BACKENDS)) throw new BackendError(`unknown ASSISTANT_BACKEND: ${name}`)
+  return name
+}
+
+// --- run records (devpolicy/agent_records.md) -------------------------------
+
+const RECORDS_DIR = process.env.ASSISTANT_RECORDS_DIR || ''
+
+async function recordRun(record) {
+  console.log(JSON.stringify({ kind: 'assistant.run.v1', ...record }))
+  if (!RECORDS_DIR) return
+  try {
+    await mkdir(RECORDS_DIR, { recursive: true })
+    await writeFile(join(RECORDS_DIR, `${record.id}.json`), JSON.stringify(record, null, 2) + '\n')
+  } catch (error) {
+    console.warn('could not write the run record to disk:', error)
+  }
+}
 
 // agforge request service (see agforge/README_DEV.md for the contract).
 // Real endpoint values belong in env / compose, never committed defaults.
@@ -145,39 +295,27 @@ async function handleChat(req, res) {
       : 'No cluster summary is available right now.'
   const system = `${ROLE_PROMPT}\n\n${cluster}\n\n=== CAPABILITY CARD ===\n${await readGuide()}`
 
-  let ollamaResponse
+  const record = { id: randomUUID(), started: new Date().toISOString(), backend: null, outcome: 'failed' }
+  const started = Date.now()
+  let answer
   try {
-    ollamaResponse = await fetch(`${OLLAMA_URL}/api/chat`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({
-        model: OLLAMA_MODEL,
-        stream: false,
-        messages: [{ role: 'system', content: system }, ...messages],
-      }),
-    })
+    record.backend = chosenBackend()
+    answer = await BACKENDS[record.backend]({ system, messages })
   } catch (error) {
-    console.error('ollama unreachable:', error)
-    return sendJson(res, 502, {
-      error: 'assistant_offline',
-      detail: `The language model at ${OLLAMA_URL} is unreachable.`,
-    })
+    if (!(error instanceof BackendError)) throw error
+    // The engine never spoke, so the free-text failure report the record policy
+    // asks for is the failing party's own words.
+    record.failure = error.message
+    record.duration_ms = Date.now() - started
+    await recordRun(record)
+    return sendJson(res, 502, { error: 'assistant_offline', detail: error.message })
   }
-
-  if (!ollamaResponse.ok) {
-    console.error('ollama error status:', ollamaResponse.status, await ollamaResponse.text().catch(() => ''))
-    return sendJson(res, 502, {
-      error: 'assistant_offline',
-      detail: `The language model returned HTTP ${ollamaResponse.status}.`,
-    })
-  }
-
-  const data = await ollamaResponse.json().catch(() => null)
-  const reply = data?.message?.content
-  if (typeof reply !== 'string') {
-    return sendJson(res, 502, { error: 'assistant_offline', detail: 'The language model returned an unexpected shape.' })
-  }
-  return sendJson(res, 200, { reply })
+  Object.assign(record, answer.meta)
+  record.backend_model = `${record.backend}/${answer.meta.model}`
+  record.outcome = 'done'
+  record.duration_ms = Date.now() - started
+  await recordRun(record)
+  return sendJson(res, 200, { reply: answer.reply, backend: record.backend_model })
 }
 
 // Same-origin passthrough so the browser can reach the agforge request
@@ -323,5 +461,7 @@ const server = createServer((req, res) => {
 })
 
 server.listen(PORT, () => {
-  console.log(`assistant listening on :${PORT}, model=${OLLAMA_MODEL}, ollama=${OLLAMA_URL}`)
+  const backend = process.env.ASSISTANT_BACKEND || 'ollama'
+  const model = backend === 'claude' ? CLAUDE_MODEL : `${OLLAMA_MODEL} @ ${OLLAMA_URL}`
+  console.log(`assistant listening on :${PORT}, backend=${backend}, model=${model}`)
 })

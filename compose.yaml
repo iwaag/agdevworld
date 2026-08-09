@@ -9,6 +9,12 @@ services:
   assistant:
     build: ./assistant
     environment:
+      # Agent != Model: `ollama` (default, free, local) or `claude`. The claude
+      # backend needs ANTHROPIC_API_KEY, which lives in .env (git-ignored) or
+      # the operator's environment — never a committed default.
+      ASSISTANT_BACKEND: ${ASSISTANT_BACKEND:-ollama}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      CLAUDE_MODEL: ${CLAUDE_MODEL:-}
       OLLAMA_URL: ${OLLAMA_URL:-http://host.docker.internal:11434}
       OLLAMA_MODEL: ${OLLAMA_MODEL:-glm-4.7-flash:latest}
       AGFORGE_URL: ${AGFORGE_URL:-http://host.docker.internal:8092}

@@ -83,6 +83,31 @@ editing the card changes the next answer without a restart. The file is
 COPYed into the assistant image, so a *container* still needs a rebuild
 unless it is bind-mounted.
 
+## Assistant backend (Agent ≠ Model)
+
+`assistant/server.mjs` has one seam: `handleChat` builds the system prompt and
+hands `(system, messages)` to a backend; only the `BACKENDS` entries know what
+engine answers. Same shape as agforge's `AGFORGE_AGENT_BACKEND` — one default,
+and an unknown value is an error rather than a silent fallback.
+
+| variable | default | meaning |
+|---|---|---|
+| `ASSISTANT_BACKEND` | `ollama` | `ollama` \| `claude` |
+| `OLLAMA_URL` / `OLLAMA_MODEL` | `host.docker.internal:11434` / `glm-4.7-flash:latest` | the local default |
+| `CLAUDE_MODEL` | `claude-opus-5` | model for the claude backend |
+| `CLAUDE_EFFORT` / `CLAUDE_MAX_TOKENS` | `low` / `4096` | the assistant answers from a snapshot and a card, not from hard reasoning |
+| `ANTHROPIC_API_KEY` | — | **required by the claude backend only**; put it in `.env` (git-ignored) or the environment, never a committed default |
+
+The claude backend uses the official `@anthropic-ai/sdk` (the assistant image
+now runs `npm install`); the ollama default stays plain `fetch` and pulls in
+nothing. Compose passes both through, and empty means "use the default".
+
+Every reply is recorded per `devpolicy/agent_records.md` as one JSON line on
+stdout (`kind: "assistant.run.v1"` — id, backend, backend_model, outcome,
+duration, tokens, and on failure the backend's verbatim words). The container
+has no writable volume, so `docker compose logs assistant` *is* the record
+store; set `ASSISTANT_RECORDS_DIR` to also write one file per run.
+
 ## autolab passthrough
 
 The browser fetches same-origin only, so autolab gateways are reached through

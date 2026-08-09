@@ -1,0 +1,9 @@
+{
+  "name": "agdevworld-assistant",
+  "private": true,
+  "type": "module",
+  "description": "Chat assistant service for agdevworld. The ollama backend is stdlib-only fetch; the claude backend uses the official Anthropic SDK.",
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.116.0"
+  }
+}

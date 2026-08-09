@@ -3,14 +3,34 @@
 // POST /api/chat
 //   { "messages": [{"role":"user"|"assistant","content":"..."}], "context": "<cluster summary text>" }
 //   -> { "reply": "..." }
+// GET /api/guide -> GUIDE.md as text/plain
 //
 // Stateless: conversation history lives in the browser and is sent whole on
 // each request. This endpoint is the engine-agnostic seam — only the code
 // below this comment knows that ollama is the engine.
+//
+// The assistant's entrance guide (devpolicy/policy.md) is GUIDE.md next to
+// this file, read from disk on every chat request and appended to the role
+// prompt. Reading per request rather than at boot is the cagent llms.txt
+// pattern: editing the card changes the next answer without a restart, and
+// with the file bind-mounted, without a rebuild either.
 
+import { readFile } from 'node:fs/promises'
 import { createServer } from 'node:http'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 
 const PORT = Number(process.env.PORT ?? 8091)
+const GUIDE_PATH = join(dirname(fileURLToPath(import.meta.url)), 'GUIDE.md')
+
+async function readGuide() {
+  try {
+    return await readFile(GUIDE_PATH, 'utf8')
+  } catch (error) {
+    console.warn('capability card unreadable:', error)
+    return 'No capability card is installed on this assistant.'
+  }
+}
 
 // Role and action protocol are engine-agnostic; keep them above the ollama
 // configuration below.
@@ -30,7 +50,11 @@ const ROLE_PROMPT =
   '{"action":"generate_image","desire":"<short English image prompt>"} ' +
   'where the desire describes what to draw, on a single line, using no double quotes, braces, or ' +
   'backslashes inside it. Add one short sentence saying the image is being generated. Do not ' +
-  'include this object unless the user asked for an image, and never mention or explain the JSON.'
+  'include this object unless the user asked for an image, and never mention or explain the JSON.\n\n' +
+  'When the user asks what you can do, what you are, what something costs, or how long it takes, ' +
+  'answer from the capability card below. Quote its figures as they stand — tentative ranges and ' +
+  '"unknown" are correct answers, and you must never invent a price, a duration or a capability ' +
+  'the card does not claim.'
 
 const OLLAMA_URL = (process.env.OLLAMA_URL ?? 'http://host.docker.internal:11434').replace(/\/$/, '')
 const OLLAMA_MODEL = process.env.OLLAMA_MODEL ?? 'glm-4.7-flash:latest'
@@ -115,10 +139,11 @@ async function handleChat(req, res) {
     })
   }
 
-  const system =
+  const cluster =
     typeof context === 'string' && context.trim() !== ''
-      ? `${ROLE_PROMPT}\n\nCurrent cluster summary:\n${context}`
-      : `${ROLE_PROMPT}\n\nNo cluster summary is available right now.`
+      ? `Current cluster summary:\n${context}`
+      : 'No cluster summary is available right now.'
+  const system = `${ROLE_PROMPT}\n\n${cluster}\n\n=== CAPABILITY CARD ===\n${await readGuide()}`
 
   let ollamaResponse
   try {
@@ -253,8 +278,26 @@ async function handleAutolab(req, res) {
   res.end(body)
 }
 
+// The card, raw. Same content the chat answers from, for a caller that would
+// rather read it than ask.
+async function handleGuide(res) {
+  const body = Buffer.from(await readGuide(), 'utf8')
+  res.writeHead(200, {
+    'content-type': 'text/plain; charset=utf-8',
+    'content-length': body.byteLength,
+  })
+  res.end(body)
+}
+
 const server = createServer((req, res) => {
   if (req.method === 'GET' && req.url === '/healthz') return sendJson(res, 200, { ok: true })
+  if (req.method === 'GET' && (req.url === '/api/guide' || req.url === '/guide')) {
+    handleGuide(res).catch((error) => {
+      console.error('unhandled guide error:', error)
+      sendJson(res, 500, { error: 'internal_error', detail: 'Unexpected guide failure.' })
+    })
+    return
+  }
   if (req.url?.startsWith('/api/forge/')) {
     handleForge(req, res).catch((error) => {
       console.error('unhandled forge passthrough error:', error)

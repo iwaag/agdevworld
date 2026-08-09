@@ -69,6 +69,20 @@ to the chat assistant. Raw evidence files are never fetched — see below.
 Data is fetched on view entry, on chip click, and while a summary is pending;
 there is no polling loop.
 
+## Entrance guide
+
+`assistant/GUIDE.md` is the assistant's capability card (devpolicy/policy.md,
+*Entrance Guide*): what it can do, what it cannot, and what a chat, an image
+and an autolab summary cost. `assistant/server.mjs` reads it from disk on
+every `POST /api/chat` and appends it to the role prompt, so "what can you
+do?" and "what does that cost?" are answered from the card rather than from
+the model's imagination. `GET /api/guide` serves it raw.
+
+Reading per request (rather than at boot) is cagent's `llms.txt` pattern:
+editing the card changes the next answer without a restart. The file is
+COPYed into the assistant image, so a *container* still needs a rebuild
+unless it is bind-mounted.
+
 ## autolab passthrough
 
 The browser fetches same-origin only, so autolab gateways are reached through

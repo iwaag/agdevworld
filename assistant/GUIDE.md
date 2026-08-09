@@ -41,8 +41,9 @@ it drives the screen and the other agents on your behalf.
   reply — small, and recorded per run rather than estimated here.
 - **A generated image: free in money, ~20–105 seconds** — it is agforge's
   local pipeline. See agforge's own card.
-- **An autolab iteration summary: ~0.01–0.05 USD**, paid once per iteration
-  and cached on the node forever after. Autolab jobs themselves cost
+- **An autolab iteration summary: ~0.11–0.19 USD** and 11–15 seconds, paid
+  once per iteration and cached on the node forever after (measured across
+  the five summaries on agstudio, 2026-08-09). Autolab jobs themselves cost
   0.13–1.35 USD each; see autolab's card.
 
 ## Backend (Agent ≠ Model)

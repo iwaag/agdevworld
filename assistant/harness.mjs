@@ -1,10 +1,18 @@
 import { spawn } from 'node:child_process'
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 
 const ANSI = /\x1b\[[0-9;?]*[a-zA-Z]/g
-const OUTPUT_TAIL = 800
+const OUTPUT_TAIL = 2000
+const TOOL_SERVICE = join(dirname(fileURLToPath(import.meta.url)), 'tool-service.mjs')
+const CLAUDE_TOOLS = [
+  'fetch',
+  'wait',
+  'switch_view',
+  'show_image',
+].map((name) => `mcp__agdevworld__${name}`).join(',')
 
 export class AgentRunError extends Error {
   constructor(message, meta = {}, outcome = 'failed') {
@@ -15,10 +23,23 @@ export class AgentRunError extends Error {
   }
 }
 
-export function buildArgv(agent) {
+export function buildArgv(agent, { mcpConfigPath } = {}) {
   if (agent.harness === 'fake') return [agent.command]
-  if (agent.harness !== 'opencode') throw new AgentRunError(`harness ${agent.harness} is not implemented by Phase 4`)
-  return [agent.command, 'run', '--format', 'json', '-m', agent.model]
+  if (agent.harness === 'opencode') return [agent.command, 'run', '--format', 'json', '-m', agent.model]
+  if (agent.harness === 'claude_code') {
+    if (!mcpConfigPath) throw new AgentRunError('claude_code requires an MCP config path')
+    const nativeModel = agent.model.slice(agent.model.indexOf('/') + 1)
+    return [
+      agent.command,
+      '-p',
+      '--output-format', 'json',
+      '--model', nativeModel,
+      '--mcp-config', mcpConfigPath,
+      '--strict-mcp-config',
+      '--allowedTools', CLAUDE_TOOLS,
+    ]
+  }
+  throw new AgentRunError(`unsupported harness ${agent.harness}`)
 }
 
 export function extractEventText(raw) {
@@ -57,6 +78,27 @@ export function extractEventText(raw) {
   }
 }
 
+export function extractClaude(raw) {
+  let envelope
+  try {
+    envelope = JSON.parse(raw)
+  } catch {
+    return { text: raw.trim(), stats: {} }
+  }
+  if (!envelope || typeof envelope !== 'object' || Array.isArray(envelope)) {
+    return { text: raw.trim(), stats: {} }
+  }
+  const stats = {}
+  for (const key of ['duration_ms', 'num_turns', 'is_error', 'subtype']) {
+    if (key in envelope) stats[key] = envelope[key]
+  }
+  if (typeof envelope.total_cost_usd === 'number') stats.cost_usd = envelope.total_cost_usd
+  if (envelope.usage && typeof envelope.usage === 'object' && !Array.isArray(envelope.usage)) {
+    stats.usage = envelope.usage
+  }
+  return { text: typeof envelope.result === 'string' ? envelope.result.trim() : '', stats }
+}
+
 export function composePrompt({ system, messages }) {
   const history = messages
     .map((message) => `${message.role === 'assistant' ? 'ASSISTANT' : 'USER'}:\n${message.content ?? ''}`)
@@ -79,7 +121,6 @@ async function readActions(path) {
 }
 
 export async function runAgent({ agent, prompt, timeoutMs, transcriptPath, toolBaseUrl }) {
-  const argv = buildArgv(agent)
   const meta = {
     role: agent.role,
     profile: agent.profile,
@@ -89,12 +130,21 @@ export async function runAgent({ agent, prompt, timeoutMs, transcriptPath, toolB
   }
   const runTemp = await mkdtemp(join(tmpdir(), 'agdevworld-agent-'))
   const actionsPath = join(runTemp, 'actions.jsonl')
+  const mcpConfigPath = join(runTemp, 'claude-mcp.json')
+  if (agent.harness === 'claude_code') {
+    await writeFile(mcpConfigPath, JSON.stringify({
+      mcpServers: {
+        agdevworld: { command: process.execPath, args: [TOOL_SERVICE] },
+      },
+    }))
+  }
+  const argv = buildArgv(agent, { mcpConfigPath })
   const started = performance.now()
   let stdout = ''
   let stderr = ''
   try {
     const child = spawn(argv[0], argv.slice(1), {
-      cwd: new URL('..', import.meta.url),
+      cwd: agent.harness === 'claude_code' ? runTemp : new URL('..', import.meta.url),
       env: {
         ...process.env,
         NO_COLOR: '1',
@@ -126,11 +176,19 @@ export async function runAgent({ agent, prompt, timeoutMs, transcriptPath, toolB
     const raw = stdout.replace(ANSI, '')
     if (transcriptPath && raw.trim()) await writeFile(transcriptPath, raw)
     if (result.timedOut) throw new AgentRunError(`agent run timed out after ${Math.round(timeoutMs / 1000)}s`, meta, 'aborted')
-    const extracted = agent.harness === 'opencode' ? extractEventText(raw) : { text: raw.trim(), stats: {} }
+    const extracted = agent.harness === 'opencode'
+      ? extractEventText(raw)
+      : agent.harness === 'claude_code'
+        ? extractClaude(raw)
+        : { text: raw.trim(), stats: {} }
     Object.assign(meta, extracted.stats)
     if (result.code !== 0) {
       const tail = (stderr.replace(ANSI, '').trim() || extracted.text || 'no output').slice(-OUTPUT_TAIL)
       throw new AgentRunError(`agent exited ${result.code}${result.signal ? ` (${result.signal})` : ''}: ${tail}`, meta)
+    }
+    if (meta.is_error) {
+      const tail = (extracted.text || stderr.replace(ANSI, '').trim() || 'no output').slice(-OUTPUT_TAIL)
+      throw new AgentRunError(`agent reported an error${meta.subtype ? ` (${meta.subtype})` : ''}: ${tail}`, meta)
     }
     if (!extracted.text) throw new AgentRunError('agent produced no text', meta)
     return { reply: extracted.text, actions: await readActions(actionsPath), meta }

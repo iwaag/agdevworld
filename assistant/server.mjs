@@ -6,13 +6,14 @@
 // GET /api/guide -> GUIDE.md as text/plain
 //
 // Stateless: the browser owns conversation history and sends it whole. One
-// fresh OpenCode process owns the complete bounded tool loop for one request.
+// fresh harness process owns the complete bounded tool loop for one request.
 // Server tools execute through the agdevworld MCP service; UI-only operations
 // are returned as actions for the browser to apply after the run finishes.
 //
 // Every reply is recorded per devpolicy/agent_records.md as one JSON line on
 // stdout (`assistant.run.v1`) and as a durable JSON file. The neighboring
-// `.agent.jsonl` is the raw OpenCode event transcript.
+// `.agent.jsonl` is the raw harness transcript (JSONL for OpenCode, one JSON
+// envelope for Claude Code).
 //
 // The assistant's entrance guide (devpolicy/policy.md) is GUIDE.md next to
 // this file, read from disk on every chat request and appended to the role
@@ -35,7 +36,7 @@ const PROJECT_ROOT = dirname(ASSISTANT_DIR)
 const GUIDE_PATH = join(ASSISTANT_DIR, 'GUIDE.md')
 const AGENTS_CONFIG = join(PROJECT_ROOT, 'agents.toml')
 const AGENTS_LOCAL_CONFIG = join(PROJECT_ROOT, '.local', 'agents.local.toml')
-const AGENT_TIMEOUT_MS = Number(process.env.AGDEVWORLD_AGENT_TIMEOUT_MS || 900_000)
+const AGENT_TIMEOUT_MS = Number(process.env.AGDEVWORLD_AGENT_TIMEOUT_MS || 300_000)
 const TOOL_BASE_URL = process.env.AGDEVWORLD_TOOL_BASE_URL || 'http://127.0.0.1:8090'
 
 async function readGuide() {

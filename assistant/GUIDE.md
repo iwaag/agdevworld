@@ -1,6 +1,6 @@
 # agdevworld assistant — entrance guide
 
-The capability card. Read from disk for every fresh OpenCode run and appended
+The capability card. Read from disk for every fresh front-agent run and appended
 to its role prompt; served raw at `GET /api/guide`.
 
 ## What this is

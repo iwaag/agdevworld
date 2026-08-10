@@ -5,7 +5,7 @@ services:
     ports:
       - "8090:80"
 
-  # One fresh OpenCode front run per browser chat request.
+  # One fresh profile-selected front run per browser chat request.
   assistant:
     build:
       context: .

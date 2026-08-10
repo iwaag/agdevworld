@@ -6,7 +6,7 @@
 - `npm run build` — `tsc && vite build`; the Docker build runs it too, so a successful image build is a compile check.
 - `docker compose up --build -d web` — production-style bundle behind nginx on :8090. Keep it current when a user may want to look.
 - `docker compose ps web` / `curl -I http://localhost:8090/` — confirm it came up.
-- `docker compose up --build -d web assistant` — the UI and OpenCode chat service on :8090/:8091. The assistant image contains the Phase-4-pinned OpenCode runtime; code, config, and `GUIDE.md` changes need a rebuild.
+- `docker compose up --build -d web assistant` — the UI and profile-selected chat service on :8090/:8091. The assistant image currently contains the Phase-4-pinned OpenCode runtime; code, config, and `GUIDE.md` changes need a rebuild.
 - `CAGENT_URL=https://localhost:8789 npm run cluster:fetch` — refresh the three cluster snapshots through cagent.
 - `docker compose logs assistant` — run records (`assistant.run.v1`) and notes (`assistant.note.v1`) as they happen. The durable copy is the `assistant_records` volume (`ASSISTANT_RECORDS_DIR=/records`); the log alone does not survive `up --build`.
 - `docker compose exec assistant ls /records` — what the assistant has left behind, including notes about facts that turned out wrong.
@@ -22,7 +22,7 @@
 - `src/clusterState.ts` / `src/autolabState.ts` — snapshot and gateway reads for the panels.
 - `agents.toml` / `.local/agents.local.toml` — common role/profile contract and machine-local harness/provider facts.
 - `opencode.json` — front-role OpenCode provider, MCP, and permission configuration.
-- `assistant/server.mjs` — one OpenCode process per chat request, passthrough routes, notes, and run records.
+- `assistant/server.mjs` — one profile-selected process per chat request, passthrough routes, notes, and run records.
 - `assistant/agent-config.mjs` / `harness.mjs` — JavaScript contract loader and process seam.
 - `assistant/tool-service.mjs` — bounded stdio MCP tools; server actions execute here and UI actions are collected.
 - `assistant/GUIDE.md` — the capability card, re-read per chat request.
@@ -33,20 +33,37 @@
 
 `POST /api/chat` takes the whole browser-owned conversation and screen context,
 starts one fresh `front` run, and answers once with prose plus UI actions. The
-OpenCode process owns its multi-step MCP loop; the browser never reposts tool
-results. Every request receives a new process and run ID, so no OpenCode
+selected harness owns its multi-step MCP loop; the browser never reposts tool
+results. Every request receives a new process and run ID, so no harness
 session state leaks between requests.
 
 The committed default is profile `local-front` = OpenCode +
 `ollama/qwen3.6:35b-a3b-coding-nvfp4`. Harness command and provider endpoint
-come only from the ignored local overlay. `sonnet-front` is declared for Phase
-5 but is unavailable until the Claude Code runner is added; selecting it fails
-clearly and never falls back.
+come only from the ignored local overlay. The alternative `sonnet-front` =
+Claude Code + `anthropic/claude-sonnet-5` uses the same MCP tools and UI-action
+channel. Select it only through `[roles.front] profile = "sonnet-front"` in the
+ignored local overlay; there is no per-request backend selector or fallback.
+
+| harness | local requirement | container status |
+|---|---|---|
+| `opencode` | executable plus `local.provider.ollama.base_url` | OpenCode 1.18.10 is installed; the compose overlay supplies the endpoint |
+| `claude_code` | executable plus a valid Claude Code login under `~/.claude`, or deployment-supplied API-key authentication | intentionally not installed/authenticated until Phase 6; selecting it fails with `E_UNAVAILABLE` |
+
+For this Mac, `.local/agents.local.toml` resolves Claude Code through the
+VS Code extension's versioned native-binary glob. Do not copy
+`~/.claude/.credentials.json` into the repository or image. A future container
+deployment may mount credentials or reference `ANTHROPIC_API_KEY` through
+deployment configuration; the key itself must not enter either agents file.
+Binary absence fails during profile resolution, while invalid or absent login
+fails as a recorded Claude run whose stderr/result tail is returned in the 502
+detail. Neither case attempts OpenCode.
 
 Runtime-only variables are `AUTOLAB_NODES`, `AGFORGE_URL`,
 `ASSISTANT_RECORDS_DIR`, `AGDEVWORLD_TOOL_BASE_URL`, and the optional
-`AGDEVWORLD_AGENT_TIMEOUT_MS`. Compose mounts `.local/agents.compose.toml` as
-the container overlay. Native runs use `.local/agents.local.toml`.
+`AGDEVWORLD_AGENT_TIMEOUT_MS`. Its default is 300 seconds; nginx waits 310
+seconds so a process timeout reaches the browser as an explicit assistant
+error. Compose mounts `.local/agents.compose.toml` as the container overlay.
+Native runs use `.local/agents.local.toml`.
 
 ## Safety devices
 
@@ -58,7 +75,7 @@ in prompt prohibitions. Each refusal reaches the agent with its reason.
 - Node routes are otherwise passed through as-is (zero_auth episode): the
   nodes carry no auth, and this passthrough adds no gate of its own.
 - MCP `fetch` stays on the configured agdevworld origin, clips responses at 1 MB, and times out at 60 s.
-- MCP `wait` caps one call at 60 s; the whole fresh agent process has a 900 s default wall-clock bound.
+- MCP `wait` caps one call at 60 s; the whole fresh agent process has a 300 s default wall-clock bound.
 
 ## cagent convention (agcluster)
 

@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { chmod, mkdtemp, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, mkdtemp, utimes, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import test from 'node:test'
@@ -75,4 +75,26 @@ test('unmatched command glob fails without falling back to PATH', async () => {
     const loaded = await loadConfig(VALID, overlay)
     await resolveRole(loaded.config, loaded.overlay, 'front')
   }), 'E_UNAVAILABLE')
+})
+
+test('command glob expands wildcard directory components and selects newest match', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'agdevworld-config-glob-'))
+  const olderDir = join(dir, 'claude-code-1', 'resources', 'native-binary')
+  const newerDir = join(dir, 'claude-code-2', 'resources', 'native-binary')
+  await mkdir(olderDir, { recursive: true })
+  await mkdir(newerDir, { recursive: true })
+  const older = join(olderDir, 'claude')
+  const newer = join(newerDir, 'claude')
+  await writeFile(older, '#!/bin/sh\n')
+  await writeFile(newer, '#!/bin/sh\n')
+  await chmod(older, 0o755)
+  await chmod(newer, 0o755)
+  const now = new Date()
+  await utimes(older, new Date(now.getTime() - 1000), new Date(now.getTime() - 1000))
+  await utimes(newer, now, now)
+  const overlay = join(dir, 'agents.local.toml')
+  await writeFile(overlay, `schema = "ag.agent-config.v1"\n[local.harness.claude_code]\ncommand_glob = "${dir}/claude-code-*/resources/native-binary/claude"\n[roles.front]\nprofile = "sonnet-front"\n`)
+  const loaded = await loadConfig(VALID, overlay)
+  const agent = await resolveRole(loaded.config, loaded.overlay, 'front')
+  assert.equal(agent.command, newer)
 })

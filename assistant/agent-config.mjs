@@ -1,6 +1,6 @@
 import { access, readFile, readdir, stat } from 'node:fs/promises'
 import { constants } from 'node:fs'
-import { basename, delimiter, dirname, isAbsolute, join } from 'node:path'
+import { delimiter, isAbsolute, join, parse, sep } from 'node:path'
 import { homedir } from 'node:os'
 
 export const SCHEMA = 'ag.agent-config.v1'
@@ -201,18 +201,36 @@ function expandHome(value) {
   return value === '~' ? homedir() : value.startsWith('~/') ? join(homedir(), value.slice(2)) : value
 }
 
+function globPattern(value) {
+  return new RegExp(`^${value.replace(/[.+^${}()|[\]\\]/g, '\\$&').replaceAll('*', '.*').replaceAll('?', '.')}$`)
+}
+
+async function expandGlob(pattern) {
+  const { root } = parse(pattern)
+  let candidates = [root || '.']
+  for (const part of pattern.slice(root.length).split(sep).filter(Boolean)) {
+    if (!part.includes('*') && !part.includes('?')) {
+      candidates = candidates.map((base) => join(base, part))
+      continue
+    }
+    const matcher = globPattern(part)
+    const next = []
+    for (const base of candidates) {
+      try {
+        next.push(...(await readdir(base)).filter((name) => matcher.test(name)).map((name) => join(base, name)))
+      } catch {}
+    }
+    candidates = next
+  }
+  return candidates
+}
+
 async function resolveCommand(harness, overlay, checkAvailable) {
   const facts = object(object(object(overlay.local, 'local').harness, 'local.harness')[harness], `local.harness.${harness}`)
   let configured = facts.command
   if (!configured && facts.command_glob) {
     const pattern = expandHome(facts.command_glob)
-    const namePattern = new RegExp(`^${basename(pattern).replace(/[.+^${}()|[\]\\]/g, '\\$&').replaceAll('*', '.*').replaceAll('?', '.')}$`)
-    let candidates = []
-    try {
-      candidates = (await readdir(dirname(pattern)))
-        .filter((name) => namePattern.test(name))
-        .map((name) => join(dirname(pattern), name))
-    } catch {}
+    const candidates = await expandGlob(pattern)
     if (candidates.length) {
       const times = await Promise.all(candidates.map(async (candidate) => [candidate, (await stat(candidate)).mtimeMs]))
       configured = times.sort((left, right) => right[1] - left[1])[0][0]

@@ -57,3 +57,13 @@ each answers with its own reason where the assistant can read it.
 - Node routes are otherwise passed through as-is (zero_auth episode): the
   nodes carry no auth, and this passthrough adds no gate of its own.
 - 16 tool rounds per reply, a 60 s ceiling on one `wait`, and a 10 s fetch timeout in `chatPanel.ts`; 10 s upstream timeouts in the passthrough.
+
+## cagent convention (agcluster)
+
+agdevworld sends only read-shaped requests to cagent — today that is the
+snapshot fetch in `scripts/fetch-cluster-state.mjs`. Write-shaped prompts
+(`desired apply`, `reconcile --yes`) are out of bounds. This is a
+convention, not enforced: the human token cannot distinguish reads from
+writes. Enforcement is deferred to the future system-wide auth (JWT)
+episode — see `devdocs/episodes/zero_auth/` (the single pointer to that
+vision).

@@ -6,7 +6,7 @@
 - `npm run build` — `tsc && vite build`; the Docker build runs it too, so a successful image build is a compile check.
 - `docker compose up --build -d web` — production-style bundle behind nginx on :8090. Keep it current when a user may want to look.
 - `docker compose ps web` / `curl -I http://localhost:8090/` — confirm it came up.
-- `docker compose up --build -d assistant` — the chat service on :8091. `server.mjs` and `GUIDE.md` are COPYed in, so both need a rebuild unless bind-mounted.
+- `docker compose up --build -d web assistant` — the UI and OpenCode chat service on :8090/:8091. The assistant image contains the Phase-4-pinned OpenCode runtime; code, config, and `GUIDE.md` changes need a rebuild.
 - `CAGENT_URL=https://localhost:8789 npm run cluster:fetch` — refresh the three cluster snapshots through cagent.
 - `docker compose logs assistant` — run records (`assistant.run.v1`) and notes (`assistant.note.v1`) as they happen. The durable copy is the `assistant_records` volume (`ASSISTANT_RECORDS_DIR=/records`); the log alone does not survive `up --build`.
 - `docker compose exec assistant ls /records` — what the assistant has left behind, including notes about facts that turned out wrong.
@@ -17,46 +17,48 @@
 - `src/scenes/PanelGridScene.ts` — one config-driven grid scene, shared by all three views.
 - `src/views.ts` — the three view configs (`nodes`, `workspaces`, `autolab`).
 - `src/viewSwitcher.ts` — the single seam for changing the visible view.
-- `src/chatPanel.ts` — the chat overlay, and where the assistant's tools run.
+- `src/chatPanel.ts` — the chat overlay; it owns history and applies returned UI actions.
 - `src/detailPopup.ts` — the detail overlay, incl. the per-iteration `summary` button.
 - `src/clusterState.ts` / `src/autolabState.ts` — snapshot and gateway reads for the panels.
-- `assistant/server.mjs` — the chat service, the agforge / autolab passthroughs, and `POST /api/note`.
+- `agents.toml` / `.local/agents.local.toml` — common role/profile contract and machine-local harness/provider facts.
+- `opencode.json` — front-role OpenCode provider, MCP, and permission configuration.
+- `assistant/server.mjs` — one OpenCode process per chat request, passthrough routes, notes, and run records.
+- `assistant/agent-config.mjs` / `harness.mjs` — JavaScript contract loader and process seam.
+- `assistant/tool-service.mjs` — bounded stdio MCP tools; server actions execute here and UI actions are collected.
 - `assistant/GUIDE.md` — the capability card, re-read per chat request.
 - `scripts/fetch-cluster-state.mjs` — snapshot refresh through cagent.
 - `public/cluster/*.json` — live snapshots, git-ignored; `public/*.sample.json` is the fallback. The Docker build copies whatever is in `public/` at build time, so move a live snapshot out first if a sample-only image is wanted.
 
 ## Assistant
 
-`POST /api/chat` takes the whole conversation and answers with prose, tool
-calls, or both; the browser runs the tools and posts the results back. The
-service is stateless and engine-agnostic — `handleChat` builds the system
-prompt and hands `(system, messages, tools)` to a backend.
+`POST /api/chat` takes the whole browser-owned conversation and screen context,
+starts one fresh `front` run, and answers once with prose plus UI actions. The
+OpenCode process owns its multi-step MCP loop; the browser never reposts tool
+results. Every request receives a new process and run ID, so no OpenCode
+session state leaks between requests.
 
-| variable | default | meaning |
-|---|---|---|
-| `ASSISTANT_BACKEND` | `ollama` | `ollama` \| `claude`; an unknown value is an error, never a silent fallback |
-| `OLLAMA_URL` / `OLLAMA_MODEL` | `host.docker.internal:11434` / `glm-4.7-flash:latest` | the local default |
-| `CLAUDE_MODEL` | `claude-opus-5` | model for the claude backend |
-| `CLAUDE_EFFORT` / `CLAUDE_MAX_TOKENS` | `low` / `4096` | |
-| `ANTHROPIC_API_KEY` | — | required by the claude backend only; `.env` or the environment |
-| `AUTOLAB_NODES` | `agstudio=http://host.docker.internal:8791` | `"<name>=<url>,…"`; real hostnames belong in `.env` |
-| `AGFORGE_URL` | `http://host.docker.internal:8092` | agforge request service |
-| `ASSISTANT_RECORDS_DIR` | — | also write one run record file per run |
+The committed default is profile `local-front` = OpenCode +
+`ollama/qwen3.6:35b-a3b-coding-nvfp4`. Harness command and provider endpoint
+come only from the ignored local overlay. `sonnet-front` is declared for Phase
+5 but is unavailable until the Claude Code runner is added; selecting it fails
+clearly and never falls back.
 
-Compose passes an empty string for anything the operator has not set, so the
-code reads env with `||`, never `??`.
+Runtime-only variables are `AUTOLAB_NODES`, `AGFORGE_URL`,
+`ASSISTANT_RECORDS_DIR`, `AGDEVWORLD_TOOL_BASE_URL`, and the optional
+`AGDEVWORLD_AGENT_TIMEOUT_MS`. Compose mounts `.local/agents.compose.toml` as
+the container overlay. Native runs use `.local/agents.local.toml`.
 
 ## Safety devices
 
-Two guards in `assistant/server.mjs` and two in the browser. They differ in
-kind from instructions: they bound reach and resources, not correctness, and
-each answers with its own reason where the assistant can read it.
+The reach and resource guards live at the HTTP/MCP tool boundary rather than
+in prompt prohibitions. Each refusal reaches the agent with its reason.
 
 - The autolab node list is finite — otherwise this is an open relay into the LAN.
 - `/evidence/` answers `403` — raw evidence stays on the node that produced it.
 - Node routes are otherwise passed through as-is (zero_auth episode): the
   nodes carry no auth, and this passthrough adds no gate of its own.
-- 16 tool rounds per reply, a 60 s ceiling on one `wait`, and a 10 s fetch timeout in `chatPanel.ts`; 10 s upstream timeouts in the passthrough.
+- MCP `fetch` stays on the configured agdevworld origin, clips responses at 1 MB, and times out at 60 s.
+- MCP `wait` caps one call at 60 s; the whole fresh agent process has a 900 s default wall-clock bound.
 
 ## cagent convention (agcluster)
 

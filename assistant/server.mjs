@@ -2,28 +2,17 @@
 //
 // POST /api/chat
 //   { "messages": [...], "context": "<what is on screen>" }
-//   -> { "reply": "...", "tool_calls": [...], "backend": "..." }
+//   -> { "reply": "...", "actions": [...], "run": {...} }
 // GET /api/guide -> GUIDE.md as text/plain
 //
-// Stateless: the conversation lives in the browser and is sent whole on each
-// request. Tool calls are answered the same way — the assistant asks, the
-// browser runs the call and posts the result back in the next message list.
-// Tools run in the browser because that is where the screen and the same-origin
-// paths are; this service stays a pure (system, messages, tools) -> reply seam.
-//
-// Backend selection (devpolicy/policy.md, Agent != Model), same shape as
-// agforge's AGFORGE_AGENT_BACKEND — process env, one default, unknown value is
-// an error rather than a silent fallback:
-//
-//   ASSISTANT_BACKEND=ollama (default) | claude
-//   OLLAMA_URL / OLLAMA_MODEL      the local default
-//   CLAUDE_MODEL                   model for the claude backend
-//   ANTHROPIC_API_KEY              required by the claude backend only
+// Stateless: the browser owns conversation history and sends it whole. One
+// fresh OpenCode process owns the complete bounded tool loop for one request.
+// Server tools execute through the agdevworld MCP service; UI-only operations
+// are returned as actions for the browser to apply after the run finishes.
 //
 // Every reply is recorded per devpolicy/agent_records.md as one JSON line on
-// stdout (`assistant.run.v1`) — the container has no writable volume, so its
-// log is the record store. ASSISTANT_RECORDS_DIR, when set, also writes one
-// file per run there.
+// stdout (`assistant.run.v1`) and as a durable JSON file. The neighboring
+// `.agent.jsonl` is the raw OpenCode event transcript.
 //
 // The assistant's entrance guide (devpolicy/policy.md) is GUIDE.md next to
 // this file, read from disk on every chat request and appended to the role
@@ -37,8 +26,17 @@ import { createServer } from 'node:http'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
+import { AgentConfigError, loadConfig, resolveRole } from './agent-config.mjs'
+import { AgentRunError, composePrompt, runAgent } from './harness.mjs'
+
 const PORT = Number(process.env.PORT ?? 8091)
-const GUIDE_PATH = join(dirname(fileURLToPath(import.meta.url)), 'GUIDE.md')
+const ASSISTANT_DIR = dirname(fileURLToPath(import.meta.url))
+const PROJECT_ROOT = dirname(ASSISTANT_DIR)
+const GUIDE_PATH = join(ASSISTANT_DIR, 'GUIDE.md')
+const AGENTS_CONFIG = join(PROJECT_ROOT, 'agents.toml')
+const AGENTS_LOCAL_CONFIG = join(PROJECT_ROOT, '.local', 'agents.local.toml')
+const AGENT_TIMEOUT_MS = Number(process.env.AGDEVWORLD_AGENT_TIMEOUT_MS || 900_000)
+const TOOL_BASE_URL = process.env.AGDEVWORLD_TOOL_BASE_URL || 'http://127.0.0.1:8090'
 
 async function readGuide() {
   try {
@@ -48,58 +46,6 @@ async function readGuide() {
     return 'No capability card is installed on this assistant.'
   }
 }
-
-// --- tools ------------------------------------------------------------------
-//
-// Declared here, executed in the browser. `fetch` is one tool rather than one
-// tool per endpoint on purpose: an enumerated tool per endpoint is the same
-// allowlist wearing a different hat. The paths below are facts; what is
-// actually reachable is decided by the passthrough at request time, and its
-// refusals reach the assistant verbatim.
-
-const TOOLS = [
-  {
-    name: 'fetch',
-    description:
-      'Fetch any same-origin path of this app. Returns the HTTP status, the content type and the body, raw.',
-    parameters: {
-      type: 'object',
-      properties: {
-        path: { type: 'string', description: 'Path starting with /' },
-        method: { type: 'string', description: 'GET (default) or POST' },
-        body: { type: 'string', description: 'Request body for POST, usually JSON' },
-      },
-      required: ['path'],
-    },
-  },
-  {
-    name: 'switch_view',
-    description: 'Show one of the views on screen.',
-    parameters: {
-      type: 'object',
-      properties: { view: { type: 'string', description: 'nodes, workspaces or autolab' } },
-      required: ['view'],
-    },
-  },
-  {
-    name: 'wait',
-    description: 'Pause before the next tool call, for something that takes time to finish.',
-    parameters: {
-      type: 'object',
-      properties: { seconds: { type: 'number' } },
-      required: ['seconds'],
-    },
-  },
-  {
-    name: 'show_image',
-    description: 'Put a picture in the conversation.',
-    parameters: {
-      type: 'object',
-      properties: { url: { type: 'string' } },
-      required: ['url'],
-    },
-  },
-]
 
 const ROLE_PROMPT = `You are the assistant inside agdevworld, an immersive development interface, and the human's conversational entrance to it.
 
@@ -117,211 +63,11 @@ Paths reachable with fetch:
 
 The screen shows one view at a time: nodes, workspaces, autolab.
 
-Budget: up to 16 tool rounds per reply. One call gets 60 seconds — a single wait lasts at most that, and a fetch that does not answer within it comes back as a timeout. Whatever a path answers, including a refusal and its reason, is returned to you as it stands; a path outside /api/ that does not exist answers 200 with this app's own HTML rather than 404.`
-
-// --- backends ---------------------------------------------------------------
-//
-// A backend takes ({ system, messages, tools }) and returns
-// { reply, tool_calls, meta }. It throws BackendError when it cannot answer;
-// the caller turns that into a 502 and a `failed` record carrying the
-// backend's own words.
-//
-// The wire message shape is neutral, and each backend translates it:
-//   { role: 'user' | 'assistant', content: string }
-//   { role: 'assistant', content: string, tool_calls: [{ id, name, arguments }] }
-//   { role: 'tool', tool_call_id, name, content: string }
-
-class BackendError extends Error {}
-
-const OLLAMA_URL = (process.env.OLLAMA_URL ?? 'http://host.docker.internal:11434').replace(/\/$/, '')
-const OLLAMA_MODEL = process.env.OLLAMA_MODEL ?? 'glm-4.7-flash:latest'
-
-// Claude Opus 5 is the default rather than a cheaper tier on purpose: this is
-// the opt-in "strong backend" of the switch, and the cheap path is the ollama
-// default. Effort stays low — the assistant answers from what it fetches and a
-// capability card, not from hard reasoning.
-// `||`, not `??`, throughout: compose passes an empty string for a variable the
-// operator has not set, and empty must mean "use the default" (the same trap
-// AUTOLAB_NODES documents below).
-const CLAUDE_MODEL = process.env.CLAUDE_MODEL || 'claude-opus-5'
-const CLAUDE_EFFORT = process.env.CLAUDE_EFFORT || 'low'
-const CLAUDE_MAX_TOKENS = Number(process.env.CLAUDE_MAX_TOKENS || 4096)
-
-function toOllamaMessages(messages) {
-  return messages.map((message) => {
-    if (message.role === 'tool') {
-      return { role: 'tool', content: message.content ?? '' }
-    }
-    if (Array.isArray(message.tool_calls) && message.tool_calls.length > 0) {
-      return {
-        role: 'assistant',
-        content: message.content ?? '',
-        tool_calls: message.tool_calls.map((call) => ({
-          function: { name: call.name, arguments: call.arguments ?? {} },
-        })),
-      }
-    }
-    return { role: message.role, content: message.content ?? '' }
-  })
-}
-
-async function askOllama({ system, messages, tools }) {
-  let response
-  try {
-    response = await fetch(`${OLLAMA_URL}/api/chat`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({
-        model: OLLAMA_MODEL,
-        stream: false,
-        tools: tools.map((tool) => ({
-          type: 'function',
-          function: { name: tool.name, description: tool.description, parameters: tool.parameters },
-        })),
-        messages: [{ role: 'system', content: system }, ...toOllamaMessages(messages)],
-      }),
-    })
-  } catch (error) {
-    throw new BackendError(`the language model at ${OLLAMA_URL} is unreachable: ${error}`)
-  }
-  if (!response.ok) {
-    const detail = await response.text().catch(() => '')
-    throw new BackendError(`the language model returned HTTP ${response.status}: ${detail.slice(0, 400)}`)
-  }
-  const data = await response.json().catch(() => null)
-  const message = data?.message
-  if (message === undefined || message === null) {
-    throw new BackendError('the language model returned an unexpected shape')
-  }
-  const calls = Array.isArray(message.tool_calls)
-    ? message.tool_calls.map((call, index) => ({
-        id: call.id ?? `call_${index}`,
-        name: call.function?.name ?? '',
-        arguments: call.function?.arguments ?? {},
-      }))
-    : []
-  return {
-    reply: typeof message.content === 'string' ? message.content : '',
-    tool_calls: calls,
-    meta: {
-      model: OLLAMA_MODEL,
-      // ollama reports tokens but never a price; never invent one.
-      cost_usd: null,
-      prompt_tokens: data.prompt_eval_count ?? null,
-      output_tokens: data.eval_count ?? null,
-    },
-  }
-}
-
-// Loaded lazily so the ollama default never pays for the import, and a missing
-// dependency only breaks the backend that needs it.
-let anthropicClient = null
-async function getAnthropic() {
-  if (anthropicClient) return anthropicClient
-  if (!process.env.ANTHROPIC_API_KEY) {
-    throw new BackendError('ANTHROPIC_API_KEY is not set in the assistant container')
-  }
-  let Anthropic
-  try {
-    ;({ default: Anthropic } = await import('@anthropic-ai/sdk'))
-  } catch (error) {
-    throw new BackendError(`the @anthropic-ai/sdk package is not installed: ${error}`)
-  }
-  anthropicClient = new Anthropic()
-  return anthropicClient
-}
-
-// Tool results are user-turn content blocks for this API, and turns must
-// alternate, so consecutive results merge into one message.
-function toClaudeMessages(messages) {
-  const out = []
-  for (const message of messages) {
-    if (message.role === 'tool') {
-      const block = {
-        type: 'tool_result',
-        tool_use_id: message.tool_call_id,
-        content: message.content ?? '',
-      }
-      const last = out[out.length - 1]
-      if (last?.role === 'user' && Array.isArray(last.content)) last.content.push(block)
-      else out.push({ role: 'user', content: [block] })
-      continue
-    }
-    if (Array.isArray(message.tool_calls) && message.tool_calls.length > 0) {
-      const blocks = []
-      if (message.content) blocks.push({ type: 'text', text: message.content })
-      for (const call of message.tool_calls) {
-        blocks.push({ type: 'tool_use', id: call.id, name: call.name, input: call.arguments ?? {} })
-      }
-      out.push({ role: 'assistant', content: blocks })
-      continue
-    }
-    out.push({ role: message.role, content: message.content ?? '' })
-  }
-  return out
-}
-
-async function askClaude({ system, messages, tools }) {
-  const client = await getAnthropic()
-  let response
-  try {
-    response = await client.messages.create({
-      model: CLAUDE_MODEL,
-      max_tokens: CLAUDE_MAX_TOKENS,
-      output_config: { effort: CLAUDE_EFFORT },
-      system,
-      tools: tools.map((tool) => ({
-        name: tool.name,
-        description: tool.description,
-        input_schema: tool.parameters,
-      })),
-      messages: toClaudeMessages(messages),
-    })
-  } catch (error) {
-    throw new BackendError(`the claude backend failed: ${error?.message ?? error}`)
-  }
-  if (response.stop_reason === 'refusal') {
-    throw new BackendError(
-      `the claude backend declined the request (${response.stop_details?.category ?? 'no category'})`,
-    )
-  }
-  // Thinking blocks come first when the model thinks; text is the reply and
-  // tool_use blocks are the calls.
-  const reply = response.content
-    .filter((block) => block.type === 'text')
-    .map((block) => block.text)
-    .join('')
-  const calls = response.content
-    .filter((block) => block.type === 'tool_use')
-    .map((block) => ({ id: block.id, name: block.name, arguments: block.input ?? {} }))
-  if (reply.trim() === '' && calls.length === 0) {
-    throw new BackendError('the claude backend produced no text')
-  }
-  return {
-    reply,
-    tool_calls: calls,
-    meta: {
-      model: response.model,
-      // The Messages API reports tokens, not dollars — record what it says.
-      cost_usd: null,
-      prompt_tokens: response.usage?.input_tokens ?? null,
-      output_tokens: response.usage?.output_tokens ?? null,
-      stop_reason: response.stop_reason,
-    },
-  }
-}
-
-const BACKENDS = { ollama: askOllama, claude: askClaude }
-
-function chosenBackend() {
-  const name = process.env.ASSISTANT_BACKEND || 'ollama'
-  if (!(name in BACKENDS)) throw new BackendError(`unknown ASSISTANT_BACKEND: ${name}`)
-  return name
-}
+Budget: the complete agent run is bounded by the service timeout. Each wait or fetch tool call lasts at most 60 seconds. Whatever a path answers, including a refusal and its reason, is returned as-is; a path outside /api/ that does not exist answers 200 with this app's HTML rather than 404.`
 
 // --- run records (devpolicy/agent_records.md) -------------------------------
 
-const RECORDS_DIR = process.env.ASSISTANT_RECORDS_DIR || ''
+const RECORDS_DIR = process.env.ASSISTANT_RECORDS_DIR || join(PROJECT_ROOT, '.local', 'assistant-records')
 
 async function recordRun(record) {
   console.log(JSON.stringify({ kind: 'assistant.run.v1', ...record }))
@@ -373,9 +119,8 @@ function parseNodes(spec) {
 
 function isValidMessage(value) {
   if (value === null || typeof value !== 'object') return false
-  if (value.role === 'tool') return typeof value.content === 'string'
   if (value.role !== 'user' && value.role !== 'assistant') return false
-  return typeof value.content === 'string' || Array.isArray(value.tool_calls)
+  return typeof value.content === 'string'
 }
 
 function readBody(req) {
@@ -408,7 +153,7 @@ async function handleChat(req, res) {
   if (!Array.isArray(messages) || messages.length === 0 || !messages.every(isValidMessage)) {
     return sendJson(res, 400, {
       error: 'bad_request',
-      detail: 'messages must be a non-empty array of chat or tool messages.',
+      detail: 'messages must be a non-empty array of user or assistant messages.',
     })
   }
 
@@ -418,34 +163,45 @@ async function handleChat(req, res) {
   const record = {
     id: randomUUID(),
     started: new Date().toISOString(),
-    backend: null,
     outcome: 'failed',
-    tool_rounds: messages.filter((message) => message.role === 'tool').length,
   }
-  const started = Date.now()
   let answer
   try {
-    record.backend = chosenBackend()
-    answer = await BACKENDS[record.backend]({ system, messages, tools: TOOLS })
+    const { config, overlay } = await loadConfig(AGENTS_CONFIG, AGENTS_LOCAL_CONFIG)
+    const agent = await resolveRole(config, overlay, 'front')
+    const transcriptPath = join(RECORDS_DIR, `${record.id}.agent.jsonl`)
+    await mkdir(RECORDS_DIR, { recursive: true })
+    answer = await runAgent({
+      agent,
+      prompt: composePrompt({ system, messages }),
+      timeoutMs: AGENT_TIMEOUT_MS,
+      transcriptPath,
+      toolBaseUrl: TOOL_BASE_URL,
+    })
   } catch (error) {
-    if (!(error instanceof BackendError)) throw error
-    // The engine never spoke, so the free-text failure report the record policy
-    // asks for is the failing party's own words.
+    if (!(error instanceof AgentConfigError) && !(error instanceof AgentRunError)) throw error
+    if (error instanceof AgentRunError) Object.assign(record, error.meta)
     record.failure = error.message
-    record.duration_ms = Date.now() - started
+    record.outcome = error.outcome ?? 'failed'
     await recordRun(record)
     return sendJson(res, 502, { error: 'assistant_offline', detail: error.message })
   }
   Object.assign(record, answer.meta)
-  record.backend_model = `${record.backend}/${answer.meta.model}`
-  record.tool_calls = answer.tool_calls.map((call) => call.name)
+  record.actions = answer.actions.map((action) => action.action)
   record.outcome = 'done'
-  record.duration_ms = Date.now() - started
   await recordRun(record)
   return sendJson(res, 200, {
     reply: answer.reply,
-    tool_calls: answer.tool_calls,
-    backend: record.backend_model,
+    actions: answer.actions,
+    run: {
+      id: record.id,
+      role: record.role,
+      profile: record.profile,
+      harness: record.harness,
+      provider: record.provider,
+      model: record.model,
+      outcome: record.outcome,
+    },
   })
 }
 
@@ -633,7 +389,5 @@ const server = createServer((req, res) => {
 })
 
 server.listen(PORT, () => {
-  const backend = process.env.ASSISTANT_BACKEND || 'ollama'
-  const model = backend === 'claude' ? CLAUDE_MODEL : `${OLLAMA_MODEL} @ ${OLLAMA_URL}`
-  console.log(`assistant listening on :${PORT}, backend=${backend}, model=${model}`)
+  console.log(`assistant listening on :${PORT}; front resolves through agents.toml per request`)
 })

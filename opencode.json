@@ -1,0 +1,44 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "provider": {
+    "ollama": {
+      "npm": "@ai-sdk/openai-compatible",
+      "options": {
+        "baseURL": "{env:AGENT_PROVIDER_OLLAMA_BASE_URL}"
+      },
+      "models": {
+        "qwen3.6:35b-a3b-coding-nvfp4": {}
+      }
+    }
+  },
+  "mcp": {
+    "agdevworld": {
+      "type": "local",
+      "command": ["node", "assistant/tool-service.mjs"],
+      "enabled": true,
+      "timeout": 65000
+    }
+  },
+  "tools": {
+    "read": false,
+    "write": false,
+    "edit": false,
+    "glob": false,
+    "grep": false,
+    "list": false,
+    "bash": false,
+    "webfetch": false,
+    "websearch": false
+  },
+  "permission": {
+    "read": "deny",
+    "edit": "deny",
+    "write": "deny",
+    "glob": "deny",
+    "grep": "deny",
+    "list": "deny",
+    "bash": "deny",
+    "webfetch": "deny",
+    "websearch": "deny"
+  }
+}

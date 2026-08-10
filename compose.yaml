@@ -5,18 +5,13 @@ services:
     ports:
       - "8090:80"
 
-  # Server-side chat assistant: browser -> (nginx|vite proxy) -> assistant -> ollama
+  # One fresh OpenCode front run per browser chat request.
   assistant:
-    build: ./assistant
+    build:
+      context: .
+      dockerfile: assistant/Dockerfile
     environment:
-      # Agent != Model: `ollama` (default, free, local) or `claude`. The claude
-      # backend needs ANTHROPIC_API_KEY, which lives in .env (git-ignored) or
-      # the operator's environment — never a committed default.
-      ASSISTANT_BACKEND: ${ASSISTANT_BACKEND:-ollama}
-      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
-      CLAUDE_MODEL: ${CLAUDE_MODEL:-}
-      OLLAMA_URL: ${OLLAMA_URL:-http://host.docker.internal:11434}
-      OLLAMA_MODEL: ${OLLAMA_MODEL:-glm-4.7-flash:latest}
+      AGDEVWORLD_TOOL_BASE_URL: http://web
       AGFORGE_URL: ${AGFORGE_URL:-http://host.docker.internal:8092}
       # "<name>=<url>,..."; unset falls back to the local node only, so real
       # cluster hostnames stay out of the repo.
@@ -27,6 +22,7 @@ services:
       ASSISTANT_RECORDS_DIR: /records
     volumes:
       - assistant_records:/records
+      - ./.local/agents.compose.toml:/app/.local/agents.local.toml:ro
     extra_hosts:
       - "host.docker.internal:host-gateway"
     ports:

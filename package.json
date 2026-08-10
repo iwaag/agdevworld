@@ -6,6 +6,7 @@
   "scripts": {
     "cluster:fetch": "node scripts/fetch-cluster-state.mjs",
     "dev": "vite",
+    "test": "node --test assistant/tests/*.test.mjs",
     "build": "tsc && vite build",
     "preview": "vite preview"
   },

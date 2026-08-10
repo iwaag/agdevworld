@@ -1,8 +1,7 @@
 # agdevworld assistant — entrance guide
 
-The capability card. Read from disk on every chat request and appended to the
-role prompt; served raw at `GET /api/guide`. Editing it changes the next
-answer with no restart.
+The capability card. Read from disk for every fresh OpenCode run and appended
+to its role prompt; served raw at `GET /api/guide`.
 
 ## What this is
 
@@ -34,16 +33,16 @@ human's conversational entrance to the world.
 
 ## Costs
 
-- Chat on the default backend: 0.00 USD, seconds per reply — a local ollama model (`glm-4.7-flash`), which reports no price.
-- Chat on `ASSISTANT_BACKEND=claude`: one Anthropic API call per reply, recorded per run rather than estimated here.
+- Chat on the `local-front` profile uses OpenCode with the local Ollama model and reports no price.
 - An image: free in money, ~15–130 seconds — agforge's local pipeline. See agforge's own card.
 - An autolab iteration summary: ~0.13–0.21 USD and 11–18 seconds, paid once per iteration and cached on the node afterwards. Each cached summary carries its own `summarizer.cost_usd` and `duration_ms` — read those rather than this line, which has already been wrong once.
 - An autolab job itself: `cost_usd` per job is in `/api/autolab/<node>/jobs`; on agstudio they have run $0.09–$3.78. A number written here goes stale as jobs run; the path does not.
 
-## Backend (Agent ≠ Model)
+## Agent identity
 
-`ASSISTANT_BACKEND` = `ollama` (default) | `claude`; model within a backend is
-`OLLAMA_MODEL` / `CLAUDE_MODEL`. Every reply records which backend served it.
+The `front` role resolves through `ag.agent-config.v1`. Every reply records
+profile, harness, provider, and canonical model separately. There is no direct
+provider chat path and no silent harness or model fallback.
 
 ## Safety devices
 

@@ -110,8 +110,7 @@ Paths reachable with fetch:
 - /api/autolab/nodes — the autolab nodes this service is configured with, and whether each answers right now.
 - /api/autolab/<node>/jobs, /api/autolab/<node>/jobs/<job>, /api/autolab/<node>/status — one node's autolab gateway.
 - /api/autolab/<node>/jobs/<job>/summarize/<iter> — POST asks the node to summarize that iteration, GET reads the result; it takes about 15 seconds and may answer "pending".
-- /api/autolab/<node>/window and /api/autolab/<node>/director — POST {"text":"..."} to a node's own conversational window, or to its director.
-- /api/autolab/<node>/mission — POST {"mission":"...", "max_sessions"?: n} starts a mission on that node; 409 while one is already running.
+- /api/autolab/<node>/window and /api/autolab/<node>/director — POST {"text":"..."} to a node's own conversational window, or to its director. The window is the node's entrance: asking it for work is how a mission gets started (it refuses while one is already running).
 - /api/note — POST {"text":"..."} writes a note into this service's records; it is the one thing you can leave behind.
 - /api/forge/requests — POST {"desire":"..."} starts an image generation on agforge; GET /api/forge/requests/<id> reads it back. It takes 20 to 105 seconds.
 - /api/guide — the capability card below, raw.

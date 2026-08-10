@@ -25,9 +25,8 @@ human's conversational entrance to the world.
 - `/api/autolab/nodes` — configured autolab nodes and whether each answers now.
 - `/api/autolab/<node>/jobs`, `/jobs/<job>`, `/status` — one node's autolab gateway. A job's `evidence[].iter` names its iterations.
 - `/api/autolab/<node>/jobs/<job>/summarize/<iter>` — POST asks for an iteration summary, GET reads it. `<iter>` is a name like `iter-0001`, not a number.
-- `/api/autolab/<node>/window` — POST `{"text":"…"}` to a node's own conversational window; it answers from its job state and its own card.
+- `/api/autolab/<node>/window` — POST `{"text":"…"}` to a node's own conversational window; it answers from its job state and its own card. The window is the node's entrance: asking it for work is how a mission gets started (it refuses while one is already running, and its answer says so).
 - `/api/autolab/<node>/director` — POST `{"text":"…"}` to that node's director, a reader over its direction workspace.
-- `/api/autolab/<node>/mission` — POST `{"mission":"…"}` (optional `"max_sessions"`) starts a mission on that node; answers `409` while one is already running.
 - `/api/note` — POST `{"text":"…"}` writes a note into this service's records. It is the one thing you can leave behind; a line on this card that turned out to be false belongs there, since you are the only one who finds out.
 - A path outside `/api/` that does not exist answers `200` with this app's own HTML, not `404` — the page's deep-link fallback. Under `/api/` a wrong path answers `404`.
 - `/api/forge/requests` — POST `{"desire":"…"}` starts an image on agforge; GET `/api/forge/requests/<id>` reads it back.

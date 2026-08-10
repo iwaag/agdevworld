@@ -21,6 +21,12 @@ services:
       # "<name>=<url>,..."; unset falls back to the local node only, so real
       # cluster hostnames stay out of the repo.
       AUTOLAB_NODES: ${AUTOLAB_NODES:-}
+      # Records outlive the container. Without this the store is the container
+      # log, which `up --build` destroys — and a note an agent leaves about a
+      # wrong fact is worth nothing if the next rebuild erases it.
+      ASSISTANT_RECORDS_DIR: /records
+    volumes:
+      - assistant_records:/records
     extra_hosts:
       - "host.docker.internal:host-gateway"
     ports:
@@ -40,3 +46,4 @@ services:
 
 volumes:
   node_modules:
+  assistant_records:

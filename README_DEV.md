@@ -8,7 +8,8 @@
 - `docker compose ps web` / `curl -I http://localhost:8090/` — confirm it came up.
 - `docker compose up --build -d assistant` — the chat service on :8091. `server.mjs` and `GUIDE.md` are COPYed in, so both need a rebuild unless bind-mounted.
 - `CAGENT_URL=https://localhost:8789 npm run cluster:fetch` — refresh the three cluster snapshots through cagent.
-- `docker compose logs assistant` — the container has no writable volume, so this is the run-record store (`assistant.run.v1`).
+- `docker compose logs assistant` — run records (`assistant.run.v1`) and notes (`assistant.note.v1`) as they happen. The durable copy is the `assistant_records` volume (`ASSISTANT_RECORDS_DIR=/records`); the log alone does not survive `up --build`.
+- `docker compose exec assistant ls /records` — what the assistant has left behind, including notes about facts that turned out wrong.
 
 ## Files
 
@@ -19,7 +20,7 @@
 - `src/chatPanel.ts` — the chat overlay, and where the assistant's tools run.
 - `src/detailPopup.ts` — the detail overlay, incl. the per-iteration `summary` button.
 - `src/clusterState.ts` / `src/autolabState.ts` — snapshot and gateway reads for the panels.
-- `assistant/server.mjs` — the chat service and the agforge / autolab passthroughs.
+- `assistant/server.mjs` — the chat service, the agforge / autolab passthroughs, and `POST /api/note`.
 - `assistant/GUIDE.md` — the capability card, re-read per chat request.
 - `scripts/fetch-cluster-state.mjs` — snapshot refresh through cagent.
 - `public/cluster/*.json` — live snapshots, git-ignored; `public/*.sample.json` is the fallback. The Docker build copies whatever is in `public/` at build time, so move a live snapshot out first if a sample-only image is wanted.
@@ -52,6 +53,6 @@ kind from instructions: they bound reach and resources, not correctness, and
 each answers with its own reason where the assistant can read it.
 
 - The autolab node list is finite — otherwise this is an unauthenticated relay into the LAN.
-- Writes to a node are refused (`405`) except a summarize route: `POST /mission` and the review transitions sit behind this passthrough, and it carries no identity. Introduce identity and this can go.
+- Writes to a node are refused (`405`) except the routes the node itself leaves unauthenticated — `/summarize/`, `/window`, `/director`. `POST /mission` is token-gated on the node and this passthrough holds no token. Introduce identity and this can go.
 - `/evidence/` answers `403` — raw evidence stays on the node that produced it.
 - 16 tool rounds per reply, a 60 s ceiling on one `wait`, and a 10 s fetch timeout in `chatPanel.ts`; 10 s upstream timeouts in the passthrough.

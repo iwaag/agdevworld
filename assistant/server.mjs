@@ -110,12 +110,14 @@ Paths reachable with fetch:
 - /api/autolab/nodes — the autolab nodes this service is configured with, and whether each answers right now.
 - /api/autolab/<node>/jobs, /api/autolab/<node>/jobs/<job>, /api/autolab/<node>/status — one node's autolab gateway.
 - /api/autolab/<node>/jobs/<job>/summarize/<iter> — POST asks the node to summarize that iteration, GET reads the result; it takes about 15 seconds and may answer "pending".
+- /api/autolab/<node>/window and /api/autolab/<node>/director — POST {"text":"..."} to a node's own conversational window, or to its director.
+- /api/note — POST {"text":"..."} writes a note into this service's records; it is the one thing you can leave behind.
 - /api/forge/requests — POST {"desire":"..."} starts an image generation on agforge; GET /api/forge/requests/<id> reads it back. It takes 20 to 105 seconds.
 - /api/guide — the capability card below, raw.
 
 The screen shows one view at a time: nodes, workspaces, autolab.
 
-Budget: up to 16 tool rounds per reply, and a single wait lasts at most 60 seconds. A fetch that does not answer within about 10 seconds comes back as a timeout. Whatever a path answers, including a refusal and its reason, is returned to you as it stands.`
+Budget: up to 16 tool rounds per reply. One call gets 60 seconds — a single wait lasts at most that, and a fetch that does not answer within it comes back as a timeout. Whatever a path answers, including a refusal and its reason, is returned to you as it stands; a path outside /api/ that does not exist answers 200 with this app's own HTML rather than 404.`
 
 // --- backends ---------------------------------------------------------------
 //
@@ -520,13 +522,20 @@ async function handleAutolab(req, res) {
       detail: 'Raw evidence stays on the node that produced it; the iteration summary crosses instead.',
     })
   }
-  const isSummarize = /\/summarize\//.test(path)
-  if (req.method !== 'GET' && !(req.method === 'POST' && isSummarize)) {
+  // What may be POSTed is decided by what the node itself leaves
+  // unauthenticated, not by a shorter list of our own: `/summarize/`, `/window`
+  // and `/director` are open on the node to anyone who can reach it, so
+  // refusing them here removed reach without removing risk. `POST /mission`
+  // stays out because the node gates it behind a bearer token and this
+  // passthrough holds none.
+  const isOpenPost = /\/summarize\//.test(path) || path === '/window' || path === '/director'
+  if (req.method !== 'GET' && !(req.method === 'POST' && isOpenPost)) {
     return sendJson(res, 405, {
       error: 'method_not_allowed',
       detail:
-        'This passthrough carries no identity, so it reads freely and writes only to a summarize route. ' +
-        'Anything that changes a node goes through the node itself with a token.',
+        'This passthrough carries no identity, so it reaches only what the node leaves unauthenticated: ' +
+        'reads, /summarize/, /window and /director. A route the node gates behind a token — /mission — ' +
+        'goes through the node itself with that token.',
     })
   }
   const target = `${url}${path}${query ? `?${query}` : ''}`
@@ -536,7 +545,10 @@ async function handleAutolab(req, res) {
       method: req.method,
       headers: { 'content-type': req.headers['content-type'] ?? 'application/json' },
       body: req.method === 'GET' ? undefined : await readBody(req),
-      signal: AbortSignal.timeout(10_000),
+      // 60 s, the same bound one `wait` gets: a node's own window answers in
+      // 3–28 s on its local model, so the 10 s this used to hold turned an
+      // open door into `node_offline` — a closed door reporting a wrong reason.
+      signal: AbortSignal.timeout(60_000),
     })
   } catch (error) {
     console.error(`autolab node ${node} unreachable:`, error)
@@ -551,6 +563,37 @@ async function handleAutolab(req, res) {
     'content-length': body.byteLength,
   })
   res.end(body)
+}
+
+// POST /api/note {"text": "..."} -> an `assistant.note.v1` record.
+//
+// The assistant had no way to write anything down: it reads the card on every
+// request and has no file, so a card line it discovers to be false died with
+// the reply. This is that missing half of the record policy — a free-text
+// report in the agent's own words, whose path is fixed here and whose content
+// never is. No new tool: `fetch` already reaches it, and the card names it.
+async function handleNote(req, res) {
+  let parsed
+  try {
+    parsed = JSON.parse(await readBody(req))
+  } catch {
+    return sendJson(res, 400, { error: 'bad_request', detail: 'Body must be JSON.' })
+  }
+  const text = parsed?.text
+  if (typeof text !== 'string' || text.trim() === '') {
+    return sendJson(res, 400, { error: 'bad_request', detail: 'Body must be {"text": "..."}.' })
+  }
+  const record = { id: randomUUID(), written: new Date().toISOString(), text }
+  console.log(JSON.stringify({ kind: 'assistant.note.v1', ...record }))
+  if (RECORDS_DIR) {
+    try {
+      await mkdir(RECORDS_DIR, { recursive: true })
+      await writeFile(join(RECORDS_DIR, `${record.id}.note.json`), JSON.stringify(record, null, 2) + '\n')
+    } catch (error) {
+      console.warn('could not write the note to disk:', error)
+    }
+  }
+  return sendJson(res, 201, { kind: 'assistant.note.v1', id: record.id, written: record.written })
 }
 
 // The card, raw. Same content the chat answers from, for a caller that would
@@ -584,6 +627,13 @@ const server = createServer((req, res) => {
     handleAutolab(req, res).catch((error) => {
       console.error('unhandled autolab passthrough error:', error)
       sendJson(res, 500, { error: 'internal_error', detail: 'Unexpected passthrough failure.' })
+    })
+    return
+  }
+  if (req.method === 'POST' && req.url === '/api/note') {
+    handleNote(req, res).catch((error) => {
+      console.error('unhandled note error:', error)
+      sendJson(res, 500, { error: 'internal_error', detail: 'Unexpected note failure.' })
     })
     return
   }

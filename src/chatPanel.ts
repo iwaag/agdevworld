@@ -24,7 +24,11 @@ interface ChatMessage {
 // keeps calling tools polls this browser forever. The assistant is told the
 // number; it is not a statement about whether its calls are worthwhile.
 const MAX_TOOL_ROUNDS = 16
-const FETCH_TIMEOUT_MS = 10_000
+// One bound for one call, the same 60 s a single `wait` gets. It used to be
+// 10 s, which is shorter than a node's own window takes to answer (3–28 s) —
+// a path the assistant is told it can reach has to stay reachable long enough
+// to answer.
+const FETCH_TIMEOUT_MS = 60_000
 
 const PANEL_CSS = `
 #chat-panel {

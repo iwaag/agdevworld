@@ -87,10 +87,9 @@ function isObject(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object'
 }
 
-// A node that is down, unconfigured, or running an older gateway that still
-// demands a token is a normal outcome here, not a bug. Carry the node's own
-// words into the error so the view can show what actually happened instead of
-// a generic failure.
+// A node that is down, unconfigured, or running an older gateway build is a
+// normal outcome here, not a bug. Carry the node's own words into the error
+// so the view can show what actually happened instead of a generic failure.
 async function getJson(url: string, init?: RequestInit): Promise<unknown> {
   const response = await fetch(url, { cache: 'no-store', ...init })
   const text = await response.text()

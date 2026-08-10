@@ -111,6 +111,7 @@ Paths reachable with fetch:
 - /api/autolab/<node>/jobs, /api/autolab/<node>/jobs/<job>, /api/autolab/<node>/status — one node's autolab gateway.
 - /api/autolab/<node>/jobs/<job>/summarize/<iter> — POST asks the node to summarize that iteration, GET reads the result; it takes about 15 seconds and may answer "pending".
 - /api/autolab/<node>/window and /api/autolab/<node>/director — POST {"text":"..."} to a node's own conversational window, or to its director.
+- /api/autolab/<node>/mission — POST {"mission":"...", "max_sessions"?: n} starts a mission on that node; 409 while one is already running.
 - /api/note — POST {"text":"..."} writes a note into this service's records; it is the one thing you can leave behind.
 - /api/forge/requests — POST {"desire":"..."} starts an image generation on agforge; GET /api/forge/requests/<id> reads it back. It takes 20 to 105 seconds.
 - /api/guide — the capability card below, raw.
@@ -497,10 +498,11 @@ async function handleAutolabNodes(res) {
 // /api/autolab/<node>/<rest> -> <node url>/<rest>.
 //
 // Two safety devices live here, both about reach rather than correctness: the
-// node list is finite (otherwise this is an unauthenticated relay into the
-// LAN), and nothing without an identity may change a node's state — the write
-// routes behind this proxy start missions and approve reviews. Both answer with
-// their own reason, which the assistant reads like any other result.
+// node list is finite (otherwise this is an open relay into the LAN), and raw
+// evidence stays on the node that produced it. Both answer with their own
+// reason, which the assistant reads like any other result. The node routes
+// themselves are open (zero_auth episode) — what a POST may do is decided by
+// the node, not by a gate here.
 async function handleAutolab(req, res) {
   const [pathname, query] = req.url.slice('/api/autolab'.length).split('?')
   if (pathname === '/nodes' || pathname === '/nodes/') {
@@ -520,22 +522,6 @@ async function handleAutolab(req, res) {
     return sendJson(res, 403, {
       error: 'evidence_not_proxied',
       detail: 'Raw evidence stays on the node that produced it; the iteration summary crosses instead.',
-    })
-  }
-  // What may be POSTed is decided by what the node itself leaves
-  // unauthenticated, not by a shorter list of our own: `/summarize/`, `/window`
-  // and `/director` are open on the node to anyone who can reach it, so
-  // refusing them here removed reach without removing risk. `POST /mission`
-  // stays out because the node gates it behind a bearer token and this
-  // passthrough holds none.
-  const isOpenPost = /\/summarize\//.test(path) || path === '/window' || path === '/director'
-  if (req.method !== 'GET' && !(req.method === 'POST' && isOpenPost)) {
-    return sendJson(res, 405, {
-      error: 'method_not_allowed',
-      detail:
-        'This passthrough carries no identity, so it reaches only what the node leaves unauthenticated: ' +
-        'reads, /summarize/, /window and /director. A route the node gates behind a token — /mission — ' +
-        'goes through the node itself with that token.',
     })
   }
   const target = `${url}${path}${query ? `?${query}` : ''}`

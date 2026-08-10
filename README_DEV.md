@@ -48,11 +48,12 @@ code reads env with `||`, never `??`.
 
 ## Safety devices
 
-Three guards in `assistant/server.mjs` and two in the browser. They differ in
+Two guards in `assistant/server.mjs` and two in the browser. They differ in
 kind from instructions: they bound reach and resources, not correctness, and
 each answers with its own reason where the assistant can read it.
 
-- The autolab node list is finite — otherwise this is an unauthenticated relay into the LAN.
-- Writes to a node are refused (`405`) except the routes the node itself leaves unauthenticated — `/summarize/`, `/window`, `/director`. `POST /mission` is token-gated on the node and this passthrough holds no token. Introduce identity and this can go.
+- The autolab node list is finite — otherwise this is an open relay into the LAN.
 - `/evidence/` answers `403` — raw evidence stays on the node that produced it.
+- Node routes are otherwise passed through as-is (zero_auth episode): the
+  nodes carry no auth, and this passthrough adds no gate of its own.
 - 16 tool rounds per reply, a 60 s ceiling on one `wait`, and a 10 s fetch timeout in `chatPanel.ts`; 10 s upstream timeouts in the passthrough.

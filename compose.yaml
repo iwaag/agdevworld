@@ -19,6 +19,10 @@ services:
       # "<name>=<url>,..."; unset falls back to the local node only, so real
       # cluster hostnames stay out of the repo.
       AUTOLAB_NODES: ${AUTOLAB_NODES:-}
+      PLANE_URL: ${PLANE_URL:-}
+      PLANE_API_KEY: ${PLANE_API_KEY:-}
+      PLANE_WORKSPACE_SLUG: ${PLANE_WORKSPACE_SLUG:-}
+      PLANE_PROJECT_ID: ${PLANE_PROJECT_ID:-}
       # Records outlive the container. Without this the store is the container
       # log, which `up --build` destroys — and a note an agent leaves about a
       # wrong fact is worth nothing if the next rebuild erases it.

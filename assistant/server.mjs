@@ -29,6 +29,7 @@ import { fileURLToPath } from 'node:url'
 
 import { AgentConfigError, loadConfig, resolveRole } from './agent-config.mjs'
 import { AgentRunError, composePrompt, runAgent } from './harness.mjs'
+import { proxyPlaneRequest, readPlaneConfig } from './plane-passthrough.mjs'
 
 const PORT = Number(process.env.PORT ?? 8091)
 const ASSISTANT_DIR = dirname(fileURLToPath(import.meta.url))
@@ -38,6 +39,7 @@ const AGENTS_CONFIG = join(PROJECT_ROOT, 'agents.toml')
 const AGENTS_LOCAL_CONFIG = join(PROJECT_ROOT, '.local', 'agents.local.toml')
 const AGENT_TIMEOUT_MS = Number(process.env.AGDEVWORLD_AGENT_TIMEOUT_MS || 300_000)
 const TOOL_BASE_URL = process.env.AGDEVWORLD_TOOL_BASE_URL || 'http://127.0.0.1:8090'
+const PLANE_CONFIG = readPlaneConfig()
 
 async function readGuide() {
   try {
@@ -59,6 +61,7 @@ Paths reachable with fetch:
 - /api/autolab/<node>/jobs, /api/autolab/<node>/jobs/<job>, /api/autolab/<node>/status — one node's autolab gateway.
 - /api/autolab/<node>/jobs/<job>/summarize/<iter> — POST asks the node to summarize that iteration, GET reads the result; it takes about 15 seconds and may answer "pending".
 - /api/autolab/<node>/window and /api/autolab/<node>/director — POST {"text":"..."} to a node's own conversational window, or to its director. The window is the node's entrance: asking it for work is how a mission gets started (it refuses while one is already running).
+- /api/plane/issues and /api/plane/states — the configured Plane project's task list and state vocabulary. POST an issue with a state_name field; the server resolves it without exposing Plane credentials or live state IDs.
 - To change a project's coding or director profile, read that node's /projects, ask its /window in ordinary words to make the change, then re-read /projects to confirm it. There is no direct settings-write route.
 - /api/note — POST {"text":"..."} writes a note into this service's records; it is the one thing you can leave behind.
 - /api/forge/requests — POST {"desire":"..."} starts an image generation on agforge; GET /api/forge/requests/<id> reads it back. It takes 20 to 105 seconds.
@@ -309,6 +312,36 @@ async function handleAutolab(req, res) {
   res.end(body)
 }
 
+// Same-origin, project-scoped Plane passthrough. The API key never crosses
+// this boundary, and callers cannot widen the configured workspace/project by
+// putting identifiers in a URL. Human-readable state_name values are resolved
+// against the running instance so environment-specific UUIDs stay out of the
+// guide and browser.
+async function handlePlane(req, res) {
+  let body
+  if (req.method !== 'GET' && req.method !== 'HEAD') body = await readBody(req)
+  let result
+  try {
+    result = await proxyPlaneRequest({
+      method: req.method,
+      url: req.url,
+      contentType: req.headers['content-type'],
+      body,
+    }, PLANE_CONFIG)
+  } catch (error) {
+    console.error('Plane unreachable:', error)
+    return sendJson(res, 502, {
+      error: 'plane_offline',
+      detail: 'The configured Plane service is unreachable.',
+    })
+  }
+  res.writeHead(result.status, {
+    'content-type': result.contentType,
+    'content-length': result.body.byteLength,
+  })
+  res.end(result.body)
+}
+
 // POST /api/note {"text": "..."} -> an `assistant.note.v1` record.
 //
 // The assistant had no way to write anything down: it reads the card on every
@@ -370,6 +403,13 @@ const server = createServer((req, res) => {
   if (req.url?.startsWith('/api/autolab/')) {
     handleAutolab(req, res).catch((error) => {
       console.error('unhandled autolab passthrough error:', error)
+      sendJson(res, 500, { error: 'internal_error', detail: 'Unexpected passthrough failure.' })
+    })
+    return
+  }
+  if (req.url?.startsWith('/api/plane/')) {
+    handlePlane(req, res).catch((error) => {
+      console.error('unhandled Plane passthrough error:', error)
       sendJson(res, 500, { error: 'internal_error', detail: 'Unexpected passthrough failure.' })
     })
     return

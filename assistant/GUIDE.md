@@ -27,10 +27,54 @@ human's conversational entrance to the world.
 - `/api/autolab/<node>/jobs/<job>/summarize/<iter>` — POST asks for an iteration summary, GET reads it. `<iter>` is a name like `iter-0001`, not a number.
 - `/api/autolab/<node>/window` — POST `{"text":"…"}` to a node's own conversational window; it answers from its job state and its own card. The window is the node's entrance: asking it for work is how a mission gets started (it refuses while one is already running, and its answer says so).
 - `/api/autolab/<node>/director` — POST `{"text":"…"}` to that node's director, a reader over its direction workspace.
+- `/api/plane/states` — GET the configured Plane project's live state list.
+- `/api/plane/issues` — GET the configured project's issues; POST a new issue. The Plane key and workspace/project IDs stay server-side.
+- `/api/plane/issues/<issue-id>` — GET one issue. The same-origin HTTP route also accepts PATCH for the task UI; your `fetch` tool is intentionally limited to GET/POST.
 - `/api/note` — POST `{"text":"…"}` writes a note into this service's records. It is the one thing you can leave behind; a line on this card that turned out to be false belongs there, since you are the only one who finds out.
 - A path outside `/api/` that does not exist answers `200` with this app's own HTML, not `404` — the page's deep-link fallback. Under `/api/` a wrong path answers `404`.
 - `/api/forge/requests` — POST `{"desire":"…"}` starts an image on agforge; GET `/api/forge/requests/<id>` reads it back.
 - `/api/guide` — this card.
+
+## Filing complaints in Plane
+
+A concrete complaint that calls for work should become one Plane issue, with a
+short outcome-oriented title and enough description that an autolab mediator
+can act without seeing this chat. Use `Backlog` when triage or clarification is
+still needed, and `Ready` when the complaint is already dispatchable. This is
+judgement, not a mechanical rule; say which state you chose in your reply.
+
+Read the live vocabulary and current work before creating anything. Through
+the `fetch` tool these are GETs of the two paths above; their curl-shaped
+equivalents are:
+
+```sh
+curl '<agdevworld-origin>/api/plane/states'
+curl '<agdevworld-origin>/api/plane/issues'
+```
+
+Create an issue through the existing `fetch` tool as a POST to
+`/api/plane/issues`. `state_name` is resolved by the server against Plane, so
+do not copy state UUIDs into prompts or notes:
+
+```json
+{
+  "name": "Improve ProjectA UI legibility",
+  "description_html": "<p>The current game UI is difficult to read. Improve contrast, type size, and spacing, and verify the main play flow at desktop and phone widths.</p>",
+  "state_name": "Ready"
+}
+```
+
+For callers that can send PATCH, transitions use the same name-shaped body:
+
+```sh
+curl -X PATCH '<agdevworld-origin>/api/plane/issues/<issue-id>' \
+  -H 'Content-Type: application/json' \
+  -d '{"state_name":"In Progress"}'
+```
+
+Never put a Plane API key in a request or reply. If the passthrough says it is
+unconfigured, offline, or names no such state, report that evidence rather
+than inventing an issue or transition.
 
 To change a project's agent backend, first read `/projects`, then ask that
 node's `/window` in ordinary words to change the named project's `coding` or

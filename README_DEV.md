@@ -59,7 +59,8 @@ Binary absence fails during profile resolution, while invalid or absent login
 fails as a recorded Claude run whose stderr/result tail is returned in the 502
 detail. Neither case attempts OpenCode.
 
-Runtime-only variables are `AUTOLAB_NODES`, `AGFORGE_URL`,
+Runtime-only variables are `AUTOLAB_NODES`, `AGFORGE_URL`, `PLANE_URL`,
+`PLANE_API_KEY`, `PLANE_WORKSPACE_SLUG`, `PLANE_PROJECT_ID`,
 `ASSISTANT_RECORDS_DIR`, `AGDEVWORLD_TOOL_BASE_URL`,
 `AGENT_PROVIDER_OLLAMA_BASE_URL`, optional `AGENT_FRONT_PROFILE`, and the optional
 `AGDEVWORLD_AGENT_TIMEOUT_MS`. Its default is 300 seconds; nginx waits 310

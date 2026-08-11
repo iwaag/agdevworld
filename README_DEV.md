@@ -68,6 +68,20 @@ error. The assistant entrypoint generates `/app/.local/agents.local.toml`
 from deployment environment values on every start, so no ignored hand-written
 compose overlay is required. Native runs use `.local/agents.local.toml`.
 
+## Autolab project profiles
+
+The autolab view fetches `/api/autolab/<node>/projects` alongside jobs and
+status. Read-only project cards show the effective `coding` and `director`
+profiles before the job cards; job rows and details also show their optional
+project association. Use the refresh chip after an out-of-band change.
+
+Changing a profile stays inside the conversational single entrance. Ask the
+agdevworld assistant in ordinary words; it reads the project's current value,
+passes the request to that node's `/window`, and confirms with another
+`/projects` read. There is deliberately no selector or direct settings-write
+route in agdevworld. This is separate from the assistant's own front profile,
+which still has no per-request selector.
+
 ## Safety devices
 
 The reach and resource guards live at the HTTP/MCP tool boundary rather than

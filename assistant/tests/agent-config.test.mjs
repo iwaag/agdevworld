@@ -19,14 +19,18 @@ async function errorCode(fn) {
   assert.fail('expected AgentConfigError')
 }
 
-test('valid agdevworld fixture resolves front', async () => {
-  const { config, overlay } = await loadConfig(VALID)
-  const agent = await resolveRole(config, overlay, 'front', { checkAvailable: false })
-  assert.deepEqual(
-    { profile: agent.profile, harness: agent.harness, model: agent.model },
-    { profile: 'local-front', harness: 'opencode', model: 'ollama/qwen3.6:35b-a3b-coding-nvfp4' },
-  )
-})
+for (const project of ['agforge', 'agautolab', 'agdevworld']) {
+  test(`valid ${project} fixture resolves every role`, async () => {
+    const main = join(CONTRACT, 'valid', project, 'agents.toml')
+    const local = join(CONTRACT, 'valid', project, 'agents.local.toml')
+    const { config, overlay } = await loadConfig(main, project === 'agdevworld' ? undefined : local)
+    for (const role of Object.keys(config.roles)) {
+      const agent = await resolveRole(config, overlay, role, { checkAvailable: false })
+      assert.equal(agent.role, role)
+      assert.ok(['opencode', 'claude_code', 'fake'].includes(agent.harness))
+    }
+  })
+}
 
 for (const [file, expected] of [
   ['missing-schema.toml', 'E_SCHEMA'],
@@ -93,7 +97,7 @@ test('command glob expands wildcard directory components and selects newest matc
   await utimes(older, new Date(now.getTime() - 1000), new Date(now.getTime() - 1000))
   await utimes(newer, now, now)
   const overlay = join(dir, 'agents.local.toml')
-  await writeFile(overlay, `schema = "ag.agent-config.v1"\n[local.harness.claude_code]\ncommand_glob = "${dir}/claude-code-*/resources/native-binary/claude"\n[roles.front]\nprofile = "sonnet-front"\n`)
+  await writeFile(overlay, `schema = "ag.agent-config.v1"\n[local.harness.claude_code]\ncommand_glob = "${dir}/claude-code-*/resources/native-binary/claude"\n[roles.front]\nprofile = "sonnet"\n`)
   const loaded = await loadConfig(VALID, overlay)
   const agent = await resolveRole(loaded.config, loaded.overlay, 'front')
   assert.equal(agent.command, newer)

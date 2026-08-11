@@ -7,11 +7,11 @@ project = "agdevworld"
 effort = "low"
 max_tokens = 4096
 
-[profiles.local-front]
+[profiles.local]
 harness = "opencode"
 model = "ollama/qwen3.6:35b-a3b-coding-nvfp4"
 
-[profiles.sonnet-front]
+[profiles.sonnet]
 harness = "claude_code"
 model = "anthropic/claude-sonnet-5"
 
@@ -20,7 +20,7 @@ harness = "fake"
 model = "ollama/qwen3.6:35b-a3b-coding-nvfp4"
 
 [roles.front]
-profile = "local-front"
+profile = "local"
 requires = ["ui_actions"]
 
 [capabilities]

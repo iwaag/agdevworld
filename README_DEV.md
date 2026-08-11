@@ -37,11 +37,11 @@ selected harness owns its multi-step MCP loop; the browser never reposts tool
 results. Every request receives a new process and run ID, so no harness
 session state leaks between requests.
 
-The committed default is profile `local-front` = OpenCode +
+The committed default is profile `local` = OpenCode +
 `ollama/qwen3.6:35b-a3b-coding-nvfp4`. Harness command and provider endpoint
-come only from the ignored local overlay. The alternative `sonnet-front` =
+come only from the ignored local overlay. The alternative `sonnet` =
 Claude Code + `anthropic/claude-sonnet-5` uses the same MCP tools and UI-action
-channel. Select it only through `[roles.front] profile = "sonnet-front"` in the
+channel. Select it only through `[roles.front] profile = "sonnet"` in the
 ignored local overlay; there is no per-request backend selector or fallback.
 
 | harness | local requirement | container status |

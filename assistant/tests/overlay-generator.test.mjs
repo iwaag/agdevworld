@@ -10,7 +10,7 @@ test('generated compose overlay contains only deployment facts and secret refere
     AGENT_HARNESS_CLAUDE_CODE_COMMAND: '/opt/bin/claude',
     AGENT_PROVIDER_OLLAMA_BASE_URL: 'http://models.example:11434/v1',
     AGENT_ANTHROPIC_API_KEY_ENV: 'DEPLOYED_ANTHROPIC_KEY',
-    AGENT_FRONT_PROFILE: 'sonnet-front',
+    AGENT_FRONT_PROFILE: 'sonnet',
   })
   assert.deepEqual(parseToml(rendered), {
     schema: 'ag.agent-config.v1',
@@ -22,7 +22,7 @@ test('generated compose overlay contains only deployment facts and secret refere
       provider: { ollama: { base_url: 'http://models.example:11434/v1' } },
       secrets: { anthropic_api_key_env: 'DEPLOYED_ANTHROPIC_KEY' },
     },
-    roles: { front: { profile: 'sonnet-front' } },
+    roles: { front: { profile: 'sonnet' } },
   })
   assert.equal(rendered.includes('DEPLOYED_ANTHROPIC_KEY ='), false)
 })

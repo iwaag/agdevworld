@@ -65,7 +65,7 @@ test('Claude is_error envelope fails while preserving reported metadata and raw 
   await chmod(command, 0o755)
   await assert.rejects(
     runAgent({
-      agent: { role: 'front', profile: 'sonnet-front', harness: 'claude_code', provider: 'anthropic', model: 'anthropic/claude-sonnet-5', command },
+      agent: { role: 'front', profile: 'sonnet', harness: 'claude_code', provider: 'anthropic', model: 'anthropic/claude-sonnet-5', command },
       prompt: 'x', timeoutMs: 1000, transcriptPath: transcript, toolBaseUrl: 'http://127.0.0.1:1',
     }),
     (error) => error instanceof AgentRunError
@@ -83,7 +83,7 @@ test('Claude process failure keeps the stderr tail in the run error', async () =
   await chmod(command, 0o755)
   await assert.rejects(
     runAgent({
-      agent: { role: 'front', profile: 'sonnet-front', harness: 'claude_code', provider: 'anthropic', model: 'anthropic/claude-sonnet-5', command },
+      agent: { role: 'front', profile: 'sonnet', harness: 'claude_code', provider: 'anthropic', model: 'anthropic/claude-sonnet-5', command },
       prompt: 'x', timeoutMs: 1000, toolBaseUrl: 'http://127.0.0.1:1',
     }),
     (error) => error instanceof AgentRunError && /login required/.test(error.message),

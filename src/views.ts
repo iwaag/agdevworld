@@ -111,13 +111,12 @@ function jobStatusStyle(job: AutolabJobRow): PanelRowStatus {
 // The picked node lives here rather than in the scene: the scene stays a
 // config-driven grid, and this closure is what the chips mutate.
 export function autolabViewConfig(onSelect: (selection: PanelSelection) => void): PanelGridConfig {
+  let mode: 'projects' | 'jobs' = 'projects'
   let nodes: AutolabNode[] = []
   let selected = ''
   let status: AutolabStatus | undefined
   let statusError: string | undefined
   let api: PanelGridApi | undefined
-  let jobCount = 0
-  let projectCount = 0
   let availableProfiles: string[] = []
 
   const projectRow = (project: AutolabProject) => ({
@@ -136,15 +135,25 @@ export function autolabViewConfig(onSelect: (selection: PanelSelection) => void)
     title: 'autolab / now',
     loadingText: 'asking the autolab nodes…',
     unavailableText: 'autolab unavailable',
-    subtitle: () => (selected ? `${projectCount} projects · ${jobCount} jobs on ${selected}` : 'no autolab node selected'),
-    footer: 'project profiles are read-only here; ask the agent to change one',
+    subtitle: (count) => (selected ? `${count} ${mode} on ${selected}` : 'no autolab node selected'),
+    footer: 'projects and jobs are separate views; changes go through conversation',
     switchTo: { key: 'nodes', label: 'nodes' },
     bind: (bound) => {
       api = bound
     },
     headline: () => (selected ? statusHeadline(selected, status, statusError) : undefined),
     chips: () => {
-      const chips: PanelChip[] = nodes.map((node) => ({
+      const chips: PanelChip[] = (['projects', 'jobs'] as const).map((value) => ({
+        id: `mode-${value}`,
+        label: value,
+        active: mode === value,
+        onClick: () => {
+          if (mode === value) return
+          mode = value
+          api?.reload()
+        },
+      }))
+      chips.push(...nodes.map((node) => ({
         id: node.name,
         // An unreachable node stays clickable and says so: picking it and
         // reading the real error beats a disabled control that explains
@@ -156,7 +165,7 @@ export function autolabViewConfig(onSelect: (selection: PanelSelection) => void)
           selected = node.name
           api?.reload()
         },
-      }))
+      })))
       if (selected) chips.push({ id: 'refresh', label: '⟳ refresh', onClick: () => api?.reload() })
       return chips
     },
@@ -170,31 +179,31 @@ export function autolabViewConfig(onSelect: (selection: PanelSelection) => void)
       }
       status = undefined
       statusError = undefined
-      // The mediator headline must not decide whether the job grid renders:
-      // /status can fail on a node whose /jobs answers perfectly well.
-      const [jobs, projects, statusResult] = await Promise.all([
-        loadAutolabJobs(selected),
-        loadAutolabProjects(selected),
-        loadAutolabStatus(selected).catch((error: unknown) => {
-          statusError = error instanceof Error ? error.message : 'status unavailable'
-          return undefined
-        }),
-      ])
+      // The mediator headline must not decide whether either grid renders:
+      // /status can fail on a node whose project or job route answers.
+      const statusPromise = loadAutolabStatus(selected).catch((error: unknown) => {
+        statusError = error instanceof Error ? error.message : 'status unavailable'
+        return undefined
+      })
+      if (mode === 'projects') {
+        const [projects, statusResult] = await Promise.all([
+          loadAutolabProjects(selected),
+          statusPromise,
+        ])
+        status = statusResult
+        availableProfiles = projects.profiles
+        return projects.projects.map(projectRow)
+      }
+      const [jobs, statusResult] = await Promise.all([loadAutolabJobs(selected), statusPromise])
       status = statusResult
-      jobCount = jobs.length
-      projectCount = projects.projects.length
-      availableProfiles = projects.profiles
-      return [
-        ...projects.projects.map(projectRow),
-        ...jobs.map((job) => ({
+      return jobs.map((job) => ({
           id: `${selected}/${job.name}`,
           name: job.name,
           status: jobStatusStyle(job),
           detail: jobDetailLine(job),
           payload: { kind: 'job' as const, job },
           interactive: true,
-        })),
-      ]
+      }))
     },
     onSelect: (row) => {
       const payload = row.payload as

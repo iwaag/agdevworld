@@ -71,10 +71,12 @@ compose overlay is required. Native runs use `.local/agents.local.toml`.
 ## Autolab project profiles
 
 The autolab view fetches `/api/autolab/<node>/projects` alongside jobs and
-status. Read-only project cards show the effective `coding` and `director`
-profiles before the job cards. Clicking one opens its read-only profile detail
-and the common ask-agent action; job rows and details also show their optional
-project association. Use the refresh chip after an out-of-band change.
+status. Its `projects` and `jobs` tabs keep the two record types in separate
+grids while sharing the selected node. Read-only project cards show the
+effective `coding` and `director` profiles; clicking one opens its profile
+detail and the common ask-agent action. Job rows and details also show their
+optional project association. Use the refresh chip after an out-of-band
+change.
 
 Changing a profile stays inside the conversational single entrance. Ask the
 agdevworld assistant in ordinary words; it reads the project's current value,

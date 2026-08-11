@@ -20,6 +20,8 @@ export interface PanelRow {
   // Opaque source record (drift target, workspace row, …) carried through so
   // selection handlers get the full data, not the flattened display fields.
   payload?: unknown
+  // Read-only records can share the grid without pretending to be actions.
+  interactive?: boolean
 }
 
 // A small clickable label under the subtitle: the autolab view's node picker
@@ -227,7 +229,7 @@ export class PanelGridScene extends Phaser.Scene {
 
     // The hit area lives on the static anchor, not the tweened floatLayer, so
     // clicks land even while the panel floats.
-    anchor
+    if (row.interactive !== false) anchor
       .setInteractive({
         hitArea: new Phaser.Geom.Rectangle(-PANEL_WIDTH / 2, -PANEL_HEIGHT / 2, PANEL_WIDTH, PANEL_HEIGHT),
         hitAreaCallback: Phaser.Geom.Rectangle.Contains,

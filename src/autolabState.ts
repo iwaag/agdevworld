@@ -22,6 +22,7 @@ export interface AutolabGateSummary {
 
 export interface AutolabJobRow {
   name: string
+  project?: string
   status?: string | null
   terminal?: boolean
   phase?: string | null
@@ -38,6 +39,25 @@ export interface AutolabJobRow {
   not_started?: boolean
   error?: string
   state_error?: string | null
+}
+
+export interface AutolabProjectRole {
+  profile: string
+  source: 'project' | 'default'
+}
+
+export interface AutolabProject {
+  name: string
+  roles?: {
+    coding?: AutolabProjectRole
+    director?: AutolabProjectRole
+  }
+  error?: string
+}
+
+export interface AutolabProjects {
+  profiles: string[]
+  projects: AutolabProject[]
 }
 
 export type SummaryState = 'absent' | 'pending' | 'done' | 'error'
@@ -133,6 +153,20 @@ export async function loadAutolabJobs(node: string): Promise<AutolabJobRow[]> {
   return envelope.jobs.filter(isObject).map((job) => ({ ...job, name: String(job.name) })) as AutolabJobRow[]
 }
 
+export async function loadAutolabProjects(node: string): Promise<AutolabProjects> {
+  const envelope = readAutolabEnvelope(await getJson(`/api/autolab/${node}/projects`))
+  if (!Array.isArray(envelope.profiles) || !Array.isArray(envelope.projects)) {
+    throw new Error('the node returned a malformed projects listing')
+  }
+  return {
+    profiles: envelope.profiles.map(String),
+    projects: envelope.projects.filter(isObject).map((project) => ({
+      ...project,
+      name: String(project.name),
+    })) as AutolabProject[],
+  }
+}
+
 export async function loadAutolabJob(node: string, job: string): Promise<AutolabJobDetail> {
   const envelope = readAutolabEnvelope(await getJson(`/api/autolab/${node}/jobs/${job}`))
   const detail = envelope.job
@@ -197,7 +231,7 @@ export function iterationText(job: AutolabJobRow): string | undefined {
 // One line for the panel: what a human wants at a glance, in the order they
 // ask for it — how far along, did the gates pass, what has it cost.
 export function jobDetailLine(job: AutolabJobRow): string | undefined {
-  const parts = [iterationText(job), gateText(job.last_gate_summary), moneyText(job.cost_usd)]
+  const parts = [job.project ? `project ${job.project}` : undefined, iterationText(job), gateText(job.last_gate_summary), moneyText(job.cost_usd)]
   return parts.filter(Boolean).join(' · ') || undefined
 }
 

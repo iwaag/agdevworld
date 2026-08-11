@@ -22,7 +22,8 @@ human's conversational entrance to the world.
 - `/cluster/actual.json` — per-node detail incl. hardware facts, `nctl actual --json --detail`.
 - `/state.sample.json`, `/workspaces.sample.json`, `/actual.sample.json` — the samples served when no live snapshot is present.
 - `/api/autolab/nodes` — configured autolab nodes and whether each answers now.
-- `/api/autolab/<node>/jobs`, `/jobs/<job>`, `/status` — one node's autolab gateway. A job's `evidence[].iter` names its iterations.
+- `/api/autolab/<node>/projects` — projects, their effective `coding` and `director` profiles, profile sources, and the available profiles.
+- `/api/autolab/<node>/jobs`, `/jobs/<job>`, `/status` — one node's autolab gateway. A job's `project` names its project when linked; `evidence[].iter` names its iterations.
 - `/api/autolab/<node>/jobs/<job>/summarize/<iter>` — POST asks for an iteration summary, GET reads it. `<iter>` is a name like `iter-0001`, not a number.
 - `/api/autolab/<node>/window` — POST `{"text":"…"}` to a node's own conversational window; it answers from its job state and its own card. The window is the node's entrance: asking it for work is how a mission gets started (it refuses while one is already running, and its answer says so).
 - `/api/autolab/<node>/director` — POST `{"text":"…"}` to that node's director, a reader over its direction workspace.
@@ -30,6 +31,11 @@ human's conversational entrance to the world.
 - A path outside `/api/` that does not exist answers `200` with this app's own HTML, not `404` — the page's deep-link fallback. Under `/api/` a wrong path answers `404`.
 - `/api/forge/requests` — POST `{"desire":"…"}` starts an image on agforge; GET `/api/forge/requests/<id>` reads it back.
 - `/api/guide` — this card.
+
+To change a project's agent backend, first read `/projects`, then ask that
+node's `/window` in ordinary words to change the named project's `coding` or
+`director` profile. Re-read `/projects` to confirm the effective value. The
+node window owns the edit; never invent a direct settings-write endpoint.
 
 ## Costs
 

@@ -55,9 +55,11 @@ Tools: fetch(path, method, body), wait(seconds), switch_view(view), show_image(u
 Paths reachable with fetch:
 - /cluster/state.json, /cluster/workspaces.json, /cluster/actual.json — the live cluster snapshots (nctl drift, workspaces, actual with hardware facts). When a live one is absent the samples are /state.sample.json, /workspaces.sample.json, /actual.sample.json.
 - /api/autolab/nodes — the autolab nodes this service is configured with, and whether each answers right now.
+- /api/autolab/<node>/projects — projects, their current coding/director profiles, their sources, and the available profiles.
 - /api/autolab/<node>/jobs, /api/autolab/<node>/jobs/<job>, /api/autolab/<node>/status — one node's autolab gateway.
 - /api/autolab/<node>/jobs/<job>/summarize/<iter> — POST asks the node to summarize that iteration, GET reads the result; it takes about 15 seconds and may answer "pending".
 - /api/autolab/<node>/window and /api/autolab/<node>/director — POST {"text":"..."} to a node's own conversational window, or to its director. The window is the node's entrance: asking it for work is how a mission gets started (it refuses while one is already running).
+- To change a project's coding or director profile, read that node's /projects, ask its /window in ordinary words to make the change, then re-read /projects to confirm it. There is no direct settings-write route.
 - /api/note — POST {"text":"..."} writes a note into this service's records; it is the one thing you can leave behind.
 - /api/forge/requests — POST {"desire":"..."} starts an image generation on agforge; GET /api/forge/requests/<id> reads it back. It takes 20 to 105 seconds.
 - /api/guide — the capability card below, raw.

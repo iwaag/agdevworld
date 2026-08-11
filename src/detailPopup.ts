@@ -485,6 +485,7 @@ function renderJob(node: string, job: AutolabJobRow): void {
   section.append(
     kvList([
       ['node', node],
+      ['project', job.project],
       ['status', status],
       ['phase', job.phase],
       ['iteration', iterationText(job)],

@@ -10,11 +10,13 @@ import {
   jobDetailLine,
   loadAutolabJobs,
   loadAutolabNodes,
+  loadAutolabProjects,
   loadAutolabStatus,
   statusHeadline,
   type AutolabJobDetail,
   type AutolabJobRow,
   type AutolabNode,
+  type AutolabProject,
   type AutolabStatus,
 } from './autolabState'
 import type { PanelChip, PanelGridApi, PanelGridConfig, PanelRowStatus } from './scenes/PanelGridScene'
@@ -96,6 +98,8 @@ const JOB_STATUS_STYLE: Record<string, PanelRowStatus> = {
 }
 const JOB_STATUS_UNKNOWN: PanelRowStatus = { emoji: '❓', color: 0xb7b5d8, label: 'UNKNOWN' }
 const JOB_NOT_STARTED: PanelRowStatus = { emoji: '🌱', color: 0xb7b5d8, label: 'NOT STARTED' }
+const PROJECT_STATUS: PanelRowStatus = { emoji: '🧭', color: 0x9b8cff, label: 'PROJECT' }
+const PROJECT_ERROR: PanelRowStatus = { emoji: '💥', color: 0xff8aa8, label: 'PROJECT ERROR' }
 
 function jobStatusStyle(job: AutolabJobRow): PanelRowStatus {
   if (job.error) return { emoji: '💥', color: 0xff8aa8, label: 'UNREADABLE' }
@@ -111,14 +115,27 @@ export function autolabViewConfig(onSelect: (selection: PanelSelection) => void)
   let status: AutolabStatus | undefined
   let statusError: string | undefined
   let api: PanelGridApi | undefined
+  let jobCount = 0
+  let projectCount = 0
+
+  const projectRow = (project: AutolabProject) => ({
+    id: `${selected}/project/${project.name}`,
+    name: `project / ${project.name}`,
+    status: project.error ? PROJECT_ERROR : PROJECT_STATUS,
+    detail: project.error
+      ? project.error
+      : `coding ${project.roles?.coding?.profile ?? '?'} · director ${project.roles?.director?.profile ?? '?'}`,
+    payload: project,
+    interactive: false,
+  })
 
   return {
     key: 'autolab',
     title: 'autolab / now',
     loadingText: 'asking the autolab nodes…',
     unavailableText: 'autolab unavailable',
-    subtitle: (count) => (selected ? `${count} jobs on ${selected}` : 'no autolab node selected'),
-    footer: 'agent-driven jobs; click one for its iterations',
+    subtitle: () => (selected ? `${projectCount} projects · ${jobCount} jobs on ${selected}` : 'no autolab node selected'),
+    footer: 'project profiles are read-only here; ask the agent to change one',
     switchTo: { key: 'nodes', label: 'nodes' },
     bind: (bound) => {
       api = bound
@@ -153,21 +170,28 @@ export function autolabViewConfig(onSelect: (selection: PanelSelection) => void)
       statusError = undefined
       // The mediator headline must not decide whether the job grid renders:
       // /status can fail on a node whose /jobs answers perfectly well.
-      const [jobs, statusResult] = await Promise.all([
+      const [jobs, projects, statusResult] = await Promise.all([
         loadAutolabJobs(selected),
+        loadAutolabProjects(selected),
         loadAutolabStatus(selected).catch((error: unknown) => {
           statusError = error instanceof Error ? error.message : 'status unavailable'
           return undefined
         }),
       ])
       status = statusResult
-      return jobs.map((job) => ({
-        id: `${selected}/${job.name}`,
-        name: job.name,
-        status: jobStatusStyle(job),
-        detail: jobDetailLine(job),
-        payload: job,
-      }))
+      jobCount = jobs.length
+      projectCount = projects.projects.length
+      return [
+        ...projects.projects.map(projectRow),
+        ...jobs.map((job) => ({
+          id: `${selected}/${job.name}`,
+          name: job.name,
+          status: jobStatusStyle(job),
+          detail: jobDetailLine(job),
+          payload: job,
+          interactive: true,
+        })),
+      ]
     },
     onSelect: (row) => onSelect({ view: 'autolab', node: selected, job: row.payload as AutolabJobRow }),
   }

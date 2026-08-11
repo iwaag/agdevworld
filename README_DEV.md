@@ -14,12 +14,12 @@
 ## Files
 
 - `src/main.ts` — wiring: scenes, the chat panel, the click-to-detail path.
-- `src/scenes/PanelGridScene.ts` — one config-driven grid scene, shared by all three views.
-- `src/views.ts` — the three view configs (`nodes`, `workspaces`, `autolab`).
+- `src/scenes/PanelGridScene.ts` — one config-driven grid scene, shared by all four views.
+- `src/views.ts` — the four view configs (`nodes`, `workspaces`, `autolab`, `tasks`).
 - `src/viewSwitcher.ts` — the single seam for changing the visible view.
 - `src/chatPanel.ts` — the chat overlay; it owns history and applies returned UI actions.
 - `src/detailPopup.ts` — the detail overlay, incl. the per-iteration `summary` button.
-- `src/clusterState.ts` / `src/autolabState.ts` — snapshot and gateway reads for the panels.
+- `src/clusterState.ts` / `src/autolabState.ts` / `src/planeState.ts` — snapshot, gateway, and Plane reads/actions for the panels.
 - `agents.toml` / `.local/agents.local.toml` — common role/profile contract and machine-local harness/provider facts.
 - `opencode.json` — front-role OpenCode provider, MCP, and permission configuration.
 - `assistant/server.mjs` — one profile-selected process per chat request, passthrough routes, notes, and run records.
@@ -85,6 +85,21 @@ passes the request to that node's `/window`, and confirms with another
 `/projects` read. There is deliberately no selector or direct settings-write
 route in agdevworld. This is separate from the assistant's own front profile,
 which still has no per-request selector.
+
+## Plane task dispatch
+
+The `tasks` view lists only Backlog and Ready issues from the configured Plane
+project. Node chips come from `AUTOLAB_NODES`; their marker distinguishes
+unreachable, reachable/idle, and busy nodes when `/status` is available.
+Backlog is display-only. A Ready card has Execute and Cancel controls.
+
+Execute first moves the issue to In Progress, then asks the selected node's
+`/window` to start a mission containing the Plane issue ID, title, and full
+description. A definite refusal returns the issue to Ready. A transport timeout
+is deliberately left In Progress because the remote window can finish and
+launch after the browser's connection has gone away; the UI reports that
+ambiguous outcome instead of creating a Ready + running split. Cancel only
+moves a not-yet-dispatched Ready issue to Cancelled.
 
 ## Safety devices
 

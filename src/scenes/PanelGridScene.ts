@@ -22,6 +22,14 @@ export interface PanelRow {
   payload?: unknown
   // Read-only records can share the grid without pretending to be actions.
   interactive?: boolean
+  actions?: PanelRowAction[]
+}
+
+export interface PanelRowAction {
+  label: string
+  color?: number
+  disabled?: boolean
+  onClick: () => void | Promise<void>
 }
 
 // A small clickable label under the subtitle: the autolab view's node picker
@@ -204,16 +212,17 @@ export class PanelGridScene extends Phaser.Scene {
     chrome.fillStyle(style.color, 0.85)
     chrome.fillCircle(-PANEL_WIDTH / 2 + 20, 0, 3)
 
-    const nameText = this.add.text(-PANEL_WIDTH / 2 + 35, -23, `${style.emoji}  ${row.name}`, {
+    const hasActions = (row.actions?.length ?? 0) > 0
+    const nameText = this.add.text(-PANEL_WIDTH / 2 + 35, hasActions ? -30 : -23, `${style.emoji}  ${row.name}`, {
       fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif',
-      fontSize: '19px',
+      fontSize: hasActions ? '16px' : '19px',
       color: '#f7f5ff',
       fontStyle: 'bold',
       fixedWidth: PANEL_WIDTH - 50,
     })
 
     const statusLine = row.detail ? `${style.label} · ${row.detail}` : style.label
-    const statusText = this.add.text(-PANEL_WIDTH / 2 + 67, 10, statusLine, {
+    const statusText = this.add.text(-PANEL_WIDTH / 2 + 67, hasActions ? -4 : 10, statusLine, {
       fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
       fontSize: '10px',
       color: `#${style.color.toString(16).padStart(6, '0')}`,
@@ -223,7 +232,22 @@ export class PanelGridScene extends Phaser.Scene {
       wordWrap: { width: PANEL_WIDTH - 82 },
     })
 
-    const floatLayer = this.add.container(0, 0, [shadow, chrome, nameText, statusText])
+    const actionTexts = (row.actions ?? []).map((action, actionIndex) => {
+      const color = action.disabled ? 0x777a91 : (action.color ?? 0x70c7ff)
+      const button = this.add.text(-PANEL_WIDTH / 2 + 35 + actionIndex * 94, 22, action.label, {
+        fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
+        fontSize: '10px',
+        color: action.disabled ? '#a2a5b8' : '#0d0f14',
+        backgroundColor: `#${color.toString(16).padStart(6, '0')}`,
+        padding: { x: 8, y: 3 },
+      })
+      if (!action.disabled) {
+        button.setInteractive({ useHandCursor: true }).on('pointerup', () => void action.onClick())
+      }
+      return button
+    })
+
+    const floatLayer = this.add.container(0, 0, [shadow, chrome, nameText, statusText, ...actionTexts])
     floatLayer.angle = index % 2 === 0 ? -0.7 : 0.7
     const anchor = this.add.container(0, 0, [floatLayer])
 

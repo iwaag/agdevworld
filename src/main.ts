@@ -1,6 +1,6 @@
 import Phaser from 'phaser'
 import { PanelGridScene } from './scenes/PanelGridScene'
-import { autolabViewConfig, nodesViewConfig, workspacesViewConfig, type PanelSelection } from './views'
+import { autolabViewConfig, nodesViewConfig, tasksViewConfig, workspacesViewConfig, type PanelSelection } from './views'
 import { VIEW_KEYS, currentView, registerGame, switchView } from './viewSwitcher'
 import { initChatPanel } from './chatPanel'
 import { setAskHandler, showDetailPopup } from './detailPopup'
@@ -83,6 +83,7 @@ const game = new Phaser.Game({
     new PanelGridScene(nodesViewConfig(handleSelection)),
     new PanelGridScene(workspacesViewConfig(handleSelection)),
     new PanelGridScene(autolabViewConfig(handleSelection)),
+    new PanelGridScene(tasksViewConfig()),
   ],
 })
 registerGame(game, 'nodes')

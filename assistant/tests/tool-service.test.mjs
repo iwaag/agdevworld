@@ -48,7 +48,7 @@ test('stdio MCP lists tools and collects a UI action', async () => {
   child.stdout.on('data', (chunk) => { stdout += chunk })
   child.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: {} })}\n`)
   child.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} })}\n`)
-  child.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'switch_view', arguments: { view: 'autolab' } } })}\n`)
+  child.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'switch_view', arguments: { view: 'tasks' } } })}\n`)
   child.stdin.end()
   await new Promise((resolvePromise, reject) => {
     child.once('error', reject)
@@ -57,6 +57,6 @@ test('stdio MCP lists tools and collects a UI action', async () => {
   const replies = stdout.trim().split('\n').map(JSON.parse)
   assert.equal(replies[0].result.serverInfo.name, 'agdevworld-tools')
   assert.equal(replies[1].result.tools.length, 4)
-  assert.match(replies[2].result.content[0].text, /switch to autolab/)
-  assert.deepEqual(JSON.parse((await readFile(actions, 'utf8')).trim()), { action: 'switch_view', view: 'autolab' })
+  assert.match(replies[2].result.content[0].text, /switch to tasks/)
+  assert.deepEqual(JSON.parse((await readFile(actions, 'utf8')).trim()), { action: 'switch_view', view: 'tasks' })
 })

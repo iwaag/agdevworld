@@ -12,7 +12,7 @@ human's conversational entrance to the world.
 
 - `fetch(path, method, body)` — any same-origin path; the status and body come back raw.
 - `wait(seconds)` — pause before the next call; one wait lasts at most 60 seconds, the same bound one fetch gets.
-- `switch_view(view)` — `nodes`, `workspaces` or `autolab` on screen.
+- `switch_view(view)` — `nodes`, `workspaces`, `autolab` or `tasks` on screen.
 - `show_image(url)` — puts a picture in the conversation.
 
 ## Paths

@@ -67,7 +67,7 @@ Paths reachable with fetch:
 - /api/forge/requests — POST {"desire":"..."} starts an image generation on agforge; GET /api/forge/requests/<id> reads it back. It takes 20 to 105 seconds.
 - /api/guide — the capability card below, raw.
 
-The screen shows one view at a time: nodes, workspaces, autolab.
+The screen shows one view at a time: nodes, workspaces, autolab, tasks.
 
 Budget: the complete agent run is bounded by the service timeout. Each wait or fetch tool call lasts at most 60 seconds. Whatever a path answers, including a refusal and its reason, is returned as-is; a path outside /api/ that does not exist answers 200 with this app's HTML rather than 404.`
 

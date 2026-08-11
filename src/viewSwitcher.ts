@@ -4,10 +4,10 @@
 
 import type Phaser from 'phaser'
 
-// Three views, cycled in this order by the ⇄ label and the V key: each view's
+// Four views, cycled in this order by the ⇄ label and the V key: each view's
 // `switchTo` names the next one, so the nav stays a one-control cycle instead
 // of growing a menu.
-export const VIEW_KEYS = ['nodes', 'workspaces', 'autolab'] as const
+export const VIEW_KEYS = ['nodes', 'workspaces', 'autolab', 'tasks'] as const
 export type ViewKey = (typeof VIEW_KEYS)[number]
 
 let game: Phaser.Game | undefined

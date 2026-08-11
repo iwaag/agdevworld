@@ -19,6 +19,16 @@ import {
   type AutolabProject,
   type AutolabStatus,
 } from './autolabState'
+import {
+  changePlaneIssueState,
+  dispatchPlaneIssue,
+  loadDispatchNodes,
+  loadPlaneIssues,
+  loadPlaneStates,
+  planeIssueState,
+  type DispatchNode,
+  type PlaneIssue,
+} from './planeState'
 import type { PanelChip, PanelGridApi, PanelGridConfig, PanelRowStatus } from './scenes/PanelGridScene'
 
 // A selection carries the full source record so detail views can render
@@ -137,7 +147,7 @@ export function autolabViewConfig(onSelect: (selection: PanelSelection) => void)
     unavailableText: 'autolab unavailable',
     subtitle: (count) => (selected ? `${count} ${mode} on ${selected}` : 'no autolab node selected'),
     footer: 'projects and jobs are separate views; changes go through conversation',
-    switchTo: { key: 'nodes', label: 'nodes' },
+    switchTo: { key: 'tasks', label: 'tasks' },
     bind: (bound) => {
       api = bound
     },
@@ -219,6 +229,116 @@ export function autolabViewConfig(onSelect: (selection: PanelSelection) => void)
         return
       }
       onSelect({ view: 'autolab', node: selected, job: payload.job })
+    },
+  }
+}
+
+const TASK_BACKLOG: PanelRowStatus = { emoji: '🗂️', color: 0xb7b5d8, label: 'BACKLOG' }
+const TASK_READY: PanelRowStatus = { emoji: '▶️', color: 0x70c7ff, label: 'READY' }
+
+export function tasksViewConfig(): PanelGridConfig {
+  let nodes: DispatchNode[] = []
+  let selected = ''
+  let api: PanelGridApi | undefined
+  let message = ''
+  const pending = new Set<string>()
+
+  const selectedNode = () => nodes.find((node) => node.name === selected)
+  const runAction = async (issue: PlaneIssue, action: 'execute' | 'cancel') => {
+    const node = selectedNode()
+    pending.add(issue.id)
+    message = action === 'execute' ? `dispatching “${issue.name}”…` : `cancelling “${issue.name}”…`
+    api?.reload()
+    try {
+      if (action === 'execute') {
+        if (!node?.reachable) throw new Error('select a reachable autolab node')
+        if (node.busy) throw new Error(`${node.name} already has a mission running`)
+        await dispatchPlaneIssue(issue, node.name)
+        message = `dispatched “${issue.name}” to ${node.name}`
+      } else {
+        await changePlaneIssueState(issue.id, 'Cancelled')
+        message = `cancelled “${issue.name}” before dispatch`
+      }
+    } catch (error) {
+      message = `${action} failed: ${error instanceof Error ? error.message : String(error)}`
+    } finally {
+      pending.delete(issue.id)
+      api?.reload()
+    }
+  }
+
+  return {
+    key: 'tasks',
+    title: 'tasks / plane',
+    loadingText: 'asking Plane for dispatchable work…',
+    unavailableText: 'Plane task list unavailable',
+    subtitle: (count) => `${count} backlog / ready tasks`,
+    footer: 'manual dispatch: choose a node, then execute or cancel a Ready task',
+    switchTo: { key: 'nodes', label: 'nodes' },
+    bind: (bound) => {
+      api = bound
+    },
+    headline: () => {
+      if (message) return message
+      const node = selectedNode()
+      if (!node) return 'no node selected'
+      if (!node.reachable) return `${node.name}: unreachable`
+      if (node.busy === undefined) return `${node.name}: reachable; mission state unknown`
+      return `${node.name}: ${node.busy ? 'busy' : 'available for dispatch'}`
+    },
+    chips: () => [
+      ...nodes.map((node) => ({
+        id: node.name,
+        label: `${node.busy ? '◉' : node.reachable ? '●' : '○'} ${node.name}`,
+        active: node.name === selected,
+        onClick: () => {
+          if (selected === node.name) return
+          selected = node.name
+          message = ''
+          api?.reload()
+        },
+      })),
+      { id: 'refresh', label: '⟳ refresh', onClick: () => api?.reload() },
+    ],
+    loadRows: async () => {
+      const [states, issues, foundNodes] = await Promise.all([
+        loadPlaneStates(),
+        loadPlaneIssues(),
+        loadDispatchNodes(),
+      ])
+      nodes = foundNodes
+      if (!nodes.some((node) => node.name === selected)) {
+        selected = (nodes.find((node) => node.reachable && !node.busy) ?? nodes.find((node) => node.reachable) ?? nodes[0])?.name ?? ''
+      }
+      return issues.flatMap((issue) => {
+        const state = planeIssueState(issue, states)
+        if (!state || !['backlog', 'unstarted'].includes(state.group)) return []
+        const ready = state.name === 'Ready' || state.group === 'unstarted'
+        const working = pending.has(issue.id)
+        const node = selectedNode()
+        return [{
+          id: issue.id,
+          name: issue.name.length > 31 ? `${issue.name.slice(0, 30)}…` : issue.name,
+          status: ready ? TASK_READY : TASK_BACKLOG,
+          detail: state.name,
+          payload: issue,
+          interactive: false,
+          actions: ready ? [
+            {
+              label: working ? 'working…' : '▶ execute',
+              color: 0x67e8a5,
+              disabled: working || !node?.reachable || node.busy === true,
+              onClick: () => runAction(issue, 'execute'),
+            },
+            {
+              label: '× cancel',
+              color: 0xff8aa8,
+              disabled: working,
+              onClick: () => runAction(issue, 'cancel'),
+            },
+          ] : undefined,
+        }]
+      })
     },
   }
 }

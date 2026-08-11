@@ -31,10 +31,10 @@ export const TOOLS = [
   },
   {
     name: 'switch_view',
-    description: 'Ask the browser to switch to the nodes, workspaces, or autolab view.',
+    description: 'Ask the browser to switch to the nodes, workspaces, autolab, or tasks view.',
     inputSchema: {
       type: 'object',
-      properties: { view: { type: 'string', enum: ['nodes', 'workspaces', 'autolab'] } },
+      properties: { view: { type: 'string', enum: ['nodes', 'workspaces', 'autolab', 'tasks'] } },
       required: ['view'],
     },
   },
@@ -89,7 +89,7 @@ async function actionTool(name, args) {
   let action
   if (name === 'switch_view') {
     const view = String(args.view ?? '')
-    if (!['nodes', 'workspaces', 'autolab'].includes(view)) return text(`unknown view: ${view}`, true)
+    if (!['nodes', 'workspaces', 'autolab', 'tasks'].includes(view)) return text(`unknown view: ${view}`, true)
     action = { action: name, view }
   } else {
     const url = String(args.url ?? '')

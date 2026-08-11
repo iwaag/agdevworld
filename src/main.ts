@@ -42,6 +42,10 @@ const chat = initChatPanel(
 // Clicking "ask the agent" says what was clicked, and nothing more. What is
 // worth looking up about it is the assistant's call.
 setAskHandler((selection) => {
+  if (selection.view === 'autolab-project') {
+    chat.ask(`Tell me about the autolab project ${selection.project.name} on node ${selection.node}.`)
+    return
+  }
   if (selection.view === 'autolab') {
     if (selection.summary) {
       // The exception to "identity only": this text is already prose, written

@@ -17,6 +17,7 @@ import {
   requestIterationSummary,
   type AutolabIteration,
   type AutolabJobRow,
+  type AutolabProject,
   type AutolabSummary,
 } from './autolabState'
 import type { PanelSelection } from './views'
@@ -157,12 +158,18 @@ function selectionKey(selection: PanelSelection): string {
     return `nodes:${t.id ?? t.slug ?? t.name ?? 'unnamed'}`
   }
   if (selection.view === 'autolab') return `autolab:${selection.node}/${selection.job.name}`
+  if (selection.view === 'autolab-project') {
+    return `autolab-project:${selection.node}/${selection.project.name}`
+  }
   return `workspaces:${selection.row.slug}`
 }
 
 function selectionPayload(selection: PanelSelection): unknown {
   if (selection.view === 'nodes') return selection.target
   if (selection.view === 'autolab') return selection.job
+  if (selection.view === 'autolab-project') {
+    return { project: selection.project, profiles: selection.profiles }
+  }
   return selection.row
 }
 
@@ -507,6 +514,29 @@ function renderJob(node: string, job: AutolabJobRow): void {
   renderIterations(node, job.name, iterations)
 }
 
+function renderProject(node: string, project: AutolabProject, profiles: string[]): void {
+  headerName.textContent = project.name
+  headerKind.textContent = `autolab project @ ${node}`
+  headerStatus.textContent = project.error ? 'ERROR' : 'PROJECT'
+  headerStatus.style.color = project.error ? '#ff8aa8' : '#9b8cff'
+
+  const section = el('section')
+  section.append(el('h3', undefined, 'PROJECT PROFILES'))
+  section.append(
+    kvList([
+      ['node', node],
+      ['coding', project.roles?.coding?.profile],
+      ['coding source', project.roles?.coding?.source],
+      ['director', project.roles?.director?.profile],
+      ['director source', project.roles?.director?.source],
+      ['available profiles', profiles.join(', ')],
+      ['settings error', project.error],
+    ]),
+  )
+  section.append(el('p', 'dp-msg', 'Profile changes go through the assistant conversation.'))
+  body!.append(section)
+}
+
 export function showDetailPopup(selection: PanelSelection): void {
   const node = ensurePopup()
   const key = selectionKey(selection)
@@ -528,6 +558,9 @@ export function showDetailPopup(selection: PanelSelection): void {
   body!.replaceChildren()
   if (selection.view === 'nodes') renderNode(selection.target, selection.device)
   else if (selection.view === 'autolab') renderJob(selection.node, selection.job)
+  else if (selection.view === 'autolab-project') {
+    renderProject(selection.node, selection.project, selection.profiles)
+  }
   else renderWorkspace(selection.row)
 
   const rawSection = el('section')

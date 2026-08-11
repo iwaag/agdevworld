@@ -28,6 +28,7 @@ import type { PanelChip, PanelGridApi, PanelGridConfig, PanelRowStatus } from '.
 export type PanelSelection =
   | { view: 'nodes'; target: DriftTarget; device?: ActualDeviceModel }
   | { view: 'workspaces'; row: WorkspaceRow }
+  | { view: 'autolab-project'; node: string; project: AutolabProject; profiles: string[] }
   // `detail` and `summary` are attached by the popup once the drill-down has
   // loaded, so "ask the agent" carries what the user is actually looking at.
   | {
@@ -117,6 +118,7 @@ export function autolabViewConfig(onSelect: (selection: PanelSelection) => void)
   let api: PanelGridApi | undefined
   let jobCount = 0
   let projectCount = 0
+  let availableProfiles: string[] = []
 
   const projectRow = (project: AutolabProject) => ({
     id: `${selected}/project/${project.name}`,
@@ -125,8 +127,8 @@ export function autolabViewConfig(onSelect: (selection: PanelSelection) => void)
     detail: project.error
       ? project.error
       : `coding ${project.roles?.coding?.profile ?? '?'} · director ${project.roles?.director?.profile ?? '?'}`,
-    payload: project,
-    interactive: false,
+    payload: { kind: 'project' as const, project },
+    interactive: true,
   })
 
   return {
@@ -181,6 +183,7 @@ export function autolabViewConfig(onSelect: (selection: PanelSelection) => void)
       status = statusResult
       jobCount = jobs.length
       projectCount = projects.projects.length
+      availableProfiles = projects.profiles
       return [
         ...projects.projects.map(projectRow),
         ...jobs.map((job) => ({
@@ -188,12 +191,26 @@ export function autolabViewConfig(onSelect: (selection: PanelSelection) => void)
           name: job.name,
           status: jobStatusStyle(job),
           detail: jobDetailLine(job),
-          payload: job,
+          payload: { kind: 'job' as const, job },
           interactive: true,
         })),
       ]
     },
-    onSelect: (row) => onSelect({ view: 'autolab', node: selected, job: row.payload as AutolabJobRow }),
+    onSelect: (row) => {
+      const payload = row.payload as
+        | { kind: 'project'; project: AutolabProject }
+        | { kind: 'job'; job: AutolabJobRow }
+      if (payload.kind === 'project') {
+        onSelect({
+          view: 'autolab-project',
+          node: selected,
+          project: payload.project,
+          profiles: availableProfiles,
+        })
+        return
+      }
+      onSelect({ view: 'autolab', node: selected, job: payload.job })
+    },
   }
 }
 

@@ -72,7 +72,8 @@ compose overlay is required. Native runs use `.local/agents.local.toml`.
 
 The autolab view fetches `/api/autolab/<node>/projects` alongside jobs and
 status. Read-only project cards show the effective `coding` and `director`
-profiles before the job cards; job rows and details also show their optional
+profiles before the job cards. Clicking one opens its read-only profile detail
+and the common ask-agent action; job rows and details also show their optional
 project association. Use the refresh chip after an out-of-band change.
 
 Changing a profile stays inside the conversational single entrance. Ask the

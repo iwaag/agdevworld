@@ -2,6 +2,7 @@ services:
   # Production-style: build the static bundle, serve via nginx
   web:
     build: .
+    restart: unless-stopped
     ports:
       - "8090:80"
 
@@ -10,6 +11,7 @@ services:
     build:
       context: .
       dockerfile: assistant/Dockerfile
+    restart: unless-stopped
     environment:
       AGDEVWORLD_TOOL_BASE_URL: http://web
       AGFORGE_URL: ${AGFORGE_URL:-http://host.docker.internal:8092}

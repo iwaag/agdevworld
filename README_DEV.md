@@ -6,7 +6,7 @@
 - `npm run build` — `tsc && vite build`; the Docker build runs it too, so a successful image build is a compile check.
 - `docker compose up --build -d web` — production-style bundle behind nginx on :8090. Keep it current when a user may want to look.
 - `docker compose ps web` / `curl -I http://localhost:8090/` — confirm it came up.
-- `docker compose up --build -d web assistant` — the UI and profile-selected chat service on :8090/:8091. The assistant image currently contains the Phase-4-pinned OpenCode runtime; code, config, and `GUIDE.md` changes need a rebuild.
+- `docker compose up --build -d web assistant` — the UI and profile-selected chat service on :8090/:8091. The assistant image contains the pinned OpenCode and Claude Code runtimes; code, config, and `GUIDE.md` changes need a rebuild.
 - `CAGENT_URL=https://localhost:8789 npm run cluster:fetch` — refresh the three cluster snapshots through cagent.
 - `docker compose logs assistant` — run records (`assistant.run.v1`) and notes (`assistant.note.v1`) as they happen. The durable copy is the `assistant_records` volume (`ASSISTANT_RECORDS_DIR=/records`); the log alone does not survive `up --build`.
 - `docker compose exec assistant ls /records` — what the assistant has left behind, including notes about facts that turned out wrong.
@@ -47,23 +47,26 @@ ignored local overlay; there is no per-request backend selector or fallback.
 | harness | local requirement | container status |
 |---|---|---|
 | `opencode` | executable plus `local.provider.ollama.base_url` | OpenCode 1.18.10 is installed; the compose overlay supplies the endpoint |
-| `claude_code` | executable plus a valid Claude Code login under `~/.claude`, or deployment-supplied API-key authentication | intentionally not installed/authenticated until Phase 6; selecting it fails with `E_UNAVAILABLE` |
+| `claude_code` | executable plus API-key authentication | Claude Code 2.1.226 is installed; compose passes optional `ANTHROPIC_API_KEY`, and missing authentication fails explicitly without fallback |
 
 For this Mac, `.local/agents.local.toml` resolves Claude Code through the
 VS Code extension's versioned native-binary glob. Do not copy
-`~/.claude/.credentials.json` into the repository or image. A future container
-deployment may mount credentials or reference `ANTHROPIC_API_KEY` through
-deployment configuration; the key itself must not enter either agents file.
+`~/.claude/.credentials.json` into the repository or image. Compose supplies
+the optional `ANTHROPIC_API_KEY` environment value and the generated overlay
+contains only `anthropic_api_key_env = "ANTHROPIC_API_KEY"`; the key itself
+never enters either agents file or the image.
 Binary absence fails during profile resolution, while invalid or absent login
 fails as a recorded Claude run whose stderr/result tail is returned in the 502
 detail. Neither case attempts OpenCode.
 
 Runtime-only variables are `AUTOLAB_NODES`, `AGFORGE_URL`,
-`ASSISTANT_RECORDS_DIR`, `AGDEVWORLD_TOOL_BASE_URL`, and the optional
+`ASSISTANT_RECORDS_DIR`, `AGDEVWORLD_TOOL_BASE_URL`,
+`AGENT_PROVIDER_OLLAMA_BASE_URL`, optional `AGENT_FRONT_PROFILE`, and the optional
 `AGDEVWORLD_AGENT_TIMEOUT_MS`. Its default is 300 seconds; nginx waits 310
 seconds so a process timeout reaches the browser as an explicit assistant
-error. Compose mounts `.local/agents.compose.toml` as the container overlay.
-Native runs use `.local/agents.local.toml`.
+error. The assistant entrypoint generates `/app/.local/agents.local.toml`
+from deployment environment values on every start, so no ignored hand-written
+compose overlay is required. Native runs use `.local/agents.local.toml`.
 
 ## Safety devices
 

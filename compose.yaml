@@ -13,6 +13,9 @@ services:
     environment:
       AGDEVWORLD_TOOL_BASE_URL: http://web
       AGFORGE_URL: ${AGFORGE_URL:-http://host.docker.internal:8092}
+      AGENT_PROVIDER_OLLAMA_BASE_URL: ${AGENT_PROVIDER_OLLAMA_BASE_URL:-http://host.docker.internal:11434/v1}
+      AGENT_FRONT_PROFILE: ${AGENT_FRONT_PROFILE:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       # "<name>=<url>,..."; unset falls back to the local node only, so real
       # cluster hostnames stay out of the repo.
       AUTOLAB_NODES: ${AUTOLAB_NODES:-}
@@ -22,7 +25,6 @@ services:
       ASSISTANT_RECORDS_DIR: /records
     volumes:
       - assistant_records:/records
-      - ./.local/agents.compose.toml:/app/.local/agents.local.toml:ro
     extra_hosts:
       - "host.docker.internal:host-gateway"
     ports:

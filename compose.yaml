@@ -24,7 +24,12 @@ services:
       PLANE_URL: ${PLANE_URL:-}
       PLANE_API_KEY: ${PLANE_API_KEY:-}
       PLANE_WORKSPACE_SLUG: ${PLANE_WORKSPACE_SLUG:-}
+      # Optional: only the task UI's default-project view needs it; mission
+      # briefings carry their own project UUID (multi-project Plane).
       PLANE_PROJECT_ID: ${PLANE_PROJECT_ID:-}
+      # Project starts (Gitea repo pair + direction seed). The API URL is
+      # container-reachable; mDNS names do not resolve inside Docker.
+      GITEA_URL: ${GITEA_URL:-http://host.docker.internal:3000}
       # Records outlive the container. Without this the store is the container
       # log, which `up --build` destroys — and a note an agent leaves about a
       # wrong fact is worth nothing if the next rebuild erases it.
@@ -32,6 +37,7 @@ services:
     volumes:
       - assistant_records:/records
       - ../.local/zulip/devworld-assistant.env:/run/secrets/zulip.env:ro
+      - ../agautolab/.local/gitea/autolab-agent.token:/run/secrets/gitea.token:ro
     extra_hosts:
       - "host.docker.internal:host-gateway"
     ports:

@@ -40,3 +40,19 @@ test('openForgeRequest posts the desire as one fresh FreeForge topic', async () 
 test('the resolved-topic prefix matches Zulip’s marker', () => {
   assert.equal(RESOLVED_TOPIC_PREFIX, '✔ ')
 })
+
+test('mission topics open in the project channel with the mission- prefix', async () => {
+  const { openMissionTopic, projectChannelName } = await import('../zulip.mjs')
+  const calls = []
+  const sender = {
+    sendToChannel: async (channel, topic, content) => {
+      calls.push([channel, topic, content])
+      return 77
+    },
+  }
+  const opened = await openMissionTopic(sender, 'whack-a-mole-2', 'the briefing')
+  assert.equal(projectChannelName('whack-a-mole-2'), 'pj-whack-a-mole-2')
+  assert.equal(calls[0][0], 'pj-whack-a-mole-2')
+  assert.match(opened.topic, /^mission-\d{8}-\d{6}-[0-9a-f]+$/)
+  assert.deepEqual(opened, { channel: 'pj-whack-a-mole-2', topic: opened.topic, message_id: 77 })
+})

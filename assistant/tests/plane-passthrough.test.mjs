@@ -12,8 +12,37 @@ const config = readPlaneConfig({
 
 test('Plane configuration reports missing server-side values without a key', () => {
   const missing = readPlaneConfig({ PLANE_URL: 'http://plane.example' })
-  assert.deepEqual(missing.missing, ['PLANE_API_KEY', 'PLANE_WORKSPACE_SLUG', 'PLANE_PROJECT_ID'])
+  // PLANE_PROJECT_ID is optional now (multi-project): only the bare
+  // default-project paths need it.
+  assert.deepEqual(missing.missing, ['PLANE_API_KEY', 'PLANE_WORKSPACE_SLUG'])
   assert.equal(JSON.stringify(missing).includes('server-secret'), false)
+})
+
+test('project-scoped paths carry their own project id', async () => {
+  const calls = []
+  const result = await proxyPlaneRequest({
+    method: 'GET',
+    url: '/api/plane/projects/other-uuid/issues?per_page=5',
+  }, config, async (url, options) => {
+    calls.push({ url, options })
+    return new Response('{"results":[]}', {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    })
+  })
+  assert.equal(result.status, 200)
+  assert.equal(calls[0].url, 'http://plane.example/api/v1/workspaces/agautolab/projects/other-uuid/issues/?per_page=5')
+})
+
+test('bare paths without a configured default project answer 404', async () => {
+  const noDefault = readPlaneConfig({
+    PLANE_URL: 'http://plane.example',
+    PLANE_API_KEY: 'k',
+    PLANE_WORKSPACE_SLUG: 'agautolab',
+  })
+  const result = await proxyPlaneRequest({ method: 'GET', url: '/api/plane/issues' }, noDefault)
+  assert.equal(result.status, 404)
+  assert.match(result.body.toString(), /plane_no_default_project/)
 })
 
 test('Plane passthrough fixes the project scope and injects the API key', async () => {

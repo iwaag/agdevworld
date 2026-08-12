@@ -125,6 +125,26 @@ export class ZulipSender {
     return Number(result.id)
   }
 
+  // Create (or join) a channel and subscribe the given user ids in one call —
+  // the same realm-default mechanics the Step-1 spikes proved for bots
+  // (pyagag has the Python reference, agag/zulip.py `create_channel`).
+  async createChannel(name, description, principals) {
+    await this.call('POST', 'users/me/subscriptions', {
+      subscriptions: [{ name, description }],
+      principals,
+    })
+  }
+
+  // Every active realm user. A project channel subscribes all agents and the
+  // Developer (the braindump's participation rule), and "everyone" is the
+  // maintenance-free way to say that in a single-team realm.
+  async activeUserIds() {
+    const result = await this.call('GET', 'users')
+    return result.members
+      .filter((member) => member.is_active !== false)
+      .map((member) => Number(member.user_id))
+  }
+
   async resolveTopic(messageId, topic) {
     if (topic.startsWith(RESOLVED_TOPIC_PREFIX)) return
     await this.call('PATCH', `messages/${messageId}`, {
@@ -135,11 +155,28 @@ export class ZulipSender {
   }
 }
 
-export function requestTopicName(now = new Date(), randomHex) {
+export function stampedTopicName(prefix, now = new Date(), randomHex) {
   const pad = (n) => String(n).padStart(2, '0')
   const stamp = `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}` +
     `-${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`
-  return `create-${stamp}-${randomHex}`
+  return `${prefix}-${stamp}-${randomHex}`
+}
+
+export function requestTopicName(now = new Date(), randomHex) {
+  return stampedTopicName('create', now, randomHex)
+}
+
+// Autolab project channels: one standing `#pj-<name>` channel per project,
+// one disposable `mission-*` topic per mission (zulip_channel_topic2).
+export function projectChannelName(project) {
+  return `pj-${project}`
+}
+
+export async function openMissionTopic(sender, project, briefing) {
+  const topic = stampedTopicName('mission', new Date(), Math.random().toString(16).slice(2, 8))
+  const channel = projectChannelName(project)
+  const messageId = await sender.sendToChannel(channel, topic, briefing)
+  return { channel, topic, message_id: messageId }
 }
 
 // The whole send side of the workflow: one message opening a fresh `create-*`

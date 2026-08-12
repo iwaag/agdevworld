@@ -29,8 +29,15 @@ import { fileURLToPath } from 'node:url'
 
 import { AgentConfigError, loadConfig, resolveRole } from './agent-config.mjs'
 import { AgentRunError, composePrompt, runAgent } from './harness.mjs'
+import {
+  PROJECT_NAME,
+  ProjectStartError,
+  readGiteaConfig,
+  readPlaneWorkspaceConfig,
+  startProject,
+} from './autolab-projects.mjs'
 import { proxyPlaneRequest, readPlaneConfig } from './plane-passthrough.mjs'
-import { ZulipError, ZulipSender, openForgeRequest } from './zulip.mjs'
+import { ZulipError, ZulipSender, openForgeRequest, openMissionTopic } from './zulip.mjs'
 
 const PORT = Number(process.env.PORT ?? 8091)
 const ASSISTANT_DIR = dirname(fileURLToPath(import.meta.url))
@@ -41,6 +48,8 @@ const AGENTS_LOCAL_CONFIG = join(PROJECT_ROOT, '.local', 'agents.local.toml')
 const AGENT_TIMEOUT_MS = Number(process.env.AGDEVWORLD_AGENT_TIMEOUT_MS || 300_000)
 const TOOL_BASE_URL = process.env.AGDEVWORLD_TOOL_BASE_URL || 'http://127.0.0.1:8090'
 const PLANE_CONFIG = readPlaneConfig()
+const GITEA_CONFIG = readGiteaConfig()
+const PLANE_WORKSPACE_CONFIG = readPlaneWorkspaceConfig()
 
 async function readGuide() {
   try {
@@ -62,11 +71,13 @@ Paths reachable with fetch:
 - /api/autolab/<node>/jobs, /api/autolab/<node>/jobs/<job>, /api/autolab/<node>/status — one node's autolab gateway.
 - /api/autolab/<node>/jobs/<job>/summarize/<iter> — POST asks the node to summarize that iteration, GET reads the result; it takes about 15 seconds and may answer "pending".
 - /api/autolab/<node>/window and /api/autolab/<node>/director — POST {"text":"..."} to a node's own conversational window, or to its director. The window is the node's entrance: asking it for work is how a mission gets started (it refuses while one is already running).
-- /api/plane/issues and /api/plane/states — the configured Plane project's task list and state vocabulary. POST an issue with a state_name field; the server resolves it without exposing Plane credentials or live state IDs.
+- /api/plane/issues and /api/plane/states — the default Plane project's task list and state vocabulary. /api/plane/projects/<project-uuid>/issues|states reaches any project by UUID (project starts return it). POST an issue with a state_name field; the server resolves it without exposing Plane credentials or live state IDs.
 - To change a project's coding or director profile, read that node's /projects, ask its /window in ordinary words to make the change, then re-read /projects to confirm it. There is no direct settings-write route.
 - /api/note — POST {"text":"..."} writes a note into this service's records; it is the one thing you can leave behind.
 - /api/forge/requests — POST {"desire":"..."} starts an image generation on agforge; GET /api/forge/requests/<id> reads it back. It takes 20 to 105 seconds.
 - /api/freeforge/requests — POST {"desire":"..."} posts the request as a fresh create-* topic in the #FreeForge Zulip channel; agforge answers in that topic where the Developer can watch. Returns {channel, topic, message_id}. POST /api/freeforge/resolve {"message_id":..., "topic":"..."} marks the topic resolved when the exchange is done.
+- /api/autolab/projects — POST {"project":"<lowercase-hyphen name>","concept":"..."} starts a new autolab project: the autodev/<name> + <name>-direction Gitea repo pair (direction seeded), a fresh Plane project (its UUID and state ids are returned — mission briefings must carry them), and the standing #pj-<name> Zulip channel with every agent and the Developer subscribed. It creates no issue and starts no mission: development starts separately.
+- /api/autolab/missions — POST {"project":"<name>","briefing":"..."} posts the briefing as a fresh mission-* topic in #pj-<name>; the autolab listener bridges it to a node window and reports the outcome in the same topic. Returns {channel, topic, message_id}. The briefing is the whole mission: include the goal, the repositories, and the Plane project/issue/state ids to report to. POST /api/autolab/missions/resolve {"message_id":..., "topic":"..."} marks the topic resolved when the mission's outcome is settled.
 - /api/guide — the capability card below, raw.
 
 The screen shows one view at a time: nodes, workspaces, autolab, tasks.
@@ -252,6 +263,80 @@ async function handleFreeForge(req, res) {
     if (!(error instanceof ZulipError)) throw error
     console.error('zulip send failed:', error)
     return sendJson(res, 502, { error: 'zulip_unavailable', detail: error.message })
+  }
+  return sendJson(res, 404, { error: 'not_found' })
+}
+
+// The autolab project workflow trio (zulip_channel_topic2), mirroring the
+// freeforge pair: project start provisions the standing pieces (Gitea repo
+// pair, Plane project, #pj-<name> channel) and deliberately nothing else —
+// no Plane issue, no mission, so prep and dev start stay separable. Missions
+// are one disposable `mission-*` topic each in the project channel; the
+// autolab listener reacts to the topic, nothing here talks to a node.
+async function handleAutolabWorkflow(req, res) {
+  if (req.method !== 'POST') return sendJson(res, 405, { error: 'method_not_allowed' })
+  let parsed
+  try {
+    parsed = JSON.parse(await readBody(req))
+  } catch {
+    return sendJson(res, 400, { error: 'bad_request', detail: 'Body must be JSON.' })
+  }
+  try {
+    if (req.url === '/api/autolab/projects') {
+      const { project, concept } = parsed ?? {}
+      if (typeof project !== 'string' || !PROJECT_NAME.test(project)) {
+        return sendJson(res, 400, {
+          error: 'bad_request',
+          detail: 'Body must be {"project": "<lowercase-hyphen name>", "concept": "..."}.',
+        })
+      }
+      if (typeof concept !== 'string' || concept.trim() === '') {
+        return sendJson(res, 400, { error: 'bad_request', detail: 'A non-empty "concept" is required.' })
+      }
+      const missing = [...GITEA_CONFIG.missing, ...PLANE_WORKSPACE_CONFIG.missing]
+      if (missing.length > 0) {
+        return sendJson(res, 503, {
+          error: 'project_start_unconfigured',
+          detail: `Missing configuration: ${missing.join(', ')}.`,
+        })
+      }
+      const created = await startProject({ project, concept }, {
+        gitea: GITEA_CONFIG,
+        plane: PLANE_WORKSPACE_CONFIG,
+        sender: await getZulipSender(),
+      })
+      return sendJson(res, 201, { kind: 'autolab.project.v1', project, ...created })
+    }
+    if (req.url === '/api/autolab/missions') {
+      const { project, briefing } = parsed ?? {}
+      if (typeof project !== 'string' || !PROJECT_NAME.test(project)
+        || typeof briefing !== 'string' || briefing.trim() === '') {
+        return sendJson(res, 400, {
+          error: 'bad_request',
+          detail: 'Body must be {"project": "<name>", "briefing": "..."}.',
+        })
+      }
+      const opened = await openMissionTopic(await getZulipSender(), project, briefing.trim())
+      return sendJson(res, 201, { kind: 'autolab.mission.v1', ...opened })
+    }
+    if (req.url === '/api/autolab/missions/resolve') {
+      const { message_id: messageId, topic } = parsed ?? {}
+      if (!Number.isInteger(messageId) || typeof topic !== 'string' || topic === '') {
+        return sendJson(res, 400, { error: 'bad_request', detail: 'Body must be {"message_id": N, "topic": "..."}.' })
+      }
+      await (await getZulipSender()).resolveTopic(messageId, topic)
+      return sendJson(res, 200, { kind: 'autolab.mission-resolve.v1', message_id: messageId })
+    }
+  } catch (error) {
+    if (error instanceof ProjectStartError) {
+      console.error('project start failed:', error)
+      return sendJson(res, 502, { error: 'project_start_failed', step: error.step, detail: error.message })
+    }
+    if (error instanceof ZulipError) {
+      console.error('zulip send failed:', error)
+      return sendJson(res, 502, { error: 'zulip_unavailable', detail: error.message })
+    }
+    throw error
   }
   return sendJson(res, 404, { error: 'not_found' })
 }
@@ -449,6 +534,14 @@ const server = createServer((req, res) => {
     handleForge(req, res).catch((error) => {
       console.error('unhandled forge passthrough error:', error)
       sendJson(res, 500, { error: 'internal_error', detail: 'Unexpected passthrough failure.' })
+    })
+    return
+  }
+  if (req.url === '/api/autolab/projects' || req.url === '/api/autolab/missions'
+    || req.url === '/api/autolab/missions/resolve') {
+    handleAutolabWorkflow(req, res).catch((error) => {
+      console.error('unhandled autolab workflow error:', error)
+      sendJson(res, 500, { error: 'internal_error', detail: 'Unexpected autolab workflow failure.' })
     })
     return
   }

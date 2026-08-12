@@ -1,4 +1,9 @@
-const PROJECT_PATH = /^\/(issues|states)(\/[A-Za-z0-9_-]+)*\/?$/
+// Multi-project (zulip_channel_topic2): the project travels in the path —
+// /api/plane/projects/<uuid>/issues|states/… — instead of being pinned in
+// config. The bare /issues|/states form remains as the default-project view
+// for the task UI and requires PLANE_PROJECT_ID to be configured.
+const PROJECT_SCOPED_PATH = /^\/projects\/([A-Za-z0-9-]+)(\/(?:issues|states)(?:\/[A-Za-z0-9_-]+)*\/?)$/
+const DEFAULT_PROJECT_PATH = /^\/(issues|states)(\/[A-Za-z0-9_-]+)*\/?$/
 
 function jsonResult(status, body) {
   return {
@@ -12,22 +17,22 @@ export function readPlaneConfig(env = process.env) {
   const url = String(env.PLANE_URL ?? '').trim().replace(/\/$/, '')
   const apiKey = String(env.PLANE_API_KEY ?? '').trim()
   const workspace = String(env.PLANE_WORKSPACE_SLUG ?? '').trim()
+  // Optional: only the bare /issues|/states default-project view needs it.
   const project = String(env.PLANE_PROJECT_ID ?? '').trim()
   const missing = []
   if (!url) missing.push('PLANE_URL')
   if (!apiKey) missing.push('PLANE_API_KEY')
   if (!workspace) missing.push('PLANE_WORKSPACE_SLUG')
-  if (!project) missing.push('PLANE_PROJECT_ID')
   if (url && !/^https?:\/\//.test(url)) missing.push('valid PLANE_URL')
   return { url, apiKey, workspace, project, missing }
 }
 
-function projectBase(config) {
-  return `${config.url}/api/v1/workspaces/${encodeURIComponent(config.workspace)}/projects/${encodeURIComponent(config.project)}`
+function projectBase(config, project) {
+  return `${config.url}/api/v1/workspaces/${encodeURIComponent(config.workspace)}/projects/${encodeURIComponent(project)}`
 }
 
-async function stateIdForName(config, name, fetchImpl) {
-  const response = await fetchImpl(`${projectBase(config)}/states/`, {
+async function stateIdForName(config, project, name, fetchImpl) {
+  const response = await fetchImpl(`${projectBase(config, project)}/states/`, {
     headers: { 'X-API-Key': config.apiKey },
     signal: AbortSignal.timeout(60_000),
   })
@@ -49,11 +54,25 @@ export async function proxyPlaneRequest(request, config, fetchImpl = fetch) {
   }
 
   const parsed = new URL(request.url, 'http://agdevworld.local')
-  const path = parsed.pathname.slice('/api/plane'.length) || '/'
-  if (!PROJECT_PATH.test(path)) {
+  const fullPath = parsed.pathname.slice('/api/plane'.length) || '/'
+  const scoped = PROJECT_SCOPED_PATH.exec(fullPath)
+  let project
+  let path
+  if (scoped) {
+    ;[, project, path] = scoped
+  } else if (DEFAULT_PROJECT_PATH.test(fullPath)) {
+    if (!config.project) {
+      return jsonResult(404, {
+        error: 'plane_no_default_project',
+        detail: 'No default Plane project is configured; use /api/plane/projects/<uuid>/… instead.',
+      })
+    }
+    project = config.project
+    path = fullPath
+  } else {
     return jsonResult(404, {
       error: 'plane_path_not_proxied',
-      detail: 'Only this project\'s issues and states are reachable through the Plane passthrough.',
+      detail: 'Only per-project issues and states (/api/plane/projects/<uuid>/…) are reachable through the Plane passthrough.',
     })
   }
   if (!['GET', 'POST', 'PATCH'].includes(request.method)) {
@@ -70,7 +89,7 @@ export async function proxyPlaneRequest(request, config, fetchImpl = fetch) {
     }
     if (payload && Object.hasOwn(payload, 'state_name')) {
       const name = payload.state_name
-      const resolved = await stateIdForName(config, name, fetchImpl)
+      const resolved = await stateIdForName(config, project, name, fetchImpl)
       if (resolved.response) {
         const upstreamBody = Buffer.from(await resolved.response.arrayBuffer())
         return {
@@ -92,7 +111,7 @@ export async function proxyPlaneRequest(request, config, fetchImpl = fetch) {
   }
 
   const upstreamPath = path.endsWith('/') ? path : `${path}/`
-  const target = `${projectBase(config)}${upstreamPath}${parsed.search}`
+  const target = `${projectBase(config, project)}${upstreamPath}${parsed.search}`
   const response = await fetchImpl(target, {
     method: request.method,
     headers: {

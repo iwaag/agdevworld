@@ -1,10 +1,14 @@
 // Zulip sender for the FreeForge workflow (zulip_channel_topic episode).
 //
-// The assistant opens a per-request `create-*` channel, announces it in
-// #FreeForge, posts the production request there, and later resolves the
-// topic. agforge's listener answers in the same topic, so the whole exchange
-// is browsable and searchable by the Developer — the thing agent-to-agent DMs
-// could never be.
+// The assistant posts each production request as its own `create-*` topic in
+// the standing #FreeForge channel, and later resolves the topic. agforge's
+// listener answers in the same topic, so the whole exchange is browsable and
+// searchable by the Developer — the thing agent-to-agent DMs could never be.
+// Topic-per-request, not channel-per-request: agents filter by topic rules in
+// their own listeners, so channel subscribers who don't care never react.
+//
+// #FreeForge itself is standing infrastructure (participants: Forge,
+// Devworld Assistant, Developer), created once — not by this module.
 //
 // Credentials are the mounted /run/secrets/zulip.env (ZULIP_URL, ZULIP_EMAIL,
 // ZULIP_API_KEY). The realm's certificate is self-signed, so verification is
@@ -16,12 +20,7 @@ import { request as httpRequest } from 'node:http'
 
 export const ZULIP_ENV_PATH = process.env.ZULIP_ENV_PATH || '/run/secrets/zulip.env'
 
-// Realm user ids (this realm hides emails, everything keys on ids).
-export const FORGE_USER_ID = Number(process.env.ZULIP_FORGE_USER_ID || 13)
-export const DEVELOPER_USER_ID = Number(process.env.ZULIP_DEVELOPER_USER_ID || 8)
-
 export const FREEFORGE_CHANNEL = process.env.ZULIP_FREEFORGE_CHANNEL || 'FreeForge'
-export const REQUEST_TOPIC = 'request'
 export const RESOLVED_TOPIC_PREFIX = '✔ ' // Zulip's "✔ " resolved marker
 
 export function parseEnv(text) {
@@ -121,19 +120,6 @@ export class ZulipSender {
     })
   }
 
-  async selfId() {
-    if (this._selfId === undefined) this._selfId = Number((await this.call('GET', 'users/me')).user_id)
-    return this._selfId
-  }
-
-  async createChannel(name, description, principals) {
-    return this.call('POST', 'users/me/subscriptions', {
-      subscriptions: [{ name, description }],
-      principals,
-      announce: false,
-    })
-  }
-
   async sendToChannel(channel, topic, content) {
     const result = await this.call('POST', 'messages', { type: 'stream', to: channel, topic, content })
     return Number(result.id)
@@ -149,20 +135,18 @@ export class ZulipSender {
   }
 }
 
-export function requestChannelName(now = new Date(), randomHex) {
+export function requestTopicName(now = new Date(), randomHex) {
   const pad = (n) => String(n).padStart(2, '0')
   const stamp = `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}` +
     `-${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`
   return `create-${stamp}-${randomHex}`
 }
 
-// The whole send side of the workflow, one call: open the channel, announce
-// it, post the desire. Returns what a caller needs to watch and to resolve.
+// The whole send side of the workflow: one message opening a fresh `create-*`
+// topic in #FreeForge. The topic list is its own index — no announcement
+// message needed. Returns what a caller needs to watch and to resolve.
 export async function openForgeRequest(sender, desire) {
-  const name = requestChannelName(new Date(), Math.random().toString(16).slice(2, 8))
-  const principals = [FORGE_USER_ID, DEVELOPER_USER_ID, await sender.selfId()]
-  await sender.createChannel(name, 'One-off agforge request (opened by the devworld assistant).', principals)
-  await sender.sendToChannel(FREEFORGE_CHANNEL, 'requests', `Opened #**${name}** for a new request.`)
-  const messageId = await sender.sendToChannel(name, REQUEST_TOPIC, desire)
-  return { channel: name, topic: REQUEST_TOPIC, message_id: messageId }
+  const topic = requestTopicName(new Date(), Math.random().toString(16).slice(2, 8))
+  const messageId = await sender.sendToChannel(FREEFORGE_CHANNEL, topic, desire)
+  return { channel: FREEFORGE_CHANNEL, topic, message_id: messageId }
 }

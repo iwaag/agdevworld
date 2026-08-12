@@ -66,7 +66,7 @@ Paths reachable with fetch:
 - To change a project's coding or director profile, read that node's /projects, ask its /window in ordinary words to make the change, then re-read /projects to confirm it. There is no direct settings-write route.
 - /api/note — POST {"text":"..."} writes a note into this service's records; it is the one thing you can leave behind.
 - /api/forge/requests — POST {"desire":"..."} starts an image generation on agforge; GET /api/forge/requests/<id> reads it back. It takes 20 to 105 seconds.
-- /api/freeforge/requests — POST {"desire":"..."} opens a per-request Zulip channel (create-*), announces it in #FreeForge, and posts the request; agforge answers in that channel where the Developer can watch. Returns {channel, topic, message_id}. POST /api/freeforge/resolve {"message_id":..., "topic":"..."} marks the topic resolved when the exchange is done.
+- /api/freeforge/requests — POST {"desire":"..."} posts the request as a fresh create-* topic in the #FreeForge Zulip channel; agforge answers in that topic where the Developer can watch. Returns {channel, topic, message_id}. POST /api/freeforge/resolve {"message_id":..., "topic":"..."} marks the topic resolved when the exchange is done.
 - /api/guide — the capability card below, raw.
 
 The screen shows one view at a time: nodes, workspaces, autolab, tasks.
@@ -214,7 +214,7 @@ async function handleChat(req, res) {
 }
 
 // The FreeForge workflow (zulip_channel_topic): the assistant's own Zulip
-// account opens a create-* channel per request and posts the desire there;
+// account posts each desire as a fresh create-* topic in #FreeForge;
 // agforge's listener answers in the topic. Unlike /api/forge/requests, the
 // conversation is public — the Developer watches and searches it in Zulip.
 let zulipSender

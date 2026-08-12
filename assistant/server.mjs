@@ -30,6 +30,7 @@ import { fileURLToPath } from 'node:url'
 import { AgentConfigError, loadConfig, resolveRole } from './agent-config.mjs'
 import { AgentRunError, composePrompt, runAgent } from './harness.mjs'
 import { proxyPlaneRequest, readPlaneConfig } from './plane-passthrough.mjs'
+import { ZulipError, ZulipSender, openForgeRequest } from './zulip.mjs'
 
 const PORT = Number(process.env.PORT ?? 8091)
 const ASSISTANT_DIR = dirname(fileURLToPath(import.meta.url))
@@ -65,6 +66,7 @@ Paths reachable with fetch:
 - To change a project's coding or director profile, read that node's /projects, ask its /window in ordinary words to make the change, then re-read /projects to confirm it. There is no direct settings-write route.
 - /api/note — POST {"text":"..."} writes a note into this service's records; it is the one thing you can leave behind.
 - /api/forge/requests — POST {"desire":"..."} starts an image generation on agforge; GET /api/forge/requests/<id> reads it back. It takes 20 to 105 seconds.
+- /api/freeforge/requests — POST {"desire":"..."} opens a per-request Zulip channel (create-*), announces it in #FreeForge, and posts the request; agforge answers in that channel where the Developer can watch. Returns {channel, topic, message_id}. POST /api/freeforge/resolve {"message_id":..., "topic":"..."} marks the topic resolved when the exchange is done.
 - /api/guide — the capability card below, raw.
 
 The screen shows one view at a time: nodes, workspaces, autolab, tasks.
@@ -209,6 +211,49 @@ async function handleChat(req, res) {
       outcome: record.outcome,
     },
   })
+}
+
+// The FreeForge workflow (zulip_channel_topic): the assistant's own Zulip
+// account opens a create-* channel per request and posts the desire there;
+// agforge's listener answers in the topic. Unlike /api/forge/requests, the
+// conversation is public — the Developer watches and searches it in Zulip.
+let zulipSender
+async function getZulipSender() {
+  if (!zulipSender) zulipSender = await ZulipSender.fromEnvFile()
+  return zulipSender
+}
+
+async function handleFreeForge(req, res) {
+  if (req.method !== 'POST') return sendJson(res, 405, { error: 'method_not_allowed' })
+  let parsed
+  try {
+    parsed = JSON.parse(await readBody(req))
+  } catch {
+    return sendJson(res, 400, { error: 'bad_request', detail: 'Body must be JSON.' })
+  }
+  try {
+    if (req.url === '/api/freeforge/requests') {
+      const desire = parsed?.desire
+      if (typeof desire !== 'string' || desire.trim() === '') {
+        return sendJson(res, 400, { error: 'bad_request', detail: 'Body must be {"desire": "..."}.' })
+      }
+      const opened = await openForgeRequest(await getZulipSender(), desire.trim())
+      return sendJson(res, 201, { kind: 'freeforge.request.v1', ...opened })
+    }
+    if (req.url === '/api/freeforge/resolve') {
+      const { message_id: messageId, topic } = parsed ?? {}
+      if (!Number.isInteger(messageId) || typeof topic !== 'string' || topic === '') {
+        return sendJson(res, 400, { error: 'bad_request', detail: 'Body must be {"message_id": N, "topic": "..."}.' })
+      }
+      await (await getZulipSender()).resolveTopic(messageId, topic)
+      return sendJson(res, 200, { kind: 'freeforge.resolve.v1', message_id: messageId })
+    }
+  } catch (error) {
+    if (!(error instanceof ZulipError)) throw error
+    console.error('zulip send failed:', error)
+    return sendJson(res, 502, { error: 'zulip_unavailable', detail: error.message })
+  }
+  return sendJson(res, 404, { error: 'not_found' })
 }
 
 // Same-origin passthrough so the browser can reach the agforge request
@@ -390,6 +435,13 @@ const server = createServer((req, res) => {
     handleGuide(res).catch((error) => {
       console.error('unhandled guide error:', error)
       sendJson(res, 500, { error: 'internal_error', detail: 'Unexpected guide failure.' })
+    })
+    return
+  }
+  if (req.url?.startsWith('/api/freeforge/')) {
+    handleFreeForge(req, res).catch((error) => {
+      console.error('unhandled freeforge error:', error)
+      sendJson(res, 500, { error: 'internal_error', detail: 'Unexpected FreeForge failure.' })
     })
     return
   }

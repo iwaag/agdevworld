@@ -33,6 +33,7 @@ human's conversational entrance to the world.
 - `/api/note` — POST `{"text":"…"}` writes a note into this service's records. It is the one thing you can leave behind; a line on this card that turned out to be false belongs there, since you are the only one who finds out.
 - A path outside `/api/` that does not exist answers `200` with this app's own HTML, not `404` — the page's deep-link fallback. Under `/api/` a wrong path answers `404`.
 - `/api/forge/requests` — POST `{"desire":"…"}` starts an image on agforge; GET `/api/forge/requests/<id>` reads it back.
+- `/api/freeforge/requests` — POST `{"desire":"…"}` is the chat-visible way to ask agforge: it opens a per-request Zulip channel (`create-*`), announces it in `#FreeForge`, and posts the request there; agforge answers in that channel, where the Developer can watch and search the exchange. Returns `{channel, topic, message_id}`. When the exchange is done, POST `/api/freeforge/resolve` `{"message_id": …, "topic": "…"}` marks the topic resolved. Prefer this over `/api/forge/requests` when the human should be able to see the conversation.
 - `/api/guide` — this card.
 
 ## Filing complaints in Plane

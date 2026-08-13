@@ -105,6 +105,45 @@ def open_mission_topic(client, project: str, briefing: str) -> dict:
 
 # --- route handlers (POST only; the server owns the 405) ---------------------
 
+def handle_project_start(payload, client=None, fetch=None, env=None) -> tuple[int, dict]:
+    """POST /api/autolab/projects — provision the standing pieces of one
+    autolab project (Gitea repo pair, Plane project, #pj-<name> channel) and
+    deliberately nothing else: no Plane issue, no mission, so prep and dev
+    start stay separable."""
+    from .passthrough import proxy_fetch
+    from .projects import (
+        ProjectStartError,
+        read_gitea_config,
+        read_plane_workspace_config,
+        start_project,
+    )
+
+    env = os.environ if env is None else env
+    project = payload.get("project") if isinstance(payload, dict) else None
+    concept = payload.get("concept") if isinstance(payload, dict) else None
+    if not isinstance(project, str) or not PROJECT_NAME.match(project):
+        return 400, {"error": "bad_request",
+                     "detail": 'Body must be {"project": "<lowercase-hyphen name>", "concept": "..."}.'}
+    if not isinstance(concept, str) or not concept.strip():
+        return 400, {"error": "bad_request", "detail": 'A non-empty "concept" is required.'}
+    gitea = read_gitea_config(env)
+    plane = read_plane_workspace_config(env)
+    missing = [*gitea["missing"], *plane["missing"]]
+    if missing:
+        return 503, {"error": "project_start_unconfigured",
+                     "detail": f"Missing configuration: {', '.join(missing)}."}
+    try:
+        created = start_project(project, concept, gitea=gitea, plane=plane,
+                                client=client or get_client(), fetch=fetch or proxy_fetch)
+    except ProjectStartError as error:
+        print(f"project start failed: {error}", file=sys.stderr, flush=True)
+        return 502, {"error": "project_start_failed", "step": error.step, "detail": str(error)}
+    except ZulipError as error:
+        print(f"zulip send failed: {error}", file=sys.stderr, flush=True)
+        return 502, {"error": "zulip_unavailable", "detail": str(error)}
+    return 201, {"kind": "autolab.project.v1", "project": project, **created}
+
+
 def _is_message_id(value) -> bool:
     return isinstance(value, int) and not isinstance(value, bool)
 

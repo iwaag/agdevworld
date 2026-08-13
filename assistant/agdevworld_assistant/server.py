@@ -29,7 +29,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from .chat import ChatFailure, ChatAnswer, VALIDATION_DETAIL, compose_prompt, compose_system, run_front, valid_messages
 from .overlay import write_overlay
 from .passthrough import handle_autolab, handle_forge, handle_plane
-from .workflows import handle_freeforge, handle_missions
+from .workflows import handle_freeforge, handle_missions, handle_project_start
 from .records import RUN_SCHEMA, NOTE_SCHEMA, record_note, record_run
 from .settings import RECORDS_DIR, read_guide
 
@@ -128,8 +128,7 @@ class Handler(BaseHTTPRequestHandler):
         ("/api/plane/", handle_plane),
     )
 
-    # POST-only JSON routes served by this process itself (the workflow trio
-    # grows /api/autolab/projects in step 3).
+    # POST-only JSON routes served by this process itself.
     MISSION_PATHS = ("/api/autolab/missions", "/api/autolab/missions/resolve")
 
     def workflow_handler(self, path):
@@ -137,6 +136,8 @@ class Handler(BaseHTTPRequestHandler):
             return lambda payload: handle_freeforge(path, payload)
         if path in self.MISSION_PATHS:
             return lambda payload: handle_missions(path, payload)
+        if path == "/api/autolab/projects":
+            return handle_project_start
         return None
 
     def passthrough(self, method):

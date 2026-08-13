@@ -7,35 +7,85 @@ service, so both answer at the same time from the same `/records` volume.
 
 Routes so far:
 
-  GET /healthz              liveness probe
-  GET /api/guide, /guide    GUIDE.md as text/plain
+  GET  /healthz              liveness probe
+  GET  /api/guide, /guide    GUIDE.md as text/plain
+  POST /api/chat             one bounded front run -> {reply, actions, run}
+  POST /api/note             {"text": "..."} -> an assistant.note.v1 record
 
-The entrance guide is read from disk on **every** request. That is the cagent
-llms.txt pattern and it is deliberate: editing the card changes the next
-answer without a restart, and with the file bind-mounted, without a rebuild
-either. An unreadable card is not a 500 — the assistant simply has no card.
+Stateless: the browser owns the conversation history and sends it whole.
 """
 
 import json
 import os
 import signal
 import sys
+import uuid
+from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from pathlib import Path
 
-ASSISTANT_DIR = Path(__file__).resolve().parent.parent
-PROJECT_ROOT = ASSISTANT_DIR.parent
-GUIDE_PATH = ASSISTANT_DIR / "GUIDE.md"
+from .chat import ChatFailure, ChatAnswer, VALIDATION_DETAIL, compose_prompt, compose_system, run_front, valid_messages
+from .overlay import write_overlay
+from .records import RUN_SCHEMA, NOTE_SCHEMA, record_note, record_run
+from .settings import RECORDS_DIR, read_guide
 
-NO_GUIDE = "No capability card is installed on this assistant."
+BAD_JSON = "Body must be JSON."
 
 
-def read_guide() -> str:
+def _now() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+
+def handle_chat(payload) -> tuple[int, dict]:
+    """Resolve, run and record one chat. Returns the status and the body."""
+    messages = payload.get("messages") if isinstance(payload, dict) else None
+    if not valid_messages(messages):
+        return 400, {"error": "bad_request", "detail": VALIDATION_DETAIL}
+
+    system = compose_system(payload.get("context"), read_guide())
+    run_id = str(uuid.uuid4())
+    record = {"schema": RUN_SCHEMA, "id": run_id, "started": _now(), "outcome": "failed"}
     try:
-        return GUIDE_PATH.read_text(encoding="utf-8")
-    except OSError as error:
-        print(f"capability card unreadable: {error}", file=sys.stderr, flush=True)
-        return NO_GUIDE
+        answer = run_front(
+            compose_prompt(system, messages),
+            transcript_path=RECORDS_DIR / f"{run_id}.agent.jsonl",
+        )
+    except ChatFailure as failure:
+        record.update(failure.meta)
+        record["failure"] = str(failure)
+        record["outcome"] = failure.outcome
+        record_run(record)
+        return 502, {"error": "assistant_offline", "detail": str(failure)}
+    return 200, _answered(record, answer)
+
+
+def _answered(record: dict, answer: ChatAnswer) -> dict:
+    record.update(answer.meta)
+    record["actions"] = [action.get("action") for action in answer.actions]
+    record["outcome"] = "done"
+    record_run(record)
+    return {
+        "reply": answer.reply,
+        "actions": answer.actions,
+        "run": {
+            "id": record["id"],
+            "role": record.get("role"),
+            "profile": record.get("profile"),
+            "harness": record.get("harness"),
+            "provider": record.get("provider"),
+            "model": record.get("model"),
+            "outcome": record["outcome"],
+        },
+    }
+
+
+def handle_note(payload) -> tuple[int, dict]:
+    """The one thing the assistant can leave behind: free text in the records."""
+    text = payload.get("text") if isinstance(payload, dict) else None
+    if not isinstance(text, str) or not text.strip():
+        return 400, {"error": "bad_request", "detail": 'Body must be {"text": "..."}.'}
+    record = {"schema": NOTE_SCHEMA, "id": str(uuid.uuid4()), "written": _now(), "text": text}
+    record_note(record)
+    return 201, {"kind": NOTE_SCHEMA, "id": record["id"], "written": record["written"]}
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -57,6 +107,10 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def read_json(self):
+        length = int(self.headers.get("Content-Length") or 0)
+        return json.loads(self.rfile.read(length) or b"null")
+
     def do_GET(self):
         path = self.path.split("?")[0]
         if path == "/healthz":
@@ -65,6 +119,24 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_text(200, read_guide())
         self.send_json(404, {"error": "not_found"})
 
+    def do_POST(self):
+        path = self.path.split("?")[0]
+        handler = {"/api/chat": handle_chat, "/api/note": handle_note}.get(path)
+        if handler is None:
+            return self.send_json(404, {"error": "not_found"})
+        try:
+            payload = self.read_json()
+        except (ValueError, OSError):
+            return self.send_json(400, {"error": "bad_request", "detail": BAD_JSON})
+        try:
+            code, body = handler(payload)
+        except Exception as error:  # an unhandled failure is still an answer
+            print(f"unhandled {path} error: {error!r}", file=sys.stderr, flush=True)
+            return self.send_json(
+                500, {"error": "internal_error", "detail": "Unexpected assistant failure."}
+            )
+        self.send_json(code, body)
+
     def log_message(self, fmt, *args):
         sys.stderr.write("%s - %s\n" % (self.address_string(), fmt % args))
 
@@ -72,6 +144,7 @@ class Handler(BaseHTTPRequestHandler):
 def main():
     host = os.environ.get("HOST", "0.0.0.0")
     port = int(os.environ.get("PORT", "8093"))
+    write_overlay()
     signal.signal(signal.SIGTERM, lambda *a: sys.exit(0))
     server = ThreadingHTTPServer((host, port), Handler)
     print(f"assistant (python) listening on {host}:{port}", flush=True)

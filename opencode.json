@@ -14,7 +14,7 @@
   "mcp": {
     "agdevworld": {
       "type": "local",
-      "command": ["node", "assistant/tool-service.mjs"],
+      "command": ["python3", "assistant/agdevworld_assistant/tool_service.py"],
       "enabled": true,
       "timeout": 65000
     }

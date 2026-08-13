@@ -24,7 +24,7 @@
 - `opencode.json` — front-role OpenCode provider, MCP, and permission configuration.
 - `assistant/server.mjs` — one profile-selected process per chat request, passthrough routes, notes, and run records.
 - `assistant/agent-config.mjs` / `harness.mjs` — JavaScript contract loader and process seam.
-- `assistant/tool-service.mjs` — bounded stdio MCP tools; server actions execute here and UI actions are collected.
+- `assistant/agdevworld_assistant/tool_service.py` — bounded stdio MCP tools; server actions execute here and UI actions are collected. Tested with `uv run pytest` from `assistant/`.
 - `assistant/GUIDE.md` — the capability card, re-read per chat request.
 - `scripts/fetch-cluster-state.mjs` — snapshot refresh through cagent.
 - `public/cluster/*.json` — live snapshots, git-ignored; `public/*.sample.json` is the fallback. The Docker build copies whatever is in `public/` at build time, so move a live snapshot out first if a sample-only image is wanted.

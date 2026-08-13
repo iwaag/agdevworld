@@ -6,7 +6,9 @@ import { fileURLToPath } from 'node:url'
 
 const ANSI = /\x1b\[[0-9;?]*[a-zA-Z]/g
 const OUTPUT_TAIL = 2000
-const TOOL_SERVICE = join(dirname(fileURLToPath(import.meta.url)), 'tool-service.mjs')
+// Claude Code runs in a per-run temporary directory, so this stays absolute.
+const TOOL_SERVICE = join(dirname(fileURLToPath(import.meta.url)), 'agdevworld_assistant', 'tool_service.py')
+const TOOL_SERVICE_PYTHON = process.env.AGDEVWORLD_PYTHON ?? 'python3'
 const CLAUDE_TOOLS = [
   'fetch',
   'wait',
@@ -134,7 +136,7 @@ export async function runAgent({ agent, prompt, timeoutMs, transcriptPath, toolB
   if (agent.harness === 'claude_code') {
     await writeFile(mcpConfigPath, JSON.stringify({
       mcpServers: {
-        agdevworld: { command: process.execPath, args: [TOOL_SERVICE] },
+        agdevworld: { command: TOOL_SERVICE_PYTHON, args: [TOOL_SERVICE] },
       },
     }))
   }

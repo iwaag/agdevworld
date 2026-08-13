@@ -8,15 +8,34 @@ No fallback: a resolution, launch or authentication failure is a 502 and a
 recorded run, never a silent downgrade to another profile or harness.
 """
 
+import dataclasses
+import json
+import os
+import sys
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
 from agag.agent_config import AgentConfigError, load_config, resolve_role
 from agag.harness import run_harness
 
-from .settings import AGENT_TIMEOUT_SECONDS, AGENTS_CONFIG, AGENTS_LOCAL_CONFIG, PROJECT_ROOT
+from .settings import (
+    AGENT_TIMEOUT_SECONDS,
+    AGENTS_CONFIG,
+    AGENTS_LOCAL_CONFIG,
+    ASSISTANT_DIR,
+    PROJECT_ROOT,
+    TOOL_BASE_URL,
+)
 
 ROLE = "front"
+
+# Absolute, because claude_code runs from a per-run temporary directory.
+TOOL_SERVICE = ASSISTANT_DIR / "agdevworld_assistant" / "tool_service.py"
+TOOL_SERVICE_PYTHON = os.environ.get("AGDEVWORLD_PYTHON") or "python3"
+CLAUDE_TOOLS = ",".join(
+    f"mcp__agdevworld__{name}" for name in ("fetch", "wait", "switch_view", "show_image")
+)
 
 # The paths this lists are the assistant's map of the surface it can reach;
 # the capability card below it says what to do with them.
@@ -105,6 +124,55 @@ def resolve_front(config_path: Path | None = None, overlay_path: Path | None = N
         raise ChatFailure(str(error)) from error
 
 
+def read_actions(path: Path) -> list:
+    """The UI actions the tool service appended during the run.
+
+    A malformed line is skipped with a stderr note rather than killing the
+    request the way the JavaScript did: the run already happened, the reply is
+    already earned, and one unreadable line is not worth losing it.
+    """
+    actions = []
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except OSError:
+        return actions
+    for line in raw.splitlines():
+        if not line.strip():
+            continue
+        try:
+            actions.append(json.loads(line))
+        except json.JSONDecodeError:
+            print(f"skipping malformed action line: {line!r}", file=sys.stderr, flush=True)
+    return actions
+
+
+def _launch_conditions(agent, run_dir: Path) -> tuple[Path, dict]:
+    """Where the harness runs, and what it needs to find the MCP service.
+
+    opencode reads its MCP configuration from `opencode.json`, whose command is
+    relative and spawned with opencode's own cwd, so it must run from the
+    project root. claude_code carries its MCP configuration in argv and runs in
+    its own temporary directory — it has no workspace here, and the actions
+    file and transcript are the only things it must reach, both by absolute
+    path.
+    """
+    if agent.harness == "claude_code":
+        config = run_dir / "claude-mcp.json"
+        config.write_text(json.dumps({
+            "mcpServers": {
+                "agdevworld": {
+                    "command": TOOL_SERVICE_PYTHON,
+                    "args": [str(TOOL_SERVICE)],
+                }
+            }
+        }), encoding="utf-8")
+        return run_dir, {
+            "extra_args": ["--mcp-config", str(config), "--strict-mcp-config"],
+            "allowed_tools": CLAUDE_TOOLS,
+        }
+    return PROJECT_ROOT, {}
+
+
 def run_front(
     prompt: str,
     *,
@@ -112,20 +180,34 @@ def run_front(
     config_path: Path | None = None,
     overlay_path: Path | None = None,
     timeout: float | None = None,
-    cwd: Path | None = None,
+    tool_base_url: str | None = None,
 ) -> ChatAnswer:
     agent = resolve_front(config_path, overlay_path)
     timeout = AGENT_TIMEOUT_SECONDS if timeout is None else timeout
-    cwd = cwd or PROJECT_ROOT
-    result = run_harness(agent, prompt, cwd=cwd, timeout=timeout, transcript_path=transcript_path)
-    # run_harness never raises for a bad run, and a zero exit code is not a
-    # pass: an error envelope or empty output is a failure too. The outcome is
-    # the whole verdict.
-    if result.meta.get("outcome") != "done":
-        raise ChatFailure(
-            result.meta.get("failure") or result.output,
-            result.meta,
-            result.meta.get("outcome", "failed"),
+    with tempfile.TemporaryDirectory(prefix="agdevworld-agent-") as run_dir:
+        run_dir = Path(run_dir)
+        actions_path = run_dir / "actions.jsonl"
+        # The per-run environment is the one thing run_harness takes no
+        # parameter for, and mutating os.environ in a threaded server is a
+        # race. ResolvedAgent is frozen, so replace it with a copy carrying
+        # this run's two variables.
+        agent = dataclasses.replace(agent, environment={
+            **agent.environment,
+            "AGDEVWORLD_TOOL_BASE_URL": tool_base_url or TOOL_BASE_URL,
+            "AGDEVWORLD_ACTIONS_FILE": str(actions_path),
+        })
+        cwd, conditions = _launch_conditions(agent, run_dir)
+        result = run_harness(
+            agent, prompt, cwd=cwd, timeout=timeout, transcript_path=transcript_path, **conditions
         )
-    # extract_event_text does not strip; the reply the browser renders should.
-    return ChatAnswer(result.output.strip(), [], result.meta)
+        # run_harness never raises for a bad run, and a zero exit code is not a
+        # pass: an error envelope or empty output is a failure too. The outcome
+        # is the whole verdict.
+        if result.meta.get("outcome") != "done":
+            raise ChatFailure(
+                result.meta.get("failure") or result.output,
+                result.meta,
+                result.meta.get("outcome", "failed"),
+            )
+        # extract_event_text does not strip; the reply the browser renders should.
+        return ChatAnswer(result.output.strip(), read_actions(actions_path), result.meta)

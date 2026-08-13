@@ -6,10 +6,15 @@ value rather than something only a model sees.
 """
 
 import json
+from collections import namedtuple
+from pathlib import Path
 
 import pytest
 
 from agdevworld_assistant import chat, records, server
+
+# `_launch_conditions` reads exactly one field of the resolved agent.
+FakeAgent = namedtuple("FakeAgent", "harness")
 
 AGENTS_TOML = """\
 schema = "ag.agent-config.v1"
@@ -168,6 +173,60 @@ def test_an_unresolvable_role_is_a_502_before_any_launch(monkeypatch, tmp_path):
     written = json.loads(next((tmp_path / "records").glob("*.json")).read_text())
     assert written["outcome"] == "failed"
     assert "harness" not in written  # nothing was resolved, so nothing is claimed
+
+
+# --- the per-run launch conditions -----------------------------------------
+
+
+def test_the_run_gets_its_own_actions_file_and_tool_base_url(stub_config, tmp_path):
+    """The two per-run variables reach the process, and what it appends to the
+    actions file comes back as actions. A shell script stands in for a harness."""
+    command = tmp_path / "acting.sh"
+    command.write_text(
+        "#!/bin/sh\n"
+        "cat > /dev/null\n"
+        'printf \'{"action":"switch_view","view":"tasks"}\\n\' >> "$AGDEVWORLD_ACTIONS_FILE"\n'
+        'printf \'bad line\\n\' >> "$AGDEVWORLD_ACTIONS_FILE"\n'
+        'echo "reached $AGDEVWORLD_TOOL_BASE_URL"\n'
+    )
+    command.chmod(0o755)
+    answer = chat.run_front("prompt", timeout=30, tool_base_url="http://web",
+                            **stub_config(str(command)))
+    assert answer.reply == "reached http://web"
+    assert answer.actions == [{"action": "switch_view", "view": "tasks"}]  # the bad line is skipped
+
+
+def test_the_actions_file_does_not_outlive_the_run(stub_config, tmp_path):
+    command = tmp_path / "leaking.sh"
+    command.write_text('#!/bin/sh\ncat > /dev/null\necho "$AGDEVWORLD_ACTIONS_FILE"\n')
+    command.chmod(0o755)
+    answer = chat.run_front("prompt", timeout=30, **stub_config(str(command)))
+    path = Path(answer.reply)
+    assert not path.exists()
+    assert not path.parent.exists()
+
+
+def test_opencode_runs_from_the_project_root_with_no_extra_argv():
+    agent = FakeAgent("opencode")
+    cwd, conditions = chat._launch_conditions(agent, Path("/tmp/unused"))
+    assert cwd == chat.PROJECT_ROOT  # opencode.json's MCP command is relative to it
+    assert conditions == {}
+
+
+def test_claude_code_carries_its_mcp_config_in_argv(tmp_path):
+    cwd, conditions = chat._launch_conditions(FakeAgent("claude_code"), tmp_path)
+    assert cwd == tmp_path
+    config = tmp_path / "claude-mcp.json"
+    assert conditions["extra_args"] == ["--mcp-config", str(config), "--strict-mcp-config"]
+    assert conditions["allowed_tools"] == (
+        "mcp__agdevworld__fetch,mcp__agdevworld__wait,"
+        "mcp__agdevworld__switch_view,mcp__agdevworld__show_image"
+    )
+    assert "--model" not in conditions["extra_args"]  # agag raises on it; the profile owns it
+    server_config = json.loads(config.read_text())["mcpServers"]["agdevworld"]
+    assert server_config["command"] == chat.TOOL_SERVICE_PYTHON
+    assert Path(server_config["args"][0]).is_absolute()
+    assert Path(server_config["args"][0]).name == "tool_service.py"
 
 
 # --- notes -----------------------------------------------------------------

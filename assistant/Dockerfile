@@ -1,8 +1,9 @@
 FROM node:26-alpine
 WORKDIR /app
-# The MCP tool service is Python and stdlib-only; the interpreter is all it
-# needs. `git` is not optional — uv shells out to it for the pyagag git source.
-# Which image is the base stays a phase-3 decision.
+# The service is Python, but the base stays node: the harnesses arrive by
+# npm and need a runtime node anyway, so node-plus-apk-python is the smaller
+# diff than python-plus-node — switching the base would buy nothing here.
+# `git` is not optional — uv shells out to it for the pyagag git source.
 RUN apk add --no-cache python3 uv git
 # Both standard harnesses are image inputs, not developer-checkout facts.
 RUN npm install -g \
@@ -17,4 +18,6 @@ COPY assistant/ ./assistant/
 # names it, and the native workflow has no venv).
 RUN cd /app/assistant && uv sync --frozen --python /usr/bin/python3
 EXPOSE 8091
-CMD ["node", "assistant/entrypoint.mjs"]
+# write_overlay() at boot replaced entrypoint.mjs; no API key value ever
+# enters the generated overlay (anthropic_api_key_env only).
+CMD ["/app/assistant/.venv/bin/python", "-m", "agdevworld_assistant.server"]

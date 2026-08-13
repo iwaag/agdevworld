@@ -1,6 +1,0 @@
-{
-  "name": "agdevworld-assistant",
-  "private": true,
-  "type": "module",
-  "description": "Stateless profile-selected front service and bounded MCP tool bridge for agdevworld."
-}

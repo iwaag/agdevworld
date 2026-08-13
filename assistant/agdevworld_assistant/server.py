@@ -1,11 +1,10 @@
-"""The agdevworld assistant service, in Python.
+"""The agdevworld assistant service.
 
 Stdlib HTTP plus `agag` (pyagag) for everything about agent identity and
-process launch. This module is taking over `server.mjs` route by route; during
-the port nginx sends the ported paths here and the rest to the JavaScript
-service, so both answer at the same time from the same `/records` volume.
+process launch. This is the whole assistant: the JavaScript service it was
+ported from (python_backend phases 2-3) is gone.
 
-Routes so far:
+Routes:
 
   GET  /healthz              liveness probe
   GET  /api/guide, /guide    GUIDE.md as text/plain

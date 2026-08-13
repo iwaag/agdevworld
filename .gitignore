@@ -26,3 +26,8 @@ public/cluster/
 
 # Local endpoint values (real hostnames stay out of the repo)
 .env
+
+# Python (assistant)
+__pycache__/
+.venv/
+.pytest_cache/

@@ -43,6 +43,38 @@ services:
     ports:
       - "8091:8091"
 
+  # The Python assistant (python_backend phase 2). Same image and same
+  # `/records` volume as `assistant`: during the port both services answer,
+  # nginx decides which route reaches which, and neither owns the store.
+  assistant-py:
+    build:
+      context: .
+      dockerfile: assistant/Dockerfile
+    restart: unless-stopped
+    working_dir: /app
+    command: ["/app/assistant/.venv/bin/python", "-m", "agdevworld_assistant.server"]
+    environment:
+      # 8092 is agforge's host port; 8093 is free.
+      PORT: 8093
+      AGDEVWORLD_TOOL_BASE_URL: http://web
+      AGFORGE_URL: ${AGFORGE_URL:-http://host.docker.internal:8092}
+      AGENT_PROVIDER_OLLAMA_BASE_URL: ${AGENT_PROVIDER_OLLAMA_BASE_URL:-http://host.docker.internal:11434/v1}
+      AGENT_FRONT_PROFILE: ${AGENT_FRONT_PROFILE:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      AUTOLAB_NODES: ${AUTOLAB_NODES:-}
+      PLANE_URL: ${PLANE_URL:-}
+      PLANE_API_KEY: ${PLANE_API_KEY:-}
+      PLANE_WORKSPACE_SLUG: ${PLANE_WORKSPACE_SLUG:-}
+      PLANE_PROJECT_ID: ${PLANE_PROJECT_ID:-}
+      GITEA_URL: ${GITEA_URL:-http://host.docker.internal:3000}
+      ASSISTANT_RECORDS_DIR: /records
+    volumes:
+      - assistant_records:/records
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    ports:
+      - "8093:8093"
+
   # Dev with HMR: docker compose up dev
   dev:
     image: node:26-alpine

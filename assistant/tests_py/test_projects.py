@@ -11,6 +11,7 @@ from agdevworld_assistant.projects import (
     create_plane_project,
     create_project_channel,
     plane_identifier,
+    plane_name,
     read_gitea_config,
     read_plane_workspace_config,
     start_project,
@@ -52,7 +53,17 @@ def test_project_names_are_lowercase_hyphen_only():
 def test_plane_identifiers_are_initials_plus_numeric_parts():
     assert plane_identifier("whack-a-mole") == "WAM"
     assert plane_identifier("whack-a-mole-2") == "WAM2"
-    assert plane_identifier("quiz") == "Q"
+
+
+def test_single_word_names_keep_their_letters_so_they_do_not_all_collide():
+    assert plane_identifier("quiz") == "QUIZ"
+    assert plane_identifier("p3smoke1") != plane_identifier("p3smoke2")
+    assert plane_identifier("a" * 20) == "A" * 12
+
+
+def test_plane_names_drop_the_hyphens_plane_refuses():
+    assert plane_name("whack-a-mole-2") == "whack a mole 2"
+    assert plane_name("quiz") == "quiz"
 
 
 def test_config_readers_report_what_is_missing():
@@ -98,13 +109,26 @@ def test_create_gitea_repo_pair_reports_an_unreadable_token(gitea_config):
 
 
 def test_create_plane_project_returns_the_uuid_and_state_ids():
+    sent = []
+
     def fetch(url, *, method="GET", headers=None, body=None, timeout):
         if method == "POST":
-            return json_reply(201, {"id": "uuid-1", "identifier": "D"})
+            sent.append(json.loads(body))
+            return json_reply(201, {"id": "uuid-1", "identifier": "DG"})
         return json_reply(200, [{"name": "Todo", "id": "s-todo"}, {"name": "Done", "id": "s-done"}])
 
-    result = create_plane_project(PLANE_CONFIG, "demo", "concept", fetch)
-    assert result == {"id": "uuid-1", "identifier": "D", "states": {"Todo": "s-todo", "Done": "s-done"}}
+    result = create_plane_project(PLANE_CONFIG, "demo-game", "concept", fetch)
+    assert result == {"id": "uuid-1", "identifier": "DG", "states": {"Todo": "s-todo", "Done": "s-done"}}
+    assert sent[0]["name"] == "demo game"
+    assert sent[0]["identifier"] == "DG"
+
+
+def test_a_failed_create_names_the_name_and_the_identifier_it_sent():
+    def fetch(url, **_kwargs):
+        return json_reply(409, {"name": "The project name is already taken"})
+
+    with pytest.raises(ProjectStartError, match="identifier='P3SMOKE2'"):
+        create_plane_project(PLANE_CONFIG, "p3smoke2", "c", fetch)
 
 
 def test_create_plane_project_surfaces_a_failed_create():

@@ -59,11 +59,30 @@ def read_plane_workspace_config(env=os.environ) -> dict:
     return {"url": url, "api_key": api_key, "workspace": workspace, "missing": missing}
 
 
+def plane_name(project: str) -> str:
+    """"whack-a-mole-2" -> "whack a mole 2".
+
+    Plane 1.4.1 rejects a hyphen in a project name ("Project name cannot
+    contain special characters"), so the repo/channel name cannot be the Plane
+    name verbatim. The words are what a human reads on the Plane board; the
+    hyphenated form stays the contract everywhere else.
+    """
+    return " ".join(part for part in re.split(r"[^a-z0-9]+", project) if part)
+
+
 def plane_identifier(project: str) -> str:
     """"whack-a-mole-2" -> "WAM2": initials of the word parts plus any numeric
     parts, which keeps identifiers short, readable, and distinct across the
-    `<name>-N` families Phase B provisions."""
+    `<name>-N` families Phase B provisions.
+
+    A single-word name has no initials to combine, and taking its first letter
+    made every such project claim one identifier — `p3smoke2` failed on
+    `p3smoke1`'s `P`, behind Plane's misleading "name is already taken" 409.
+    One word therefore keeps its own letters, up to Plane's 12.
+    """
     parts = [part for part in re.split(r"[^a-z0-9]+", project) if part]
+    if len(parts) == 1:
+        return parts[0].upper()[:12]
     identifier = "".join(part if part.isdigit() else part[0] for part in parts)
     return identifier.upper()[:12]
 
@@ -138,10 +157,11 @@ def urlquote(value: str) -> str:
 def create_plane_project(config, project, concept, fetch=proxy_fetch) -> dict:
     base = f"{config['url']}/api/v1/workspaces/{urlquote(config['workspace'])}/projects"
     headers = {"X-API-Key": config["api_key"], "Content-Type": "application/json"}
+    name, identifier = plane_name(project), plane_identifier(project)
     try:
         reply = fetch(f"{base}/", method="POST", headers=headers, body=json.dumps({
-            "name": project,
-            "identifier": plane_identifier(project),
+            "name": name,
+            "identifier": identifier,
             "description": concept.strip(),
         }).encode(), timeout=PLANE_TIMEOUT_SECONDS)
     except OSError as error:
@@ -151,8 +171,13 @@ def create_plane_project(config, project, concept, fetch=proxy_fetch) -> dict:
     except ValueError:
         payload = None
     if not 200 <= reply.status < 300:
+        # Both fields are named: Plane answers an identifier clash with a
+        # message about the *name*, which sent one phase-3 smoke test looking
+        # for a project that did not exist.
         raise ProjectStartError(
-            "plane", f"project create -> HTTP {reply.status}: {json.dumps(payload)[:200]}"
+            "plane",
+            f"project create (name={name!r} identifier={identifier!r})"
+            f" -> HTTP {reply.status}: {json.dumps(payload)[:200]}",
         )
     try:
         states_reply = fetch(f"{base}/{payload['id']}/states/", headers=headers, timeout=PLANE_TIMEOUT_SECONDS)

@@ -11,6 +11,9 @@ Routes so far:
   GET  /api/guide, /guide    GUIDE.md as text/plain
   POST /api/chat             one bounded front run -> {reply, actions, run}
   POST /api/note             {"text": "..."} -> an assistant.note.v1 record
+  *    /api/forge/...        passthrough to the agforge request service
+  *    /api/autolab/...      node reachability + passthrough to node gateways
+  *    /api/plane/...        project-scoped Plane passthrough
 
 Stateless: the browser owns the conversation history and sends it whole.
 """
@@ -25,6 +28,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from .chat import ChatFailure, ChatAnswer, VALIDATION_DETAIL, compose_prompt, compose_system, run_front, valid_messages
 from .overlay import write_overlay
+from .passthrough import handle_autolab, handle_forge, handle_plane
 from .records import RUN_SCHEMA, NOTE_SCHEMA, record_note, record_run
 from .settings import RECORDS_DIR, read_guide
 
@@ -107,9 +111,39 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def read_json(self):
+    def read_body(self):
         length = int(self.headers.get("Content-Length") or 0)
-        return json.loads(self.rfile.read(length) or b"null")
+        return self.rfile.read(length)
+
+    def read_json(self):
+        return json.loads(self.read_body() or b"null")
+
+    # The passthrough prefixes, checked before the exact-path JSON routes. The
+    # exact workflow paths (/api/autolab/projects|missions…) are *not* proxied
+    # to a node; they arrive with steps 2 and 3 of the port.
+    PASSTHROUGHS = (
+        ("/api/forge/", handle_forge),
+        ("/api/autolab/", handle_autolab),
+        ("/api/plane/", handle_plane),
+    )
+
+    def passthrough(self, method):
+        """Serve the path if a passthrough owns it. Returns whether it did."""
+        for prefix, handler in self.PASSTHROUGHS:
+            if not self.path.startswith(prefix):
+                continue
+            try:
+                reply = handler(
+                    method, self.path, self.headers.get("Content-Type"),
+                    self.read_body() if method != "GET" else None,
+                )
+            except Exception as error:  # an unhandled failure is still an answer
+                print(f"unhandled {prefix} passthrough error: {error!r}", file=sys.stderr, flush=True)
+                self.send_json(500, {"error": "internal_error", "detail": "Unexpected passthrough failure."})
+                return True
+            self.send_bytes(reply.status, reply.content_type, reply.body)
+            return True
+        return False
 
     def do_GET(self):
         path = self.path.split("?")[0]
@@ -117,12 +151,16 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_json(200, {"ok": True})
         if path in ("/api/guide", "/guide"):
             return self.send_text(200, read_guide())
+        if self.passthrough("GET"):
+            return
         self.send_json(404, {"error": "not_found"})
 
     def do_POST(self):
         path = self.path.split("?")[0]
         handler = {"/api/chat": handle_chat, "/api/note": handle_note}.get(path)
         if handler is None:
+            if self.passthrough("POST"):
+                return
             return self.send_json(404, {"error": "not_found"})
         try:
             payload = self.read_json()
@@ -136,6 +174,10 @@ class Handler(BaseHTTPRequestHandler):
                 500, {"error": "internal_error", "detail": "Unexpected assistant failure."}
             )
         self.send_json(code, body)
+
+    def do_PATCH(self):
+        if not self.passthrough("PATCH"):
+            self.send_json(404, {"error": "not_found"})
 
     def log_message(self, fmt, *args):
         sys.stderr.write("%s - %s\n" % (self.address_string(), fmt % args))

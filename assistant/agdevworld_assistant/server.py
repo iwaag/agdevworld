@@ -29,6 +29,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from .chat import ChatFailure, ChatAnswer, VALIDATION_DETAIL, compose_prompt, compose_system, run_front, valid_messages
 from .overlay import write_overlay
 from .passthrough import handle_autolab, handle_forge, handle_plane
+from .workflows import handle_freeforge, handle_missions
 from .records import RUN_SCHEMA, NOTE_SCHEMA, record_note, record_run
 from .settings import RECORDS_DIR, read_guide
 
@@ -118,14 +119,25 @@ class Handler(BaseHTTPRequestHandler):
     def read_json(self):
         return json.loads(self.read_body() or b"null")
 
-    # The passthrough prefixes, checked before the exact-path JSON routes. The
-    # exact workflow paths (/api/autolab/projects|missions…) are *not* proxied
-    # to a node; they arrive with steps 2 and 3 of the port.
+    # The passthrough prefixes, checked after the workflow routes: the exact
+    # workflow paths under /api/autolab/ are Zulip/provisioning calls, never
+    # proxied to a node.
     PASSTHROUGHS = (
         ("/api/forge/", handle_forge),
         ("/api/autolab/", handle_autolab),
         ("/api/plane/", handle_plane),
     )
+
+    # POST-only JSON routes served by this process itself (the workflow trio
+    # grows /api/autolab/projects in step 3).
+    MISSION_PATHS = ("/api/autolab/missions", "/api/autolab/missions/resolve")
+
+    def workflow_handler(self, path):
+        if path.startswith("/api/freeforge/"):
+            return lambda payload: handle_freeforge(path, payload)
+        if path in self.MISSION_PATHS:
+            return lambda payload: handle_missions(path, payload)
+        return None
 
     def passthrough(self, method):
         """Serve the path if a passthrough owns it. Returns whether it did."""
@@ -151,13 +163,16 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_json(200, {"ok": True})
         if path in ("/api/guide", "/guide"):
             return self.send_text(200, read_guide())
+        if self.workflow_handler(path):
+            return self.send_json(405, {"error": "method_not_allowed"})
         if self.passthrough("GET"):
             return
         self.send_json(404, {"error": "not_found"})
 
     def do_POST(self):
         path = self.path.split("?")[0]
-        handler = {"/api/chat": handle_chat, "/api/note": handle_note}.get(path)
+        handler = ({"/api/chat": handle_chat, "/api/note": handle_note}.get(path)
+                   or self.workflow_handler(path))
         if handler is None:
             if self.passthrough("POST"):
                 return
@@ -176,6 +191,8 @@ class Handler(BaseHTTPRequestHandler):
         self.send_json(code, body)
 
     def do_PATCH(self):
+        if self.workflow_handler(self.path.split("?")[0]):
+            return self.send_json(405, {"error": "method_not_allowed"})
         if not self.passthrough("PATCH"):
             self.send_json(404, {"error": "not_found"})
 

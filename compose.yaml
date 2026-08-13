@@ -70,8 +70,16 @@ services:
       ASSISTANT_RECORDS_DIR: /records
     volumes:
       - assistant_records:/records
+      - ../.local/zulip/devworld-assistant.env:/run/secrets/zulip.env:ro
+      - ../agautolab/.local/gitea/autolab-agent.token:/run/secrets/gitea.token:ro
     extra_hosts:
       - "host.docker.internal:host-gateway"
+      # The Zulip realm answers only its own LAN hostname (Host-based realm
+      # resolution), and the host's DNS answers that name with every interface
+      # address it has — which Python's urllib walks serially, 30 s a piece.
+      # Pinning the name to the gateway makes it one address and keeps the
+      # Host header right. The name itself stays in the ignored .env.
+      - "${ZULIP_LAN_HOST:-host.docker.internal}:host-gateway"
     ports:
       - "8093:8093"
 

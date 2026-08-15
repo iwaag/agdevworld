@@ -1,7 +1,16 @@
-"""The agdevworld MCP tool service: fetch, wait, switch_view, show_image.
+"""The agdevworld tool bodies: fetch, wait, switch_view, show_image.
 
-Line-delimited JSON-RPC over stdio, standard library only. stdout carries
-JSON-RPC and nothing else; anything else goes to stderr.
+Two entrances, one implementation. ``serve()`` is the MCP entry point —
+line-delimited JSON-RPC over stdio, standard library only, stdout carrying
+JSON-RPC and nothing else — used by the `sonnet` profile through
+``--mcp-config``. ``call_tool()`` is the same four tools called directly,
+used by the `agcode` profile in-process (`chat.agcode_tools`).
+
+The per-run context (the agdevworld origin to fetch from, the file UI actions
+are appended to) arrives as arguments to ``call_tool``; it falls back to the
+two environment variables the MCP subprocess is started with. In-process
+callers pass it explicitly, because mutating ``os.environ`` in a threaded
+server is a race.
 
 Runnable both as a file and as ``python -m agdevworld_assistant.tool_service``,
 so it holds no package-relative imports.
@@ -138,11 +147,11 @@ def _origin(url):
     return parts.scheme, parts.netloc
 
 
-def fetch_tool(args):
+def fetch_tool(args, base_url=None):
     path = _as_text(args.get("path"))
     if not path.startswith("/") or path.startswith("//"):
         return text("fetch refused: path must begin with one /", True)
-    base = os.environ.get("AGDEVWORLD_TOOL_BASE_URL") or DEFAULT_BASE_URL
+    base = base_url or os.environ.get("AGDEVWORLD_TOOL_BASE_URL") or DEFAULT_BASE_URL
     target = urljoin(base, path)
     if _origin(target) != _origin(base):
         return text("fetch refused: target must stay on the configured agdevworld origin", True)
@@ -192,8 +201,8 @@ def wait_tool(args):
     return text(f"waited {_number_text(seconds)} seconds ({_display(raw)} was requested)")
 
 
-def action_tool(name, args):
-    actions_file = os.environ.get("AGDEVWORLD_ACTIONS_FILE") or ""
+def action_tool(name, args, actions_file=None):
+    actions_file = actions_file or os.environ.get("AGDEVWORLD_ACTIONS_FILE") or ""
     if not actions_file:
         return text("UI action channel is unavailable", True)
     if name == "switch_view":
@@ -213,15 +222,45 @@ def action_tool(name, args):
     return text(reply)
 
 
-def call_tool(name, args=None):
+def call_tool(name, args=None, *, base_url=None, actions_file=None):
     args = args if isinstance(args, dict) else {}
     if name == "fetch":
-        return fetch_tool(args)
+        return fetch_tool(args, base_url)
     if name == "wait":
         return wait_tool(args)
     if name in ("switch_view", "show_image"):
-        return action_tool(name, args)
+        return action_tool(name, args, actions_file)
     return text(f"unknown tool: {name}", True)
+
+
+def result_text(reply):
+    """One MCP tool reply as the plain string a non-MCP caller wants.
+
+    The bodies already name their own failures ("fetch refused: ...",
+    "unknown view: ..."), so the ``isError`` flag adds nothing a reader of the
+    text does not already have.
+    """
+    return "".join(
+        block.get("text", "")
+        for block in reply.get("content", [])
+        if isinstance(block, dict) and block.get("type") == "text"
+    )
+
+
+def messages_api_specs():
+    """The four tool specs in Anthropic Messages API spelling.
+
+    MCP says ``inputSchema``; the Messages API says ``input_schema``. The
+    schemas themselves are identical, so this is a rename, not a translation.
+    """
+    return [
+        {
+            "name": tool["name"],
+            "description": tool["description"],
+            "input_schema": tool["inputSchema"],
+        }
+        for tool in TOOLS
+    ]
 
 
 def handle(message):

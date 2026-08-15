@@ -87,7 +87,7 @@ node window owns the edit; never invent a direct settings-write endpoint.
 
 ## Costs
 
-- Chat on the `local` profile uses OpenCode with the local Ollama model and reports no price.
+- Chat on the `local` profile uses agcode with the local Ollama model and reports no price.
 - An image: free in money, ~15–130 seconds — agforge's local pipeline. See agforge's own card.
 - An autolab iteration summary: ~0.13–0.21 USD and 11–18 seconds, paid once per iteration and cached on the node afterwards. Each cached summary carries its own `summarizer.cost_usd` and `duration_ms` — read those rather than this line, which has already been wrong once.
 - An autolab job itself: `cost_usd` per job is in `/api/autolab/<node>/jobs`; on agstudio they have run $0.09–$3.78. A number written here goes stale as jobs run; the path does not.

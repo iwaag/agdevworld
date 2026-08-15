@@ -181,3 +181,42 @@ def test_stdio_mcp_lists_tools_and_collects_a_ui_action(tmp_path):
     assert "switch to tasks" in replies[3]["result"]["content"][0]["text"]
     assert replies[4]["error"]["code"] == -32601
     assert json.loads(actions.read_text().strip()) == {"action": "switch_view", "view": "tasks"}
+
+
+# --- the two entrances share one implementation ------------------------------
+
+
+def test_messages_api_specs_rename_the_schema_key_and_nothing_else():
+    """The Messages API says input_schema where MCP says inputSchema; the
+    schemas themselves are the same objects, so a tool description written
+    once serves both doors."""
+    specs = tool_service.messages_api_specs()
+    assert [spec["name"] for spec in specs] == [tool["name"] for tool in tool_service.TOOLS]
+    for spec, mcp in zip(specs, tool_service.TOOLS):
+        assert set(spec) == {"name", "description", "input_schema"}
+        assert spec["description"] == mcp["description"]
+        assert spec["input_schema"] == mcp["inputSchema"]
+
+
+def test_result_text_flattens_a_reply_including_an_error_one():
+    assert tool_service.result_text(tool_service.text("plain")) == "plain"
+    assert tool_service.result_text(tool_service.text("refused", True)) == "refused"
+    assert tool_service.result_text({}) == ""
+
+
+def test_explicit_context_wins_over_the_environment(tmp_path, monkeypatch):
+    env_file, explicit = tmp_path / "env.jsonl", tmp_path / "explicit.jsonl"
+    monkeypatch.setenv("AGDEVWORLD_ACTIONS_FILE", str(env_file))
+
+    tool_service.call_tool("switch_view", {"view": "nodes"}, actions_file=str(explicit))
+
+    assert explicit.exists() and not env_file.exists()
+
+
+def test_the_environment_still_serves_the_mcp_subprocess(tmp_path, monkeypatch):
+    actions = tmp_path / "env.jsonl"
+    monkeypatch.setenv("AGDEVWORLD_ACTIONS_FILE", str(actions))
+
+    tool_service.call_tool("switch_view", {"view": "nodes"})
+
+    assert json.loads(actions.read_text()) == {"action": "switch_view", "view": "nodes"}

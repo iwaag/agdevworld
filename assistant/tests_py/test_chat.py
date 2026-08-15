@@ -206,10 +206,98 @@ def test_the_actions_file_does_not_outlive_the_run(stub_config, tmp_path):
     assert not path.parent.exists()
 
 
-def test_opencode_runs_from_the_project_root_with_no_extra_argv():
-    agent = FakeAgent("opencode")
-    cwd, conditions = chat._launch_conditions(agent, Path("/tmp/unused"))
-    assert cwd == chat.PROJECT_ROOT  # opencode.json's MCP command is relative to it
+# --- the agcode door -------------------------------------------------------
+
+
+def test_agcode_tools_are_the_four_with_messages_api_schemas(tmp_path):
+    tools = chat.agcode_tools(tool_base_url="http://web", actions_file=tmp_path / "a.jsonl")
+    assert [tool.name for tool in tools] == ["fetch", "wait", "switch_view", "show_image"]
+    for tool in tools:
+        # Messages API spelling, not MCP's inputSchema.
+        assert set(tool.spec) == {"name", "description", "input_schema"}
+
+
+def test_agcode_switch_view_appends_to_the_run_actions_file(tmp_path):
+    actions = tmp_path / "actions.jsonl"
+    tools = {t.name: t for t in chat.agcode_tools(tool_base_url="http://web", actions_file=actions)}
+
+    # agcode calls func(working_dir, **arguments); the working directory is
+    # ignored — the actions file arrives by absolute path.
+    reply = tools["switch_view"].func(tmp_path, view="tasks")
+
+    assert reply == "the browser will switch to tasks"
+    assert json.loads(actions.read_text()) == {"action": "switch_view", "view": "tasks"}
+
+
+def test_agcode_tool_context_is_per_call_not_environment(tmp_path, monkeypatch):
+    """The in-process door must not depend on os.environ: two concurrent runs
+    in one threaded server would race on it."""
+    monkeypatch.delenv("AGDEVWORLD_ACTIONS_FILE", raising=False)
+    monkeypatch.delenv("AGDEVWORLD_TOOL_BASE_URL", raising=False)
+    a, b = tmp_path / "a.jsonl", tmp_path / "b.jsonl"
+    tools_a = {t.name: t for t in chat.agcode_tools(tool_base_url="http://web", actions_file=a)}
+    tools_b = {t.name: t for t in chat.agcode_tools(tool_base_url="http://web", actions_file=b)}
+
+    tools_a["show_image"].func(tmp_path, url="http://x/1.png")
+    tools_b["show_image"].func(tmp_path, url="http://x/2.png")
+
+    assert json.loads(a.read_text())["url"] == "http://x/1.png"
+    assert json.loads(b.read_text())["url"] == "http://x/2.png"
+
+
+def test_agcode_tool_reports_a_refusal_as_its_own_text(tmp_path):
+    tools = {t.name: t for t in chat.agcode_tools(tool_base_url="http://web", actions_file=tmp_path / "a")}
+    assert "unknown view: elsewhere" in tools["switch_view"].func(tmp_path, view="elsewhere")
+    assert "fetch refused" in tools["fetch"].func(tmp_path, path="no-leading-slash")
+
+
+def test_agcode_profile_never_reaches_run_harness(monkeypatch, tmp_path):
+    """`run_front` routes agcode in-process; nothing is launched as a
+    subprocess and no per-run environment variable is set."""
+    agent = namedtuple("A", "harness provider_base_url native_model role profile provider model")(
+        "agcode", "http://ollama", "test-model", "front", "local", "ollama", "ollama/test-model"
+    )
+    monkeypatch.setattr(chat, "resolve_front", lambda *a, **k: agent)
+    monkeypatch.setattr(chat, "run_harness", lambda *a, **k: pytest.fail("run_harness was called"))
+    seen = {}
+
+    def fake_run(prompt, working_dir, **kwargs):
+        seen.update(prompt=prompt, working_dir=working_dir, **kwargs)
+        return chat.agcode.AgcodeResult("the reply", "ok", {"outcome": "done", "num_turns": 1})
+
+    monkeypatch.setattr(chat.agcode, "run", fake_run)
+    answer = chat.run_front("prompt", timeout=42, tool_base_url="http://web")
+
+    assert answer.reply == "the reply"
+    assert answer.meta["harness"] == "agcode"        # identity comes from the agent
+    assert answer.meta["model"] == "ollama/test-model"  # canonical, not native
+    assert seen["model"] == "test-model"             # native, for the wire
+    assert seen["base_url"] == "http://ollama"
+    assert seen["deadline_s"] == 42
+    assert [t.name for t in seen["tools"]] == ["fetch", "wait", "switch_view", "show_image"]
+    # The working directory is the per-run temp dir, gone by now: exactly one
+    # base, and nothing of the checkout is reachable through it.
+    assert not Path(seen["working_dir"]).exists()
+
+
+def test_a_failed_agcode_run_is_still_a_chat_failure(monkeypatch):
+    agent = namedtuple("A", "harness provider_base_url native_model role profile provider model")(
+        "agcode", "http://ollama", "test-model", "front", "local", "ollama", "ollama/test-model"
+    )
+    monkeypatch.setattr(chat, "resolve_front", lambda *a, **k: agent)
+    monkeypatch.setattr(chat.agcode, "run", lambda *a, **k: chat.agcode.AgcodeResult(
+        "", "aborted", {"outcome": "aborted", "failure": "deadline_exceeded: out of time"}
+    ))
+
+    with pytest.raises(chat.ChatFailure) as error:
+        chat.run_front("prompt", timeout=1)
+    assert error.value.outcome == "aborted"
+    assert "deadline_exceeded" in str(error.value)
+
+
+def test_non_claude_harness_runs_from_the_project_root_with_no_extra_argv():
+    cwd, conditions = chat._launch_conditions(FakeAgent("fake"), Path("/tmp/unused"))
+    assert cwd == chat.PROJECT_ROOT
     assert conditions == {}
 
 

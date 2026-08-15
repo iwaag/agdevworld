@@ -18,7 +18,7 @@ services:
       PORT: 8091
       AGDEVWORLD_TOOL_BASE_URL: http://web
       AGFORGE_URL: ${AGFORGE_URL:-http://host.docker.internal:8092}
-      AGENT_PROVIDER_OLLAMA_BASE_URL: ${AGENT_PROVIDER_OLLAMA_BASE_URL:-http://host.docker.internal:11434/v1}
+      AGENT_PROVIDER_OLLAMA_BASE_URL: ${AGENT_PROVIDER_OLLAMA_BASE_URL:-http://host.docker.internal:11434}
       AGENT_FRONT_PROFILE: ${AGENT_FRONT_PROFILE:-}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       # "<name>=<url>,..."; unset falls back to the local node only, so real

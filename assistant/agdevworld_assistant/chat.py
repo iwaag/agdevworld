@@ -16,9 +16,11 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
+from agag import agcode
 from agag.agent_config import AgentConfigError, load_config, resolve_role
-from agag.harness import run_harness
+from agag.harness import HarnessResult, identity, run_harness
 
+from . import tool_service
 from .settings import (
     AGENT_TIMEOUT_SECONDS,
     AGENTS_CONFIG,
@@ -36,6 +38,11 @@ TOOL_SERVICE_PYTHON = os.environ.get("AGDEVWORLD_PYTHON") or "python3"
 CLAUDE_TOOLS = ",".join(
     f"mcp__agdevworld__{name}" for name in ("fetch", "wait", "switch_view", "show_image")
 )
+
+# agcode's real bound is the service deadline; the turn budget is only a
+# runaway backstop. The front agent polls (`wait` then `fetch` again), so a
+# tight turn budget would end a legitimately slow answer.
+AGCODE_MAX_TURNS = 60
 
 # The paths this lists are the assistant's map of the surface it can reach;
 # the capability card below it says what to do with them.
@@ -146,15 +153,72 @@ def read_actions(path: Path) -> list:
     return actions
 
 
+def agcode_tools(*, tool_base_url: str, actions_file: Path) -> list[agcode.Tool]:
+    """The four agdevworld tools as agcode tools, in-process.
+
+    The bodies are `tool_service`'s — one implementation, two entrances — so a
+    fix to `fetch` lands on both the agcode door and the claude_code/MCP one.
+    Each tool receives agcode's working directory first and ignores it: none of
+    these four touch the filesystem except the actions file, which arrives here
+    as an absolute path.
+    """
+
+    def bind(name: str):
+        def call(_working_dir, **arguments):
+            return tool_service.result_text(
+                tool_service.call_tool(
+                    name,
+                    arguments,
+                    base_url=tool_base_url,
+                    actions_file=str(actions_file),
+                )
+            )
+
+        return call
+
+    return [agcode.Tool(spec, bind(spec["name"])) for spec in tool_service.messages_api_specs()]
+
+
+def run_agcode(
+    agent,
+    prompt: str,
+    *,
+    working_dir: Path,
+    actions_file: Path,
+    tool_base_url: str,
+    timeout: float,
+    transcript_path: Path | None,
+) -> HarnessResult:
+    """One agcode run, in-process, shaped like a `run_harness` result.
+
+    In-process rather than through `run_harness` because the tools are Python
+    callables — there is no argv or config file that can carry them. It also
+    removes the MCP subprocess, the per-run environment variables, and the
+    stdout round trip: `transcript_path` here is agcode's own verbatim wire
+    capture, not the harness's stdout.
+    """
+    result = agcode.run(
+        prompt,
+        str(working_dir),
+        base_url=agent.provider_base_url,
+        model=agent.native_model,
+        max_turns=AGCODE_MAX_TURNS,
+        deadline_s=timeout,
+        tools=agcode_tools(tool_base_url=tool_base_url, actions_file=actions_file),
+        transcript_path=str(transcript_path) if transcript_path else None,
+    )
+    meta = {**identity(agent), **result.meta}
+    return HarnessResult(result.output, 0 if result.meta["outcome"] == "done" else -1, meta)
+
+
 def _launch_conditions(agent, run_dir: Path) -> tuple[Path, dict]:
     """Where the harness runs, and what it needs to find the MCP service.
 
-    opencode reads its MCP configuration from `opencode.json`, whose command is
-    relative and spawned with opencode's own cwd, so it must run from the
-    project root. claude_code carries its MCP configuration in argv and runs in
-    its own temporary directory — it has no workspace here, and the actions
-    file and transcript are the only things it must reach, both by absolute
-    path.
+    claude_code carries its MCP configuration in argv and runs in its own
+    temporary directory — it has no workspace here, and the actions file and
+    transcript are the only things it must reach, both by absolute path. Every
+    other harness runs from the project root, which is where the `fake` stub
+    profile expects to be. agcode never reaches here: it runs in-process.
     """
     if agent.harness == "claude_code":
         config = run_dir / "claude-mcp.json"
@@ -191,15 +255,27 @@ def run_front(
         # parameter for, and mutating os.environ in a threaded server is a
         # race. ResolvedAgent is frozen, so replace it with a copy carrying
         # this run's two variables.
-        agent = dataclasses.replace(agent, environment={
-            **agent.environment,
-            "AGDEVWORLD_TOOL_BASE_URL": tool_base_url or TOOL_BASE_URL,
-            "AGDEVWORLD_ACTIONS_FILE": str(actions_path),
-        })
-        cwd, conditions = _launch_conditions(agent, run_dir)
-        result = run_harness(
-            agent, prompt, cwd=cwd, timeout=timeout, transcript_path=transcript_path, **conditions
-        )
+        if agent.harness == "agcode":
+            result = run_agcode(
+                agent,
+                prompt,
+                working_dir=run_dir,
+                actions_file=actions_path,
+                tool_base_url=tool_base_url or TOOL_BASE_URL,
+                timeout=timeout,
+                transcript_path=transcript_path,
+            )
+        else:
+            agent = dataclasses.replace(agent, environment={
+                **agent.environment,
+                "AGDEVWORLD_TOOL_BASE_URL": tool_base_url or TOOL_BASE_URL,
+                "AGDEVWORLD_ACTIONS_FILE": str(actions_path),
+            })
+            cwd, conditions = _launch_conditions(agent, run_dir)
+            result = run_harness(
+                agent, prompt, cwd=cwd, timeout=timeout,
+                transcript_path=transcript_path, **conditions,
+            )
         # run_harness never raises for a bad run, and a zero exit code is not a
         # pass: an error envelope or empty output is a failure too. The outcome
         # is the whole verdict.

@@ -23,18 +23,18 @@ def _toml_string(value) -> str:
 
 def render_overlay(env=None) -> str:
     env = os.environ if env is None else env
-    opencode = env.get("AGENT_HARNESS_OPENCODE_COMMAND") or "/usr/local/bin/opencode"
     claude = env.get("AGENT_HARNESS_CLAUDE_CODE_COMMAND") or "/usr/local/bin/claude"
-    ollama = env.get("AGENT_PROVIDER_OLLAMA_BASE_URL") or "http://host.docker.internal:11434/v1"
+    # No `/v1` suffix: agcode posts to `{base_url}/v1/messages`, so the
+    # OpenAI-compatible `/v1` path the previous harness wanted would double it.
+    ollama = env.get("AGENT_PROVIDER_OLLAMA_BASE_URL") or "http://host.docker.internal:11434"
     secret_env = env.get("AGENT_ANTHROPIC_API_KEY_ENV") or "ANTHROPIC_API_KEY"
     fake = env.get("AGENT_HARNESS_FAKE_COMMAND") or "/bin/cat"
     profile = env.get("AGENT_FRONT_PROFILE") or ""
     lines = [
         'schema = "ag.agent-config.v1"',
         "",
-        "[local.harness.opencode]",
-        f"command = {_toml_string(opencode)}",
-        "",
+        # agcode needs no [local.harness.agcode] block: its default command is
+        # sys.executable, which is already the interpreter importing agag.
         "[local.harness.claude_code]",
         f"command = {_toml_string(claude)}",
         "",

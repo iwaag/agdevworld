@@ -7,7 +7,7 @@
 - `uv run pytest` from `assistant/` — the whole assistant test suite (tool service, chat, passthroughs, workflows, project starts). This is the test entrance.
 - `docker compose up --build -d web` — production-style bundle behind nginx on :8090. Keep it current when a user may want to look.
 - `docker compose ps web` / `curl -I http://localhost:8090/` — confirm it came up.
-- `docker compose up --build -d web assistant` — the UI and profile-selected chat service on :8090/:8091. The assistant image contains the pinned OpenCode and Claude Code runtimes; code, config, and `GUIDE.md` changes need a rebuild.
+- `docker compose up --build -d web assistant` — the UI and profile-selected chat service on :8090/:8091. The assistant image contains the pinned Claude Code runtime; agcode ships inside pyagag and runs in-process. Code, config, and `GUIDE.md` changes need a rebuild.
 - `CAGENT_URL=https://localhost:8789 npm run cluster:fetch` — refresh the three cluster snapshots through cagent.
 - `docker compose logs assistant` — run records (`assistant.run.v1`) and notes (`assistant.note.v1`) as they happen; stdout carries records only, stderr carries access logs and warnings. The durable copy is the `assistant_records` volume (`ASSISTANT_RECORDS_DIR=/records`); the log alone does not survive `up --build`.
 - `docker compose exec assistant ls /records` — what the assistant has left behind, including notes about facts that turned out wrong.
@@ -22,7 +22,6 @@
 - `src/detailPopup.ts` — the detail overlay, incl. the per-iteration `summary` button.
 - `src/clusterState.ts` / `src/autolabState.ts` / `src/planeState.ts` — snapshot, gateway, and Plane reads/actions for the panels.
 - `agents.toml` / `.local/agents.local.toml` — common role/profile contract and machine-local harness/provider facts. The overlay is generated at every container start from deployment environment values.
-- `opencode.json` — front-role OpenCode provider, MCP, and permission configuration.
 - `assistant/pyproject.toml` — the Python package (`agdevworld-assistant`) and its `pyagag` git source; `uv` owns `assistant/.venv`.
 - `assistant/agdevworld_assistant/server.py` — the stdlib HTTP service: routing, chat, notes, guide, and the record writer's callers.
 - `assistant/agdevworld_assistant/chat.py` — one chat request: role resolution and the harness launch through `agag`, prompt shaping, UI-action collection.
@@ -51,18 +50,19 @@ session state leaks between requests. The other routes — `/api/note`,
 `/api/guide`, the forge / autolab / Plane passthroughs, the freeforge and
 mission workflows, and project starts — are served by the same process.
 
-The committed default is profile `local` = OpenCode +
-`ollama/qwen3.6:35b-a3b-coding-nvfp4`. Harness command and provider endpoint
-come only from the ignored local overlay. The alternative `sonnet` =
-Claude Code + `anthropic/claude-sonnet-5` uses the same MCP tools and UI-action
-channel. Select it only through `[roles.front] profile = "sonnet"` in the
+The committed default is profile `local` = agcode +
+`ollama/qwen3.6:35b-a3b-coding-nvfp4`. The provider endpoint comes only from
+the ignored local overlay; agcode needs no harness command, because it ships
+inside pyagag and `chat.run_agcode()` calls it in this process. The
+alternative `sonnet` = Claude Code + `anthropic/claude-sonnet-5` reaches the
+same four tools and the same UI-action channel through MCP. Select it only through `[roles.front] profile = "sonnet"` in the
 ignored local overlay; there is no per-request backend selector or fallback.
 A third profile, `stub` (`harness = "fake"`), runs a chat end to end without a
 model and is how the route is proven without spending anything.
 
 | harness | local requirement | container status |
 |---|---|---|
-| `opencode` | executable plus `local.provider.ollama.base_url` | OpenCode 1.18.10 is installed; the compose overlay supplies the endpoint |
+| `agcode` | `local.provider.ollama.base_url` only | nothing to install; the compose overlay supplies the endpoint, without the OpenAI-compatible `/v1` suffix |
 | `claude_code` | executable plus API-key authentication | Claude Code 2.1.226 is installed; compose passes optional `ANTHROPIC_API_KEY`, and missing authentication fails explicitly without fallback |
 
 For this Mac, `.local/agents.local.toml` resolves Claude Code through the
@@ -73,7 +73,7 @@ contains only `anthropic_api_key_env = "ANTHROPIC_API_KEY"`; the key itself
 never enters either agents file or the image.
 Binary absence fails during profile resolution, while invalid or absent login
 fails as a recorded Claude run whose stderr/result tail is returned in the 502
-detail. Neither case attempts OpenCode.
+detail. Neither case falls back to the `local` profile.
 
 Runtime-only variables are `AUTOLAB_NODES`, `AGFORGE_URL`, `PLANE_URL`,
 `PLANE_API_KEY`, `PLANE_WORKSPACE_SLUG`, `PLANE_PROJECT_ID`, `GITEA_URL`,

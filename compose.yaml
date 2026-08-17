@@ -6,52 +6,6 @@ services:
     ports:
       - "8090:80"
 
-  # One fresh profile-selected front run per browser chat request. The
-  # Python service (python_backend phases 2-3); the JavaScript service it
-  # replaced is gone, so this is simply `assistant` again on the known port.
-  assistant:
-    build:
-      context: .
-      dockerfile: assistant/Dockerfile
-    restart: unless-stopped
-    environment:
-      PORT: 8091
-      AGDEVWORLD_TOOL_BASE_URL: http://web
-      AGFORGE_URL: ${AGFORGE_URL:-http://host.docker.internal:8092}
-      AGENT_PROVIDER_OLLAMA_BASE_URL: ${AGENT_PROVIDER_OLLAMA_BASE_URL:-http://host.docker.internal:11434}
-      AGENT_FRONT_PROFILE: ${AGENT_FRONT_PROFILE:-}
-      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
-      # "<name>=<url>,..."; unset falls back to the local node only, so real
-      # cluster hostnames stay out of the repo.
-      AUTOLAB_NODES: ${AUTOLAB_NODES:-}
-      PLANE_URL: ${PLANE_URL:-}
-      PLANE_API_KEY: ${PLANE_API_KEY:-}
-      PLANE_WORKSPACE_SLUG: ${PLANE_WORKSPACE_SLUG:-}
-      # Optional: only the task UI's default-project view needs it; mission
-      # briefings carry their own project UUID (multi-project Plane).
-      PLANE_PROJECT_ID: ${PLANE_PROJECT_ID:-}
-      # Project starts (Gitea repo pair + direction seed). The API URL is
-      # container-reachable; mDNS names do not resolve inside Docker.
-      GITEA_URL: ${GITEA_URL:-http://host.docker.internal:3000}
-      # Records outlive the container. Without this the store is the container
-      # log, which `up --build` destroys — and a note an agent leaves about a
-      # wrong fact is worth nothing if the next rebuild erases it.
-      ASSISTANT_RECORDS_DIR: /records
-    volumes:
-      - assistant_records:/records
-      - ../.local/zulip/devworld-assistant.env:/run/secrets/zulip.env:ro
-      - ../agautolab/.local/gitea/autolab-agent.token:/run/secrets/gitea.token:ro
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
-      # The Zulip realm answers only its own LAN hostname (Host-based realm
-      # resolution), and the host's DNS answers that name with every interface
-      # address it has — which Python's urllib walks serially, 30 s a piece.
-      # Pinning the name to the gateway makes it one address and keeps the
-      # Host header right. The name itself stays in the ignored .env.
-      - "${ZULIP_LAN_HOST:-host.docker.internal}:host-gateway"
-    ports:
-      - "8091:8091"
-
   # Dev with HMR: docker compose up dev
   dev:
     image: node:26-alpine
@@ -66,4 +20,3 @@ services:
 
 volumes:
   node_modules:
-  assistant_records:

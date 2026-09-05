@@ -255,7 +255,12 @@ export class PanelGridScene extends Phaser.Scene {
 
     const actionTexts = (row.actions ?? []).map((action, actionIndex) => {
       const color = action.disabled ? 0x777a91 : (action.color ?? 0x70c7ff)
-      const button = this.add.text(-PANEL_WIDTH / 2 + 35 + actionIndex * 94, top + height - 20, action.label, {
+      // The short card's 64 is unchanged; the tall one needs the extra six
+      // pixels or the button's own background sits flush on the card border
+      // and the rounded corner clips it — visible in the first screenshot of
+      // this feature and in no other way.
+      const buttonY = top + (tight ? 64 : height - 26)
+      const button = this.add.text(-PANEL_WIDTH / 2 + 35 + actionIndex * 94, buttonY, action.label, {
         fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
         fontSize: '10px',
         color: action.disabled ? '#a2a5b8' : '#0d0f14',

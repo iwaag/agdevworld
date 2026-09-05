@@ -1,12 +1,19 @@
-"""The agent room's HTTP door: stdlib, read-only, unauthenticated.
+"""The agent room's HTTP door: stdlib, unauthenticated, loopback.
 
 Modelled on cagent's *window* listener
 (`pj-clusterintent/cagent/src/cagent_api/server.py`): `ThreadingHTTPServer`,
 no framework, no auth. cagent needs three doors because two of them can change
-the cluster; this one only reads a chat realm the browser's own user can read
+the cluster; this one reads a chat realm the browser's own user can read
 anyway, on a loopback port in a private lab, so the window's shape is the whole
-of what it needs. If it ever grows a write route it needs cagent's other doors
-too, not a flag.
+of what it needs.
+
+There is now exactly one POST, and it is worth being precise about why it did
+not buy cagent's other doors. `POST /ops/confirm` writes to **this process's
+own memory**: it marks which `done` rows a human has looked at. It reaches
+neither Zulip nor any node — the observer still never posts (`operation_room`
+p2 constraint 5) — and its effect dies with the relay, along with the rows it
+hides. A route that could change the realm would be a different thing and
+would need a different door.
 
 CORS is answered permissively for the same reason: the frontend may be served
 from vite (:5173) or nginx (:8090), and there is nothing here to protect from
@@ -23,6 +30,7 @@ from .ops import Ops
 from .room import Room
 
 ROUTES = ("/healthz", "/agents", "/work", "/ops")
+WRITE_ROUTES = ("/ops/confirm",)
 
 
 def make_handler(room: Room, ops: Ops | None = None):
@@ -44,7 +52,7 @@ def make_handler(room: Room, ops: Ops | None = None):
         def do_OPTIONS(self) -> None:  # noqa: N802 (stdlib naming)
             self.send_response(204)
             self.send_header("Access-Control-Allow-Origin", "*")
-            self.send_header("Access-Control-Allow-Methods", "GET, OPTIONS")
+            self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
             self.send_header("Access-Control-Allow-Headers", "Content-Type")
             self.end_headers()
 
@@ -54,7 +62,11 @@ def make_handler(room: Room, ops: Ops | None = None):
                 if path == "/healthz":
                     self._write_json(200, {"ok": True})
                 elif path == "/":
-                    self._write_json(200, {"service": "agentroom", "routes": list(ROUTES)})
+                    self._write_json(200, {
+                        "service": "agentroom",
+                        "routes": list(ROUTES),
+                        "post": list(WRITE_ROUTES),
+                    })
                 elif path == "/agents":
                     self._write_json(200, room.agents())
                 elif path == "/work":
@@ -78,6 +90,57 @@ def make_handler(room: Room, ops: Ops | None = None):
                 # A Zulip outage is the expected failure here, and the view
                 # says so rather than rendering an empty room.
                 self._write_json(502, {"error": f"{type(error).__name__}: {error}"})
+
+        def do_POST(self) -> None:  # noqa: N802
+            path = urlparse(self.path).path.rstrip("/") or "/"
+            if path != "/ops/confirm":
+                self._write_json(404, {"error": f"no POST route {path}",
+                                       "post": list(WRITE_ROUTES)})
+                return
+            if ops is None:
+                self._write_json(503, {
+                    "error": "the ops engine is not configured; "
+                             "set OPSROOM_ZULIP_ENV to its own bot credential",
+                })
+                return
+            try:
+                length = int(self.headers.get("Content-Length") or 0)
+                raw = self.rfile.read(length) if length > 0 else b""
+                # No body at all is the common case — the view's one button
+                # means "all of them" — so an empty request is not an error.
+                body = json.loads(raw) if raw.strip() else {}
+            except (ValueError, json.JSONDecodeError) as error:
+                self._write_json(400, {"error": f"unreadable body: {error}"})
+                return
+            if not isinstance(body, dict):
+                self._write_json(400, {"error": "body must be a JSON object"})
+                return
+
+            channel, topic = body.get("channel"), body.get("topic")
+            if channel is None and topic is None:
+                if body.get("all", True) is not True:
+                    self._write_json(400, {
+                        "error": "pass {\"all\": true} or a {channel, topic} pair",
+                    })
+                    return
+                target = None
+            elif channel is None or topic is None:
+                self._write_json(400, {"error": "channel and topic go together"})
+                return
+            else:
+                target = (str(channel), str(topic))
+
+            try:
+                found = ops.confirm(target)
+            except Exception as error:
+                self._write_json(502, {"error": f"{type(error).__name__}: {error}"})
+                return
+            # 409, not 400: the request was well formed and the *state* is what
+            # refused it. Only `done` may be dismissed — the relay decides
+            # that, so a view that forgets to hide the button cannot clear a
+            # stall off the screen.
+            self._write_json(409 if found.get("refused") else
+                             404 if found.get("error") else 200, found)
 
     return Handler
 

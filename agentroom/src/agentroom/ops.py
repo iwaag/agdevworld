@@ -88,6 +88,7 @@ __all__ = [
     "named_in",
     "owns",
     "row_state",
+    "shown_state",
     "state_of",
 ]
 
@@ -307,6 +308,16 @@ def summarize(row: dict, instance: str) -> str:
     return f"{minutes} unanswered · {ident} by {who} · {served}"
 
 
+def shown_state(row: dict) -> str:
+    """The state a rendered row is actually *wearing*.
+
+    While the queue is dead every row reads `unknown` and keeps its last
+    verdict in `stale_state`; confirm has to act on what the human is looking
+    at, not on the field underneath it. Everywhere else the two are the same.
+    """
+    return str(row.get("stale_state") or row["state"])
+
+
 def describe(row: dict, instance: str, stalled_minutes: float) -> str:
     """One line of provenance. Every colour on this board is an inference from
     somebody else's leftovers, so the screen says what it inferred it from."""
@@ -358,6 +369,13 @@ class Ops:
     #: An `update_message` event names its channel by id and nothing else, so
     #: the sweep's own name/id mapping is what turns a resolve into a row.
     _stream_names: dict[int, str] = field(default_factory=dict, repr=False)
+    #: `(channel, bare topic)` a human has said they have seen, and the id of
+    #: the last post at the moment they said it. Not a delete: `_topics` keeps
+    #: the conversation, so an unresolve rename still finds its `old_key` in
+    #: `_apply_update` and the row comes back rather than being lost. In
+    #: memory only, and deliberately — it must die with the `done` rows it
+    #: hides, or a restart would show a board of debts already seen.
+    _confirmed: dict[tuple[str, str], int] = field(default_factory=dict, repr=False)
     _live: bool = False
     _reason: str = "starting"
     _error: str | None = None
@@ -702,6 +720,79 @@ class Ops:
         with self._lock:
             return self._stream_names.get(int(stream_id))
 
+    # -- what a human clears -----------------------------------------------
+
+    def confirm(
+        self, target: tuple[str, str] | None = None, now: float | None = None
+    ) -> dict:
+        """Mark the `done` rows as seen, so the board can stop showing them.
+
+        This board's principle is that evidence stays until a human has looked
+        at it, so `done` is not evicted on a timer — it is dismissed, by hand,
+        and `done` is the *only* state that may be. `stalled`, `awaiting` and
+        `acked` are live debt, and a button that clears live debt from the
+        screen is p9's twenty-six unnoticed minutes with a shortcut to it. The
+        check is here and not only in the view: a screen that hides a button is
+        not a rule, it is a habit.
+
+        What is recorded is the row *as it stood* — `(channel, topic)` and the
+        id of its last post. So the hiding expires by itself: any later post,
+        an unresolve included, carries a higher id and floats the row back up.
+        """
+        board = self.snapshot(now)
+        if target is None:
+            # "All of them" means all the *done* ones. The live debt beside
+            # them is not refused here, it is simply not what was asked for.
+            here = [row for row in board["rows"] if shown_state(row) == "done"]
+            refused: list[str] = []
+        else:
+            here = [
+                row
+                for row in board["rows"]
+                if (row["channel"], row["topic"]) == target
+            ]
+            if not here:
+                return {
+                    "confirmed": 0,
+                    "topics": [],
+                    "refused": [],
+                    "error": f"no row for {target[0]} / {target[1]} is on the board",
+                }
+            refused = sorted({
+                shown_state(row) for row in here if shown_state(row) != "done"
+            })
+        if refused:
+            return {
+                "confirmed": 0,
+                "topics": [],
+                "refused": refused,
+                "error": (
+                    "only done rows can be confirmed; "
+                    + ", ".join(refused)
+                    + " is still owed"
+                ),
+            }
+
+        marks: dict[tuple[str, str], int] = {}
+        for row in here:
+            if row["channel"] is None or row["topic"] is None:
+                continue  # an instance-level unknown row belongs to no topic
+            key = (row["channel"], row["topic"])
+            ident = int(row["provenance"].get("message_id") or 0)
+            marks[key] = max(marks.get(key, 0), ident)
+        with self._lock:
+            for key, ident in marks.items():
+                if ident >= self._confirmed.get(key, 0):
+                    self._confirmed[key] = ident
+        return {
+            "confirmed": len(here),
+            "topics": [
+                {"channel": channel, "topic": topic, "message_id": ident}
+                for (channel, topic), ident in sorted(marks.items())
+            ],
+            "refused": [],
+        }
+
     # -- what the view reads ---------------------------------------------
 
     def snapshot(self, now: float | None = None) -> dict:
@@ -725,6 +816,7 @@ class Ops:
             sweeps = self._sweeps
             sweep_calls = self._sweep_calls
             errors = list(self._errors)
+            confirmed = dict(self._confirmed)
 
         stalled_minutes = self.stalled_seconds / 60
         rows: list[dict] = []
@@ -744,6 +836,8 @@ class Ops:
                 "prefixes": list(roster.prefixes) if roster else [],
                 "served_marks": len(marks.get(instance, {})),
                 "counts": {"awaiting": 0, "stalled": 0, "acked": 0, "done": 0, "unknown": 0},
+                #: done rows of this instance a human has already dismissed.
+                "confirmed": 0,
             }
             if roster is None:
                 # Rule 3 of the plan, at the level of a whole agent: an
@@ -847,6 +941,30 @@ class Ops:
                 f"which would sweep it too"
             )
 
+        # A `done` row is the receipt for a debt that was paid, and it stays on
+        # the board until somebody says they have seen it (`confirm`). Hiding
+        # is by *mark*, not by deletion: the row is dropped only while it is
+        # still done and no post newer than the confirmed one has landed, so an
+        # unresolve — or any reply into a closed topic — brings it straight
+        # back. A `del` from `_topics` could not do that: the later rename
+        # would arrive with an `orig_subject` this engine no longer knows.
+        hidden = 0
+        if confirmed:
+            summaries = {summary["instance"]: summary for summary in instances}
+            kept = []
+            for row in rows:
+                mark = confirmed.get((row["channel"], row["topic"]))
+                ident = row["provenance"].get("message_id") or 0
+                if mark is not None and shown_state(row) == "done" and ident <= mark:
+                    hidden += 1
+                    summary = summaries.get(row["instance"])
+                    if summary is not None:
+                        summary["counts"]["done"] = max(0, summary["counts"]["done"] - 1)
+                        summary["confirmed"] += 1
+                    continue
+                kept.append(row)
+            rows = kept
+
         order = {"stalled": 0, "unknown": 1, "awaiting": 2, "acked": 3, "done": 4}
         rows.sort(key=lambda r: (order.get(r["state"], 9), -(r.get("age_seconds") or 0)))
 
@@ -866,6 +984,7 @@ class Ops:
                 "channels": len(channels),
                 "topics": len(topics),
             },
+            "confirmed": {"rows": hidden, "topics": len(confirmed)},
             "instances": instances,
             "rows": rows,
             "errors": errors,

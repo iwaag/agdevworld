@@ -1,8 +1,10 @@
 # agentroom
 
-A small read-only relay that lets agdevworld show what Zulip already knows:
+A small relay that lets agdevworld show what Zulip already knows:
 which agents exist, which of their work is still open, and — since
-`operation_room` p2 — **who owes a reply and for how long**.
+`operation_room` p2 — **who owes a reply and for how long**. It only ever
+reads the realm; the one thing it can be told is which of its own rows a human
+has already seen.
 
 Two halves with different disciplines, deliberately:
 
@@ -47,8 +49,9 @@ listening — the fastest way to tell a credentials problem from a UI one.
 
 ## Routes
 
-Unauthenticated, `GET` only, CORS open. This is cagent's *window* shape
-(`cagent_api/server.py`), minus the write side it does not have.
+Unauthenticated, CORS open, loopback. This is cagent's *window* shape
+(`cagent_api/server.py`). Everything is a `GET` except one POST, and that one
+writes only to this process's memory (see `POST /ops/confirm`).
 
 - `GET /healthz` → `{"ok": true}`
 - `GET /agents` → the `intro-<instance>` topics of `#agents`, each with its
@@ -64,6 +67,12 @@ Unauthenticated, `GET` only, CORS open. This is cagent's *window* shape
   `(instance, channel, topic)` that is `awaiting`, `stalled`, `acked`, `done`
   or `unknown`, sorted with stalled first, each carrying the evidence its
   state was read off. See below.
+
+- `POST /ops/confirm` → dismiss the `done` rows a human has looked at. An
+  empty body (or `{"all": true}`) confirms every `done` row on the board;
+  `{"channel": …, "topic": …}` confirms one conversation. Answers
+  `{"confirmed": n, "topics": [...], "refused": [...]}`, `409` when the target
+  is not `done`, `404` when it is not on the board at all.
 
 A Zulip failure answers `502` with the error text, so the view can say the
 room is unreadable instead of showing an empty one.
@@ -96,3 +105,22 @@ wrong reported 53 phantom stalls for Front on the first live run.
 in `stale_state` as evidence and never as the answer. p9's 26 silent minutes
 looked exactly like a quiet board, and a screen that renders unknown as idle
 cannot show the one failure it exists to catch.
+
+**`done` leaves the board by hand, not by clock.** A `done` row is the receipt
+for a debt that was paid, and this board's principle is that evidence stays
+until somebody has seen it — so there is no eviction timer, there is
+`POST /ops/confirm`. Three things about it:
+
+- **Only `done` may be dismissed**, and the *relay* is what enforces that. A
+  button that clears `stalled` off a screen is p9's twenty-six unnoticed
+  minutes with a shortcut to it, and a view that merely hides such a button is
+  a habit rather than a rule.
+- **It records a mark, not a deletion**: `(channel, bare topic)` plus the id of
+  the last post at that moment. Any later post floats the row back up — an
+  unresolve included, which a `del` from the topic table could not manage,
+  because the later rename would arrive naming an `orig_subject` the engine no
+  longer knew.
+- **It is in memory only.** The marks die with the relay, and so do the rows
+  they hide, so the two can never disagree — and a restart never opens on a
+  board of debts somebody already cleared. Nothing about a confirm reaches
+  Zulip.

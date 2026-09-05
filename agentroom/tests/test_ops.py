@@ -225,14 +225,18 @@ def test_a_real_rename_moves_the_row_rather_than_duplicating_it():
 # --- the roster is not guessed --------------------------------------------
 
 
-def snapshot_with(rosters, topics=(), live=True):
+def ops_with(rosters, topics=(), live=True):
     ops = Ops(env_path=__file__, stalled_seconds=STALL)
     ops._rosters = rosters
     ops._topics = {(t.channel, t.topic): t for t in topics}
     ops._channels = {"agforge-agstudio1", "pj-mediagen", "front"}
     ops._live = live
     ops._reason = "live" if live else "event queue expired; resyncing"
-    return ops.snapshot(now=NOW)
+    return ops
+
+
+def snapshot_with(rosters, topics=(), live=True):
+    return ops_with(rosters, topics, live).snapshot(now=NOW)
 
 
 def test_an_instance_without_a_roster_block_is_unknown_not_idle():
@@ -356,3 +360,115 @@ def test_a_sibling_reaching_into_an_owned_channel_is_stated_on_both_rows():
     # The sibling's own row has nobody to name: only prefix-owned rows are
     # collected, and the channel owner is not one of them.
     assert "shared_with" not in theirs["provenance"]
+
+
+# --- confirm: the only way a row leaves this board -------------------------
+
+
+def done_board(*, live=True):
+    """One `done` row and one live `stalled` row, which is the whole question:
+    the receipt may be dismissed and the debt beside it may not."""
+    return ops_with(
+        {"agforge-agstudio1": FORGE},
+        [
+            topic("agforge-agstudio1", "assetplan-poster",
+                  message("thanks", ident=42, ago=60), resolved=True),
+            topic("agforge-agstudio1", "assetrun-poster",
+                  message("please", ident=43, ago=5000)),
+        ],
+        live=live,
+    )
+
+
+def states(found):
+    return {row["topic"]: row["state"] for row in found["rows"]}
+
+
+def test_confirming_hides_the_done_rows_and_nothing_else():
+    ops = done_board()
+    assert states(ops.snapshot(now=NOW)) == {
+        "assetplan-poster": "done", "assetrun-poster": "stalled"}
+    found = ops.confirm(now=NOW)
+    assert found["confirmed"] == 1
+    assert found["topics"] == [
+        {"channel": "agforge-agstudio1", "topic": "assetplan-poster", "message_id": 42}]
+    assert states(ops.snapshot(now=NOW)) == {"assetrun-poster": "stalled"}
+
+
+def test_a_confirmed_row_stops_being_counted_for_its_agent():
+    # The agent card reads its counts, so a hidden row that is still counted
+    # would leave the board and the card disagreeing about the same debt.
+    ops = done_board()
+    assert ops.snapshot(now=NOW)["instances"][0]["counts"]["done"] == 1
+    ops.confirm(now=NOW)
+    summary = ops.snapshot(now=NOW)["instances"][0]
+    assert summary["counts"]["done"] == 0
+    assert summary["confirmed"] == 1
+
+
+def test_live_debt_cannot_be_confirmed_and_the_relay_is_what_refuses():
+    # The plan's first constraint, and the reason it is a constraint: a button
+    # that clears `stalled` off the screen is p9's twenty-six unnoticed
+    # minutes with a shortcut to it. The view hiding the button is not enough.
+    ops = done_board()
+    found = ops.confirm(("agforge-agstudio1", "assetrun-poster"), now=NOW)
+    assert found["confirmed"] == 0 and found["refused"] == ["stalled"]
+    assert states(ops.snapshot(now=NOW))["assetrun-poster"] == "stalled"
+
+
+def test_confirming_one_topic_leaves_the_other_done_rows_alone():
+    ops = ops_with(
+        {"agforge-agstudio1": FORGE},
+        [
+            topic("agforge-agstudio1", "a", message("ok", ident=1, ago=60), resolved=True),
+            topic("agforge-agstudio1", "b", message("ok", ident=2, ago=60), resolved=True),
+        ],
+    )
+    ops.confirm(("agforge-agstudio1", "a"), now=NOW)
+    assert list(states(ops.snapshot(now=NOW))) == ["b"]
+
+
+def test_a_topic_that_is_not_on_the_board_is_not_silently_confirmed():
+    ops = done_board()
+    found = ops.confirm(("agforge-agstudio1", "never-existed"), now=NOW)
+    assert found["confirmed"] == 0 and "no row for" in found["error"]
+
+
+def test_a_new_post_floats_a_confirmed_row_back_up():
+    # Why the mark is a message id and not a delete: confirm says "I have seen
+    # this row", not "forget this conversation".
+    ops = done_board()
+    ops.confirm(now=NOW)
+    assert "assetplan-poster" not in states(ops.snapshot(now=NOW))
+    ops._topics[("agforge-agstudio1", "assetplan-poster")].add(
+        message("one more thing", ident=99, ago=5))
+    assert states(ops.snapshot(now=NOW))["assetplan-poster"] == "done"
+
+
+def test_an_unresolve_brings_the_row_back_even_with_no_new_post():
+    # The trap the plan names: a plain `del` from `_topics` would leave the
+    # later rename with an `orig_subject` this engine no longer knows, and
+    # `_apply_update` would drop it — a re-opened conversation nobody sees.
+    ops = done_board()
+    ops._stream_names = {7: "agforge-agstudio1"}
+    ops.confirm(now=NOW)
+    ops._apply({"type": "update_message", "stream_id": 7,
+                "orig_subject": "✔ assetplan-poster", "subject": "assetplan-poster"})
+    assert states(ops.snapshot(now=NOW))["assetplan-poster"] == "awaiting"
+
+
+def test_confirm_acts_on_what_the_screen_shows_while_the_queue_is_dead():
+    # Every row reads `unknown` then, with its last verdict in `stale_state`.
+    # A `done` receipt is still dismissible; the stall beside it is still not.
+    ops = done_board(live=False)
+    assert states(ops.snapshot(now=NOW)) == {
+        "assetplan-poster": "unknown", "assetrun-poster": "unknown"}
+    assert ops.confirm(("agforge-agstudio1", "assetrun-poster"), now=NOW)["refused"] == ["stalled"]
+    ops.confirm(now=NOW)
+    assert list(states(ops.snapshot(now=NOW))) == ["assetrun-poster"]
+
+
+def test_the_board_says_how_much_it_is_hiding():
+    ops = done_board()
+    ops.confirm(now=NOW)
+    assert ops.snapshot(now=NOW)["confirmed"] == {"rows": 1, "topics": 1}

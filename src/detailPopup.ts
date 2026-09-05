@@ -20,6 +20,7 @@ import {
   type AutolabProject,
   type AutolabSummary,
 } from './autolabState'
+import { postedAt, type RoomAgent, type RoomWorkRow } from './agentRoomState'
 import type { PanelSelection } from './views'
 
 const POPUP_CSS = `
@@ -158,6 +159,10 @@ function selectionKey(selection: PanelSelection): string {
     return `nodes:${t.id ?? t.slug ?? t.name ?? 'unnamed'}`
   }
   if (selection.view === 'autolab') return `autolab:${selection.node}/${selection.job.name}`
+  if (selection.view === 'agent-room') return `agent-room:${selection.agent.instance}`
+  if (selection.view === 'agent-room-topic') {
+    return `agent-room-topic:${selection.row.channel}/${selection.row.topic}`
+  }
   if (selection.view === 'autolab-project') {
     return `autolab-project:${selection.node}/${selection.project.name}`
   }
@@ -165,6 +170,8 @@ function selectionKey(selection: PanelSelection): string {
 }
 
 function selectionPayload(selection: PanelSelection): unknown {
+  if (selection.view === 'agent-room') return { agent: selection.agent, open: selection.work }
+  if (selection.view === 'agent-room-topic') return selection.row
   if (selection.view === 'nodes') return selection.target
   if (selection.view === 'autolab') return selection.job
   if (selection.view === 'autolab-project') {
@@ -537,6 +544,80 @@ function renderProject(node: string, project: AutolabProject, profiles: string[]
   body!.append(section)
 }
 
+
+// The agent room. An introduction is a contract other agents act on, so it is
+// shown as it was posted — no summarising, no re-ordering, and no harness or
+// model line, which the introductions do not carry and this view does not add.
+function renderRoomAgent(agent: RoomAgent, open: RoomWorkRow[]): void {
+  headerName.textContent = agent.instance
+  headerKind.textContent = agent.entrance ? `entrance ${agent.entrance}` : 'no own channel'
+  headerStatus.textContent = open.length === 0 ? 'NOTHING OPEN' : `${open.length} OPEN`
+  headerStatus.style.color = open.length === 0 ? '#67e8a5' : '#70c7ff'
+
+  const intro = el('section')
+  intro.append(el('h3', undefined, 'INTRODUCTION'))
+  if (agent.intro) {
+    intro.append(el('p', 'dp-summary-meta', `#agents / ${agent.topic} · posted ${postedAt(agent.intro)}`))
+    intro.append(el('pre', undefined, agent.intro.content))
+  } else {
+    intro.append(el('p', 'dp-msg', 'this topic holds no readable introduction'))
+  }
+  body!.append(intro)
+
+  const work = el('section')
+  work.append(el('h3', undefined, `OPEN IN ${(agent.entrance ?? agent.instance).toUpperCase()}`))
+  if (open.length === 0) {
+    work.append(el('p', 'dp-msg', 'every topic in this channel is resolved'))
+  } else {
+    for (const row of open) {
+      const box = el('div', 'dp-diff')
+      const head = el('div', 'dp-diff-head')
+      head.append(el('span', undefined, row.topic))
+      box.append(head)
+      box.append(el('p', 'dp-msg', row.channel))
+      work.append(box)
+    }
+  }
+  // Project work is not attributed to an agent on purpose: a `pj-` channel is
+  // the project's board, and no topic name says whose task it is.
+  work.append(el('p', 'dp-summary-meta', 'project work is listed under its project, in the open-work mode'))
+  body!.append(work)
+
+  if (agent.history.length > 1) {
+    const history = el('section')
+    const details = el('details')
+    details.append(el('summary', undefined, `EARLIER INTRODUCTIONS (${agent.history.length - 1})`))
+    for (const post of agent.history.slice(0, -1).reverse()) {
+      details.append(el('p', 'dp-summary-meta', `${post.sender} · ${postedAt(post)}`))
+      details.append(el('pre', undefined, post.content))
+    }
+    history.append(details)
+    body!.append(history)
+  }
+}
+
+function renderRoomTopic(row: RoomWorkRow): void {
+  headerName.textContent = row.topic
+  headerKind.textContent = row.channel
+  headerStatus.textContent = 'UNRESOLVED'
+  headerStatus.style.color = row.kind === 'project' ? '#9b8cff' : '#70c7ff'
+
+  const section = el('section')
+  section.append(el('h3', undefined, 'TOPIC'))
+  section.append(
+    kvList([
+      ['topic', row.topic],
+      ['channel', row.channel],
+      [row.kind === 'project' ? 'project' : 'agent', row.group],
+      ['state', 'unresolved — the name carries no ✔ prefix'],
+    ]),
+  )
+  // What the topic means is the agent's vocabulary, not this view's: the only
+  // thing read here is Zulip's own resolve marker.
+  section.append(el('p', 'dp-summary-meta', 'the topic name is shown as posted; its prefix is the owning agent\'s convention'))
+  body!.append(section)
+}
+
 export function showDetailPopup(selection: PanelSelection): void {
   const node = ensurePopup()
   const key = selectionKey(selection)
@@ -556,7 +637,9 @@ export function showDetailPopup(selection: PanelSelection): void {
   currentSelection = selection
 
   body!.replaceChildren()
-  if (selection.view === 'nodes') renderNode(selection.target, selection.device)
+  if (selection.view === 'agent-room') renderRoomAgent(selection.agent, selection.work)
+  else if (selection.view === 'agent-room-topic') renderRoomTopic(selection.row)
+  else if (selection.view === 'nodes') renderNode(selection.target, selection.device)
   else if (selection.view === 'autolab') renderJob(selection.node, selection.job)
   else if (selection.view === 'autolab-project') {
     renderProject(selection.node, selection.project, selection.profiles)

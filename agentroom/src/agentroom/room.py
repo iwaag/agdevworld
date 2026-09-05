@@ -122,16 +122,25 @@ class Room:
 
     # -- reads -----------------------------------------------------------
 
+    def _intro_topics(self, client: ZulipClient) -> list[tuple[str, str]]:
+        """`(topic, instance)` for every introduction in `#agents`.
+
+        Matched after the `\u2714 ` prefix is removed, so a resolved
+        introduction topic is still an agent rather than a disappearance.
+        """
+        stream_id = client.stream_id(AGENTS_CHANNEL)
+        found = []
+        for topic in client.channel_topics(stream_id):
+            name = bare_topic(topic)
+            if name.startswith(INTRO_PREFIX):
+                found.append((topic, name[len(INTRO_PREFIX):]))
+        return found
+
     def _read_agents(self) -> dict:
         client = self.client()
         channel_names = {channel["name"] for channel in client.channels()}
-        stream_id = client.stream_id(AGENTS_CHANNEL)
         agents = []
-        for topic in client.channel_topics(stream_id):
-            name = bare_topic(topic)
-            if not name.startswith(INTRO_PREFIX):
-                continue
-            instance = name[len(INTRO_PREFIX):]
+        for topic, instance in self._intro_topics(client):
             posts = _readable(client.topic_history(AGENTS_CHANNEL, topic, self.intro_history))
             agents.append({
                 "instance": instance,
@@ -146,28 +155,47 @@ class Room:
         return {"channel": AGENTS_CHANNEL, "agents": agents, "calls": client.calls}
 
     def _read_work(self) -> dict:
-        """Every unresolved topic of every project channel, flat.
+        """Every unresolved topic of every board an agent works on, flat.
 
-        A project is a `pj-<slug>` channel; the `work-<label>` channels autolab
-        opens for its tasks inherit the project channel's folder, which is the
-        only machine-readable link back to the project (see
-        `agautolab/project_archive.py` for the naming rules themselves).
+        Two kinds of board, because work lives in two places:
+
+        - a **project**: the `pj-<slug>` channel, plus the `work-<label>`
+          channels autolab opens for its tasks. Those are linked to the project
+          by their **channel folder**, not by their name — a project channel
+          files itself and its `work-` channels inherit the folder — which is
+          the only machine-readable link back (see `agautolab/project_archive.py`
+          for the naming rules themselves).
+        - an **agent**: the instance's own channel, where forge's
+          `assetplan-`/`assetrun-` topics and every question put to an agent
+          live. Nothing in a `pj-` channel would ever show those.
+
+        What counts as open is Zulip's `\u2714 ` rename and nothing else. Topic
+        naming differs per agent; resolution does not.
         """
         client = self.client()
         channels = client.channels()
+        by_name = {channel["name"]: channel for channel in channels}
         projects = {
             channel["folder_id"]: channel["name"]
             for channel in channels
             if channel["name"].startswith(PROJECT_PREFIX) and channel.get("folder_id") is not None
         }
-        watched = [
-            channel for channel in channels
-            if channel["name"].startswith(PROJECT_PREFIX)
-            or (channel["name"].startswith(WORK_PREFIX) and channel.get("folder_id") in projects)
-        ]
+        # (channel, kind, group) — `group` is what the row is filed under.
+        watched: list[tuple[dict, str, str]] = []
+        for channel in sorted(channels, key=lambda c: c["name"]):
+            name = channel["name"]
+            if name.startswith(PROJECT_PREFIX):
+                watched.append((channel, "project", name))
+            elif name.startswith(WORK_PREFIX) and channel.get("folder_id") in projects:
+                watched.append((channel, "project", projects[channel["folder_id"]]))
+        for _, instance in self._intro_topics(client):
+            channel = by_name.get(instance)
+            if channel is not None:
+                watched.append((channel, "agent", instance))
+
         rows: list[dict] = []
         errors: list[dict] = []
-        for channel in sorted(watched, key=lambda c: c["name"]):
+        for channel, kind, group in watched:
             try:
                 topics = client.channel_topics(int(channel["stream_id"]))
             except Exception as error:  # one unreadable channel must not empty the view
@@ -179,11 +207,12 @@ class Room:
                 rows.append({
                     "channel": channel["name"],
                     "topic": topic,
-                    "project": projects.get(channel.get("folder_id"), channel["name"]),
+                    "kind": kind,
+                    "group": group,
                     "stream_id": int(channel["stream_id"]),
                 })
         return {
-            "channels": [channel["name"] for channel in watched],
+            "channels": [channel["name"] for channel, _, _ in watched],
             "topics": rows,
             "errors": errors,
             "calls": client.calls,

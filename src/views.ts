@@ -29,6 +29,15 @@ import {
   type DispatchNode,
   type PlaneIssue,
 } from './planeState'
+import {
+  agentWork,
+  introHeadline,
+  loadRoomAgents,
+  loadRoomWork,
+  type RoomAgent,
+  type RoomWork,
+  type RoomWorkRow,
+} from './agentRoomState'
 import type { PanelChip, PanelGridApi, PanelGridConfig, PanelRowStatus } from './scenes/PanelGridScene'
 
 // A selection carries the full source record so detail views can render
@@ -48,6 +57,10 @@ export type PanelSelection =
       detail?: AutolabJobDetail
       summary?: { iter: string; text: string }
     }
+  // The agent room carries the agent's whole introduction and the open topics
+  // of its own channel, so the popup renders without a second fetch.
+  | { view: 'agent-room'; agent: RoomAgent; work: RoomWorkRow[] }
+  | { view: 'agent-room-topic'; row: RoomWorkRow }
 
 const CLUSTER_STATUS_STYLE: Record<ClusterStatus, PanelRowStatus> = {
   converged: { emoji: '✅', color: 0x67e8a5, label: 'CONVERGED' },
@@ -274,7 +287,7 @@ export function tasksViewConfig(): PanelGridConfig {
     unavailableText: 'Plane task list unavailable',
     subtitle: (count) => `${count} backlog / ready tasks`,
     footer: 'manual dispatch: choose a node, then execute or cancel a Ready task',
-    switchTo: { key: 'nodes', label: 'nodes' },
+    switchTo: { key: 'agentroom', label: 'agent room' },
     bind: (bound) => {
       api = bound
     },
@@ -352,3 +365,104 @@ const WORKSPACE_ACTIVITY_STYLE: Record<string, PanelRowStatus> = {
 }
 
 const WORKSPACE_ACTIVITY_UNKNOWN: PanelRowStatus = { emoji: '❓', color: 0xb7b5d8, label: 'UNKNOWN' }
+
+// The agent room: who exists, and what of theirs is still open. Both come
+// live from Zulip through the `agentroom` relay — there is no snapshot file
+// behind this view, deliberately.
+//
+// Two modes rather than two views, because they are two readings of one
+// board: the agents, and the flat list of everything unresolved. The plan
+// asked for cards; this is the same card grid the other four views use.
+
+const AGENT_IDLE: PanelRowStatus = { emoji: '🟢', color: 0x67e8a5, label: 'NOTHING OPEN' }
+const AGENT_UNKNOWN: PanelRowStatus = { emoji: '❓', color: 0xb7b5d8, label: 'NO INTRO' }
+const TOPIC_PROJECT: PanelRowStatus = { emoji: '🧭', color: 0x9b8cff, label: 'PROJECT' }
+const TOPIC_AGENT: PanelRowStatus = { emoji: '💬', color: 0x70c7ff, label: 'AGENT' }
+
+function agentStatus(agent: RoomAgent, open: number): PanelRowStatus {
+  if (!agent.intro) return AGENT_UNKNOWN
+  if (open === 0) return AGENT_IDLE
+  return { emoji: '📥', color: 0x70c7ff, label: `${open} OPEN` }
+}
+
+function clipped(text: string, limit: number): string {
+  return text.length > limit ? `${text.slice(0, limit - 1)}…` : text
+}
+
+export function agentRoomViewConfig(onSelect: (selection: PanelSelection) => void): PanelGridConfig {
+  let mode: 'agents' | 'work' = 'agents'
+  let agents: RoomAgent[] = []
+  let work: RoomWork | undefined
+  let api: PanelGridApi | undefined
+
+  return {
+    key: 'agentroom',
+    title: 'agent room / zulip now',
+    loadingText: 'reading Zulip…',
+    unavailableText: 'the agent room is unreadable',
+    subtitle: (count) =>
+      mode === 'agents' ? `${count} agents have introduced themselves` : `${count} topics are still open`,
+    footer: 'live from Zulip: introductions from #agents, open work from every project and agent channel',
+    switchTo: { key: 'nodes', label: 'nodes' },
+    bind: (bound) => {
+      api = bound
+    },
+    // One unreadable channel must be said out loud: the alternative is a
+    // shorter list that looks exactly like a quieter realm.
+    headline: () => {
+      const failed = work?.errors ?? []
+      if (failed.length > 0) return `${failed.length} channel(s) could not be read: ${failed.map((e) => e.channel).join(', ')}`
+      return work ? `${work.channels.length} channels swept` : undefined
+    },
+    chips: () => {
+      const chips: PanelChip[] = (['agents', 'work'] as const).map((value) => ({
+        id: `mode-${value}`,
+        label: value === 'agents' ? 'agents' : 'open work',
+        active: mode === value,
+        onClick: () => {
+          if (mode === value) return
+          mode = value
+          api?.reload()
+        },
+      }))
+      chips.push({ id: 'refresh', label: '⟳ refresh', onClick: () => api?.reload() })
+      return chips
+    },
+    loadRows: async () => {
+      // Both reads on every load: the agent cards carry an open-work count, so
+      // neither answer is complete without the other.
+      const [foundAgents, foundWork] = await Promise.all([loadRoomAgents(), loadRoomWork()])
+      agents = foundAgents
+      work = foundWork
+      if (mode === 'agents') {
+        return agents.map((agent) => {
+          const open = agentWork(foundWork, agent.instance)
+          return {
+            id: `agent/${agent.instance}`,
+            name: clipped(agent.instance, 24),
+            status: agentStatus(agent, open.length),
+            detail: `${agent.entrance ?? 'no channel'} · ${clipped(introHeadline(agent), 76)}`,
+            payload: { kind: 'agent' as const, agent, work: open },
+          }
+        })
+      }
+      return foundWork.topics.map((row) => ({
+        id: `${row.channel}/${row.topic}`,
+        name: clipped(row.topic, 26),
+        status: row.kind === 'project' ? TOPIC_PROJECT : TOPIC_AGENT,
+        detail: row.channel === row.group ? row.channel : `${row.group} · ${row.channel}`,
+        payload: { kind: 'topic' as const, row },
+      }))
+    },
+    onSelect: (row) => {
+      const payload = row.payload as
+        | { kind: 'agent'; agent: RoomAgent; work: RoomWorkRow[] }
+        | { kind: 'topic'; row: RoomWorkRow }
+      if (payload.kind === 'agent') {
+        onSelect({ view: 'agent-room', agent: payload.agent, work: payload.work })
+        return
+      }
+      onSelect({ view: 'agent-room-topic', row: payload.row })
+    },
+  }
+}

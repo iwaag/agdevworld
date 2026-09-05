@@ -1,6 +1,13 @@
 import Phaser from 'phaser'
 import { PanelGridScene } from './scenes/PanelGridScene'
-import { autolabViewConfig, nodesViewConfig, tasksViewConfig, workspacesViewConfig, type PanelSelection } from './views'
+import {
+  agentRoomViewConfig,
+  autolabViewConfig,
+  nodesViewConfig,
+  tasksViewConfig,
+  workspacesViewConfig,
+  type PanelSelection,
+} from './views'
 import { VIEW_KEYS, currentView, registerGame, switchView } from './viewSwitcher'
 import { initChatPanel } from './chatPanel'
 import { setAskHandler, showDetailPopup } from './detailPopup'
@@ -60,6 +67,14 @@ setAskHandler((selection) => {
     chat.ask(`Tell me about the autolab job ${selection.job.name} on node ${selection.node}.`)
     return
   }
+  if (selection.view === 'agent-room') {
+    chat.ask(`Tell me about the agent ${selection.agent.instance}.`)
+    return
+  }
+  if (selection.view === 'agent-room-topic') {
+    chat.ask(`Tell me about the Zulip topic ${selection.row.topic} in ${selection.row.channel}.`)
+    return
+  }
   if (selection.view === 'nodes') {
     const target = selection.target.target
     const name = target.slug ?? target.name ?? target.id ?? 'the selected node'
@@ -84,6 +99,7 @@ const game = new Phaser.Game({
     new PanelGridScene(workspacesViewConfig(handleSelection)),
     new PanelGridScene(autolabViewConfig(handleSelection)),
     new PanelGridScene(tasksViewConfig()),
+    new PanelGridScene(agentRoomViewConfig(handleSelection)),
   ],
 })
 registerGame(game, 'nodes')

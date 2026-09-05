@@ -1,8 +1,12 @@
 # agdevworld Development Guide
 
-agdevworld is a pure frontend. It hosts no agent: the conversational entrance
-moved to the Front agent in `pj-agdev/agfront`, which talks to the Developer
-in Zulip `#front` and dispatches work to the other agents from there.
+agdevworld hosts no agent: the conversational entrance moved to the Front agent
+in `pj-agdev/agfront`, which talks to the Developer in Zulip `#front` and
+dispatches work to the other agents from there.
+
+Since the `agent_room` episode it is no longer a *pure* frontend either. One
+small read-only service sits beside it, `agentroom/`, and the agent room view
+is the only thing that reads it. Everything else is still static.
 
 ## Commands
 
@@ -11,12 +15,16 @@ in Zulip `#front` and dispatches work to the other agents from there.
 - `docker compose up --build -d web` — production-style bundle behind nginx on :8090. Keep it current when a user may want to look.
 - `docker compose ps web` / `curl -I http://localhost:8090/` — confirm it came up.
 - `CAGENT_URL=https://localhost:8789 npm run cluster:fetch` — refresh the three cluster snapshots through cagent.
+- `AGENTROOM_ZULIP_ENV=<a zulip .env> agentroom/service/serve.sh` — the agent room's relay on :8094. The agent room view is blank without it; every other view is unaffected.
+- `agentroom/service/serve.sh check` — one read, counts printed, no listener. Tells a credentials problem from a UI one.
+- `cd agentroom && uv run pytest -q` — the relay's tests.
 
 ## Files
 
 - `src/main.ts` — wiring: scenes, the chat panel, the click-to-detail path.
 - `src/scenes/PanelGridScene.ts` — one config-driven grid scene, shared by all four views.
-- `src/views.ts` — the four view configs (`nodes`, `workspaces`, `autolab`, `tasks`).
+- `src/views.ts` — the five view configs (`nodes`, `workspaces`, `autolab`, `tasks`, `agentroom`).
+- `src/agentRoomState.ts` — the agent room's two reads, through the `agentroom` relay.
 - `src/viewSwitcher.ts` — the single seam for changing the visible view.
 - `src/chatPanel.ts` — the chat overlay; it owns history and applies returned UI actions.
 - `src/detailPopup.ts` — the detail overlay, incl. the per-iteration `summary` button.
@@ -24,7 +32,44 @@ in Zulip `#front` and dispatches work to the other agents from there.
 - `scripts/fetch-cluster-state.mjs` — snapshot refresh through cagent. The one piece of JavaScript outside `src/`; it is a developer command, not part of the service.
 - `public/cluster/*.json` — live snapshots, git-ignored; `public/*.sample.json` is the fallback. The Docker build copies whatever is in `public/` at build time, so move a live snapshot out first if a sample-only image is wanted.
 
-## No backend this phase
+## The agent room
+
+`agentroom/` is a stdlib HTTP relay (cagent's *window* shape: unauthenticated,
+`GET` only, loopback) that reads Zulip live and answers three routes —
+`/healthz`, `/agents`, `/work`. Its own `README.md` is the reference.
+
+The view is the fifth entry in the `nodes → workspaces → autolab → tasks →
+agentroom` cycle, and it has two modes:
+
+- **agents** — one card per `intro-<instance>` topic of `#agents`: the
+  instance, its own channel, the first line of its introduction, and a badge
+  counting the open topics in that channel. Clicking one shows the whole
+  introduction as posted, its open topics, and the earlier introductions.
+- **open work** — every unresolved topic of every `pj-<slug>` channel, the
+  `work-<label>` channels filed in the same channel folder, and every agent's
+  own channel. Flat, filed under its project or its agent.
+
+Three things it deliberately does not do, all of them from the episode plan:
+
+- **No snapshot file.** Unlike the cluster views there is no
+  `public/*.json` behind it; the relay reads Zulip per request and caches for
+  30 s in memory only.
+- **No topic-name interpretation.** Open means the absence of Zulip's `✔ `
+  prefix and nothing else. `workplan-`/`assetplan-`/`workrun-` are each
+  agent's own vocabulary, and reading them here would make this view wrong
+  the first time an agent changed one.
+- **No harness, model or backend.** The introductions do not carry it and the
+  view does not add it ("Agent ≠ Model").
+
+`[selfnote]` posts and lines never reach the browser: the relay strips them,
+so the view hides exactly what `agentchat read` hides.
+
+The relay's address defaults to `http://localhost:8094`; set
+`VITE_AGENTROOM_URL` at build time to point elsewhere. It is a separate
+process nobody starts automatically — when it is down the agent room view says
+so by name and the other four views carry on.
+
+## No backend for the rest
 
 The embedded assistant service and everything that pointed at it — the
 `assistant` compose service, the nginx `/api` proxy, the vite dev proxy,

@@ -19,12 +19,13 @@ import json
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse
 
+from .ops import Ops
 from .room import Room
 
-ROUTES = ("/healthz", "/agents", "/work")
+ROUTES = ("/healthz", "/agents", "/work", "/ops")
 
 
-def make_handler(room: Room):
+def make_handler(room: Room, ops: Ops | None = None):
     class Handler(BaseHTTPRequestHandler):
         server_version = "agentroom/0.1.0"
 
@@ -58,6 +59,19 @@ def make_handler(room: Room):
                     self._write_json(200, room.agents())
                 elif path == "/work":
                     self._write_json(200, room.work())
+                elif path == "/ops":
+                    # Without a credential of its own the engine does not run,
+                    # and the view must be told that rather than shown an
+                    # empty board — an unreadable room and a quiet one look
+                    # identical, which is the failure this whole view exists
+                    # to prevent.
+                    if ops is None:
+                        self._write_json(503, {
+                            "error": "the ops engine is not configured; "
+                                     "set OPSROOM_ZULIP_ENV to its own bot credential",
+                        })
+                    else:
+                        self._write_json(200, ops.snapshot())
                 else:
                     self._write_json(404, {"error": f"no route {path}", "routes": list(ROUTES)})
             except Exception as error:
@@ -68,5 +82,5 @@ def make_handler(room: Room):
     return Handler
 
 
-def build_server(host: str, port: int, room: Room) -> ThreadingHTTPServer:
-    return ThreadingHTTPServer((host, port), make_handler(room))
+def build_server(host: str, port: int, room: Room, ops: Ops | None = None) -> ThreadingHTTPServer:
+    return ThreadingHTTPServer((host, port), make_handler(room, ops))

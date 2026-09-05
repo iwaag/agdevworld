@@ -60,6 +60,9 @@ export interface OpsInstance {
   prefixes: string[]
   served_marks: number
   counts: Record<OpsState, number>
+  // done rows of this instance that have already been confirmed away. The
+  // counts above no longer include them, so the card and the board agree.
+  confirmed: number
 }
 
 export interface OpsHealth {
@@ -83,6 +86,8 @@ export interface OpsBoard {
   instances: OpsInstance[]
   rows: OpsRow[]
   errors: Array<{ channel: string; error: string }>
+  // What the relay is holding back because somebody said they had seen it.
+  confirmed: { rows: number; topics: number }
 }
 
 // A board the view can render when the relay itself cannot be reached. The
@@ -108,6 +113,7 @@ export function unreadableBoard(reason: string): OpsBoard {
     instances: [],
     rows: [],
     errors: [],
+    confirmed: { rows: 0, topics: 0 },
   }
 }
 
@@ -124,6 +130,47 @@ export async function loadOpsBoard(): Promise<OpsBoard> {
     return unreadableBoard(detail ?? `agentroom answered ${response.status}`)
   }
   return payload as OpsBoard
+}
+
+// The state a row is *wearing*, which is the one a human is deciding about.
+// While the queue is dead every row reads `unknown` and keeps its last verdict
+// in `stale_state`; the relay's `confirm` reads it the same way.
+export function shownState(row: OpsRow): OpsState {
+  return row.stale_state ?? row.state
+}
+
+// Dismiss the `done` rows: all of them, or one conversation.
+//
+// The relay is the one that decides what may be dismissed — only `done`, and
+// it answers 409 for anything else. This function does not pre-filter and
+// does not interpret the refusal beyond showing it: a screen that decided for
+// itself which debts could be cleared would be a second opinion in front of
+// the evidence, which is the mistake this whole view is built against.
+export async function confirmDone(
+  target?: { channel: string; topic: string },
+): Promise<{ ok: boolean; confirmed: number; message: string }> {
+  let response: Response
+  try {
+    response = await fetch(`${BASE}/ops/confirm`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(target ?? { all: true }),
+    })
+  } catch {
+    return { ok: false, confirmed: 0, message: `the agentroom relay is not answering on ${BASE}` }
+  }
+  const payload = (await response.json().catch(() => undefined)) as
+    | { confirmed?: number; error?: string }
+    | undefined
+  if (!response.ok) {
+    return {
+      ok: false,
+      confirmed: 0,
+      message: payload?.error ?? `agentroom answered ${response.status}`,
+    }
+  }
+  const confirmed = payload?.confirmed ?? 0
+  return { ok: true, confirmed, message: `confirmed ${confirmed} done ${confirmed === 1 ? 'row' : 'rows'}` }
 }
 
 export function ago(seconds: number | null | undefined): string {

@@ -40,7 +40,9 @@ import {
 } from './agentRoomState'
 import {
   healthLine,
+  confirmDone,
   loadOpsBoard,
+  shownState,
   type OpsBoard,
   type OpsInstance,
   type OpsRow,
@@ -561,6 +563,23 @@ export function opsViewConfig(onSelect: (selection: PanelSelection) => void): Pa
   let mode: 'board' | 'agents' = 'board'
   let board: OpsBoard | undefined
   let api: PanelGridApi | undefined
+  // What the last confirm answered. A refusal has to be *read*, not swallowed
+  // into a reload that looks like nothing happened.
+  let note = ''
+  let working = false
+
+  const doneRows = () => (board?.rows ?? []).filter((row) => shownState(row) === 'done')
+
+  const confirm = async (target?: { channel: string; topic: string }) => {
+    if (working) return
+    working = true
+    note = target ? 'confirming…' : 'confirming all done…'
+    api?.reload()
+    const found = await confirmDone(target)
+    working = false
+    note = found.ok ? '' : `⚠ ${found.message}`
+    api?.reload()
+  }
 
   return {
     key: 'ops',
@@ -583,10 +602,16 @@ export function opsViewConfig(onSelect: (selection: PanelSelection) => void): Pa
           : `${count} ${plural(count, 'row')}, state unknown`
       }
       if (mode === 'agents') return `${count} ${plural(count, 'agent')} on the board`
+      // `done` is a receipt, not an open row. Counting it under the word
+      // "open" was the p2 review's small lie: the number grew all day while
+      // nothing was owed. It is still shown, just not as debt.
+      const done = doneRows().length
+      const open = count - done
+      const tail = done > 0 ? ` · ${done} done to confirm` : ''
+      if (open === 0) return `nothing is owed a reply right now${tail}`
       const stalled = board.rows.filter((row) => row.state === 'stalled').length
-      if (count === 0) return 'nothing is owed a reply right now'
-      if (stalled > 0) return `${stalled} stalled of ${count} open ${plural(count, 'row')}`
-      return `${count} ${plural(count, 'row')} open`
+      if (stalled > 0) return `${stalled} stalled of ${open} open ${plural(open, 'row')}${tail}`
+      return `${open} ${plural(open, 'row')} open${tail}`
     },
     footer:
       'conversation layer only — Zulip, live: awaiting · stalled · acked · done · unknown',
@@ -594,7 +619,14 @@ export function opsViewConfig(onSelect: (selection: PanelSelection) => void): Pa
     bind: (bound) => {
       api = bound
     },
-    headline: () => (board ? healthLine(board) : undefined),
+    headline: () => {
+      if (note) return note
+      if (!board) return undefined
+      const hidden = board.confirmed?.rows ?? 0
+      return hidden > 0
+        ? `${healthLine(board)} · ${hidden} confirmed ${plural(hidden, 'row')} hidden`
+        : healthLine(board)
+    },
     chips: () => {
       const chips: PanelChip[] = (['board', 'agents'] as const).map((value) => ({
         id: `ops-mode-${value}`,
@@ -606,6 +638,17 @@ export function opsViewConfig(onSelect: (selection: PanelSelection) => void): Pa
           api?.reload()
         },
       }))
+      // Only when there is something to confirm, and only on the board — the
+      // agents view has no rows to act on. The relay refuses anything but
+      // `done` anyway; this is the affordance, not the rule.
+      const done = doneRows().length
+      if (mode === 'board' && done > 0) {
+        chips.push({
+          id: 'ops-confirm',
+          label: working ? '✓ confirming…' : `✓ confirm ${done} done`,
+          onClick: () => void confirm(),
+        })
+      }
       chips.push({ id: 'ops-refresh', label: '⟳ refresh', onClick: () => api?.reload() })
       return chips
     },
@@ -654,6 +697,18 @@ export function opsViewConfig(onSelect: (selection: PanelSelection) => void): Pa
         detail:
           (row.topic ? `${clipped(row.channel ?? '', 22)}\n${clipped(row.topic, 22)}\n` : '') +
           clipped(row.provenance.short, 76),
+        // One card, one conversation, so the row-level confirm belongs here
+        // rather than only in the chip. The card stays selectable: the
+        // evidence popup is the reason it is a card at all.
+        actions:
+          shownState(row) === 'done' && row.channel && row.topic
+            ? [{
+                label: '✓ confirm',
+                color: 0x67e8a5,
+                disabled: working,
+                onClick: () => void confirm({ channel: row.channel!, topic: row.topic! }),
+              }]
+            : undefined,
         payload: { kind: 'row' as const, row, board: found },
       }))
     },

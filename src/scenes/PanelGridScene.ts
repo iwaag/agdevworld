@@ -228,8 +228,13 @@ export class PanelGridScene extends Phaser.Scene {
     const hasActions = (row.actions?.length ?? 0) > 0
     const height = this.panelHeight()
     const top = -height / 2
-    const nameSize = hasActions ? 16 : (this.config.nameFontSize ?? 19)
-    const nameText = this.add.text(-PANEL_WIDTH / 2 + 35, top + (hasActions ? 12 : 19), `${style.emoji}  ${row.name}`, {
+    // Buttons sit on the card's bottom edge. On the 84px task card that
+    // leaves no room for the roomy title, so those two lines tighten up; a
+    // card tall enough for prose (the operation room's 148) has the strip
+    // already and keeps the layout it was measured at.
+    const tight = hasActions && height < PANEL_HEIGHT + 40
+    const nameSize = tight ? 16 : (this.config.nameFontSize ?? 19)
+    const nameText = this.add.text(-PANEL_WIDTH / 2 + 35, top + (tight ? 12 : 19), `${style.emoji}  ${row.name}`, {
       fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif',
       fontSize: `${nameSize}px`,
       color: '#f7f5ff',
@@ -238,7 +243,7 @@ export class PanelGridScene extends Phaser.Scene {
     })
 
     const statusLine = row.detail ? `${style.label} · ${row.detail}` : style.label
-    const statusText = this.add.text(-PANEL_WIDTH / 2 + 67, top + (hasActions ? 38 : 52), statusLine, {
+    const statusText = this.add.text(-PANEL_WIDTH / 2 + 67, top + (tight ? 38 : 52), statusLine, {
       fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
       fontSize: '10px',
       color: `#${style.color.toString(16).padStart(6, '0')}`,
@@ -250,7 +255,7 @@ export class PanelGridScene extends Phaser.Scene {
 
     const actionTexts = (row.actions ?? []).map((action, actionIndex) => {
       const color = action.disabled ? 0x777a91 : (action.color ?? 0x70c7ff)
-      const button = this.add.text(-PANEL_WIDTH / 2 + 35 + actionIndex * 94, top + 64, action.label, {
+      const button = this.add.text(-PANEL_WIDTH / 2 + 35 + actionIndex * 94, top + height - 20, action.label, {
         fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
         fontSize: '10px',
         color: action.disabled ? '#a2a5b8' : '#0d0f14',

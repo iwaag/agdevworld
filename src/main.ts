@@ -71,8 +71,8 @@ setAskHandler((selection) => {
     chat.ask(`Tell me about the agent ${selection.agent.instance}.`)
     return
   }
-  if (selection.view === 'agent-room-topic') {
-    chat.ask(`Tell me about the Zulip topic ${selection.row.topic} in ${selection.row.channel}.`)
+  if (selection.view === 'agent-room-board') {
+    chat.ask(`Tell me about the open work of ${selection.group} (${selection.rows.length} unresolved topics).`)
     return
   }
   if (selection.view === 'nodes') {

@@ -45,9 +45,12 @@ agentroom` cycle, and it has two modes:
   instance, its own channel, the first line of its introduction, and a badge
   counting the open topics in that channel. Clicking one shows the whole
   introduction as posted, its open topics, and the earlier introductions.
-- **open work** — every unresolved topic of every `pj-<slug>` channel, the
-  `work-<label>` channels filed in the same channel folder, and every agent's
-  own channel. Flat, filed under its project or its agent.
+- **open work** — one card per board: every `pj-<slug>` project (its own
+  channel plus the `work-<label>` channels filed in the same channel folder)
+  and every agent's own channel, each with its open count. Clicking one opens
+  the flat list of its unresolved topics, grouped by channel. The list is flat
+  in the popup rather than on the grid because 94 cards in a four-column grid
+  that scales to fit is unreadable — measured, in `agent_room` step 5.
 
 Three things it deliberately does not do, all of them from the episode plan:
 

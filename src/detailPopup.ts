@@ -160,9 +160,7 @@ function selectionKey(selection: PanelSelection): string {
   }
   if (selection.view === 'autolab') return `autolab:${selection.node}/${selection.job.name}`
   if (selection.view === 'agent-room') return `agent-room:${selection.agent.instance}`
-  if (selection.view === 'agent-room-topic') {
-    return `agent-room-topic:${selection.row.channel}/${selection.row.topic}`
-  }
+  if (selection.view === 'agent-room-board') return `agent-room-board:${selection.group}`
   if (selection.view === 'autolab-project') {
     return `autolab-project:${selection.node}/${selection.project.name}`
   }
@@ -171,7 +169,7 @@ function selectionKey(selection: PanelSelection): string {
 
 function selectionPayload(selection: PanelSelection): unknown {
   if (selection.view === 'agent-room') return { agent: selection.agent, open: selection.work }
-  if (selection.view === 'agent-room-topic') return selection.row
+  if (selection.view === 'agent-room-board') return selection.rows
   if (selection.view === 'nodes') return selection.target
   if (selection.view === 'autolab') return selection.job
   if (selection.view === 'autolab-project') {
@@ -550,7 +548,14 @@ function renderProject(node: string, project: AutolabProject, profiles: string[]
 // model line, which the introductions do not carry and this view does not add.
 function renderRoomAgent(agent: RoomAgent, open: RoomWorkRow[]): void {
   headerName.textContent = agent.instance
-  headerKind.textContent = agent.entrance ? `entrance ${agent.entrance}` : 'no own channel'
+  // The entrance is nearly always the instance's own name; saying it twice in
+  // one header is noise. It is worth a word only when it differs, or is absent.
+  headerKind.textContent =
+    agent.entrance === null
+      ? 'no own channel'
+      : agent.entrance === agent.instance
+        ? 'own channel is its entrance'
+        : `entrance ${agent.entrance}`
   headerStatus.textContent = open.length === 0 ? 'NOTHING OPEN' : `${open.length} OPEN`
   headerStatus.style.color = open.length === 0 ? '#67e8a5' : '#70c7ff'
 
@@ -569,12 +574,13 @@ function renderRoomAgent(agent: RoomAgent, open: RoomWorkRow[]): void {
   if (open.length === 0) {
     work.append(el('p', 'dp-msg', 'every topic in this channel is resolved'))
   } else {
+    // Every row here is in the one channel the heading already names, so the
+    // channel is not repeated under each topic.
     for (const row of open) {
       const box = el('div', 'dp-diff')
       const head = el('div', 'dp-diff-head')
       head.append(el('span', undefined, row.topic))
       box.append(head)
-      box.append(el('p', 'dp-msg', row.channel))
       work.append(box)
     }
   }
@@ -596,27 +602,35 @@ function renderRoomAgent(agent: RoomAgent, open: RoomWorkRow[]): void {
   }
 }
 
-function renderRoomTopic(row: RoomWorkRow): void {
-  headerName.textContent = row.topic
-  headerKind.textContent = row.channel
-  headerStatus.textContent = 'UNRESOLVED'
-  headerStatus.style.color = row.kind === 'project' ? '#9b8cff' : '#70c7ff'
+function renderRoomBoard(group: string, kind: 'project' | 'agent', rows: RoomWorkRow[]): void {
+  headerName.textContent = group
+  headerKind.textContent = kind
+  headerStatus.textContent = `${rows.length} OPEN`
+  headerStatus.style.color = kind === 'project' ? '#9b8cff' : '#70c7ff'
+
+  // The flat list the plan asks for: channel name and raw topic name, nothing
+  // read into either. `workplan-`/`assetplan-`/`workrun-` are each agent's own
+  // vocabulary; the only thing interpreted anywhere here is Zulip's `✔ `.
+  const byChannel = new Map<string, RoomWorkRow[]>()
+  for (const row of rows) byChannel.set(row.channel, [...(byChannel.get(row.channel) ?? []), row])
 
   const section = el('section')
-  section.append(el('h3', undefined, 'TOPIC'))
+  section.append(el('h3', undefined, 'UNRESOLVED TOPICS'))
+  for (const [channel, channelRows] of byChannel) {
+    const box = el('div', 'dp-diff')
+    const head = el('div', 'dp-diff-head')
+    head.append(el('span', undefined, channel))
+    head.append(el('span', 'dp-sev info', `${channelRows.length}`))
+    box.append(head)
+    for (const row of channelRows) box.append(el('p', 'dp-msg', row.topic))
+    section.append(box)
+  }
   section.append(
-    kvList([
-      ['topic', row.topic],
-      ['channel', row.channel],
-      [row.kind === 'project' ? 'project' : 'agent', row.group],
-      ['state', 'unresolved — the name carries no ✔ prefix'],
-    ]),
+    el('p', 'dp-summary-meta', 'open means the topic carries no ✔ prefix — nothing else is read'),
   )
-  // What the topic means is the agent's vocabulary, not this view's: the only
-  // thing read here is Zulip's own resolve marker.
-  section.append(el('p', 'dp-summary-meta', 'the topic name is shown as posted; its prefix is the owning agent\'s convention'))
   body!.append(section)
 }
+
 
 export function showDetailPopup(selection: PanelSelection): void {
   const node = ensurePopup()
@@ -638,7 +652,9 @@ export function showDetailPopup(selection: PanelSelection): void {
 
   body!.replaceChildren()
   if (selection.view === 'agent-room') renderRoomAgent(selection.agent, selection.work)
-  else if (selection.view === 'agent-room-topic') renderRoomTopic(selection.row)
+  else if (selection.view === 'agent-room-board') {
+    renderRoomBoard(selection.group, selection.kind, selection.rows)
+  }
   else if (selection.view === 'nodes') renderNode(selection.target, selection.device)
   else if (selection.view === 'autolab') renderJob(selection.node, selection.job)
   else if (selection.view === 'autolab-project') {

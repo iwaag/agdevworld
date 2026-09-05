@@ -60,7 +60,7 @@ export type PanelSelection =
   // The agent room carries the agent's whole introduction and the open topics
   // of its own channel, so the popup renders without a second fetch.
   | { view: 'agent-room'; agent: RoomAgent; work: RoomWorkRow[] }
-  | { view: 'agent-room-topic'; row: RoomWorkRow }
+  | { view: 'agent-room-board'; group: string; kind: 'project' | 'agent'; rows: RoomWorkRow[] }
 
 const CLUSTER_STATUS_STYLE: Record<ClusterStatus, PanelRowStatus> = {
   converged: { emoji: '✅', color: 0x67e8a5, label: 'CONVERGED' },
@@ -398,10 +398,17 @@ export function agentRoomViewConfig(onSelect: (selection: PanelSelection) => voi
   return {
     key: 'agentroom',
     title: 'agent room / zulip now',
+    // `<agent>-<host>` instance names and raw topic names are both longer than
+    // a node's; at 19px they were clipped mid-word by the panel's fixed width.
+    nameFontSize: 15,
+    // The card carries an introduction, not a status word: it needs the room.
+    panelHeight: 124,
     loadingText: 'reading Zulip…',
     unavailableText: 'the agent room is unreadable',
     subtitle: (count) =>
-      mode === 'agents' ? `${count} agents have introduced themselves` : `${count} topics are still open`,
+      mode === 'agents'
+        ? `${count} agents have introduced themselves`
+        : `${count} boards have work still open`,
     footer: 'live from Zulip: introductions from #agents, open work from every project and agent channel',
     switchTo: { key: 'nodes', label: 'nodes' },
     bind: (bound) => {
@@ -437,32 +444,62 @@ export function agentRoomViewConfig(onSelect: (selection: PanelSelection) => voi
       if (mode === 'agents') {
         return agents.map((agent) => {
           const open = agentWork(foundWork, agent.instance)
+          // The card is 84px tall and the status line wraps at ~28 characters,
+          // so `detail` gets two lines and no more — measured, after a first
+          // attempt spilled five lines of introduction over the row below.
+          // The entrance is only worth a card line when it is not simply the
+          // instance's name, which today it always is.
+          const entrance = agent.entrance && agent.entrance !== agent.instance ? `${agent.entrance} · ` : ''
           return {
             id: `agent/${agent.instance}`,
             name: clipped(agent.instance, 24),
             status: agentStatus(agent, open.length),
-            detail: `${agent.entrance ?? 'no channel'} · ${clipped(introHeadline(agent), 76)}`,
+            detail: `${entrance}${clipped(introHeadline(agent), 84)}`,
             payload: { kind: 'agent' as const, agent, work: open },
           }
         })
       }
-      return foundWork.topics.map((row) => ({
-        id: `${row.channel}/${row.topic}`,
-        name: clipped(row.topic, 26),
-        status: row.kind === 'project' ? TOPIC_PROJECT : TOPIC_AGENT,
-        detail: row.channel === row.group ? row.channel : `${row.group} · ${row.channel}`,
-        payload: { kind: 'topic' as const, row },
-      }))
+      // One card per board, not per topic. 94 open topics in a grid that caps
+      // at four columns and scales to fit came out unreadable — measured, in a
+      // screenshot. The flat list the plan asks for lives one click away, in
+      // the popup, which is where a list of 27 raw topic names is legible.
+      const boards = new Map<string, { kind: 'project' | 'agent'; rows: RoomWorkRow[] }>()
+      for (const row of foundWork.topics) {
+        const board = boards.get(row.group) ?? { kind: row.kind, rows: [] }
+        board.rows.push(row)
+        boards.set(row.group, board)
+      }
+      return [...boards].map(([group, board]) => {
+        const channels = new Set(board.rows.map((row) => row.channel))
+        return {
+          id: `board/${group}`,
+          name: clipped(group, 24),
+          status: {
+            ...(board.kind === 'project' ? TOPIC_PROJECT : TOPIC_AGENT),
+            label: `${board.rows.length} OPEN`,
+          },
+          detail:
+            channels.size === 1
+              ? `${board.kind} · one channel`
+              : `${board.kind} · ${channels.size} channels`,
+          payload: { kind: 'board' as const, group, board },
+        }
+      })
     },
     onSelect: (row) => {
       const payload = row.payload as
         | { kind: 'agent'; agent: RoomAgent; work: RoomWorkRow[] }
-        | { kind: 'topic'; row: RoomWorkRow }
+        | { kind: 'board'; group: string; board: { kind: 'project' | 'agent'; rows: RoomWorkRow[] } }
       if (payload.kind === 'agent') {
         onSelect({ view: 'agent-room', agent: payload.agent, work: payload.work })
         return
       }
-      onSelect({ view: 'agent-room-topic', row: payload.row })
+      onSelect({
+        view: 'agent-room-board',
+        group: payload.group,
+        kind: payload.board.kind,
+        rows: payload.board.rows,
+      })
     },
   }
 }

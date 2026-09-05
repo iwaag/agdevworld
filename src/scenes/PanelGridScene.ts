@@ -53,6 +53,14 @@ export interface PanelGridConfig {
   subtitle: (count: number) => string
   footer: string
   switchTo?: { key: string; label: string }
+  // The agent room's names are `<agent>-<host>` and run to 19 characters,
+  // which the default 19px clips. Views whose names are long say so instead of
+  // truncating them into ambiguity.
+  nameFontSize?: number
+  // A taller card for a view whose `detail` is prose rather than a status
+  // word. Text is positioned from the card's top edge, so the four original
+  // views are unaffected by this existing.
+  panelHeight?: number
   loadRows: () => Promise<PanelRow[]>
   onSelect?: (row: PanelRow) => void
   // Read after every load, so a view that fetches extra context in loadRows()
@@ -85,6 +93,10 @@ export class PanelGridScene extends Phaser.Scene {
   constructor(config: PanelGridConfig) {
     super(config.key)
     this.config = config
+  }
+
+  private panelHeight(): number {
+    return this.config.panelHeight ?? PANEL_HEIGHT
   }
 
   create() {
@@ -200,29 +212,33 @@ export class PanelGridScene extends Phaser.Scene {
 
   private createPanel(row: PanelRow, index: number): PanelView {
     const style = row.status
+    const cardHeight = this.panelHeight()
     const shadow = this.add.graphics()
     shadow.fillStyle(0x000000, 0.28)
-    shadow.fillRoundedRect(-PANEL_WIDTH / 2 + 5, -PANEL_HEIGHT / 2 + 7, PANEL_WIDTH, PANEL_HEIGHT, 22)
+    shadow.fillRoundedRect(-PANEL_WIDTH / 2 + 5, -cardHeight / 2 + 7, PANEL_WIDTH, cardHeight, 22)
 
     const chrome = this.add.graphics()
     chrome.fillStyle(0x151927, 0.96)
-    chrome.fillRoundedRect(-PANEL_WIDTH / 2, -PANEL_HEIGHT / 2, PANEL_WIDTH, PANEL_HEIGHT, 22)
+    chrome.fillRoundedRect(-PANEL_WIDTH / 2, -cardHeight / 2, PANEL_WIDTH, cardHeight, 22)
     chrome.lineStyle(1, style.color, 0.58)
-    chrome.strokeRoundedRect(-PANEL_WIDTH / 2, -PANEL_HEIGHT / 2, PANEL_WIDTH, PANEL_HEIGHT, 22)
+    chrome.strokeRoundedRect(-PANEL_WIDTH / 2, -cardHeight / 2, PANEL_WIDTH, cardHeight, 22)
     chrome.fillStyle(style.color, 0.85)
     chrome.fillCircle(-PANEL_WIDTH / 2 + 20, 0, 3)
 
     const hasActions = (row.actions?.length ?? 0) > 0
-    const nameText = this.add.text(-PANEL_WIDTH / 2 + 35, hasActions ? -30 : -23, `${style.emoji}  ${row.name}`, {
+    const height = this.panelHeight()
+    const top = -height / 2
+    const nameSize = hasActions ? 16 : (this.config.nameFontSize ?? 19)
+    const nameText = this.add.text(-PANEL_WIDTH / 2 + 35, top + (hasActions ? 12 : 19), `${style.emoji}  ${row.name}`, {
       fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif',
-      fontSize: hasActions ? '16px' : '19px',
+      fontSize: `${nameSize}px`,
       color: '#f7f5ff',
       fontStyle: 'bold',
       fixedWidth: PANEL_WIDTH - 50,
     })
 
     const statusLine = row.detail ? `${style.label} · ${row.detail}` : style.label
-    const statusText = this.add.text(-PANEL_WIDTH / 2 + 67, hasActions ? -4 : 10, statusLine, {
+    const statusText = this.add.text(-PANEL_WIDTH / 2 + 67, top + (hasActions ? 38 : 52), statusLine, {
       fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
       fontSize: '10px',
       color: `#${style.color.toString(16).padStart(6, '0')}`,
@@ -234,7 +250,7 @@ export class PanelGridScene extends Phaser.Scene {
 
     const actionTexts = (row.actions ?? []).map((action, actionIndex) => {
       const color = action.disabled ? 0x777a91 : (action.color ?? 0x70c7ff)
-      const button = this.add.text(-PANEL_WIDTH / 2 + 35 + actionIndex * 94, 22, action.label, {
+      const button = this.add.text(-PANEL_WIDTH / 2 + 35 + actionIndex * 94, top + 64, action.label, {
         fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
         fontSize: '10px',
         color: action.disabled ? '#a2a5b8' : '#0d0f14',
@@ -255,7 +271,7 @@ export class PanelGridScene extends Phaser.Scene {
     // clicks land even while the panel floats.
     if (row.interactive !== false) anchor
       .setInteractive({
-        hitArea: new Phaser.Geom.Rectangle(-PANEL_WIDTH / 2, -PANEL_HEIGHT / 2, PANEL_WIDTH, PANEL_HEIGHT),
+        hitArea: new Phaser.Geom.Rectangle(-PANEL_WIDTH / 2, -cardHeight / 2, PANEL_WIDTH, cardHeight),
         hitAreaCallback: Phaser.Geom.Rectangle.Contains,
         useHandCursor: true,
       })
@@ -313,17 +329,18 @@ export class PanelGridScene extends Phaser.Scene {
 
     const usableWidth = Math.max(1, width - 40)
     const usableHeight = Math.max(1, height - 190 - chipTop)
+    const panelHeight = this.panelHeight()
     const maxColumns = Math.max(1, Math.floor((usableWidth + COLUMN_GAP) / (PANEL_WIDTH + COLUMN_GAP)))
     const columns = Math.min(this.panels.length, maxColumns, 4)
     const rows = Math.ceil(this.panels.length / columns)
     const gridWidth = columns * PANEL_WIDTH + (columns - 1) * COLUMN_GAP
-    const gridHeight = rows * PANEL_HEIGHT + (rows - 1) * ROW_GAP
+    const gridHeight = rows * panelHeight + (rows - 1) * ROW_GAP
     const scale = Math.min(1, usableWidth / gridWidth, usableHeight / gridHeight)
     const scaledCellWidth = (PANEL_WIDTH + COLUMN_GAP) * scale
-    const scaledCellHeight = (PANEL_HEIGHT + ROW_GAP) * scale
+    const scaledCellHeight = (panelHeight + ROW_GAP) * scale
     const scaledGridHeight = gridHeight * scale
     const startY =
-      150 + chipTop + Math.max(0, (usableHeight - scaledGridHeight) / 2) + (PANEL_HEIGHT * scale) / 2
+      150 + chipTop + Math.max(0, (usableHeight - scaledGridHeight) / 2) + (panelHeight * scale) / 2
 
     this.panels.forEach(({ anchor, floatLayer }, index) => {
       const column = index % columns

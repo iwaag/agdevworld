@@ -82,7 +82,9 @@ __all__ = [
     "SCHEMA",
     "Topic",
     "acked",
+    "by_prefix",
     "describe",
+    "summarize",
     "named_in",
     "owns",
     "row_state",
@@ -161,9 +163,20 @@ def owns(roster: Roster, channel: str, topic: str) -> bool:
     The listener matches its own channel by *name* and its prefixes anywhere.
     Both halves are in the roster because neither can be read from outside.
     """
-    return channel == roster.channel or (
-        bool(roster.prefixes) and topic.startswith(tuple(roster.prefixes))
-    )
+    return channel == roster.channel or by_prefix(roster, topic)
+
+
+def by_prefix(roster: Roster, topic: str) -> bool:
+    """Whether this topic is owned only because its *name* starts a prefix.
+
+    Worth its own name because a prefix says which **kind** of agent owns a
+    topic and never which instance: `agechoplan-` is both agecho instances',
+    `workplan-` is every autolab's. p1 read that ambiguity as observer error
+    and charged one bot 59 phantom stalled rows for it. It is not an error —
+    both listeners really would sweep such a topic — so the board states it
+    rather than picking a winner.
+    """
+    return bool(roster.prefixes) and topic.startswith(tuple(roster.prefixes))
 
 
 def named_in(topic: Topic, roster: Roster, mark: int) -> Message | None:
@@ -269,6 +282,29 @@ def acked(topic: Topic, roster: Roster) -> bool:
         and last.sender_id == roster.bot_id
         and is_ack(last.content)
     )
+
+
+def summarize(row: dict, instance: str) -> str:
+    """The provenance a *card* has room for.
+
+    Measured, not guessed: the panel's status line wraps at about 28
+    characters, so the full sentence below runs to six lines and spills
+    through the card's border — the same defect `agent_room` step 5 found by
+    looking, and could not have found any other way. Both strings are served
+    because a row needs its evidence on the board (plan rule 2) *and* the whole
+    of it one click away.
+    """
+    age = row.get("age_seconds")
+    minutes = f"{age / 60:.0f} min" if age is not None else "unknown age"
+    ident = f"#{row['message_id']}" if row.get("message_id") else "no post"
+    who = row.get("by") or "somebody"
+    served = f"served ≤#{row['served_mark']}" if row.get("served_mark") else "no served note"
+    state = row["state"]
+    if state == "done":
+        return f"✔ resolved · last post {ident} by {who}"
+    if state == "acked":
+        return f"ack posted {minutes} ago, no answer yet"
+    return f"{minutes} unanswered · {ident} by {who} · {served}"
 
 
 def describe(row: dict, instance: str, stalled_minutes: float) -> str:
@@ -730,6 +766,7 @@ class Ops:
                             f"unknown — {instance} has an introduction on #agents but no "
                             f"roster block, so nothing can be said about what it owes"
                         ),
+                        "short": "introduction carries no roster block",
                     },
                 })
                 instances.append(summary)
@@ -777,8 +814,38 @@ class Ops:
                     f"unknown — the relay is not reading Zulip ({reason}); "
                     f"last known: {row['provenance']['text']}"
                 )
+                row["provenance"]["short"] = (
+                    f"relay not reading Zulip · last known {row['stale_state']}"
+                )
             for summary in instances:
                 summary["state"] = "unknown"
+
+        # A topic owned by prefix alone is owed by every instance of that
+        # agent, and each row says so rather than the board quietly showing
+        # what looks like a duplicate.
+        shared: dict[tuple[str, str], list[str]] = {}
+        for row in rows:
+            if row.get("route") not in ("owner", "resolved") or row["topic"] is None:
+                continue
+            roster = rosters.get(row["instance"])
+            if roster is None or not by_prefix(roster, row["topic"]):
+                continue
+            if row["channel"] == roster.channel:
+                continue
+            shared.setdefault((row["channel"], row["topic"]), []).append(row["instance"])
+        for row in rows:
+            others = [
+                name
+                for name in shared.get((row["channel"], row["topic"]), [])
+                if name != row["instance"]
+            ]
+            if not others:
+                continue
+            row["provenance"]["shared_with"] = others
+            row["provenance"]["text"] += (
+                f" · the topic prefix is shared with {', '.join(others)}, "
+                f"which would sweep it too"
+            )
 
         order = {"stalled": 0, "unknown": 1, "awaiting": 2, "acked": 3, "done": 4}
         rows.sort(key=lambda r: (order.get(r["state"], 9), -(r.get("age_seconds") or 0)))
@@ -821,6 +888,7 @@ class Ops:
             # for another purpose, and this is what it was inferred from.
             "provenance": {
                 "text": describe(found, instance, stalled_minutes),
+                "short": summarize(found, instance),
                 "message_id": found["message_id"],
                 "message_at": found["message_at"],
                 "by": found["by"],

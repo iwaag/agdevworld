@@ -298,3 +298,61 @@ def test_the_provenance_line_names_the_served_note_when_there_is_one():
     row = {"state": "awaiting", "route": "mention", "age_seconds": 120.0,
            "message_id": 9, "message_at": 0, "by": "Developer", "served_mark": 5}
     assert "served note up to #5" in describe(row, "front-agstudio1", 15)
+
+
+def test_a_card_sized_provenance_is_served_beside_the_sentence():
+    # The panel's status line wraps at about 28 characters; the full sentence
+    # renders as six lines and spills through the card's border, which is what
+    # a screenshot found and no other check could.
+    found = snapshot_with(
+        {"agforge-agstudio1": FORGE},
+        [topic("agforge-agstudio1", "assetplan-poster", message("please", ident=42, ago=1020))],
+    )
+    short = found["rows"][0]["provenance"]["short"]
+    assert short == "17 min unanswered · #42 by Developer · no served note"
+    assert len(short) < len(found["rows"][0]["provenance"]["text"])
+
+
+def test_an_unknown_row_has_a_short_form_too():
+    assert snapshot_with({"agping-agstudio1": None})["rows"][0]["provenance"]["short"]
+    dead = snapshot_with(
+        {"agforge-agstudio1": FORGE},
+        [topic("agforge-agstudio1", "x", message("please", ago=5000))],
+        live=False,
+    )
+    assert dead["rows"][0]["provenance"]["short"] == "relay not reading Zulip · last known stalled"
+
+
+def test_a_shared_prefix_is_stated_rather_than_arbitrated():
+    # A prefix says which *kind* of agent owns a topic, never which instance,
+    # and both listeners really would sweep it. p1 read that as observer error
+    # and charged one bot 59 phantom rows for it; the honest answer is two
+    # rows that each name the other.
+    other = Roster(instance="agforge-agautolab1", agent="agforge", bot="agforge-agautolab1",
+                   bot_id=99, channel="agforge-agautolab1", prefixes=FORGE.prefixes)
+    found = snapshot_with(
+        {"agforge-agstudio1": FORGE, "agforge-agautolab1": other},
+        [topic("pj-mediagen", "assetplan-poster", message("please", ago=5000))],
+    )
+    assert len(found["rows"]) == 2
+    for row in found["rows"]:
+        assert row["provenance"]["shared_with"] != [row["instance"]]
+        assert "shared with" in row["provenance"]["text"]
+
+
+def test_a_sibling_reaching_into_an_owned_channel_is_stated_on_both_rows():
+    # The owner of the channel has no doubt that the topic is its own — but a
+    # sibling's prefix reaches into any channel it is subscribed to, so the
+    # sibling would sweep it too, and that is the surprising half.
+    other = Roster(instance="agforge-agautolab1", agent="agforge", bot="agforge-agautolab1",
+                   bot_id=99, channel="agforge-agautolab1", prefixes=FORGE.prefixes)
+    found = snapshot_with(
+        {"agforge-agstudio1": FORGE, "agforge-agautolab1": other},
+        [topic("agforge-agstudio1", "assetplan-poster", message("please", ago=5000))],
+    )
+    mine = [r for r in found["rows"] if r["instance"] == "agforge-agstudio1"][0]
+    theirs = [r for r in found["rows"] if r["instance"] == "agforge-agautolab1"][0]
+    assert mine["provenance"]["shared_with"] == ["agforge-agautolab1"]
+    # The sibling's own row has nobody to name: only prefix-owned rows are
+    # collected, and the channel owner is not one of them.
+    assert "shared_with" not in theirs["provenance"]

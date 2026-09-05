@@ -15,7 +15,8 @@ is the only thing that reads it. Everything else is still static.
 - `docker compose up --build -d web` — production-style bundle behind nginx on :8090. Keep it current when a user may want to look.
 - `docker compose ps web` / `curl -I http://localhost:8090/` — confirm it came up.
 - `CAGENT_URL=https://localhost:8789 npm run cluster:fetch` — refresh the three cluster snapshots through cagent.
-- `AGENTROOM_ZULIP_ENV=<a zulip .env> agentroom/service/serve.sh` — the agent room's relay on :8094. The agent room view is blank without it; every other view is unaffected.
+- `AGENTROOM_ZULIP_ENV=<a zulip .env> OPSROOM_ZULIP_ENV=<the opsroom bot's .env> agentroom/service/serve.sh` — the relay on :8094, serving both the agent room and the operation room. Without `OPSROOM_ZULIP_ENV` the relay still runs and `/ops` answers 503; the operation room then says so rather than showing an empty board.
+- `node .local/opsshot.mjs http://localhost:5173/ .local/shots` — the ~70-line CDP screenshot driver (`OPSSHOT_STEPS` scripts the clicks). `--headless --screenshot` hangs on this app: `--virtual-time-budget` waits for the page to go idle and `PanelGridScene` tweens forever.
 - `agentroom/service/serve.sh check` — one read, counts printed, no listener. Tells a credentials problem from a UI one.
 - `cd agentroom && uv run pytest -q` — the relay's tests.
 
@@ -23,8 +24,9 @@ is the only thing that reads it. Everything else is still static.
 
 - `src/main.ts` — wiring: scenes, the chat panel, the click-to-detail path.
 - `src/scenes/PanelGridScene.ts` — one config-driven grid scene, shared by all four views.
-- `src/views.ts` — the five view configs (`nodes`, `workspaces`, `autolab`, `tasks`, `agentroom`).
+- `src/views.ts` — the six view configs (`nodes`, `workspaces`, `autolab`, `tasks`, `agentroom`, `ops`).
 - `src/agentRoomState.ts` — the agent room's two reads, through the `agentroom` relay.
+- `src/opsState.ts` — the operation room's one read, `/ops` on the same relay.
 - `src/viewSwitcher.ts` — the single seam for changing the visible view.
 - `src/chatPanel.ts` — the chat overlay; it owns history and applies returned UI actions.
 - `src/detailPopup.ts` — the detail overlay, incl. the per-iteration `summary` button.
@@ -71,6 +73,38 @@ The relay's address defaults to `http://localhost:8094`; set
 `VITE_AGENTROOM_URL` at build time to point elsewhere. It is a separate
 process nobody starts automatically — when it is down the agent room view says
 so by name and the other four views carry on.
+
+## The operation room
+
+The sixth view, and the only one that answers *"is anything stuck right
+now?"*. It reads `GET /ops` on the same relay, which holds a running
+reconstruction of the conversation layer from a Zulip event queue —
+`agentroom/README.md` and `agentroom/src/agentroom/ops.py` are the reference.
+
+Two modes: **owed replies**, one card per `(instance, channel, topic)` that is
+`stalled` / `awaiting` / `acked` / `done` / `unknown` with stalled first; and
+**agents**, one card per instance with the routing it declares in `#agents`.
+
+Three rules, all of them findings from `operation_room` p1 rather than taste:
+
+- **`unknown` is drawn as its own state, in amber, never in the grey this app
+  uses for idle everywhere else.** A relay that cannot be read renders a card
+  saying so, not an empty grid: p9's 26 silent minutes were indistinguishable
+  from a quiet board, and that distinction is the whole reason this view
+  exists.
+- **Every row carries its provenance** — the relay writes both a sentence and
+  a card-sized short form, and this view renders them without reading anything
+  out of either. Every state on the board is inferred from a trace somebody
+  left for another purpose; the evidence is the only defence against a
+  confident wrong answer.
+- **No state is decided here.** A second copy of the rules in the browser would
+  drift from the relay's, which is precisely how p1 produced 66 stalled rows
+  for conversations that had been answered.
+
+The board is a list of what is *owed*, not of everything: a conversation
+nobody is waiting on has no row. `done` is a transition the relay watches
+happen, so it appears when a topic is resolved while the relay is up and is
+gone after a restart.
 
 ## No backend for the rest
 

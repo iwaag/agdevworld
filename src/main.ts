@@ -4,6 +4,7 @@ import {
   agentRoomViewConfig,
   autolabViewConfig,
   nodesViewConfig,
+  opsViewConfig,
   tasksViewConfig,
   workspacesViewConfig,
   type PanelSelection,
@@ -75,6 +76,22 @@ setAskHandler((selection) => {
     chat.ask(`Tell me about the open work of ${selection.group} (${selection.rows.length} unresolved topics).`)
     return
   }
+  if (selection.view === 'ops-row') {
+    const where = selection.row.topic ? `${selection.row.channel}/${selection.row.topic}` : 'the realm'
+    chat.ask(
+      `About ${selection.row.instance} in ${where}: the operation room calls it ` +
+        `${selection.row.state}. Its reason: ${selection.row.provenance.text}`,
+    )
+    return
+  }
+  if (selection.view === 'ops-instance') {
+    chat.ask(`Tell me about the agent ${selection.instance.instance}.`)
+    return
+  }
+  if (selection.view === 'ops-health') {
+    chat.ask(`The operation room relay says: ${selection.board.health.reason}. What does that mean?`)
+    return
+  }
   if (selection.view === 'nodes') {
     const target = selection.target.target
     const name = target.slug ?? target.name ?? target.id ?? 'the selected node'
@@ -100,6 +117,7 @@ const game = new Phaser.Game({
     new PanelGridScene(autolabViewConfig(handleSelection)),
     new PanelGridScene(tasksViewConfig()),
     new PanelGridScene(agentRoomViewConfig(handleSelection)),
+    new PanelGridScene(opsViewConfig(handleSelection)),
   ],
 })
 registerGame(game, 'nodes')

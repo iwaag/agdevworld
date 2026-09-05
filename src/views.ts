@@ -38,7 +38,21 @@ import {
   type RoomWork,
   type RoomWorkRow,
 } from './agentRoomState'
-import type { PanelChip, PanelGridApi, PanelGridConfig, PanelRowStatus } from './scenes/PanelGridScene'
+import {
+  healthLine,
+  loadOpsBoard,
+  type OpsBoard,
+  type OpsInstance,
+  type OpsRow,
+  type OpsState,
+} from './opsState'
+import type {
+  PanelChip,
+  PanelGridApi,
+  PanelGridConfig,
+  PanelRow,
+  PanelRowStatus,
+} from './scenes/PanelGridScene'
 
 // A selection carries the full source record so detail views can render
 // everything the snapshot knows about the clicked panel. `device` is the
@@ -61,6 +75,11 @@ export type PanelSelection =
   // of its own channel, so the popup renders without a second fetch.
   | { view: 'agent-room'; agent: RoomAgent; work: RoomWorkRow[] }
   | { view: 'agent-room-board'; group: string; kind: 'project' | 'agent'; rows: RoomWorkRow[] }
+  // The operation room carries the whole board beside the clicked row, because
+  // a row's meaning depends on whether the relay could vouch for it at all.
+  | { view: 'ops-row'; row: OpsRow; board: OpsBoard }
+  | { view: 'ops-instance'; instance: OpsInstance; board: OpsBoard }
+  | { view: 'ops-health'; board: OpsBoard }
 
 const CLUSTER_STATUS_STYLE: Record<ClusterStatus, PanelRowStatus> = {
   converged: { emoji: '✅', color: 0x67e8a5, label: 'CONVERGED' },
@@ -410,7 +429,7 @@ export function agentRoomViewConfig(onSelect: (selection: PanelSelection) => voi
         ? `${count} agents have introduced themselves`
         : `${count} boards have work still open`,
     footer: 'live from Zulip: introductions from #agents, open work from every project and agent channel',
-    switchTo: { key: 'nodes', label: 'nodes' },
+    switchTo: { key: 'ops', label: 'operation room' },
     bind: (bound) => {
       api = bound
     },
@@ -502,4 +521,179 @@ export function agentRoomViewConfig(onSelect: (selection: PanelSelection) => voi
       })
     },
   }
+}
+
+// The operation room: the conversation layer, and only it. Every row is a
+// `(instance, channel, topic)` that somebody owes a reply in, coloured by what
+// the `agentroom` relay's state engine concluded and captioned by why.
+//
+// Three rules from the plan, all of them p1 findings rather than taste:
+//
+//  1. `unknown` is drawn as its own state, never as quiet. p9's 26 silent
+//     minutes were indistinguishable from an idle board, and this screen
+//     exists to make that distinction visible.
+//  2. Every row carries its provenance. Green and red alike are inferences
+//     from traces left for other purposes; showing the evidence is the only
+//     defence against a confident wrong answer.
+//  3. Stalled comes first. The relay sorts; this view does not re-sort.
+
+const OPS_STATUS: Record<OpsState, PanelRowStatus> = {
+  stalled: { emoji: '🛑', color: 0xff8aa8, label: 'STALLED' },
+  awaiting: { emoji: '📥', color: 0x70c7ff, label: 'AWAITING' },
+  acked: { emoji: '🔄', color: 0x9b8cff, label: 'ACKED' },
+  done: { emoji: '✅', color: 0x67e8a5, label: 'DONE' },
+  // Amber, and never the grey this app uses for idle in every other view.
+  unknown: { emoji: '❓', color: 0xffc56d, label: 'UNKNOWN' },
+}
+
+function opsInstanceStatus(instance: OpsInstance): PanelRowStatus {
+  if (instance.state !== 'ok' || instance.roster === 'missing') return OPS_STATUS.unknown
+  const counts = instance.counts
+  if (counts.stalled > 0) return { ...OPS_STATUS.stalled, label: `${counts.stalled} STALLED` }
+  if (counts.awaiting > 0) return { ...OPS_STATUS.awaiting, label: `${counts.awaiting} AWAITING` }
+  if (counts.acked > 0) return { ...OPS_STATUS.acked, label: `${counts.acked} RUNNING` }
+  // "Nothing owed" is a real answer here and only here: this instance has a
+  // roster, the queue is live, and no conversation is waiting on it.
+  return { emoji: '🟢', color: 0x67e8a5, label: 'NOTHING OWED' }
+}
+
+export function opsViewConfig(onSelect: (selection: PanelSelection) => void): PanelGridConfig {
+  let mode: 'board' | 'agents' = 'board'
+  let board: OpsBoard | undefined
+  let api: PanelGridApi | undefined
+
+  return {
+    key: 'ops',
+    title: 'operation room / who owes a reply',
+    nameFontSize: 13,
+    // The card's second line is the evidence, which is the point of the view.
+    // `provenance.short` is sized for three of these lines; 148 holds them.
+    panelHeight: 148,
+    loadingText: 'reading the operation room relay…',
+    unavailableText: 'the operation room is unreadable',
+    subtitle: (count) => {
+      if (!board) return 'reading…'
+      if (board.health.state !== 'live') {
+        // The relay is unreachable when it knows of no agents at all, and the
+        // single card on screen is then a placeholder, not a row: counting it
+        // would be the board's first small lie.
+        if (board.instances.length === 0) return 'the operation room cannot be read'
+        return mode === 'agents'
+          ? `${count} ${plural(count, 'agent')} — state unknown`
+          : `${count} ${plural(count, 'row')}, state unknown`
+      }
+      if (mode === 'agents') return `${count} ${plural(count, 'agent')} on the board`
+      const stalled = board.rows.filter((row) => row.state === 'stalled').length
+      if (count === 0) return 'nothing is owed a reply right now'
+      if (stalled > 0) return `${stalled} stalled of ${count} open ${plural(count, 'row')}`
+      return `${count} ${plural(count, 'row')} open`
+    },
+    footer:
+      'conversation layer only — Zulip, live: awaiting · stalled · acked · done · unknown',
+    switchTo: { key: 'nodes', label: 'nodes' },
+    bind: (bound) => {
+      api = bound
+    },
+    headline: () => (board ? healthLine(board) : undefined),
+    chips: () => {
+      const chips: PanelChip[] = (['board', 'agents'] as const).map((value) => ({
+        id: `ops-mode-${value}`,
+        label: value === 'board' ? 'owed replies' : 'agents',
+        active: mode === value,
+        onClick: () => {
+          if (mode === value) return
+          mode = value
+          api?.reload()
+        },
+      }))
+      chips.push({ id: 'ops-refresh', label: '⟳ refresh', onClick: () => api?.reload() })
+      return chips
+    },
+    loadRows: async () => {
+      const found = await loadOpsBoard()
+      board = found
+      if (mode === 'agents') {
+        // A relay that cannot be read knows of no agents, and an empty agent
+        // list would read as "there are none". Say which it is.
+        if (found.instances.length === 0) return [opsUnreadableCard(found)]
+        return found.instances.map((instance) => ({
+          id: `ops-agent/${instance.instance}`,
+          name: clipped(instance.instance, 27),
+          status: opsInstanceStatus(instance),
+          detail: opsInstanceDetail(instance),
+          payload: { kind: 'instance' as const, instance, board: found },
+        }))
+      }
+      if (found.rows.length === 0) {
+        // Two very different empties, and the difference is the whole point.
+        if (found.health.state !== 'live') return [opsUnreadableCard(found)]
+        return []
+      }
+      // The relay sorted these stalled-first; re-sorting here would put a
+      // second opinion between the evidence and the screen.
+      // The card is named after the **instance**, not the conversation. Four
+      // rows of `ops-testbed/agechoplan-…` came out as four identical clipped
+      // titles in a screenshot — two topics for two instances, and the card
+      // said which of neither. The instance is the short, always-distinct
+      // half; the conversation is the first line of the body.
+      return found.rows.map((row, index) => ({
+        id: `ops-row/${index}/${row.instance}/${row.channel ?? ''}/${row.topic ?? ''}`,
+        name: clipped(row.instance, 26),
+        status: {
+          ...OPS_STATUS[row.state],
+          label:
+            row.state === 'unknown' && row.stale_state
+              ? `UNKNOWN (was ${row.stale_state.toUpperCase()})`
+              : OPS_STATUS[row.state].label,
+        },
+        // Hard-clipped per line, not word-wrapped: a channel/topic name is
+        // one unbroken token, and Phaser's wrap only breaks on spaces — at 52
+        // characters it ran straight through the card's right edge and into
+        // the neighbouring card; 27 and 24 each still reached the border.
+        // 22 is what the status line actually holds at 10px, measured.
+        detail:
+          (row.topic ? `${clipped(row.channel ?? '', 22)}\n${clipped(row.topic, 22)}\n` : '') +
+          clipped(row.provenance.short, 76),
+        payload: { kind: 'row' as const, row, board: found },
+      }))
+    },
+    onSelect: (row) => {
+      const payload = row.payload as
+        | { kind: 'row'; row: OpsRow; board: OpsBoard }
+        | { kind: 'instance'; instance: OpsInstance; board: OpsBoard }
+        | { kind: 'health'; board: OpsBoard }
+      if (payload.kind === 'row') onSelect({ view: 'ops-row', row: payload.row, board: payload.board })
+      else if (payload.kind === 'instance') {
+        onSelect({ view: 'ops-instance', instance: payload.instance, board: payload.board })
+      } else onSelect({ view: 'ops-health', board: payload.board })
+    },
+  }
+}
+
+// The card that stands in for a board nobody could read. It is a card and not
+// an empty grid because an empty grid is indistinguishable from a quiet realm.
+function opsUnreadableCard(board: OpsBoard): PanelRow {
+  return {
+    id: 'ops-unreadable',
+    name: 'operation room',
+    status: OPS_STATUS.unknown,
+    detail: board.health.reason,
+    payload: { kind: 'health' as const, board },
+  }
+}
+
+function plural(count: number, word: string): string {
+  return count === 1 ? word : `${word}s`
+}
+
+function opsInstanceDetail(instance: OpsInstance): string {
+  if (instance.roster === 'missing') {
+    return 'its #agents introduction carries no roster block'
+  }
+  const channel =
+    instance.channel_exists === false
+      ? `no channel of its own (declares ${instance.channel})`
+      : `channel ${instance.channel}`
+  const prefixes = instance.prefixes.length > 0 ? instance.prefixes.join(' ') : 'no prefixes'
+  return clipped(`${channel} · ${prefixes}`, 88)
 }

@@ -21,6 +21,7 @@ import {
   type AutolabSummary,
 } from './autolabState'
 import { postedAt, type RoomAgent, type RoomWorkRow } from './agentRoomState'
+import { ago, at, healthLine, type OpsBoard, type OpsInstance, type OpsRow } from './opsState'
 import type { PanelSelection } from './views'
 
 const POPUP_CSS = `
@@ -164,6 +165,11 @@ function selectionKey(selection: PanelSelection): string {
   if (selection.view === 'autolab-project') {
     return `autolab-project:${selection.node}/${selection.project.name}`
   }
+  if (selection.view === 'ops-row') {
+    return `ops-row:${selection.row.instance}/${selection.row.channel}/${selection.row.topic}`
+  }
+  if (selection.view === 'ops-instance') return `ops-instance:${selection.instance.instance}`
+  if (selection.view === 'ops-health') return 'ops-health'
   return `workspaces:${selection.row.slug}`
 }
 
@@ -175,6 +181,9 @@ function selectionPayload(selection: PanelSelection): unknown {
   if (selection.view === 'autolab-project') {
     return { project: selection.project, profiles: selection.profiles }
   }
+  if (selection.view === 'ops-row') return selection.row
+  if (selection.view === 'ops-instance') return selection.instance
+  if (selection.view === 'ops-health') return selection.board.health
   return selection.row
 }
 
@@ -632,6 +641,186 @@ function renderRoomBoard(group: string, kind: 'project' | 'agent', rows: RoomWor
 }
 
 
+// --- the operation room ---------------------------------------------------
+//
+// Everything here is provenance. The relay decided the state; this shows what
+// it decided it from, because a board built entirely on absence of evidence
+// has no other defence against a confident wrong answer.
+
+const OPS_COLOR: Record<string, string> = {
+  stalled: '#ff8aa8',
+  awaiting: '#70c7ff',
+  acked: '#9b8cff',
+  done: '#67e8a5',
+  unknown: '#ffc56d',
+}
+
+function opsHealthSection(board: OpsBoard): HTMLElement {
+  const section = el('section')
+  section.append(el('h3', undefined, 'RELAY'))
+  section.append(el('p', 'dp-msg', healthLine(board)))
+  section.append(
+    kvList([
+      ['state', board.health.state],
+      ['reason', board.health.reason],
+      ['event queue', board.health.queue ? 'registered' : 'none'],
+      ['last event', at(board.health.last_event_at)],
+      ['last full sweep', at(board.health.last_sweep_at)],
+      ['sweeps', board.health.sweeps],
+      ['sweep cost', `${board.health.sweep_calls} Zulip calls`],
+      ['stalled after', `${Math.round(board.settings.stalled_seconds / 60)} min`],
+    ]),
+  )
+  if (board.errors.length > 0) {
+    const errors = el('details')
+    errors.append(el('summary', undefined, `CHANNELS NOT READ (${board.errors.length})`))
+    for (const error of board.errors) {
+      errors.append(el('p', 'dp-msg', `${error.channel}: ${error.error}`))
+    }
+    section.append(errors)
+  }
+  return section
+}
+
+function renderOpsRow(row: OpsRow, board: OpsBoard): void {
+  headerName.textContent = row.topic ? `${row.channel}/${row.topic}` : row.instance
+  // A row with no conversation behind it is named after its instance already;
+  // repeating it beside the heading is the noise the agent room's popup had.
+  headerKind.textContent = row.topic ? row.instance : 'standing'
+  headerStatus.textContent =
+    row.state === 'unknown' && row.stale_state
+      ? `UNKNOWN (was ${row.stale_state.toUpperCase()})`
+      : row.state.toUpperCase()
+  headerStatus.style.color = OPS_COLOR[row.state] ?? '#b7b5d8'
+
+  const why = el('section')
+  why.append(el('h3', undefined, 'WHY THIS STATE'))
+  why.append(el('p', 'dp-msg', row.provenance.text))
+  // A row that stands for an agent nobody can route for has no post behind it,
+  // and a table of eight em-dashes reads as missing data rather than as the
+  // point. The sentence above is the whole of what is known.
+  const hasEvidence = row.provenance.message_id != null || row.route != null
+  if (hasEvidence) why.append(
+    kvList([
+      ['route', row.route ?? 'none'],
+      ['owed since', ago(row.age_seconds)],
+      ['last real post', row.provenance.message_id ? `#${row.provenance.message_id}` : '—'],
+      ['posted', at(row.provenance.message_at)],
+      ['by', row.provenance.by ?? '—'],
+      // The mention route is answered at home, so this note is the only
+      // record that a callback was ever dealt with. Its absence is half the
+      // reason a row is here at all.
+      ['served note', row.provenance.served_mark ? `up to #${row.provenance.served_mark}` : 'none'],
+      ['live topic name', row.live_topic ?? '—'],
+      ['resolved (✔)', row.provenance.resolved ? 'yes' : 'no'],
+    ]),
+  )
+  why.append(
+    el(
+      'p',
+      'dp-summary-meta',
+      hasEvidence
+        ? 'every state on this board is read off traces left for other purposes — ' +
+            'the evidence above is the whole of what it was read from'
+        : 'there is no evidence to show: the observer refuses to guess a roster, ' +
+            'because guessing one is what produced 66 phantom stalled rows in p1',
+    ),
+  )
+  body!.append(why)
+  body!.append(opsHealthSection(board))
+}
+
+function renderOpsInstance(instance: OpsInstance, board: OpsBoard): void {
+  headerName.textContent = instance.instance
+  headerKind.textContent = instance.roster === 'intro' ? 'roster from #agents' : 'no roster'
+  const counts = instance.counts
+  headerStatus.textContent =
+    instance.state === 'ok'
+      ? `${counts.stalled} STALLED · ${counts.awaiting} AWAITING`
+      : 'UNKNOWN'
+  headerStatus.style.color = instance.state === 'ok' ? OPS_COLOR.awaiting : OPS_COLOR.unknown
+
+  const routing = el('section')
+  routing.append(el('h3', undefined, 'HOW IT IS ROUTED'))
+  if (instance.roster === 'missing') {
+    routing.append(
+      el(
+        'p',
+        'dp-msg',
+        'This instance has an introduction on #agents with no roster block, so nothing ' +
+          'here can say what it answers for. That is unknown, not idle: the observer ' +
+          'refuses to guess, because guessing a roster is what produced 66 phantom ' +
+          'stalled rows in the investigation this screen came out of.',
+      ),
+    )
+  } else {
+    routing.append(
+      kvList([
+        ['mentioned as', instance.bot ? `@**${instance.bot}**` : '—'],
+        ['zulip user id', instance.bot_id ?? '—'],
+        ['answers every topic in', instance.channel ?? '—'],
+        // Declared, not assumed — Front declares a channel that does not exist
+        // and is served by its prefix alone.
+        ['that channel exists', instance.channel_exists === null ? '—' : instance.channel_exists ? 'yes' : 'no'],
+        ['sweeps prefixes', instance.prefixes.length > 0 ? instance.prefixes.join('  ') : 'none'],
+        ['served notes seen', instance.served_marks],
+      ]),
+    )
+    routing.append(
+      el(
+        'p',
+        'dp-summary-meta',
+        'read from its own introduction in #agents — no roster is compiled into this view',
+      ),
+    )
+  }
+  body!.append(routing)
+
+  const owed = el('section')
+  owed.append(el('h3', undefined, 'WHAT IT OWES'))
+  const rows = board.rows.filter((row) => row.instance === instance.instance)
+  if (rows.length === 0) {
+    owed.append(el('p', 'dp-msg', 'nothing is waiting on this instance'))
+  } else {
+    for (const row of rows) {
+      const box = el('div', 'dp-diff')
+      const head = el('div', 'dp-diff-head')
+      head.append(el('span', undefined, row.topic ? `${row.channel}/${row.topic}` : row.instance))
+      const badge = el('span', 'dp-sev info', row.state.toUpperCase())
+      badge.style.color = OPS_COLOR[row.state] ?? '#b7b5d8'
+      head.append(badge)
+      box.append(head)
+      box.append(el('p', 'dp-msg', row.provenance.text))
+      owed.append(box)
+    }
+  }
+  body!.append(owed)
+  body!.append(opsHealthSection(board))
+}
+
+function renderOpsHealth(board: OpsBoard): void {
+  headerName.textContent = 'operation room'
+  headerKind.textContent = 'relay'
+  headerStatus.textContent = board.health.state.toUpperCase()
+  headerStatus.style.color = board.health.state === 'live' ? OPS_COLOR.done : OPS_COLOR.unknown
+
+  const section = el('section')
+  section.append(el('h3', undefined, 'NOTHING CAN BE SAID RIGHT NOW'))
+  section.append(
+    el(
+      'p',
+      'dp-msg',
+      'This board is unknown, which is not the same as quiet. An agent that is not ' +
+        'running cannot report that it is not running — that is the whole reason this ' +
+        'screen is computed outside the agents — so a relay that cannot read Zulip must ' +
+        'say so rather than show an empty, calm board.',
+    ),
+  )
+  body!.append(section)
+  body!.append(opsHealthSection(board))
+}
+
+
 export function showDetailPopup(selection: PanelSelection): void {
   const node = ensurePopup()
   const key = selectionKey(selection)
@@ -660,6 +849,9 @@ export function showDetailPopup(selection: PanelSelection): void {
   else if (selection.view === 'autolab-project') {
     renderProject(selection.node, selection.project, selection.profiles)
   }
+  else if (selection.view === 'ops-row') renderOpsRow(selection.row, selection.board)
+  else if (selection.view === 'ops-instance') renderOpsInstance(selection.instance, selection.board)
+  else if (selection.view === 'ops-health') renderOpsHealth(selection.board)
   else renderWorkspace(selection.row)
 
   const rawSection = el('section')

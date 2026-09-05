@@ -11,9 +11,17 @@ agentroom = "agentroom.main:main"
 [tool.uv.sources]
 pyagag = { git = "https://github.com/iwaag/pyagag.git", branch = "main" }
 
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/agentroom"]

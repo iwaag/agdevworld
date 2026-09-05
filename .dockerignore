@@ -4,3 +4,5 @@ dist
 .local
 Dockerfile
 compose.yaml
+# The frontend image builds the frontend; the relay runs beside it.
+agentroom

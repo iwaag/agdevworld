@@ -10,6 +10,11 @@ lerna-debug.log*
 node_modules
 dist
 dist-ssr
+
+# agentroom (Python relay) build and virtualenv artefacts
+.venv/
+__pycache__/
+*.pyc
 *.local
 public/cluster/
 

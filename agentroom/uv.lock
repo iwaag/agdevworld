@@ -1,0 +1,19 @@
+version = 1
+revision = 3
+requires-python = ">=3.11"
+
+[[package]]
+name = "agentroom"
+version = "0.1.0"
+source = { editable = "." }
+dependencies = [
+    { name = "pyagag" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "pyagag", git = "https://github.com/iwaag/pyagag.git?branch=main" }]
+
+[[package]]
+name = "pyagag"
+version = "0.1.0"
+source = { git = "https://github.com/iwaag/pyagag.git?branch=main#9f6797e0aa87f3ddb1d54df394012b1be7ce9556" }

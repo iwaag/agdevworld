@@ -169,7 +169,7 @@ export function unreadableRoutines(reason: string): RoutineBoard {
 async function read<T>(path: string): Promise<T | { error: string }> {
   let response: Response
   try {
-    response = await fetch(`${BASE}${path}`)
+    response = await fetch(`${BASE}${path}`, { signal: AbortSignal.timeout(8000) })
   } catch {
     return { error: `the agentroom relay is not answering on ${BASE}` }
   }
@@ -178,6 +178,7 @@ async function read<T>(path: string): Promise<T | { error: string }> {
     const detail = (payload as { error?: string } | undefined)?.error
     return { error: detail ?? `agentroom answered ${response.status}` }
   }
+  if (!payload || typeof payload !== 'object') return { error: 'agentroom returned an unreadable response' }
   return payload as T
 }
 

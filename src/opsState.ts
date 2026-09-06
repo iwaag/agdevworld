@@ -125,7 +125,7 @@ export function unreadableBoard(reason: string): OpsBoard {
 export async function loadOpsBoard(): Promise<OpsBoard> {
   let response: Response
   try {
-    response = await fetch(`${BASE}/ops`)
+    response = await fetch(`${BASE}/ops`, { signal: AbortSignal.timeout(8000) })
   } catch {
     return unreadableBoard(`the agentroom relay is not answering on ${BASE}`)
   }
@@ -134,6 +134,7 @@ export async function loadOpsBoard(): Promise<OpsBoard> {
     const detail = (payload as { error?: string } | undefined)?.error
     return unreadableBoard(detail ?? `agentroom answered ${response.status}`)
   }
+  if (!payload || typeof payload !== 'object' || !('health' in payload)) return unreadableBoard('agentroom returned an unreadable response')
   const board = payload as OpsBoard
   // A relay older than this field is not a relay with nothing retired; it is
   // one that cannot answer, and an undefined here would reach `.length`.

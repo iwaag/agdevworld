@@ -1,6 +1,7 @@
+import { loadOpsBoard } from './opsState'
 import { initChatPanel } from './chatPanel'
 import { renderSessionGraph } from './sessionGraph'
-import { loadRoutines, loadRoutine, routineHeadline, ago, at, type RoutineBoard, type RoutineDetail, type RoutineSession } from './routineState'
+import { loadRoutines, loadRoutine, loadInflight, routineHeadline, ago, at, type RoutineBoard, type RoutineDetail, type RoutineSession } from './routineState'
 import './operationParts.css'
 
 const sessionKey = (session: RoutineSession) => String(session.fire?.message_id ?? 'manual')
@@ -24,6 +25,12 @@ export async function initOperationDashboard(): Promise<void> {
   const selection = { routine: new URLSearchParams(location.search).get('routine') ?? '', session: '' }
   let board: RoutineBoard | undefined, detail: RoutineDetail | undefined
   let generation = 0
+  let refreshing = false
+  let graphSignature = ''
+  let inflightGeneration = 0, inflightBusy = false
+  let lastInflightAt = 0, lastInflightName = ''
+  let stopped = false
+  let timer: number | undefined
   const chat = initChatPanel({ mount: find('.chat-mount'), managed: true, onRefresh: () => { void refresh() } })
 
   function drawSession(scroll = false) {
@@ -40,13 +47,21 @@ export async function initOperationDashboard(): Promise<void> {
       button.append(element('strong', session.fire ? `Fire #${session.fire.message_id}` : 'Manual activity'))
       button.append(element('small', session.fire ? `${ago(detail.generated_at - session.fire.at)} since fire · ${at(session.fire.at)}` : 'No identified scheduled run'))
       button.append(element('small', detail.health.state === 'live' ? `${session.nodes.length} linked conversations · current topic observations` : 'Unknown · last known links'))
-      button.onclick = () => { selection.session = key; drawSession(true) }
+      button.onclick = () => { selection.session = key; lastInflightAt = 0; drawSession(true); void refreshInflight() }
       list.append(button)
     }
     const index = detail.sessions.findIndex(session => sessionKey(session) === selection.session)
     const session = detail.sessions[index]
     if (session) {
-      renderSessionGraph(graph, detail, session)
+      const signature = JSON.stringify([selection.routine, selection.session, detail.health.state, detail.health.reason, session])
+      if (signature !== graphSignature) {
+        const viewport = graph.querySelector('.graph-viewport')
+        const previousScroll = scroll ? undefined : [viewport?.scrollLeft ?? 0, viewport?.scrollTop ?? 0]
+        renderSessionGraph(graph, detail, session)
+        const nextViewport = graph.querySelector('.graph-viewport')
+        if (previousScroll && nextViewport) { nextViewport.scrollLeft = previousScroll[0]!; nextViewport.scrollTop = previousScroll[1]! }
+        graphSignature = signature
+      }
       const until = index > 0 ? detail.sessions[index - 1]?.fire?.message_id : undefined
       chat.highlight(session.fire?.message_id, until, scroll)
       find('.chat-span-note').textContent = session.fire
@@ -57,6 +72,7 @@ export async function initOperationDashboard(): Promise<void> {
       find('.chat-span-note').textContent = 'No session span identified.'
     }
     host.dataset.routine = selection.routine; host.dataset.session = selection.session
+    if (index > 0) find('.parts-inflight').textContent = 'Host observation is latest-only; it is not attached to this historical fire.'
   }
 
   function drawRoutines() {
@@ -95,36 +111,77 @@ export async function initOperationDashboard(): Promise<void> {
 
   async function selectRoutine() {
     const current = ++generation, name = selection.routine
+    const changed = chat.selected() !== name
     chat.select(name || undefined)
     if (!detail) {
       graph.textContent = 'Reading session…'; find('.session-list').textContent = 'Reading sessions…'
+      graphSignature = ''
       find('.standing-request').textContent = ''; find('.chat-span-note').textContent = ''
+      find('.parts-inflight').textContent = 'Reading latest host observation…'
     }
     if (!name) { unavailable('No routine selected'); return }
     const found = await loadRoutine(name)
     if (generation !== current) return
     if ('error' in found) { unavailable(found.error); return }
+    if (board?.health.state !== 'live') found.health = { ...found.health, state: 'unknown', reason: board?.health.reason ?? 'Board unavailable' }
+    if (found.health.state !== 'live' && board) { board = { ...board, health: found.health }; drawRoutines() }
     detail = found
-    health.textContent = `${routineHeadline(found)} · observed ${at(found.generated_at)}`
+    health.textContent = `${routineHeadline(found)} · observed ${at(found.generated_at)} · refresh 5 s`
+    const requestOpen = find('.standing-request').querySelector('details')?.open ?? false
     const request = element('details', '', 'request-evidence')
+    request.open = requestOpen
     request.append(element('summary', `Standing request · ${found.routine.request_topic ?? 'unknown'}`))
     request.append(element('p', found.routine.request?.text ?? 'Standing request unknown — no author post observed.'))
     find('.standing-request').replaceChildren(request)
-    chat.update(found); drawSession()
+    chat.update(found); drawSession(changed)
+    if (found.health.state !== 'live') {
+      find('.parts-inflight').textContent = 'Host observation unknown — event queue cannot identify current activity.'
+    } else void refreshInflight()
+  }
+
+  async function refreshInflight() {
+    const name = selection.routine
+    const latest = detail?.sessions[0]
+    if (!detail || detail.health.state !== 'live' || !latest || sessionKey(latest) !== selection.session) return
+    if (inflightBusy && lastInflightName === name) return
+    if (lastInflightName === name && Date.now() - lastInflightAt < 15000) return
+    lastInflightName = name; lastInflightAt = Date.now(); inflightBusy = true
+    const current = ++inflightGeneration
+    const found = await loadInflight(name)
+    if (current !== inflightGeneration) return
+    inflightBusy = false
+    if (selection.routine !== name || detail?.health.state !== 'live' || sessionKey(detail.sessions[0]!) !== selection.session) return
+    const line = find('.parts-inflight')
+    if ('error' in found) { line.textContent = `Host observation unknown — ${found.error}`; return }
+    line.textContent = `Latest activity only · host directories · observed ${at(found.generated_at)} · ` +
+      (!found.configured ? 'Unknown — observation not configured.' :
+        !found.topics.length ? 'Unknown — no topic observations returned.' :
+        found.topics.map(topic => `${topic.instance}: ${topic.known ? topic.in_flight ? 'in flight' : 'no run in flight observed' : 'unknown'} (${topic.reason})`).join(' · '))
   }
 
   async function refresh() {
-    const current = ++generation
-    const found = await loadRoutines()
-    if (generation !== current) return
-    if (found.health.state !== 'live' && !found.routines.length) { unavailable(found.health.reason); return }
-    board = found
-    if (!found.routines.some(row => row.name === selection.routine)) {
-      selection.routine = found.routines[0]?.name ?? ''; selection.session = ''; detail = undefined
-    }
-    drawRoutines()
-    await selectRoutine()
+    if (refreshing || stopped) return
+    refreshing = true
+    try {
+      const current = ++generation
+      const [found, ops] = await Promise.all([loadRoutines(), loadOpsBoard()])
+      if (generation !== current || stopped) return
+      if (ops.health.state !== 'live') found.health = { ...found.health, state: 'unknown', reason: ops.health.reason }
+      if (found.health.state !== 'live' && !found.routines.length) { unavailable(found.health.reason); return }
+      board = found
+      if (!found.routines.some(row => row.name === selection.routine)) {
+        selection.routine = found.routines[0]?.name ?? ''; selection.session = ''; detail = undefined
+      }
+      drawRoutines()
+      await selectRoutine()
+    } finally { refreshing = false }
   }
   find('.refresh').onclick = () => { void refresh() }
-  await refresh()
+  async function tick() {
+    await refresh()
+    if (!stopped) timer = window.setTimeout(() => { void tick() }, 5000)
+  }
+  window.addEventListener('pagehide', () => { stopped = true; generation++; inflightGeneration++; window.clearTimeout(timer) })
+  window.addEventListener('pageshow', event => { if (event.persisted) { stopped = false; void tick() } })
+  await tick()
 }

@@ -181,3 +181,12 @@ are collapsed or scaled down. Select a card for its complete relay evidence.
 Current topic observations are not historical session outcomes, and manual
 activity without a dispatcher fire is explicitly labelled. Local comparison
 sketches and real-data screenshots remain ignored under `.local/p4/`.
+
+`/?parts=shell` proves the separate-page DOM/CSS-grid frame: routine sidebar,
+recent sessions above the central graph slot, and persistent chat-history slot
+on the right. Slots show loader counts and explicit unknown/errors, not the
+finished dashboard. It reads the existing three loaders on selection; only an
+explicit refresh repeats the reads. Host observation is labelled latest activity
+only, independent of the selected historical session. No new send control exists.
+At narrow widths the desktop skeleton scrolls horizontally; mobile assembly is
+not part of p4. The reusable graph remains on its own page until assembly.

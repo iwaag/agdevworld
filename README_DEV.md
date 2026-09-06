@@ -5,8 +5,9 @@ in `pj-agdev/agfront`, which talks to the Developer in Zulip `#front` and
 dispatches work to the other agents from there.
 
 Since the `agent_room` episode it is no longer a *pure* frontend either. One
-small read-only service sits beside it, `agentroom/`, and the agent room view
-is the only thing that reads it. Everything else is still static.
+small service sits beside it, `agentroom/`, serving agent discovery, operation
+state, routine history and the Developer chat door. The cluster views still
+read static snapshots or their existing sample fallbacks.
 
 ## Commands
 
@@ -22,13 +23,16 @@ is the only thing that reads it. Everything else is still static.
 
 ## Files
 
-- `src/main.ts` — wiring: scenes, the chat panel, the click-to-detail path.
-- `src/scenes/PanelGridScene.ts` — one config-driven grid scene, shared by all four views.
-- `src/views.ts` — the six view configs (`nodes`, `workspaces`, `autolab`, `tasks`, `agentroom`, `ops`).
+- `src/main.ts` — URL entry; dashboard by default, lazily loaded world views.
+- `src/worldViews.ts` — Phaser scene wiring, the legacy chat overlay and detail path.
+- `src/operationDashboard.ts` — dashboard selection and refresh controller.
+- `src/sessionGraph.ts` — bounded conversation graph and node evidence.
+- `src/scenes/PanelGridScene.ts` — one config-driven grid scene, shared by all seven world views.
+- `src/views.ts` — the seven view configs (`nodes`, `workspaces`, `autolab`, `tasks`, `agentroom`, `ops`, `routines`).
 - `src/agentRoomState.ts` — the agent room's two reads, through the `agentroom` relay.
 - `src/opsState.ts` — the operation room's one read, `/ops` on the same relay.
 - `src/viewSwitcher.ts` — the single seam for changing the visible view.
-- `src/chatPanel.ts` — the chat overlay; it owns history and applies returned UI actions.
+- `src/chatPanel.ts` — one routine fire topic and the existing `POST /chat` door; dashboard mode receives shared detail payloads, while world mode owns its selected-topic refresh.
 - `src/detailPopup.ts` — the detail overlay, incl. the per-iteration `summary` button.
 - `src/clusterState.ts` / `src/autolabState.ts` / `src/planeState.ts` — snapshot, gateway, and Plane reads/actions for the panels.
 - `scripts/fetch-cluster-state.mjs` — snapshot refresh through cagent. The one piece of JavaScript outside `src/`; it is a developer command, not part of the service.
@@ -71,8 +75,8 @@ so the view hides exactly what `agentchat read` hides.
 
 The relay's address defaults to `http://localhost:8094`; set
 `VITE_AGENTROOM_URL` at build time to point elsewhere. It is a separate
-process nobody starts automatically — when it is down the agent room view says
-so by name and the other four views carry on.
+process, supervised by the local launchd deployment. When unavailable, the
+relay-backed views say unknown; cluster snapshot views remain available.
 
 ## The operation room
 
@@ -115,9 +119,8 @@ The embedded assistant service and everything that pointed at it — the
 
 The consequences are deliberate and temporary:
 
-- The **chat panel still renders**. Its send path posts to `/api/chat` and
-  fails; it becomes a thin wrapper over Zulip `#front` in a later phase, so
-  it was left alone rather than rewritten twice.
+- The **chat panel now uses `POST /chat` on the relay**, as the Developer
+  in the selected routine fire topic. It does not use the removed assistant.
 - The `workspaces`, `autolab` and `tasks` views fall back to their sample
   JSON where they read `/api/*`. The `nodes` view is unaffected — it reads
   the cagent snapshot from `public/`, which never went through the assistant.
@@ -168,31 +171,53 @@ writes. Enforcement is deferred to the future system-wide auth (JWT)
 episode — see `devdocs/episodes/zero_auth/` (the single pointer to that
 vision).
 
-## Operation room parts (p4)
+## Operation room dashboard (p5)
 
-Open `/?parts=graph` for the standalone conversation-flow prototype. Select a
-routine and one of its latest three sessions. This surface takes a snapshot on
-selection or explicit refresh; it adds no Zulip polling or writes. The existing
-seven-view cycle remains at `/`.
+`/` is the four-pane dashboard: routine list, latest three sessions above the
+conversation graph, and the selected routine's fire conversation on the right.
+`/?parts=shell` remains an alias. DOM scrolling, keyboard focus and selectable
+source evidence make it the default entrance. Phaser is loaded only for a world
+view, rather than being downloaded with the dashboard.
 
-`src/sessionGraph.ts` renders SVG edges behind keyboard-accessible DOM cards.
-Cards stay readable past 15 nodes by scrolling in both directions; no nodes
-are collapsed or scaled down. Select a card for its complete relay evidence.
-Current topic observations are not historical session outcomes, and manual
-activity without a dispatcher fire is explicitly labelled. Local comparison
-sketches and real-data screenshots remain ignored under `.local/p4/`.
+`/?view=ops` opens the retained stalled-first Ops board. The existing seven-view
+cycle remains available at `/?view=nodes`, and any existing view key may be
+selected directly. The older Phaser `routines` view is retained as a compact
+board with its existing detail popup; the dashboard is the primary routine
+workflow. Each world view links back to the dashboard. No eighth scene is added.
+`/?parts=graph` remains the standalone snapshot/explicit-refresh graph workbench.
 
-`/?parts=shell` proves the separate-page DOM/CSS-grid frame: routine sidebar,
-recent sessions above the central graph slot, and persistent chat-history slot
-on the right. Slots show loader counts and explicit unknown/errors, not the
-finished dashboard. It reads the existing three loaders on selection; only an
-explicit refresh repeats the reads. Host observation is labelled latest activity
-only, independent of the selected historical session. No new send control exists.
-At narrow widths the desktop skeleton scrolls horizontally; mobile assembly is
-not part of p4. The reusable graph remains on its own page until assembly.
+The dashboard owns one routine name and one fire message ID. Routine selection
+updates every pane. Session selection updates the graph and highlights that
+fire's message-ID span in chat; sending still targets the routine fire topic,
+never a historical run or a child conversation. Draft text and selection survive
+refresh. Manual activity has no identified scheduled session span.
 
-The p4 relay gap check corrected `sessions[].nodes[].parent` to name the
-immediate parent at every depth (covered by a three-hop regression). No new
-endpoint or polling path was needed. The relay still bounds reconstruction to
-40 linked nodes and four hops; the graph displays the returned tree, not a
-complete historical dependency graph beyond those existing limits.
+Every five seconds the browser reads `/routines`, `/ops` health and the selected
+`/routines/<name>` from the existing event-queue reconstruction. These reads
+make no additional Zulip calls. Eight-second read timeouts and generation guards
+bound failures and reject late selections. `/inflight/<name>` scans host
+directories every fifteen seconds for the selected routine's latest session;
+historical session display suspends it. Counts and expandable per-topic reasons
+identify the host evidence separately. Leaving the page stops the refresh loop.
+
+Health remains on screen. Unavailable/stale relay evidence masks current states
+as unknown and disables the composer; cached history is labelled last known.
+The standing request, schedule next/overdue evidence, time since fire and
+Ack overdue annotation are visible without adding a state or execution timer.
+Node states are current topic observations, not historical session outcomes.
+
+The relay reports session `truncation` metadata: `truncated`, `reasons`,
+`max_nodes` (40), and `max_depth` (4). Actual omitted eligible links trigger the
+marker; reaching a cap exactly, cycles, and out-of-window links do not. Missing
+metadata from an older relay means unknown completeness. An untruncated tree
+may still contain unread topics, whose states remain unknown. Branches occupy
+separate vertical bands with wrapped, inspectable names; scrolling keeps every
+returned card readable. Below desktop width panes reorganize, then stack on
+phones. There are no progress percentages, pipeline stages or predicted steps.
+
+Validation: `npm run build`, `cd agentroom && uv run pytest -q`, and CDP visual
+checks using the ignored `.local/opsshot.mjs` driver. Synthetic truncation,
+health and send tests intercept browser fetch; unit tests mock Zulip. Real chat
+verification is deliberate and at most one round trip, never automated posting.
+Rebuild the web image after frontend changes and kickstart the local relay job
+after relay code changes; verify event-queue health returns to live.

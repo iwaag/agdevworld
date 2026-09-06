@@ -168,7 +168,11 @@ Every node wears the **ops board's** verdict, lifted unchanged. What is added
 is only what `/ops` has no row for: `quiet` (swept, nothing owed) and `unknown`
 (never read — the `note-only` nodes). The walk is capped at depth 4 and 40
 nodes, because two agents can anchor each other and a board is not where a
-cycle should be discovered.
+cycle should be discovered. Each session also carries `truncation` with
+`truncated`, `reasons` (`nodes` and/or `depth`), `max_nodes`, and `max_depth`.
+It reports actual omitted eligible links, not merely a tree exactly at a cap.
+This inspects already-held links only. A false truncation flag does not make
+unread topic evidence known or turn current verdicts into historical outcomes.
 
 A routine's two topics are the only ones this service reads **through a ✔**:
 resolution is how a routine is retired, and there are sixteen such topics

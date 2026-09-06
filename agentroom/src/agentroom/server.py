@@ -26,14 +26,15 @@ import json
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import unquote, urlparse
 
+from .chat import Chat
 from .ops import Ops
 from .room import Room
 
 ROUTES = ("/healthz", "/agents", "/work", "/ops", "/routines", "/routines/<name>")
-WRITE_ROUTES = ("/ops/confirm",)
+WRITE_ROUTES = ("/ops/confirm", "/chat")
 
 
-def make_handler(room: Room, ops: Ops | None = None):
+def make_handler(room: Room, ops: Ops | None = None, chat: Chat | None = None):
     class Handler(BaseHTTPRequestHandler):
         server_version = "agentroom/0.1.0"
 
@@ -55,6 +56,18 @@ def make_handler(room: Room, ops: Ops | None = None):
             self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
             self.send_header("Access-Control-Allow-Headers", "Content-Type")
             self.end_headers()
+
+        def _with_chat(self, payload: dict) -> dict:
+            """Say, in the read payload, whether this relay can answer at all.
+
+            The view has to know before it draws a box: a chat input that
+            silently refuses on submit is the same lie as an empty board.
+            """
+            payload["chat"] = chat.status() if chat is not None else {
+                "configured": False,
+                "reason": "this relay was built without a chat credential",
+            }
+            return payload
 
         def do_GET(self) -> None:  # noqa: N802
             path = urlparse(self.path).path.rstrip("/") or "/"
@@ -94,7 +107,7 @@ def make_handler(room: Room, ops: Ops | None = None):
                                      "set OPSROOM_ZULIP_ENV to its own bot credential",
                         })
                     else:
-                        self._write_json(200, ops.routines())
+                        self._write_json(200, self._with_chat(ops.routines()))
                 elif path.startswith("/routines/"):
                     if ops is None:
                         self._write_json(503, {
@@ -107,7 +120,8 @@ def make_handler(room: Room, ops: Ops | None = None):
                         # narrow — it is matched against the routines the
                         # engine already found.
                         found = ops.routine(unquote(path[len("/routines/"):]))
-                        self._write_json(404 if found.get("error") else 200, found)
+                        self._write_json(404 if found.get("error") else 200,
+                                         self._with_chat(found))
                 else:
                     self._write_json(404, {"error": f"no route {path}", "routes": list(ROUTES)})
             except Exception as error:
@@ -115,8 +129,67 @@ def make_handler(room: Room, ops: Ops | None = None):
                 # says so rather than rendering an empty room.
                 self._write_json(502, {"error": f"{type(error).__name__}: {error}"})
 
+        def _body(self) -> dict | None:
+            """The request's JSON object, or None once an error is written."""
+            try:
+                length = int(self.headers.get("Content-Length") or 0)
+                raw = self.rfile.read(length) if length > 0 else b""
+                # No body at all is the common case for confirm — the view's
+                # one button means "all of them" — so an empty request is not
+                # an error here.
+                body = json.loads(raw) if raw.strip() else {}
+            except (ValueError, json.JSONDecodeError) as error:
+                self._write_json(400, {"error": f"unreadable body: {error}"})
+                return None
+            if not isinstance(body, dict):
+                self._write_json(400, {"error": "body must be a JSON object"})
+                return None
+            return body
+
+        def _chat(self) -> None:
+            """The one route that writes to the realm (`operation_room` p3).
+
+            Every refusal is decided in `chat.py` and answered as 403: the
+            request was well formed and the *rule* is what declined it. A view
+            that forgot to hide the box therefore still cannot post into
+            another agent's channel.
+            """
+            if chat is None or not chat.configured:
+                reason = (chat.status()["reason"] if chat else
+                          "this relay was built without a chat credential")
+                self._write_json(503, {"error": reason})
+                return
+            if ops is None:
+                self._write_json(503, {
+                    "error": "the ops engine is not configured, so no routine is known "
+                             "and nothing can be posted into one",
+                })
+                return
+            body = self._body()
+            if body is None:
+                return
+            topic = str(body.get("topic") or "")
+            text = str(body.get("text") or "")
+            names = {row["name"] for row in ops.routines()["routines"]}
+            refused = chat.check(topic, text, names)
+            if refused is not None:
+                self._write_json(403, {"sent": False, "error": refused})
+                return
+            try:
+                found = chat.send(topic, text, names)
+            except Exception as error:
+                # No retry: the post may well have landed, and a second one
+                # buys a second paid run for a thing the human asked once.
+                self._write_json(502, {"sent": False,
+                                       "error": f"{type(error).__name__}: {error}"})
+                return
+            self._write_json(200, found)
+
         def do_POST(self) -> None:  # noqa: N802
             path = urlparse(self.path).path.rstrip("/") or "/"
+            if path == "/chat":
+                self._chat()
+                return
             if path != "/ops/confirm":
                 self._write_json(404, {"error": f"no POST route {path}",
                                        "post": list(WRITE_ROUTES)})
@@ -127,17 +200,8 @@ def make_handler(room: Room, ops: Ops | None = None):
                              "set OPSROOM_ZULIP_ENV to its own bot credential",
                 })
                 return
-            try:
-                length = int(self.headers.get("Content-Length") or 0)
-                raw = self.rfile.read(length) if length > 0 else b""
-                # No body at all is the common case — the view's one button
-                # means "all of them" — so an empty request is not an error.
-                body = json.loads(raw) if raw.strip() else {}
-            except (ValueError, json.JSONDecodeError) as error:
-                self._write_json(400, {"error": f"unreadable body: {error}"})
-                return
-            if not isinstance(body, dict):
-                self._write_json(400, {"error": "body must be a JSON object"})
+            body = self._body()
+            if body is None:
                 return
 
             channel, topic = body.get("channel"), body.get("topic")
@@ -169,5 +233,7 @@ def make_handler(room: Room, ops: Ops | None = None):
     return Handler
 
 
-def build_server(host: str, port: int, room: Room, ops: Ops | None = None) -> ThreadingHTTPServer:
-    return ThreadingHTTPServer((host, port), make_handler(room, ops))
+def build_server(
+    host: str, port: int, room: Room, ops: Ops | None = None, chat: Chat | None = None
+) -> ThreadingHTTPServer:
+    return ThreadingHTTPServer((host, port), make_handler(room, ops, chat))

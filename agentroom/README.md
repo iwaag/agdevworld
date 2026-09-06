@@ -102,6 +102,11 @@ writes only to this process's memory (see `POST /ops/confirm`).
   `{"confirmed": n, "topics": [...], "refused": [...]}`, `409` when the target
   is not `done`, `404` when it is not on the board at all.
 
+- `POST /chat` → **the one route that writes to the realm**: a post into a
+  routine topic of `#front`, as the Developer. `{topic, text}`; answers
+  `{sent, channel, topic, message_id}`, `403` with the reason for anything the
+  rules decline, `503` when no chat credential is configured. See below.
+
 A Zulip failure answers `502` with the error text, so the view can say the
 room is unreadable instead of showing an empty one.
 
@@ -169,6 +174,28 @@ A routine's two topics are the only ones this service reads **through a ✔**:
 resolution is how a routine is retired, and there are sixteen such topics
 rather than a realm's worth. Their history is also the only history kept in
 full (200 messages), because the chat view *is* that history.
+
+## `POST /chat` — the only write
+
+`AGENTROOM_CHAT_ZULIP_ENV` is a **third** credential variable, the Developer's,
+and nothing falls back to it or from it. Unset means the relay is read-only for
+chat and every read payload says so in `chat.configured`, so a view knows
+before it draws a box. The `/ops` observer never gains the ability to post.
+
+Three rules, all enforced in the relay rather than in the view, because a view
+that hides a box is a habit and not a rule:
+
+- **`#front`, and only a routine topic of a routine this relay already sees**
+  (`routine-<name>` or `front-routine-<name>`). The GUI cannot write into
+  another agent's channel: routing work is Front's job, which is what Single
+  Entrance means.
+- **A length guard.** This realm's `max_message_length` is 10000 and Zulip
+  **truncates silently** past it (measured in `comfynotify`). The door sends up
+  to `AGENTROOM_CHAT_MAX_CHARS` (default 4000) and refuses louder messages
+  rather than letting a boundary fail invisibly.
+- **No selfnote may be typed by hand**, and there is **no retry**: a post here
+  starts a paid Front run, and a retry would buy a second one for a request the
+  human made once — in exactly the case where the first post may have landed.
 
 ## `/ops` — the state engine
 

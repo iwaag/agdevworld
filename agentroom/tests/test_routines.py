@@ -7,6 +7,7 @@ that mean somebody has to look.
 
 import json
 
+from agentroom.chat import Chat, allowed_topic
 from agentroom.ops import Topic
 from agentroom.routines import (
     Schedule,
@@ -401,3 +402,74 @@ def test_the_chat_is_real_posts_only_and_oldest_first():
     )
     found = chat_of(mapping(root), "papers")
     assert [post["message_id"] for post in found] == [10, 20]
+
+
+# --- the write door --------------------------------------------------------
+
+
+def test_chat_posts_only_into_a_known_routines_topics():
+    names = {"papers"}
+    assert allowed_topic("front-routine-papers", names)
+    assert allowed_topic("routine-papers", names)
+    # Front's own request topics, another agent's channel, and a routine this
+    # relay has never seen are all the same refusal: routing is Front's job.
+    assert not allowed_topic("front-p10-cleanup", names)
+    assert not allowed_topic("front-routine-ghosts", names)
+
+
+def test_an_unconfigured_chat_refuses_and_says_which_variable():
+    chat = Chat(env_path=None)
+    refused = chat.check("front-routine-papers", "hello", {"papers"})
+    assert "AGENTROOM_CHAT_ZULIP_ENV" in refused
+    assert chat.status()["configured"] is False
+
+
+def test_a_configured_chat_still_refuses_the_wrong_topic(tmp_path):
+    chat = Chat(env_path=tmp_path / "developer.env")
+    assert chat.check("pj-mediagen/whatever", "hello", {"papers"}) is not None
+    assert chat.check("front-routine-papers", "hello", {"papers"}) is None
+
+
+def test_an_over_long_message_is_refused_rather_than_truncated(tmp_path):
+    # comfynotify proved Zulip drops the tail of an over-long post with no
+    # error anywhere. A boundary that fails invisibly gets a loud refusal.
+    chat = Chat(env_path=tmp_path / "developer.env", max_chars=50)
+    refused = chat.check("front-routine-papers", "x" * 51, {"papers"})
+    assert "51 characters" in refused and "10000" in refused
+    assert chat.check("front-routine-papers", "x" * 50, {"papers"}) is None
+
+
+def test_a_selfnote_cannot_be_typed_by_hand(tmp_path):
+    chat = Chat(env_path=tmp_path / "developer.env")
+    refused = chat.check("front-routine-papers", "[selfnote][served] a/b 1", {"papers"})
+    assert "machine-to-machine" in refused
+
+
+def test_a_sent_message_goes_to_front_and_reports_its_id(tmp_path):
+    class FakeClient:
+        def __init__(self):
+            self.sent = []
+
+        def send_to_channel(self, channel, topic, content):
+            self.sent.append((channel, topic, content))
+            return 4242
+
+    fake = FakeClient()
+    chat = Chat(env_path=tmp_path / "developer.env", client_factory=lambda path: fake)
+    found = chat.send("front-routine-papers", "  how did that run go?  ", {"papers"})
+    assert found == {
+        "sent": True, "channel": "front", "topic": "front-routine-papers",
+        "message_id": 4242,
+        "note": "the post is live in the realm; the event queue will carry it back",
+    }
+    # Trimmed, and posted exactly once.
+    assert fake.sent == [("front", "front-routine-papers", "how did that run go?")]
+
+
+def test_a_refused_message_is_never_posted(tmp_path):
+    class Exploding:
+        def send_to_channel(self, *args):
+            raise AssertionError("a refused message must not reach Zulip")
+
+    chat = Chat(env_path=tmp_path / "developer.env", client_factory=lambda path: Exploding())
+    assert chat.send("front-p10-cleanup", "hello", {"papers"})["sent"] is False

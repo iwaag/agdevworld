@@ -12,6 +12,7 @@ import sys
 import time
 from pathlib import Path
 
+from .chat import CHAT_ENV_VARIABLE, DEFAULT_MAX_CHARS, Chat
 from .ops import DEFAULT_STALLED_SECONDS, Ops
 from .room import Room
 from .server import build_server
@@ -29,6 +30,10 @@ OPS_ENV_VARIABLE = "OPSROOM_ZULIP_ENV"
 #: is. A path, in the environment, for the same reason the credentials are
 #: (`devpolicy/styles.md`): it is an absolute local path.
 SCHEDULE_VARIABLE = "AGENTROOM_SCHEDULE_JSON"
+#: The chat's own credential (the Developer's). Deliberately a third variable
+#: with no fallback in either direction: the observer that reads the realm
+#: never posts, and a relay without this one is read-only for chat and says so.
+CHAT_VARIABLE = CHAT_ENV_VARIABLE
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8094
 DEFAULT_CACHE_SECONDS = 30.0
@@ -66,6 +71,16 @@ def main(argv: list[str] | None = None) -> int:
         # several times a fire would be the more fragile arrangement.
         ops = Ops(env_path=ops_path, stalled_seconds=stalled, schedule_path=schedule_path)
 
+    chat_env = os.environ.get(CHAT_VARIABLE, "")
+    chat_path = Path(chat_env).expanduser() if chat_env else None
+    if chat_path is not None and not chat_path.is_file():
+        print(f"{CHAT_VARIABLE}={chat_path} is not a file", file=sys.stderr)
+        return 2
+    chat = Chat(
+        env_path=chat_path,
+        max_chars=int(os.environ.get("AGENTROOM_CHAT_MAX_CHARS", DEFAULT_MAX_CHARS)),
+    )
+
     if argv and argv[0] == "check":
         # A one-shot read, so a credentials or connectivity problem is found
         # without a browser in the loop.
@@ -95,14 +110,16 @@ def main(argv: list[str] | None = None) -> int:
         for row in routines["routines"]:
             print(f"  {row['name']:<12} {row['state']:<9} {row['answer']['state']:<11} "
                   f"{row['posts']} posts")
+        print("chat: " + ("configured" if chat.configured else chat.status()["reason"]))
         return 0
 
     if ops is not None:
         ops.start()
-    server = build_server(host, port, room, ops)
+    server = build_server(host, port, room, ops, chat)
     print(
         f"agentroom listening on http://{host}:{port} (cache {ttl:g}s, "
-        + (f"ops on, stalled at {stalled:g}s)" if ops else "ops off)"),
+        + (f"ops on, stalled at {stalled:g}s, " if ops else "ops off, ")
+        + ("chat on)" if chat.configured else "chat read-only)"),
         flush=True,
     )
     try:

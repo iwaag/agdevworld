@@ -107,6 +107,9 @@ export interface ChatPanelHandle {
   // Show a routine's fire topic. `undefined` puts the panel back to its
   // "nothing selected" state.
   select: (name: string | undefined) => void
+  update: (detail: RoutineDetail) => void
+  unavailable: (reason: string) => void
+  highlight: (since: number | undefined, until?: number, scroll?: boolean) => void
   selected: () => string | undefined
   // Put text in the box **without sending it**. The popup's "Ask Front" uses
   // this: a run is bought by a human pressing Send, never by a click that
@@ -115,7 +118,7 @@ export interface ChatPanelHandle {
   onUpdate: (listener: (detail: RoutineDetail) => void) => void
 }
 
-export function initChatPanel(): ChatPanelHandle {
+export function initChatPanel(options: { mount?: HTMLElement; managed?: boolean; onRefresh?: () => void } = {}): ChatPanelHandle {
   const style = document.createElement('style')
   style.textContent = PANEL_CSS
   document.head.append(style)
@@ -137,7 +140,7 @@ export function initChatPanel(): ChatPanelHandle {
       </div>
     </form>
   `
-  document.body.append(panel)
+  ;(options.mount ?? document.body).append(panel)
 
   const topicEl = panel.querySelector<HTMLSpanElement>('.cp-topic')!
   const noteEl = panel.querySelector<HTMLSpanElement>('.cp-note')!
@@ -187,7 +190,7 @@ export function initChatPanel(): ChatPanelHandle {
     // The relay is the source of the history, so a repaint only happens when
     // the history actually changed — otherwise the panel would scroll itself
     // away from what the reader is looking at every five seconds.
-    const ids = posts.map((post) => post.message_id).join(',')
+    const ids = JSON.stringify(posts)
     if (ids === lastIds) return
     const atBottom =
       messagesEl.scrollHeight - messagesEl.scrollTop - messagesEl.clientHeight < 60 ||
@@ -201,7 +204,7 @@ export function initChatPanel(): ChatPanelHandle {
     for (const post of posts) {
       const kind = classOf(post)
       const who = kind === 'ack' ? undefined : `${post.by} · ${ago(detail.generated_at - post.at)} ago`
-      bubble(kind, who, kind === 'ack' ? 'ack — Front received it' : post.content)
+      bubble(kind, who, kind === 'ack' ? 'ack — Front received it' : post.content).dataset.messageId = String(post.message_id)
     }
     if (atBottom) messagesEl.scrollTop = messagesEl.scrollHeight
   }
@@ -211,8 +214,8 @@ export function initChatPanel(): ChatPanelHandle {
     const live = detail.health.state === 'live'
     const answer = detail.routine.answer
     const parts = [
-      live ? 'realm live' : `⚠ ${detail.health.reason}`,
-      answer.state === 'answered'
+      live ? `realm live · observed ${at(detail.generated_at)}` : `Unknown — ${detail.health.reason}; last known history`,
+      !live ? 'Current answer unknown' : answer.state === 'answered'
         ? `last fire answered in ${ago(answer.answered_after ?? null)}`
         : answer.state === 'no fire'
           ? 'never fired by the dispatcher'
@@ -221,7 +224,7 @@ export function initChatPanel(): ChatPanelHandle {
     if (!status?.configured) parts.push(status?.reason ?? 'chat is read-only')
     noteEl.className = `cp-note${live ? (status?.configured ? ' live' : ' warn') : ' warn'}`
     noteEl.textContent = parts.join(' · ')
-    const usable = Boolean(status?.configured) && !sending
+    const usable = live && Boolean(status?.configured) && !sending
     input.disabled = !usable
     sendButton.disabled = !usable
     countEl.textContent = status?.max_chars ? `${input.value.length}/${status.max_chars}` : ''
@@ -230,12 +233,12 @@ export function initChatPanel(): ChatPanelHandle {
 
   async function refresh() {
     if (!selected) return
-    const found = await loadRoutine(selected)
+    if (options.managed) { options.onRefresh?.(); return }
+    const name = selected
+    const found = await loadRoutine(name)
+    if (selected !== name) return
     if ('error' in found) {
-      noteEl.className = 'cp-note warn'
-      noteEl.textContent = found.error
-      renderEmpty(found.error)
-      lastIds = ''
+      unavailable(found.error)
       return
     }
     renderChat(found)
@@ -254,6 +257,10 @@ export function initChatPanel(): ChatPanelHandle {
     started = true
     selected = name
     lastIds = ''
+    status = undefined
+    input.value = ''
+    input.disabled = true
+    sendButton.disabled = true
     window.clearInterval(timer)
     if (!name) {
       topicEl.textContent = ''
@@ -265,6 +272,7 @@ export function initChatPanel(): ChatPanelHandle {
     }
     topicEl.textContent = `#front › front-routine-${name}`
     renderEmpty('reading the fire topic…')
+    if (options.managed) return
     void refresh()
     // Only the selected routine is refreshed, and only from the relay's own
     // memory: this makes no Zulip call, which is the whole reason it is
@@ -274,14 +282,16 @@ export function initChatPanel(): ChatPanelHandle {
 
   async function send(text: string) {
     if (!selected || sending) return
+    const destination = selected
     sending = true
     sendButton.disabled = true
     input.disabled = true
     const pending = bubble('pending', undefined, 'posting to #front…')
     messagesEl.scrollTop = messagesEl.scrollHeight
-    const found = await sendChat(`front-routine-${selected}`, text)
+    const found = await sendChat(`front-routine-${destination}`, text)
     pending.remove()
     sending = false
+    if (selected !== destination) { await refresh(); return }
     if (!found.sent) {
       bubble('error', undefined, found.error ?? 'the post was refused')
       messagesEl.scrollTop = messagesEl.scrollHeight
@@ -320,9 +330,35 @@ export function initChatPanel(): ChatPanelHandle {
     }
   })
 
+  function unavailable(reason: string) {
+    status = undefined
+    noteEl.className = 'cp-note warn'
+    noteEl.textContent = `Unknown — ${reason}`
+    input.disabled = true
+    sendButton.disabled = true
+    renderEmpty(`History unknown — ${reason}`)
+    lastIds = ''
+  }
+
   select(undefined)
 
   return {
+    update(detail) {
+      if (detail.routine.name !== selected) return
+      renderChat(detail)
+      renderStatus(detail)
+    },
+    unavailable,
+    highlight(since, until, scroll = false) {
+      let first: HTMLElement | undefined
+      for (const node of messagesEl.querySelectorAll<HTMLElement>('[data-message-id]')) {
+        const id = Number(node.dataset.messageId)
+        const active = since !== undefined && id >= since && (until === undefined || id < until)
+        node.classList.toggle('session-span', active)
+        if (active && !first) first = node
+      }
+      if (scroll && first) messagesEl.scrollTop = first.offsetTop - messagesEl.offsetTop
+    },
     select,
     selected: () => selected,
     compose(text: string) {

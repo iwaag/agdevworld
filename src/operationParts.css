@@ -26,3 +26,40 @@
 @media (max-width: 900px) {
   .parts-grid { grid-template-columns: 180px minmax(280px, 1fr) 260px; min-width: 744px; }
 }
+/* Assembled dashboard; pane sizes follow their content and the viewport. */
+.dashboard { padding: 20px 24px; }
+.dashboard-header { display: flex; align-items: center; flex-wrap: wrap; gap: 12px 32px; }
+.dashboard-header h1 { margin: 0; }
+.eyebrow { color: #829bb4; font-size: 10px; letter-spacing: 3px; }
+.dashboard-header nav { margin-left: auto; }
+.dashboard .parts-health { width: 100%; margin: 0 0 14px; font-size: 12px; }
+.dashboard .parts-grid { min-height: 0; grid-template-columns: 240px minmax(300px, 1fr) 360px; grid-template-rows: auto minmax(0, 1fr); }
+.dashboard h2 { margin: 0 0 12px; }
+.dashboard h2 small { display: block; font-weight: 400; color: #829bb4; font-size: 11px; }
+.routine-list { display: flex; flex-direction: column; gap: 10px; }
+.dashboard .routine-card, .dashboard .session-card { text-align: left; display: flex; flex-direction: column; gap: 5px; width: 100%; }
+.dashboard button[aria-pressed=true] { border-color: #88d6ff; background: #1f3b54; box-shadow: inset 3px 0 #88d6ff; }
+.routine-card strong { overflow-wrap: anywhere; }
+.routine-card small, .session-card small { color: #b2c3d3; font-size: 11px; }
+.state-chip { align-self: flex-start; font-size: 11px; border-radius: 12px; padding: 1px 8px; background: #101c2b; }
+.state-chip.done { color: #6ee0b0; } .state-chip.stalled { color: #ff8585; }
+.state-chip.unknown, .annotation { color: #f4bd57 !important; }
+.state-chip.acked { color: #d2adff; } .state-chip.awaiting { color: #72bbff; }
+.provenance { opacity: .8; }
+.session-list { display: flex; gap: 10px; }
+.dashboard .session-card { flex: 1; min-width: 0; }
+.dashboard .flow-pane { display: flex; flex-direction: column; }
+.request-evidence { font-size: 12px; color: #b2c3d3; margin-bottom: 8px; }
+.request-evidence p { max-height: 180px; overflow: auto; white-space: pre-wrap; }
+.dashboard .parts-graph { min-height: 0; flex: 1; display: flex; flex-direction: column; }
+.dashboard .parts-graph > p { font-size: 11px; margin: 0 0 10px; color: #b2c3d3; }
+.dashboard .graph-viewport { flex: 1; min-height: 200px; height: auto; }
+.parts-inflight { color: #b2c3d3; font-size: 11px; margin-bottom: 0; }
+.dashboard .chat-pane { display: flex; flex-direction: column; overflow: hidden; }
+.chat-span-note { color: #b2c3d3; font-size: 11px; margin: 0 0 10px; }
+.chat-mount { flex: 1; min-height: 0; display: flex; }
+.dashboard #chat-panel { position: relative; inset: auto; width: 100%; min-width: 0; border: 0; z-index: auto; }
+.dashboard #chat-panel header { padding: 8px; }
+.dashboard #chat-messages { min-height: 0; position: relative; padding: 10px 8px; }
+.dashboard .chat-msg.session-span { border-left: 3px solid #88d6ff; }
+.dashboard #chat-form { padding: 10px 0 0; }

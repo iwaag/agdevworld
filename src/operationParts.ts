@@ -1,8 +1,10 @@
 import { loadRoutines, loadRoutine, loadInflight, routineHeadline, at } from './routineState'
 import { renderSessionGraph } from './sessionGraph'
 import './operationParts.css'
+import { initOperationDashboard } from './operationDashboard'
 
 export async function initOperationParts(): Promise<void> {
+  if (new URLSearchParams(location.search).get('parts') === 'shell') return initOperationDashboard()
   const shell = new URLSearchParams(location.search).get('parts') === 'shell'
   const host = document.createElement('main'); host.className = 'operation-parts'
   host.innerHTML = '<h1>Operation room · graph part</h1><div class="parts-toolbar"><a href="/">Existing views</a><label>Routine <select aria-label="Routine"></select></label><label>Session <select aria-label="Session"></select></label><button>Refresh snapshot</button></div><p class="parts-health" role="status">Reading relay…</p><section class="parts-graph"></section>'

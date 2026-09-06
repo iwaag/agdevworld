@@ -55,8 +55,11 @@ from agag.intro import (
 from agag.selfnote import Conversation, is_selfnote, parse_rootchat, parse_served
 from agag.zulip import RESOLVED_TOPIC_PREFIX, QueueExpired, RateLimited, ZulipClient
 
+from .inflight import Inflight
 from .room import SYSTEM_REALM, bare_topic
 from .routines import (
+    FIRE_PREFIX,
+    ROUTINE_CHANNEL,
     ROUTINE_HISTORY,
     Schedule,
     chat_of,
@@ -70,6 +73,10 @@ from .routines import (
 SCHEMA = "ag.ops.v1"
 #: The routine board's own version (`operation_room` p3).
 ROUTINES_SCHEMA = "ag.routines.v1"
+#: The host-side in-flight signal's version. A separate payload because it is
+#: the only one that may be polled fast, and it must be obvious that nothing
+#: in it came from Zulip.
+INFLIGHT_SCHEMA = "ag.inflight.v1"
 #: How long an owed reply may go unanswered before the board calls it stalled.
 #: p1 proposed 15 minutes; the p9 incident it exists to catch was 26. A number
 #: to tune, never a finding — which is why it is configuration.
@@ -89,6 +96,7 @@ RESYNC_BACKOFF = 30.0
 
 __all__ = [
     "DEFAULT_STALLED_SECONDS",
+    "INFLIGHT_SCHEMA",
     "Ops",
     "ROUTINES_SCHEMA",
     "SCHEMA",
@@ -429,6 +437,9 @@ class Ops:
     #: The dispatcher's own `schedule.json`, read as a local file. None when
     #: unconfigured, which the payload says rather than showing no fires.
     schedule_path: Path | None = None
+    #: `instance -> project root` for the in-flight signal. Empty is an
+    #: answer: every instance then reports `known: false`.
+    agent_roots: dict = field(default_factory=dict)
     client_factory: Callable[[Path], ZulipClient] | None = None
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
     _stop: threading.Event = field(default_factory=threading.Event, repr=False)
@@ -981,7 +992,62 @@ class Ops:
             "schedule": schedule.payload(),
             "routine": row,
             "sessions": sessions,
-            "chat": chat_of(topics, name),
+            # `chat_log`, not `chat`: the server adds a `chat` block saying
+            # whether this relay may post at all, and one key meaning two
+            # things silently replaced the history with the status — the panel
+            # then sat on "reading the fire topic…" forever. Found by looking
+            # at the screen, which is the only place it was visible.
+            "chat_log": chat_of(topics, name),
+        }
+
+    def inflight(self, name: str, now: float | None = None) -> dict:
+        """The **non-Zulip** half, for the selected routine's newest session.
+
+        This is the only thing in this service that may be polled at a few
+        seconds, and it is allowed because it touches no realm: every answer
+        below is a `stat` of this host's own directories. The Zulip side is
+        already real-time on the event queue, so polling it would spend the
+        agents' quota to learn nothing (plan constraint 3).
+
+        Who is looked at is decided by the **roster**, not by who happens to
+        owe a reply: an agent with no open row is exactly the one a human wants
+        to know is still running.
+        """
+        now = time.time() if now is None else now
+        with self._lock:
+            topics = dict(self._topics)
+            rosters = {i: r for i, r in self._rosters.items() if r is not None}
+            retired = set(self._retired)
+        sessions = sessions_of(topics, name, {})
+        session = sessions[0] if sessions else None
+        watched: list[tuple[str, str]] = [(ROUTINE_CHANNEL, f"{FIRE_PREFIX}{name}")]
+        for node in (session or {}).get("nodes", []):
+            watched.append((node["channel"], node["topic"]))
+        look = Inflight(roots=self.agent_roots)
+        seen: set[tuple[str, str, str]] = set()
+        rows: list[dict] = []
+        agents: dict[str, dict] = {}
+        for channel, topic in watched:
+            for instance, roster in rosters.items():
+                if instance in retired or not owns(roster, channel, topic):
+                    continue
+                key = (instance, channel, topic)
+                if key in seen:
+                    continue
+                seen.add(key)
+                rows.append(look.look(instance, channel, topic))
+                if instance not in agents:
+                    agents[instance] = look.busy(instance)
+        return {
+            "schema": INFLIGHT_SCHEMA,
+            "generated_at": now,
+            "routine": name,
+            "configured": bool(self.agent_roots),
+            "session": None if session is None else {
+                "fire": session["fire"], "nodes": len(session["nodes"]),
+            },
+            "topics": rows,
+            "agents": sorted(agents.values(), key=lambda row: row["instance"]),
         }
 
     # -- what the view reads ---------------------------------------------

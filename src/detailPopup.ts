@@ -22,6 +22,13 @@ import {
 } from './autolabState'
 import { postedAt, type RoomAgent, type RoomWorkRow } from './agentRoomState'
 import { ago, at, healthLine, type OpsBoard, type OpsInstance, type OpsRow } from './opsState'
+import {
+  routineDetail,
+  type InflightBoard,
+  type RoutineDetail,
+  type RoutineRow,
+  type SessionNode,
+} from './routineState'
 import type { PanelSelection } from './views'
 
 const POPUP_CSS = `
@@ -132,6 +139,22 @@ const POPUP_CSS = `
   font-size: 11.5px; padding: 5px 11px; cursor: pointer;
 }
 .dp-iter-ask:hover { background: #2c3450; }
+.dp-node {
+  border-left: 2px solid #262b3d; padding: 5px 0 5px 10px; margin: 0 0 6px 0;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11.5px;
+}
+.dp-node .dp-node-name { color: #f4f1ff; word-break: break-all; }
+.dp-node .dp-node-meta { color: #777a91; font-size: 10.5px; display: block; margin-top: 2px; }
+.dp-node .dp-node-state { font-size: 10px; letter-spacing: 1px; padding: 1px 7px;
+  border-radius: 999px; border: 1px solid currentColor; margin-right: 6px; }
+.dp-session { border: 1px solid #262b3d; border-radius: 10px; padding: 9px 12px;
+  margin-bottom: 9px; background: #12151f; }
+.dp-session-head { display: flex; align-items: baseline; gap: 8px; margin-bottom: 7px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11.5px; color: #c3c7de; }
+.dp-session-head .dp-session-when { color: #777a91; font-size: 10.5px; margin-left: auto; }
+.dp-flight { color: #67e8a5; }
+.dp-flight.idle { color: #777a91; }
+.dp-flight.unknown { color: #ffc56d; }
 `
 
 const STATUS_COLOR: Record<string, string> = {
@@ -150,6 +173,7 @@ let headerName: HTMLSpanElement, headerKind: HTMLSpanElement, headerStatus: HTML
 let currentKey: string | null = null
 let currentSelection: PanelSelection | null = null
 let askHandler: ((selection: PanelSelection) => void) | undefined
+let askButton: HTMLButtonElement | undefined
 // When an outside-pointerdown closes the popup and the very same click's
 // pointerup re-selects the same panel, treat it as a toggle: skip reopening.
 let dismissed: { key: string; at: number } | null = null
@@ -170,6 +194,7 @@ function selectionKey(selection: PanelSelection): string {
   }
   if (selection.view === 'ops-instance') return `ops-instance:${selection.instance.instance}`
   if (selection.view === 'ops-health') return 'ops-health'
+  if (selection.view === 'routine') return `routine:${selection.routine.name}`
   return `workspaces:${selection.row.slug}`
 }
 
@@ -184,6 +209,9 @@ function selectionPayload(selection: PanelSelection): unknown {
   if (selection.view === 'ops-row') return selection.row
   if (selection.view === 'ops-instance') return selection.instance
   if (selection.view === 'ops-health') return selection.board.health
+  if (selection.view === 'routine') {
+    return { routine: selection.routine, sessions: selection.detail?.sessions ?? null }
+  }
   return selection.row
 }
 
@@ -233,12 +261,17 @@ function ensurePopup(): HTMLDivElement {
   body = el('div')
   body.id = 'detail-body'
   const footer = el('footer')
-  const ask = el('button', undefined, 'Ask agent')
+  // "Ask Front", not "Ask agent": the embedded assistant this button used to
+  // reach was deleted in `modernize_agdevworld` p1, and the only conversation
+  // this application can now reach is a routine's own topic with Front. The
+  // button composes a message; a human sends it, because sending buys a run.
+  const ask = el('button', undefined, 'Ask Front')
   ask.id = 'dp-ask'
   ask.addEventListener('click', () => {
     if (currentSelection) askHandler?.(currentSelection)
   })
   footer.append(ask)
+  askButton = ask
   popup.append(header, body, footer)
   document.body.append(popup)
 
@@ -821,6 +854,187 @@ function renderOpsHealth(board: OpsBoard): void {
 }
 
 
+// --- the routine board -----------------------------------------------------
+//
+// The tree is the point here: one fire, and every conversation it opened. Each
+// node wears the state the ops relay gave it and says which selfnote named it,
+// because a link the reader cannot account for is indistinguishable from a
+// guess — and this whole view is built out of other people's leftovers.
+
+const NODE_COLOR: Record<string, string> = {
+  ...OPS_COLOR,
+  quiet: '#9a9db5',
+}
+
+function renderSessionNode(node: SessionNode, flight?: InflightBoard): HTMLDivElement {
+  const row = el('div', 'dp-node')
+  row.style.marginLeft = `${(node.depth - 1) * 12}px`
+  const state = el('span', 'dp-node-state', node.state.toUpperCase())
+  state.style.color = NODE_COLOR[node.state] ?? '#b7b5d8'
+  const name = el('span', 'dp-node-name', `${node.channel}/${node.topic}`)
+  const head = el('div')
+  head.append(state, name)
+  row.append(head)
+
+  const why =
+    node.known === 'note-only'
+      ? `known only from the ${node.via} note #${node.link_id} — never read, because a ✔ topic is never swept`
+      : `linked by the ${node.via} note #${node.link_id}`
+  const meta = el('span', 'dp-node-meta', why)
+  row.append(meta)
+  for (const owed of node.rows) {
+    row.append(
+      el('span', 'dp-node-meta', `${owed.instance}: ${owed.provenance?.short ?? owed.state}`),
+    )
+  }
+  // The one non-Zulip signal, and only for the agents of this session.
+  for (const seen of flight?.topics ?? []) {
+    if (seen.channel !== node.channel || seen.topic !== node.topic) continue
+    const line = el(
+      'span',
+      `dp-node-meta dp-flight ${seen.in_flight ? '' : seen.known ? 'idle' : 'unknown'}`,
+      // The separator is not decoration: without it the screenshot read
+      // "no run in flightgeneration 1 is older than…" as one word.
+      `${seen.instance}: ${
+        seen.known ? (seen.in_flight ? '● a run is in flight' : '○ no run in flight') : '? unknown'
+      } · ${seen.reason}`,
+    )
+    row.append(line)
+  }
+  return row
+}
+
+function renderRoutine(
+  routine: RoutineRow,
+  detail: RoutineDetail | undefined,
+  flight: InflightBoard | undefined,
+): void {
+  headerName.textContent = routine.name
+  headerKind.textContent = routine.retired ? 'retired routine' : 'routine'
+  headerStatus.textContent = routine.state.toUpperCase()
+  headerStatus.style.color = OPS_COLOR[routine.state] ?? '#b7b5d8'
+
+  const now = el('section')
+  now.append(el('h3', undefined, 'THE LAST FIRE'))
+  now.append(el('p', 'dp-msg', routineDetail(routine)))
+  now.append(
+    kvList([
+      ['fired at', at(routine.last_fire?.at)],
+      ['fired by', routine.last_fire?.by],
+      ['answer', routine.answer.state],
+      ['answered by', routine.answer.answer?.by],
+      ['ack', routine.answer.ack ? at(routine.answer.ack.at) : undefined],
+      ['fire topic', routine.fire_topic ? `#front › ${routine.fire_topic}` : 'none on the realm'],
+      ['posts in it', routine.posts],
+    ]),
+  )
+  if (routine.answer.answer) {
+    now.append(el('p', 'dp-summary-text', routine.answer.answer.excerpt))
+  }
+  body!.append(now)
+
+  const schedule = el('section')
+  schedule.append(el('h3', undefined, 'SCHEDULE'))
+  schedule.append(
+    kvList([
+      ['events for this routine', routine.schedule.events],
+      ['next fire', routine.schedule.next ? at(routine.schedule.next.at) : 'none scheduled'],
+      ['last fired', routine.schedule.last ? at(routine.schedule.last.fired_at) : '—'],
+      [
+        'overdue',
+        routine.schedule.overdue.length > 0
+          ? `${routine.schedule.overdue.length} due and unfired — the dispatcher runs every 5 min`
+          : undefined,
+      ],
+    ]),
+  )
+  body!.append(schedule)
+
+  const request = el('section')
+  request.append(el('h3', undefined, 'STANDING REQUEST'))
+  if (routine.request) {
+    request.append(
+      el('p', 'dp-summary-meta', `#${routine.request.message_id} by ${routine.request.by}, ${at(routine.request.at)}`),
+    )
+    request.append(el('p', 'dp-summary-text', routine.request.text))
+  } else {
+    request.append(el('p', 'dp-msg', 'no `routine-` topic on the realm for this name'))
+  }
+  if (routine.request_strays.length > 0) {
+    // The ghtrends defect: an agent answered in the request topic, so the
+    // "latest post" the trigger tells Front to read is a report about the
+    // routine rather than the request for it.
+    const strays = el('details')
+    strays.append(
+      el('summary', undefined, `POSTS BY SOMEBODY ELSE (${routine.request_strays.length})`),
+    )
+    strays.append(
+      el(
+        'p',
+        'dp-msg',
+        'The trigger tells Front the standing request is "the latest post" in this topic. ' +
+          'These posts are not the request, and the newest of them would be read as one.',
+      ),
+    )
+    for (const stray of routine.request_strays) {
+      strays.append(el('p', 'dp-summary-meta', `#${stray.message_id} by ${stray.by}, ${at(stray.at)}`))
+    }
+    request.append(strays)
+  }
+  body!.append(request)
+
+  const sessions = el('section')
+  sessions.append(el('h3', undefined, 'SESSIONS (LAST 3 FIRES)'))
+  if (!detail) {
+    sessions.append(el('p', 'dp-msg', 'reading the session tree…'))
+  } else if (detail.sessions.length === 0) {
+    sessions.append(el('p', 'dp-msg', 'no fire and no conversation for this routine'))
+  }
+  for (const session of detail?.sessions ?? []) {
+    const card = el('div', 'dp-session')
+    const head = el('div', 'dp-session-head')
+    head.append(
+      el('span', undefined, session.fire ? `fire #${session.fire.message_id}` : 'no fire'),
+    )
+    head.append(el('span', 'dp-session-when', session.fire ? at(session.fire.at) : ''))
+    card.append(head)
+    if (session.note) card.append(el('p', 'dp-msg', session.note))
+    if (session.nodes.length === 0) {
+      card.append(el('p', 'dp-msg', 'nothing was opened on behalf of this fire'))
+    }
+    for (const node of session.nodes) card.append(renderSessionNode(node, flight))
+    sessions.append(card)
+  }
+  body!.append(sessions)
+
+  if (flight) {
+    const host = el('section')
+    host.append(el('h3', undefined, 'IS ANYTHING RUNNING (HOST, NOT ZULIP)'))
+    host.append(
+      el(
+        'p',
+        'dp-msg',
+        'A role workspace with no run record newer than it is a run in flight. This is ' +
+          'the only signal on this screen that does not come from the realm, which is why ' +
+          'it is the only one polled.',
+      ),
+    )
+    for (const agent of flight.agents) {
+      host.append(
+        el(
+          'p',
+          `dp-summary-meta dp-flight ${agent.in_flight ? '' : agent.known ? 'idle' : 'unknown'}`,
+          `${agent.instance}: ${agent.reason}`,
+        ),
+      )
+    }
+    if (flight.agents.length === 0) {
+      host.append(el('p', 'dp-msg', 'no agent of this realm owns any topic of this session'))
+    }
+    body!.append(host)
+  }
+}
+
 export function showDetailPopup(selection: PanelSelection): void {
   const node = ensurePopup()
   const key = selectionKey(selection)
@@ -852,6 +1066,9 @@ export function showDetailPopup(selection: PanelSelection): void {
   else if (selection.view === 'ops-row') renderOpsRow(selection.row, selection.board)
   else if (selection.view === 'ops-instance') renderOpsInstance(selection.instance, selection.board)
   else if (selection.view === 'ops-health') renderOpsHealth(selection.board)
+  else if (selection.view === 'routine') {
+    renderRoutine(selection.routine, selection.detail, selection.flight)
+  }
   else renderWorkspace(selection.row)
 
   const rawSection = el('section')
@@ -866,6 +1083,11 @@ export function showDetailPopup(selection: PanelSelection): void {
     rawSection.append(rawFacts)
   }
   body!.append(rawSection)
+
+  // Every other view's selection has nobody to ask: there is no assistant in
+  // this application any more, and a button that quietly does nothing is worse
+  // than no button.
+  if (askButton) askButton.hidden = selection.view !== 'routine'
 
   node.classList.add('open')
   body!.scrollTop = 0

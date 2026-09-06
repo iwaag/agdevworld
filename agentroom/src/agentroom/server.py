@@ -30,7 +30,8 @@ from .chat import Chat
 from .ops import Ops
 from .room import Room
 
-ROUTES = ("/healthz", "/agents", "/work", "/ops", "/routines", "/routines/<name>")
+ROUTES = ("/healthz", "/agents", "/work", "/ops", "/routines", "/routines/<name>",
+          "/inflight/<name>")
 WRITE_ROUTES = ("/ops/confirm", "/chat")
 
 
@@ -122,6 +123,16 @@ def make_handler(room: Room, ops: Ops | None = None, chat: Chat | None = None):
                         found = ops.routine(unquote(path[len("/routines/"):]))
                         self._write_json(404 if found.get("error") else 200,
                                          self._with_chat(found))
+                elif path.startswith("/inflight/"):
+                    # The one route a view may poll at a few seconds. It reads
+                    # this host's directories and never Zulip.
+                    if ops is None:
+                        self._write_json(503, {
+                            "error": "the ops engine is not configured; "
+                                     "set OPSROOM_ZULIP_ENV to its own bot credential",
+                        })
+                    else:
+                        self._write_json(200, ops.inflight(unquote(path[len("/inflight/"):])))
                 else:
                     self._write_json(404, {"error": f"no route {path}", "routes": list(ROUTES)})
             except Exception as error:

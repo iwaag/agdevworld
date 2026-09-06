@@ -48,6 +48,17 @@ import {
   type OpsRow,
   type OpsState,
 } from './opsState'
+import {
+  loadInflight,
+  loadRoutine,
+  loadRoutines,
+  routineDetail,
+  routineHeadline,
+  type InflightBoard,
+  type RoutineBoard,
+  type RoutineDetail,
+  type RoutineRow,
+} from './routineState'
 import type {
   PanelChip,
   PanelGridApi,
@@ -82,6 +93,15 @@ export type PanelSelection =
   | { view: 'ops-row'; row: OpsRow; board: OpsBoard }
   | { view: 'ops-instance'; instance: OpsInstance; board: OpsBoard }
   | { view: 'ops-health'; board: OpsBoard }
+  // The routine carries the row the board already has; the tree and the
+  // host-side in-flight read arrive a moment later and re-open the popup.
+  | {
+      view: 'routine'
+      routine: RoutineRow
+      board: RoutineBoard
+      detail?: RoutineDetail
+      flight?: InflightBoard
+    }
 
 const CLUSTER_STATUS_STYLE: Record<ClusterStatus, PanelRowStatus> = {
   converged: { emoji: '✅', color: 0x67e8a5, label: 'CONVERGED' },
@@ -623,7 +643,7 @@ export function opsViewConfig(onSelect: (selection: PanelSelection) => void): Pa
     },
     footer:
       'conversation layer only — Zulip, live: awaiting · stalled · acked · done · unknown',
-    switchTo: { key: 'nodes', label: 'nodes' },
+    switchTo: { key: 'routines', label: 'routines' },
     bind: (bound) => {
       api = bound
     },
@@ -729,6 +749,109 @@ export function opsViewConfig(onSelect: (selection: PanelSelection) => void): Pa
       else if (payload.kind === 'instance') {
         onSelect({ view: 'ops-instance', instance: payload.instance, board: payload.board })
       } else onSelect({ view: 'ops-health', board: payload.board })
+    },
+  }
+}
+
+const ROUTINE_STATUS: Record<string, PanelRowStatus> = {
+  stalled: { emoji: '🔴', color: 0xff8aa8, label: 'STALLED' },
+  awaiting: { emoji: '🕓', color: 0x70c7ff, label: 'AWAITING' },
+  acked: { emoji: '🌀', color: 0x9b8cff, label: 'ACKED' },
+  done: { emoji: '✅', color: 0x67e8a5, label: 'ANSWERED' },
+  unknown: { emoji: '❓', color: 0xffc56d, label: 'UNKNOWN' },
+}
+
+export function routinesViewConfig(
+  onSelect: (selection: PanelSelection) => void,
+): PanelGridConfig {
+  let board: RoutineBoard | undefined
+  let api: PanelGridApi | undefined
+  // The routine whose tree and chat are on screen. The chat panel owns the
+  // conversation; this is only what the popup is showing.
+  let opened: string | undefined
+
+  // The tree and the host signal are a second and third fetch, so the popup
+  // opens immediately with what the board already knows and fills in. Neither
+  // costs a Zulip call: the relay answers both from memory and from this
+  // host's own directories.
+  const open = async (row: RoutineRow) => {
+    opened = row.name
+    onSelect({ view: 'routine', routine: row, board: board! })
+    const [detail, flight] = await Promise.all([loadRoutine(row.name), loadInflight(row.name)])
+    if (opened !== row.name) return
+    onSelect({
+      view: 'routine',
+      routine: 'error' in detail ? row : detail.routine,
+      board: board!,
+      detail: 'error' in detail ? undefined : detail,
+      flight: 'error' in flight ? undefined : flight,
+    })
+  }
+
+  return {
+    key: 'routines',
+    title: 'routines / standing requests and their runs',
+    nameFontSize: 15,
+    panelHeight: 132,
+    loadingText: 'reading the routine board…',
+    unavailableText: 'the routine board is unreadable',
+    subtitle: (count) => {
+      if (!board) return 'reading…'
+      if (board.health.state !== 'live') {
+        if (board.routines.length === 0) return 'the routine board cannot be read'
+        return `${count} ${plural(count, 'routine')} — state unknown`
+      }
+      const owed = board.routines.filter(
+        (row) => row.state === 'stalled' || row.state === 'awaiting' || row.state === 'acked',
+      ).length
+      const never = board.routines.filter((row) => row.answer.state === 'no fire').length
+      const tail = never > 0 ? ` · ${never} never fired by the dispatcher` : ''
+      if (owed === 0) return `every routine's last fire was answered${tail}`
+      return `${owed} ${plural(owed, 'fire')} still unanswered${tail}`
+    },
+    footer:
+      'a routine is a standing request, a fire topic and a schedule — click one to talk to Front about it',
+    switchTo: { key: 'nodes', label: 'nodes' },
+    bind: (bound) => {
+      api = bound
+    },
+    headline: () => (board ? routineHeadline(board) : undefined),
+    chips: () => [{ id: 'routines-refresh', label: '⟳ refresh', onClick: () => api?.reload() }],
+    loadRows: async () => {
+      const found = await loadRoutines()
+      board = found
+      if (found.routines.length === 0) {
+        return [{
+          id: 'routines-unreadable',
+          name: 'routine board',
+          status: ROUTINE_STATUS.unknown,
+          detail: found.health.reason,
+          payload: undefined,
+          interactive: false,
+        }]
+      }
+      return found.routines.map((row) => ({
+        id: `routine/${row.name}`,
+        name: clipped(row.retired ? `✔ ${row.name}` : row.name, 24),
+        status: {
+          ...ROUTINE_STATUS[row.state],
+          label:
+            row.state === 'unknown' && row.stale_state
+              ? `UNKNOWN (was ${row.stale_state.toUpperCase()})`
+              : ROUTINE_STATUS[row.state].label,
+        },
+        detail: clipped(routineDetail(row), 76),
+        actions: [{
+          label: '💬 chat',
+          color: 0x70c7ff,
+          onClick: () => void open(row),
+        }],
+        payload: row,
+      }))
+    },
+    onSelect: (row) => {
+      const found = row.payload as RoutineRow | undefined
+      if (found) void open(found)
     },
   }
 }

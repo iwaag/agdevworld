@@ -5,19 +5,19 @@ import {
   autolabViewConfig,
   nodesViewConfig,
   opsViewConfig,
+  routinesViewConfig,
   tasksViewConfig,
   workspacesViewConfig,
   type PanelSelection,
 } from './views'
-import { VIEW_KEYS, currentView, registerGame, switchView } from './viewSwitcher'
+import { registerGame } from './viewSwitcher'
 import { initChatPanel } from './chatPanel'
 import { setAskHandler, showDetailPopup } from './detailPopup'
 import { loadActualDevices, matchDeviceForTarget, type ActualDeviceModel } from './clusterState'
 
 // Devices from the optional nctl.actual.v2 detail snapshot; empty until (and
 // unless) that snapshot loads. Node selections are enriched opportunistically
-// so the popup can show hardware — this is rendering, not context for the
-// assistant, which reads the snapshots itself.
+// so the popup can show hardware.
 let actualDevices: ActualDeviceModel[] = []
 loadActualDevices()
   .then((devices) => {
@@ -25,84 +25,38 @@ loadActualDevices()
   })
   .catch((error) => console.warn('actual detail snapshot unavailable:', error))
 
+// The chat panel is one Zulip topic and nothing else since `operation_room` p3.
+// There is no assistant to route tool calls to — the entrance is Front, in the
+// realm — so selecting a routine is the only thing that fills it.
+const chat = initChatPanel()
+
 function handleSelection(selection: PanelSelection) {
   if (selection.view === 'nodes' && selection.device === undefined) {
     selection.device = matchDeviceForTarget(actualDevices, selection.target.target)
   }
+  if (selection.view === 'routine') chat.select(selection.routine.name)
   showDetailPopup(selection)
 }
 
-const chat = initChatPanel(
-  // The one thing the assistant cannot look up: what is currently on screen.
-  () => `The screen is showing the ${currentView()} view.`,
-  (call) => {
-    if (call.name === 'switch_view') {
-      const view = String(call.arguments.view ?? '')
-      return switchView(view)
-        ? `the screen is showing the ${view} view`
-        : `there is no view named "${view}"; the views are ${VIEW_KEYS.join(', ')}` +
-            (view === currentView() ? ` (the ${view} view was already showing)` : '')
-    }
-    return `there is no tool named "${call.name}"`
-  },
-)
-
-// Clicking "ask the agent" says what was clicked, and nothing more. What is
-// worth looking up about it is the assistant's call.
+// "Ask Front" **composes**, it does not send: a post into a routine topic
+// starts a paid Front run, and a run is bought by a human pressing Send, never
+// by a click that happened to land on a card. Only the routine view offers it,
+// because Front's entrance is the only one this application can reach.
 setAskHandler((selection) => {
-  if (selection.view === 'autolab-project') {
-    chat.ask(`Tell me about the autolab project ${selection.project.name} on node ${selection.node}.`)
-    return
-  }
-  if (selection.view === 'autolab') {
-    if (selection.summary) {
-      // The exception to "identity only": this text is already prose, written
-      // by a Claude run on the node, and the popup shows it unabridged. Passing
-      // along what is on screen is not a digest.
-      chat.ask(
-        `About iteration ${selection.summary.iter} of the autolab job ${selection.job.name} on node ` +
-          `${selection.node}. The node's own summary of it reads:\n\n${selection.summary.text}`,
-      )
-      return
-    }
-    chat.ask(`Tell me about the autolab job ${selection.job.name} on node ${selection.node}.`)
-    return
-  }
-  if (selection.view === 'agent-room') {
-    chat.ask(`Tell me about the agent ${selection.agent.instance}.`)
-    return
-  }
-  if (selection.view === 'agent-room-board') {
-    chat.ask(`Tell me about the open work of ${selection.group} (${selection.rows.length} unresolved topics).`)
-    return
-  }
-  if (selection.view === 'ops-row') {
-    const where = selection.row.topic ? `${selection.row.channel}/${selection.row.topic}` : 'the realm'
-    chat.ask(
-      `About ${selection.row.instance} in ${where}: the operation room calls it ` +
-        `${selection.row.state}. Its reason: ${selection.row.provenance.text}`,
-    )
-    return
-  }
-  if (selection.view === 'ops-instance') {
-    chat.ask(`Tell me about the agent ${selection.instance.instance}.`)
-    return
-  }
-  if (selection.view === 'ops-health') {
-    chat.ask(`The operation room relay says: ${selection.board.health.reason}. What does that mean?`)
-    return
-  }
-  if (selection.view === 'nodes') {
-    const target = selection.target.target
-    const name = target.slug ?? target.name ?? target.id ?? 'the selected node'
-    chat.ask(`Tell me about the node ${name}.`)
-    return
-  }
-  chat.ask(`Tell me about the workspace ${selection.row.name}.`)
+  if (selection.view !== 'routine') return
+  const routine = selection.routine
+  const owed = selection.detail?.sessions?.[0]?.nodes ?? []
+  const where = owed.length > 0
+    ? `\n\nThe last run touched: ${owed.map((node) => `${node.channel}/${node.topic}`).join(', ')}.`
+    : ''
+  chat.compose(
+    `About the \`${routine.name}\` routine: its last fire was ` +
+      `${routine.answer.state === 'answered' ? 'answered' : routine.answer.state}.${where}`,
+  )
 })
 
-// Phaser auto-starts only the first scene in the list; 'workspaces' stays
-// dormant until switchView() runs it.
+// Phaser auto-starts only the first scene in the list; the rest stay dormant
+// until switchView() runs them.
 const game = new Phaser.Game({
   type: Phaser.AUTO,
   parent: 'app',
@@ -118,6 +72,7 @@ const game = new Phaser.Game({
     new PanelGridScene(tasksViewConfig()),
     new PanelGridScene(agentRoomViewConfig(handleSelection)),
     new PanelGridScene(opsViewConfig(handleSelection)),
+    new PanelGridScene(routinesViewConfig(handleSelection)),
   ],
 })
 registerGame(game, 'nodes')

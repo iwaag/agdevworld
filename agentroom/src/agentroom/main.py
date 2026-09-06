@@ -13,6 +13,7 @@ import time
 from pathlib import Path
 
 from .chat import CHAT_ENV_VARIABLE, DEFAULT_MAX_CHARS, Chat
+from .inflight import ROOTS_VARIABLE, parse_roots
 from .ops import DEFAULT_STALLED_SECONDS, Ops
 from .room import Room
 from .server import build_server
@@ -69,7 +70,10 @@ def main(argv: list[str] | None = None) -> int:
         # still has the realm's half, and the payload says which half is gone.
         # A relay that refuses to start over a file the dispatcher rewrites
         # several times a fire would be the more fragile arrangement.
-        ops = Ops(env_path=ops_path, stalled_seconds=stalled, schedule_path=schedule_path)
+        ops = Ops(
+            env_path=ops_path, stalled_seconds=stalled, schedule_path=schedule_path,
+            agent_roots=parse_roots(os.environ.get(ROOTS_VARIABLE, "")),
+        )
 
     chat_env = os.environ.get(CHAT_VARIABLE, "")
     chat_path = Path(chat_env).expanduser() if chat_env else None

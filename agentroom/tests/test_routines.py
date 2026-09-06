@@ -6,8 +6,12 @@ that mean somebody has to look.
 """
 
 import json
+import os
+import time
+from pathlib import Path
 
 from agentroom.chat import Chat, allowed_topic
+from agentroom.inflight import Inflight, parse_roots
 from agentroom.ops import Topic
 from agentroom.routines import (
     Schedule,
@@ -473,3 +477,77 @@ def test_a_refused_message_is_never_posted(tmp_path):
 
     chat = Chat(env_path=tmp_path / "developer.env", client_factory=lambda path: Exploding())
     assert chat.send("front-p10-cleanup", "hello", {"papers"})["sent"] is False
+
+
+# --- the host-side in-flight signal ----------------------------------------
+
+
+def workspace(root, channel, topic, generation, role="front"):
+    made = root / ".local" / "topics" / channel / topic / str(generation) / role
+    made.mkdir(parents=True)
+    (made / "chatlog.md").write_text("hello", encoding="utf-8")
+    return made
+
+
+def record(root, role, number, *, at):
+    made = root / ".local" / "agent" / role
+    made.mkdir(parents=True, exist_ok=True)
+    path = made / f"run-{number:04d}.json"
+    path.write_text("{}", encoding="utf-8")
+    os.utime(path, (at, at))
+    return path
+
+
+def test_roots_are_parsed_as_instances_because_an_agent_runs_on_more_than_one_node():
+    found = parse_roots("front-agstudio1=/a/agfront, autolab-agstudio1=/a/agautolab ,junk")
+    assert set(found) == {"front-agstudio1", "autolab-agstudio1"}
+    assert found["front-agstudio1"] == Path("/a/agfront")
+
+
+def test_an_instance_with_no_root_here_is_unknown_and_never_idle(tmp_path):
+    look = Inflight(roots={})
+    found = look.look("agecho-agautolab1", "front", "front-routine-papers")
+    assert found["known"] is False and found["in_flight"] is None
+    assert look.busy("agecho-agautolab1")["known"] is False
+
+
+def test_a_workspace_newer_than_every_run_record_is_a_run_in_flight(tmp_path):
+    root = tmp_path / "agfront"
+    record(root, "front", 1, at=time.time() - 3600)
+    workspace(root, "front", "front-routine-papers", 7)
+    found = Inflight(roots={"front-agstudio1": root}).look(
+        "front-agstudio1", "front", "front-routine-papers")
+    assert found["in_flight"] is True and found["generation"] == 7
+
+
+def test_a_finished_run_leaves_a_record_newer_than_its_workspace(tmp_path):
+    root = tmp_path / "agfront"
+    workspace(root, "front", "front-routine-papers", 7)
+    record(root, "entrance_front", 1, at=time.time() + 60)
+    found = Inflight(roots={"front-agstudio1": root}).look(
+        "front-agstudio1", "front", "front-routine-papers")
+    # The record is filed under a different role name than the workspace uses
+    # (p1: `…/<N>/front/` against `.local/agent/entrance_front/`), so the
+    # comparison is against the newest record of *any* role.
+    assert found["in_flight"] is False
+
+
+def test_a_topic_this_instance_never_worked_in_is_not_in_flight(tmp_path):
+    root = tmp_path / "agfront"
+    record(root, "front", 1, at=time.time() - 60)
+    found = Inflight(roots={"front-agstudio1": root}).look(
+        "front-agstudio1", "front", "front-routine-nothing")
+    assert found["in_flight"] is False and found["generation"] is None
+
+
+def test_busy_catches_a_run_that_is_not_in_this_topics_workspace(tmp_path):
+    # p1: autolab's `coding` and `director` roles run in no topic workspace at
+    # all — 100% of them. The coarse signal is what keeps the screen from
+    # calling an agent idle exactly when it is busiest.
+    root = tmp_path / "agautolab"
+    record(root, "coding", 1, at=time.time() - 3600)
+    workspace(root, "pj-studyarxiv", "workplan-papers", 2, role="supercoder")
+    look = Inflight(roots={"autolab-agstudio1": root})
+    assert look.look("autolab-agstudio1", "front", "front-routine-papers")["in_flight"] is False
+    busy = look.busy("autolab-agstudio1")
+    assert busy["in_flight"] is True and busy["where"] == "pj-studyarxiv/workplan-papers"

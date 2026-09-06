@@ -551,3 +551,20 @@ def test_busy_catches_a_run_that_is_not_in_this_topics_workspace(tmp_path):
     assert look.look("autolab-agstudio1", "front", "front-routine-papers")["in_flight"] is False
     busy = look.busy("autolab-agstudio1")
     assert busy["in_flight"] is True and busy["where"] == "pj-studyarxiv/workplan-papers"
+
+
+def test_graph_edges_keep_the_immediate_parent_through_three_hops():
+    root = topic("front", "front-routine-papers", fire("papers", ident=10),
+                 servednote("project/plan", 90, ident=20))
+    plan = topic("project", "plan", rootnote("front/front-routine-papers", ident=21))
+    work = topic("work", "task", rootnote("project/plan", ident=30),
+                 servednote("forge/result", 100, ident=40))
+    nodes = session_tree(mapping(root, plan, work),
+                         ("front", "front-routine-papers"), {}, since=0, until=None)
+    assert [(node["channel"], node["topic"], node["depth"], node["parent"]) for node in nodes] == [
+        ("project", "plan", 1, {"channel": "front", "topic": "front-routine-papers"}),
+        ("work", "task", 2, {"channel": "project", "topic": "plan"}),
+        ("forge", "result", 3, {"channel": "work", "topic": "task"}),
+    ]
+    assert nodes[-1]["known"] == "note-only"
+    assert nodes[-1]["state"] == "unknown"

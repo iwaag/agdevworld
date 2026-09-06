@@ -455,9 +455,9 @@ def session_tree(
     """
     nodes: list[dict] = []
     seen = {root}
-    frontier = [(root, 0, None)]
+    frontier = [(root, 0)]
     while frontier and len(nodes) < max_nodes:
-        key, depth, parent = frontier.pop(0)
+        key, depth = frontier.pop(0)
         if depth >= max_depth:
             continue
         for child in children_of(topics, key):
@@ -471,8 +471,7 @@ def session_tree(
             node = {
                 **child,
                 "depth": depth + 1,
-                "parent": {"channel": parent[0], "topic": parent[1]} if parent else
-                          {"channel": key[0], "topic": key[1]},
+                "parent": {"channel": key[0], "topic": key[1]},
                 # A topic the sweep never read is one this board knows only by
                 # the note that named it — usually because it carries a ✔ and
                 # resolved topics are not swept. Saying which is the difference
@@ -490,7 +489,7 @@ def session_tree(
                 }
             node["state"] = _node_state(node)
             nodes.append(node)
-            frontier.append((child_key, depth + 1, key))
+            frontier.append((child_key, depth + 1))
             if len(nodes) >= max_nodes:
                 break
     return nodes

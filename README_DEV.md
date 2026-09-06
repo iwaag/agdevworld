@@ -190,3 +190,9 @@ explicit refresh repeats the reads. Host observation is labelled latest activity
 only, independent of the selected historical session. No new send control exists.
 At narrow widths the desktop skeleton scrolls horizontally; mobile assembly is
 not part of p4. The reusable graph remains on its own page until assembly.
+
+The p4 relay gap check corrected `sessions[].nodes[].parent` to name the
+immediate parent at every depth (covered by a three-hop regression). No new
+endpoint or polling path was needed. The relay still bounds reconstruction to
+40 linked nodes and four hops; the graph displays the returned tree, not a
+complete historical dependency graph beyond those existing limits.

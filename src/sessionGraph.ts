@@ -22,7 +22,8 @@ export function graphLayout(session: RoutineSession, root: { channel: string; to
 
 export function nodeEvidence(node: SessionNode): string {
   return node.rows.map(row => row.provenance?.short).filter(Boolean).join(' · ') ||
-    (node.known === 'note-only' ? 'Unknown — linked topic has not been read' : 'Swept topic — no owed reply row')
+    (node.known === 'note-only' ? 'Unknown — linked topic has not been read' :
+      node.rows.length ? 'Relay verdict — provenance unavailable; inspect rows' : 'Swept topic — no owed reply row')
 }
 
 export function renderSessionGraph(host: HTMLElement, detail: RoutineDetail, session: RoutineSession): void {

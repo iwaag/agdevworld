@@ -59,9 +59,11 @@ from .room import SYSTEM_REALM, bare_topic
 from .routines import (
     ROUTINE_HISTORY,
     Schedule,
+    chat_of,
     is_routine_topic,
     read_schedule,
     routine_rows,
+    sessions_of,
 )
 
 #: The payload's own version. The view is built against this shape.
@@ -165,10 +167,13 @@ class Topic:
     #: (`operation_room` p3 constraint 4).
     roots: list[tuple[Conversation, int, str, int]] = field(default_factory=list)
     #: `[selfnote][served]` written *in* this topic: the remote conversations
-    #: this one's owner has answered a callback from, newest id per remote.
-    #: The other direction of the same edge, and the only one that survives a
-    #: child topic being resolved — a resolved topic is never swept.
-    served: dict[tuple[str, str], int] = field(default_factory=dict)
+    #: this one's owner has answered a callback from. The other direction of
+    #: the same edge, and the only one that survives a child topic being
+    #: resolved — a resolved topic is never swept. Each entry keeps the newest
+    #: remote id it covers and the **first** note that named it, because the
+    #: first note is when this conversation started working there, which is
+    #: what attributes a child to one fire rather than another.
+    served: dict[tuple[str, str], dict] = field(default_factory=dict)
 
     def add(self, message: dict) -> None:
         self.link(message)
@@ -209,8 +214,15 @@ class Topic:
         if parsed is not None:
             remote, ident = parsed
             key = (remote.channel, bare_topic(remote.topic))
-            if ident > self.served.get(key, 0):
-                self.served[key] = ident
+            note_id = int(message.get("id") or 0)
+            found = self.served.get(key)
+            if found is None:
+                self.served[key] = {"remote_id": ident, "first_note": note_id,
+                                    "last_note": note_id}
+            else:
+                found["remote_id"] = max(found["remote_id"], ident)
+                found["first_note"] = min(found["first_note"] or note_id, note_id)
+                found["last_note"] = max(found["last_note"], note_id)
 
 
 # --- the two routes --------------------------------------------------------
@@ -934,6 +946,42 @@ class Ops:
             "health": board["health"],
             "schedule": schedule.payload(),
             "routines": rows,
+        }
+
+    def routine(self, name: str, now: float | None = None) -> dict:
+        """One routine: its row, the last runs as trees, and the chat.
+
+        The tree is built from the link notes and every node's *state* is
+        lifted from the ops board unchanged — one engine, one verdict, which
+        is the plan's "do not implement the state calculation twice".
+        """
+        now = time.time() if now is None else now
+        board = self.snapshot(now)
+        with self._lock:
+            topics = dict(self._topics)
+        schedule = read_schedule(self.schedule_path)
+        rows = routine_rows(topics, schedule, now, stalled_seconds=self.stalled_seconds)
+        row = next((one for one in rows if one["name"] == name), None)
+        if row is None:
+            return {"error": f"no routine named {name}", "routines": [one["name"] for one in rows]}
+        by_topic: dict[tuple[str, str], list[dict]] = {}
+        for one in board["rows"]:
+            if one["channel"] is None or one["topic"] is None:
+                continue
+            by_topic.setdefault((one["channel"], one["topic"]), []).append(one)
+        sessions = sessions_of(topics, name, by_topic)
+        if board["health"]["state"] != "live":
+            row["stale_state"] = row["state"]
+            row["state"] = "unknown"
+        return {
+            "schema": ROUTINES_SCHEMA,
+            "generated_at": now,
+            "settings": {"stalled_seconds": self.stalled_seconds},
+            "health": board["health"],
+            "schedule": schedule.payload(),
+            "routine": row,
+            "sessions": sessions,
+            "chat": chat_of(topics, name),
         }
 
     # -- what the view reads ---------------------------------------------

@@ -24,12 +24,12 @@ from __future__ import annotations
 
 import json
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 
 from .ops import Ops
 from .room import Room
 
-ROUTES = ("/healthz", "/agents", "/work", "/ops", "/routines")
+ROUTES = ("/healthz", "/agents", "/work", "/ops", "/routines", "/routines/<name>")
 WRITE_ROUTES = ("/ops/confirm",)
 
 
@@ -95,6 +95,19 @@ def make_handler(room: Room, ops: Ops | None = None):
                         })
                     else:
                         self._write_json(200, ops.routines())
+                elif path.startswith("/routines/"):
+                    if ops is None:
+                        self._write_json(503, {
+                            "error": "the ops engine is not configured; "
+                                     "set OPSROOM_ZULIP_ENV to its own bot credential",
+                        })
+                    else:
+                        # The name is a topic suffix, so it arrives percent
+                        # encoded and is never used to build a path or a
+                        # narrow — it is matched against the routines the
+                        # engine already found.
+                        found = ops.routine(unquote(path[len("/routines/"):]))
+                        self._write_json(404 if found.get("error") else 200, found)
                 else:
                     self._write_json(404, {"error": f"no route {path}", "routes": list(ROUTES)})
             except Exception as error:

@@ -15,8 +15,11 @@ from agentroom.routines import (
     is_routine_topic,
     read_schedule,
     routine_name,
+    chat_of,
     routine_rows,
     schedule_for,
+    session_tree,
+    sessions_of,
 )
 
 NOW = 1_800_000_000.0
@@ -223,7 +226,7 @@ def test_a_selfnote_is_not_history_and_never_reaches_the_view():
                 ident=2, sender_id=FRONT, sender="Front"),
     )
     assert [kept.id for kept in found.history] == [1]
-    assert found.served == {("pj-studyarxiv", "workplan-papers"): 2809}
+    assert found.served[("pj-studyarxiv", "workplan-papers")]["remote_id"] == 2809
 
 
 def test_a_routine_the_schedule_names_but_the_realm_does_not_still_gets_a_row():
@@ -275,3 +278,126 @@ def test_an_unreadable_schedule_says_so_rather_than_reading_as_no_fires(tmp_path
     shaped = tmp_path / "shaped.json"
     shaped.write_text(json.dumps({"requests": [], "events": []}), encoding="utf-8")
     assert read_schedule(shaped).ok is True
+
+
+# --- the session tree ------------------------------------------------------
+
+
+def rootnote(home, *, ident, sender_id=FRONT, sender="Front"):
+    return message(f"[selfnote][rootchat] {home}", ident=ident,
+                   sender_id=sender_id, sender=sender)
+
+
+def servednote(remote, remote_id, *, ident, sender_id=FRONT, sender="Front"):
+    return message(f"[selfnote][served] {remote} {remote_id}", ident=ident,
+                   sender_id=sender_id, sender=sender)
+
+
+def mapping(*topics):
+    return {(found.channel, found.topic): found for found in topics}
+
+
+def test_a_served_note_finds_a_child_that_was_resolved_and_never_swept():
+    # The half of a finished session that only this edge can see: a resolved
+    # topic is not swept, so the child is not in `topics` at all — and the
+    # board says `note-only` rather than pretending it read it.
+    topics = mapping(topic(
+        "front", "front-routine-papers",
+        fire("papers", ident=10),
+        servednote("pj-studyarxiv/workplan-papers", 90, ident=20),
+    ))
+    nodes = session_tree(topics, ("front", "front-routine-papers"), {}, since=0, until=None)
+    assert [(node["topic"], node["via"], node["known"]) for node in nodes] == [
+        ("workplan-papers", "served", "note-only")
+    ]
+    assert nodes[0]["state"] == "unknown"
+
+
+def test_a_rootchat_note_finds_a_child_nothing_has_answered_yet():
+    # The in-flight half: Front has posted into the workplan topic and nobody
+    # has called back, so no served note exists anywhere.
+    child = topic("pj-studyarxiv", "workplan-papers",
+                  rootnote("front/front-routine-papers", ident=21),
+                  message("opened the mission", ident=22, sender_id=FRONT, sender="Front"),
+                  keep=False)
+    topics = mapping(topic("front", "front-routine-papers", fire("papers", ident=10)), child)
+    nodes = session_tree(topics, ("front", "front-routine-papers"), {}, since=0, until=None)
+    assert [(node["topic"], node["via"], node["known"]) for node in nodes] == [
+        ("workplan-papers", "rootchat", "swept")
+    ]
+    # No ops row for it means nothing is owed there, which is not "unknown".
+    assert nodes[0]["state"] == "quiet"
+
+
+def test_the_tree_goes_deeper_than_one_hop():
+    root = topic("front", "front-routine-papers", fire("papers", ident=10),
+                 servednote("pj-studyarxiv/workplan-papers", 90, ident=20))
+    middle = topic("pj-studyarxiv", "workplan-papers",
+                   servednote("work-s3-1/workrun-task1", 95, ident=30), keep=False)
+    nodes = session_tree(topics := mapping(root, middle),
+                         ("front", "front-routine-papers"), {}, since=0, until=None)
+    assert [(node["topic"], node["depth"]) for node in nodes] == [
+        ("workplan-papers", 1), ("workrun-task1", 2)
+    ]
+    assert topics is not None
+
+
+def test_a_node_wears_the_ops_boards_verdict_and_never_its_own():
+    root = topic("front", "front-routine-papers", fire("papers", ident=10),
+                 servednote("pj-studyarxiv/workplan-papers", 90, ident=20))
+    child = topic("pj-studyarxiv", "workplan-papers",
+                  message("anybody?", ident=91), keep=False)
+    rows = {("pj-studyarxiv", "workplan-papers"): [
+        {"state": "done", "instance": "a"}, {"state": "stalled", "instance": "b"},
+    ]}
+    nodes = session_tree(mapping(root, child), ("front", "front-routine-papers"),
+                         rows, since=0, until=None)
+    # Both rows are carried; the node wears the most urgent of them.
+    assert nodes[0]["state"] == "stalled"
+    assert len(nodes[0]["rows"]) == 2
+
+
+def test_a_session_is_bounded_by_the_next_fire():
+    root = topic(
+        "front", "front-routine-papers",
+        fire("papers", ident=10),
+        servednote("pj-a/one", 5, ident=11),
+        fire("papers", ident=20),
+        servednote("pj-a/two", 6, ident=21),
+    )
+    found = sessions_of(mapping(root), "papers", {})
+    # Newest first, and each run carries only what was linked inside it.
+    assert [session["fire"]["message_id"] for session in found] == [20, 10]
+    assert [node["topic"] for node in found[0]["nodes"]] == ["two"]
+    assert [node["topic"] for node in found[1]["nodes"]] == ["one"]
+
+
+def test_only_the_last_three_runs_are_listed():
+    posts = []
+    for index in range(5):
+        posts.append(fire("papers", ident=10 * (index + 1)))
+        posts.append(servednote(f"pj-a/run{index}", 1, ident=10 * (index + 1) + 1))
+    found = sessions_of(mapping(topic("front", "front-routine-papers", *posts)), "papers", {})
+    assert [session["fire"]["message_id"] for session in found] == [50, 40, 30]
+
+
+def test_a_routine_nobody_fired_still_shows_its_conversation():
+    # mediagen: 164 posts in the fire topic and not one trigger line.
+    root = topic("front", "front-routine-mediagen",
+                 message("do the thing by hand", ident=10),
+                 servednote("pj-mediagen/assetplan-x", 5, ident=11))
+    found = sessions_of(mapping(root), "mediagen", {})
+    assert len(found) == 1 and found[0]["fire"] is None
+    assert [node["topic"] for node in found[0]["nodes"]] == ["assetplan-x"]
+
+
+def test_the_chat_is_real_posts_only_and_oldest_first():
+    root = topic(
+        "front", "front-routine-papers",
+        message("later", ident=20),
+        message("[selfnote][rootchat] front/front-routine-papers", ident=15,
+                sender_id=FRONT, sender="Front"),
+        fire("papers", ident=10),
+    )
+    found = chat_of(mapping(root), "papers")
+    assert [post["message_id"] for post in found] == [10, 20]

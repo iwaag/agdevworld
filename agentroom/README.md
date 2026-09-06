@@ -137,6 +137,34 @@ Three rules here were measured on the live realm rather than assumed:
   Reading "the newest post by the Developer" as the fire would turn every
   comment on a run into a new unanswered one.
 
+### `GET /routines/<name>` — one routine, its last runs, its chat
+
+The same row, plus the **session tree** of the last three fires and the fire
+topic's history as a chat log. A session is one fire and everything opened on
+its behalf, walked from two selfnote edges — the only thing selfnotes are ever
+read for here, and never rendered (constraint 4):
+
+- a **`[served]` note in the fire topic** names a remote conversation whose
+  callback Front answered. It is the only edge that survives the remote being
+  resolved, and a resolved topic is never swept — so most of a *finished*
+  session is invisible without it.
+- a **`[rootchat]` note in the remote** names the fire topic as the home the
+  remote was opened for. It exists from the remote's first post, which is the
+  whole of an *in-flight* session: nothing has been answered yet, so no served
+  note exists anywhere.
+
+Runs are separated by **message id**, not by time: the notes carry ids, Zulip's
+ids are realm-wide and monotonic, and a fire's own id is the boundary between
+one run and the next. A late note about an old callback therefore lands in the
+run it was written in — which is honest (that is when the conversation started
+working there again) and does inflate a session occasionally; `rtnotes` has one.
+
+Every node wears the **ops board's** verdict, lifted unchanged. What is added
+is only what `/ops` has no row for: `quiet` (swept, nothing owed) and `unknown`
+(never read — the `note-only` nodes). The walk is capped at depth 4 and 40
+nodes, because two agents can anchor each other and a board is not where a
+cycle should be discovered.
+
 A routine's two topics are the only ones this service reads **through a ✔**:
 resolution is how a routine is retired, and there are sixteen such topics
 rather than a realm's worth. Their history is also the only history kept in

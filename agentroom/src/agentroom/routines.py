@@ -50,6 +50,13 @@ FIRE_PREFIX = "front-routine-"
 #: Matching the trigger's own wording is what makes "the last fire" a fact
 #: rather than a guess at which post looked like a request.
 FIRE_LINE = re.compile(r"^\s*Routine\s+`?(?P<name>[^`\s,]+)`?,\s*run of\b")
+#: Sessions listed for one routine. The braindump asks for about three: a
+#: fourth is a drill-down, not a board.
+SESSION_LIMIT = 3
+#: Caps on the walk. A cycle in the link notes is possible — two agents can
+#: anchor each other — and a board is not where that should be discovered.
+MAX_DEPTH = 4
+MAX_NODES = 40
 #: Messages kept per routine topic. The sweep reads a topic in one call
 #: whatever the depth, so this costs nothing over the engine's usual 50 — and
 #: a fire topic is the one place where the history *is* the feature.
@@ -61,12 +68,19 @@ __all__ = [
     "ROUTINE_HISTORY",
     "STANDING_PREFIX",
     "Schedule",
+    "MAX_DEPTH",
+    "MAX_NODES",
+    "SESSION_LIMIT",
+    "chat_of",
+    "children_of",
     "fire_of",
     "is_routine_topic",
     "read_schedule",
     "routine_name",
     "routine_rows",
     "schedule_for",
+    "session_tree",
+    "sessions_of",
     "standing_request",
 ]
 
@@ -370,6 +384,191 @@ def routine_rows(
             "schedule": schedule_for(schedule, name, now),
         })
     return rows
+
+
+# --- the session tree ------------------------------------------------------
+
+
+def children_of(topics: dict, key: tuple[str, str]) -> list[dict]:
+    """Every conversation opened on behalf of `key`, and how that is known.
+
+    Two edges, and both are needed because each one is blind where the other
+    sees:
+
+    - a **`[served]` note written in this topic** names a remote conversation
+      whose callback this one's owner answered. It survives the remote being
+      resolved, which matters because a resolved topic is never swept — most
+      of a finished session is invisible without it.
+    - a **`[rootchat]` note written in the remote** names this conversation as
+      the home the remote was opened for. It exists from the remote's very
+      first post, which is the whole of an in-flight session: nothing has been
+      answered yet, so no served note has been written.
+
+    Neither is ever rendered (constraint 4). This is the linking they are read
+    for, and the reason the plan allows it.
+    """
+    found: dict[tuple[str, str], dict] = {}
+    here = topics.get(key)
+    if here is not None:
+        for child, note in (getattr(here, "served", None) or {}).items():
+            found[child] = {
+                "channel": child[0], "topic": child[1],
+                "via": "served", "link_id": note.get("first_note") or 0,
+                "by": None,
+            }
+    for other_key, other in topics.items():
+        if other_key == key:
+            continue
+        for home, sender_id, sender, note_id in getattr(other, "roots", None) or []:
+            if (home.channel, home.topic) != key:
+                continue
+            existing = found.get(other_key)
+            if existing is None or note_id < existing["link_id"]:
+                found[other_key] = {
+                    "channel": other_key[0], "topic": other_key[1],
+                    "via": "rootchat", "link_id": note_id, "by": sender,
+                }
+    return sorted(found.values(), key=lambda child: child["link_id"])
+
+
+def session_tree(
+    topics: dict,
+    root: tuple[str, str],
+    rows_by_topic: dict,
+    *,
+    since: int,
+    until: int | None,
+    max_depth: int = MAX_DEPTH,
+    max_nodes: int = MAX_NODES,
+) -> list[dict]:
+    """The conversations of one fire, walked breadth-first from the fire topic.
+
+    `since`/`until` are **message ids**, not times: the link notes carry ids,
+    Zulip's ids are realm-wide and monotonic, and a fire's own id is therefore
+    the cleanest boundary between one run of a routine and the next. A link
+    recorded inside the window belongs to that run — including a note written
+    late about an old callback, which is honest: the note *is* when this
+    conversation started working there again.
+
+    Depth and node caps exist because a cycle in the notes is possible (two
+    agents anchoring each other) and a board is not the place to discover it.
+    """
+    nodes: list[dict] = []
+    seen = {root}
+    frontier = [(root, 0, None)]
+    while frontier and len(nodes) < max_nodes:
+        key, depth, parent = frontier.pop(0)
+        if depth >= max_depth:
+            continue
+        for child in children_of(topics, key):
+            child_key = (child["channel"], child["topic"])
+            if child_key in seen:
+                continue
+            if child["link_id"] < since or (until is not None and child["link_id"] >= until):
+                continue
+            seen.add(child_key)
+            found = topics.get(child_key)
+            node = {
+                **child,
+                "depth": depth + 1,
+                "parent": {"channel": parent[0], "topic": parent[1]} if parent else
+                          {"channel": key[0], "topic": key[1]},
+                # A topic the sweep never read is one this board knows only by
+                # the note that named it — usually because it carries a ✔ and
+                # resolved topics are not swept. Saying which is the difference
+                # between "quiet" and "not looked at", which is this whole
+                # board's one rule.
+                "known": "swept" if found is not None else "note-only",
+                "resolved": bool(getattr(found, "resolved", False)) if found else None,
+                "last_post": None,
+                "rows": rows_by_topic.get(child_key, []),
+            }
+            last = getattr(found, "last", None) if found else None
+            if last is not None:
+                node["last_post"] = {
+                    "message_id": last.id, "at": last.timestamp, "by": last.sender,
+                }
+            node["state"] = _node_state(node)
+            nodes.append(node)
+            frontier.append((child_key, depth + 1, key))
+            if len(nodes) >= max_nodes:
+                break
+    return nodes
+
+
+def _node_state(node: dict) -> str:
+    """The node's state, taken from `/ops` and never recomputed.
+
+    The ops board already decides what every conversation owes and explains
+    what it decided it from; a second opinion here would be the drift p1's 66
+    phantom rows came from. What is added is only what `/ops` has no row for:
+    a topic nobody owes anything in is `quiet`, and one this board has never
+    read is `unknown`.
+    """
+    if node["known"] == "note-only":
+        return "unknown"
+    rows = node.get("rows") or []
+    if not rows:
+        return "quiet"
+    order = {"stalled": 0, "unknown": 1, "awaiting": 2, "acked": 3, "done": 4}
+    return sorted(rows, key=lambda row: order.get(row["state"], 9))[0]["state"]
+
+
+def sessions_of(
+    topics: dict,
+    name: str,
+    rows_by_topic: dict,
+    *,
+    limit: int = SESSION_LIMIT,
+) -> list[dict]:
+    """The last `limit` runs of one routine, each with the tree it opened.
+
+    A run is bounded by the fire that started it and the next fire. A routine
+    nobody has ever fired from the schedule still gets one session — mediagen
+    is fired by hand and its topic is the busiest of the eight — because the
+    conversations are real whatever started them, and an empty screen would be
+    the wrong answer for the wrong reason.
+    """
+    root = (ROUTINE_CHANNEL, f"{FIRE_PREFIX}{name}")
+    topic = topics.get(root)
+    history = sorted(getattr(topic, "history", None) or [], key=lambda found: found.id)
+    fires = [
+        found for found in history
+        if (match := FIRE_LINE.match(found.content or "")) and match.group("name") == name
+    ]
+    if not fires:
+        if topic is None:
+            return []
+        return [{
+            "index": 0,
+            "fire": None,
+            "note": "no fire from the dispatcher; every run of this routine was started by hand",
+            "nodes": session_tree(topics, root, rows_by_topic, since=0, until=None),
+        }]
+    spans = []
+    for index, fire in enumerate(fires):
+        after = fires[index + 1].id if index + 1 < len(fires) else None
+        spans.append((fire, after))
+    sessions = []
+    for index, (fire, after) in enumerate(reversed(spans[-limit:])):
+        sessions.append({
+            "index": index,
+            "fire": {**_message(fire), "text": _excerpt(fire.content, 200)},
+            "note": None,
+            "nodes": session_tree(topics, root, rows_by_topic, since=fire.id, until=after),
+        })
+    return sessions
+
+
+def chat_of(topics: dict, name: str) -> list[dict]:
+    """The fire conversation as a chat log: real posts, oldest first.
+
+    Selfnotes are not in `history` at all — the engine drops them on the way
+    in — so there is nothing to filter here and nothing that could leak.
+    """
+    topic = topics.get((ROUTINE_CHANNEL, f"{FIRE_PREFIX}{name}"))
+    history = sorted(getattr(topic, "history", None) or [], key=lambda found: found.id)
+    return [{**_message(found), "content": found.content} for found in history]
 
 
 def _state(answer: dict, stalled_seconds: float) -> str:

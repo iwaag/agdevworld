@@ -440,7 +440,7 @@ def session_tree(
     until: int | None,
     max_depth: int = MAX_DEPTH,
     max_nodes: int = MAX_NODES,
-) -> list[dict]:
+) -> dict:
     """The conversations of one fire, walked breadth-first from the fire topic.
 
     `since`/`until` are **message ids**, not times: the link notes carry ids,
@@ -456,15 +456,22 @@ def session_tree(
     nodes: list[dict] = []
     seen = {root}
     frontier = [(root, 0)]
-    while frontier and len(nodes) < max_nodes:
+    exhausted: set[str] = set()
+    while frontier:
         key, depth = frontier.pop(0)
-        if depth >= max_depth:
-            continue
         for child in children_of(topics, key):
             child_key = (child["channel"], child["topic"])
             if child_key in seen:
                 continue
             if child["link_id"] < since or (until is not None and child["link_id"] >= until):
+                continue
+            # Inspect only already-held link evidence. Reaching the exact cap
+            # is not truncation unless an eligible unseen child was omitted.
+            if depth >= max_depth:
+                exhausted.add("depth")
+                continue
+            if len(nodes) >= max_nodes:
+                exhausted.add("nodes")
                 continue
             seen.add(child_key)
             found = topics.get(child_key)
@@ -490,9 +497,15 @@ def session_tree(
             node["state"] = _node_state(node)
             nodes.append(node)
             frontier.append((child_key, depth + 1))
-            if len(nodes) >= max_nodes:
-                break
-    return nodes
+    return {
+        "nodes": nodes,
+        "truncation": {
+            "truncated": bool(exhausted),
+            "reasons": sorted(exhausted),
+            "max_nodes": max_nodes,
+            "max_depth": max_depth,
+        },
+    }
 
 
 def _node_state(node: dict) -> str:
@@ -542,7 +555,7 @@ def sessions_of(
             "index": 0,
             "fire": None,
             "note": "no fire from the dispatcher; every run of this routine was started by hand",
-            "nodes": session_tree(topics, root, rows_by_topic, since=0, until=None),
+            **session_tree(topics, root, rows_by_topic, since=0, until=None),
         }]
     spans = []
     for index, fire in enumerate(fires):
@@ -554,7 +567,7 @@ def sessions_of(
             "index": index,
             "fire": {**_message(fire), "text": _excerpt(fire.content, 200)},
             "note": None,
-            "nodes": session_tree(topics, root, rows_by_topic, since=fire.id, until=after),
+            **session_tree(topics, root, rows_by_topic, since=fire.id, until=after),
         })
     return sessions
 

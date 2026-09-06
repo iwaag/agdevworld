@@ -17,7 +17,7 @@ export async function initOperationDashboard(): Promise<void> {
   host.innerHTML = `<header class="dashboard-header"><div><span class="eyebrow">AGDEVWORLD</span><h1>Operation room</h1></div><nav class="parts-toolbar"><a href="/?view=ops">Ops board</a><a href="/?view=nodes">World views</a><button class="refresh">Refresh</button></nav><p class="parts-health" role="status">Reading relay…</p></header>
     <div class="parts-grid"><aside class="routine-pane"><h2>Routines</h2><div class="routine-list"></div></aside>
     <section class="session-pane"><h2>Recent sessions <small>up to 3 · history, not capacity</small></h2><div class="session-list"></div></section>
-    <section class="flow-pane"><h2>Conversation flow</h2><div class="standing-request"></div><div class="parts-graph"></div><p class="parts-inflight">Host observation not loaded.</p></section>
+    <section class="flow-pane"><h2>Conversation flow</h2><div class="standing-request"></div><div class="parts-graph"></div><div class="parts-inflight">Host observation not loaded.</div></section>
     <aside class="chat-pane"><h2>Fire conversation</h2><p class="chat-span-note"></p><div class="chat-mount"></div></aside></div>`
   document.body.append(host)
   const find = (selector: string) => host.querySelector<HTMLElement>(selector)!
@@ -50,6 +50,7 @@ export async function initOperationDashboard(): Promise<void> {
       button.onclick = () => { selection.session = key; lastInflightAt = 0; drawSession(true); void refreshInflight() }
       list.append(button)
     }
+    if (!detail.sessions.length) list.textContent = detail.health.state === 'live' ? 'No session observed.' : 'Unknown — session history is not available.'
     const index = detail.sessions.findIndex(session => sessionKey(session) === selection.session)
     const session = detail.sessions[index]
     if (session) {
@@ -153,10 +154,15 @@ export async function initOperationDashboard(): Promise<void> {
     if (selection.routine !== name || detail?.health.state !== 'live' || sessionKey(detail.sessions[0]!) !== selection.session) return
     const line = find('.parts-inflight')
     if ('error' in found) { line.textContent = `Host observation unknown — ${found.error}`; return }
-    line.textContent = `Latest activity only · host directories · observed ${at(found.generated_at)} · ` +
-      (!found.configured ? 'Unknown — observation not configured.' :
-        !found.topics.length ? 'Unknown — no topic observations returned.' :
-        found.topics.map(topic => `${topic.instance}: ${topic.known ? topic.in_flight ? 'in flight' : 'no run in flight observed' : 'unknown'} (${topic.reason})`).join(' · '))
+    const observation = element('details', '', 'host-evidence')
+    const running = found.topics.filter(topic => topic.known && topic.in_flight).length
+    const unknown = found.topics.filter(topic => !topic.known).length
+    const summary = !found.configured ? 'Unknown — observation not configured' : !found.topics.length
+      ? 'Unknown — no topic observations returned' : `${running} in flight · ${unknown} unknown · ${found.topics.length - running - unknown} without an observed run`
+    observation.append(element('summary', `Latest activity only · host directories · ${summary} · observed ${at(found.generated_at)}`))
+    const evidence = element('div', '')
+    for (const topic of found.topics) evidence.append(element('p', `${topic.instance} · ${topic.channel}/${topic.topic}: ${topic.known ? topic.in_flight ? 'in flight' : 'no run in flight observed' : 'unknown'} — ${topic.reason}`))
+    observation.append(evidence); line.replaceChildren(observation)
   }
 
   async function refresh() {
@@ -169,7 +175,7 @@ export async function initOperationDashboard(): Promise<void> {
       if (ops.health.state !== 'live') found.health = { ...found.health, state: 'unknown', reason: ops.health.reason }
       if (found.health.state !== 'live' && !found.routines.length) { unavailable(found.health.reason); return }
       board = found
-      if (!found.routines.some(row => row.name === selection.routine)) {
+      if ((!selection.routine || found.health.state === 'live') && !found.routines.some(row => row.name === selection.routine)) {
         selection.routine = found.routines[0]?.name ?? ''; selection.session = ''; detail = undefined
       }
       drawRoutines()

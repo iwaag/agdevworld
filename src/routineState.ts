@@ -88,6 +88,7 @@ export interface RoutineSession {
   fire: (RoutinePost & { text: string }) | null
   note: string | null
   nodes: SessionNode[]
+  truncation?: { truncated: boolean; reasons: string[]; max_nodes: number; max_depth: number }
 }
 
 export interface ChatStatus {

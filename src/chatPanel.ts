@@ -190,7 +190,7 @@ export function initChatPanel(options: { mount?: HTMLElement; managed?: boolean;
     // The relay is the source of the history, so a repaint only happens when
     // the history actually changed — otherwise the panel would scroll itself
     // away from what the reader is looking at every five seconds.
-    const ids = JSON.stringify(posts)
+    const ids = JSON.stringify([detail.health.state, posts])
     if (ids === lastIds) return
     const atBottom =
       messagesEl.scrollHeight - messagesEl.scrollTop - messagesEl.clientHeight < 60 ||
@@ -198,7 +198,7 @@ export function initChatPanel(options: { mount?: HTMLElement; managed?: boolean;
     lastIds = ids
     messagesEl.replaceChildren()
     if (posts.length === 0) {
-      renderEmpty('This routine has no posts in its fire topic yet.')
+      renderEmpty(detail.health.state === 'live' ? 'This routine has no posts in its fire topic yet.' : 'History unknown — no posts available in the last known evidence.')
       return
     }
     for (const post of posts) {

@@ -311,7 +311,7 @@ def test_a_served_note_finds_a_child_that_was_resolved_and_never_swept():
         fire("papers", ident=10),
         servednote("pj-studyarxiv/workplan-papers", 90, ident=20),
     ))
-    nodes = session_tree(topics, ("front", "front-routine-papers"), {}, since=0, until=None)
+    nodes = session_tree(topics, ("front", "front-routine-papers"), {}, since=0, until=None)["nodes"]
     assert [(node["topic"], node["via"], node["known"]) for node in nodes] == [
         ("workplan-papers", "served", "note-only")
     ]
@@ -326,7 +326,7 @@ def test_a_rootchat_note_finds_a_child_nothing_has_answered_yet():
                   message("opened the mission", ident=22, sender_id=FRONT, sender="Front"),
                   keep=False)
     topics = mapping(topic("front", "front-routine-papers", fire("papers", ident=10)), child)
-    nodes = session_tree(topics, ("front", "front-routine-papers"), {}, since=0, until=None)
+    nodes = session_tree(topics, ("front", "front-routine-papers"), {}, since=0, until=None)["nodes"]
     assert [(node["topic"], node["via"], node["known"]) for node in nodes] == [
         ("workplan-papers", "rootchat", "swept")
     ]
@@ -340,7 +340,7 @@ def test_the_tree_goes_deeper_than_one_hop():
     middle = topic("pj-studyarxiv", "workplan-papers",
                    servednote("work-s3-1/workrun-task1", 95, ident=30), keep=False)
     nodes = session_tree(topics := mapping(root, middle),
-                         ("front", "front-routine-papers"), {}, since=0, until=None)
+                         ("front", "front-routine-papers"), {}, since=0, until=None)["nodes"]
     assert [(node["topic"], node["depth"]) for node in nodes] == [
         ("workplan-papers", 1), ("workrun-task1", 2)
     ]
@@ -356,7 +356,7 @@ def test_a_node_wears_the_ops_boards_verdict_and_never_its_own():
         {"state": "done", "instance": "a"}, {"state": "stalled", "instance": "b"},
     ]}
     nodes = session_tree(mapping(root, child), ("front", "front-routine-papers"),
-                         rows, since=0, until=None)
+                         rows, since=0, until=None)["nodes"]
     # Both rows are carried; the node wears the most urgent of them.
     assert nodes[0]["state"] == "stalled"
     assert len(nodes[0]["rows"]) == 2
@@ -560,7 +560,7 @@ def test_graph_edges_keep_the_immediate_parent_through_three_hops():
     work = topic("work", "task", rootnote("project/plan", ident=30),
                  servednote("forge/result", 100, ident=40))
     nodes = session_tree(mapping(root, plan, work),
-                         ("front", "front-routine-papers"), {}, since=0, until=None)
+                         ("front", "front-routine-papers"), {}, since=0, until=None)["nodes"]
     assert [(node["channel"], node["topic"], node["depth"], node["parent"]) for node in nodes] == [
         ("project", "plan", 1, {"channel": "front", "topic": "front-routine-papers"}),
         ("work", "task", 2, {"channel": "project", "topic": "plan"}),
@@ -568,3 +568,41 @@ def test_graph_edges_keep_the_immediate_parent_through_three_hops():
     ]
     assert nodes[-1]["known"] == "note-only"
     assert nodes[-1]["state"] == "unknown"
+
+
+def test_node_limit_reports_only_actual_omissions():
+    root = topic("front", "front-routine-papers", fire("papers", ident=10),
+                 *[servednote(f"pj-a/child-{i}", 90, ident=20+i) for i in range(41)])
+    tree = session_tree(mapping(root), ("front", root.topic), {}, since=0, until=None)
+    assert len(tree["nodes"]) == 40
+    assert tree["truncation"] == {
+        "truncated": True, "reasons": ["nodes"], "max_nodes": 40, "max_depth": 4,
+    }
+    # A link outside the fire window does not consume the limit.
+    exact = session_tree(mapping(root), ("front", root.topic), {}, since=0, until=60)
+    assert len(exact["nodes"]) == 40
+    assert exact["truncation"]["truncated"] is False
+
+
+def test_depth_limit_distinguishes_leaf_cycle_and_omitted_descendant():
+    root = topic("front", "front-routine-papers", fire("papers", ident=10),
+                 servednote("pj-a/level-1", 90, ident=20))
+    chain = [topic("pj-a", f"level-{i}",
+                   servednote(f"pj-a/level-{i+1}", 90, ident=20+i)) for i in range(1, 5)]
+    tree = session_tree(mapping(root, *chain), ("front", root.topic), {}, since=0, until=None)
+    assert len(tree["nodes"]) == 4
+    assert tree["truncation"]["reasons"] == ["depth"]
+    leaf = session_tree(mapping(root, *chain[:-1]), ("front", root.topic), {}, since=0, until=None)
+    assert leaf["truncation"]["truncated"] is False
+    cycle = topic("pj-a", "level-4", servednote("front/front-routine-papers", 90, ident=30))
+    tree = session_tree(mapping(root, *chain[:-1], cycle), ("front", root.topic), {}, since=0, until=None)
+    assert tree["truncation"]["truncated"] is False
+
+
+def test_sessions_expose_reconstruction_bounds_for_manual_and_scheduled_activity():
+    for posts in [[], [fire("papers", ident=10)]]:
+        root = topic("front", "front-routine-papers", *posts,
+                     *[servednote(f"pj-a/child-{i}", 90, ident=20+i) for i in range(41)])
+        session = sessions_of(mapping(root), "papers", {})[0]
+        assert session["truncation"]["truncated"] is True
+        assert len(session["nodes"]) == 40

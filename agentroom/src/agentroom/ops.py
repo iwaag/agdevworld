@@ -52,13 +52,22 @@ from agag.intro import (
     Roster,
     parse_roster,
 )
-from agag.selfnote import is_selfnote, parse_served
+from agag.selfnote import Conversation, is_selfnote, parse_rootchat, parse_served
 from agag.zulip import RESOLVED_TOPIC_PREFIX, QueueExpired, RateLimited, ZulipClient
 
 from .room import SYSTEM_REALM, bare_topic
+from .routines import (
+    ROUTINE_HISTORY,
+    Schedule,
+    is_routine_topic,
+    read_schedule,
+    routine_rows,
+)
 
 #: The payload's own version. The view is built against this shape.
 SCHEMA = "ag.ops.v1"
+#: The routine board's own version (`operation_room` p3).
+ROUTINES_SCHEMA = "ag.routines.v1"
 #: How long an owed reply may go unanswered before the board calls it stalled.
 #: p1 proposed 15 minutes; the p9 incident it exists to catch was 26. A number
 #: to tune, never a finding — which is why it is configuration.
@@ -79,6 +88,7 @@ RESYNC_BACKOFF = 30.0
 __all__ = [
     "DEFAULT_STALLED_SECONDS",
     "Ops",
+    "ROUTINES_SCHEMA",
     "SCHEMA",
     "Topic",
     "acked",
@@ -143,8 +153,25 @@ class Topic:
     #: the *oldest unserved* one, because that is when the reply started being
     #: owed — the newest would reset the clock on every nudge.
     mentions: list[Message] = field(default_factory=list)
+    #: Kept only for the conversations a *routine* is made of. The board needs
+    #: the last post of every topic on the realm and the whole history of
+    #: about sixteen of them; keeping all of both would be a copy of the realm
+    #: in memory for the sake of the sixteen.
+    keep_history: bool = False
+    history: list[Message] = field(default_factory=list)
+    #: `[selfnote][rootchat]` — the conversations this topic was opened *for*,
+    #: with who said so. This is the edge a session tree is built from, and it
+    #: is the one thing selfnotes are read for: linking, never display
+    #: (`operation_room` p3 constraint 4).
+    roots: list[tuple[Conversation, int, str, int]] = field(default_factory=list)
+    #: `[selfnote][served]` written *in* this topic: the remote conversations
+    #: this one's owner has answered a callback from, newest id per remote.
+    #: The other direction of the same edge, and the only one that survives a
+    #: child topic being resolved — a resolved topic is never swept.
+    served: dict[tuple[str, str], int] = field(default_factory=dict)
 
     def add(self, message: dict) -> None:
+        self.link(message)
         if not is_real(message):
             return
         found = Message.of(message)
@@ -153,6 +180,37 @@ class Topic:
         if "@**" in found.content:
             self.mentions.append(found)
             self.mentions.sort(key=lambda m: m.id)
+        if self.keep_history and all(kept.id != found.id for kept in self.history):
+            self.history.append(found)
+            self.history.sort(key=lambda kept: kept.id)
+            del self.history[:-ROUTINE_HISTORY]
+
+    def link(self, message: dict) -> None:
+        """Read the two link notes out of a post, whatever else it is.
+
+        Selfnotes are filtered out of everything above and stay filtered out of
+        everything below; this is the one place that reads them, because they
+        are the only record of which conversation a run was opened on behalf
+        of. Nothing read here is ever rendered.
+        """
+        content = str(message.get("content") or "")
+        sender_id = int(message.get("sender_id") or 0)
+        sender = str(message.get("sender_full_name") or "")
+        home = parse_rootchat(content)
+        if home is not None and not any(
+            root == home and by == sender_id for root, by, _, _ in self.roots
+        ):
+            # The earliest note by each agent wins: a topic is anchored once,
+            # by the run that opened it, and two agents may each anchor it to
+            # a home of their own.
+            self.roots.append((home, sender_id, sender, int(message.get("id") or 0)))
+            self.roots.sort(key=lambda root: root[3])
+        parsed = parse_served(content)
+        if parsed is not None:
+            remote, ident = parsed
+            key = (remote.channel, bare_topic(remote.topic))
+            if ident > self.served.get(key, 0):
+                self.served[key] = ident
 
 
 # --- the two routes --------------------------------------------------------
@@ -356,6 +414,9 @@ class Ops:
 
     env_path: Path
     stalled_seconds: float = DEFAULT_STALLED_SECONDS
+    #: The dispatcher's own `schedule.json`, read as a local file. None when
+    #: unconfigured, which the payload says rather than showing no fires.
+    schedule_path: Path | None = None
     client_factory: Callable[[Path], ZulipClient] | None = None
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
     _stop: threading.Event = field(default_factory=threading.Event, repr=False)
@@ -496,17 +557,27 @@ class Ops:
                 errors.append({"channel": name, "error": str(error)})
                 continue
             for live in found:
+                key = (name, bare_topic(live))
                 # Resolved topics are not read on a sweep. `done` is a
                 # transition this engine watches happen, not a history it
                 # reconstructs — and reading every ✔ topic on the realm would
-                # multiply the one cost the plan caps.
-                if live.startswith(RESOLVED_TOPIC_PREFIX):
+                # multiply the one cost the plan caps. The exception is a
+                # routine's own two topics: a ✔ there is how a routine is
+                # retired, and there are sixteen of them, not a realm's worth.
+                if live.startswith(RESOLVED_TOPIC_PREFIX) and not is_routine_topic(name, key[1]):
                     continue
-                key = (name, bare_topic(live))
-                topic = Topic(channel=name, topic=key[1], live_topic=live)
+                # A routine's own topics are read deeper and kept whole: the
+                # chat view *is* that history, and a topic costs one call
+                # whatever depth it is read at.
+                deep = is_routine_topic(name, key[1])
+                topic = Topic(
+                    channel=name, topic=key[1], live_topic=live, keep_history=deep,
+                    resolved=live.startswith(RESOLVED_TOPIC_PREFIX),
+                )
                 try:
                     history = self._patient(
-                        client, client.topic_history, name, live, num_before=TOPIC_LOOKBACK
+                        client, client.topic_history, name, live,
+                        num_before=ROUTINE_HISTORY if deep else TOPIC_LOOKBACK,
                     )
                 except Exception as error:
                     errors.append({"channel": f"{name}/{live}", "error": str(error)})
@@ -704,7 +775,10 @@ class Ops:
 
             topic = self._topics.get(key)
             if topic is None:
-                topic = Topic(channel=channel, topic=key[1], live_topic=live)
+                topic = Topic(
+                    channel=channel, topic=key[1], live_topic=live,
+                    keep_history=is_routine_topic(channel, key[1]),
+                )
                 self._topics[key] = topic
             topic.live_topic = live
             topic.resolved = live.startswith(RESOLVED_TOPIC_PREFIX)
@@ -827,6 +901,39 @@ class Ops:
                 for (channel, topic), ident in sorted(marks.items())
             ],
             "refused": [],
+        }
+
+    # -- routines ----------------------------------------------------------
+
+    def routines(self, now: float | None = None) -> dict:
+        """The routine board: the standing request, the schedule, the last fire.
+
+        It reuses `snapshot()` for health and for the conversation states
+        rather than deciding either again — one engine, one verdict. The realm
+        half costs no Zulip call at all: these topics are already in memory,
+        read by the same sweep and kept current by the same queue.
+        """
+        now = time.time() if now is None else now
+        board = self.snapshot(now)
+        with self._lock:
+            topics = dict(self._topics)
+        schedule = read_schedule(self.schedule_path)
+        rows = routine_rows(topics, schedule, now, stalled_seconds=self.stalled_seconds)
+        if board["health"]["state"] != "live":
+            # The same rule the ops board obeys: while the queue is dead this
+            # is the last thing known and not the state now. The schedule is
+            # exempt — it is a local file, read a moment ago, and its own
+            # freshness does not depend on Zulip.
+            for row in rows:
+                row["stale_state"] = row["state"]
+                row["state"] = "unknown"
+        return {
+            "schema": ROUTINES_SCHEMA,
+            "generated_at": now,
+            "settings": {"stalled_seconds": self.stalled_seconds},
+            "health": board["health"],
+            "schedule": schedule.payload(),
+            "routines": rows,
         }
 
     # -- what the view reads ---------------------------------------------

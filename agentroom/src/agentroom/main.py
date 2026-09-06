@@ -23,6 +23,12 @@ ENV_VARIABLE = "AGENTROOM_ZULIP_ENV"
 #: 183 calls against the same realm quota the agents' listeners spend, so the
 #: observer holds an identity of its own or does not run (plan constraint 2).
 OPS_ENV_VARIABLE = "OPSROOM_ZULIP_ENV"
+#: The routine dispatcher's `schedule.json`, read as a **local file**. The
+#: routine GUI on `:8093` serves the same clone over HTTP but answers no CORS
+#: header, so a browser cannot read it and this relay is the only path there
+#: is. A path, in the environment, for the same reason the credentials are
+#: (`devpolicy/styles.md`): it is an absolute local path.
+SCHEDULE_VARIABLE = "AGENTROOM_SCHEDULE_JSON"
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8094
 DEFAULT_CACHE_SECONDS = 30.0
@@ -52,7 +58,13 @@ def main(argv: list[str] | None = None) -> int:
         if not ops_path.is_file():
             print(f"{OPS_ENV_VARIABLE}={ops_path} is not a file", file=sys.stderr)
             return 2
-        ops = Ops(env_path=ops_path, stalled_seconds=stalled)
+        schedule_env = os.environ.get(SCHEDULE_VARIABLE, "")
+        schedule_path = Path(schedule_env).expanduser() if schedule_env else None
+        # Not fatal when it is missing: a routine board without the schedule
+        # still has the realm's half, and the payload says which half is gone.
+        # A relay that refuses to start over a file the dispatcher rewrites
+        # several times a fire would be the more fragile arrangement.
+        ops = Ops(env_path=ops_path, stalled_seconds=stalled, schedule_path=schedule_path)
 
     if argv and argv[0] == "check":
         # A one-shot read, so a credentials or connectivity problem is found
@@ -76,6 +88,13 @@ def main(argv: list[str] | None = None) -> int:
               f"{found['health']['topics']} topics in {found['health']['channels']} channels")
         for summary in found["instances"]:
             print(f"  {summary['instance']:<24} roster={summary['roster']:<7} {summary['counts']}")
+        routines = ops.routines()
+        schedule = routines["schedule"]
+        print(f"routines: {len(routines['routines'])} — schedule "
+              + ("ok" if schedule["ok"] else f"unreadable ({schedule['error']})"))
+        for row in routines["routines"]:
+            print(f"  {row['name']:<12} {row['state']:<9} {row['answer']['state']:<11} "
+                  f"{row['posts']} posts")
         return 0
 
     if ops is not None:

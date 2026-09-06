@@ -27,7 +27,9 @@ AGENTROOM_ZULIP_ENV=/path/to/zulip.env service/serve.sh
 Zulip has no read-only API key, so nothing here can be narrowed by permission.
 **Never commit one.**
 
-Other environment values: `AGENTROOM_HOST` (default `127.0.0.1`),
+Other environment values: `AGENTROOM_SCHEDULE_JSON` (the routine
+dispatcher's `schedule.json`; `/routines` says so when it is unset),
+`AGENTROOM_HOST` (default `127.0.0.1`),
 `AGENTROOM_PORT` (default `8094`), `AGENTROOM_CACHE_SECONDS` (default `30`;
 `0` disables the in-memory cache).
 
@@ -85,6 +87,10 @@ writes only to this process's memory (see `POST /ops/confirm`).
   prefix (`agag.zulip.RESOLVED_TOPIC_PREFIX`) and nothing else: topic naming
   differs per agent, resolution does not.
 
+- `GET /routines` → the routine board (`operation_room` p3): one row per
+  routine, carrying its standing request, its schedule, its last fire and
+  **whether that fire was answered**. See below.
+
 - `GET /ops` → the conversation-layer state board: one row per
   `(instance, channel, topic)` that is `awaiting`, `stalled`, `acked`, `done`
   or `unknown`, sorted with stalled first, each carrying the evidence its
@@ -98,6 +104,43 @@ writes only to this process's memory (see `POST /ops/confirm`).
 
 A Zulip failure answers `502` with the error text, so the view can say the
 room is unreadable instead of showing an empty one.
+
+## `/routines` — the routine board
+
+A routine lives in three places and this is the first thing that reads all
+three: the standing request in `#front` › `routine-<name>`, the fire
+conversation in `#front` › `front-routine-<name>`, and the dispatcher's
+`schedule.json`. The realm half costs **no extra Zulip call** — those topics
+are already in the `/ops` engine's memory, read by the same sweep and kept
+current by the same queue.
+
+`AGENTROOM_SCHEDULE_JSON` points at the dispatcher's `schedule.json`
+(`pj-agdev/.local/rtschedule/schedule.json` on agstudio). It is read as a
+**local file** on every request, because the routine GUI on `:8093` is a
+`http.server`: it answers no CORS header, so the browser cannot read the same
+file itself. Unset is not "no fires" — the payload says `configured: false`
+and the view says so.
+
+Three rules here were measured on the live realm rather than assumed:
+
+- **An ack is not an answer.** Front acks every request it is served, so a
+  fire that has only an ack is `acked`, and the age is always the age of the
+  *fire*.
+- **The standing request is the newest post by the topic's author**, not the
+  newest post. `trigger.sh` tells Front the request is "the latest post", and
+  on 2026-09-04 Front filed a run report into `#front` › `routine-ghtrends`
+  instead of the fire topic — the latest post there is now a report about the
+  routine. Posts by anybody but the author are served as `request_strays`
+  rather than dropped: they are the evidence that an agent answered in the
+  wrong topic.
+- **A fire is the trigger's own wording** (`Routine \`<name>\`, run of …`).
+  Reading "the newest post by the Developer" as the fire would turn every
+  comment on a run into a new unanswered one.
+
+A routine's two topics are the only ones this service reads **through a ✔**:
+resolution is how a routine is retired, and there are sixteen such topics
+rather than a realm's worth. Their history is also the only history kept in
+full (200 messages), because the chat view *is* that history.
 
 ## `/ops` — the state engine
 

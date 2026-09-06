@@ -29,7 +29,7 @@ from urllib.parse import urlparse
 from .ops import Ops
 from .room import Room
 
-ROUTES = ("/healthz", "/agents", "/work", "/ops")
+ROUTES = ("/healthz", "/agents", "/work", "/ops", "/routines")
 WRITE_ROUTES = ("/ops/confirm",)
 
 
@@ -84,6 +84,17 @@ def make_handler(room: Room, ops: Ops | None = None):
                         })
                     else:
                         self._write_json(200, ops.snapshot())
+                elif path == "/routines":
+                    # The routine board is the same engine's reading of the
+                    # same realm, so it degrades the same way: no credential,
+                    # no board, and it says which variable is missing.
+                    if ops is None:
+                        self._write_json(503, {
+                            "error": "the ops engine is not configured; "
+                                     "set OPSROOM_ZULIP_ENV to its own bot credential",
+                        })
+                    else:
+                        self._write_json(200, ops.routines())
                 else:
                     self._write_json(404, {"error": f"no route {path}", "routes": list(ROUTES)})
             except Exception as error:

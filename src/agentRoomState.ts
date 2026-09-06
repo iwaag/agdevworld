@@ -58,8 +58,17 @@ async function read<T>(path: string): Promise<T> {
   return payload as T
 }
 
-export async function loadRoomAgents(): Promise<RoomAgent[]> {
-  return (await read<{ agents: RoomAgent[] }>('/agents')).agents
+export interface RoomRoster {
+  agents: RoomAgent[]
+  // Instances whose `intro-` topic carries Zulip's ✔ — retired, and so not in
+  // `agents`. Kept so the room can say an agent left rather than letting the
+  // card quietly stop being drawn.
+  retired: string[]
+}
+
+export async function loadRoomAgents(): Promise<RoomRoster> {
+  const found = await read<RoomRoster>('/agents')
+  return { agents: found.agents, retired: found.retired ?? [] }
 }
 
 export async function loadRoomWork(): Promise<RoomWork> {

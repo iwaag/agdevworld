@@ -364,6 +364,13 @@ class Ops:
     # -- state, all of it under _lock
     _topics: dict[tuple[str, str], Topic] = field(default_factory=dict, repr=False)
     _rosters: dict[str, Roster | None] = field(default_factory=dict, repr=False)
+    #: Instances whose `intro-` topic carries Zulip's ✔ — **retired**. An
+    #: introduction is the contract that says an agent exists and how to reach
+    #: it, so resolving that topic is how the realm says the agent is gone. It
+    #: is the only retirement signal there is: a project can vanish from every
+    #: machine without the realm noticing, which is exactly what left
+    #: `agping-agstudio1` amber on this board for a phase (`p2 ex2` step C).
+    _retired: set[str] = field(default_factory=set, repr=False)
     _marks: dict[str, dict[tuple[str, str], int]] = field(default_factory=dict, repr=False)
     _channels: set[str] = field(default_factory=set, repr=False)
     #: An `update_message` event names its channel by id and nothing else, so
@@ -473,7 +480,7 @@ class Ops:
             except Exception as error:
                 errors.append({"channel": ", ".join(missing), "error": f"subscribe: {error}"})
 
-        rosters = self._read_rosters(client, errors)
+        rosters, retired = self._read_rosters(client, errors)
 
         topics: dict[tuple[str, str], Topic] = {}
         marks: dict[str, dict[tuple[str, str], int]] = {
@@ -513,6 +520,7 @@ class Ops:
             self._channels = set(names)
             self._stream_names = {int(v): k for k, v in stream_ids.items()}
             self._rosters = rosters
+            self._retired = retired
             self._topics = topics
             self._marks = marks
             self._errors = errors
@@ -524,25 +532,41 @@ class Ops:
             self._sweeps += 1
             self._sweep_calls = client.calls - before
 
-    def _read_rosters(self, client: ZulipClient, errors: list[dict]) -> dict[str, Roster | None]:
-        """Every instance on the board, and the routing it declares.
+    def _read_rosters(
+        self, client: ZulipClient, errors: list[dict]
+    ) -> tuple[dict[str, Roster | None], set[str]]:
+        """Every instance on the board, the routing it declares, and which of
+        them are retired.
 
         `None` is kept as an answer: an introduction with no roster block is an
         instance whose routing is *unknown*, and a default here would be the
         guessed roster p1 charged 66 phantom stalls for.
+
+        A ✔ on the `intro-` topic is the second answer, and a different one:
+        the agent is **retired**. Matching is still on the bare name, so the
+        instance is recognised either way — resolution is a flag on the agent,
+        never a topic the reader fails to see (the p9 rename lesson).
         """
         found: dict[str, Roster | None] = {}
+        retired: set[str] = set()
         try:
             stream_id = client.stream_id(AGENTS_CHANNEL)
             board = client.channel_topics(stream_id)
         except Exception as error:
             errors.append({"channel": AGENTS_CHANNEL, "error": str(error)})
-            return found
+            return found, retired
         for live in board:
             name = bare_topic(live)
             if not name.startswith(INTRO_TOPIC_PREFIX):
                 continue
             instance = name[len(INTRO_TOPIC_PREFIX):]
+            if live.startswith(RESOLVED_TOPIC_PREFIX):
+                # Retired: its introduction is not read, and no history call is
+                # spent on it. `found` still carries the instance so an
+                # unresolve has something to bring back.
+                retired.add(instance)
+                found[instance] = None
+                continue
             try:
                 history = client.topic_history(AGENTS_CHANNEL, live, num_before=1)
             except Exception as error:
@@ -550,7 +574,7 @@ class Ops:
                 found[instance] = None
                 continue
             found[instance] = parse_roster(history[-1].get("content", "")) if history else None
-        return found
+        return found, retired
 
     def _served_marks(
         self,
@@ -702,6 +726,18 @@ class Ops:
             return
         old_key = (channel, bare_topic(str(original)))
         new_key = (channel, bare_topic(str(renamed)))
+        if channel == AGENTS_CHANNEL and new_key[1].startswith(INTRO_TOPIC_PREFIX):
+            # An introduction resolved or un-resolved while this runs retires
+            # or restores the agent without a re-sweep — the same courtesy
+            # `_apply_message` pays a re-posted introduction. `#agents` topics
+            # are not in `_topics` (no roster owns them), so this is deliberately
+            # before the lookup that returns early for them.
+            instance = new_key[1][len(INTRO_TOPIC_PREFIX):]
+            with self._lock:
+                if str(renamed).startswith(RESOLVED_TOPIC_PREFIX):
+                    self._retired.add(instance)
+                else:
+                    self._retired.discard(instance)
         with self._lock:
             topic = self._topics.get(old_key)
             if topic is None:
@@ -807,6 +843,7 @@ class Ops:
             reason = self._reason
             error = self._error
             rosters = dict(self._rosters)
+            retired = set(self._retired)
             marks = {k: dict(v) for k, v in self._marks.items()}
             topics = list(self._topics.values())
             channels = set(self._channels)
@@ -823,6 +860,13 @@ class Ops:
         instances: list[dict] = []
 
         for instance in sorted(rosters):
+            if instance in retired:
+                # A ✔ on the introduction is the realm saying this agent is
+                # gone. It leaves the board rather than sitting in amber
+                # forever, and `retired` below is why it is not there — a
+                # disappearance nobody can account for is the failure this
+                # board exists to prevent, so the payload accounts for it.
+                continue
             roster = rosters[instance]
             summary = {
                 "instance": instance,
@@ -985,6 +1029,10 @@ class Ops:
                 "topics": len(topics),
             },
             "confirmed": {"rows": hidden, "topics": len(confirmed)},
+            #: Instances the realm has retired (a ✔ on their `intro-` topic).
+            #: Named rather than merely absent: a reader must be able to tell
+            #: "gone on purpose" from "never seen".
+            "retired": sorted(retired),
             "instances": instances,
             "rows": rows,
             "errors": errors,

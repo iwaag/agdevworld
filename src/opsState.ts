@@ -88,6 +88,10 @@ export interface OpsBoard {
   errors: Array<{ channel: string; error: string }>
   // What the relay is holding back because somebody said they had seen it.
   confirmed: { rows: number; topics: number }
+  // Instances the realm has retired — a ✔ on their `intro-` topic. They are
+  // not in `instances`, and this is how the screen can say so rather than
+  // letting an agent disappear without an account of itself.
+  retired: string[]
 }
 
 // A board the view can render when the relay itself cannot be reached. The
@@ -114,6 +118,7 @@ export function unreadableBoard(reason: string): OpsBoard {
     rows: [],
     errors: [],
     confirmed: { rows: 0, topics: 0 },
+    retired: [],
   }
 }
 
@@ -129,7 +134,10 @@ export async function loadOpsBoard(): Promise<OpsBoard> {
     const detail = (payload as { error?: string } | undefined)?.error
     return unreadableBoard(detail ?? `agentroom answered ${response.status}`)
   }
-  return payload as OpsBoard
+  const board = payload as OpsBoard
+  // A relay older than this field is not a relay with nothing retired; it is
+  // one that cannot answer, and an undefined here would reach `.length`.
+  return { ...board, retired: board.retired ?? [] }
 }
 
 // The state a row is *wearing*, which is the one a human is deciding about.

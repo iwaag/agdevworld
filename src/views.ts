@@ -413,6 +413,7 @@ function clipped(text: string, limit: number): string {
 export function agentRoomViewConfig(onSelect: (selection: PanelSelection) => void): PanelGridConfig {
   let mode: 'agents' | 'work' = 'agents'
   let agents: RoomAgent[] = []
+  let retired: string[] = []
   let work: RoomWork | undefined
   let api: PanelGridApi | undefined
 
@@ -428,7 +429,8 @@ export function agentRoomViewConfig(onSelect: (selection: PanelSelection) => voi
     unavailableText: 'the agent room is unreadable',
     subtitle: (count) =>
       mode === 'agents'
-        ? `${count} agents have introduced themselves`
+        ? `${count} agents have introduced themselves` +
+          (retired.length > 0 ? ` · ${retired.length} retired` : '')
         : `${count} boards have work still open`,
     footer: 'live from Zulip: introductions from #agents, open work from every project and agent channel',
     switchTo: { key: 'ops', label: 'operation room' },
@@ -460,7 +462,8 @@ export function agentRoomViewConfig(onSelect: (selection: PanelSelection) => voi
       // Both reads on every load: the agent cards carry an open-work count, so
       // neither answer is complete without the other.
       const [foundAgents, foundWork] = await Promise.all([loadRoomAgents(), loadRoomWork()])
-      agents = foundAgents
+      agents = foundAgents.agents
+      retired = foundAgents.retired
       work = foundWork
       if (mode === 'agents') {
         return agents.map((agent) => {
@@ -601,7 +604,12 @@ export function opsViewConfig(onSelect: (selection: PanelSelection) => void): Pa
           ? `${count} ${plural(count, 'agent')} — state unknown`
           : `${count} ${plural(count, 'row')}, state unknown`
       }
-      if (mode === 'agents') return `${count} ${plural(count, 'agent')} on the board`
+      // Retired agents are not on the board at all (a ✔ on the `intro-`
+      // topic). Counted here anyway: an agent that simply stops being drawn
+      // is indistinguishable from one the relay failed to read.
+      const retired = board.retired.length
+      const gone = retired > 0 ? ` · ${retired} retired` : ''
+      if (mode === 'agents') return `${count} ${plural(count, 'agent')} on the board${gone}`
       // `done` is a receipt, not an open row. Counting it under the word
       // "open" was the p2 review's small lie: the number grew all day while
       // nothing was owed. It is still shown, just not as debt.

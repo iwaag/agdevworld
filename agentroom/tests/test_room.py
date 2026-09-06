@@ -5,7 +5,7 @@ happen to contain no selfnote and no Zulip notice, so a broken filter would
 read exactly like a working one. These are the messages that would break it.
 """
 
-from agentroom.room import _readable, bare_topic, strip_selfnotes, unresolved
+from agentroom.room import Room, _readable, bare_topic, strip_selfnotes, unresolved
 
 
 def message(content: str, *, ident: int = 1, system: bool = False) -> dict:
@@ -53,3 +53,70 @@ def test_zulip_notices_are_not_posts():
 
 def test_a_post_that_was_only_a_note_leaves_nothing_behind():
     assert _readable([message("[selfnote][work] project/1", ident=1)]) == []
+
+
+# --- retirement: a ✔ on an introduction ------------------------------------
+
+
+class FakeClient:
+    """Just enough of `ZulipClient` for `_intro_topics` and `_read_work`."""
+
+    calls = 0
+
+    def __init__(self, topics, channels=(), by_stream=None):
+        self._topics = topics
+        self._channels = list(channels)
+        self._by_stream = by_stream or {}
+
+    def stream_id(self, name):
+        return 35
+
+    def channels(self):
+        return list(self._channels)
+
+    def channel_topics(self, stream_id):
+        if stream_id == 35:
+            return list(self._topics)
+        return list(self._by_stream.get(stream_id, ()))
+
+
+def test_a_resolved_introduction_retires_its_agent_from_the_room():
+    # `operation_room` p2 ex2 step C. An introduction is the contract that
+    # says an agent exists and how to reach it, so resolving that topic is the
+    # realm's only way to say the agent is gone — a project can be deleted
+    # from every machine without Zulip noticing, which is what left
+    # `agping-agstudio1` on the board after its fixture stopped existing.
+    room = Room.__new__(Room)
+    live, retired = room._intro_topics(FakeClient([
+        "intro-agforge-agstudio1",
+        "✔ intro-agping-agstudio1",
+        "✔ front-greet-agecho",
+    ]))
+    assert live == [("intro-agforge-agstudio1", "agforge-agstudio1")]
+    assert retired == ["agping-agstudio1"]
+
+
+def test_a_resolved_topic_that_is_not_an_introduction_is_neither():
+    room = Room.__new__(Room)
+    live, retired = room._intro_topics(FakeClient(["✔ front-greet-agecho"]))
+    assert live == [] and retired == []
+
+
+def test_a_retired_agents_channel_is_not_walked_for_open_work():
+    # The signature change that retires an agent has two callers, and the
+    # second one is the agent room's work half. Missed once, live: the view
+    # said "the agent room is unreadable · ValueError" and only a screenshot
+    # said so — `/agents` alone answered perfectly well.
+    room = Room.__new__(Room)
+    room.client = lambda: client
+    client = FakeClient(
+        ["intro-agforge-agstudio1", "\u2714 intro-agping-agstudio1"],
+        channels=[
+            {"name": "agforge-agstudio1", "stream_id": 7, "folder_id": None},
+            {"name": "agping-agstudio1", "stream_id": 8, "folder_id": None},
+        ],
+        by_stream={7: ["assetplan-a-poster"], 8: ["agpingplan-something"]},
+    )
+    found = room._read_work()
+    assert found["channels"] == ["agforge-agstudio1"]
+    assert [row["topic"] for row in found["topics"]] == ["assetplan-a-poster"]

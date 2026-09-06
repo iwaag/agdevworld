@@ -122,25 +122,38 @@ class Room:
 
     # -- reads -----------------------------------------------------------
 
-    def _intro_topics(self, client: ZulipClient) -> list[tuple[str, str]]:
-        """`(topic, instance)` for every introduction in `#agents`.
+    def _intro_topics(self, client: ZulipClient) -> tuple[list[tuple[str, str]], list[str]]:
+        """`(topic, instance)` for every live introduction in `#agents`, and
+        the instances that have been retired.
 
         Matched after the `\u2714 ` prefix is removed, so a resolved
-        introduction topic is still an agent rather than a disappearance.
+        introduction topic is still recognised as an agent — but since
+        `operation_room` p2 ex2 it is recognised as a **retired** one. An
+        introduction is the contract that says an agent exists and how to
+        reach it, so the realm's way of saying an agent is gone is to resolve
+        that topic; there is no other signal, because a project can disappear
+        from every machine without the realm noticing.
         """
         stream_id = client.stream_id(AGENTS_CHANNEL)
-        found = []
+        found: list[tuple[str, str]] = []
+        retired: list[str] = []
         for topic in client.channel_topics(stream_id):
             name = bare_topic(topic)
-            if name.startswith(INTRO_PREFIX):
-                found.append((topic, name[len(INTRO_PREFIX):]))
-        return found
+            if not name.startswith(INTRO_PREFIX):
+                continue
+            instance = name[len(INTRO_PREFIX):]
+            if unresolved(topic):
+                found.append((topic, instance))
+            else:
+                retired.append(instance)
+        return found, sorted(retired)
 
     def _read_agents(self) -> dict:
         client = self.client()
         channel_names = {channel["name"] for channel in client.channels()}
         agents = []
-        for topic, instance in self._intro_topics(client):
+        live, retired = self._intro_topics(client)
+        for topic, instance in live:
             posts = _readable(client.topic_history(AGENTS_CHANNEL, topic, self.intro_history))
             agents.append({
                 "instance": instance,
@@ -152,7 +165,15 @@ class Room:
                 "history": posts,
             })
         agents.sort(key=lambda agent: agent["instance"])
-        return {"channel": AGENTS_CHANNEL, "agents": agents, "calls": client.calls}
+        # `retired` is named rather than merely missing: a reader has to be
+        # able to tell an agent that was retired on purpose from one that was
+        # never there.
+        return {
+            "channel": AGENTS_CHANNEL,
+            "agents": agents,
+            "retired": retired,
+            "calls": client.calls,
+        }
 
     def _read_work(self) -> dict:
         """Every unresolved topic of every board an agent works on, flat.
@@ -188,7 +209,11 @@ class Room:
                 watched.append((channel, "project", name))
             elif name.startswith(WORK_PREFIX) and channel.get("folder_id") in projects:
                 watched.append((channel, "project", projects[channel["folder_id"]]))
-        for _, instance in self._intro_topics(client):
+        # A retired agent's channel is not a board any more: its introduction
+        # is resolved, so nothing is expected to answer there. The live half
+        # is the only half this walks.
+        introduced, _retired = self._intro_topics(client)
+        for _, instance in introduced:
             channel = by_name.get(instance)
             if channel is not None:
                 watched.append((channel, "agent", instance))

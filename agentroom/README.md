@@ -104,6 +104,15 @@ room is unreadable instead of showing an empty one.
 Its module docstring (`src/agentroom/ops.py`) is the reference; this is the
 operator's half.
 
+**A ✔ on an `intro-` topic retires the agent.** An introduction is the
+contract that says an agent exists and how to reach it, so resolving that
+topic is the realm's way of saying it is gone — and the only way, because a
+project can be deleted from every machine without Zulip noticing. A retired
+instance leaves `/ops` and `/agents`, its channel stops being walked for open
+work, and both payloads carry it in `retired` so a reader can tell "gone on
+purpose" from "never seen". It is a flag, not a deletion: un-✔ the topic and
+the agent comes back, live, without a re-sweep.
+
 **The roster is not in this repository.** Every instance states its own
 routing — the Zulip name it is mentioned by, the channel it answers every
 topic in, the prefixes it sweeps — in a fenced block in its `#agents`

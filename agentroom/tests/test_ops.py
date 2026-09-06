@@ -225,9 +225,10 @@ def test_a_real_rename_moves_the_row_rather_than_duplicating_it():
 # --- the roster is not guessed --------------------------------------------
 
 
-def ops_with(rosters, topics=(), live=True):
+def ops_with(rosters, topics=(), live=True, retired=()):
     ops = Ops(env_path=__file__, stalled_seconds=STALL)
     ops._rosters = rosters
+    ops._retired = set(retired)
     ops._topics = {(t.channel, t.topic): t for t in topics}
     ops._channels = {"agforge-agstudio1", "pj-mediagen", "front"}
     ops._live = live
@@ -235,8 +236,8 @@ def ops_with(rosters, topics=(), live=True):
     return ops
 
 
-def snapshot_with(rosters, topics=(), live=True):
-    return ops_with(rosters, topics, live).snapshot(now=NOW)
+def snapshot_with(rosters, topics=(), live=True, retired=()):
+    return ops_with(rosters, topics, live, retired).snapshot(now=NOW)
 
 
 def test_an_instance_without_a_roster_block_is_unknown_not_idle():
@@ -472,3 +473,61 @@ def test_the_board_says_how_much_it_is_hiding():
     ops = done_board()
     ops.confirm(now=NOW)
     assert ops.snapshot(now=NOW)["confirmed"] == {"rows": 1, "topics": 1}
+
+
+# --- retirement: a ✔ on an introduction ------------------------------------
+
+
+def test_a_retired_agent_leaves_the_board_and_the_payload_says_why():
+    # p2 ex2 step C. `agping-agstudio1` sat amber for a whole phase because
+    # its project existed on no machine and so could never re-post a roster.
+    # The realm's answer is a ✔ on its introduction; the board's answer is to
+    # stop drawing it — but to *name* it, because an agent that vanishes with
+    # no account of itself is the failure this board exists to prevent.
+    found = snapshot_with(
+        {"agping-agstudio1": None, "agforge-agstudio1": FORGE},
+        retired=["agping-agstudio1"],
+    )
+    assert found["retired"] == ["agping-agstudio1"]
+    assert [i["instance"] for i in found["instances"]] == ["agforge-agstudio1"]
+    assert found["rows"] == []
+
+
+def test_retiring_an_agent_does_not_retire_the_rest():
+    found = snapshot_with({"agping-agstudio1": None}, retired=["agecho-agstudio1"])
+    assert found["retired"] == ["agecho-agstudio1"]
+    assert [i["instance"] for i in found["instances"]] == ["agping-agstudio1"]
+
+
+def test_resolving_an_introduction_retires_the_agent_without_a_resweep():
+    # The same courtesy `_apply_message` pays a re-posted introduction: the
+    # contract says the realm is the authority, and an observer that needs a
+    # restart to notice has not honoured it.
+    ops = ops_with({"agping-agstudio1": None})
+    ops._stream_names = {35: "agents"}
+    ops._apply({"type": "update_message", "stream_id": 35,
+                "orig_subject": "intro-agping-agstudio1",
+                "subject": "✔ intro-agping-agstudio1"})
+    assert ops._retired == {"agping-agstudio1"}
+    assert ops.snapshot(now=NOW)["rows"] == []
+
+
+def test_un_resolving_an_introduction_brings_the_agent_back():
+    # Retirement is a flag read off the realm, not a deletion — the mistake
+    # `confirm` avoided for the same reason in ex1.
+    ops = ops_with({"agping-agstudio1": None}, retired=["agping-agstudio1"])
+    ops._stream_names = {35: "agents"}
+    ops._apply({"type": "update_message", "stream_id": 35,
+                "orig_subject": "✔ intro-agping-agstudio1",
+                "subject": "intro-agping-agstudio1"})
+    assert ops._retired == set()
+    assert [row["instance"] for row in ops.snapshot(now=NOW)["rows"]] == ["agping-agstudio1"]
+
+
+def test_a_resolve_elsewhere_retires_nobody():
+    ops = ops_with({"agforge-agstudio1": FORGE},
+                   [topic("agforge-agstudio1", "assetplan-poster", message("please"))])
+    ops._stream_names = {7: "agforge-agstudio1"}
+    ops._apply({"type": "update_message", "stream_id": 7,
+                "orig_subject": "assetplan-poster", "subject": "✔ assetplan-poster"})
+    assert ops._retired == set()

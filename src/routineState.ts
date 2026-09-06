@@ -224,7 +224,7 @@ export async function sendChat(
   return { sent: true, message_id: payload.message_id }
 }
 
-export function routineHeadline(board: RoutineBoard): string {
+export function routineHeadline(board: Pick<RoutineBoard, 'health' | 'schedule' | 'chat'>): string {
   if (board.health.state !== 'live') {
     return `⚠ UNKNOWN — ${board.health.reason}. Every row below is the last thing known, not the state now.`
   }

@@ -1,0 +1,17 @@
+.operation-parts { color: #dbe7f4; background: #0d1420; font: 14px/1.5 system-ui, sans-serif; position: fixed; inset: 0; overflow: auto; padding: 20px; box-sizing: border-box; }
+.operation-parts * { box-sizing: border-box; }
+.operation-parts h1 { font-size: 22px; margin: 0 0 10px; }
+.operation-parts h2 { font-size: 16px; }
+.operation-parts a { color: #8dccff; }
+.operation-parts button, .operation-parts select { background: #172739; color: #e3edf9; border: 1px solid #4e6984; border-radius: 6px; padding: 8px 12px; cursor: pointer; }
+.operation-parts button:focus-visible, .graph-viewport:focus-visible { outline: 3px solid #86d7ff; outline-offset: 2px; }
+.parts-toolbar { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; }
+.parts-health { color: #f4bd57; overflow-wrap: anywhere; }
+.graph-viewport { height: min(65vh, 680px); overflow: auto; background: #101c2b; border: 1px solid #354b61; border-radius: 8px; }
+.graph-surface { position: relative; background-image: radial-gradient(#344456 1px, transparent 1px); background-size: 20px 20px; }
+.graph-surface svg { position: absolute; inset: 0; pointer-events: none; }
+.operation-parts .graph-node { position: absolute; width: 280px; height: 132px; text-align: left; border-width: 2px; display: flex; flex-direction: column; gap: 4px; overflow: hidden; }
+.graph-node strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; width: 100%; }
+.graph-node small { display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; color: #bccbda; }
+.graph-evidence { padding: 12px 0; }
+.graph-evidence pre { max-height: 240px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }

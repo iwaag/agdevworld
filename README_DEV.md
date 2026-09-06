@@ -167,3 +167,17 @@ convention, not enforced: the human token cannot distinguish reads from
 writes. Enforcement is deferred to the future system-wide auth (JWT)
 episode — see `devdocs/episodes/zero_auth/` (the single pointer to that
 vision).
+
+## Operation room parts (p4)
+
+Open `/?parts=graph` for the standalone conversation-flow prototype. Select a
+routine and one of its latest three sessions. This surface takes a snapshot on
+selection or explicit refresh; it adds no Zulip polling or writes. The existing
+seven-view cycle remains at `/`.
+
+`src/sessionGraph.ts` renders SVG edges behind keyboard-accessible DOM cards.
+Cards stay readable past 15 nodes by scrolling in both directions; no nodes
+are collapsed or scaled down. Select a card for its complete relay evidence.
+Current topic observations are not historical session outcomes, and manual
+activity without a dispatcher fire is explicitly labelled. Local comparison
+sketches and real-data screenshots remain ignored under `.local/p4/`.

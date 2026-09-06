@@ -15,6 +15,10 @@ import { initChatPanel } from './chatPanel'
 import { setAskHandler, showDetailPopup } from './detailPopup'
 import { loadActualDevices, matchDeviceForTarget, type ActualDeviceModel } from './clusterState'
 
+if (new URLSearchParams(location.search).has('parts')) {
+  void import('./operationParts').then(module => module.initOperationParts())
+} else {
+
 // Devices from the optional nctl.actual.v2 detail snapshot; empty until (and
 // unless) that snapshot loads. Node selections are enriched opportunistically
 // so the popup can show hardware.
@@ -76,3 +80,5 @@ const game = new Phaser.Game({
   ],
 })
 registerGame(game, 'nodes')
+
+}

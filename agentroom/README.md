@@ -47,6 +47,28 @@ identity of its own (`Opsroom Observer`) or none. `AGENTROOM_STALLED_SECONDS`
 `service/serve.sh check` does one read and prints the counts instead of
 listening — the fastest way to tell a credentials problem from a UI one.
 
+## Always on
+
+On agstudio the relay is a launchd agent, `com.agdev.agentroom`
+(`pj-agdev/devenv/launchd/com.agdev.agentroom.plist.in`), because `/ops` is a
+*running* reconstruction: a restart costs a 241-call sweep and about half a
+minute during which every row honestly reads `unknown`. A relay somebody has
+to remember to start is a board that is not there when it matters.
+
+- Reload after a code change: `launchctl kickstart -k gui/$(id -u)/com.agdev.agentroom`.
+- The log is `.local/out/agentroom.log`.
+- `KeepAlive` is on, with `ThrottleInterval` at 30 s — deliberately slower than
+  launchd's default 10 s, because each respawn re-sweeps the realm and a crash
+  loop would spend the agents' quota as fast as it could.
+- The plist must set `PATH`: `serve.sh` execs `uv`, and launchd's own PATH does
+  not have it. It passes `AGENTROOM_ZULIP_ENV`, `OPSROOM_ZULIP_ENV` and
+  `AGENTROOM_STALLED_SECONDS` — the credential **paths**, never their values.
+
+`serve.sh check` is worth running *from the job's own domain* before trusting
+the daemon, because macOS grants Local Network permission per binary and a
+launchd agent is its own responsible process: a read that works from a
+terminal proves nothing about the same code under launchd.
+
 ## Routes
 
 Unauthenticated, CORS open, loopback. This is cagent's *window* shape

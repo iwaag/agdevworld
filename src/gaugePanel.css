@@ -1,0 +1,46 @@
+/* The cost gauge: a scrolling page on the operation-parts surface. */
+.gauge { display: flex; flex-direction: column; gap: 18px; padding: 20px 24px; }
+.gauge .parts-health { width: 100%; margin: 0; font-size: 12px; color: #b2c3d3; }
+.gauge .parts-health.unknown { color: #f4bd57; }
+.poll-note { color: #829bb4; font-size: 11px; }
+.gauge-body { display: flex; flex-direction: column; gap: 18px; }
+.gauge h2 { margin: 0 0 10px; }
+.gauge h2 small, .gauge h3 small { display: block; font-weight: 400; color: #829bb4; font-size: 11px; }
+.gauge .muted { color: #829bb4; }
+.gauge-tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; }
+.gauge-tile { padding: 14px 16px; border: 1px solid #354b61; border-radius: 8px; background: #101c2b; display: flex; flex-direction: column; gap: 3px; }
+.gauge-tile small { color: #829bb4; font-size: 11px; letter-spacing: 1px; text-transform: uppercase; }
+.gauge-tile strong { font-size: 26px; font-variant-numeric: tabular-nums; }
+.gauge-tile span { font-size: 12px; color: #b2c3d3; }
+.gauge-tile .uncovered { color: #f4bd57; }
+.chart-legend { display: flex; flex-wrap: wrap; gap: 6px 16px; font-size: 12px; color: #dbe7f4; }
+.swatch { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 6px; vertical-align: -1px; }
+.gauge-charts { display: grid; grid-template-columns: repeat(auto-fit, minmax(420px, 1fr)); gap: 12px; }
+.gauge-chart { padding: 14px 16px; border: 1px solid #354b61; border-radius: 8px; background: #101c2b; }
+.chart-plot { display: flex; align-items: stretch; gap: 6px; height: 200px; border-bottom: 1px solid #354b61; padding-bottom: 22px; position: relative; }
+.chart-column { flex: 1; display: flex; flex-direction: column; justify-content: flex-end; align-items: center; position: relative; min-width: 0; cursor: default; }
+.chart-column:hover .chart-bar { filter: brightness(1.15); }
+.chart-bar { width: 70%; height: 100%; display: flex; flex-direction: column-reverse; gap: 2px; }
+.chart-segment { width: 100%; }
+.chart-segment:last-child { border-radius: 4px 4px 0 0; }
+.chart-value { font-size: 10px; color: #b2c3d3; margin-bottom: 4px; font-variant-numeric: tabular-nums; }
+.chart-day { position: absolute; bottom: -20px; font-size: 10px; color: #829bb4; }
+.chart-tooltip { position: fixed; z-index: 10; pointer-events: none; background: #172739; border: 1px solid #4e6984; border-radius: 6px; padding: 8px 10px; font: 12px/1.5 system-ui, sans-serif; color: #e3edf9; max-width: 280px; }
+.routine-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 12px; }
+.routine-cost { padding: 12px 14px; border: 1px solid #354b61; border-radius: 8px; background: #101c2b; }
+.routine-cost h3 { margin: 0 0 8px; font-size: 15px; }
+.session-cost { border-top: 1px solid #23364a; padding: 8px 0; display: flex; flex-direction: column; gap: 3px; font-size: 12px; }
+.session-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+.session-money { font-size: 16px; font-variant-numeric: tabular-nums; }
+.session-money small { font-size: 11px; color: #b2c3d3; margin-left: 6px; }
+.session-agents { margin: 0; padding-left: 0; list-style: none; color: #dbe7f4; }
+.kind-chip { font-size: 10px; border-radius: 10px; padding: 0 7px; background: #172739; color: #b2c3d3; }
+.kind-chip.reported { color: #6ee0b0; } .kind-chip.estimated { color: #f4bd57; } .kind-chip.subscription { color: #d2adff; }
+.kind-chip.unknown { color: #ff8585; } .kind-chip.local { color: #829bb4; }
+.table-wrap { overflow-x: auto; border: 1px solid #354b61; border-radius: 8px; background: #101c2b; }
+.gauge table { border-collapse: collapse; width: 100%; font-size: 12px; }
+.gauge th, .gauge td { padding: 6px 10px; text-align: left; border-bottom: 1px solid #23364a; white-space: nowrap; }
+.gauge th { color: #829bb4; font-weight: 500; font-size: 11px; position: sticky; top: 0; background: #101c2b; }
+.gauge td.num, .gauge th.num { text-align: right; font-variant-numeric: tabular-nums; }
+.gauge td.model, .gauge td.conversation { max-width: 320px; overflow: hidden; text-overflow: ellipsis; }
+.gauge tr.failed td { color: #ff8585; }

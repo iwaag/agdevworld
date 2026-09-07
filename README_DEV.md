@@ -186,6 +186,20 @@ board with its existing detail popup; the dashboard is the primary routine
 workflow. Each world view links back to the dashboard. No eighth scene is added.
 `/?parts=graph` remains the standalone snapshot/explicit-refresh graph workbench.
 
+## Cost gauge (`gauge_panel`)
+
+`/?parts=gauge` is a separate page meant for its own window beside the
+dashboard (the dashboard header links it with `target=_blank`). It draws the
+relay's `/cost` — this host's `ag.agent-run.v1` records, never Zulip — and
+polls it every 20 s. `src/costState.ts` is the read and the formatting rules,
+`src/gaugePanel.ts` the page, `src/gaugePanel.css` its layout on top of
+`operationParts.css`. Reported USD (claude_code) and estimated USD (a metered
+key priced by `agentroom/prices.json`) are always two numbers; runs on a
+subscription (codex on ChatGPT, Antigravity) or with no usage show a dash,
+never `$0.00`, and each tile says how many runs its figure does not cover.
+Harness hues are fixed slots from the dataviz palette validated against the
+`#101c2b` surface; the same hue follows a harness everywhere on the page.
+
 The dashboard owns one routine name and one fire message ID. Routine selection
 updates every pane. Session selection updates the graph and highlights that
 fire's message-ID span in chat; sending still targets the routine fire topic,

@@ -64,6 +64,21 @@ NOTICE_LINE = re.compile(r"has marked this topic as (?P<kind>resolved|unresolved
 #: to be the same event. The dispatcher runs every five minutes and posts
 #: within seconds of its receipt.
 SCHEDULE_MATCH_SECONDS = 180.0
+#: Optional display metadata, one line anywhere in the standing request:
+#: `display: 📰 Papers digest` (`operation_room` p6). The standing request is
+#: already the document the Developer edits for the routine, so a title lives
+#: where the routine is defined and travels with its version — no file, no
+#: variable, nothing to provision. Front reads past the line like any other.
+DISPLAY_LINE = re.compile(r"^\s*display:\s*(?P<value>\S.*?)\s*$", re.IGNORECASE | re.MULTILINE)
+#: A markdown heading as the first line is the next best title.
+HEADING_LINE = re.compile(r"^\s*#{1,3}\s+(?P<value>\S.*?)\s*$")
+#: A leading emoji (or other symbol) on either of the above becomes the icon.
+LEADING_SYMBOL = re.compile(r"^(?P<icon>[^\w\s`*#][\uFE0F\u200D]?(?:[^\w\s`*#][\uFE0F]?)?)\s+(?P<rest>.+)$")
+#: Icons assigned when the request names none: picked by the routine's name,
+#: so a routine keeps its icon across restarts and screens without anybody
+#: maintaining a mapping. Assigned, not meaningful, and the payload says so.
+ASSIGNED_ICONS = ("🔁 📌 🧭 🛰 🧪 📦 🗂 🔔 🪄 🧵 🎯 🧰 🌱 🔭 🎲 🧲 🪁 🗝 🧊 🎨 "
+                  "🛠 🧯 🪐 🧿").split()
 #: Sessions listed for one routine. The braindump asks for about three: a
 #: fourth is a drill-down, not a board.
 SESSION_LIMIT = 3
@@ -80,6 +95,7 @@ __all__ = [
     "FIRE_PREFIX",
     "MANUAL_MARK",
     "NOTICE_LINE",
+    "display_of",
     "fire_line",
     "fire_origin",
     "resolution_of",
@@ -276,6 +292,53 @@ def fire_of(history: Iterable, name: str):
         if newest is None or found.id > newest.id:
             newest = found
     return newest
+
+
+def assigned_icon(name: str, taken: set[str] | None = None) -> str:
+    """The icon a routine gets from its name alone.
+
+    FNV-1a over the name, so similar names land apart; `taken` lets a board
+    step past an icon another routine already wears, walking the palette from
+    the hashed slot so the step is deterministic too.
+    """
+    digest = 0x811C9DC5
+    for byte in name.encode("utf-8"):
+        digest = ((digest ^ byte) * 0x01000193) & 0xFFFFFFFF
+    slot = digest % len(ASSIGNED_ICONS)
+    for offset in range(len(ASSIGNED_ICONS)):
+        icon = ASSIGNED_ICONS[(slot + offset) % len(ASSIGNED_ICONS)]
+        if not taken or icon not in taken:
+            return icon
+    return ASSIGNED_ICONS[slot]
+
+
+def display_of(name: str, request_text: str | None) -> dict:
+    """How a routine is shown: an icon, a title, and where each came from.
+
+    Routing stays keyed by `name`; this is presentation only. A `display:`
+    line wins, then a first-line heading, then the internal name — a routine
+    nobody has titled is still usable and still recognisable, because the
+    assigned icon is stable for its name.
+    """
+    text = request_text or ""
+    source, value = "name", name
+    found = DISPLAY_LINE.search(text)
+    if found:
+        source, value = "metadata", found.group("value")
+    else:
+        first = next((line for line in text.splitlines() if line.strip()), "")
+        heading = HEADING_LINE.match(first)
+        if heading:
+            source, value = "heading", heading.group("value")
+    value = value.strip().strip("*_").strip()
+    icon_source = "assigned"
+    icon = assigned_icon(name)
+    symbol = LEADING_SYMBOL.match(value)
+    if symbol and source != "name":
+        icon, value, icon_source = symbol.group("icon"), symbol.group("rest").strip(), source
+    if not value:
+        source, value = "name", name
+    return {"icon": icon, "icon_source": icon_source, "title": value, "title_source": source}
 
 
 def fire_line(name: str, stamp: str, instruction: str | None = None) -> str:
@@ -512,6 +575,7 @@ def routine_rows(
         request, strays = standing_request(getattr(standing, "history", None) or [])
         rows.append({
             "name": name,
+            "display": display_of(name, request["text"] if request else None),
             # A ✔ on the standing request is the realm retiring the routine,
             # the same sentence a ✔ on an `intro-` topic makes about an agent.
             "retired": bool(standing is not None and standing.resolved),
@@ -529,6 +593,16 @@ def routine_rows(
             "state": _state(answer, stalled_seconds),
             "schedule": schedule_for(schedule, name, now),
         })
+    # Assigned icons must not collide on one board: two routines wearing the
+    # same symbol would defeat the point. Chosen icons are kept as chosen;
+    # assigned ones step to the next free slot in name order.
+    worn = {row["display"]["icon"] for row in rows if row["display"]["icon_source"] != "assigned"}
+    for row in rows:
+        display = row["display"]
+        if display["icon_source"] != "assigned":
+            continue
+        display["icon"] = assigned_icon(row["name"], worn)
+        worn.add(display["icon"])
     return rows
 
 

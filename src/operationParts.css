@@ -124,3 +124,14 @@
 .graph-node.compact small { display: block; font-size: 10.5px; -webkit-line-clamp: 1; }
 .graph-node[aria-pressed=true] { box-shadow: 0 0 0 2px #88d6ff inset; }
 .graph-selected { font-size: 11px; color: #b2c3d3; margin: 8px 0 0; overflow-wrap: anywhere; }
+/* Routine identity (operation_room p6): icon and title first, internal name
+   second, state and next fire on one line; timing and provenance only on the
+   selected card. */
+.routine-card .rc-head { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.routine-card .rc-icon { font-size: 20px; line-height: 1; flex: none; width: 24px; text-align: center; }
+.routine-card .rc-title { font-size: 14px; overflow-wrap: anywhere; min-width: 0; }
+.routine-card .rc-name { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; color: #829bb4; overflow-wrap: anywhere; }
+.routine-card .rc-state { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.routine-card .rc-more { display: flex; flex-direction: column; gap: 3px; padding-top: 4px; border-top: 1px dashed #354b61; }
+.routine-card.retired { opacity: .72; } .routine-card.retired[aria-pressed=true] { opacity: 1; }
+.routine-card.retired .rc-title { text-decoration: line-through #829bb4; text-decoration-thickness: 1px; }

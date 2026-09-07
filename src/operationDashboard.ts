@@ -76,7 +76,8 @@ export async function initOperationDashboard(): Promise<void> {
   let pendingFire: { routine: string; id: number; at: number } | undefined
   const chat = initChatPanel({ mount: find('.chat-mount'), managed: true, onRefresh: () => { void refresh() } })
 
-  function drawSession(scroll = false) {
+  function drawSession(scroll = false) { refocus(find('.session-list'), 'session', () => drawSessionCards(scroll)) }
+  function drawSessionCards(scroll: boolean) {
     const list = find('.session-list'); list.replaceChildren()
     if (!detail) return
     const pending = pendingFire && pendingFire.routine === selection.routine ? pendingFire : undefined
@@ -187,7 +188,7 @@ export async function initOperationDashboard(): Promise<void> {
     find('.ns-request').textContent = !detail ? '' : request
       ? `Standing request (${detail.routine.request_topic}, #${request.message_id}): ${request.text.length > 280 ? `${request.text.slice(0, 279)}…` : request.text}`
       : 'Standing request unknown — no author post observed.'
-    newSession.dataset.routine = detail?.routine.name ?? ''
+    newSession.dataset.for = detail?.routine.name ?? ''
   }
 
   async function start() {
@@ -237,21 +238,52 @@ export async function initOperationDashboard(): Promise<void> {
     void selectRoutine()
   }
 
-  function drawRoutines() {
+  // A redraw replaces the cards, and a keyboard user's focus would go with
+  // them every five seconds. Remember which card had it and give it back.
+  function refocus(list: HTMLElement, attribute: 'routine' | 'session', draw: () => void) {
+    const focused = document.activeElement instanceof HTMLElement && list.contains(document.activeElement)
+      ? document.activeElement.dataset[attribute] : undefined
+    draw()
+    if (focused !== undefined) list.querySelector<HTMLElement>(`[data-${attribute}="${CSS.escape(focused)}"]`)?.focus()
+  }
+
+  function drawRoutines() { refocus(find('.routine-list'), 'routine', drawRoutineCards) }
+  function drawRoutineCards() {
     const list = find('.routine-list'); list.replaceChildren()
     if (!board) return
     for (const row of board.routines) {
       const live = board.health.state === 'live'
-      const button = element('button', '', 'routine-card'); button.dataset.routine = row.name
-      button.setAttribute('aria-pressed', String(row.name === selection.routine))
-      button.append(element('strong', row.name + (row.retired ? ' · retired' : '')))
-      button.append(element('span', live ? row.state : 'unknown', `state-chip ${live ? row.state : 'unknown'}`))
-      button.append(element('small', row.last_fire ? `${ago(board.generated_at - row.last_fire.at)} since fire` : 'No dispatcher fire observed'))
+      const selected = row.name === selection.routine
+      const button = element('button', '', `routine-card${row.retired ? ' retired' : ''}`); button.dataset.routine = row.name
+      button.setAttribute('aria-pressed', String(selected))
+      // Identity first: icon and title, with the internal name as secondary
+      // text (or omitted when it is the title). Routing keys on the name.
+      const display = row.display ?? { icon: '▫', icon_source: 'assigned', title: row.name, title_source: 'name' }
+      const head = element('span', '', 'rc-head')
+      const icon = element('span', display.icon, 'rc-icon'); icon.setAttribute('aria-hidden', 'true')
+      icon.title = display.icon_source === 'assigned' ? 'Icon assigned from the name; add a `display:` line to the standing request to choose one' : `Icon from the standing request (${display.icon_source})`
+      const title = element('strong', display.title, 'rc-title')
+      head.append(icon, title)
+      button.append(head)
+      button.setAttribute('aria-label', `${display.title}${display.title !== row.name ? ` (${row.name})` : ''}${row.retired ? ', retired' : ''}, ${live ? row.state : 'unknown'}`)
+      const secondary = [display.title !== row.name ? row.name : '', row.retired ? 'retired' : ''].filter(Boolean).join(' · ')
+      if (secondary) button.append(element('small', secondary, 'rc-name'))
+      const stateRow = element('span', '', 'rc-state')
+      stateRow.append(element('span', live ? row.state : 'unknown', `state-chip ${live ? row.state : 'unknown'}`))
+      stateRow.append(element('small', !board.schedule.ok ? 'schedule unknown' : row.schedule.next ? `next ${at(row.schedule.next.at)}` : 'none scheduled'))
+      button.append(stateRow)
       if (live && row.answer.state === 'acked' && (row.answer.age_seconds ?? 0) >= board.settings.stalled_seconds) {
         button.append(element('small', 'Ack overdue · no answer observed', 'annotation'))
       }
-      button.append(element('small', !board.schedule.ok ? 'Schedule unknown' : `Next: ${row.schedule.next ? at(row.schedule.next.at) : 'none scheduled'} · ${row.schedule.overdue.length} overdue`))
-      button.append(element('small', live ? 'Source: dispatcher fire / reply evidence' : 'Last known evidence · current state unknown', 'provenance'))
+      if (board.schedule.ok && row.schedule.overdue.length) button.append(element('small', `${row.schedule.overdue.length} overdue`, 'annotation'))
+      if (selected) {
+        // Timing and provenance belong to the selected view, not to every card.
+        const more = element('span', '', 'rc-more')
+        more.append(element('small', row.last_fire ? `${ago(board.generated_at - row.last_fire.at)} since fire · ${at(row.last_fire.at)}` : 'No dispatcher fire observed'))
+        more.append(element('small', `Title from ${display.title_source} · icon ${display.icon_source}`))
+        more.append(element('small', live ? 'Source: dispatcher fire / reply evidence' : 'Last known evidence · current state unknown', 'provenance'))
+        button.append(more)
+      }
       button.onclick = () => {
         if (selection.routine === row.name) return
         selection.routine = row.name; selection.session = ''; detail = undefined

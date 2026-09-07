@@ -47,8 +47,20 @@ export interface RoutineSchedule {
   overdue: Array<{ id: string; at: number | null; from: string }>
 }
 
+// How a routine is shown. Routing stays keyed by `name`; the relay reads an
+// optional `display:` line or a heading out of the standing request and
+// otherwise falls back to the name, with an icon assigned by the name so a
+// new routine is recognisable without anybody adding a mapping.
+export interface RoutineDisplay {
+  icon: string
+  icon_source: 'metadata' | 'heading' | 'assigned'
+  title: string
+  title_source: 'metadata' | 'heading' | 'name'
+}
+
 export interface RoutineRow {
   name: string
+  display?: RoutineDisplay
   retired: boolean
   request: (RoutinePost & { text: string }) | null
   request_topic: string | null

@@ -824,3 +824,41 @@ def test_an_over_long_instruction_is_refused_like_any_other_post(tmp_path):
     found = chat.start(live_row(), "papers", "x" * 300, stamp="s", names={"papers"})
     assert found["sent"] is False and found["uncertain"] is False
     assert client.sent == []
+
+
+# --- display metadata (operation_room p6 step 5) ----------------------------
+
+
+from agentroom.routines import display_of  # noqa: E402
+
+
+def test_a_display_line_anywhere_in_the_request_names_icon_and_title():
+    found = display_of("papers", "Standing request, v4.\n\ndisplay: 📰 Papers digest\n\nDo it.")
+    assert found == {"icon": "📰", "icon_source": "metadata",
+                     "title": "Papers digest", "title_source": "metadata"}
+
+
+def test_a_first_line_heading_is_the_next_title_and_the_name_is_last():
+    heading = display_of("papers", "# Weekly papers\nthe request")
+    assert (heading["title"], heading["title_source"]) == ("Weekly papers", "heading")
+    assert heading["icon_source"] == "assigned"
+    bare = display_of("papers", "Standing request for the `papers` routine, **v4**.")
+    assert (bare["title"], bare["title_source"]) == ("papers", "name")
+    none = display_of("papers", None)
+    assert none["title"] == "papers" and none["icon"] == bare["icon"] == heading["icon"]
+
+
+def test_display_reaches_the_row_without_any_mapping():
+    found = rows(topic("front", "routine-papers", message("display: 🧪 Lab run", ident=1)))
+    assert found[0]["display"]["title"] == "Lab run" and found[0]["display"]["icon"] == "🧪"
+
+
+def test_assigned_icons_do_not_collide_on_one_board():
+    names = ["ghtrends", "imgprompt", "localtest", "manual", "mediagen", "papers", "publish", "rtnotes"]
+    found = rows(*[topic("front", f"routine-{name}", message("request", ident=i + 1)) for i, name in enumerate(names)])
+    icons = [row["display"]["icon"] for row in found]
+    assert len(set(icons)) == len(icons)
+    # And a chosen icon is never displaced by an assigned one.
+    chosen = rows(topic("front", "routine-a", message("display: 🔁 A", ident=1)),
+                  topic("front", "routine-b", message("request", ident=2)))
+    assert chosen[0]["display"]["icon"] == "🔁" and chosen[1]["display"]["icon"] != "🔁"

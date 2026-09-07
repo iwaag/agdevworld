@@ -6,6 +6,7 @@ import {
   HARNESS_ORDER, at, clock, compact, harnessHue, healthLine, loadCost, money, uncovered, usd,
   type Bucket, type CostBoard, type Day, type RecentRow,
 } from './costState'
+import { loadBudget, percentText, resetsIn, type BudgetBoard, type BudgetCard, type BudgetWindow } from './budgetState'
 import './operationParts.css'
 import './gaugePanel.css'
 
@@ -24,6 +25,71 @@ function esc(text: string | null | undefined): string {
 
 function kindChip(kind: string): string {
   return `<span class="kind-chip ${esc(kind)}">${esc(kind)}</span>`
+}
+
+// --- the budgets strip (`gauge_panel` ex1) --------------------------------------
+// One card per harness: the plan, one meter per window (the harness's own
+// slot colour, the percent always as text beside it), "resets in", and when
+// it was read. A card that could not read says why in amber and greys its
+// last good numbers, if it has any. Percent is what the vendor said; an
+// absence is a `?`, never 0 or 100.
+
+function meter(window: BudgetWindow, hue: string, stale = false): HTMLElement {
+  const node = element('div', `budget-meter${stale ? ' stale' : ''}`)
+  const percent = window.percent === null || window.percent === undefined ? null : Math.max(0, Math.min(100, window.percent))
+  const severity = window.severity && window.severity !== 'normal' ? ` <span class="annotation">${esc(window.severity)}</span>` : ''
+  node.innerHTML = `<span class="meter-label">${esc(window.label)}${severity}</span>
+    <div class="meter-track" role="meter" aria-valuemin="0" aria-valuemax="100" ${percent === null ? '' : `aria-valuenow="${percent}"`} aria-label="${esc(window.label)} used"><div class="meter-fill" style="width:${percent ?? 0}%;background:${stale ? '#4e6984' : hue}"></div></div>
+    <span class="meter-pct">${esc(percentText(window.percent))}</span>
+    <span class="meter-reset">${window.resets_at ? `resets in ${esc(resetsIn(window.resets_at))}` : 'reset unknown'}</span>`
+  return node
+}
+
+function budgetFooter(card: BudgetCard | NonNullable<BudgetCard['stale']>): string {
+  const bits: string[] = []
+  if (card.reset_credits && card.reset_credits.available) bits.push(`${card.reset_credits.available} reset credit${card.reset_credits.available === 1 ? '' : 's'} available`)
+  if (card.credits && (card.credits.has || card.credits.unlimited)) bits.push(`credits: ${card.credits.unlimited ? 'unlimited' : card.credits.balance}`)
+  if (card.extra_usage?.enabled) bits.push('extra usage enabled')
+  if (typeof card.remaining_credits === 'number' && card.remaining_credits > 0) bits.push(`${card.remaining_credits} AI credits remaining`)
+  return bits.join(' · ')
+}
+
+function budgetCard(harness: string, card: BudgetCard): HTMLElement {
+  const hue = harnessHue(harness)
+  const node = element('article', `budget-card${card.ok ? '' : ' unknown'}`)
+  const plan = card.ok ? card.plan : card.stale?.plan ?? card.plan
+  node.innerHTML = `<div class="budget-head"><span class="swatch" style="background:${hue}"></span><strong>${esc(harness)}</strong><span class="budget-plan">${esc(plan ?? 'plan unknown')}${card.tier ? ` · ${esc(card.tier)}` : ''}</span></div>`
+  if (card.ok) {
+    card.windows.forEach(window => node.append(meter(window, hue)))
+  } else {
+    const why = element('p', 'budget-error', `⚠ unknown — ${card.error ?? 'no reason given'}`)
+    node.append(why)
+    if (card.stale) {
+      card.stale.windows.forEach(window => node.append(meter(window, hue, true)))
+      node.append(element('small', 'budget-stale', `greyed: last good read ${clock(card.stale.read_at)}`))
+    }
+  }
+  const foot = element('small', 'budget-foot')
+  const read = card.ok ? `read ${clock(card.read_at)}` : `tried ${clock(card.read_at)}`
+  const footer = budgetFooter(card.ok ? card : card.stale ?? card)
+  foot.textContent = [read, footer, card.note ?? (card.ok ? '' : card.stale?.note ?? '')].filter(Boolean).join(' · ')
+  node.append(foot)
+  return node
+}
+
+function budgets(board: BudgetBoard | { error: string }): HTMLElement {
+  const node = element('section', 'gauge-budgets')
+  node.innerHTML = '<h2>Budgets <small>how much of each plan\'s window is used · read through the CLIs\' own routes, cached on the relay</small></h2>'
+  if ('error' in board) {
+    node.append(element('p', 'budget-error', `⚠ UNKNOWN — ${board.error}`))
+    return node
+  }
+  const grid = element('div', 'budget-grid')
+  const present = Object.keys(board.harnesses)
+  const order = [...HARNESS_ORDER.filter(h => present.includes(h)), ...present.filter(h => !HARNESS_ORDER.includes(h)).sort()]
+  order.forEach(harness => grid.append(budgetCard(harness, board.harnesses[harness])))
+  node.append(grid)
+  return node
 }
 
 // --- the tiles ---------------------------------------------------------------
@@ -156,7 +222,7 @@ function recent(rows: RecentRow[]): HTMLElement {
 export async function initGaugePanel(): Promise<void> {
   document.title = 'agdevworld · cost gauge'
   const host = element('main', 'operation-parts gauge')
-  host.innerHTML = `<header class="dashboard-header"><div><span class="eyebrow">AGDEVWORLD</span><h1>Cost gauge</h1></div><nav class="parts-toolbar"><a href="/">Operation room</a><span class="poll-note">polls /cost every ${POLL_MS / 1000}s</span><button class="refresh">Refresh</button></nav><p class="parts-health" role="status">Reading relay…</p></header><div class="gauge-body"></div>`
+  host.innerHTML = `<header class="dashboard-header"><div><span class="eyebrow">AGDEVWORLD</span><h1>Cost gauge</h1></div><nav class="parts-toolbar"><a href="/">Operation room</a><span class="poll-note">polls /cost and /budget every ${POLL_MS / 1000}s</span><button class="refresh">Refresh</button></nav><p class="parts-health" role="status">Reading relay…</p></header><div class="gauge-body"></div>`
   const tooltip = element('div', 'chart-tooltip')
   tooltip.hidden = true
   document.body.append(host, tooltip)
@@ -166,7 +232,8 @@ export async function initGaugePanel(): Promise<void> {
 
   async function refresh(): Promise<void> {
     const current = ++generation
-    const board = await loadCost()
+    // Both on the same tick; the budget half never blanks the cost half.
+    const [board, budget] = await Promise.all([loadCost(), loadBudget()])
     if (current !== generation) return
     if ('error' in board) {
       health.textContent = `⚠ UNKNOWN — ${board.error}. Everything below is the last thing read, not the state now.`
@@ -186,7 +253,7 @@ export async function initGaugePanel(): Promise<void> {
     // The page scrolls inside `main` (operation-parts is fixed), so keep the
     // reader where they were across a poll.
     const scroll = host.scrollTop
-    body.replaceChildren(tiles, legend(harnesses), charts, routines(board), table(board), recent(board.recent))
+    body.replaceChildren(budgets(budget), tiles, legend(harnesses), charts, routines(board), table(board), recent(board.recent))
     host.scrollTop = scroll
   }
 

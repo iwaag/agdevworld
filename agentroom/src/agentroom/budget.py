@@ -128,6 +128,9 @@ class Provider:
             try:
                 found = self.read()
                 found.setdefault("ok", True)
+            except (RuntimeError, TimeoutError) as error:
+                # The provider's own words: it said what went wrong.
+                found = {"ok": False, "error": str(error)}
             except Exception as error:  # noqa: BLE001 - the reason is the payload
                 found = {"ok": False, "error": f"{type(error).__name__}: {error}"}
             payload = {"harness": self.harness, "source": self.source, "read_at": now, **found}

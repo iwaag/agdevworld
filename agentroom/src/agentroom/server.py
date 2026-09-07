@@ -27,6 +27,7 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, unquote, urlparse
 
+from .budget import Budget
 from .chat import Chat
 from .cost import Cost
 from .inflight import ROOTS_VARIABLE
@@ -34,12 +35,12 @@ from .ops import Ops
 from .room import Room
 
 ROUTES = ("/healthz", "/agents", "/work", "/ops", "/routines", "/routines/<name>",
-          "/inflight/<name>", "/cost")
+          "/inflight/<name>", "/cost", "/budget")
 WRITE_ROUTES = ("/ops/confirm", "/chat", "/routines/<name>/start")
 
 
 def make_handler(room: Room, ops: Ops | None = None, chat: Chat | None = None,
-                 cost: Cost | None = None):
+                 cost: Cost | None = None, budget: Budget | None = None):
     class Handler(BaseHTTPRequestHandler):
         server_version = "agentroom/0.1.0"
 
@@ -159,6 +160,15 @@ def make_handler(room: Room, ops: Ops | None = None, chat: Chat | None = None,
                         payload = cost.board(roster=roster, routine_sessions=sessions)
                         payload["note"] = note
                         self._write_json(200, payload)
+                elif path == "/budget":
+                    # Its own route, not folded into /cost: this one calls the
+                    # vendors (through the CLIs' own reads), and /cost is
+                    # stat-only and polled at 20 s. The per-provider cache in
+                    # budget.py is what limits the vendor calls, not the page.
+                    if budget is None:
+                        self._write_json(503, {"error": "the budget read is not configured"})
+                    else:
+                        self._write_json(200, budget.snapshot())
                 elif path.startswith("/inflight/"):
                     # The one route a view may poll at a few seconds. It reads
                     # this host's directories and never Zulip.
@@ -323,6 +333,6 @@ def make_handler(room: Room, ops: Ops | None = None, chat: Chat | None = None,
 
 def build_server(
     host: str, port: int, room: Room, ops: Ops | None = None, chat: Chat | None = None,
-    cost: Cost | None = None,
+    cost: Cost | None = None, budget: Budget | None = None,
 ) -> ThreadingHTTPServer:
-    return ThreadingHTTPServer((host, port), make_handler(room, ops, chat, cost))
+    return ThreadingHTTPServer((host, port), make_handler(room, ops, chat, cost, budget))

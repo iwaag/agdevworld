@@ -12,6 +12,7 @@ import sys
 import time
 from pathlib import Path
 
+from .budget import budget_from_env
 from .chat import CHAT_ENV_VARIABLE, DEFAULT_MAX_CHARS, Chat
 from .cost import PRICES_VARIABLE, Cost, prices_path_from_env
 from .inflight import ROOTS_VARIABLE, parse_roots
@@ -61,6 +62,9 @@ def main(argv: list[str] | None = None) -> int:
     # says so.
     roots = parse_roots(os.environ.get(ROOTS_VARIABLE, ""))
     cost = Cost(roots, prices_path_from_env()) if roots else None
+    # The budget read needs no configuration at all: its defaults are the
+    # CLIs' own stores and binaries, and a missing one is *unknown* per card.
+    budget = budget_from_env()
 
     stalled = float(os.environ.get("AGENTROOM_STALLED_SECONDS", DEFAULT_STALLED_SECONDS))
     ops_env = os.environ.get(OPS_ENV_VARIABLE, "")
@@ -129,16 +133,23 @@ def main(argv: list[str] | None = None) -> int:
             print(f"cost: {len(scanned['rows'])} records in {len(scanned['roots'])} roots; "
                   f"prices {'ok' if table.error is None else table.error} "
                   f"({table.path or PRICES_VARIABLE + ' unset'})")
+        for harness, card in budget.snapshot()["harnesses"].items():
+            if card["ok"]:
+                meters = ", ".join(f"{w['label']} {w['percent']:g}%" for w in card["windows"])
+                print(f"budget {harness:<12} {card.get('plan')}: {meters}")
+            else:
+                print(f"budget {harness:<12} unknown — {card['error']}")
         return 0
 
     if ops is not None:
         ops.start()
-    server = build_server(host, port, room, ops, chat, cost)
+    server = build_server(host, port, room, ops, chat, cost, budget)
     print(
         f"agentroom listening on http://{host}:{port} (cache {ttl:g}s, "
         + (f"ops on, stalled at {stalled:g}s, " if ops else "ops off, ")
         + ("chat on, " if chat.configured else "chat read-only, ")
-        + (f"cost over {len(roots)} roots)" if cost else "cost off)"),
+        + (f"cost over {len(roots)} roots, " if cost else "cost off, ")
+        + f"budget of {len(budget.providers)} harnesses)",
         flush=True,
     )
     try:

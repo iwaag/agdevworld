@@ -260,6 +260,44 @@ conversation: their end is the file's mtime, their start is derived from
 mtime span overlaps the run's (`attribution: "window"`, 30 s slack, each
 directory spent once). New records say it themselves (`"fields"`).
 
+## `/budget` — how much of each plan's window is used (`gauge_panel` ex1)
+
+`GET /budget` answers `ag.budget.v1`: one card per harness under
+`harnesses.{claude_code,codex,agy}`, each `{ok, plan, source, windows[],
+read_at, error, …}` and, when a read failed, `stale` — the last good card,
+apart from the failure. A window is `{kind, label, percent, resets_at}`
+(percent *used*, as the vendor said it; `resets_at` in epoch seconds like
+every other stamp here). **No provider ever answers 0 for "did not
+answer"** — a failed card has `ok: false`, the reason, and an empty
+`windows`.
+
+It is its own route rather than a field of `/cost` because it calls the
+vendors, through the CLIs' own reads, and `/cost` is stat-only. Each provider
+caches on its own clock (`AGENTROOM_BUDGET_SECONDS`, default 60) behind its
+own lock, so the page's 20 s poll costs one vendor call a minute per harness,
+and a hung codex process never blanks the Claude card.
+
+- **claude_code** — `GET api.anthropic.com/api/oauth/usage` with the bearer
+  token from `AGENTROOM_CLAUDE_CREDENTIALS` (default
+  `~/.claude/.credentials.json`, Claude Code's own store). `limits[]` is
+  rendered: the 5-hour session, the weekly all-models window and the weekly
+  per-model scoped window, each with `severity` and `scope`. There is no
+  absolute credit number on Max — the maximum is 100 % of a window — and the
+  card's `note` says the `cost_usd` on claude_code records is the
+  API-equivalent price, not money leaving an account. **On 401 the card is
+  unknown** ("token expired; the next claude_code run refreshes it"):
+  refreshing is the CLI's job, the relay never sends the refresh token and
+  never writes the file; `credential_renewed_at` is the file's mtime.
+- **codex** — `codex app-server` (`AGENTROOM_CODEX_BIN`, default `codex` on
+  PATH) over stdio JSON-RPC: `initialize`, `initialized`,
+  `account/rateLimits/read`, stdin held open until the reply, then killed.
+  `primary`/`secondary` become the `5h` and `weekly` windows; `plan` is
+  `planType`; `reset_credits` and `credits` ride along. A fresh process per
+  read (~1 s) rather than the daemon, which could go stale. `codex exec
+  "/status"` is **not** a headless read — it sends the text to the model and
+  bills for it.
+- **agy** — step 3.
+
 ## `/ops` — the state engine
 
 Its module docstring (`src/agentroom/ops.py`) is the reference; this is the

@@ -227,11 +227,17 @@ export async function loadRoutines(): Promise<RoutineBoard> {
   return found
 }
 
-export async function loadRoutine(name: string): Promise<RoutineDetail | { error: string }> {
+export async function loadRoutine(
+  name: string,
+  options: { includeResolved?: boolean } = {},
+): Promise<RoutineDetail | { error: string }> {
   // `chat` is the relay's chat *status* and `chat_log` is the fire topic's
   // history. They were one key for one screenshot, and the panel sat on
   // "reading the fire topic…" until the two were separated.
-  return read<RoutineDetail>(`/routines/${encodeURIComponent(name)}`)
+  // `resolved=hide` is filtered by the relay before its limit, so hiding
+  // three finished runs shows the three before them rather than nothing.
+  const query = options.includeResolved === false ? '?resolved=hide' : ''
+  return read<RoutineDetail>(`/routines/${encodeURIComponent(name)}${query}`)
 }
 
 export async function loadInflight(name: string): Promise<InflightBoard | { error: string }> {

@@ -531,3 +531,28 @@ def test_a_resolve_elsewhere_retires_nobody():
     ops._apply({"type": "update_message", "stream_id": 7,
                 "orig_subject": "assetplan-poster", "subject": "✔ assetplan-poster"})
     assert ops._retired == set()
+
+
+def test_the_routine_detail_filters_resolved_sessions_only_when_asked():
+    # operation_room p6: the filter is the relay's, applied before its
+    # three-session limit, and the payload names the actual latest fire
+    # whichever way it was asked.
+    ops = Ops(env_path=__file__)
+    ops._live = True
+    fire = "Routine `papers`, run of 2026-09-06T00:00Z. The standing request is the latest post in #front › `routine-papers`; do it."
+    notice = {"sender_id": 6, "sender_full_name": "Notification Bot", "sender_realm_str": "zulipinternal",
+              "timestamp": 1, "content": "@_**Developer|8** has marked this topic as resolved."}
+    posts = [{"id": 10, "sender_id": 8, "sender_full_name": "Developer", "sender_realm_str": "agdev",
+              "timestamp": 1, "content": fire},
+             {**notice, "id": 11},
+             {"id": 20, "sender_id": 8, "sender_full_name": "Developer", "sender_realm_str": "agdev",
+              "timestamp": 2, "content": fire}]
+    for post in posts:
+        ops._apply_message({"type": "stream", "display_recipient": "front",
+                            "subject": "✔ front-routine-papers", **post})
+    shown = ops.routine("papers")
+    assert [session["id"] for session in shown["sessions"]] == [20, 10]
+    assert [session["resolution"]["state"] for session in shown["sessions"]] == ["resolved", "resolved"]
+    hidden = ops.routine("papers", include_resolved=False)
+    assert hidden["sessions"] == [] and hidden["history"]["hidden_resolved"] == 2
+    assert hidden["latest_fire"]["message_id"] == 20 and hidden["filter"] == {"include_resolved": False}

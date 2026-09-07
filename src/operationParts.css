@@ -104,3 +104,10 @@
 .ns-result { margin: 6px 0 0; color: #6ee0b0; }
 .ns-result.error { color: #ff8585; } .ns-result.uncertain { color: #f4bd57; }
 .dashboard .session-card.pending { border-style: dashed; }
+/* Show resolved (operation_room p6): a persisted preference, off by default.
+   Only positively resolved sessions hide; unknown stays on the board. */
+.pane-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+.show-resolved { font-size: 12px; color: #b2c3d3; display: flex; align-items: center; gap: 6px; cursor: pointer; }
+.session-card .resolution.resolved { color: #6ee0b0; } .session-card .resolution.reopened { color: #d2adff; }
+.session-card .resolution.open { color: #72bbff; } .session-card .resolution.unknown { color: #f4bd57; }
+.session-history { font-size: 11px; color: #829bb4; margin: 8px 0 0; }

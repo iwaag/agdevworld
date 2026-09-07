@@ -25,7 +25,7 @@ from __future__ import annotations
 import json
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import unquote, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
 from .chat import Chat
 from .ops import Ops
@@ -121,7 +121,13 @@ def make_handler(room: Room, ops: Ops | None = None, chat: Chat | None = None):
                         # encoded and is never used to build a path or a
                         # narrow — it is matched against the routines the
                         # engine already found.
-                        found = ops.routine(unquote(path[len("/routines/"):]))
+                        # `?resolved=hide` drops the sessions a human has ✔'d
+                        # before the last three are taken; the default keeps
+                        # every caller that never asked reading what it read.
+                        query = parse_qs(urlparse(self.path).query)
+                        hide = (query.get("resolved") or ["show"])[0] == "hide"
+                        found = ops.routine(unquote(path[len("/routines/"):]),
+                                            include_resolved=not hide)
                         self._write_json(404 if found.get("error") else 200,
                                          self._with_chat(found))
                 elif path.startswith("/inflight/"):

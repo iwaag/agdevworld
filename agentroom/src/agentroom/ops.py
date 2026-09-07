@@ -58,6 +58,7 @@ from agag.zulip import RESOLVED_TOPIC_PREFIX, QueueExpired, RateLimited, ZulipCl
 from .inflight import Inflight
 from .room import SYSTEM_REALM, bare_topic
 from .routines import (
+    NOTICE_LINE,
     FIRE_PREFIX,
     ROUTINE_CHANNEL,
     ROUTINE_HISTORY,
@@ -66,6 +67,7 @@ from .routines import (
     is_routine_topic,
     read_schedule,
     routine_rows,
+    session_list,
     sessions_of,
 )
 
@@ -149,6 +151,19 @@ def is_real(message: dict) -> bool:
     return not is_selfnote(message.get("content")) and message.get("sender_realm_str") != SYSTEM_REALM
 
 
+def is_resolve_notice(message: dict) -> bool:
+    """Zulip's own notice that somebody marked the topic (un)resolved.
+
+    Posted by the Notification Bot from the system realm, so a human typing
+    the same sentence is not one. The wording is `routines.NOTICE_LINE`, the
+    one place it is spelled.
+    """
+    return (
+        message.get("sender_realm_str") == SYSTEM_REALM
+        and NOTICE_LINE.search(str(message.get("content") or "")) is not None
+    )
+
+
 @dataclass
 class Topic:
     """One conversation, keyed by its **bare** name, across the ✔ rename."""
@@ -182,9 +197,26 @@ class Topic:
     #: first note is when this conversation started working there, which is
     #: what attributes a child to one fire rather than another.
     served: dict[tuple[str, str], dict] = field(default_factory=dict)
+    #: Zulip's own "marked this topic as resolved/unresolved" notices, kept
+    #: only with `history` (`operation_room` p6). They are not speech — a
+    #: notice never makes anybody owe a reply — but each one carries a message
+    #: id, and the id is what attributes a ✔ to *one fire* of a routine rather
+    #: than to the topic as a whole. The realm keeps them, so a relay restart
+    #: reads the same evidence back; no ledger of this service's own is needed.
+    notices: list[Message] = field(default_factory=list)
+    #: Whether `history` is known to be a *window* rather than the whole topic:
+    #: the sweep's read came back full, or a later post pushed an older one out.
+    #: A session list built on a window must say so instead of implying that
+    #: every run of the routine was searched.
+    history_bounded: bool = False
 
     def add(self, message: dict) -> None:
         self.link(message)
+        if self.keep_history and is_resolve_notice(message):
+            found = Message.of(message)
+            if all(kept.id != found.id for kept in self.notices):
+                self.notices.append(found)
+                self.notices.sort(key=lambda kept: kept.id)
         if not is_real(message):
             return
         found = Message.of(message)
@@ -196,7 +228,9 @@ class Topic:
         if self.keep_history and all(kept.id != found.id for kept in self.history):
             self.history.append(found)
             self.history.sort(key=lambda kept: kept.id)
-            del self.history[:-ROUTINE_HISTORY]
+            if len(self.history) > ROUTINE_HISTORY:
+                self.history_bounded = True
+                del self.history[:-ROUTINE_HISTORY]
 
     def link(self, message: dict) -> None:
         """Read the two link notes out of a post, whatever else it is.
@@ -607,6 +641,11 @@ class Ops:
                     continue
                 for message in history:
                     topic.add(message)
+                # A read that came back full may have left older posts behind;
+                # the session list says so rather than calling the window the
+                # whole history.
+                if deep and len(history) >= ROUTINE_HISTORY:
+                    topic.history_bounded = True
                 topics[key] = topic
             self._served_marks(client, name, marks, by_id, by_name, errors)
 
@@ -959,7 +998,9 @@ class Ops:
             "routines": rows,
         }
 
-    def routine(self, name: str, now: float | None = None) -> dict:
+    def routine(
+        self, name: str, now: float | None = None, *, include_resolved: bool = True
+    ) -> dict:
         """One routine: its row, the last runs as trees, and the chat.
 
         The tree is built from the link notes and every node's *state* is
@@ -980,7 +1021,9 @@ class Ops:
             if one["channel"] is None or one["topic"] is None:
                 continue
             by_topic.setdefault((one["channel"], one["topic"]), []).append(one)
-        sessions = sessions_of(topics, name, by_topic)
+        listed = session_list(
+            topics, name, by_topic, schedule=schedule, include_resolved=include_resolved,
+        )
         if board["health"]["state"] != "live":
             row["stale_state"] = row["state"]
             row["state"] = "unknown"
@@ -991,7 +1034,13 @@ class Ops:
             "health": board["health"],
             "schedule": schedule.payload(),
             "routine": row,
-            "sessions": sessions,
+            "sessions": listed["sessions"],
+            # The routine's actual newest fire, whatever the filter left
+            # visible: host observation and "is this the latest" both hang
+            # off it (`operation_room` p6).
+            "latest_fire": listed["latest_fire"],
+            "history": listed["history"],
+            "filter": {"include_resolved": include_resolved},
             # `chat_log`, not `chat`: the server adds a `chat` block saying
             # whether this relay may post at all, and one key meaning two
             # things silently replaced the history with the status — the panel

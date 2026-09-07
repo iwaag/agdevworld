@@ -50,6 +50,20 @@ FIRE_PREFIX = "front-routine-"
 #: Matching the trigger's own wording is what makes "the last fire" a fact
 #: rather than a guess at which post looked like a request.
 FIRE_LINE = re.compile(r"^\s*Routine\s+`?(?P<name>[^`\s,]+)`?,\s*run of\b")
+#: The phrase a fire started from the operation room carries after its stamp
+#: (`operation_room` p6). `fire_line()` writes it and `fire_origin()` reads
+#: it back, so the two cannot drift; the dispatcher's own wording never has it.
+MANUAL_MARK = "started by hand from the operation room"
+#: The sentence `trigger.sh` writes after the stamp. Its presence, without the
+#: manual mark, is what says a fire came from the dispatcher.
+TRIGGER_SENTENCE = "The standing request is the latest post in"
+#: Zulip's own resolve notice, as the Notification Bot writes it. Only the
+#: engine's `is_resolve_notice` applies it, and only to system-realm posts.
+NOTICE_LINE = re.compile(r"has marked this topic as (?P<kind>resolved|unresolved)\b")
+#: How close the dispatcher's `fired_at` must be to the fire post for the two
+#: to be the same event. The dispatcher runs every five minutes and posts
+#: within seconds of its receipt.
+SCHEDULE_MATCH_SECONDS = 180.0
 #: Sessions listed for one routine. The braindump asks for about three: a
 #: fourth is a drill-down, not a board.
 SESSION_LIMIT = 3
@@ -64,6 +78,12 @@ ROUTINE_HISTORY = 200
 
 __all__ = [
     "FIRE_PREFIX",
+    "MANUAL_MARK",
+    "NOTICE_LINE",
+    "fire_line",
+    "fire_origin",
+    "resolution_of",
+    "session_list",
     "ROUTINE_CHANNEL",
     "ROUTINE_HISTORY",
     "STANDING_PREFIX",
@@ -256,6 +276,132 @@ def fire_of(history: Iterable, name: str):
         if newest is None or found.id > newest.id:
             newest = found
     return newest
+
+
+def fire_line(name: str, stamp: str, instruction: str | None = None) -> str:
+    """The one line that starts a run by hand, in the trigger's own shape.
+
+    `devenv/routine/trigger.sh` is the other writer of this sentence and the
+    contract between the two is `FIRE_LINE` plus the tests: a manual fire
+    must be recognised as a fire by the same reader, and told apart from the
+    dispatcher's by `MANUAL_MARK` alone. Front reads the rest exactly as it
+    reads the trigger's, which is the point — a run started from the screen
+    is the same run, not a different request.
+    """
+    text = (
+        f"Routine `{name}`, run of {stamp}, {MANUAL_MARK}. "
+        f"{TRIGGER_SENTENCE} #front › `{STANDING_PREFIX}{name}`; "
+        f"this topic holds the earlier runs and my comments on them. Do it."
+    )
+    extra = (instruction or "").strip()
+    if extra:
+        text += f"\n\nInstruction for this run: {extra}"
+    return text
+
+
+def fire_origin(content: str) -> str:
+    """Who started this fire, as far as its own wording says.
+
+    `manual` carries the operation room's mark; `scheduled` is the trigger's
+    sentence without it; anything else that still matches `FIRE_LINE` is a
+    fire somebody typed and is `unknown`. Not a guess from the sender — both
+    writers post as the Developer.
+    """
+    text = content or ""
+    if MANUAL_MARK in text:
+        return "manual"
+    if TRIGGER_SENTENCE in text:
+        return "scheduled"
+    return "unknown"
+
+
+def _schedule_event_for(schedule: "Schedule | None", name: str, at: int) -> dict | None:
+    """The dispatcher's fired event this post is the receipt of, if one is."""
+    if schedule is None or not schedule.ok:
+        return None
+    best = None
+    for event in schedule.events:
+        if not isinstance(event, dict) or event.get("routine") != name:
+            continue
+        fired = _seconds(event.get("fired_at"))
+        if fired is None or abs(fired - at) > SCHEDULE_MATCH_SECONDS:
+            continue
+        if best is None or abs(fired - at) < abs(best[1] - at):
+            best = (event, fired)
+    return None if best is None else {"id": best[0].get("id"), "fired_at": best[1]}
+
+
+def resolution_of(
+    notices: Iterable, *, since: int, until: int | None, topic_resolved: bool
+) -> dict:
+    """Whether one session is finished, and what says so.
+
+    `done` on the routine row means the fire got an answer; a session being
+    *resolved* is a different sentence and a human's, made with Zulip's ✔.
+    The ✔ is a flag on the whole fire topic, so on its own it can speak for
+    one session at most — the latest. What lets it speak for an older one is
+    Zulip's own notice, "has marked this topic as resolved", which is a post
+    with a message id and therefore falls inside exactly one fire's span.
+
+    - Any notice inside `[since, until)`: the newest decides — `resolved`, or
+      `reopened` when the newest is an unresolve. That is the historical case
+      and it survives a relay restart because the realm keeps the notices.
+    - The latest session (`until` is None): the topic's current flag is the
+      current evidence and wins; a notice in the span is cited beside it.
+      With no notice and no flag it is `open`.
+    - An older session with no notice in its span is `unknown`. The topic's
+      flag today does not describe it, and this board does not pretend.
+
+    Limits that stay limits: the notices are read from the same bounded
+    history as the fires, so a notice older than the window is gone with the
+    fire it belonged to; and Zulip drops a notice when a topic is toggled
+    back within a few minutes, so a resolve/unresolve pair may leave one
+    notice or none. Neither turns an unknown into a verdict.
+    """
+    inside = [
+        found for found in notices
+        if found.id >= since and (until is None or found.id < until)
+    ]
+    newest = max(inside, key=lambda found: found.id) if inside else None
+    kind = None
+    if newest is not None:
+        match = NOTICE_LINE.search(newest.content or "")
+        kind = match.group("kind") if match else None
+    cited = None if newest is None else {
+        "message_id": newest.id, "at": newest.timestamp, "kind": kind,
+    }
+    if until is None:
+        if topic_resolved:
+            return {
+                "state": "resolved", "notice": cited,
+                "evidence": "the fire topic carries ✔ now and this is its latest fire"
+                            + (f"; resolve notice #{newest.id} is inside the span"
+                               if kind == "resolved" else
+                               "; no resolve notice inside the span" if newest is None else
+                               f"; the newest notice #{newest.id} says unresolved, "
+                               "the current flag wins"),
+            }
+        return {
+            "state": "reopened" if kind == "unresolved" else "open",
+            "notice": cited,
+            "evidence": "the fire topic is open now and this is its latest fire"
+                        + (f"; unresolve notice #{newest.id} is inside the span"
+                           if kind == "unresolved" else
+                           f"; resolve notice #{newest.id} is inside the span but the "
+                           "topic is open now, so it was reopened without a notice"
+                           if kind == "resolved" else ""),
+        }
+    if kind == "resolved":
+        return {"state": "resolved", "notice": cited,
+                "evidence": f"resolve notice #{newest.id} inside this fire's span"}
+    if kind == "unresolved":
+        return {"state": "reopened", "notice": cited,
+                "evidence": f"unresolve notice #{newest.id} is the newest inside this fire's span"}
+    return {
+        "state": "unknown", "notice": None,
+        "evidence": "no resolve notice inside this fire's span; the topic's current "
+                    "flag describes only its latest fire",
+    }
 
 
 def standing_request(history: Iterable) -> tuple[dict | None, list[dict]]:
@@ -526,6 +672,122 @@ def _node_state(node: dict) -> str:
     return sorted(rows, key=lambda row: order.get(row["state"], 9))[0]["state"]
 
 
+def session_list(
+    topics: dict,
+    name: str,
+    rows_by_topic: dict,
+    *,
+    schedule: Schedule | None = None,
+    limit: int = SESSION_LIMIT,
+    include_resolved: bool = True,
+) -> dict:
+    """The last `limit` runs of one routine, each with the tree it opened.
+
+    A run is bounded by the fire that started it and the next fire, and the
+    fire's message id **is** the session's identity: `start_id`/`end_id` are
+    the same ids, returned explicitly so a chat view can mark the span without
+    knowing which sessions its neighbour list happens to show. A routine
+    nobody has ever fired still gets one session — mediagen is fired by hand
+    and its topic is the busiest of the eight — because the conversations are
+    real whatever started them.
+
+    `include_resolved=False` drops the sessions `resolution_of` calls
+    `resolved` **before** the last `limit` are taken, so hiding three finished
+    runs shows the three before them. `history` says how far back that could
+    look: the fire topic is kept as a window of `ROUTINE_HISTORY` posts, and
+    a window that is full is not the routine's whole past.
+    """
+    root = (ROUTINE_CHANNEL, f"{FIRE_PREFIX}{name}")
+    topic = topics.get(root)
+    history = sorted(getattr(topic, "history", None) or [], key=lambda found: found.id)
+    notices = list(getattr(topic, "notices", None) or [])
+    topic_resolved = bool(getattr(topic, "resolved", False))
+    bounded = bool(getattr(topic, "history_bounded", False))
+    fires = [
+        found for found in history
+        if (match := FIRE_LINE.match(found.content or "")) and match.group("name") == name
+    ]
+    about = {
+        "posts": len(history),
+        "post_limit": ROUTINE_HISTORY,
+        "bounded": bounded,
+        "fires": len(fires),
+        "session_limit": limit,
+        "hidden_resolved": 0,
+        "note": ("the fire topic is read as a window of the newest posts; older runs "
+                 "are not searched" if bounded else
+                 "every post of the fire topic the relay holds was searched"),
+    }
+    if not fires:
+        if topic is None:
+            return {"sessions": [], "latest_fire": None, "history": about}
+        resolution = resolution_of(notices, since=0, until=None, topic_resolved=topic_resolved)
+        session = {
+            "id": None, "index": 0, "fire": None, "start_id": 0, "end_id": None,
+            "origin": "unknown", "origin_evidence": "no dispatcher fire; every run started by hand",
+            "schedule_event": None,
+            "note": "no fire from the dispatcher; every run of this routine was started by hand",
+            "resolution": resolution,
+            **session_tree(topics, root, rows_by_topic, since=0, until=None),
+        }
+        hidden = 0
+        sessions = [session]
+        if not include_resolved and resolution["state"] == "resolved":
+            hidden, sessions = 1, []
+        about["hidden_resolved"] = hidden
+        return {"sessions": sessions, "latest_fire": None, "history": about}
+    spans = []
+    for index, fire in enumerate(fires):
+        after = fires[index + 1].id if index + 1 < len(fires) else None
+        spans.append((fire, after))
+    candidates = []
+    for fire, after in reversed(spans):
+        resolution = resolution_of(
+            notices, since=fire.id, until=after, topic_resolved=topic_resolved,
+        )
+        if not include_resolved and resolution["state"] == "resolved":
+            about["hidden_resolved"] += 1
+            continue
+        origin = fire_origin(fire.content)
+        event = _schedule_event_for(schedule, name, fire.timestamp)
+        candidates.append((fire, after, origin, event, resolution))
+        if len(candidates) >= limit:
+            break
+    sessions = []
+    for index, (fire, after, origin, event, resolution) in enumerate(candidates):
+        sessions.append({
+            "id": fire.id,
+            "index": index,
+            "fire": {**_message(fire), "text": _excerpt(fire.content, 200)},
+            "start_id": fire.id,
+            "end_id": after,
+            "origin": origin,
+            "origin_evidence": _origin_evidence(origin, event),
+            "schedule_event": event,
+            "note": None,
+            "resolution": resolution,
+            **session_tree(topics, root, rows_by_topic, since=fire.id, until=after),
+        })
+    latest = fires[-1]
+    return {
+        "sessions": sessions,
+        "latest_fire": {**_message(latest), "text": _excerpt(latest.content, 200)},
+        "history": about,
+    }
+
+
+def _origin_evidence(origin: str, event: dict | None) -> str:
+    if origin == "manual":
+        return "the fire carries the operation room's mark"
+    if origin == "scheduled":
+        if event:
+            return f"the trigger's wording, and schedule event {event['id']} fired at the same time"
+        return "the trigger's wording; no fired schedule event within reach matches its time"
+    if event:
+        return f"unfamiliar wording, but schedule event {event['id']} fired at the same time"
+    return "unfamiliar wording and no matching schedule event"
+
+
 def sessions_of(
     topics: dict,
     name: str,
@@ -533,43 +795,13 @@ def sessions_of(
     *,
     limit: int = SESSION_LIMIT,
 ) -> list[dict]:
-    """The last `limit` runs of one routine, each with the tree it opened.
+    """`session_list` without the filter: every session, newest first.
 
-    A run is bounded by the fire that started it and the next fire. A routine
-    nobody has ever fired from the schedule still gets one session — mediagen
-    is fired by hand and its topic is the busiest of the eight — because the
-    conversations are real whatever started them, and an empty screen would be
-    the wrong answer for the wrong reason.
+    Kept as the unfiltered reading because the host observation must attach
+    to the routine's *actual* latest fire, not to the newest one a filter
+    happened to leave visible.
     """
-    root = (ROUTINE_CHANNEL, f"{FIRE_PREFIX}{name}")
-    topic = topics.get(root)
-    history = sorted(getattr(topic, "history", None) or [], key=lambda found: found.id)
-    fires = [
-        found for found in history
-        if (match := FIRE_LINE.match(found.content or "")) and match.group("name") == name
-    ]
-    if not fires:
-        if topic is None:
-            return []
-        return [{
-            "index": 0,
-            "fire": None,
-            "note": "no fire from the dispatcher; every run of this routine was started by hand",
-            **session_tree(topics, root, rows_by_topic, since=0, until=None),
-        }]
-    spans = []
-    for index, fire in enumerate(fires):
-        after = fires[index + 1].id if index + 1 < len(fires) else None
-        spans.append((fire, after))
-    sessions = []
-    for index, (fire, after) in enumerate(reversed(spans[-limit:])):
-        sessions.append({
-            "index": index,
-            "fire": {**_message(fire), "text": _excerpt(fire.content, 200)},
-            "note": None,
-            **session_tree(topics, root, rows_by_topic, since=fire.id, until=after),
-        })
-    return sessions
+    return session_list(topics, name, rows_by_topic, limit=limit)["sessions"]
 
 
 def chat_of(topics: dict, name: str) -> list[dict]:

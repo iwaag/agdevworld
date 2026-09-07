@@ -606,3 +606,142 @@ def test_sessions_expose_reconstruction_bounds_for_manual_and_scheduled_activity
         session = sessions_of(mapping(root), "papers", {})[0]
         assert session["truncation"]["truncated"] is True
         assert len(session["nodes"]) == 40
+
+
+# --- session identity, origin and resolution (operation_room p6) ----------
+
+
+from agentroom.routines import (  # noqa: E402
+    MANUAL_MARK,
+    fire_line,
+    fire_origin,
+    resolution_of,
+    session_list,
+)
+
+TRIGGER = Path(__file__).resolve().parents[3] / "devenv" / "routine" / "trigger.sh"
+
+
+def notice(kind, *, ident):
+    return {
+        "id": ident, "sender_id": 6, "sender_full_name": "Notification Bot",
+        "sender_realm_str": "zulipinternal", "timestamp": int(NOW),
+        "content": f"@_**Developer|8** has marked this topic as {kind}.",
+    }
+
+
+def test_the_triggers_own_wording_is_recognised_as_a_scheduled_fire():
+    # The contract with `devenv/routine/trigger.sh`: its `text=` line, with
+    # the shell pieces substituted, must be a fire and must read as scheduled.
+    # Rewording the script without rewording this reader breaks here, not on
+    # the board.
+    source = TRIGGER.read_text(encoding="utf-8")
+    line = next(one for one in source.splitlines() if one.startswith("text="))
+    text = line[len("text="):].strip('"').replace("\\`", "`")
+    text = text.replace("$name", "papers").replace("$stamp", "2026-09-07T05:00Z")
+    assert FIRE_LINE_MATCH(text) == "papers"
+    assert fire_origin(text) == "scheduled"
+
+
+def FIRE_LINE_MATCH(text):
+    from agentroom.routines import FIRE_LINE
+    match = FIRE_LINE.match(text)
+    return match.group("name") if match else None
+
+
+def test_a_manual_fire_is_a_fire_and_is_told_apart_by_its_mark():
+    text = fire_line("papers", "2026-09-07T05:00Z")
+    assert FIRE_LINE_MATCH(text) == "papers"
+    assert fire_origin(text) == "manual"
+    assert MANUAL_MARK in text and "routine-papers" in text
+    with_note = fire_line("papers", "2026-09-07T05:00Z", "  only the first paper  ")
+    assert with_note.endswith("Instruction for this run: only the first paper")
+    assert fire_origin("Routine `papers`, run of now. Go.") == "unknown"
+
+
+def test_a_resolve_notice_is_kept_beside_the_history_and_never_in_it():
+    found = topic("front", "front-routine-papers", fire("papers", ident=1),
+                  notice("resolved", ident=2))
+    assert [kept.id for kept in found.history] == [1]
+    assert [kept.id for kept in found.notices] == [2]
+    # A human typing the sentence is speech, not a notice.
+    typed = topic("front", "front-routine-papers",
+                  message("has marked this topic as resolved", ident=3))
+    assert typed.notices == [] and [kept.id for kept in typed.history] == [3]
+
+
+def test_the_latest_session_is_resolved_by_the_topics_current_flag():
+    found = resolution_of([], since=10, until=None, topic_resolved=True)
+    assert found["state"] == "resolved" and "latest fire" in found["evidence"]
+    assert resolution_of([], since=10, until=None, topic_resolved=False)["state"] == "open"
+
+
+def test_an_older_session_is_resolved_only_by_a_notice_inside_its_span():
+    notices = topic("front", "front-routine-papers", notice("resolved", ident=15)).notices
+    # Inside [10, 20): resolved, and it says which notice.
+    inside = resolution_of(notices, since=10, until=20, topic_resolved=False)
+    assert inside["state"] == "resolved" and inside["notice"]["message_id"] == 15
+    # A span with no notice is unknown even while the topic carries ✔ today.
+    older = resolution_of(notices, since=1, until=10, topic_resolved=True)
+    assert older["state"] == "unknown" and older["notice"] is None
+
+
+def test_reopening_is_the_newest_notice_in_the_span():
+    notices = topic("front", "front-routine-papers",
+                    notice("resolved", ident=15), notice("unresolved", ident=17)).notices
+    found = resolution_of(notices, since=10, until=20, topic_resolved=False)
+    assert found["state"] == "reopened" and found["notice"]["message_id"] == 17
+    # For the latest session the current flag still wins over an old notice.
+    assert resolution_of(notices, since=10, until=None, topic_resolved=True)["state"] == "resolved"
+
+
+def test_sessions_carry_their_identity_origin_and_resolution():
+    schedule = Schedule(
+        path="x", ok=True, requests=[],
+        events=[{"id": "e7", "at": "2026-09-06T00:00:00Z", "kind": "fire", "from": "r8",
+                 "fired_at": "2026-09-06T00:00:20Z", "routine": "papers"}],
+    )
+    from datetime import datetime, timezone
+    at = int(datetime(2026, 9, 6, tzinfo=timezone.utc).timestamp())
+    root = topic(
+        "front", "front-routine-papers",
+        {**fire("papers", ident=10), "timestamp": at + 5},
+        notice("resolved", ident=12),
+        {**message(fire_line("papers", "2026-09-07T05:00Z"), ident=20), "timestamp": at + 9000},
+    )
+    found = session_list(mapping(root), "papers", {}, schedule=schedule)
+    first, second = found["sessions"]
+    assert (first["id"], first["start_id"], first["end_id"]) == (20, 20, None)
+    assert first["origin"] == "manual" and first["resolution"]["state"] == "open"
+    assert (second["id"], second["start_id"], second["end_id"]) == (10, 10, 20)
+    assert second["origin"] == "scheduled" and second["schedule_event"]["id"] == "e7"
+    assert second["resolution"]["state"] == "resolved"
+    assert found["latest_fire"]["message_id"] == 20
+    assert found["history"]["fires"] == 2 and found["history"]["bounded"] is False
+
+
+def test_hiding_resolved_sessions_filters_before_the_limit():
+    posts = []
+    for index in range(5):
+        posts.append(fire("papers", ident=10 * (index + 1)))
+        if index < 3:
+            posts.append(notice("resolved", ident=10 * (index + 1) + 5))
+    root = topic("front", "front-routine-papers", *posts)
+    shown = session_list(mapping(root), "papers", {}, include_resolved=False)
+    assert [session["id"] for session in shown["sessions"]] == [50, 40]
+    assert shown["history"]["hidden_resolved"] == 3
+    # The unfiltered reading still leads with the actual latest fire.
+    assert [session["id"] for session in sessions_of(mapping(root), "papers", {})] == [50, 40, 30]
+
+
+def test_a_full_history_window_is_reported_as_bounded():
+    posts = [fire("papers", ident=index + 1) for index in range(ROUTINE_HISTORY_LIMIT() + 1)]
+    root = topic("front", "front-routine-papers", *posts)
+    found = session_list(mapping(root), "papers", {})
+    assert found["history"]["bounded"] is True
+    assert "not searched" in found["history"]["note"]
+
+
+def ROUTINE_HISTORY_LIMIT():
+    from agentroom.routines import ROUTINE_HISTORY
+    return ROUTINE_HISTORY

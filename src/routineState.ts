@@ -83,12 +83,46 @@ export interface SessionNode {
   rows: Array<{ instance: string; state: string; provenance?: { short?: string } }>
 }
 
+// One session is finished when a human said so with Zulip's ✔ — a different
+// sentence from `done`, which only means the fire got an answer. The relay
+// attributes the ✔ to one fire by the id of Zulip's own resolve notice; an
+// older span with no notice is `unknown`, never quietly resolved.
+export interface SessionResolution {
+  state: 'resolved' | 'reopened' | 'open' | 'unknown'
+  evidence: string
+  notice: { message_id: number; at: number; kind: 'resolved' | 'unresolved' | null } | null
+}
+
 export interface RoutineSession {
+  // The fire's message id is the session's identity; `null` is the one
+  // manual-activity session of a routine the dispatcher never fired.
+  id: number | null
   index: number
   fire: (RoutinePost & { text: string }) | null
+  // Explicit message-id boundaries, `[start_id, end_id)`. Chat highlighting
+  // reads these and never infers a span from its neighbour in the list.
+  start_id: number
+  end_id: number | null
+  origin: 'manual' | 'scheduled' | 'unknown'
+  origin_evidence: string
+  schedule_event: { id: string; fired_at: number } | null
+  resolution: SessionResolution
   note: string | null
   nodes: SessionNode[]
   truncation?: { truncated: boolean; reasons: string[]; max_nodes: number; max_depth: number }
+}
+
+// How far back the session list could look. The fire topic is held as a
+// window of posts; a full window is disclosed rather than read as the whole
+// past of the routine.
+export interface SessionHistory {
+  posts: number
+  post_limit: number
+  bounded: boolean
+  fires: number
+  session_limit: number
+  hidden_resolved: number
+  note: string
 }
 
 export interface ChatStatus {
@@ -120,6 +154,10 @@ export interface RoutineBoard {
 export interface RoutineDetail extends Omit<RoutineBoard, 'routines'> {
   routine: RoutineRow
   sessions: RoutineSession[]
+  // The routine's actual newest fire, whatever a filter left visible.
+  latest_fire?: (RoutinePost & { text: string }) | null
+  history?: SessionHistory
+  filter?: { include_resolved: boolean }
   chat_log: RoutinePost[] & Array<{ content: string }>
 }
 

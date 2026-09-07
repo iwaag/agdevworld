@@ -57,6 +57,14 @@ MANUAL_MARK = "started by hand from the operation room"
 #: The sentence `trigger.sh` writes after the stamp. Its presence, without the
 #: manual mark, is what says a fire came from the dispatcher.
 TRIGGER_SENTENCE = "The standing request is the latest post in"
+#: The pointer to the routine's previous run topic (`operation_room` p7). One
+#: topic per run means the previous run is not in this topic's history; the
+#: fire names it so Front can read it if it wants the context.
+PREVIOUS_MARK = "Previous run: #front › "
+#: The dispatcher's `run_topic()`: `front-routine-<name>-<stamp>`, the stamp
+#: being the fire line's own UTC minute. Both writers build it from the same
+#: pieces and this regex reads it back.
+RUN_TOPIC = re.compile(r"^front-routine-(?P<name>.+)-(?P<stamp>\d{4}-\d{2}-\d{2}T\d{2}:\d{2}Z)$")
 #: Zulip's own resolve notice, as the Notification Bot writes it. Only the
 #: engine's `is_resolve_notice` applies it, and only to system-realm posts.
 NOTICE_LINE = re.compile(r"has marked this topic as (?P<kind>resolved|unresolved)\b")
@@ -93,6 +101,12 @@ ROUTINE_HISTORY = 200
 
 __all__ = [
     "FIRE_PREFIX",
+    "PREVIOUS_MARK",
+    "RUN_TOPIC",
+    "fire_line",
+    "parse_run_topic",
+    "previous_of",
+    "run_topic",
     "MANUAL_MARK",
     "NOTICE_LINE",
     "display_of",
@@ -341,7 +355,20 @@ def display_of(name: str, request_text: str | None) -> dict:
     return {"icon": icon, "icon_source": icon_source, "title": value, "title_source": source}
 
 
-def fire_line(name: str, stamp: str, instruction: str | None = None) -> str:
+def run_topic(name: str, stamp: str) -> str:
+    """The topic one run lives in: the dispatcher's `run_topic()`, verbatim."""
+    return f"{FIRE_PREFIX}{name}-{stamp}"
+
+
+def parse_run_topic(topic: str) -> tuple[str, str] | None:
+    """`(name, stamp)` of a run topic, or None for anything else."""
+    match = RUN_TOPIC.match(topic)
+    return (match.group("name"), match.group("stamp")) if match else None
+
+
+def fire_line(
+    name: str, stamp: str, instruction: str | None = None, previous: str | None = None
+) -> str:
     """The one line that starts a run by hand, in the trigger's own shape.
 
     `devenv/routine/trigger.sh` is the other writer of this sentence and the
@@ -349,17 +376,32 @@ def fire_line(name: str, stamp: str, instruction: str | None = None) -> str:
     must be recognised as a fire by the same reader, and told apart from the
     dispatcher's by `MANUAL_MARK` alone. Front reads the rest exactly as it
     reads the trigger's, which is the point — a run started from the screen
-    is the same run, not a different request.
+    is the same run, not a different request. `previous` is the routine's
+    last run topic, named the way the trigger names it.
     """
     text = (
         f"Routine `{name}`, run of {stamp}, {MANUAL_MARK}. "
-        f"{TRIGGER_SENTENCE} #front › `{STANDING_PREFIX}{name}`; "
-        f"this topic holds the earlier runs and my comments on them. Do it."
+        f"{TRIGGER_SENTENCE} #front › `{STANDING_PREFIX}{name}`. "
+        f"This topic is this run alone; resolve it (✔) when the run is finished."
     )
+    if previous:
+        text += f" {PREVIOUS_MARK}`{previous}`."
+    text += " Do it."
     extra = (instruction or "").strip()
     if extra:
         text += f"\n\nInstruction for this run: {extra}"
     return text
+
+
+def previous_of(content: str) -> str | None:
+    """The previous run topic a fire names, if it names one."""
+    text = content or ""
+    at = text.find(PREVIOUS_MARK)
+    if at < 0:
+        return None
+    rest = text[at + len(PREVIOUS_MARK):]
+    match = re.match(r"`?(?P<topic>[^`\s.]+(?:\.[^`\s.]+)*)`?", rest)
+    return match.group("topic") if match else None
 
 
 def fire_origin(content: str) -> str:

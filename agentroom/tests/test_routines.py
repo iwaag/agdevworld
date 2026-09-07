@@ -615,7 +615,10 @@ from agentroom.routines import (  # noqa: E402
     MANUAL_MARK,
     fire_line,
     fire_origin,
+    parse_run_topic,
+    previous_of,
     resolution_of,
+    run_topic,
     session_list,
 )
 
@@ -641,6 +644,15 @@ def test_the_triggers_own_wording_is_recognised_as_a_scheduled_fire():
     text = text.replace("$name", "papers").replace("$stamp", "2026-09-07T05:00Z")
     assert FIRE_LINE_MATCH(text) == "papers"
     assert fire_origin(text) == "scheduled"
+    # The trigger's topic line builds the same name `run_topic` does, and the
+    # previous-run sentence is the one `previous_of` reads.
+    topic_line = next(one for one in source.splitlines() if one.startswith("topic="))
+    topic = topic_line[len("topic="):].strip('"').replace("$name", "papers").replace("$stamp", "2026-09-07T05:00Z")
+    assert topic == run_topic("papers", "2026-09-07T05:00Z")
+    assert parse_run_topic(topic) == ("papers", "2026-09-07T05:00Z")
+    prev_line = next(one for one in source.splitlines() if "Previous run:" in one)
+    prev = prev_line.split('"$text ', 1)[1].rstrip('"').replace("\\`", "`").replace("$prev", "front-routine-papers-2026-09-06T05:00Z")
+    assert previous_of(text + " " + prev) == "front-routine-papers-2026-09-06T05:00Z"
 
 
 def FIRE_LINE_MATCH(text):
@@ -657,6 +669,12 @@ def test_a_manual_fire_is_a_fire_and_is_told_apart_by_its_mark():
     with_note = fire_line("papers", "2026-09-07T05:00Z", "  only the first paper  ")
     assert with_note.endswith("Instruction for this run: only the first paper")
     assert fire_origin("Routine `papers`, run of now. Go.") == "unknown"
+    assert previous_of(with_note) is None
+    linked = fire_line("papers", "2026-09-07T05:00Z", None, "front-routine-papers-2026-09-06T05:00Z")
+    assert previous_of(linked) == "front-routine-papers-2026-09-06T05:00Z"
+    assert linked.endswith("Do it.")
+    assert parse_run_topic("front-routine-papers") is None
+    assert parse_run_topic("front-routine-my-routine-2026-09-07T05:00Z") == ("my-routine", "2026-09-07T05:00Z")
 
 
 def test_a_resolve_notice_is_kept_beside_the_history_and_never_in_it():

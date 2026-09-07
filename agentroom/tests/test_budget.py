@@ -97,7 +97,7 @@ def test_claude_401_is_unknown_and_the_refresh_token_is_never_used(tmp_path):
     before = path.read_bytes()
     card = ClaudeProvider(credentials=path, fetch=fetch).snapshot(NOW)
     assert card["ok"] is False and card["windows"] == []
-    assert "token expired" in card["error"] and "next claude_code run" in card["error"]
+    assert "token expired" in card["error"] and "the relay never does" in card["error"]
     assert card["plan"] == "max" and card["credential_renewed_at"] == NOW - 300
     assert all("ort01" not in json.dumps(h) for h in calls)
     assert path.read_bytes() == before

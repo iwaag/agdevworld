@@ -284,10 +284,16 @@ and a hung codex process never blanks the Claude card.
   per-model scoped window, each with `severity` and `scope`. There is no
   absolute credit number on Max — the maximum is 100 % of a window — and the
   card's `note` says the `cost_usd` on claude_code records is the
-  API-equivalent price, not money leaving an account. **On 401 the card is
-  unknown** ("token expired; the next claude_code run refreshes it"):
-  refreshing is the CLI's job, the relay never sends the refresh token and
-  never writes the file; `credential_renewed_at` is the file's mtime.
+  API-equivalent price, not money leaving an account. **An expired token is
+  unknown**, before the call (the file says `expiresAt`) or on 401: the card
+  says which file, expired since when, renewed when. Refreshing is the CLI's
+  job — the relay never sends the refresh token and never writes the file;
+  `credential_renewed_at` is the file's mtime. Measured 2026-09-07: the
+  token is an 8-hour one, and a Front run on the same binary completed
+  after it expired *without* rewriting the file, so on macOS the file may
+  not be the store the CLI runs on (it keeps a Keychain item too); until
+  that is settled, an expired-file card is honest and may stay amber for
+  hours.
 - **codex** — `codex app-server` (`AGENTROOM_CODEX_BIN`, default `codex` on
   PATH) over stdio JSON-RPC: `initialize`, `initialized`,
   `account/rateLimits/read`, stdin held open until the reply, then killed.

@@ -206,9 +206,16 @@ class ClaudeProvider(Provider):
         }
         expires = base["token_expires_at"]
         if expires is not None and expires <= time.time():
+            # Measured 2026-09-07: a Front run on this binary completed while
+            # the file's token was 3 minutes expired and did *not* rewrite the
+            # file — so the file is not necessarily the store the CLI runs
+            # on (macOS keeps a Keychain item too). Say what is known: this
+            # file, expired since when, and that only the CLI renews it.
             return {**base, "ok": False,
-                    "error": "access token expired; the next claude_code run refreshes it "
-                             "(the relay never uses the refresh token)"}
+                    "error": f"access token in {self.credentials.name} expired at "
+                             f"{time.strftime('%H:%M', time.localtime(expires))} (file renewed "
+                             f"{time.strftime('%H:%M', time.localtime(renewed_at))}); only a "
+                             "Claude Code login or token refresh rewrites it — the relay never does"}
         status, body = self.fetch(CLAUDE_USAGE_URL, {
             "Authorization": f"Bearer {oauth['accessToken']}",
             "anthropic-beta": CLAUDE_BETA,
@@ -216,8 +223,8 @@ class ClaudeProvider(Provider):
         }, READ_TIMEOUT_SECONDS)
         if status == 401:
             return {**base, "ok": False,
-                    "error": "401 from the usage endpoint — token expired; the next claude_code "
-                             "run refreshes it (the relay never uses the refresh token)"}
+                    "error": "401 from the usage endpoint — token expired or revoked; only a "
+                             "Claude Code login or token refresh rewrites the file, the relay never does"}
         if status != 200:
             raise RuntimeError(f"usage endpoint answered {status}: {body[:200].decode('utf-8', 'replace')}")
         try:

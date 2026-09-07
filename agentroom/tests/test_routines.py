@@ -14,14 +14,16 @@ from agentroom.chat import Chat, allowed_topic
 from agentroom.inflight import Inflight, parse_roots
 from agentroom.ops import Topic
 from agentroom.routines import (
+    DEEP_RUNS,
     Schedule,
     answer_of,
     fire_of,
     is_routine_topic,
+    newest_run_topics,
     read_schedule,
     routine_name,
-    chat_of,
     routine_rows,
+    run_topics_of,
     schedule_for,
     session_tree,
     sessions_of,
@@ -44,18 +46,28 @@ def message(content, *, ident=1, sender_id=DEVELOPER, sender="Developer", ago=0.
     }
 
 
-def fire(name, *, ident=1, ago=0.0):
+STAMP = "2026-09-06T00:00Z"
+RUN = f"front-routine-papers-{STAMP}"
+
+
+def fire(name, *, ident=1, ago=0.0, stamp=STAMP):
     return message(
-        f"Routine `{name}`, run of 2026-09-06T00:00Z. The standing request is the latest "
-        f"post in #front › `routine-{name}`; this topic holds the earlier runs. Do it.",
+        f"Routine `{name}`, run of {stamp}. The standing request is the latest "
+        f"post in #front › `routine-{name}`. This topic is this run alone. Do it.",
         ident=ident, ago=ago,
     )
 
 
 def history_of(*messages):
-    """The `Message` records a fire topic keeps, which is what the two readers
+    """The `Message` records a run topic keeps, which is what the two readers
     below are given in the engine."""
-    return topic("front", "front-routine-x", *messages).history
+    return topic("front", RUN, *messages).history
+
+
+def run(name, index, *messages, resolved=False):
+    """A run topic of `name`, its stamp `index` hours after `STAMP`."""
+    stamp = f"2026-09-06T{index:02d}:00Z"
+    return topic("front", f"front-routine-{name}-{stamp}", *messages, resolved=resolved)
 
 
 def topic(channel, name, *messages, resolved=False, keep=True):
@@ -70,21 +82,36 @@ def topic(channel, name, *messages, resolved=False, keep=True):
 # --- which topics are a routine's -----------------------------------------
 
 
-def test_both_of_a_routines_topics_are_recognised_and_nothing_else_is():
+def test_a_routines_standing_and_run_topics_are_recognised_and_nothing_else_is():
     assert is_routine_topic("front", "routine-papers")
-    assert is_routine_topic("front", "front-routine-papers")
+    assert is_routine_topic("front", RUN)
     # Same names in another channel are somebody else's conversation.
     assert not is_routine_topic("pj-studyarxiv", "routine-papers")
     assert not is_routine_topic("front", "front-p10-cleanup")
+    # The pre-p7 layout, one topic per routine, is an ordinary conversation now.
+    assert not is_routine_topic("front", "front-routine-papers")
 
 
-def test_the_name_comes_off_the_longer_prefix_first():
-    # `front-routine-papers` starts with neither `routine-`, but a reader that
-    # tested the short prefix first would have called it `front-routine-papers`
-    # in the standing branch and produced a second, phantom routine.
-    assert routine_name("front-routine-papers") == "papers"
+def test_the_name_comes_off_a_run_topic_without_its_stamp():
+    assert routine_name(RUN) == "papers"
+    assert routine_name("front-routine-my-routine-2026-09-06T00:00Z") == "my-routine"
     assert routine_name("routine-papers") == "papers"
+    assert routine_name("front-routine-papers") is None
     assert routine_name("front-p10-cleanup") is None
+
+
+def test_run_topics_sort_newest_first_and_the_newest_few_are_the_deep_ones():
+    held = mapping(run("papers", 1), run("papers", 3, resolved=True), run("papers", 2),
+                   run("publish", 9), topic("front", "routine-papers"))
+    assert [found.topic for found in run_topics_of(held, "papers")] == [
+        "front-routine-papers-2026-09-06T03:00Z",
+        "front-routine-papers-2026-09-06T02:00Z",
+        "front-routine-papers-2026-09-06T01:00Z",
+    ]
+    names = [f"front-routine-papers-2026-09-06T{i:02d}:00Z" for i in range(6)]
+    names += ["front-routine-publish-2026-09-06T00:00Z", "routine-papers", "front-routine-papers"]
+    deep = newest_run_topics(names)
+    assert deep == set(names[6 - DEEP_RUNS:6]) | {"front-routine-publish-2026-09-06T00:00Z"}
 
 
 # --- which post is the fire -----------------------------------------------
@@ -94,6 +121,10 @@ def test_the_fire_is_the_triggers_own_wording_not_the_newest_developer_post():
     history = history_of(fire("papers", ident=1, ago=600), message("that run was wrong", ident=2, ago=60))
     found = fire_of(history, "papers")
     assert found is not None and found.id == 1
+    # A second fire line pasted into a run topic is a comment: the run is the
+    # topic, and it started once.
+    again = history_of(fire("papers", ident=1), fire("papers", ident=2))
+    assert fire_of(again, "papers").id == 1
 
 
 def test_a_fire_of_another_routine_in_the_same_topic_is_not_this_ones():
@@ -141,14 +172,16 @@ def test_the_developers_own_second_post_does_not_answer_their_fire():
     assert found["state"] == "unanswered"
 
 
-def test_a_reply_older_than_the_fire_belongs_to_the_previous_run():
+def test_a_second_fire_line_in_a_run_topic_does_not_restart_the_run():
+    # One topic is one run (p7): the answer to the first fire stays the
+    # answer, and a fire line pasted in later is a comment.
     history = history_of(
         fire("papers", ident=1, ago=9000),
         message("done", ident=2, sender_id=FRONT, sender="Front", ago=8000),
         fire("papers", ident=3, ago=300),
     )
     found = answer_of(history, fire_of(history, "papers"), NOW)
-    assert found["state"] == "unanswered"
+    assert found["state"] == "answered" and found["answer"]["message_id"] == 2
 
 
 # --- the row's state word --------------------------------------------------
@@ -165,9 +198,9 @@ def rows(*topics, schedule=None, now=NOW):
 
 
 def test_an_unanswered_fire_becomes_stalled_at_the_ops_threshold():
-    quick = rows(topic("front", "front-routine-papers", fire("papers", ident=1, ago=60)))
+    quick = rows(topic("front", RUN, fire("papers", ident=1, ago=60)))
     assert quick[0]["state"] == "awaiting"
-    slow = rows(topic("front", "front-routine-papers", fire("papers", ident=1, ago=4000)))
+    slow = rows(topic("front", RUN, fire("papers", ident=1, ago=4000)))
     assert slow[0]["state"] == "stalled"
 
 
@@ -176,7 +209,7 @@ def test_an_ack_that_never_became_an_answer_stalls_too():
     # long as you only ask "did it start?". This is the p9 failure again, in
     # the one place the routine board can catch it.
     history = topic(
-        "front", "front-routine-papers",
+        "front", RUN,
         fire("papers", ident=1, ago=4000),
         message("Message received. Please wait for the reply.",
                 ident=2, sender_id=FRONT, sender="Front", ago=3990),
@@ -242,7 +275,7 @@ def test_a_routine_the_schedule_names_but_the_realm_does_not_still_gets_a_row():
     )
     found = rows(schedule=schedule)
     assert [row["name"] for row in found] == ["ghosts"]
-    assert found[0]["fire_topic"] is None
+    assert found[0]["latest_topic"] is None and found[0]["runs"] == 0
 
 
 # --- the schedule ----------------------------------------------------------
@@ -307,11 +340,11 @@ def test_a_served_note_finds_a_child_that_was_resolved_and_never_swept():
     # topic is not swept, so the child is not in `topics` at all — and the
     # board says `note-only` rather than pretending it read it.
     topics = mapping(topic(
-        "front", "front-routine-papers",
+        "front", RUN,
         fire("papers", ident=10),
         servednote("pj-studyarxiv/workplan-papers", 90, ident=20),
     ))
-    nodes = session_tree(topics, ("front", "front-routine-papers"), {}, since=0, until=None)["nodes"]
+    nodes = session_tree(topics, ("front", RUN), {}, since=0, until=None)["nodes"]
     assert [(node["topic"], node["via"], node["known"]) for node in nodes] == [
         ("workplan-papers", "served", "note-only")
     ]
@@ -322,11 +355,11 @@ def test_a_rootchat_note_finds_a_child_nothing_has_answered_yet():
     # The in-flight half: Front has posted into the workplan topic and nobody
     # has called back, so no served note exists anywhere.
     child = topic("pj-studyarxiv", "workplan-papers",
-                  rootnote("front/front-routine-papers", ident=21),
+                  rootnote(f"front/{RUN}", ident=21),
                   message("opened the mission", ident=22, sender_id=FRONT, sender="Front"),
                   keep=False)
-    topics = mapping(topic("front", "front-routine-papers", fire("papers", ident=10)), child)
-    nodes = session_tree(topics, ("front", "front-routine-papers"), {}, since=0, until=None)["nodes"]
+    topics = mapping(topic("front", RUN, fire("papers", ident=10)), child)
+    nodes = session_tree(topics, ("front", RUN), {}, since=0, until=None)["nodes"]
     assert [(node["topic"], node["via"], node["known"]) for node in nodes] == [
         ("workplan-papers", "rootchat", "swept")
     ]
@@ -335,12 +368,12 @@ def test_a_rootchat_note_finds_a_child_nothing_has_answered_yet():
 
 
 def test_the_tree_goes_deeper_than_one_hop():
-    root = topic("front", "front-routine-papers", fire("papers", ident=10),
+    root = topic("front", RUN, fire("papers", ident=10),
                  servednote("pj-studyarxiv/workplan-papers", 90, ident=20))
     middle = topic("pj-studyarxiv", "workplan-papers",
                    servednote("work-s3-1/workrun-task1", 95, ident=30), keep=False)
     nodes = session_tree(topics := mapping(root, middle),
-                         ("front", "front-routine-papers"), {}, since=0, until=None)["nodes"]
+                         ("front", RUN), {}, since=0, until=None)["nodes"]
     assert [(node["topic"], node["depth"]) for node in nodes] == [
         ("workplan-papers", 1), ("workrun-task1", 2)
     ]
@@ -348,63 +381,65 @@ def test_the_tree_goes_deeper_than_one_hop():
 
 
 def test_a_node_wears_the_ops_boards_verdict_and_never_its_own():
-    root = topic("front", "front-routine-papers", fire("papers", ident=10),
+    root = topic("front", RUN, fire("papers", ident=10),
                  servednote("pj-studyarxiv/workplan-papers", 90, ident=20))
     child = topic("pj-studyarxiv", "workplan-papers",
                   message("anybody?", ident=91), keep=False)
     rows = {("pj-studyarxiv", "workplan-papers"): [
         {"state": "done", "instance": "a"}, {"state": "stalled", "instance": "b"},
     ]}
-    nodes = session_tree(mapping(root, child), ("front", "front-routine-papers"),
+    nodes = session_tree(mapping(root, child), ("front", RUN),
                          rows, since=0, until=None)["nodes"]
     # Both rows are carried; the node wears the most urgent of them.
     assert nodes[0]["state"] == "stalled"
     assert len(nodes[0]["rows"]) == 2
 
 
-def test_a_session_is_bounded_by_the_next_fire():
-    root = topic(
-        "front", "front-routine-papers",
-        fire("papers", ident=10),
-        servednote("pj-a/one", 5, ident=11),
-        fire("papers", ident=20),
-        servednote("pj-a/two", 6, ident=21),
+def test_a_session_is_a_run_topic_and_carries_only_what_it_linked():
+    held = mapping(
+        run("papers", 1, fire("papers", ident=10), servednote("pj-a/one", 5, ident=11)),
+        run("papers", 2, fire("papers", ident=20), servednote("pj-a/two", 6, ident=21)),
     )
-    found = sessions_of(mapping(root), "papers", {})
+    found = sessions_of(held, "papers", {})
     # Newest first, and each run carries only what was linked inside it.
     assert [session["fire"]["message_id"] for session in found] == [20, 10]
+    assert [session["topic"] for session in found] == [
+        "front-routine-papers-2026-09-06T02:00Z", "front-routine-papers-2026-09-06T01:00Z",
+    ]
     assert [node["topic"] for node in found[0]["nodes"]] == ["two"]
     assert [node["topic"] for node in found[1]["nodes"]] == ["one"]
 
 
 def test_only_the_last_three_runs_are_listed():
-    posts = []
-    for index in range(5):
-        posts.append(fire("papers", ident=10 * (index + 1)))
-        posts.append(servednote(f"pj-a/run{index}", 1, ident=10 * (index + 1) + 1))
-    found = sessions_of(mapping(topic("front", "front-routine-papers", *posts)), "papers", {})
+    held = mapping(*[
+        run("papers", index, fire("papers", ident=10 * index),
+            servednote(f"pj-a/run{index}", 1, ident=10 * index + 1))
+        for index in range(1, 6)
+    ])
+    found = sessions_of(held, "papers", {})
     assert [session["fire"]["message_id"] for session in found] == [50, 40, 30]
 
 
-def test_a_routine_nobody_fired_still_shows_its_conversation():
-    # mediagen: 164 posts in the fire topic and not one trigger line.
-    root = topic("front", "front-routine-mediagen",
-                 message("do the thing by hand", ident=10),
-                 servednote("pj-mediagen/assetplan-x", 5, ident=11))
+def test_a_run_topic_opened_by_hand_is_still_a_session():
+    # No trigger line at all: somebody opened the topic and typed.
+    root = run("mediagen", 1,
+               message("do the thing by hand", ident=10),
+               servednote("pj-mediagen/assetplan-x", 5, ident=11))
     found = sessions_of(mapping(root), "mediagen", {})
-    assert len(found) == 1 and found[0]["fire"] is None
+    assert len(found) == 1 and found[0]["fire"] is None and found[0]["id"] == 10
+    assert found[0]["origin"] == "unknown" and "by hand" in found[0]["origin_evidence"]
     assert [node["topic"] for node in found[0]["nodes"]] == ["assetplan-x"]
 
 
 def test_the_chat_is_real_posts_only_and_oldest_first():
     root = topic(
-        "front", "front-routine-papers",
+        "front", RUN,
         message("later", ident=20),
-        message("[selfnote][rootchat] front/front-routine-papers", ident=15,
+        message(f"[selfnote][rootchat] front/{RUN}", ident=15,
                 sender_id=FRONT, sender="Front"),
         fire("papers", ident=10),
     )
-    found = chat_of(mapping(root), "papers")
+    found = sessions_of(mapping(root), "papers", {})[0]["chat"]
     assert [post["message_id"] for post in found] == [10, 20]
 
 
@@ -413,17 +448,20 @@ def test_the_chat_is_real_posts_only_and_oldest_first():
 
 def test_chat_posts_only_into_a_known_routines_topics():
     names = {"papers"}
-    assert allowed_topic("front-routine-papers", names)
+    assert allowed_topic(RUN, names)
+    assert allowed_topic("front-routine-papers-2099-01-01T00:00Z", names)  # a run not opened yet
     assert allowed_topic("routine-papers", names)
-    # Front's own request topics, another agent's channel, and a routine this
-    # relay has never seen are all the same refusal: routing is Front's job.
+    # Front's own request topics, another agent's channel, a routine this
+    # relay has never seen and the pre-p7 bare topic are all the same
+    # refusal: routing is Front's job.
     assert not allowed_topic("front-p10-cleanup", names)
-    assert not allowed_topic("front-routine-ghosts", names)
+    assert not allowed_topic("front-routine-ghosts-2026-09-06T00:00Z", names)
+    assert not allowed_topic("front-routine-papers", names)
 
 
 def test_an_unconfigured_chat_refuses_and_says_which_variable():
     chat = Chat(env_path=None)
-    refused = chat.check("front-routine-papers", "hello", {"papers"})
+    refused = chat.check(RUN, "hello", {"papers"})
     assert "AGENTROOM_CHAT_ZULIP_ENV" in refused
     assert chat.status()["configured"] is False
 
@@ -431,21 +469,21 @@ def test_an_unconfigured_chat_refuses_and_says_which_variable():
 def test_a_configured_chat_still_refuses_the_wrong_topic(tmp_path):
     chat = Chat(env_path=tmp_path / "developer.env")
     assert chat.check("pj-mediagen/whatever", "hello", {"papers"}) is not None
-    assert chat.check("front-routine-papers", "hello", {"papers"}) is None
+    assert chat.check(RUN, "hello", {"papers"}) is None
 
 
 def test_an_over_long_message_is_refused_rather_than_truncated(tmp_path):
     # comfynotify proved Zulip drops the tail of an over-long post with no
     # error anywhere. A boundary that fails invisibly gets a loud refusal.
     chat = Chat(env_path=tmp_path / "developer.env", max_chars=50)
-    refused = chat.check("front-routine-papers", "x" * 51, {"papers"})
+    refused = chat.check(RUN, "x" * 51, {"papers"})
     assert "51 characters" in refused and "10000" in refused
-    assert chat.check("front-routine-papers", "x" * 50, {"papers"}) is None
+    assert chat.check(RUN, "x" * 50, {"papers"}) is None
 
 
 def test_a_selfnote_cannot_be_typed_by_hand(tmp_path):
     chat = Chat(env_path=tmp_path / "developer.env")
-    refused = chat.check("front-routine-papers", "[selfnote][served] a/b 1", {"papers"})
+    refused = chat.check(RUN, "[selfnote][served] a/b 1", {"papers"})
     assert "machine-to-machine" in refused
 
 
@@ -460,14 +498,14 @@ def test_a_sent_message_goes_to_front_and_reports_its_id(tmp_path):
 
     fake = FakeClient()
     chat = Chat(env_path=tmp_path / "developer.env", client_factory=lambda path: fake)
-    found = chat.send("front-routine-papers", "  how did that run go?  ", {"papers"})
+    found = chat.send(RUN, "  how did that run go?  ", {"papers"})
     assert found == {
-        "sent": True, "channel": "front", "topic": "front-routine-papers",
+        "sent": True, "channel": "front", "topic": RUN,
         "message_id": 4242,
         "note": "the post is live in the realm; the event queue will carry it back",
     }
     # Trimmed, and posted exactly once.
-    assert fake.sent == [("front", "front-routine-papers", "how did that run go?")]
+    assert fake.sent == [("front", RUN, "how did that run go?")]
 
 
 def test_a_refused_message_is_never_posted(tmp_path):
@@ -506,7 +544,7 @@ def test_roots_are_parsed_as_instances_because_an_agent_runs_on_more_than_one_no
 
 def test_an_instance_with_no_root_here_is_unknown_and_never_idle(tmp_path):
     look = Inflight(roots={})
-    found = look.look("agecho-agautolab1", "front", "front-routine-papers")
+    found = look.look("agecho-agautolab1", "front", RUN)
     assert found["known"] is False and found["in_flight"] is None
     assert look.busy("agecho-agautolab1")["known"] is False
 
@@ -514,18 +552,18 @@ def test_an_instance_with_no_root_here_is_unknown_and_never_idle(tmp_path):
 def test_a_workspace_newer_than_every_run_record_is_a_run_in_flight(tmp_path):
     root = tmp_path / "agfront"
     record(root, "front", 1, at=time.time() - 3600)
-    workspace(root, "front", "front-routine-papers", 7)
+    workspace(root, "front", RUN, 7)
     found = Inflight(roots={"front-agstudio1": root}).look(
-        "front-agstudio1", "front", "front-routine-papers")
+        "front-agstudio1", "front", RUN)
     assert found["in_flight"] is True and found["generation"] == 7
 
 
 def test_a_finished_run_leaves_a_record_newer_than_its_workspace(tmp_path):
     root = tmp_path / "agfront"
-    workspace(root, "front", "front-routine-papers", 7)
+    workspace(root, "front", RUN, 7)
     record(root, "entrance_front", 1, at=time.time() + 60)
     found = Inflight(roots={"front-agstudio1": root}).look(
-        "front-agstudio1", "front", "front-routine-papers")
+        "front-agstudio1", "front", RUN)
     # The record is filed under a different role name than the workspace uses
     # (p1: `…/<N>/front/` against `.local/agent/entrance_front/`), so the
     # comparison is against the newest record of *any* role.
@@ -548,21 +586,21 @@ def test_busy_catches_a_run_that_is_not_in_this_topics_workspace(tmp_path):
     record(root, "coding", 1, at=time.time() - 3600)
     workspace(root, "pj-studyarxiv", "workplan-papers", 2, role="supercoder")
     look = Inflight(roots={"autolab-agstudio1": root})
-    assert look.look("autolab-agstudio1", "front", "front-routine-papers")["in_flight"] is False
+    assert look.look("autolab-agstudio1", "front", RUN)["in_flight"] is False
     busy = look.busy("autolab-agstudio1")
     assert busy["in_flight"] is True and busy["where"] == "pj-studyarxiv/workplan-papers"
 
 
 def test_graph_edges_keep_the_immediate_parent_through_three_hops():
-    root = topic("front", "front-routine-papers", fire("papers", ident=10),
+    root = topic("front", RUN, fire("papers", ident=10),
                  servednote("project/plan", 90, ident=20))
-    plan = topic("project", "plan", rootnote("front/front-routine-papers", ident=21))
+    plan = topic("project", "plan", rootnote(f"front/{RUN}", ident=21))
     work = topic("work", "task", rootnote("project/plan", ident=30),
                  servednote("forge/result", 100, ident=40))
     nodes = session_tree(mapping(root, plan, work),
-                         ("front", "front-routine-papers"), {}, since=0, until=None)["nodes"]
+                         ("front", RUN), {}, since=0, until=None)["nodes"]
     assert [(node["channel"], node["topic"], node["depth"], node["parent"]) for node in nodes] == [
-        ("project", "plan", 1, {"channel": "front", "topic": "front-routine-papers"}),
+        ("project", "plan", 1, {"channel": "front", "topic": RUN}),
         ("work", "task", 2, {"channel": "project", "topic": "plan"}),
         ("forge", "result", 3, {"channel": "work", "topic": "task"}),
     ]
@@ -571,7 +609,7 @@ def test_graph_edges_keep_the_immediate_parent_through_three_hops():
 
 
 def test_node_limit_reports_only_actual_omissions():
-    root = topic("front", "front-routine-papers", fire("papers", ident=10),
+    root = topic("front", RUN, fire("papers", ident=10),
                  *[servednote(f"pj-a/child-{i}", 90, ident=20+i) for i in range(41)])
     tree = session_tree(mapping(root), ("front", root.topic), {}, since=0, until=None)
     assert len(tree["nodes"]) == 40
@@ -585,7 +623,7 @@ def test_node_limit_reports_only_actual_omissions():
 
 
 def test_depth_limit_distinguishes_leaf_cycle_and_omitted_descendant():
-    root = topic("front", "front-routine-papers", fire("papers", ident=10),
+    root = topic("front", RUN, fire("papers", ident=10),
                  servednote("pj-a/level-1", 90, ident=20))
     chain = [topic("pj-a", f"level-{i}",
                    servednote(f"pj-a/level-{i+1}", 90, ident=20+i)) for i in range(1, 5)]
@@ -594,14 +632,14 @@ def test_depth_limit_distinguishes_leaf_cycle_and_omitted_descendant():
     assert tree["truncation"]["reasons"] == ["depth"]
     leaf = session_tree(mapping(root, *chain[:-1]), ("front", root.topic), {}, since=0, until=None)
     assert leaf["truncation"]["truncated"] is False
-    cycle = topic("pj-a", "level-4", servednote("front/front-routine-papers", 90, ident=30))
+    cycle = topic("pj-a", "level-4", servednote(f"front/{RUN}", 90, ident=30))
     tree = session_tree(mapping(root, *chain[:-1], cycle), ("front", root.topic), {}, since=0, until=None)
     assert tree["truncation"]["truncated"] is False
 
 
 def test_sessions_expose_reconstruction_bounds_for_manual_and_scheduled_activity():
     for posts in [[], [fire("papers", ident=10)]]:
-        root = topic("front", "front-routine-papers", *posts,
+        root = topic("front", RUN, *posts,
                      *[servednote(f"pj-a/child-{i}", 90, ident=20+i) for i in range(41)])
         session = sessions_of(mapping(root), "papers", {})[0]
         assert session["truncation"]["truncated"] is True
@@ -623,14 +661,6 @@ from agentroom.routines import (  # noqa: E402
 )
 
 TRIGGER = Path(__file__).resolve().parents[3] / "devenv" / "routine" / "trigger.sh"
-
-
-def notice(kind, *, ident):
-    return {
-        "id": ident, "sender_id": 6, "sender_full_name": "Notification Bot",
-        "sender_realm_str": "zulipinternal", "timestamp": int(NOW),
-        "content": f"@_**Developer|8** has marked this topic as {kind}.",
-    }
 
 
 def test_the_triggers_own_wording_is_recognised_as_a_scheduled_fire():
@@ -677,43 +707,16 @@ def test_a_manual_fire_is_a_fire_and_is_told_apart_by_its_mark():
     assert parse_run_topic("front-routine-my-routine-2026-09-07T05:00Z") == ("my-routine", "2026-09-07T05:00Z")
 
 
-def test_a_resolve_notice_is_kept_beside_the_history_and_never_in_it():
-    found = topic("front", "front-routine-papers", fire("papers", ident=1),
-                  notice("resolved", ident=2))
-    assert [kept.id for kept in found.history] == [1]
-    assert [kept.id for kept in found.notices] == [2]
-    # A human typing the sentence is speech, not a notice.
-    typed = topic("front", "front-routine-papers",
-                  message("has marked this topic as resolved", ident=3))
-    assert typed.notices == [] and [kept.id for kept in typed.history] == [3]
+def test_a_run_is_resolved_by_its_own_topics_flag_and_nothing_else():
+    assert resolution_of(run("papers", 1, resolved=True))["state"] == "resolved"
+    assert resolution_of(run("papers", 1))["state"] == "open"
+    # Zulip's notice is not speech and not history; it changes nothing here.
+    typed = run("papers", 1, {**message("has marked this topic as resolved", ident=3),
+                              "sender_realm_str": "zulipinternal"})
+    assert [kept.id for kept in typed.history] == [] and resolution_of(typed)["state"] == "open"
 
 
-def test_the_latest_session_is_resolved_by_the_topics_current_flag():
-    found = resolution_of([], since=10, until=None, topic_resolved=True)
-    assert found["state"] == "resolved" and "latest fire" in found["evidence"]
-    assert resolution_of([], since=10, until=None, topic_resolved=False)["state"] == "open"
-
-
-def test_an_older_session_is_resolved_only_by_a_notice_inside_its_span():
-    notices = topic("front", "front-routine-papers", notice("resolved", ident=15)).notices
-    # Inside [10, 20): resolved, and it says which notice.
-    inside = resolution_of(notices, since=10, until=20, topic_resolved=False)
-    assert inside["state"] == "resolved" and inside["notice"]["message_id"] == 15
-    # A span with no notice is unknown even while the topic carries ✔ today.
-    older = resolution_of(notices, since=1, until=10, topic_resolved=True)
-    assert older["state"] == "unknown" and older["notice"] is None
-
-
-def test_reopening_is_the_newest_notice_in_the_span():
-    notices = topic("front", "front-routine-papers",
-                    notice("resolved", ident=15), notice("unresolved", ident=17)).notices
-    found = resolution_of(notices, since=10, until=20, topic_resolved=False)
-    assert found["state"] == "reopened" and found["notice"]["message_id"] == 17
-    # For the latest session the current flag still wins over an old notice.
-    assert resolution_of(notices, since=10, until=None, topic_resolved=True)["state"] == "resolved"
-
-
-def test_sessions_carry_their_identity_origin_and_resolution():
+def test_sessions_carry_their_identity_origin_resolution_and_pointer():
     schedule = Schedule(
         path="x", ok=True, requests=[],
         events=[{"id": "e7", "at": "2026-09-06T00:00:00Z", "kind": "fire", "from": "r8",
@@ -721,43 +724,41 @@ def test_sessions_carry_their_identity_origin_and_resolution():
     )
     from datetime import datetime, timezone
     at = int(datetime(2026, 9, 6, tzinfo=timezone.utc).timestamp())
-    root = topic(
-        "front", "front-routine-papers",
-        {**fire("papers", ident=10), "timestamp": at + 5},
-        notice("resolved", ident=12),
-        {**message(fire_line("papers", "2026-09-07T05:00Z"), ident=20), "timestamp": at + 9000},
-    )
-    found = session_list(mapping(root), "papers", {}, schedule=schedule)
+    older = run("papers", 0, {**fire("papers", ident=10), "timestamp": at + 5}, resolved=True)
+    newer = run("papers", 5, {**message(fire_line(
+        "papers", "2026-09-06T05:00Z", None, older.topic), ident=20), "timestamp": at + 9000})
+    found = session_list(mapping(older, newer), "papers", {}, schedule=schedule, now=NOW)
     first, second = found["sessions"]
-    assert (first["id"], first["start_id"], first["end_id"]) == (20, 20, None)
+    assert (first["id"], first["topic"], first["stamp"]) == (20, newer.topic, "2026-09-06T05:00Z")
     assert first["origin"] == "manual" and first["resolution"]["state"] == "open"
-    assert (second["id"], second["start_id"], second["end_id"]) == (10, 10, 20)
+    assert first["previous"] == older.topic and first["answer"]["state"] == "unanswered"
+    assert (second["id"], second["topic"]) == (10, older.topic)
     assert second["origin"] == "scheduled" and second["schedule_event"]["id"] == "e7"
-    assert second["resolution"]["state"] == "resolved"
-    assert found["latest_fire"]["message_id"] == 20
-    assert found["history"]["fires"] == 2 and found["history"]["bounded"] is False
+    assert second["resolution"]["state"] == "resolved" and second["previous"] is None
+    assert found["latest_fire"]["message_id"] == 20 and found["latest_topic"] == newer.topic
+    assert found["history"]["runs"] == 2 and found["history"]["open_runs"] == 1
 
 
 def test_hiding_resolved_sessions_filters_before_the_limit():
-    posts = []
-    for index in range(5):
-        posts.append(fire("papers", ident=10 * (index + 1)))
-        if index < 3:
-            posts.append(notice("resolved", ident=10 * (index + 1) + 5))
-    root = topic("front", "front-routine-papers", *posts)
-    shown = session_list(mapping(root), "papers", {}, include_resolved=False)
+    held = mapping(*[
+        run("papers", index, fire("papers", ident=10 * index), resolved=index <= 3)
+        for index in range(1, 6)
+    ])
+    shown = session_list(held, "papers", {}, include_resolved=False)
     assert [session["id"] for session in shown["sessions"]] == [50, 40]
     assert shown["history"]["hidden_resolved"] == 3
-    # The unfiltered reading still leads with the actual latest fire.
-    assert [session["id"] for session in sessions_of(mapping(root), "papers", {})] == [50, 40, 30]
+    # The unfiltered reading still leads with the actual latest run.
+    assert [session["id"] for session in sessions_of(held, "papers", {})] == [50, 40, 30]
 
 
-def test_a_full_history_window_is_reported_as_bounded():
-    posts = [fire("papers", ident=index + 1) for index in range(ROUTINE_HISTORY_LIMIT() + 1)]
-    root = topic("front", "front-routine-papers", *posts)
-    found = session_list(mapping(root), "papers", {})
-    assert found["history"]["bounded"] is True
-    assert "not searched" in found["history"]["note"]
+def test_a_full_history_window_is_reported_on_the_session():
+    posts = [fire("papers", ident=1)] + [message(f"post {i}", ident=i + 2)
+                                          for i in range(ROUTINE_HISTORY_LIMIT())]
+    session = sessions_of(mapping(run("papers", 1, *posts)), "papers", {})[0]
+    assert session["history"]["bounded"] is True
+    assert "not held" in session["history"]["note"]
+    # The fire itself fell out of the window: the session is still there.
+    assert session["fire"] is None and session["id"] is not None
 
 
 def ROUTINE_HISTORY_LIMIT():
@@ -786,7 +787,7 @@ def started_chat(tmp_path, client=None):
 
 
 def live_row(**overrides):
-    row = {"name": "papers", "retired": False, "fire_topic": "front-routine-papers",
+    row = {"name": "papers", "retired": False, "latest_topic": RUN,
            "request": {"message_id": 1, "text": "the standing request"}}
     row.update(overrides)
     return row
@@ -797,41 +798,49 @@ def test_a_manual_start_posts_the_marked_fire_line_as_the_developer(tmp_path):
     found = chat.start(live_row(), "papers", " one paper only ", stamp="2026-09-07T05:00Z",
                        names={"papers"})
     assert found["sent"] is True and found["message_id"] == 5100
-    assert found["topic"] == "front-routine-papers" and found["first_fire"] is False
+    assert found["topic"] == "front-routine-papers-2026-09-07T05:00Z" and found["previous"] == RUN
     channel, topic, text = client.sent[0]
-    assert (channel, topic) == ("front", "front-routine-papers")
-    assert text == found["text"] == fire_line("papers", "2026-09-07T05:00Z", "one paper only")
+    assert (channel, topic) == ("front", "front-routine-papers-2026-09-07T05:00Z")
+    assert text == found["text"] == fire_line("papers", "2026-09-07T05:00Z", "one paper only", RUN)
     assert fire_origin(text) == "manual" and FIRE_LINE_MATCH(text) == "papers"
+    assert previous_of(text) == RUN
 
 
-def test_the_first_fire_of_a_routine_with_no_fire_topic_is_allowed(tmp_path):
-    # The topic does not exist until the first post creates it; a relay that
-    # required it would never let a new routine start from the screen.
+def test_the_first_run_of_a_routine_names_no_previous_one(tmp_path):
     chat, client = started_chat(tmp_path)
-    found = chat.start(live_row(fire_topic=None), "papers", None, stamp="s", names={"papers"})
-    assert found["sent"] is True and found["first_fire"] is True
-    assert client.sent[0][1] == "front-routine-papers"
+    found = chat.start(live_row(latest_topic=None), "papers", None, stamp="2026-09-07T05:00Z",
+                       names={"papers"})
+    assert found["sent"] is True and found["previous"] is None
+    assert client.sent[0][1] == "front-routine-papers-2026-09-07T05:00Z"
+    assert "Previous run" not in client.sent[0][2]
+
+
+def test_two_starts_in_one_minute_would_share_a_topic_and_the_second_is_refused(tmp_path):
+    chat, client = started_chat(tmp_path)
+    found = chat.start(live_row(latest_topic="front-routine-papers-2026-09-07T05:00Z"), "papers",
+                       None, stamp="2026-09-07T05:00Z", names={"papers"})
+    assert found["sent"] is False and "this minute" in found["error"] and client.sent == []
 
 
 def test_a_retired_or_requestless_routine_is_refused_before_anything_is_posted(tmp_path):
     chat, client = started_chat(tmp_path)
-    retired = chat.start(live_row(retired=True), "papers", None, stamp="s", names={"papers"})
+    retired = chat.start(live_row(retired=True), "papers", None, stamp="2026-09-07T05:00Z", names={"papers"})
     assert retired["sent"] is False and "retired" in retired["error"]
-    blank = chat.start(live_row(request=None), "papers", None, stamp="s", names={"papers"})
+    blank = chat.start(live_row(request=None), "papers", None, stamp="2026-09-07T05:00Z", names={"papers"})
     assert blank["sent"] is False and "standing request" in blank["error"]
-    unknown = chat.start(None, "ghosts", None, stamp="s", names={"papers"})
+    unknown = chat.start(None, "ghosts", None, stamp="2026-09-07T05:00Z", names={"papers"})
     assert unknown["sent"] is False and "ghosts" in unknown["error"]
     assert client.sent == []
 
 
 def test_an_unconfigured_relay_refuses_to_start_and_names_the_variable(tmp_path):
-    found = Chat(env_path=None).start(live_row(), "papers", None, stamp="s", names={"papers"})
+    found = Chat(env_path=None).start(live_row(), "papers", None, stamp="2026-09-07T05:00Z", names={"papers"})
     assert found["sent"] is False and "AGENTROOM_CHAT_ZULIP_ENV" in found["error"]
 
 
 def test_a_failed_post_is_reported_as_uncertain_and_never_retried(tmp_path):
     chat, client = started_chat(tmp_path, RecordingClient(fail=ConnectionError("reset")))
-    found = chat.start(live_row(), "papers", None, stamp="s", names={"papers"})
+    found = chat.start(live_row(), "papers", None, stamp="2026-09-07T05:00Z", names={"papers"})
     assert found["sent"] is False and found["uncertain"] is True
     assert "may have landed" in found["note"]
 
@@ -839,7 +848,7 @@ def test_a_failed_post_is_reported_as_uncertain_and_never_retried(tmp_path):
 def test_an_over_long_instruction_is_refused_like_any_other_post(tmp_path):
     chat, client = started_chat(tmp_path)
     chat.max_chars = 300
-    found = chat.start(live_row(), "papers", "x" * 300, stamp="s", names={"papers"})
+    found = chat.start(live_row(), "papers", "x" * 300, stamp="2026-09-07T05:00Z", names={"papers"})
     assert found["sent"] is False and found["uncertain"] is False
     assert client.sent == []
 

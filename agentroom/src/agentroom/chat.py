@@ -34,7 +34,9 @@ from typing import Callable
 from agag.selfnote import SELFNOTE_MARKER
 from agag.zulip import ZulipClient
 
-from .routines import FIRE_PREFIX, ROUTINE_CHANNEL, STANDING_PREFIX, fire_line
+from .routines import (
+    FIRE_PREFIX, ROUTINE_CHANNEL, STANDING_PREFIX, fire_line, parse_run_topic, run_topic,
+)
 
 #: The credential the chat writes with. Deliberately its own variable.
 CHAT_ENV_VARIABLE = "AGENTROOM_CHAT_ZULIP_ENV"
@@ -51,16 +53,17 @@ __all__ = ["CHAT_ENV_VARIABLE", "Chat", "DEFAULT_MAX_CHARS", "REALM_MAX_CHARS", 
 def allowed_topic(topic: str, names: set[str]) -> bool:
     """Whether this `#front` topic is one the GUI may post into.
 
-    A routine's **fire** topic and its **standing request** topic, for a
-    routine the relay has actually seen. Nothing derived from the request
-    string: a name that reaches this function is compared against the routines
-    the engine found, so a topic that does not exist cannot be created from
-    here either.
+    A routine's **run** topics (`front-routine-<name>-<stamp>`) and its
+    **standing request** topic, for a routine the relay has actually seen.
+    Nothing derived from the request string: the routine name in the topic is
+    compared against the routines the engine found. A run topic that does not
+    exist yet *can* be named here — that is how `start` opens one — but only
+    for a known routine and only in the run-topic shape.
     """
-    for name in names:
-        if topic in (f"{FIRE_PREFIX}{name}", f"{STANDING_PREFIX}{name}"):
-            return True
-    return False
+    if topic.startswith(STANDING_PREFIX) and topic[len(STANDING_PREFIX):] in names:
+        return True
+    parsed = parse_run_topic(topic)
+    return parsed is not None and parsed[0] in names
 
 
 @dataclass
@@ -101,7 +104,7 @@ class Chat:
         if not allowed_topic(topic, names):
             return (
                 f"this relay only posts into #{ROUTINE_CHANNEL} routine topics "
-                f"({STANDING_PREFIX}<name> or {FIRE_PREFIX}<name>); "
+                f"({STANDING_PREFIX}<name> or {FIRE_PREFIX}<name>-<stamp>); "
                 f"{topic!r} is not one of them"
             )
         body = text.strip()
@@ -126,8 +129,8 @@ class Chat:
         The refusals are the relay's, not the view's: a retired routine has
         its standing request under ✔ and Front would be sent to read a
         document the realm has closed; a routine with no standing request has
-        nothing for Front to do. A routine with no fire topic yet is *not* a
-        refusal — the first fire is what creates the topic.
+        nothing for Front to do. A routine with no run yet is *not* a
+        refusal — every start creates its topic.
         """
         if not self.configured:
             return self.status()["reason"]
@@ -149,17 +152,24 @@ class Chat:
               stamp: str, names: set[str]) -> dict:
         """Post the fire that starts a new session, as the Developer.
 
-        The text is `routines.fire_line`, so the fire is recognised by the
-        same reader as the dispatcher's and told apart from it only by its
-        mark. One attempt and never a retry, for the same reason as `send`;
-        a failure after the request left is reported as *uncertain* — the
-        post may have landed and a second one would start a second run.
+        The post opens the run's own topic, `run_topic(name, stamp)`, and
+        names the routine's newest run as `Previous run:` the way the
+        dispatcher does. The text is `routines.fire_line`, so the fire is
+        recognised by the same reader as the dispatcher's and told apart from
+        it only by its mark. One attempt and never a retry, for the same
+        reason as `send`; a failure after the request left is reported as
+        *uncertain* — the post may have landed and a second one would start a
+        second run.
         """
         refused = self.start_check(row, name)
         if refused is not None:
             return {"sent": False, "uncertain": False, "error": refused}
-        topic = f"{FIRE_PREFIX}{name}"
-        text = fire_line(name, stamp, instruction)
+        topic = run_topic(name, stamp)
+        previous = row.get("latest_topic")
+        if previous == topic:
+            return {"sent": False, "uncertain": False,
+                    "error": f"a run of {name!r} already started this minute ({topic}); wait a minute"}
+        text = fire_line(name, stamp, instruction, previous)
         refused = self.check(topic, text, names)
         if refused is not None:
             return {"sent": False, "uncertain": False, "error": refused}
@@ -169,13 +179,13 @@ class Chat:
             return {
                 "sent": False, "uncertain": True,
                 "error": f"{type(error).__name__}: {error}",
-                "note": "the post may have landed; check the fire topic before starting again",
+                "note": f"the post may have landed; check #{ROUTINE_CHANNEL} › {topic} before starting again",
             }
         return {
             "sent": True, "uncertain": False,
             "channel": ROUTINE_CHANNEL, "topic": topic,
             "message_id": message_id, "text": text,
-            "first_fire": row.get("fire_topic") is None,
+            "previous": previous,
             "note": "the fire is live in the realm; the event queue will carry it back",
         }
 

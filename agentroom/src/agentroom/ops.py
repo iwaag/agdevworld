@@ -58,13 +58,12 @@ from agag.zulip import RESOLVED_TOPIC_PREFIX, QueueExpired, RateLimited, ZulipCl
 from .inflight import Inflight
 from .room import SYSTEM_REALM, bare_topic
 from .routines import (
-    NOTICE_LINE,
-    FIRE_PREFIX,
     ROUTINE_CHANNEL,
     ROUTINE_HISTORY,
+    STANDING_PREFIX,
     Schedule,
-    chat_of,
     is_routine_topic,
+    newest_run_topics,
     read_schedule,
     routine_rows,
     session_list,
@@ -151,19 +150,6 @@ def is_real(message: dict) -> bool:
     return not is_selfnote(message.get("content")) and message.get("sender_realm_str") != SYSTEM_REALM
 
 
-def is_resolve_notice(message: dict) -> bool:
-    """Zulip's own notice that somebody marked the topic (un)resolved.
-
-    Posted by the Notification Bot from the system realm, so a human typing
-    the same sentence is not one. The wording is `routines.NOTICE_LINE`, the
-    one place it is spelled.
-    """
-    return (
-        message.get("sender_realm_str") == SYSTEM_REALM
-        and NOTICE_LINE.search(str(message.get("content") or "")) is not None
-    )
-
-
 @dataclass
 class Topic:
     """One conversation, keyed by its **bare** name, across the ✔ rename."""
@@ -197,13 +183,6 @@ class Topic:
     #: first note is when this conversation started working there, which is
     #: what attributes a child to one fire rather than another.
     served: dict[tuple[str, str], dict] = field(default_factory=dict)
-    #: Zulip's own "marked this topic as resolved/unresolved" notices, kept
-    #: only with `history` (`operation_room` p6). They are not speech — a
-    #: notice never makes anybody owe a reply — but each one carries a message
-    #: id, and the id is what attributes a ✔ to *one fire* of a routine rather
-    #: than to the topic as a whole. The realm keeps them, so a relay restart
-    #: reads the same evidence back; no ledger of this service's own is needed.
-    notices: list[Message] = field(default_factory=list)
     #: Whether `history` is known to be a *window* rather than the whole topic:
     #: the sweep's read came back full, or a later post pushed an older one out.
     #: A session list built on a window must say so instead of implying that
@@ -212,11 +191,6 @@ class Topic:
 
     def add(self, message: dict) -> None:
         self.link(message)
-        if self.keep_history and is_resolve_notice(message):
-            found = Message.of(message)
-            if all(kept.id != found.id for kept in self.notices):
-                self.notices.append(found)
-                self.notices.sort(key=lambda kept: kept.id)
         if not is_real(message):
             return
         found = Message.of(message)
@@ -613,28 +587,40 @@ class Ops:
             except Exception as error:
                 errors.append({"channel": name, "error": str(error)})
                 continue
+            # The routine topics read *deep* and read even under ✔: every
+            # standing request (a ✔ there retires the routine) and the newest
+            # `DEEP_RUNS` run topics of each routine (`operation_room` p7).
+            # Every other topic, a routine's older runs included, follows the
+            # realm's rule: shallow while open, not read once resolved. This
+            # is what keeps one topic per run from being one deep call per
+            # run per resync, forever.
+            deep_names: set[str] = set()
+            if name == ROUTINE_CHANNEL:
+                bare_names = [bare_topic(live) for live in found]
+                deep_names = newest_run_topics(bare_names) | {
+                    bare for bare in bare_names if bare.startswith(STANDING_PREFIX)
+                }
             for live in found:
                 key = (name, bare_topic(live))
+                deep = key[1] in deep_names
                 # Resolved topics are not read on a sweep. `done` is a
                 # transition this engine watches happen, not a history it
                 # reconstructs — and reading every ✔ topic on the realm would
-                # multiply the one cost the plan caps. The exception is a
-                # routine's own two topics: a ✔ there is how a routine is
-                # retired, and there are sixteen of them, not a realm's worth.
-                if live.startswith(RESOLVED_TOPIC_PREFIX) and not is_routine_topic(name, key[1]):
+                # multiply the one cost the plan caps.
+                if live.startswith(RESOLVED_TOPIC_PREFIX) and not deep:
                     continue
-                # A routine's own topics are read deeper and kept whole: the
-                # chat view *is* that history, and a topic costs one call
-                # whatever depth it is read at.
-                deep = is_routine_topic(name, key[1])
+                # A routine's topics keep their history — the chat view *is*
+                # that history — and a topic costs one call whatever depth it
+                # is read at.
+                keep = is_routine_topic(name, key[1])
+                depth = ROUTINE_HISTORY if deep else TOPIC_LOOKBACK
                 topic = Topic(
-                    channel=name, topic=key[1], live_topic=live, keep_history=deep,
+                    channel=name, topic=key[1], live_topic=live, keep_history=keep,
                     resolved=live.startswith(RESOLVED_TOPIC_PREFIX),
                 )
                 try:
                     history = self._patient(
-                        client, client.topic_history, name, live,
-                        num_before=ROUTINE_HISTORY if deep else TOPIC_LOOKBACK,
+                        client, client.topic_history, name, live, num_before=depth,
                     )
                 except Exception as error:
                     errors.append({"channel": f"{name}/{live}", "error": str(error)})
@@ -642,9 +628,9 @@ class Ops:
                 for message in history:
                     topic.add(message)
                 # A read that came back full may have left older posts behind;
-                # the session list says so rather than calling the window the
+                # the session says so rather than calling the window the
                 # whole history.
-                if deep and len(history) >= ROUTINE_HISTORY:
+                if keep and len(history) >= depth:
                     topic.history_bounded = True
                 topics[key] = topic
             self._served_marks(client, name, marks, by_id, by_name, errors)
@@ -1034,19 +1020,18 @@ class Ops:
             "health": board["health"],
             "schedule": schedule.payload(),
             "routine": row,
+            # Each session carries its own `chat` (the run topic, whole): the
+            # server adds a top-level `chat` block saying whether this relay
+            # may post at all, and the two must not share a key (p6 found the
+            # panel reading the status as the history).
             "sessions": listed["sessions"],
-            # The routine's actual newest fire, whatever the filter left
+            # The routine's actual newest run, whatever the filter left
             # visible: host observation and "is this the latest" both hang
             # off it (`operation_room` p6).
+            "latest_topic": listed["latest_topic"],
             "latest_fire": listed["latest_fire"],
             "history": listed["history"],
             "filter": {"include_resolved": include_resolved},
-            # `chat_log`, not `chat`: the server adds a `chat` block saying
-            # whether this relay may post at all, and one key meaning two
-            # things silently replaced the history with the status — the panel
-            # then sat on "reading the fire topic…" forever. Found by looking
-            # at the screen, which is the only place it was visible.
-            "chat_log": chat_of(topics, name),
         }
 
     def inflight(self, name: str, now: float | None = None) -> dict:
@@ -1067,9 +1052,11 @@ class Ops:
             topics = dict(self._topics)
             rosters = {i: r for i, r in self._rosters.items() if r is not None}
             retired = set(self._retired)
-        sessions = sessions_of(topics, name, {})
+        sessions = sessions_of(topics, name, {}, now=now)
         session = sessions[0] if sessions else None
-        watched: list[tuple[str, str]] = [(ROUTINE_CHANNEL, f"{FIRE_PREFIX}{name}")]
+        watched: list[tuple[str, str]] = []
+        if session is not None:
+            watched.append((ROUTINE_CHANNEL, session["topic"]))
         for node in (session or {}).get("nodes", []):
             watched.append((node["channel"], node["topic"]))
         look = Inflight(roots=self.agent_roots)
@@ -1093,7 +1080,8 @@ class Ops:
             "routine": name,
             "configured": bool(self.agent_roots),
             "session": None if session is None else {
-                "fire": session["fire"], "nodes": len(session["nodes"]),
+                "topic": session["topic"], "fire": session["fire"],
+                "nodes": len(session["nodes"]),
             },
             "topics": rows,
             "agents": sorted(agents.values(), key=lambda row: row["instance"]),

@@ -186,6 +186,32 @@ board with its existing detail popup; the dashboard is the primary routine
 workflow. Each world view links back to the dashboard. No eighth scene is added.
 `/?parts=graph` remains the standalone snapshot/explicit-refresh graph workbench.
 
+### Two windows (`operation_room` p8)
+
+The dashboard holds no state of its own — every pane is the relay's memory
+re-read every 5 s (`/inflight` every 15 s) — so a second window follows the
+first without any wiring: instructions in one window on `/`, a monitoring
+window on `/?routine=<name>` beside it or on another display, the cost gauge
+in a third. Measured on the real system: the relay reflects a Zulip change
+before the HTTP reply reaches the browser that made it, and another window
+shows it on its next tick (1.6–3.7 s observed, 5 s worst case). A second
+window is 40 loopback requests a minute and zero Zulip calls.
+
+What is *not* shared, on purpose: the routine and session selection, the
+pending-fire card, and the display preferences until a reload (they live in
+`localStorage`, one copy per browser profile). Two things to know before
+leaving a monitoring window open:
+
+- Tick **Show resolved** in it. Under the default a ✔ removes the run being
+  watched from the list and says so; with it on, the chip turns `✔ resolved`.
+- The Phaser views (`?view=ops`, `?view=routines`) make no requests after
+  load — they refresh on ⟳ only. A monitoring window is the dashboard.
+
+And one thing about experiments on run topics: **✔ is free, un-✔ is not.**
+Un-resolving a `#front` run topic more than 60 s after its ✔ makes Zulip post
+a notification line into an unresolved topic, which Front serves as a paid
+run. Resolve-only measurements, or undo inside Zulip's 60 s grace period.
+
 ## Cost gauge (`gauge_panel`)
 
 `/?parts=gauge` is a separate page meant for its own window beside the

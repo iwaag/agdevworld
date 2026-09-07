@@ -13,6 +13,7 @@ import time
 from pathlib import Path
 
 from .chat import CHAT_ENV_VARIABLE, DEFAULT_MAX_CHARS, Chat
+from .cost import PRICES_VARIABLE, Cost, prices_path_from_env
 from .inflight import ROOTS_VARIABLE, parse_roots
 from .ops import DEFAULT_STALLED_SECONDS, Ops
 from .room import Room
@@ -55,6 +56,11 @@ def main(argv: list[str] | None = None) -> int:
     port = int(os.environ.get("AGENTROOM_PORT", DEFAULT_PORT))
     ttl = float(os.environ.get("AGENTROOM_CACHE_SECONDS", DEFAULT_CACHE_SECONDS))
     room = Room(env_path=path, ttl_seconds=ttl)
+    # The cost gauge reads the same roots `/inflight` does and needs no
+    # credential at all; without roots there is nothing to read and /cost
+    # says so.
+    roots = parse_roots(os.environ.get(ROOTS_VARIABLE, ""))
+    cost = Cost(roots, prices_path_from_env()) if roots else None
 
     stalled = float(os.environ.get("AGENTROOM_STALLED_SECONDS", DEFAULT_STALLED_SECONDS))
     ops_env = os.environ.get(OPS_ENV_VARIABLE, "")
@@ -72,7 +78,7 @@ def main(argv: list[str] | None = None) -> int:
         # several times a fire would be the more fragile arrangement.
         ops = Ops(
             env_path=ops_path, stalled_seconds=stalled, schedule_path=schedule_path,
-            agent_roots=parse_roots(os.environ.get(ROOTS_VARIABLE, "")),
+            agent_roots=roots,
         )
 
     chat_env = os.environ.get(CHAT_VARIABLE, "")
@@ -115,15 +121,24 @@ def main(argv: list[str] | None = None) -> int:
             print(f"  {row['name']:<12} {row['state']:<9} {row['answer']['state']:<11} "
                   f"{row['posts']} posts")
         print("chat: " + ("configured" if chat.configured else chat.status()["reason"]))
+        if cost is None:
+            print(f"cost: not configured ({ROOTS_VARIABLE} unset)")
+        else:
+            scanned = cost.scan()
+            table = scanned["prices"]
+            print(f"cost: {len(scanned['rows'])} records in {len(scanned['roots'])} roots; "
+                  f"prices {'ok' if table.error is None else table.error} "
+                  f"({table.path or PRICES_VARIABLE + ' unset'})")
         return 0
 
     if ops is not None:
         ops.start()
-    server = build_server(host, port, room, ops, chat)
+    server = build_server(host, port, room, ops, chat, cost)
     print(
         f"agentroom listening on http://{host}:{port} (cache {ttl:g}s, "
         + (f"ops on, stalled at {stalled:g}s, " if ops else "ops off, ")
-        + ("chat on)" if chat.configured else "chat read-only)"),
+        + ("chat on, " if chat.configured else "chat read-only, ")
+        + (f"cost over {len(roots)} roots)" if cost else "cost off)"),
         flush=True,
     )
     try:

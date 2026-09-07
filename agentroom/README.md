@@ -226,6 +226,40 @@ that hides a box is a habit and not a rule:
   starts a paid Front run, and a retry would buy a second one for a request the
   human made once — in exactly the case where the first post may have landed.
 
+## `/cost` — what the backends cost (`gauge_panel`)
+
+`GET /cost` reads this host's `ag.agent-run.v1` records — the same
+`AGENTROOM_AGENT_ROOTS` that `/inflight` walks, `<root>/.local/agent/<role>/run-*.json`
+— and never Zulip, so a view may poll it. It answers `ag.cost.v1`:
+
+- `totals.{today,days7,days30,all}` and `days[]` (the last 14 local days),
+  each with `runs`, `failed`, `usd_reported`, `usd_estimated`, the token
+  totals and a `kinds` histogram, plus `by_harness` on the totals.
+- `table[]` — one row per instance × role × harness × model.
+- `routines[]` — per routine, the sessions the ops engine currently lists
+  (the same three the operation room draws, from links it already holds),
+  each with the runs matched to its conversations by `channel`/`topic`,
+  broken down per agent, and an `attribution` count saying how many were
+  matched from the record's own fields and how many from the mtime window.
+- `unattributed`, `recent[]` (last 40 rows), `roots[]` (what was readable),
+  `missing[]` (roster instances with no root on this host — *unknown*, not
+  quiet), `prices` (the table in use).
+
+**Five cost kinds**, decided per harness by `prices.json` (or the file
+`AGENTROOM_PRICES` names): `reported` (the harness said USD — claude_code),
+`estimated` (tokens × the table — a metered key, gemini_cli), `subscription`
+(the plan is metered, not the run — codex on a ChatGPT login, Antigravity;
+tokens shown, **no USD invented**), `local` (ollama, 0) and `unknown` (no
+usage in the record, or a metered model the table does not price). Reported
+and estimated USD are always two numbers, never one. The table is re-read
+when its mtime changes.
+
+Records written before `gauge_panel` step 1 carry neither a time nor a
+conversation: their end is the file's mtime, their start is derived from
+`duration_ms`, and their conversation is the generation directory whose
+mtime span overlaps the run's (`attribution: "window"`, 30 s slack, each
+directory spent once). New records say it themselves (`"fields"`).
+
 ## `/ops` — the state engine
 
 Its module docstring (`src/agentroom/ops.py`) is the reference; this is the

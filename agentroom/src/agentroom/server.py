@@ -28,15 +28,18 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, unquote, urlparse
 
 from .chat import Chat
+from .cost import Cost
+from .inflight import ROOTS_VARIABLE
 from .ops import Ops
 from .room import Room
 
 ROUTES = ("/healthz", "/agents", "/work", "/ops", "/routines", "/routines/<name>",
-          "/inflight/<name>")
+          "/inflight/<name>", "/cost")
 WRITE_ROUTES = ("/ops/confirm", "/chat", "/routines/<name>/start")
 
 
-def make_handler(room: Room, ops: Ops | None = None, chat: Chat | None = None):
+def make_handler(room: Room, ops: Ops | None = None, chat: Chat | None = None,
+                 cost: Cost | None = None):
     class Handler(BaseHTTPRequestHandler):
         server_version = "agentroom/0.1.0"
 
@@ -130,6 +133,32 @@ def make_handler(room: Room, ops: Ops | None = None, chat: Chat | None = None):
                                             include_resolved=not hide)
                         self._write_json(404 if found.get("error") else 200,
                                          self._with_chat(found))
+                elif path == "/cost":
+                    # Host files only, like /inflight, so a view may poll it.
+                    # The ops engine is asked for the roster and each
+                    # routine's sessions — links it already holds, never a
+                    # Zulip read — so without it the board still comes back,
+                    # without the routine section, and says so.
+                    if cost is None:
+                        self._write_json(503, {
+                            "error": "the cost gauge is not configured; "
+                                     f"set {ROOTS_VARIABLE} to the instance roots on this host",
+                        })
+                    else:
+                        roster: list[str] = []
+                        sessions: dict[str, list[dict]] = {}
+                        note = None
+                        if ops is not None:
+                            board = ops.snapshot()
+                            roster = [one["instance"] for one in board["instances"]]
+                            for row in ops.routines()["routines"]:
+                                found = ops.routine(row["name"])
+                                sessions[row["name"]] = found.get("sessions") or []
+                        else:
+                            note = "no ops engine: routine sessions and the roster are not known"
+                        payload = cost.board(roster=roster, routine_sessions=sessions)
+                        payload["note"] = note
+                        self._write_json(200, payload)
                 elif path.startswith("/inflight/"):
                     # The one route a view may poll at a few seconds. It reads
                     # this host's directories and never Zulip.
@@ -293,6 +322,7 @@ def make_handler(room: Room, ops: Ops | None = None, chat: Chat | None = None):
 
 
 def build_server(
-    host: str, port: int, room: Room, ops: Ops | None = None, chat: Chat | None = None
+    host: str, port: int, room: Room, ops: Ops | None = None, chat: Chat | None = None,
+    cost: Cost | None = None,
 ) -> ThreadingHTTPServer:
-    return ThreadingHTTPServer((host, port), make_handler(room, ops, chat))
+    return ThreadingHTTPServer((host, port), make_handler(room, ops, chat, cost))

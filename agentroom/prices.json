@@ -1,0 +1,20 @@
+{
+  "_": "Cost kinds per harness and USD per million tokens per model, read by the relay's /cost. A model missing here is `unknown`, never 0. Prices are edited by hand; write the source and the date beside a number you change.",
+  "harnesses": {
+    "claude_code": "reported",
+    "gemini_cli": "metered",
+    "codex": "subscription",
+    "agy": "subscription",
+    "agcode": "local",
+    "opencode": "local",
+    "fake": "local"
+  },
+  "models": {
+    "google/gemini-2.5-flash": {
+      "input": 0.30,
+      "cached_input": 0.075,
+      "output": 2.50,
+      "note": "ai.google.dev/pricing as remembered on 2026-09-07; verify before trusting an estimate"
+    }
+  }
+}

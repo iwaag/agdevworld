@@ -745,3 +745,82 @@ def test_a_full_history_window_is_reported_as_bounded():
 def ROUTINE_HISTORY_LIMIT():
     from agentroom.routines import ROUTINE_HISTORY
     return ROUTINE_HISTORY
+
+
+# --- starting a session by hand (operation_room p6 step 2) ------------------
+
+
+class RecordingClient:
+    def __init__(self, fail=None):
+        self.sent = []
+        self.fail = fail
+
+    def send_to_channel(self, channel, topic, content):
+        if self.fail:
+            raise self.fail
+        self.sent.append((channel, topic, content))
+        return 5100
+
+
+def started_chat(tmp_path, client=None):
+    client = client or RecordingClient()
+    return Chat(env_path=tmp_path / "developer.env", client_factory=lambda path: client), client
+
+
+def live_row(**overrides):
+    row = {"name": "papers", "retired": False, "fire_topic": "front-routine-papers",
+           "request": {"message_id": 1, "text": "the standing request"}}
+    row.update(overrides)
+    return row
+
+
+def test_a_manual_start_posts_the_marked_fire_line_as_the_developer(tmp_path):
+    chat, client = started_chat(tmp_path)
+    found = chat.start(live_row(), "papers", " one paper only ", stamp="2026-09-07T05:00Z",
+                       names={"papers"})
+    assert found["sent"] is True and found["message_id"] == 5100
+    assert found["topic"] == "front-routine-papers" and found["first_fire"] is False
+    channel, topic, text = client.sent[0]
+    assert (channel, topic) == ("front", "front-routine-papers")
+    assert text == found["text"] == fire_line("papers", "2026-09-07T05:00Z", "one paper only")
+    assert fire_origin(text) == "manual" and FIRE_LINE_MATCH(text) == "papers"
+
+
+def test_the_first_fire_of_a_routine_with_no_fire_topic_is_allowed(tmp_path):
+    # The topic does not exist until the first post creates it; a relay that
+    # required it would never let a new routine start from the screen.
+    chat, client = started_chat(tmp_path)
+    found = chat.start(live_row(fire_topic=None), "papers", None, stamp="s", names={"papers"})
+    assert found["sent"] is True and found["first_fire"] is True
+    assert client.sent[0][1] == "front-routine-papers"
+
+
+def test_a_retired_or_requestless_routine_is_refused_before_anything_is_posted(tmp_path):
+    chat, client = started_chat(tmp_path)
+    retired = chat.start(live_row(retired=True), "papers", None, stamp="s", names={"papers"})
+    assert retired["sent"] is False and "retired" in retired["error"]
+    blank = chat.start(live_row(request=None), "papers", None, stamp="s", names={"papers"})
+    assert blank["sent"] is False and "standing request" in blank["error"]
+    unknown = chat.start(None, "ghosts", None, stamp="s", names={"papers"})
+    assert unknown["sent"] is False and "ghosts" in unknown["error"]
+    assert client.sent == []
+
+
+def test_an_unconfigured_relay_refuses_to_start_and_names_the_variable(tmp_path):
+    found = Chat(env_path=None).start(live_row(), "papers", None, stamp="s", names={"papers"})
+    assert found["sent"] is False and "AGENTROOM_CHAT_ZULIP_ENV" in found["error"]
+
+
+def test_a_failed_post_is_reported_as_uncertain_and_never_retried(tmp_path):
+    chat, client = started_chat(tmp_path, RecordingClient(fail=ConnectionError("reset")))
+    found = chat.start(live_row(), "papers", None, stamp="s", names={"papers"})
+    assert found["sent"] is False and found["uncertain"] is True
+    assert "may have landed" in found["note"]
+
+
+def test_an_over_long_instruction_is_refused_like_any_other_post(tmp_path):
+    chat, client = started_chat(tmp_path)
+    chat.max_chars = 300
+    found = chat.start(live_row(), "papers", "x" * 300, stamp="s", names={"papers"})
+    assert found["sent"] is False and found["uncertain"] is False
+    assert client.sent == []

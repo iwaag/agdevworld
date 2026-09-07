@@ -34,7 +34,7 @@ from typing import Callable
 from agag.selfnote import SELFNOTE_MARKER
 from agag.zulip import ZulipClient
 
-from .routines import FIRE_PREFIX, ROUTINE_CHANNEL, STANDING_PREFIX
+from .routines import FIRE_PREFIX, ROUTINE_CHANNEL, STANDING_PREFIX, fire_line
 
 #: The credential the chat writes with. Deliberately its own variable.
 CHAT_ENV_VARIABLE = "AGENTROOM_CHAT_ZULIP_ENV"
@@ -119,6 +119,65 @@ class Chat:
                 f"instruction belongs in the standing request instead"
             )
         return None
+
+    def start_check(self, row: dict | None, name: str) -> str | None:
+        """Why a new session of this routine may not be started, or None.
+
+        The refusals are the relay's, not the view's: a retired routine has
+        its standing request under ✔ and Front would be sent to read a
+        document the realm has closed; a routine with no standing request has
+        nothing for Front to do. A routine with no fire topic yet is *not* a
+        refusal — the first fire is what creates the topic.
+        """
+        if not self.configured:
+            return self.status()["reason"]
+        if row is None:
+            return f"no routine named {name!r} is known to this relay"
+        if row.get("retired"):
+            return (
+                f"routine {name!r} is retired: its standing request carries ✔; "
+                f"un-resolve #{ROUTINE_CHANNEL} › {STANDING_PREFIX}{name} to start it again"
+            )
+        if not row.get("request"):
+            return (
+                f"routine {name!r} has no standing request to run; write one in "
+                f"#{ROUTINE_CHANNEL} › {STANDING_PREFIX}{name} first"
+            )
+        return None
+
+    def start(self, row: dict | None, name: str, instruction: str | None, *,
+              stamp: str, names: set[str]) -> dict:
+        """Post the fire that starts a new session, as the Developer.
+
+        The text is `routines.fire_line`, so the fire is recognised by the
+        same reader as the dispatcher's and told apart from it only by its
+        mark. One attempt and never a retry, for the same reason as `send`;
+        a failure after the request left is reported as *uncertain* — the
+        post may have landed and a second one would start a second run.
+        """
+        refused = self.start_check(row, name)
+        if refused is not None:
+            return {"sent": False, "uncertain": False, "error": refused}
+        topic = f"{FIRE_PREFIX}{name}"
+        text = fire_line(name, stamp, instruction)
+        refused = self.check(topic, text, names)
+        if refused is not None:
+            return {"sent": False, "uncertain": False, "error": refused}
+        try:
+            message_id = self.client().send_to_channel(ROUTINE_CHANNEL, topic, text)
+        except Exception as error:
+            return {
+                "sent": False, "uncertain": True,
+                "error": f"{type(error).__name__}: {error}",
+                "note": "the post may have landed; check the fire topic before starting again",
+            }
+        return {
+            "sent": True, "uncertain": False,
+            "channel": ROUTINE_CHANNEL, "topic": topic,
+            "message_id": message_id, "text": text,
+            "first_fire": row.get("fire_topic") is None,
+            "note": "the fire is live in the realm; the event queue will carry it back",
+        }
 
     def send(self, topic: str, text: str, names: set[str]) -> dict:
         """Post it, or say why not. One attempt, never a retry.

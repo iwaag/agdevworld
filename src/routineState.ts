@@ -264,6 +264,43 @@ export async function sendChat(
   return { sent: true, message_id: payload.message_id }
 }
 
+// The other write: start a new session of a routine. The relay composes the
+// fire line the dispatcher would have posted, marked as started by hand, and
+// posts it as the Developer — one paid Front run, deliberately. `uncertain`
+// is the relay saying the post may have landed although it could not confirm
+// it; the view reports that and never reposts on its own.
+export async function startSession(
+  name: string,
+  instruction: string,
+): Promise<{ sent: boolean; uncertain: boolean; message_id?: number; first_fire?: boolean; error?: string; note?: string }> {
+  let response: Response
+  try {
+    response = await fetch(`${BASE}/routines/${encodeURIComponent(name)}/start`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ instruction }),
+      signal: AbortSignal.timeout(20000),
+    })
+  } catch (error) {
+    // No answer at all: the request may or may not have reached the relay.
+    const timedOut = error instanceof DOMException && error.name === 'TimeoutError'
+    return {
+      sent: false, uncertain: timedOut,
+      error: timedOut ? 'the relay did not answer in time' : `the agentroom relay is not answering on ${BASE}`,
+    }
+  }
+  const payload = (await response.json().catch(() => undefined)) as
+    | { sent?: boolean; uncertain?: boolean; message_id?: number; first_fire?: boolean; error?: string; note?: string }
+    | undefined
+  if (!response.ok || !payload?.sent) {
+    return {
+      sent: false, uncertain: Boolean(payload?.uncertain),
+      error: payload?.error ?? `agentroom answered ${response.status}`, note: payload?.note,
+    }
+  }
+  return { sent: true, uncertain: false, message_id: payload.message_id, first_fire: payload.first_fire, note: payload.note }
+}
+
 export function routineHeadline(board: Pick<RoutineBoard, 'health' | 'schedule' | 'chat'>): string {
   if (board.health.state !== 'live') {
     return `⚠ UNKNOWN — ${board.health.reason}. Every row below is the last thing known, not the state now.`

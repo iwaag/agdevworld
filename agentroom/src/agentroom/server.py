@@ -23,6 +23,7 @@ a page that can already reach the port.
 from __future__ import annotations
 
 import json
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import unquote, urlparse
 
@@ -32,7 +33,7 @@ from .room import Room
 
 ROUTES = ("/healthz", "/agents", "/work", "/ops", "/routines", "/routines/<name>",
           "/inflight/<name>")
-WRITE_ROUTES = ("/ops/confirm", "/chat")
+WRITE_ROUTES = ("/ops/confirm", "/chat", "/routines/<name>/start")
 
 
 def make_handler(room: Room, ops: Ops | None = None, chat: Chat | None = None):
@@ -196,10 +197,51 @@ def make_handler(room: Room, ops: Ops | None = None, chat: Chat | None = None):
                 return
             self._write_json(200, found)
 
+        def _start(self, name: str) -> None:
+            """Start a new session of one routine (`operation_room` p6).
+
+            The same door as `/chat` — the Developer's credential, `#front`
+            only — posting the fire line the dispatcher would have posted,
+            with the operation room's mark. Refusals are 409 because the
+            request was well formed and the routine's *state* declined it.
+            """
+            if chat is None or not chat.configured:
+                reason = (chat.status()["reason"] if chat else
+                          "this relay was built without a chat credential")
+                self._write_json(503, {"sent": False, "uncertain": False, "error": reason})
+                return
+            if ops is None:
+                self._write_json(503, {
+                    "sent": False, "uncertain": False,
+                    "error": "the ops engine is not configured, so no routine is known",
+                })
+                return
+            body = self._body()
+            if body is None:
+                return
+            instruction = body.get("instruction")
+            if instruction is not None and not isinstance(instruction, str):
+                self._write_json(400, {"error": "instruction must be a string"})
+                return
+            rows = ops.routines()["routines"]
+            row = next((one for one in rows if one["name"] == name), None)
+            stamp = time.strftime("%Y-%m-%dT%H:%MZ", time.gmtime())
+            found = chat.start(row, name, instruction, stamp=stamp,
+                               names={one["name"] for one in rows})
+            if found["sent"]:
+                self._write_json(200, found)
+            elif found.get("uncertain"):
+                self._write_json(502, found)
+            else:
+                self._write_json(409, found)
+
         def do_POST(self) -> None:  # noqa: N802
             path = urlparse(self.path).path.rstrip("/") or "/"
             if path == "/chat":
                 self._chat()
+                return
+            if path.startswith("/routines/") and path.endswith("/start"):
+                self._start(unquote(path[len("/routines/"):-len("/start")]))
                 return
             if path != "/ops/confirm":
                 self._write_json(404, {"error": f"no POST route {path}",

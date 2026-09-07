@@ -1,6 +1,6 @@
 import { loadOpsBoard } from './opsState'
 import { initChatPanel } from './chatPanel'
-import { renderSessionGraph } from './sessionGraph'
+import { renderSessionGraph, type GraphMode } from './sessionGraph'
 import { loadRoutines, loadRoutine, loadInflight, startSession, routineHeadline, ago, at, type RoutineBoard, type RoutineDetail, type RoutineSession } from './routineState'
 import './operationParts.css'
 
@@ -42,7 +42,7 @@ export async function initOperationDashboard(): Promise<void> {
         <p class="ns-result" role="status"></p>
       </details>
       <div class="session-list"></div><p class="session-history"></p></section>
-    <section class="flow-pane"><h2>Conversation flow</h2><div class="standing-request"></div><div class="parts-graph"></div><div class="parts-inflight">Host observation not loaded.</div></section>
+    <section class="flow-pane"><div class="pane-head"><h2>Conversation flow</h2><div class="graph-mode" role="radiogroup" aria-label="Flow rendering"><button type="button" data-mode="compact">Compact</button><button type="button" data-mode="detailed">Detailed</button></div></div><div class="standing-request"></div><div class="parts-graph"></div><div class="parts-inflight">Host observation not loaded.</div></section>
     <aside class="chat-pane"><h2>Fire conversation</h2><p class="chat-span-note"></p><div class="chat-mount"></div></aside></div>`
   document.body.append(host)
   const find = (selector: string) => host.querySelector<HTMLElement>(selector)!
@@ -63,6 +63,15 @@ export async function initOperationDashboard(): Promise<void> {
   // before it exists is what lets the list land on it when it arrives.
   let starting = false
   const showResolved = find('.show-resolved input') as HTMLInputElement
+  // Compact by default: the same topology drawn small. Detailed keeps the
+  // full cards. Persisted like Show resolved.
+  let graphMode: GraphMode = readPref<string>('graphMode', 'compact') === 'detailed' ? 'detailed' : 'compact'
+  function drawGraphMode() {
+    for (const button of host.querySelectorAll<HTMLButtonElement>('.graph-mode button')) {
+      button.setAttribute('aria-pressed', String(button.dataset.mode === graphMode))
+    }
+  }
+  drawGraphMode()
   showResolved.checked = readPref('showResolved', false)
   let pendingFire: { routine: string; id: number; at: number } | undefined
   const chat = initChatPanel({ mount: find('.chat-mount'), managed: true, onRefresh: () => { void refresh() } })
@@ -114,11 +123,11 @@ export async function initOperationDashboard(): Promise<void> {
     const index = detail.sessions.findIndex(session => sessionKey(session) === selection.session)
     const session = detail.sessions[index]
     if (session) {
-      const signature = JSON.stringify([selection.routine, selection.session, detail.health.state, detail.health.reason, session])
+      const signature = JSON.stringify([selection.routine, selection.session, graphMode, detail.health.state, detail.health.reason, session])
       if (signature !== graphSignature) {
         const viewport = graph.querySelector('.graph-viewport')
         const previousScroll = scroll ? undefined : [viewport?.scrollLeft ?? 0, viewport?.scrollTop ?? 0]
-        renderSessionGraph(graph, detail, session)
+        renderSessionGraph(graph, detail, session, graphMode)
         const nextViewport = graph.querySelector('.graph-viewport')
         if (previousScroll && nextViewport) { nextViewport.scrollLeft = previousScroll[0]!; nextViewport.scrollTop = previousScroll[1]! }
         graphSignature = signature
@@ -212,6 +221,14 @@ export async function initOperationDashboard(): Promise<void> {
     void refresh()
   }
   startButton.onclick = () => { void start() }
+  for (const button of host.querySelectorAll<HTMLButtonElement>('.graph-mode button')) {
+    button.onclick = () => {
+      const mode = button.dataset.mode === 'detailed' ? 'detailed' : 'compact'
+      if (mode === graphMode) return
+      graphMode = mode; writePref('graphMode', mode); drawGraphMode()
+      if (detail) drawSession()
+    }
+  }
   showResolved.onchange = () => {
     // Routine, chat draft and pending fire stay; only the list is re-read.
     // A selection that becomes hidden falls back to the newest visible one

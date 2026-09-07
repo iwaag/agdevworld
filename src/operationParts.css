@@ -111,3 +111,16 @@
 .session-card .resolution.resolved { color: #6ee0b0; } .session-card .resolution.reopened { color: #d2adff; }
 .session-card .resolution.open { color: #72bbff; } .session-card .resolution.unknown { color: #f4bd57; }
 .session-history { font-size: 11px; color: #829bb4; margin: 8px 0 0; }
+/* Compact / Detailed flow (operation_room p6). Same topology, two card sizes;
+   sizes are set inline by the renderer from METRICS, styling lives here. */
+.graph-mode { display: flex; gap: 0; }
+.graph-mode button { padding: 4px 10px; font-size: 12px; border-radius: 0; }
+.graph-mode button:first-child { border-radius: 6px 0 0 6px; } .graph-mode button:last-child { border-radius: 0 6px 6px 0; }
+.graph-mode button[aria-pressed=true] { background: #1f3b54; border-color: #88d6ff; box-shadow: none; }
+.operation-parts .graph-node.compact { flex-direction: row; align-items: center; gap: 8px; padding: 6px 8px; }
+.graph-node.compact .gn-icon { font-size: 18px; width: 22px; text-align: center; flex: none; }
+.graph-node.compact .gn-text { display: flex; flex-direction: column; min-width: 0; gap: 1px; }
+.graph-node.compact strong { display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: 12px; -webkit-line-clamp: unset; }
+.graph-node.compact small { display: block; font-size: 10.5px; -webkit-line-clamp: 1; }
+.graph-node[aria-pressed=true] { box-shadow: 0 0 0 2px #88d6ff inset; }
+.graph-selected { font-size: 11px; color: #b2c3d3; margin: 8px 0 0; overflow-wrap: anywhere; }

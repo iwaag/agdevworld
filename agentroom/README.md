@@ -107,22 +107,30 @@ writes only to this process's memory (see `POST /ops/confirm`).
   `{sent, channel, topic, message_id}`, `403` with the reason for anything the
   rules decline, `503` when no chat credential is configured. See below.
 
-- `POST /routines/<name>/start` → the other write (`operation_room` p6): start
-  a new session of one routine by posting the trigger-shaped fire line, marked
-  "started by hand from the operation room", into its fire topic as the
-  Developer. Body `{"instruction": "…"}` is optional and is appended as
-  "Instruction for this run". Answers `{sent: true, message_id, topic, text,
-  first_fire}`; `409` with the reason when the routine is retired, has no
-  standing request or is unknown; `502` with `uncertain: true` when the post
-  left and Zulip did not confirm it — nothing is retried, because a second
-  post is a second paid run.
+- `POST /routines/<name>/start` → the other write (`operation_room` p6, p7):
+  start a new run of one routine by posting the trigger-shaped fire line,
+  marked "started by hand from the operation room", into a **new run topic**
+  `front-routine-<name>-<stamp>` as the Developer, naming the routine's
+  newest run as `Previous run:` the way the dispatcher does. Body
+  `{"instruction": "…"}` is optional and is appended as "Instruction for this
+  run". Answers `{sent: true, message_id, topic, previous, text}`; `409` with
+  the reason when the routine is retired, has no standing request, is unknown,
+  or already started a run this minute (same topic); `502` with `uncertain:
+  true` when the post left and Zulip did not confirm it — nothing is retried,
+  because a second post is a second paid run.
 
-`GET /routines/<name>?resolved=hide` drops sessions a human has ✔'d before
-the three-session limit is applied; every session carries `id`, `start_id`,
-`end_id`, `origin` (`manual` / `scheduled` / `unknown`, read from the fire's
-own wording) and `resolution` (attributed to one fire through Zulip's own
-resolve notices, `unknown` for an older span with none), and the payload's
-`history` block says whether the 200-post window was full.
+**A session is a run topic** (`operation_room` p7). `GET /routines/<name>`
+lists the routine's run topics newest first by stamp, each carrying `id`
+(the fire's message id), `topic`, `stamp`, `fire`, `origin` (`manual` /
+`scheduled` / `unknown`, read from the fire's own wording), `previous` (the
+run topic the fire names), `answer`, `resolution` (`resolved` or `open` —
+the topic's own ✔, nothing else), `history` (the run's post window), `chat`
+(the run topic whole) and the linked-conversation tree. `?resolved=hide`
+drops ✔'d runs before the three-session limit is applied. The payload's
+`history` block says how many run topics are held and the sweep's rule: the
+newest `DEEP_RUNS` (3) run topics of a routine are read whole and read even
+under ✔; older runs are read shallow while open and not at all once
+resolved, so a resolved run older than that is in Zulip, not here.
 
 A Zulip failure answers `502` with the error text, so the view can say the
 room is unreadable instead of showing an empty one.
@@ -130,8 +138,8 @@ room is unreadable instead of showing an empty one.
 ## `/routines` — the routine board
 
 A routine lives in three places and this is the first thing that reads all
-three: the standing request in `#front` › `routine-<name>`, the fire
-conversation in `#front` › `front-routine-<name>`, and the dispatcher's
+three: the standing request in `#front` › `routine-<name>`, the run topics
+`#front` › `front-routine-<name>-<stamp>` (one per run), and the dispatcher's
 `schedule.json`. The realm half costs **no extra Zulip call** — those topics
 are already in the `/ops` engine's memory, read by the same sweep and kept
 current by the same queue.
@@ -207,7 +215,7 @@ Three rules, all enforced in the relay rather than in the view, because a view
 that hides a box is a habit and not a rule:
 
 - **`#front`, and only a routine topic of a routine this relay already sees**
-  (`routine-<name>` or `front-routine-<name>`). The GUI cannot write into
+  (`routine-<name>` or `front-routine-<name>-<stamp>`). The GUI cannot write into
   another agent's channel: routing work is Front's job, which is what Single
   Entrance means.
 - **A length guard.** This realm's `max_message_length` is 10000 and Zulip

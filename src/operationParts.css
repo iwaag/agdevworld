@@ -108,7 +108,7 @@
    Only positively resolved sessions hide; unknown stays on the board. */
 .pane-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
 .show-resolved { font-size: 12px; color: #b2c3d3; display: flex; align-items: center; gap: 6px; cursor: pointer; }
-.session-card .resolution.resolved { color: #6ee0b0; } .session-card .resolution.reopened { color: #d2adff; }
+.session-card .resolution.resolved { color: #6ee0b0; }
 .session-card .resolution.open { color: #72bbff; } .session-card .resolution.unknown { color: #f4bd57; }
 .session-history { font-size: 11px; color: #829bb4; margin: 8px 0 0; }
 /* Compact / Detailed flow (operation_room p6). Same topology, two card sizes;
@@ -135,3 +135,8 @@
 .routine-card .rc-more { display: flex; flex-direction: column; gap: 3px; padding-top: 4px; border-top: 1px dashed #354b61; }
 .routine-card.retired { opacity: .72; } .routine-card.retired[aria-pressed=true] { opacity: 1; }
 .routine-card.retired .rc-title { text-decoration: line-through #829bb4; text-decoration-thickness: 1px; }
+
+/* The fire's own pointer to the run before it (p7). A link when that run is
+   listed, plain text otherwise. */
+.session-card .session-prev { color: #9fb6ff; }
+.session-card .session-prev[role="link"] { text-decoration: underline; cursor: pointer; }

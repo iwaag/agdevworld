@@ -924,7 +924,8 @@ function renderRoutine(
       ['answer', routine.answer.state],
       ['answered by', routine.answer.answer?.by],
       ['ack', routine.answer.ack ? at(routine.answer.ack.at) : undefined],
-      ['fire topic', routine.fire_topic ? `#front › ${routine.fire_topic}` : 'none on the realm'],
+      ['latest run', routine.latest_topic ? `#front › ${routine.latest_topic}` : 'none on the realm'],
+      ['runs held', `${routine.runs} (${routine.open_runs} open)`],
       ['posts in it', routine.posts],
     ]),
   )
@@ -994,11 +995,13 @@ function renderRoutine(
     const card = el('div', 'dp-session')
     const head = el('div', 'dp-session-head')
     head.append(
-      el('span', undefined, session.fire ? `fire #${session.fire.message_id}` : 'no fire'),
+      el('span', undefined, session.stamp ? `run ${session.stamp}` : session.topic),
+      el('span', undefined, session.fire ? `fire #${session.fire.message_id}` : 'no fire line'),
+      el('span', undefined, session.resolution.state),
     )
     head.append(el('span', 'dp-session-when', session.fire ? at(session.fire.at) : ''))
     card.append(head)
-    if (session.note) card.append(el('p', 'dp-msg', session.note))
+    if (!session.fire) card.append(el('p', 'dp-msg', session.origin_evidence))
     if (session.nodes.length === 0) {
       card.append(el('p', 'dp-msg', 'nothing was opened on behalf of this fire'))
     }

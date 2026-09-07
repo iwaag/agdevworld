@@ -6,12 +6,14 @@
 // it would come back as "a thin wrapper over the Front agent's own Zulip
 // conversation in a later phase"; this is that phase.
 //
-// What it shows is one routine's fire topic, `#front` › `front-routine-<name>`,
-// exactly as the realm holds it: real posts only, nobody's summary, no local
-// history of its own. What it sends is one post into that topic **as the
-// Developer**, which serves Front and starts a paid run — that is not a side
-// effect to be hidden, it is what a chat with an agent is, so the panel says so
-// on the button.
+// What it shows is one run's topic, `#front` › `front-routine-<name>-<stamp>`
+// (operation_room p7: a session is a topic), exactly as the realm holds it:
+// real posts only, nobody's summary, no local history of its own. What it
+// sends is one post into that topic **as the Developer**, which serves Front
+// and starts a paid run — that is not a side effect to be hidden, it is what
+// a chat with an agent is, so the panel says so on the button. A ✔'d run is
+// shown but not written into: Front's sweep skips resolved topics, so a post
+// there would buy nothing.
 //
 // Selfnotes never arrive here: the relay drops them before the history exists,
 // and refuses one typed by hand.
@@ -24,6 +26,7 @@ import {
   type ChatStatus,
   type RoutineDetail,
   type RoutinePost,
+  type RoutineSession,
 } from './routineState'
 
 const PANEL_CSS = `
@@ -104,12 +107,15 @@ const FIRE = /^\s*Routine\s+`?[^`\s,]+`?,\s*run of\b/
 const REFRESH_MS = 5000
 
 export interface ChatPanelHandle {
-  // Show a routine's fire topic. `undefined` puts the panel back to its
-  // "nothing selected" state.
+  // Show a routine. `undefined` puts the panel back to its "nothing
+  // selected" state. Which of its runs is shown is `show`'s business; on its
+  // own (unmanaged) the panel shows the newest run.
   select: (name: string | undefined) => void
   update: (detail: RoutineDetail) => void
+  // Show one run of the selected routine — its topic, its posts, and whether
+  // it can be written into. `undefined` is "no run to show", with a reason.
+  show: (detail: RoutineDetail, session: RoutineSession | undefined, reason?: string) => void
   unavailable: (reason: string) => void
-  highlight: (since: number | undefined, until?: number, scroll?: boolean) => void
   selected: () => string | undefined
   // Put text in the box **without sending it**. The popup's "Ask Front" uses
   // this: a run is bought by a human pressing Send, never by a click that
@@ -151,6 +157,10 @@ export function initChatPanel(options: { mount?: HTMLElement; managed?: boolean;
   const countEl = panel.querySelector<HTMLSpanElement>('#chat-count')!
 
   let selected: string | undefined
+  // The run topic the panel shows and writes into; null while the routine
+  // has no run to show.
+  let sessionTopic: string | null = null
+  let sessionResolved = false
   let status: ChatStatus | undefined
   let timer: number | undefined
   let sending = false
@@ -185,20 +195,30 @@ export function initChatPanel(options: { mount?: HTMLElement; managed?: boolean;
     return post.by === 'Developer' ? 'developer' : 'agent'
   }
 
-  function renderChat(detail: RoutineDetail) {
-    const posts = detail.chat_log ?? []
+  function renderChat(detail: RoutineDetail, session: RoutineSession | undefined, reason?: string) {
+    const posts = session?.chat ?? []
     // The relay is the source of the history, so a repaint only happens when
     // the history actually changed — otherwise the panel would scroll itself
     // away from what the reader is looking at every five seconds.
-    const ids = JSON.stringify([detail.health.state, posts])
+    const ids = JSON.stringify([detail.health.state, session?.topic ?? null, reason ?? null, posts])
     if (ids === lastIds) return
     const atBottom =
       messagesEl.scrollHeight - messagesEl.scrollTop - messagesEl.clientHeight < 60 ||
       lastIds === ''
     lastIds = ids
     messagesEl.replaceChildren()
+    if (!session) {
+      renderEmpty(detail.health.state === 'live' ? (reason ?? 'No run to show — start a new session to open one.') : 'History unknown — no posts available in the last known evidence.')
+      return
+    }
+    if (session.history.bounded) {
+      const note = document.createElement('div')
+      note.className = 'chat-empty'
+      note.textContent = `Window of ${session.history.post_limit} posts — older posts of this run are not held.`
+      messagesEl.append(note)
+    }
     if (posts.length === 0) {
-      renderEmpty(detail.health.state === 'live' ? 'This routine has no posts in its fire topic yet.' : 'History unknown — no posts available in the last known evidence.')
+      renderEmpty(detail.health.state === 'live' ? 'Nothing of this run is held yet.' : 'History unknown — no posts available in the last known evidence.')
       return
     }
     for (const post of posts) {
@@ -209,22 +229,23 @@ export function initChatPanel(options: { mount?: HTMLElement; managed?: boolean;
     if (atBottom) messagesEl.scrollTop = messagesEl.scrollHeight
   }
 
-  function renderStatus(detail: RoutineDetail) {
+  function renderStatus(detail: RoutineDetail, session: RoutineSession | undefined) {
     status = detail.chat
     const live = detail.health.state === 'live'
-    const answer = detail.routine.answer
+    const answer = session?.answer ?? detail.routine.answer
     const parts = [
       live ? `realm live · observed ${at(detail.generated_at)}` : `Unknown — ${detail.health.reason}; last known history`,
-      !live ? 'Current answer unknown' : answer.state === 'answered'
-        ? `last fire answered in ${ago(answer.answered_after ?? null)}`
+      !live ? 'Current answer unknown' : !session ? 'no run selected' : answer.state === 'answered'
+        ? `fire answered in ${ago(answer.answered_after ?? null)}`
         : answer.state === 'no fire'
-          ? 'never fired by the dispatcher'
-          : `last fire ${ago(answer.age_seconds)} ago, ${answer.state}`,
+          ? 'opened by hand, no fire line'
+          : `fire ${ago(answer.age_seconds)} ago, ${answer.state}`,
     ]
+    if (session?.resolution.state === 'resolved') parts.push('✔ resolved — Front does not sweep a resolved topic; un-resolve it in Zulip or start a new session to talk')
     if (!status?.configured) parts.push(status?.reason ?? 'chat is read-only')
-    noteEl.className = `cp-note${live ? (status?.configured ? ' live' : ' warn') : ' warn'}`
+    noteEl.className = `cp-note${live ? (status?.configured && session && !sessionResolved ? ' live' : ' warn') : ' warn'}`
     noteEl.textContent = parts.join(' · ')
-    const usable = live && Boolean(status?.configured) && !sending
+    const usable = live && Boolean(status?.configured) && !sending && sessionTopic !== null && !sessionResolved
     input.disabled = !usable
     sendButton.disabled = !usable
     countEl.textContent = status?.max_chars ? `${input.value.length}/${status.max_chars}` : ''
@@ -241,9 +262,16 @@ export function initChatPanel(options: { mount?: HTMLElement; managed?: boolean;
       unavailable(found.error)
       return
     }
-    renderChat(found)
-    renderStatus(found)
+    show(found, found.sessions[0])
     for (const listener of listeners) listener(found)
+  }
+
+  function show(detail: RoutineDetail, session: RoutineSession | undefined, reason?: string) {
+    sessionTopic = session?.topic ?? null
+    sessionResolved = session?.resolution.state === 'resolved'
+    topicEl.textContent = session ? `#front › ${session.topic}` : selected ? `${selected} · no run` : ''
+    renderChat(detail, session, reason)
+    renderStatus(detail, session)
   }
 
   // `started` exists because the panel's first render is `select(undefined)`
@@ -256,6 +284,8 @@ export function initChatPanel(options: { mount?: HTMLElement; managed?: boolean;
     if (name === selected && started) return
     started = true
     selected = name
+    sessionTopic = null
+    sessionResolved = false
     lastIds = ''
     status = undefined
     input.value = ''
@@ -270,8 +300,8 @@ export function initChatPanel(options: { mount?: HTMLElement; managed?: boolean;
       renderEmpty('Pick a routine in the routines view to see its conversation with Front.')
       return
     }
-    topicEl.textContent = `#front › front-routine-${name}`
-    renderEmpty('reading the fire topic…')
+    topicEl.textContent = `${name} · reading…`
+    renderEmpty('reading the run topic…')
     if (options.managed) return
     void refresh()
     // Only the selected routine is refreshed, and only from the relay's own
@@ -281,17 +311,17 @@ export function initChatPanel(options: { mount?: HTMLElement; managed?: boolean;
   }
 
   async function send(text: string) {
-    if (!selected || sending) return
-    const destination = selected
+    if (!selected || sending || sessionTopic === null || sessionResolved) return
+    const destination = sessionTopic
     sending = true
     sendButton.disabled = true
     input.disabled = true
     const pending = bubble('pending', undefined, 'posting to #front…')
     messagesEl.scrollTop = messagesEl.scrollHeight
-    const found = await sendChat(`front-routine-${destination}`, text)
+    const found = await sendChat(destination, text)
     pending.remove()
     sending = false
-    if (selected !== destination) { await refresh(); return }
+    if (sessionTopic !== destination) { await refresh(); return }
     if (!found.sent) {
       bubble('error', undefined, found.error ?? 'the post was refused')
       messagesEl.scrollTop = messagesEl.scrollHeight
@@ -345,20 +375,15 @@ export function initChatPanel(options: { mount?: HTMLElement; managed?: boolean;
   return {
     update(detail) {
       if (detail.routine.name !== selected) return
-      renderChat(detail)
-      renderStatus(detail)
+      // Unmanaged callers get the newest run; the dashboard follows with
+      // `show` for the run it has selected.
+      if (!options.managed) show(detail, detail.sessions[0])
+    },
+    show(detail, session, reason) {
+      if (detail.routine.name !== selected) return
+      show(detail, session, reason)
     },
     unavailable,
-    highlight(since, until, scroll = false) {
-      let first: HTMLElement | undefined
-      for (const node of messagesEl.querySelectorAll<HTMLElement>('[data-message-id]')) {
-        const id = Number(node.dataset.messageId)
-        const active = since !== undefined && id >= since && (until === undefined || id < until)
-        node.classList.toggle('session-span', active)
-        if (active && !first) first = node
-      }
-      if (scroll && first) messagesEl.scrollTop = first.offsetTop - messagesEl.offsetTop
-    },
     select,
     selected: () => selected,
     compose(text: string) {

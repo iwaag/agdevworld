@@ -4,9 +4,8 @@ import { renderSessionGraph, type GraphMode } from './sessionGraph'
 import { loadRoutines, loadRoutine, loadInflight, startSession, routineHeadline, ago, at, type RoutineBoard, type RoutineDetail, type RoutineSession } from './routineState'
 import './operationParts.css'
 
-// The fire's message id is the session's identity (relay: `session.id`); the
-// one session of a routine the dispatcher never fired has none.
-const sessionKey = (session: RoutineSession) => String(session.id ?? 'manual')
+// A session is a run topic (relay: `session.topic`), which is its identity.
+const sessionKey = (session: RoutineSession) => session.topic
 // How long a fire this screen posted is waited for before the list falls back
 // to whatever the relay shows. The event queue carries a post back within a
 // second or two; a minute is far past that, and past it the fire is either in
@@ -22,7 +21,10 @@ function readPref<T>(key: string, fallback: T): T {
 function writePref(key: string, value: unknown) {
   try { localStorage.setItem(PREFS, JSON.stringify({ ...JSON.parse(localStorage.getItem(PREFS) ?? '{}'), [key]: value })) } catch { /* no storage: the choice lives for this page only */ }
 }
-const RESOLUTION_MARK: Record<string, string> = { resolved: '✔ resolved', reopened: '↺ reopened', open: '○ open', unknown: '? resolution unknown' }
+const RESOLUTION_MARK: Record<string, string> = { resolved: '✔ resolved', open: '○ open', unknown: '? unknown (relay)' }
+const ANSWER_MARK: Record<string, string> = { answered: 'answered', acked: 'acked, no answer yet', unanswered: 'unanswered', 'no fire': 'no fire line' }
+// A run's title on a card: its stamp, which is what the topic is named by.
+const sessionTitle = (session: RoutineSession) => session.stamp ? `Run ${session.stamp}` : session.topic
 function element<K extends keyof HTMLElementTagNameMap>(tag: K, text: string, className = '') {
   const node = document.createElement(tag)
   node.textContent = text; node.className = className
@@ -43,7 +45,7 @@ export async function initOperationDashboard(): Promise<void> {
       </details>
       <div class="session-list"></div><p class="session-history"></p></section>
     <section class="flow-pane"><div class="pane-head"><h2>Conversation flow</h2><div class="graph-mode" role="radiogroup" aria-label="Flow rendering"><button type="button" data-mode="compact">Compact</button><button type="button" data-mode="detailed">Detailed</button></div></div><div class="standing-request"></div><div class="parts-graph"></div><div class="parts-inflight">Host observation not loaded.</div></section>
-    <aside class="chat-pane"><h2>Fire conversation</h2><p class="chat-span-note"></p><div class="chat-mount"></div></aside></div>`
+    <aside class="chat-pane"><h2>Run conversation</h2><p class="chat-span-note"></p><div class="chat-mount"></div></aside></div>`
   document.body.append(host)
   const find = (selector: string) => host.querySelector<HTMLElement>(selector)!
   const health = find('.parts-health'), graph = find('.parts-graph')
@@ -73,7 +75,7 @@ export async function initOperationDashboard(): Promise<void> {
   }
   drawGraphMode()
   showResolved.checked = readPref('showResolved', false)
-  let pendingFire: { routine: string; id: number; at: number } | undefined
+  let pendingFire: { routine: string; id: number; topic: string; at: number } | undefined
   const chat = initChatPanel({ mount: find('.chat-mount'), managed: true, onRefresh: () => { void refresh() } })
 
   function drawSession(scroll = false) { refocus(find('.session-list'), 'session', () => drawSessionCards(scroll)) }
@@ -81,9 +83,9 @@ export async function initOperationDashboard(): Promise<void> {
     const list = find('.session-list'); list.replaceChildren()
     if (!detail) return
     const pending = pendingFire && pendingFire.routine === selection.routine ? pendingFire : undefined
-    if (pending && detail.sessions.some(session => session.id === pending.id)) {
+    if (pending && detail.sessions.some(session => session.topic === pending.topic)) {
       // The event queue carried the fire back; the pending card is over.
-      pendingFire = undefined; find('.ns-result').textContent = `Fire #${pending.id} is listed below.`
+      pendingFire = undefined; find('.ns-result').textContent = `${pending.topic} is listed below.`
     }
     const stillPending = pendingFire && pendingFire.routine === selection.routine && Date.now() - pendingFire.at < PENDING_FIRE_MS
     if (!detail.sessions.some(session => sessionKey(session) === selection.session) && !stillPending) {
@@ -91,25 +93,41 @@ export async function initOperationDashboard(): Promise<void> {
     }
     if (stillPending && pendingFire) {
       const card = element('button', '', 'session-card pending')
-      card.dataset.session = String(pendingFire.id)
-      card.setAttribute('aria-pressed', String(selection.session === String(pendingFire.id)))
-      card.append(element('strong', `Fire #${pendingFire.id}`), element('small', 'Posted from here · manual start'))
+      card.dataset.session = pendingFire.topic
+      card.setAttribute('aria-pressed', String(selection.session === pendingFire.topic))
+      card.append(element('strong', `Run ${stampOf(pendingFire.topic)}`), element('small', `Fire #${pendingFire.id} posted from here · manual start`))
       card.append(element('small', 'Waiting for the event queue to reflect it', 'annotation'))
       list.append(card)
     }
     for (const session of detail.sessions.slice(0, 3)) {
       const key = sessionKey(session)
+      const live = detail.health.state === 'live'
       const button = element('button', '', 'session-card')
       button.dataset.session = key
       button.setAttribute('aria-pressed', String(selection.session === key))
-      button.append(element('strong', session.fire ? `Fire #${session.fire.message_id}` : 'Manual activity'))
-      button.append(element('small', session.fire ? `${ago(detail.generated_at - session.fire.at)} since fire · ${at(session.fire.at)}` : 'No identified scheduled run'))
+      button.title = `#front › ${session.topic}`
+      button.append(element('strong', sessionTitle(session)))
+      button.append(element('small', session.fire ? `Fire #${session.fire.message_id} · ${ago(detail.generated_at - session.fire.at)} ago · ${at(session.fire.at)}` : 'Opened by hand · no fire line'))
       const origin = session.origin === 'manual' ? 'Manual start' : session.origin === 'scheduled' ? 'Scheduled start' : 'Origin unknown'
-      button.append(element('small', `${origin} · ${detail.health.state === 'live' ? `${session.nodes.length} linked conversations` : 'unknown · last known links'}`))
-      const resolution = detail.health.state === 'live' ? session.resolution?.state ?? 'unknown' : 'unknown'
-      const chip = element('small', RESOLUTION_MARK[resolution] ?? '? resolution unknown', `resolution ${resolution}`)
+      button.append(element('small', `${origin} · ${live ? `${ANSWER_MARK[session.answer.state] ?? session.answer.state} · ${session.nodes.length} linked conversations` : 'unknown · last known links'}`))
+      const resolution = live ? session.resolution?.state ?? 'unknown' : 'unknown'
+      const chip = element('small', RESOLUTION_MARK[resolution] ?? '? unknown (relay)', `resolution ${resolution}`)
       chip.title = session.resolution?.evidence ?? 'no resolution evidence reported'
       button.append(chip)
+      if (session.history.bounded) button.append(element('small', `Window of ${session.history.post_limit} posts — older posts not held`, 'annotation'))
+      if (session.previous) {
+        // The fire names the run before it. A link when that run is in the
+        // list; otherwise the name, so the reader can find it in Zulip.
+        const target = detail.sessions.find(one => one.topic === session.previous)
+        const prev = element('small', `↤ previous run ${stampOf(session.previous)}${target ? '' : ' · not listed (hidden, or older than the relay reads)'}`, 'session-prev')
+        prev.title = `#front › ${session.previous}`
+        if (target) {
+          prev.setAttribute('role', 'link'); prev.tabIndex = 0
+          const go = (event: Event) => { event.stopPropagation(); selection.session = target.topic; lastInflightAt = 0; drawSession(true); void refreshInflight() }
+          prev.onclick = go; prev.onkeydown = event => { if (event.key === 'Enter' || event.key === ' ') go(event) }
+        }
+        button.append(prev)
+      }
       button.onclick = () => { selection.session = key; lastInflightAt = 0; drawSession(true); void refreshInflight() }
       list.append(button)
     }
@@ -120,7 +138,7 @@ export async function initOperationDashboard(): Promise<void> {
     }
     const history = detail.history
     find('.session-history').textContent = !history ? 'History limit unknown — this relay did not report its window.'
-      : `${history.fires} fires in ${history.posts} kept posts${history.bounded ? ` (window of ${history.post_limit} — full, older runs not searched)` : ' (whole topic as held)'} · ${history.hidden_resolved} resolved hidden${showResolved.checked ? '' : ' · unknown stays visible'}`
+      : `${history.runs} run topic${history.runs === 1 ? '' : 's'} held (${history.open_runs} open) · ${history.hidden_resolved} resolved hidden · the newest ${history.deep_runs} are read whole, older ones only while open; a resolved run older than that is in Zulip, not here`
     const index = detail.sessions.findIndex(session => sessionKey(session) === selection.session)
     const session = detail.sessions[index]
     if (session) {
@@ -133,34 +151,41 @@ export async function initOperationDashboard(): Promise<void> {
         if (previousScroll && nextViewport) { nextViewport.scrollLeft = previousScroll[0]!; nextViewport.scrollTop = previousScroll[1]! }
         graphSignature = signature
       }
-      // The span is the relay's own boundaries, never the neighbour card's:
-      // with resolved sessions hidden, the next card is not the next fire.
-      chat.highlight(session.start_id, session.end_id ?? undefined, scroll)
-      find('.chat-span-note').textContent = session.fire
-        ? `Fire #${session.fire.message_id} span highlighted (#${session.start_id} to ${session.end_id ? `#${session.end_id - 1}` : 'the newest post'}). Chat always posts to this routine's fire topic.`
-        : 'Manual activity · no dispatcher fire identifies a session span.'
+      // The chat is the selected run's topic, whole — no span to infer.
+      chat.show(detail, session)
+      find('.chat-span-note').textContent = session.resolution.state === 'resolved'
+        ? `#front › ${session.topic} · ✔ resolved. Front does not sweep a resolved topic; un-resolve it in Zulip to continue, or start a new session.`
+        : `#front › ${session.topic} · chat posts into this run's topic.`
     } else if (stillPending && pendingFire) {
       graphSignature = ''
-      graph.textContent = `Waiting for the relay to list fire #${pendingFire.id}. Its conversations appear here once the event queue reflects the post.`
-      chat.highlight(pendingFire.id, undefined, scroll)
-      find('.chat-span-note').textContent = `Fire #${pendingFire.id} posted from here · span highlighted from its message id.`
+      graph.textContent = `Waiting for the relay to list ${pendingFire.topic}. Its conversations appear here once the event queue reflects the post.`
+      chat.show(detail, undefined, `Waiting for the event queue to carry ${pendingFire.topic} back…`)
+      find('.chat-span-note').textContent = `#front › ${pendingFire.topic} · fire #${pendingFire.id} posted from here.`
     } else {
       const hidden = detail.history?.hidden_resolved ?? 0
       graph.textContent = detail.health.state !== 'live' ? 'Unknown — no current session evidence.'
-        : hidden > 0 ? `No visible session — ${hidden} resolved and hidden. Turn on Show resolved to inspect them.` : 'No session observed.'
-      find('.chat-span-note').textContent = 'No session span identified.'
-      find('.parts-inflight').textContent = 'Host observation attaches to the latest fire; none is selected.'
+        : hidden > 0 ? `No visible session — ${hidden} resolved and hidden. Turn on Show resolved to inspect them.` : 'No run observed — this routine has no run topic yet.'
+      chat.show(detail, undefined, detail.health.state !== 'live' ? undefined
+        : hidden > 0 ? `Every listed run is resolved and hidden (${hidden}). Turn on Show resolved to read one.` : 'No run to show — start a new session to open one.')
+      find('.chat-span-note').textContent = 'No run selected.'
+      find('.parts-inflight').textContent = 'Host observation attaches to the latest run; none is selected.'
     }
     host.dataset.routine = selection.routine; host.dataset.session = selection.session
-    if (session && !isLatest(session)) find('.parts-inflight').textContent = 'Host observation is latest-only; it is not attached to this historical fire.'
+    if (session && !isLatest(session)) find('.parts-inflight').textContent = 'Host observation is latest-only; it is not attached to this older run.'
   }
 
-  // Whether a session is the routine's actual newest fire, judged against
-  // the relay's `latest_fire` and not against the first visible card.
+  // The stamp a run topic is named by, for a card title.
+  function stampOf(topic: string): string {
+    const found = /(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}Z)$/.exec(topic)
+    return found ? found[1]! : topic
+  }
+
+  // Whether a session is the routine's actual newest run, judged against
+  // the relay's `latest_topic` and not against the first visible card.
   function isLatest(session: RoutineSession): boolean {
     if (!detail) return false
-    const latest = detail.latest_fire === undefined ? detail.sessions[0]?.id ?? null : detail.latest_fire?.message_id ?? null
-    return (session.id ?? null) === latest
+    const latest = detail.latest_topic === undefined ? detail.sessions[0]?.topic ?? null : detail.latest_topic
+    return session.topic === latest
   }
   function selectedIsLatest(): boolean {
     const session = detail?.sessions.find(one => sessionKey(one) === selection.session)
@@ -195,11 +220,11 @@ export async function initOperationDashboard(): Promise<void> {
     if (!detail || startBlocker() !== '' || starting) return
     const name = detail.routine.name
     const text = instruction.value
-    const firstFire = !detail.routine.fire_topic
+    const previous = detail.routine.latest_topic
     starting = true; drawNewSession()
     const result = find('.ns-result')
     result.className = 'ns-result'
-    result.textContent = `Posting the fire into #front › front-routine-${name}…`
+    result.textContent = `Opening a new run topic of ${name} in #front${previous ? ` (previous run: ${previous})` : ' — its first run'}…`
     const found = await startSession(name, text)
     starting = false
     if (!found.sent) {
@@ -208,15 +233,16 @@ export async function initOperationDashboard(): Promise<void> {
       // retype it.
       result.className = `ns-result ${found.uncertain ? 'uncertain' : 'error'}`
       result.textContent = found.uncertain
-        ? `Uncertain — ${found.error}. The fire may have landed; read the fire conversation before starting again. ${found.note ?? ''}`.trim()
+        ? `Uncertain — ${found.error}. The fire may have landed; look for the run topic in #front before starting again. ${found.note ?? ''}`.trim()
         : `Refused — ${found.error}`
       drawNewSession()
       return
     }
     instruction.value = ''
-    pendingFire = { routine: name, id: found.message_id!, at: Date.now() }
-    if (selection.routine === name) selection.session = String(found.message_id)
-    result.textContent = `Fire #${found.message_id} posted${firstFire ? ' — first fire of this routine; its fire topic now exists' : ''}. Waiting for the event queue to reflect it.`
+    const topic = found.topic ?? `front-routine-${name}-?`
+    pendingFire = { routine: name, id: found.message_id!, topic, at: Date.now() }
+    if (selection.routine === name) selection.session = topic
+    result.textContent = `Fire #${found.message_id} posted into #front › ${topic}${found.previous ? ` (names ${found.previous} as the previous run)` : ' — the first run of this routine'}. Waiting for the event queue to reflect it.`
     drawNewSession()
     if (selection.routine === name && detail) drawSession(true)
     void refresh()

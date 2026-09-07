@@ -64,7 +64,11 @@ export interface RoutineRow {
   retired: boolean
   request: (RoutinePost & { text: string }) | null
   request_topic: string | null
-  fire_topic: string | null
+  // The newest run topic (`front-routine-<name>-<stamp>`), where a
+  // continuation goes and what the next fire names as `Previous run:`.
+  latest_topic: string | null
+  runs: number
+  open_runs: number
   // Posts in the standing-request topic by anybody but its author — the
   // evidence that an agent answered in the wrong topic.
   request_strays: RoutinePost[]
@@ -95,44 +99,48 @@ export interface SessionNode {
   rows: Array<{ instance: string; state: string; provenance?: { short?: string } }>
 }
 
-// One session is finished when a human said so with Zulip's ✔ — a different
-// sentence from `done`, which only means the fire got an answer. The relay
-// attributes the ✔ to one fire by the id of Zulip's own resolve notice; an
-// older span with no notice is `unknown`, never quietly resolved.
+// One session is finished when a human said so with Zulip's ✔ on the run's
+// own topic — a different sentence from `done`, which only means the fire got
+// an answer. One topic per run (operation_room p7) is what makes the flag the
+// whole answer: there is no `unknown` any more.
 export interface SessionResolution {
-  state: 'resolved' | 'reopened' | 'open' | 'unknown'
+  state: 'resolved' | 'open'
   evidence: string
-  notice: { message_id: number; at: number; kind: 'resolved' | 'unresolved' | null } | null
 }
 
+// A session is a run topic, `#front` › `front-routine-<name>-<stamp>`.
 export interface RoutineSession {
-  // The fire's message id is the session's identity; `null` is the one
-  // manual-activity session of a routine the dispatcher never fired.
+  // The fire's message id, or the first held post's when the topic was
+  // opened by hand; null only when nothing of the topic is held.
   id: number | null
   index: number
+  topic: string
+  stamp: string | null
   fire: (RoutinePost & { text: string }) | null
-  // Explicit message-id boundaries, `[start_id, end_id)`. Chat highlighting
-  // reads these and never infers a span from its neighbour in the list.
-  start_id: number
-  end_id: number | null
   origin: 'manual' | 'scheduled' | 'unknown'
   origin_evidence: string
   schedule_event: { id: string; fired_at: number } | null
+  // The run topic this fire's `Previous run:` names, if it names one.
+  previous: string | null
+  answer: RoutineAnswer
   resolution: SessionResolution
-  note: string | null
+  // The run topic is held as a window of posts; a full window is disclosed
+  // rather than read as the whole run.
+  history: { posts: number; post_limit: number; bounded: boolean; note: string }
+  // The run topic, whole: real posts, oldest first.
+  chat: Array<RoutinePost & { content: string }>
   nodes: SessionNode[]
   truncation?: { truncated: boolean; reasons: string[]; max_nodes: number; max_depth: number }
 }
 
-// How far back the session list could look. The fire topic is held as a
-// window of posts; a full window is disclosed rather than read as the whole
-// past of the routine.
+// How far back the session list could look: the relay reads the newest
+// `deep_runs` run topics of a routine even under ✔ and older ones only while
+// open, so a resolved run older than that is in Zulip and not here.
 export interface SessionHistory {
-  posts: number
-  post_limit: number
-  bounded: boolean
-  fires: number
+  runs: number
+  open_runs: number
   session_limit: number
+  deep_runs: number
   hidden_resolved: number
   note: string
 }
@@ -166,11 +174,13 @@ export interface RoutineBoard {
 export interface RoutineDetail extends Omit<RoutineBoard, 'routines'> {
   routine: RoutineRow
   sessions: RoutineSession[]
-  // The routine's actual newest fire, whatever a filter left visible.
+  // The routine's actual newest run and its fire, whatever a filter left
+  // visible. Each session carries its own `chat`; the top-level `chat` is
+  // the relay's chat *status*, added by the server.
+  latest_topic?: string | null
   latest_fire?: (RoutinePost & { text: string }) | null
   history?: SessionHistory
   filter?: { include_resolved: boolean }
-  chat_log: RoutinePost[] & Array<{ content: string }>
 }
 
 export interface InflightTopic {
@@ -243,9 +253,6 @@ export async function loadRoutine(
   name: string,
   options: { includeResolved?: boolean } = {},
 ): Promise<RoutineDetail | { error: string }> {
-  // `chat` is the relay's chat *status* and `chat_log` is the fire topic's
-  // history. They were one key for one screenshot, and the panel sat on
-  // "reading the fire topic…" until the two were separated.
   // `resolved=hide` is filtered by the relay before its limit, so hiding
   // three finished runs shows the three before them rather than nothing.
   const query = options.includeResolved === false ? '?resolved=hide' : ''
@@ -290,7 +297,7 @@ export async function sendChat(
 export async function startSession(
   name: string,
   instruction: string,
-): Promise<{ sent: boolean; uncertain: boolean; message_id?: number; first_fire?: boolean; error?: string; note?: string }> {
+): Promise<{ sent: boolean; uncertain: boolean; message_id?: number; topic?: string; previous?: string | null; error?: string; note?: string }> {
   let response: Response
   try {
     response = await fetch(`${BASE}/routines/${encodeURIComponent(name)}/start`, {
@@ -308,7 +315,7 @@ export async function startSession(
     }
   }
   const payload = (await response.json().catch(() => undefined)) as
-    | { sent?: boolean; uncertain?: boolean; message_id?: number; first_fire?: boolean; error?: string; note?: string }
+    | { sent?: boolean; uncertain?: boolean; message_id?: number; topic?: string; previous?: string | null; error?: string; note?: string }
     | undefined
   if (!response.ok || !payload?.sent) {
     return {
@@ -316,7 +323,7 @@ export async function startSession(
       error: payload?.error ?? `agentroom answered ${response.status}`, note: payload?.note,
     }
   }
-  return { sent: true, uncertain: false, message_id: payload.message_id, first_fire: payload.first_fire, note: payload.note }
+  return { sent: true, uncertain: false, message_id: payload.message_id, topic: payload.topic, previous: payload.previous ?? null, note: payload.note }
 }
 
 export function routineHeadline(board: Pick<RoutineBoard, 'health' | 'schedule' | 'chat'>): string {

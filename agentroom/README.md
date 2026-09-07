@@ -278,8 +278,13 @@ own lock, so the page's 20 s poll costs one vendor call a minute per harness,
 and a hung codex process never blanks the Claude card.
 
 - **claude_code** — `GET api.anthropic.com/api/oauth/usage` with the bearer
-  token from `AGENTROOM_CLAUDE_CREDENTIALS` (default
-  `~/.claude/.credentials.json`, Claude Code's own store). `limits[]` is
+  token from Claude Code's own store: on macOS the Keychain item
+  `AGENTROOM_CLAUDE_KEYCHAIN` (default `Claude Code-credentials`, read with
+  `security find-generic-password -w`, its `mdat` as the renewal time), and
+  after that the file `AGENTROOM_CLAUDE_CREDENTIALS` (default
+  `~/.claude/.credentials.json`). The card says which (`store`) and why the
+  Keychain was not it (`keychain_error`); an empty `AGENTROOM_CLAUDE_KEYCHAIN`
+  skips it. `limits[]` is
   rendered: the 5-hour session, the weekly all-models window and the weekly
   per-model scoped window, each with `severity` and `scope`. There is no
   absolute credit number on Max — the maximum is 100 % of a window — and the
@@ -289,11 +294,10 @@ and a hung codex process never blanks the Claude card.
   says which file, expired since when, renewed when. Refreshing is the CLI's
   job — the relay never sends the refresh token and never writes the file;
   `credential_renewed_at` is the file's mtime. Measured 2026-09-07: the
-  token is an 8-hour one, and a Front run on the same binary completed
-  after it expired *without* rewriting the file, so on macOS the file may
-  not be the store the CLI runs on (it keeps a Keychain item too); until
-  that is settled, an expired-file card is honest and may stay amber for
-  hours.
+  token is an 8-hour one, a Front run completed after the *file's* copy
+  expired without rewriting it, and the Keychain item had been renewed 13
+  minutes before that expiry — the Keychain is the live store on macOS,
+  which is why it is read first.
 - **codex** — `codex app-server` (`AGENTROOM_CODEX_BIN`, default `codex` on
   PATH) over stdio JSON-RPC: `initialize`, `initialized`,
   `account/rateLimits/read`, stdin held open until the reply, then killed.

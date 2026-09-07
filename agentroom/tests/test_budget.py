@@ -68,7 +68,7 @@ def test_claude_renders_limits_as_windows_and_says_usd_is_notional(tmp_path):
 
     path = credentials(tmp_path)
     before = path.read_bytes()
-    card = ClaudeProvider(credentials=path, fetch=fetch).snapshot(NOW)
+    card = ClaudeProvider(credentials=path, keychain="", fetch=fetch).snapshot(NOW)
     assert seen["url"] == CLAUDE_USAGE_URL
     assert seen["headers"]["Authorization"] == "Bearer sk-ant-oat01-test"
     assert seen["headers"]["anthropic-beta"] == CLAUDE_BETA
@@ -95,7 +95,7 @@ def test_claude_401_is_unknown_and_the_refresh_token_is_never_used(tmp_path):
 
     path = credentials(tmp_path)
     before = path.read_bytes()
-    card = ClaudeProvider(credentials=path, fetch=fetch).snapshot(NOW)
+    card = ClaudeProvider(credentials=path, keychain="", fetch=fetch).snapshot(NOW)
     assert card["ok"] is False and card["windows"] == []
     assert "token expired" in card["error"] and "the relay never does" in card["error"]
     assert card["plan"] == "max" and card["credential_renewed_at"] == NOW - 300
@@ -104,15 +104,51 @@ def test_claude_401_is_unknown_and_the_refresh_token_is_never_used(tmp_path):
     # A token the file itself says is expired is not even sent.
     stale = credentials(tmp_path, expires_in_ms=-1000)
     calls.clear()
-    card = ClaudeProvider(credentials=stale, fetch=fetch).snapshot(NOW)
+    card = ClaudeProvider(credentials=stale, keychain="", fetch=fetch).snapshot(NOW)
     assert card["ok"] is False and calls == [] and "expired" in card["error"]
 
 
 def test_claude_without_a_store_is_unknown(tmp_path):
-    card = ClaudeProvider(credentials=tmp_path / "missing.json",
+    card = ClaudeProvider(credentials=tmp_path / "missing.json", keychain="",
                           fetch=lambda *a: (200, b"{}")).snapshot(NOW)
     assert card["ok"] is False and "no credentials file" in card["error"]
     assert card["stale"] is None and card["windows"] == []
+
+
+def test_claude_reads_the_keychain_first_and_the_file_only_after(tmp_path):
+    fresh = json.dumps({"claudeAiOauth": {
+        "accessToken": "sk-ant-oat01-keychain", "refreshToken": "sk-ant-ort01-keychain",
+        "expiresAt": int(time.time() * 1000) + 3_000_000, "subscriptionType": "max",
+        "rateLimitTier": "default_claude_max_5x",
+    }})
+    seen = {}
+
+    def fetch(url, headers, timeout):
+        seen["auth"] = headers["Authorization"]
+        return 200, json.dumps(CLAUDE_USAGE).encode()
+
+    # The file is stale (its token expired) — the Keychain item is what counts.
+    stale = credentials(tmp_path, expires_in_ms=-1000)
+    card = ClaudeProvider(credentials=stale, keychain="Claude Code-credentials",
+                          keychain_read=lambda service: (fresh, NOW - 60), fetch=fetch).snapshot(NOW)
+    assert card["ok"] and seen["auth"] == "Bearer sk-ant-oat01-keychain"
+    assert card["store"] == "keychain" and card["credential_renewed_at"] == NOW - 60
+    assert card["keychain_error"] is None
+
+    # No such item: the file, and the card says why the Keychain was not it.
+    def missing(service):
+        raise RuntimeError(f"keychain item {service!r}: The specified item could not be found in the keychain.")
+
+    good = credentials(tmp_path)
+    card = ClaudeProvider(credentials=good, keychain="Claude Code-credentials",
+                          keychain_read=missing, fetch=fetch).snapshot(NOW)
+    assert card["ok"] and card["store"] == "file" and seen["auth"] == "Bearer sk-ant-oat01-test"
+    assert "could not be found" in card["keychain_error"]
+
+    # Neither: unknown, naming both.
+    card = ClaudeProvider(credentials=tmp_path / "none.json", keychain="x",
+                          keychain_read=missing, fetch=fetch).snapshot(NOW)
+    assert card["ok"] is False and "could not be found" in card["error"] and "no credentials file" in card["error"]
 
 
 def test_codex_reads_the_two_windows_through_the_app_server():
@@ -157,7 +193,7 @@ def test_codex_no_reply_is_unknown_and_keeps_the_last_good_read_apart():
 
 
 def test_the_board_holds_one_card_per_harness_and_fails_each_alone():
-    claude = ClaudeProvider(credentials=Path("/nonexistent/creds.json"),
+    claude = ClaudeProvider(credentials=Path("/nonexistent/creds.json"), keychain="",
                             fetch=lambda *a: (200, b"{}"))
     codex = CodexProvider(binary="codex", talk=lambda *a: CODEX_RESULT)
     def off(*a):

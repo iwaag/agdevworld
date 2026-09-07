@@ -38,7 +38,9 @@ from __future__ import annotations
 import json
 import os
 import queue
+import re
 import subprocess
+import sys
 import threading
 import time
 from dataclasses import dataclass, field
@@ -53,6 +55,13 @@ DEFAULT_BUDGET_SECONDS = 60.0
 #: Claude Code's own credentials file, read-only. Never the values themselves.
 CLAUDE_CREDENTIALS_VARIABLE = "AGENTROOM_CLAUDE_CREDENTIALS"
 DEFAULT_CLAUDE_CREDENTIALS = "~/.claude/.credentials.json"
+#: On macOS the CLI's *live* store is a Keychain item, not the file: measured
+#: 2026-09-07, the item's mdat was 20:55 JST while the file sat at 13:08 with a
+#: token that expired at 21:08 — through which a Front run served fine. Read
+#: the item first (`security find-generic-password -w`, read-only), the file
+#: after. Set to an empty string to skip the Keychain.
+CLAUDE_KEYCHAIN_VARIABLE = "AGENTROOM_CLAUDE_KEYCHAIN"
+DEFAULT_CLAUDE_KEYCHAIN = "Claude Code-credentials" if sys.platform == "darwin" else ""
 CLAUDE_USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
 CLAUDE_BETA = "oauth-2025-04-20"
 #: The codex binary. It lives in `~/.local/bin` on agstudio, which the launchd
@@ -167,6 +176,38 @@ def _http_get(url: str, headers: dict[str, str], timeout: float) -> tuple[int, b
         return error.code, error.read()
 
 
+def _keychain_read(service: str, timeout: float = 5.0) -> tuple[str, float | None]:
+    """`(secret, modified_at)` of a generic-password item, through `security`.
+
+    Two read-only calls: `-w` for the value, the attribute listing for
+    `mdat` (`"mdat"<timedate>=0x… "20260907115534Z\000"`). Nothing is added,
+    changed or deleted.
+    """
+    def run(*args: str) -> subprocess.CompletedProcess:
+        return subprocess.run(  # noqa: S603 - fixed tool, fixed verbs
+            ["security", "find-generic-password", "-s", service, *args],
+            capture_output=True, text=True, timeout=timeout, check=False,
+        )
+    try:
+        secret = run("-w")
+    except FileNotFoundError:
+        raise RuntimeError("no `security` tool on this host") from None
+    except subprocess.TimeoutExpired:
+        raise RuntimeError(f"`security` gave no answer within {timeout:g}s") from None
+    if secret.returncode != 0:
+        text = (secret.stderr or secret.stdout).strip().splitlines()
+        raise RuntimeError(f"keychain item {service!r}: " + (text[-1] if text else f"exit {secret.returncode}"))
+    modified = None
+    try:
+        attributes = run()
+        found = re.search(r'"mdat"<timedate>=0x[0-9A-Fa-f]+\s+"(\d{14})Z', attributes.stdout)
+        if found:
+            modified = datetime.strptime(found.group(1) + "+0000", "%Y%m%d%H%M%S%z").timestamp()
+    except (subprocess.SubprocessError, OSError, ValueError):
+        modified = None
+    return secret.stdout.strip(), modified
+
+
 CLAUDE_LABELS = {
     "session": "5-hour session",
     "weekly_all": "weekly, all models",
@@ -179,26 +220,44 @@ class ClaudeProvider(Provider):
     """Read the plan's windows with Claude Code's own access token. Read-only."""
 
     credentials: Path = field(default_factory=lambda: Path(DEFAULT_CLAUDE_CREDENTIALS).expanduser())
+    keychain: str = DEFAULT_CLAUDE_KEYCHAIN
     fetch: Callable[[str, dict[str, str], float], tuple[int, bytes]] = _http_get
+    keychain_read: Callable[[str], tuple[str, float | None]] = _keychain_read
     harness: str = "claude_code"
     source: str = "api.anthropic.com/api/oauth/usage"
 
-    def read(self) -> dict:
+    def _store(self) -> tuple[dict, float | None, str, str | None]:
+        """`(doc, renewed_at, store, keychain_error)`: the Keychain item first, the file after."""
+        keychain_error = None
+        if self.keychain:
+            try:
+                text, modified = self.keychain_read(self.keychain)
+                return json.loads(text), modified, "keychain", None
+            except (RuntimeError, ValueError) as error:
+                keychain_error = str(error)
         try:
             doc = json.loads(self.credentials.read_text(encoding="utf-8"))
-            renewed_at = self.credentials.stat().st_mtime
+            return doc, self.credentials.stat().st_mtime, "file", keychain_error
         except FileNotFoundError:
-            raise RuntimeError(f"no credentials file at {self.credentials.name} — "
-                               "has Claude Code logged in on this host?") from None
+            reason = f"no credentials file at {self.credentials.name}"
         except (OSError, ValueError) as error:
-            raise RuntimeError(f"credentials unreadable: {type(error).__name__}: {error}") from None
+            reason = f"credentials file unreadable: {type(error).__name__}: {error}"
+        if keychain_error:
+            reason = f"{keychain_error}; and {reason}"
+        raise RuntimeError(reason + " — has Claude Code logged in on this host?")
+
+    def read(self) -> dict:
+        doc, renewed_at, store, keychain_error = self._store()
         oauth = doc.get("claudeAiOauth") if isinstance(doc, dict) else None
         if not isinstance(oauth, dict) or not oauth.get("accessToken"):
-            raise RuntimeError("credentials carry no claude.ai OAuth token (an API-key login "
-                               "has no plan window to read)")
+            raise RuntimeError(f"the {store} credentials carry no claude.ai OAuth token (an API-key "
+                               "login has no plan window to read)")
+        where = self.keychain if store == "keychain" else self.credentials.name
         base = {
             "plan": str(oauth.get("subscriptionType") or "unknown"),
             "tier": oauth.get("rateLimitTier"),
+            "store": store,
+            "keychain_error": keychain_error,
             "credential_renewed_at": renewed_at,
             "token_expires_at": _epoch(oauth.get("expiresAt")),
             "note": "cost_usd on claude_code records is the API-equivalent price, not money "
@@ -211,11 +270,12 @@ class ClaudeProvider(Provider):
             # file — so the file is not necessarily the store the CLI runs
             # on (macOS keeps a Keychain item too). Say what is known: this
             # file, expired since when, and that only the CLI renews it.
+            renewed = (time.strftime('%H:%M', time.localtime(renewed_at)) if renewed_at else "unknown")
             return {**base, "ok": False,
-                    "error": f"access token in {self.credentials.name} expired at "
-                             f"{time.strftime('%H:%M', time.localtime(expires))} (file renewed "
-                             f"{time.strftime('%H:%M', time.localtime(renewed_at))}); only a "
-                             "Claude Code login or token refresh rewrites it — the relay never does"}
+                    "error": f"access token in {where} expired at "
+                             f"{time.strftime('%H:%M', time.localtime(expires))} ({store} renewed "
+                             f"{renewed}); only a Claude Code login or token refresh rewrites it "
+                             "— the relay never does"}
         status, body = self.fetch(CLAUDE_USAGE_URL, {
             "Authorization": f"Bearer {oauth['accessToken']}",
             "anthropic-beta": CLAUDE_BETA,
@@ -543,10 +603,11 @@ def budget_from_env() -> Budget:
     """The three providers, configured from the environment (paths only, never values)."""
     ttl = float(os.environ.get(BUDGET_SECONDS_VARIABLE, DEFAULT_BUDGET_SECONDS))
     credentials = Path(os.environ.get(CLAUDE_CREDENTIALS_VARIABLE) or DEFAULT_CLAUDE_CREDENTIALS).expanduser()
+    keychain = os.environ.get(CLAUDE_KEYCHAIN_VARIABLE, DEFAULT_CLAUDE_KEYCHAIN)
     codex_bin = os.path.expanduser(os.environ.get(CODEX_BIN_VARIABLE) or DEFAULT_CODEX_BIN)
     agy_bin = os.path.expanduser(os.environ.get(AGY_BIN_VARIABLE) or DEFAULT_AGY_BIN)
     return Budget([
-        ClaudeProvider(credentials=credentials, ttl_seconds=ttl),
+        ClaudeProvider(credentials=credentials, keychain=keychain, ttl_seconds=ttl),
         CodexProvider(binary=codex_bin, ttl_seconds=ttl),
         AgyProvider(binary=agy_bin, ttl_seconds=ttl),
     ])

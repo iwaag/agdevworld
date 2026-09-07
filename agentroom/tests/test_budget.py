@@ -160,7 +160,10 @@ def test_the_board_holds_one_card_per_harness_and_fails_each_alone():
     claude = ClaudeProvider(credentials=Path("/nonexistent/creds.json"),
                             fetch=lambda *a: (200, b"{}"))
     codex = CodexProvider(binary="codex", talk=lambda *a: CODEX_RESULT)
-    board = Budget([claude, codex, AgyProvider()]).snapshot(NOW)
+    def off(*a):
+        raise RuntimeError("agy binary not found: /x/agy")
+
+    board = Budget([claude, codex, AgyProvider(run=off)]).snapshot(NOW)
     assert board["schema"] == "ag.budget.v1" and board["generated_at"] == NOW
     assert set(board["harnesses"]) == {"claude_code", "codex", "agy"}
     assert board["harnesses"]["codex"]["ok"] is True
@@ -170,3 +173,107 @@ def test_the_board_holds_one_card_per_harness_and_fails_each_alone():
     for card in board["harnesses"].values():
         if not card["ok"]:
             assert card["windows"] == [] and card["error"]
+
+
+# --- agy (step 3) -----------------------------------------------------------------
+
+AGY_USAGE = {
+    "conversation_id": "", "status": "SUCCESS", "duration_seconds": 0, "num_turns": 0,
+    "response": "Gemini Models\tWeekly Limit Remaining\t99%\t2026-09-11T15:26:48Z\n",
+    "usage": {"input_tokens": 0, "output_tokens": 0, "thinking_tokens": 0, "cache_read_tokens": 0, "total_tokens": 0},
+    "command": {"name": "usage", "data": {"description": "Within each group…", "groups": [
+        {"name": "Gemini Models", "description": "Models within this group: Gemini Flash, Gemini Pro",
+         "buckets": [
+             {"id": "gemini-weekly", "name": "Weekly Limit Remaining", "window": "weekly",
+              "remaining_fraction": 0.9916509985923767, "reset_time": "2026-09-11T15:26:48Z",
+              "description": "You have used some of your weekly limit, it will fully refresh in 4 days, 3 hours."},
+             {"id": "gemini-5h", "name": "Five Hour Limit Remaining", "window": "5h",
+              "remaining_fraction": 1, "reset_time": "2026-09-07T17:05:44Z"}]},
+        {"name": "Claude and GPT models", "buckets": [
+            {"id": "3p-weekly", "window": "weekly", "remaining_fraction": 1, "reset_time": "2026-09-14T12:05:44Z"},
+            {"id": "3p-5h", "window": "5h", "remaining_fraction": 1, "reset_time": "2026-09-07T17:05:44Z"}]},
+    ]}},
+}
+AGY_CREDITS = {
+    "conversation_id": "", "status": "SUCCESS", "response": "Remaining credits\t0\n",
+    "command": {"name": "credits", "data": {"remaining_credits": 0,
+                                            "upgrade_uri": "https://antigravity.google/g1-upgrade"}},
+}
+
+
+def agy_run(usage=AGY_USAGE, credits=AGY_CREDITS):
+    calls = []
+
+    def run(binary, args, timeout):
+        calls.append((binary, args))
+        doc = usage if "/usage" in args else credits
+        if isinstance(doc, Exception):
+            raise doc
+        return 0, json.dumps(doc) if isinstance(doc, dict) else doc, ""
+
+    return run, calls
+
+
+def test_agy_inverts_remaining_fraction_into_four_meters():
+    run, calls = agy_run()
+    card = AgyProvider(binary="/x/agy", run=run).snapshot(NOW)
+    assert card["ok"] and card["plan"] == "consumer"
+    assert calls[0][0] == "/x/agy" and "--mode" in calls[0][1] and "plan" in calls[0][1]
+    assert [(w["kind"], w["percent"], w["label"]) for w in card["windows"]] == [
+        ("gemini-weekly", 0.8, "Gemini Models, weekly"), ("gemini-5h", 0.0, "Gemini Models, 5-hour"),
+        ("3p-weekly", 0.0, "Claude and GPT models, weekly"), ("3p-5h", 0.0, "Claude and GPT models, 5-hour"),
+    ]
+    assert card["windows"][0]["resets_at"] == 1789140408.0  # 2026-09-11T15:26:48Z
+    assert card["windows"][0]["scope"] == "Gemini Models"
+    assert card["remaining_credits"] == 0.0 and card["upgrade_uri"].startswith("https://")
+    assert card["credits_error"] is None
+
+
+def test_agy_non_success_or_missing_command_is_unknown_in_the_clis_words():
+    run, _ = agy_run(usage={"status": "ERROR", "response": "[Auth Needed] sign in again"})
+    card = AgyProvider(run=run).snapshot(NOW)
+    assert card["ok"] is False and card["windows"] == []
+    assert card["error"] == "agy answered ERROR: [Auth Needed] sign in again"
+
+    run, _ = agy_run(usage={"status": "SUCCESS", "response": "Please log in"})
+    card = AgyProvider(run=run).snapshot(NOW)
+    assert card["ok"] is False and "without a command block" in card["error"] and "Please log in" in card["error"]
+
+    run, _ = agy_run(usage=TimeoutError("agy gave no answer within 30s"))
+    card = AgyProvider(run=run).snapshot(NOW)
+    assert card["ok"] is False and card["error"] == "agy gave no answer within 30s"
+
+    run, _ = agy_run(usage="not json at all")
+    card = AgyProvider(run=run).snapshot(NOW)
+    assert card["ok"] is False and "without JSON" in card["error"]
+
+
+def test_agy_credits_failure_leaves_the_meters_standing():
+    run, _ = agy_run(credits=TimeoutError("agy gave no answer within 30s"))
+    card = AgyProvider(run=run).snapshot(NOW)
+    assert card["ok"] and len(card["windows"]) == 4
+    assert card["remaining_credits"] is None and "no answer" in card["credits_error"]
+
+
+def test_a_slow_provider_says_so_and_never_answers_zero(monkeypatch):
+    import threading
+    import agentroom.budget as budget
+
+    monkeypatch.setattr(budget, "JOIN_SECONDS", 0.05)
+    gate = threading.Event()
+
+    def slow(binary, args, timeout):
+        gate.wait(2)
+        return 0, json.dumps(AGY_USAGE if "/usage" in args else AGY_CREDITS), ""
+
+    provider = AgyProvider(run=slow)
+    board = Budget([provider]).snapshot(NOW)
+    card = board["harnesses"]["agy"]
+    assert card["ok"] is False and card["windows"] == [] and "still reading" in card["error"]
+    gate.set()
+    # The thread finishes and fills the cache: the next tick has the read.
+    for _ in range(50):
+        if provider.last_good():
+            break
+        time.sleep(0.02)
+    assert Budget([provider]).snapshot(NOW + 1)["harnesses"]["agy"]["ok"] is True

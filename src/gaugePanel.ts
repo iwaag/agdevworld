@@ -51,6 +51,7 @@ function budgetFooter(card: BudgetCard | NonNullable<BudgetCard['stale']>): stri
   if (card.credits && (card.credits.has || card.credits.unlimited)) bits.push(`credits: ${card.credits.unlimited ? 'unlimited' : card.credits.balance}`)
   if (card.extra_usage?.enabled) bits.push('extra usage enabled')
   if (typeof card.remaining_credits === 'number' && card.remaining_credits > 0) bits.push(`${card.remaining_credits} AI credits remaining`)
+  if (card.credits_error) bits.push(`AI credits unknown: ${card.credits_error}`)
   return bits.join(' · ')
 }
 

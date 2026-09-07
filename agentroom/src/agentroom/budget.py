@@ -42,7 +42,7 @@ import subprocess
 import threading
 import time
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
 from typing import Callable
 
@@ -64,6 +64,8 @@ AGY_BIN_VARIABLE = "AGENTROOM_AGY_BIN"
 DEFAULT_AGY_BIN = "~/.local/bin/agy"
 #: How long one vendor read may take before it is *unknown*.
 READ_TIMEOUT_SECONDS = 15.0
+#: How long `/budget` waits for its providers before answering with what it has.
+JOIN_SECONDS = 15.0
 HARNESSES = ("claude_code", "codex", "agy")
 
 __all__ = [
@@ -119,6 +121,9 @@ class Provider:
     def read(self) -> dict:  # pragma: no cover - overridden
         """Return the harness payload; raise to report *unknown* with the message."""
         raise NotImplementedError
+
+    def last_good(self) -> dict | None:
+        return dict(self._good) if self._good else None
 
     def snapshot(self, now: float | None = None) -> dict:
         now = time.time() if now is None else now
@@ -386,19 +391,104 @@ class CodexProvider(Provider):
         }
 
 
-# --- agy: Antigravity, step 3 --------------------------------------------------
+# --- agy: Antigravity's own /usage and /credits, headless -------------------------
+
+
+AGY_USAGE_ARGS = ("-p", "/usage", "--mode", "plan", "--output-format", "json", "--print-timeout", "60s")
+AGY_CREDITS_ARGS = ("-p", "/credits", "--mode", "plan", "--output-format", "json", "--print-timeout", "60s")
+#: /usage took 7.6 s wall on agstudio (2026-09-07), so this one gets its own.
+AGY_TIMEOUT_SECONDS = 30.0
+
+
+def _run_cli(binary: str, args: tuple[str, ...], timeout: float) -> tuple[int, str, str]:
+    """`(returncode, stdout, stderr)` of one CLI call; the caller reads the JSON."""
+    try:
+        done = subprocess.run(  # noqa: S603 - the binary is configured, the args fixed
+            [binary, *args], capture_output=True, text=True, timeout=timeout, check=False,
+        )
+    except FileNotFoundError:
+        raise RuntimeError(f"agy binary not found: {binary}") from None
+    except subprocess.TimeoutExpired:
+        raise TimeoutError(f"agy gave no answer within {timeout:g}s") from None
+    return done.returncode, done.stdout, done.stderr
+
+
+def _agy_reply(binary: str, args: tuple[str, ...], run, timeout: float) -> dict:
+    """The CLI's JSON envelope, or the reason it is not one, in the CLI's own words."""
+    code, out, err = run(binary, args, timeout)
+    try:
+        doc = json.loads(out)
+    except ValueError:
+        text = (out or err).strip()
+        raise RuntimeError(f"agy exited {code} without JSON" + (f": {text[-200:]}" if text else "")) from None
+    if not isinstance(doc, dict):
+        raise RuntimeError("agy answered something that is not an object")
+    status = doc.get("status")
+    if status != "SUCCESS":
+        text = str(doc.get("response") or doc.get("error") or "").strip()
+        raise RuntimeError(f"agy answered {status or 'no status'}" + (f": {text[:200]}" if text else ""))
+    command = doc.get("command")
+    if not isinstance(command, dict) or not isinstance(command.get("data"), dict):
+        # The slash command did not expand into data — the TUI shows
+        # "[Auth Needed]" in this state; whatever the CLI said is the reason.
+        text = str(doc.get("response") or "").strip()
+        raise RuntimeError("agy answered without a command block (logged out?)"
+                           + (f": {text[:200]}" if text else ""))
+    return command["data"]
+
+
+AGY_WINDOW_LABELS = {"weekly": "weekly", "5h": "5-hour"}
 
 
 @dataclass
 class AgyProvider(Provider):
-    """Placeholder until step 3: honestly *unknown*, never 0."""
+    """`/usage` — a weekly and a 5-hour window per model *group*, as used percent.
+
+    Antigravity reports `remaining_fraction`; the meter is `1 − remaining`
+    so the three harnesses read the same way. `/credits` is the purchasable
+    pool, a different thing: one footer line, only when non-zero. `--mode
+    plan` so nothing needs the permission bypass; the CLI does its own OAuth
+    and the relay opens no token file.
+    """
 
     binary: str = DEFAULT_AGY_BIN
+    run: Callable[[str, tuple[str, ...], float], tuple[int, str, str]] = _run_cli
+    timeout_seconds: float = AGY_TIMEOUT_SECONDS
     harness: str = "agy"
     source: str = "agy -p /usage --mode plan --output-format json"
 
     def read(self) -> dict:
-        raise RuntimeError("the agy provider is not implemented yet (gauge_panel ex1 step 3)")
+        data = _agy_reply(self.binary, AGY_USAGE_ARGS, self.run, self.timeout_seconds)
+        windows: list[dict] = []
+        for group in data.get("groups") or []:
+            if not isinstance(group, dict):
+                continue
+            name = str(group.get("name") or "models")
+            for bucket in group.get("buckets") or []:
+                if not isinstance(bucket, dict):
+                    continue
+                remaining = bucket.get("remaining_fraction")
+                percent = round((1.0 - float(remaining)) * 100.0, 1) if isinstance(remaining, (int, float)) else None
+                window = str(bucket.get("window") or "window")
+                windows.append(_window(
+                    str(bucket.get("id") or f"{name}-{window}"),
+                    f"{name}, {AGY_WINDOW_LABELS.get(window, window)}", percent,
+                    _iso_to_epoch(bucket.get("reset_time")),
+                    scope=name, window_kind=window, description=bucket.get("description"),
+                ))
+        if not windows:
+            raise RuntimeError("agy /usage answered without groups[].buckets[]")
+        found = {"plan": "consumer", "windows": windows, "note": None,
+                 "remaining_credits": None, "upgrade_uri": None, "credits_error": None}
+        try:
+            credits = _agy_reply(self.binary, AGY_CREDITS_ARGS, self.run, self.timeout_seconds)
+            value = credits.get("remaining_credits")
+            found["remaining_credits"] = float(value) if isinstance(value, (int, float)) else None
+            found["upgrade_uri"] = credits.get("upgrade_uri")
+        except (RuntimeError, TimeoutError) as error:
+            # The meters stand on their own; the footer says the pool is unknown.
+            found["credits_error"] = str(error)
+        return found
 
 
 # --- the route's payload ---------------------------------------------------------
@@ -420,23 +510,25 @@ class Budget:
             thread = threading.Thread(target=run, daemon=True)
             thread.start()
             threads.append(thread)
+        deadline = time.monotonic() + JOIN_SECONDS
         for thread in threads:
-            # A little over the read timeout: a provider that hangs past it
-            # is reported as such by its own error, not by blanking the rest.
-            thread.join(READ_TIMEOUT_SECONDS + 2)
+            # Bounded: the page's own fetch times out, and a provider still
+            # reading keeps its thread, finishes, and fills its cache for the
+            # next tick. Until then its card says it is still reading — not 0.
+            thread.join(max(deadline - time.monotonic(), 0.0))
         harnesses = {}
         for provider in self.providers:
             harnesses[provider.harness] = found.get(provider.harness) or {
                 "harness": provider.harness, "source": provider.source, "ok": False,
-                "read_at": now, "windows": [], "stale": None,
-                "error": "the provider did not answer in time",
+                "read_at": now, "windows": [], "stale": provider.last_good(),
+                "error": f"still reading after {JOIN_SECONDS:g}s; the next poll will have it",
             }
         return {
             "schema": BUDGET_SCHEMA,
             "generated_at": now,
             "harnesses": harnesses,
             "settings": {"cache_seconds": self.providers[0].ttl_seconds if self.providers else None,
-                         "read_timeout_seconds": READ_TIMEOUT_SECONDS},
+                         "read_timeout_seconds": READ_TIMEOUT_SECONDS, "join_seconds": JOIN_SECONDS},
         }
 
 

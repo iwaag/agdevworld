@@ -32,6 +32,7 @@ export interface BudgetCard {
   credits?: { has: boolean; unlimited: boolean; balance: string | null } | null
   remaining_credits?: number | null
   upgrade_uri?: string | null
+  credits_error?: string | null
   stale?: (Omit<BudgetCard, 'ok' | 'error' | 'stale'>) | null
 }
 

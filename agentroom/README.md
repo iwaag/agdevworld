@@ -296,7 +296,21 @@ and a hung codex process never blanks the Claude card.
   read (~1 s) rather than the daemon, which could go stale. `codex exec
   "/status"` is **not** a headless read — it sends the text to the model and
   bills for it.
-- **agy** — step 3.
+- **agy** — `agy -p /usage --mode plan --output-format json`
+  (`AGENTROOM_AGY_BIN`, default `~/.local/bin/agy`), a slash command that
+  expands in print mode and answers locally: `status: SUCCESS`, no model
+  run, and `command.data.groups[]` — a weekly and a 5-hour bucket per model
+  *group* ("Gemini Models", "Claude and GPT models"), four meters. Antigravity
+  reports `remaining_fraction`; the card shows `1 − remaining` so the three
+  harnesses read the same way. `/credits` (the purchasable pool, a different
+  thing) is the footer line, only when non-zero; its failure leaves the
+  meters standing. A non-`SUCCESS` status, a missing `command` block (logged
+  out — the TUI's "[Auth Needed]") or a timeout is unknown in the CLI's own
+  words. `--mode plan` so nothing needs the permission bypass; no token file
+  is read. It is the slow one (~8 s), so it has its own 30 s timeout, and
+  `/budget` answers after `JOIN_SECONDS` (15) with what it has — a provider
+  still reading says so, keeps its thread, and fills its cache for the next
+  tick.
 
 ## `/ops` — the state engine
 

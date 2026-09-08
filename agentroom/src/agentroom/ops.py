@@ -55,6 +55,7 @@ from agag.intro import (
 from agag.selfnote import Conversation, is_selfnote, parse_rootchat, parse_served
 from agag.zulip import RESOLVED_TOPIC_PREFIX, QueueExpired, RateLimited, ZulipClient
 
+from .closing import parse_work_note
 from .frontdesk import is_desk_topic, newest_desk_topics
 from .inflight import Inflight
 from .room import SYSTEM_REALM, bare_topic
@@ -184,6 +185,13 @@ class Topic:
     #: first note is when this conversation started working there, which is
     #: what attributes a child to one fire rather than another.
     served: dict[tuple[str, str], dict] = field(default_factory=dict)
+    #: `[selfnote][work]` written *in* this topic: the Plane issue an
+    #: execution topic was anchored to, with who wrote it and where
+    #: (`closing.parse_work_note`). The third link note, retained for the
+    #: same reason as the other two and rendered as little: `front_desk` p3
+    #: needs it to say which Work a finished conversation owns, and it is not
+    #: in `history` — a selfnote is never a real post.
+    works: list[tuple[str | None, str, int, str, int]] = field(default_factory=list)
     #: Whether `history` is known to be a *window* rather than the whole topic:
     #: the sweep's read came back full, or a later post pushed an older one out.
     #: A session list built on a window must say so instead of implying that
@@ -219,6 +227,11 @@ class Topic:
         sender_id = int(message.get("sender_id") or 0)
         sender = str(message.get("sender_full_name") or "")
         home = parse_rootchat(content)
+        if home is not None:
+            # Keyed bare, like everything else here: a note written after the
+            # home was resolved names the ✔ name, and the two are one
+            # conversation.
+            home = Conversation(home.channel, bare_topic(home.topic))
         if home is not None and not any(
             root == home and by == sender_id for root, by, _, _ in self.roots
         ):
@@ -227,6 +240,12 @@ class Topic:
             # a home of their own.
             self.roots.append((home, sender_id, sender, int(message.get("id") or 0)))
             self.roots.sort(key=lambda root: root[3])
+        work = parse_work_note(content)
+        if work is not None:
+            entry = (work[0], work[1], sender_id, sender, int(message.get("id") or 0))
+            if not any(kept[:3] == entry[:3] for kept in self.works):
+                self.works.append(entry)
+                self.works.sort(key=lambda kept: kept[4])
         parsed = parse_served(content)
         if parsed is not None:
             remote, ident = parsed

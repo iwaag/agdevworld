@@ -22,6 +22,7 @@ from .inflight import ROOTS_VARIABLE, parse_roots
 from .ops import DEFAULT_STALLED_SECONDS, Ops
 from .room import Room
 from .server import build_server
+from .settings import settings_from_env
 
 #: Path to a `KEY=value` Zulip credentials file (`agag.zulip.ZulipClient.from_env`).
 ENV_VARIABLE = "AGENTROOM_ZULIP_ENV"
@@ -136,6 +137,11 @@ def main(argv: list[str] | None = None) -> int:
             print(f"cost: {len(scanned['rows'])} records in {len(scanned['roots'])} roots; "
                   f"prices {'ok' if table.error is None else table.error} "
                   f"({table.path or PRICES_VARIABLE + ' unset'})")
+        found = settings_from_env().snapshot()
+        active = found["active"]
+        print("settings: " + (f"revision {active['short']} of {active['url']} ({active['ref']}); "
+                              f"characters {', '.join(active['characters'])}" if active
+                              else f"none — {found['error']}"))
         for harness, card in budget.snapshot()["harnesses"].items():
             if card["ok"]:
                 meters = ", ".join(f"{w['label']} {w['percent']:g}%" for w in card["windows"])
@@ -149,15 +155,22 @@ def main(argv: list[str] | None = None) -> int:
     # writes with the chat's. No fourth credential.
     desk = FrontDesk(ops=ops, chat=chat, reader_factory=lambda: ZulipClient.from_env(path))
 
+    # The settings repository (`front_desk` p2): read per request from the
+    # active revision the sync command switched, so a content update needs
+    # neither a restart nor a rebuild. Unconfigured is a payload, not a
+    # refusal to start.
+    settings = settings_from_env()
+
     if ops is not None:
         ops.start()
-    server = build_server(host, port, room, ops, chat, cost, budget, desk)
+    server = build_server(host, port, room, ops, chat, cost, budget, desk, settings)
     print(
         f"agentroom listening on http://{host}:{port} (cache {ttl:g}s, "
         + (f"ops on, stalled at {stalled:g}s, " if ops else "ops off, ")
         + ("chat on, " if chat.configured else "chat read-only, ")
         + (f"cost over {len(roots)} roots, " if cost else "cost off, ")
-        + f"budget of {len(budget.providers)} harnesses)",
+        + f"budget of {len(budget.providers)} harnesses, "
+        + f"settings from {settings.config_path.name})",
         flush=True,
     )
     try:

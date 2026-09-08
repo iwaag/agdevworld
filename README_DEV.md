@@ -20,6 +20,7 @@ read static snapshots or their existing sample fallbacks.
 - `node .local/opsshot.mjs http://localhost:5173/ .local/shots` — the ~70-line CDP screenshot driver (`OPSSHOT_STEPS` scripts the clicks). `--headless --screenshot` hangs on this app: `--virtual-time-budget` waits for the page to go idle and `PanelGridScene` tweens forever.
 - `agentroom/service/serve.sh check` — one read, counts printed, no listener. Tells a credentials problem from a UI one.
 - `cd agentroom && uv run pytest -q` — the relay's tests.
+- `cd agentroom && uv run agentroom-settings sync` — fetch the settings repository (`.local/settings.toml`, from `settings.example.toml`) and make its ref the active revision; `status` reads it back. No restart or rebuild follows a content update.
 
 ## Files
 
@@ -33,6 +34,7 @@ read static snapshots or their existing sample fallbacks.
 - `src/opsState.ts` — the operation room's one read, `/ops` on the same relay.
 - `src/viewSwitcher.ts` — the single seam for changing the visible view.
 - `src/frontDesk.ts` / `src/scenes/FrontDeskScene.ts` — the Front Desk (`/?view=frontdesk`), a graphic-novel scene for one `#front` › `front-desk-<id>` conversation with Front; `src/frontDeskInput.ts` is its hidden IME textarea, `src/textLayout.ts` the grapheme-safe wrap and pagination, `src/frontDeskState.ts` its relay reads/writes and a `&demo=1` source that never touches the realm.
+- `src/settingsState.ts` — the settings repository as the relay serves it (`/settings`, `/settings/<revision>`): characters, lore, revision-addressed portraits and backgrounds.
 - `src/chatPanel.ts` — one routine fire topic and the existing `POST /chat` door; dashboard mode receives shared detail payloads, while world mode owns its selected-topic refresh.
 - `src/detailPopup.ts` — the detail overlay, incl. the per-iteration `summary` button.
 - `src/clusterState.ts` / `src/autolabState.ts` / `src/planeState.ts` — snapshot, gateway, and Plane reads/actions for the panels.
@@ -211,6 +213,22 @@ Three things learned by looking rather than by design:
 
 `.local/deskshot.mjs` (ignored) is the CDP driver that types, presses keys,
 sets an IME composition, wheels and screenshots it.
+
+### Settings repository (`front_desk` p2)
+
+Characters and rooms are content, not code: a Git repository
+(`settings.example.toml` names `iwaag/agdevworld-settings`) with a
+`manifest.toml` — display names, lore, portrait and background paths, and
+which agents speak as which character. `agentroom-settings sync` fetches it,
+checks the manifest and every file it names, and switches the active
+revision; every synced revision is kept under `.local/settings/revisions/`
+so a saved dialogue can still be drawn with the faces it was written for,
+and `.local/settings/current/` is the active one for agents that read lore
+as files. The relay serves it under `/settings` with the revision in every
+asset URL, so a replaced image never survives in a browser cache. Adding a
+character is a manifest entry and its files in that repository; the frontend
+is not rebuilt and the relay is not restarted. `agentroom/README.md` has the
+routes and the failure behaviour.
 
 ### Two windows (`operation_room` p8)
 

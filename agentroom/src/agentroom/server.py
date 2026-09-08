@@ -34,15 +34,17 @@ from .frontdesk import FrontDesk
 from .inflight import ROOTS_VARIABLE
 from .ops import Ops
 from .room import Room
+from .settings import Settings
 
 ROUTES = ("/healthz", "/agents", "/work", "/ops", "/routines", "/routines/<name>",
-          "/inflight/<name>", "/cost", "/budget", "/frontdesk", "/frontdesk/<id>")
+          "/inflight/<name>", "/cost", "/budget", "/frontdesk", "/frontdesk/<id>",
+          "/settings", "/settings/<revision>", "/settings/<revision>/<path>")
 WRITE_ROUTES = ("/ops/confirm", "/chat", "/routines/<name>/start", "/frontdesk/<id>/post")
 
 
 def make_handler(room: Room, ops: Ops | None = None, chat: Chat | None = None,
                  cost: Cost | None = None, budget: Budget | None = None,
-                 desk: FrontDesk | None = None):
+                 desk: FrontDesk | None = None, settings: Settings | None = None):
     class Handler(BaseHTTPRequestHandler):
         server_version = "agentroom/0.1.0"
 
@@ -57,6 +59,41 @@ def make_handler(room: Room, ops: Ops | None = None, chat: Chat | None = None,
             self.send_header("Access-Control-Allow-Origin", "*")
             self.end_headers()
             self.wfile.write(body)
+
+        def _write_bytes(self, status: int, body: bytes, content_type: str, *, immutable: bool = False) -> None:
+            self.send_response(status)
+            self.send_header("Content-Type", content_type)
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Access-Control-Allow-Origin", "*")
+            if immutable:
+                # The URL carries the revision, so what it names never
+                # changes: a replaced portrait is a new URL, and a browser may
+                # keep this one for as long as it likes.
+                self.send_header("Cache-Control", "public, max-age=31536000, immutable")
+            self.end_headers()
+            self.wfile.write(body)
+
+        def _settings(self, rest: str) -> None:
+            """The settings repository's active revision, a retained one, or
+            one file a manifest names (`front_desk` p2 step 1)."""
+            if settings is None:
+                self._write_json(503, {"error": "the settings repository is not configured"})
+                return
+            if rest == "":
+                self._write_json(200, settings.snapshot())
+                return
+            revision, _, relpath = rest.partition("/")
+            if relpath == "":
+                found = settings.revision(revision)
+                self._write_json(200 if found.get("retained") else 404, found)
+                return
+            asset = settings.asset(revision, relpath)
+            if asset is None:
+                self._write_json(404, {"error": f"revision {revision[:12]} does not retain {relpath!r}, "
+                                                "or the manifest does not name it"})
+                return
+            body, content_type = asset
+            self._write_bytes(200, body, content_type, immutable=True)
 
         def do_OPTIONS(self) -> None:  # noqa: N802 (stdlib naming)
             self.send_response(204)
@@ -185,6 +222,8 @@ def make_handler(room: Room, ops: Ops | None = None, chat: Chat | None = None,
                     else:
                         found = desk.conversation(unquote(path[len("/frontdesk/"):]))
                         self._write_json(400 if found.get("error") else 200, found)
+                elif path == "/settings" or path.startswith("/settings/"):
+                    self._settings(unquote(path[len("/settings"):]).lstrip("/"))
                 elif path.startswith("/inflight/"):
                     # The one route a view may poll at a few seconds. It reads
                     # this host's directories and never Zulip.
@@ -381,7 +420,8 @@ def make_handler(room: Room, ops: Ops | None = None, chat: Chat | None = None,
 def build_server(
     host: str, port: int, room: Room, ops: Ops | None = None, chat: Chat | None = None,
     cost: Cost | None = None, budget: Budget | None = None, desk: FrontDesk | None = None,
+    settings: Settings | None = None,
 ) -> ThreadingHTTPServer:
     return ThreadingHTTPServer(
-        (host, port), make_handler(room, ops, chat, cost, budget, desk)
+        (host, port), make_handler(room, ops, chat, cost, budget, desk, settings)
     )

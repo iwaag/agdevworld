@@ -1,0 +1,26 @@
+# The settings repository agdevworld draws its characters and rooms from.
+#
+# Copy to `.local/settings.toml` (ignored) and edit. `agentroom-settings sync`
+# (run from `agentroom/`, or `uv run --project agentroom agentroom-settings sync`)
+# fetches the repository, checks the ref's `manifest.toml` and every file it
+# names, and makes that revision the active one; the relay serves it under
+# `/settings` on the next request, with no restart. A failed sync keeps the
+# previous revision and says why.
+
+[repository]
+url = "https://github.com/iwaag/agdevworld-settings.git"
+# A branch, a tag or a commit id.
+ref = "main"
+# Where the clone and the retained revisions live. Relative to agdevworld's
+# root when this file is in `.local/`, otherwise to this file's directory.
+# `<destination>/current/` is the active revision, for agents that read lore
+# as files; `<destination>/revisions/<sha>/` keeps every revision synced.
+destination = ".local/settings"
+
+# This realm's own additions to the manifest's agent → character mapping.
+# The manifest maps by agent name (`front`, `autolab`); an instance or a
+# Zulip display name that should speak as a character goes here, because it
+# names this realm and does not belong in the shared repository.
+# [overrides.characters.autolab]
+# agents = ["autolab-agstudio1"]
+# senders = ["Autolab"]

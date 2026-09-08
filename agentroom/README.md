@@ -263,6 +263,47 @@ inside Front's own `front-` sweep. Three routes, in `frontdesk.py`:
   with `uncertain: true` when the post left and Zulip did not confirm it;
   never a retry, because a post here starts a paid run.
 
+## `/settings` — the settings repository (`front_desk` p2)
+
+The Front Desk's characters (display names, lore, portraits, which agents
+speak as which character) and rooms (backgrounds) come from a Git
+repository — `iwaag/agdevworld-settings` to begin with — rather than from
+the frontend bundle or an agent's guide. `settings.py` owns it:
+
+- **Config**: `agdevworld/.local/settings.toml` (ignored; the tracked
+  `settings.example.toml` beside `package.json` shows the shape), or the file
+  `AGENTROOM_SETTINGS_CONFIG` names. `[repository]` gives `url`, `ref`
+  (branch, tag or commit) and `destination` (`.local/settings` by default);
+  `[overrides.characters.<id>]` adds this realm's `agents` / `senders` to a
+  character's mapping without touching the shared repository.
+- **Sync**: `uv run agentroom-settings sync` (from `agentroom/`). Clone or
+  fetch, resolve the ref, snapshot that commit under
+  `<destination>/revisions/<sha>/`, read its `manifest.toml`
+  (`ag.settings-manifest.v1`) and check that every lore and image it names
+  exists, and only then write `active.json` and repoint the `current` symlink.
+  A sync that fails — a missing file, an unknown ref, an unreachable URL —
+  prints why, records it in `last_sync.json` and leaves the previous
+  revision active. Nothing fetches on a request or a conversation.
+  `agentroom-settings status` / `show` read the state back.
+- `GET /settings` → `ag.settings.v1`: `config`, `active` (the revision in
+  use), `last_sync` (so a failed sync is visible beside the revision that is
+  still serving), and `manifest` — every character with its lore inline and
+  its `face` as `/settings/<revision>/characters/<id>/face.jpg`, every room
+  with its `background` likewise. The revision in the URL is the cache
+  buster: a replaced image is a new URL.
+- `GET /settings/<revision>` → that retained revision's manifest, or `404`
+  with `retained: false`. A dialogue saved against a revision asks for it
+  here, so it is drawn with the faces it was written for.
+- `GET /settings/<revision>/<path>` → one file the manifest at that revision
+  names, with its content type and an immutable cache header. Nothing else
+  under the snapshot is served: this is a manifest, not a file server.
+
+Agents read the same revision as files: `<destination>/current/` is the
+active one, `<destination>/revisions/<sha>/` any retained one (agfront's
+`character_talk` reads lore from there since p2 step 2). Every request reads
+the active revision afresh, so a content update needs no relay restart and
+no frontend rebuild.
+
 ## `/cost` — what the backends cost (`gauge_panel`)
 
 `GET /cost` reads this host's `ag.agent-run.v1` records — the same

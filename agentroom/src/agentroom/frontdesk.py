@@ -70,11 +70,20 @@ TOKEN_MEMORY = 200
 READ_TTL_SECONDS = 30.0
 #: How much of an unheld conversation a direct read fetches.
 READ_DEPTH = 200
+#: The turn-taking mention `serve_topic` puts in front of every reply
+#: (`@**Developer**`). Transport, like the ack: shown to nobody.
+HANDOFF = re.compile(r"^\s*@\*\*[^*\n]+\*\*\s*\n+")
 
 __all__ = [
     "DESK_DEEP", "DESK_PREFIX", "FrontDesk", "ID_PATTERN", "SCHEMA",
-    "is_desk_topic", "newest_desk_topics", "post_kind", "status_of",
+    "is_desk_topic", "newest_desk_topics", "post_kind", "shown_content", "status_of",
 ]
+
+
+def shown_content(content: str) -> str:
+    """The post as the developer should read it: without the leading
+    handoff mention the skeleton prefixes to a reply."""
+    return HANDOFF.sub("", content, count=1)
 
 
 def is_desk_topic(channel: str, topic: str) -> bool:
@@ -326,7 +335,7 @@ class FrontDesk:
             row = self._row(ident, held, held.live_topic, front_id, developer_id)
             posts = [{
                 "message_id": m.id, "at": m.timestamp, "by": m.sender, "sender_id": m.sender_id,
-                "content": m.content, "kind": post_kind(m, front_id, developer_id),
+                "content": shown_content(m.content), "kind": post_kind(m, front_id, developer_id),
             } for m in sorted(held.history, key=lambda m: m.id)]
             note = ("the newest posts were read; older ones are in Zulip" if bounded
                     else "every real post of this conversation is here")

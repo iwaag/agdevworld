@@ -16,7 +16,7 @@ from agag.intro import Roster
 
 from agentroom.chat import Chat
 from agentroom.frontdesk import (
-    DESK_DEEP, FrontDesk, is_desk_topic, newest_desk_topics, post_kind, status_of,
+    DESK_DEEP, FrontDesk, is_desk_topic, newest_desk_topics, post_kind, shown_content, status_of,
 )
 from agentroom.ops import Ops, Topic
 from agentroom.room import Room
@@ -150,6 +150,16 @@ def test_a_system_notice_is_not_somebody_speaking():
                  message("marked this topic as unresolved", ident=4, sender_id=99,
                          sender="Notification Bot", realm="zulipinternal"))
     assert status_of(held, FRONT_BOT, DEVELOPER)["state"] == "answered"
+
+
+def test_the_handoff_mention_is_transport_and_is_not_shown():
+    """Every reply Front posts begins `@**Developer**` — the skeleton's
+    turn-taking, not something Front said. The live first reply showed it raw."""
+    assert shown_content("@**Developer**\n\nやっほー✨\n\n@**autolab** is named here") == "やっほー✨\n\n@**autolab** is named here"
+    assert shown_content("plain") == "plain"
+    held = topic(DESK, by_front("@**Developer**\n\nyo", ident=3))
+    desk, _ = desk_with(held)
+    assert desk.conversation("20260908-1600", now=NOW)["conversation"]["latest_reply"]["content"] == "yo"
 
 
 # --- history: held, read, unknown -------------------------------------------

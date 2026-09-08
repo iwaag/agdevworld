@@ -186,6 +186,9 @@ class Related:
             "links": self.links, "homes": self.homes,
             "works": [note.as_dict() for note in self.works],
             "history_bounded": self.history_bounded,
+            # The id a resolve renames from: Zulip resolves a topic by moving
+            # its messages, so closing one needs a post of it to move.
+            "last_post_id": self.last_post_id,
         }
 
     @property
@@ -549,6 +552,17 @@ class PlaneReader:
                 self.errors.append({"project_id": project_id, "error": f"{type(error).__name__}: {error}"})
                 self._groups[project_id] = {}
         return self._groups[project_id]
+
+    def complete(self, project_id: str, issue_id: str) -> None:
+        """Move one issue into the project's `completed` state.
+
+        The **only** write this whole feature makes to Plane, and it is the
+        one `agautolab.mission_done` makes: the state group is asked of the
+        project rather than assumed, because a project's states are its own.
+        """
+        from agag.plane import state_id_for_group, update_issue
+        update_issue(self.config, project_id, issue_id,
+                     {"state": state_id_for_group(self.config, project_id, "completed")})
 
 
 @dataclass

@@ -29,6 +29,7 @@ from urllib.parse import parse_qs, unquote, urlparse
 
 from .budget import Budget
 from .chat import Chat
+from .close import Closer
 from .cost import Cost
 from .frontdesk import FrontDesk
 from .inflight import ROOTS_VARIABLE
@@ -38,13 +39,16 @@ from .settings import Settings
 
 ROUTES = ("/healthz", "/agents", "/work", "/ops", "/routines", "/routines/<name>",
           "/inflight/<name>", "/cost", "/budget", "/frontdesk", "/frontdesk/<id>",
+          "/frontdesk/<id>/close-plan",
           "/settings", "/settings/<revision>", "/settings/<revision>/<path>")
-WRITE_ROUTES = ("/ops/confirm", "/chat", "/routines/<name>/start", "/frontdesk/<id>/post")
+WRITE_ROUTES = ("/ops/confirm", "/chat", "/routines/<name>/start", "/frontdesk/<id>/post",
+                "/frontdesk/<id>/close")
 
 
 def make_handler(room: Room, ops: Ops | None = None, chat: Chat | None = None,
                  cost: Cost | None = None, budget: Budget | None = None,
-                 desk: FrontDesk | None = None, settings: Settings | None = None):
+                 desk: FrontDesk | None = None, settings: Settings | None = None,
+                 closer: Closer | None = None):
     class Handler(BaseHTTPRequestHandler):
         server_version = "agentroom/0.1.0"
 
@@ -216,6 +220,16 @@ def make_handler(room: Room, ops: Ops | None = None, chat: Chat | None = None,
                         self._write_json(503, {"error": "the Front Desk is not configured"})
                     else:
                         self._write_json(200, desk.board())
+                elif path.startswith("/frontdesk/") and path.endswith("/close-plan"):
+                    # What closing this conversation would change (`front_desk`
+                    # p3). A read: it touches Zulip and Plane and writes to
+                    # neither, and it is the *only* thing the button's final
+                    # click approves.
+                    if closer is None:
+                        self._write_json(503, {"error": "conversation completion is not configured"})
+                    else:
+                        found = closer.plan(unquote(path[len("/frontdesk/"):-len("/close-plan")]))
+                        self._write_json(400 if found.get("error") else 200, found)
                 elif path.startswith("/frontdesk/"):
                     if desk is None:
                         self._write_json(503, {"error": "the Front Desk is not configured"})
@@ -363,6 +377,33 @@ def make_handler(room: Room, ops: Ops | None = None, chat: Chat | None = None,
             else:
                 self._write_json(403, found)
 
+        def _desk_close(self, ident: str) -> None:
+            """Close this conversation and the work it opened.
+
+            The body carries the conversation's own id and the fingerprint of
+            the preview the human approved — never a list of destinations.
+            The targets are re-derived here, and a plan that no longer matches
+            is answered 409 with the fresh one rather than written against.
+            """
+            if closer is None:
+                self._write_json(503, {"error": "conversation completion is not configured"})
+                return
+            body = self._body()
+            if body is None:
+                return
+            expected = body.get("fingerprint")
+            if expected is not None and not isinstance(expected, str):
+                self._write_json(400, {"error": "fingerprint must be the string the plan carried"})
+                return
+            found = closer.close(ident, expected)
+            if found.get("error") and not found.get("refused"):
+                self._write_json(400 if "is not a Front Desk" in str(found["error"]) else 503,
+                                 found)
+            elif found.get("refused"):
+                self._write_json(409, found)
+            else:
+                self._write_json(200, found)
+
         def do_POST(self) -> None:  # noqa: N802
             path = urlparse(self.path).path.rstrip("/") or "/"
             if path == "/chat":
@@ -370,6 +411,9 @@ def make_handler(room: Room, ops: Ops | None = None, chat: Chat | None = None,
                 return
             if path.startswith("/frontdesk/") and path.endswith("/post"):
                 self._desk_post(unquote(path[len("/frontdesk/"):-len("/post")]))
+                return
+            if path.startswith("/frontdesk/") and path.endswith("/close"):
+                self._desk_close(unquote(path[len("/frontdesk/"):-len("/close")]))
                 return
             if path.startswith("/routines/") and path.endswith("/start"):
                 self._start(unquote(path[len("/routines/"):-len("/start")]))
@@ -420,8 +464,8 @@ def make_handler(room: Room, ops: Ops | None = None, chat: Chat | None = None,
 def build_server(
     host: str, port: int, room: Room, ops: Ops | None = None, chat: Chat | None = None,
     cost: Cost | None = None, budget: Budget | None = None, desk: FrontDesk | None = None,
-    settings: Settings | None = None,
+    settings: Settings | None = None, closer: Closer | None = None,
 ) -> ThreadingHTTPServer:
     return ThreadingHTTPServer(
-        (host, port), make_handler(room, ops, chat, cost, budget, desk, settings)
+        (host, port), make_handler(room, ops, chat, cost, budget, desk, settings, closer)
     )

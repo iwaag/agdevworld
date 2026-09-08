@@ -107,6 +107,11 @@ writes only to this process's memory (see `POST /ops/confirm`).
   `{sent, channel, topic, message_id}`, `403` with the reason for anything the
   rules decline, `503` when no chat credential is configured. See below.
 
+- `GET /frontdesk/<id>/close-plan`, `POST /frontdesk/<id>/close` → what
+  finishing one Front Desk conversation would change, and doing it
+  (`front_desk` p3). The **second** route that writes to the realm, and the
+  only one that writes to Plane. See below.
+
 - `GET /frontdesk`, `GET /frontdesk/<id>`, `POST /frontdesk/<id>/post` → the
   Front Desk's conversations, one conversation's history, and a post into it
   as the Developer (`front_desk` p1). See below.
@@ -274,6 +279,57 @@ reply), and `dialogue_error` the reason recorded in an `ag-dialogue-error`
 fence when the run's block was unusable — the reply is shown on its own
 then. A machine block never reaches the rendered conversation. The
 Developer's posts are shown as typed, fences included.
+
+## `/frontdesk/<id>/close` — finishing a conversation (`front_desk` p3)
+
+A Front Desk conversation is rarely one topic: Front opens a workplan topic,
+autolab plans a Plane Work with a Sub-Work per task and a `work-<label>`
+channel per mission, forge runs an `assetrun-` beside its `assetplan-`. When
+the thing is done, all of that is still open — including the mission Work,
+which nothing ever closed. Two routes close it, in `closing.py` (what the
+targets *are*) and `close.py` (what would change, and doing it):
+
+- `GET /frontdesk/<id>/close-plan` → `ag.frontdesk-close.v1`: the ordered
+  `actions`, each with a `kind` (`work`, `topic`, `channel`, `conversation`),
+  a stable `key`, a `state` (`ready`, `done`, `blocked`, `kept`), the
+  `reason` it is in that state and the `detail` it was decided from; plus
+  `counts`, `excluded`, `gaps`, `status` (which credentials this relay has)
+  and a `fingerprint`. It writes nothing.
+- `POST /frontdesk/<id>/close` `{fingerprint}` → applies it and answers the
+  same payload with `results` (one row per target: `applied`, `already`,
+  `failed`, `skipped`) and `partial`. `409` when the plan has changed since
+  the preview — the refusal carries the fresh plan and **nothing is
+  written**. The body carries the approved fingerprint and nothing else: the
+  server closes what it derived, never what a browser named.
+
+How each target is decided:
+
+- **A Work** by `agag.plane.reason_not_completed` — the same rule
+  `agautolab.mission_done` applies, moved into pyagag in p3 so the button
+  could ask it about one named Work instead of running a whole-board CLI.
+  Every live Sub-Work completed → `ready`; already Done → `done`, a
+  successful no-op; cancelled → `kept`, untouched; unfinished children, or a
+  standalone Work with none, → `blocked`. A Sub-Work the walk never reached
+  is listed as `unreached_children` and still counted.
+- **A topic** by whether it was actually read. `note-only` is a gap, not a
+  finished conversation, and blocks.
+- **A channel** only when it is `work-<label>` for a mission of *this*
+  conversation and every topic it actually holds is one of these targets.
+  `#front`, project and agent channels are never candidates.
+- **The Front conversation last**, and only if nothing above is blocked or
+  failed — a ✔ there is the claim that the whole thing is finished.
+
+Nothing rolls back and nothing is retried automatically: every action is
+idempotent in the realm's own terms (a resolved topic → `already`, a Done
+Work → `already`), so clicking again after a partial failure finishes what
+is left and repeats nothing.
+
+Credentials: reads use `AGENTROOM_ZULIP_ENV`, Zulip writes use
+`AGENTROOM_CHAT_ZULIP_ENV` (the Developer — the credential that already
+posts here), and Plane uses **`AGENTROOM_PLANE_ENV`**, a path to an ignored
+`KEY=value` file. Unset, or refused a project, is reported in the preview's
+`status`/`gaps` rather than discovered on submit. This operation closes
+work; it does not stop a running agent.
 
 ## `/settings` — the settings repository (`front_desk` p2)
 

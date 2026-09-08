@@ -12,10 +12,13 @@ import sys
 import time
 from pathlib import Path
 
+from agag.plane import load_plane_config
 from agag.zulip import ZulipClient
 
 from .budget import budget_from_env
 from .chat import CHAT_ENV_VARIABLE, DEFAULT_MAX_CHARS, Chat
+from .close import Closer
+from .closing import PlaneReader
 from .cost import PRICES_VARIABLE, Cost, prices_path_from_env
 from .frontdesk import FrontDesk
 from .inflight import ROOTS_VARIABLE, parse_roots
@@ -41,6 +44,15 @@ SCHEDULE_VARIABLE = "AGENTROOM_SCHEDULE_JSON"
 #: with no fallback in either direction: the observer that reads the realm
 #: never posts, and a relay without this one is read-only for chat and says so.
 CHAT_VARIABLE = CHAT_ENV_VARIABLE
+#: Plane credentials for the Front Desk's completion button (`front_desk` p3):
+#: a path to an ignored `KEY=value` file (`agag.plane.load_plane_config`).
+#: A fourth variable and no fallback, because it is the one credential here
+#: that is *not* Zulip and because a relay without it must still close the
+#: chat half — the preview says which Works it could not see. The key needs
+#: read and write access to the projects the conversations reach; planning
+#: measured a per-agent key that could read one project and was refused
+#: another, so this is deliberately configurable rather than derived.
+PLANE_VARIABLE = "AGENTROOM_PLANE_ENV"
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8094
 DEFAULT_CACHE_SECONDS = 30.0
@@ -155,6 +167,30 @@ def main(argv: list[str] | None = None) -> int:
     # writes with the chat's. No fourth credential.
     desk = FrontDesk(ops=ops, chat=chat, reader_factory=lambda: ZulipClient.from_env(path))
 
+    # The completion door (`front_desk` p3). It reads with the relay's own
+    # credential, writes to Zulip with the Developer's — the one that already
+    # posts here — and touches Plane only when it has been given a key.
+    plane_env = os.environ.get(PLANE_VARIABLE, "")
+    plane_path = Path(plane_env).expanduser() if plane_env else None
+    if plane_path is not None and not plane_path.is_file():
+        print(f"{PLANE_VARIABLE}={plane_path} is not a file", file=sys.stderr)
+        return 2
+    def held_topics() -> dict:
+        """The engine's memory, copied under its lock: a preview must not
+        read a dict a sweep is writing."""
+        if ops is None:
+            return {}
+        with ops._lock:
+            return dict(ops._topics)
+
+    closer = Closer(
+        topics=held_topics,
+        reader_factory=lambda: ZulipClient.from_env(path),
+        writer_factory=(lambda: chat.client()) if chat.configured else None,
+        plane_factory=((lambda: PlaneReader(load_plane_config(plane_path)))
+                       if plane_path is not None else None),
+    )
+
     # The settings repository (`front_desk` p2): read per request from the
     # active revision the sync command switched, so a content update needs
     # neither a restart nor a rebuild. Unconfigured is a payload, not a
@@ -163,14 +199,16 @@ def main(argv: list[str] | None = None) -> int:
 
     if ops is not None:
         ops.start()
-    server = build_server(host, port, room, ops, chat, cost, budget, desk, settings)
+    server = build_server(host, port, room, ops, chat, cost, budget, desk, settings, closer)
     print(
         f"agentroom listening on http://{host}:{port} (cache {ttl:g}s, "
         + (f"ops on, stalled at {stalled:g}s, " if ops else "ops off, ")
         + ("chat on, " if chat.configured else "chat read-only, ")
         + (f"cost over {len(roots)} roots, " if cost else "cost off, ")
         + f"budget of {len(budget.providers)} harnesses, "
-        + f"settings from {settings.config_path.name})",
+        + f"settings from {settings.config_path.name}, "
+        + ("completion with Plane" if plane_path is not None else
+           "completion without Plane") + ")",
         flush=True,
     )
     try:

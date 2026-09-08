@@ -104,9 +104,9 @@ export function linksIn(text: string): FoundLink[] {
     seen.add(match[2])
     found.push({ label: match[1], url: match[2] })
   }
-  const bare = /https?:\/\/[^\s<>()\]]+/g
+  const bare = /https?:\/\/[^\s<>()\]`'"]+/g
   while ((match = bare.exec(text)) !== null) {
-    const url = match[0].replace(/[.,;:!?。、]+$/, '')
+    const url = match[0].replace(/[.,;:!?。、」』）]+$/, '')
     if (seen.has(url)) continue
     seen.add(url)
     let label: string

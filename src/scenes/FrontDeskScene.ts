@@ -110,7 +110,6 @@ export class FrontDeskScene extends Phaser.Scene {
   private historyBackdrop!: Phaser.GameObjects.Graphics
   private historyTitle!: Phaser.GameObjects.Text
   private historyList!: Phaser.GameObjects.Container
-  private historyMaskShape!: Phaser.GameObjects.Graphics
   private conversationChips: Phaser.GameObjects.Text[] = []
 
   constructor(options: FrontDeskOptions) {
@@ -163,8 +162,6 @@ export class FrontDeskScene extends Phaser.Scene {
     this.historyBackdrop = this.add.graphics()
     this.historyTitle = this.text(0, 0, 'HISTORY', MONO, 11, COLOR.accent2).setLetterSpacing(2)
     this.historyList = this.add.container(0, 0)
-    this.historyMaskShape = this.make.graphics({ x: 0, y: 0 }, false)
-    this.historyList.setMask(this.historyMaskShape.createGeometryMask())
     this.historyPanel.add([this.historyBackdrop, this.historyTitle, this.historyList])
 
     this.keys = createFrontDeskInput({
@@ -375,9 +372,6 @@ export class FrontDeskScene extends Phaser.Scene {
       this.historyTitle.setPosition(panelX + 14, panelY + 10)
       const listY = panelY + 30 + this.conversationChipRows() * 24 + 6
       this.historyViewport = { x: panelX + 8, y: listY, width: historyWidth - 16, height: panelY + panelHeight - listY - 8 }
-      this.historyMaskShape.clear()
-      this.historyMaskShape.fillStyle(0xffffff, 1)
-      this.historyMaskShape.fillRect(this.historyViewport.x, this.historyViewport.y, this.historyViewport.width, this.historyViewport.height)
       this.renderConversationChips()
     }
     this.renderDialogue()
@@ -445,8 +439,11 @@ export class FrontDeskScene extends Phaser.Scene {
     let chipX = x + 18
     let chipY = y + height - 12
     const rows: Phaser.GameObjects.Text[][] = [[]]
+    // A chip never outgrows the box: ~7px per monospace character at 11px.
+    const maxLabel = Math.max(10, Math.floor((width - 140) / 7))
     for (const link of links) {
-      const chip = this.text(0, 0, `🔗 ${link.label}`, MONO, 11, COLOR.accent2)
+      const label = link.label.length > maxLabel ? `${link.label.slice(0, maxLabel - 1)}…` : link.label
+      const chip = this.text(0, 0, `🔗 ${label}`, MONO, 11, COLOR.accent2)
         .setBackgroundColor('#1b2030').setPadding(8, 4, 8, 4)
         .setInteractive({ useHandCursor: true })
         .on('pointerup', () => window.open(link.url, '_blank', 'noopener'))
@@ -640,6 +637,27 @@ export class FrontDeskScene extends Phaser.Scene {
     const overflow = Math.max(0, this.historyHeight - this.historyViewport.height)
     this.historyScroll = Math.max(0, Math.min(overflow, this.historyScroll + delta))
     this.historyList.setY(-this.historyScroll)
+    this.clipHistory()
+  }
+
+  // The viewport is enforced per post rather than by a geometry mask: a mask
+  // on a container's child did not clip under Phaser 4 (seen in the live
+  // screenshots — scrolled posts drew over the panel's header), and a crop
+  // is plain arithmetic.
+  private clipHistory() {
+    const top = this.historyViewport.y
+    const bottom = top + this.historyViewport.height
+    for (const child of this.historyList.list) {
+      const node = child as Phaser.GameObjects.Text
+      const y0 = node.y - this.historyScroll
+      const y1 = y0 + node.height
+      if (y1 <= top || y0 >= bottom) { node.setVisible(false); continue }
+      node.setVisible(true)
+      const cropTop = Math.max(0, top - y0)
+      const cropBottom = Math.max(0, y1 - bottom)
+      if (cropTop > 0 || cropBottom > 0) node.setCrop(0, cropTop, node.width, node.height - cropTop - cropBottom)
+      else node.setCrop()
+    }
   }
 
   private inside(pointer: Phaser.Input.Pointer, rect: { x: number; y: number; width: number; height: number }): boolean {

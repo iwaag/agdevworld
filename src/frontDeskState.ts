@@ -219,6 +219,7 @@ const DEMO_REPLIES = [
     'あとリンクのチップもね🔗 [リポジトリ](https://github.com/example/awesome-tool) と [作業トピック](https://example.invalid/#narrow/channel/pj-ghtrends) を置いとくね😉✨ ' +
     'まだ続くよ〜〜！！😂 こういう長文でも最後まで読めるように、ページの右下の矢印で進んでね▶️ 戻るのは◀️だよ〜 わかった？🥰 ' +
     'では今日もおつかれさま〜〜🌙💤 またなんでも言ってね💌',
+  'forge ちゃんからタイトル画像が届いたよ🎨✨ 設定に forge のキャラがいれば左上に顔が出るはず👀',
 ]
 
 // The scenes the demo replies play: the third reply is an exchange with
@@ -237,9 +238,16 @@ const DEMO_SCENES: (DeskDialogue | { error: string } | null)[] = [
     ],
   },
   { error: "turn 2: character 'forge' is not in settings revision demo (known: autolab, front)" },
+  {
+    schema: 'ag.frontdesk-dialogue.v1', settings_revision: 'demo',
+    turns: [
+      { character: 'forge', text: 'タイトル画像、できたぞ。', sources: [{ channel: 'agforge-agstudio1', topic: 'assetplan-title', message_id: 6001 }] },
+      { character: 'front', text: 'わ〜！ありがと〜✨ 開発者さんに見せてくるね💕', sources: [] },
+    ],
+  },
 ]
 
-export function demoSource(): DeskSource {
+export function demoSource(revision = 'demo'): DeskSource {
   const posts: DeskPost[] = []
   let next = 1
   let reply = 0
@@ -247,7 +255,7 @@ export function demoSource(): DeskSource {
   const push = (by: string, sender_id: number, content: string, kind: PostKind, scene: (typeof DEMO_SCENES)[number] = null) => {
     posts.push({
       message_id: next++, at: Date.now() / 1000, by, sender_id, content, kind,
-      dialogue: scene && 'turns' in scene ? scene : null,
+      dialogue: scene && 'turns' in scene ? { ...scene, settings_revision: revision } : null,
       dialogue_error: scene && 'error' in scene ? scene.error : null,
     })
   }

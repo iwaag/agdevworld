@@ -29,7 +29,8 @@ new Phaser.Game({
   backgroundColor: '#0d0f14',
   scale: { mode: Phaser.Scale.RESIZE, autoCenter: Phaser.Scale.CENTER_BOTH },
   scene: [new FrontDeskScene({
-    source: params.get('demo') === '1' ? demoSource() : relaySource,
+    // `&demorev=<sha>` makes the demo's scenes claim that settings revision.
+    source: params.get('demo') === '1' ? demoSource(params.get('demorev') ?? 'demo') : relaySource,
     conversationId,
   })],
 })

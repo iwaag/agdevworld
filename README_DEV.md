@@ -33,7 +33,7 @@ read static snapshots or their existing sample fallbacks.
 - `src/agentRoomState.ts` — the agent room's two reads, through the `agentroom` relay.
 - `src/opsState.ts` — the operation room's one read, `/ops` on the same relay.
 - `src/viewSwitcher.ts` — the single seam for changing the visible view.
-- `src/frontDesk.ts` / `src/scenes/FrontDeskScene.ts` — the Front Desk (`/?view=frontdesk`), a graphic-novel scene for one `#front` › `front-desk-<id>` conversation with Front; `src/frontDeskInput.ts` is its hidden IME textarea, `src/textLayout.ts` the grapheme-safe wrap and pagination, `src/frontDeskState.ts` its relay reads/writes and a `&demo=1` source that never touches the realm.
+- `src/frontDesk.ts` / `src/scenes/FrontDeskScene.ts` — the Front Desk (`/?view=frontdesk`), a graphic-novel scene for one `#front` › `front-desk-<id>` conversation with Front; `src/frontDeskInput.ts` is its hidden IME textarea, `src/textLayout.ts` the grapheme-safe wrap and pagination, `src/frontDeskState.ts` its relay reads/writes and a `&demo=1` source that never touches the realm (`&demorev=<sha>` makes the demo's scenes claim a settings revision), `src/frontDeskPlayback.ts` the replies-as-turns model and cursor, `src/frontDeskSettings.ts` which settings revision draws what.
 - `src/settingsState.ts` — the settings repository as the relay serves it (`/settings`, `/settings/<revision>`): characters, lore, revision-addressed portraits and backgrounds.
 - `src/chatPanel.ts` — one routine fire topic and the existing `POST /chat` door; dashboard mode receives shared detail payloads, while world mode owns its selected-topic refresh.
 - `src/detailPopup.ts` — the detail overlay, incl. the per-iteration `summary` button.
@@ -213,6 +213,28 @@ Three things learned by looking rather than by design:
 
 `.local/deskshot.mjs` (ignored) is the CDP driver that types, presses keys,
 sets an IME composition, wheels and screenshots it.
+
+### Scenes and portraits (`front_desk` p2)
+
+A reply from Front is turns: one turn when it is a plain reply, the turns
+of its `dialogue` when agfront wrote one (see `agentroom/README.md` ›
+`/frontdesk`). Front speaks from the lower left; any other character from a
+portrait and box in the upper left, the one not speaking dimmed with its
+last line. ▶/◀, a click on a box or the wheel step through pages, then
+turns, then replies; a reply that arrives while an earlier one is being read
+queues behind it with a `▶ n new replies waiting` chip, and a reader who had
+finished the newest reply is taken to the next one as it lands. History rows
+are portrait, name (nickname) and text per turn, a user icon for the
+Developer, a common icon for a speaker the settings do not know, acks as
+receipt lines, source citations and link chips kept.
+
+Faces, names and the background come from the settings revision: the active
+one for new content (`settings ⟳` re-reads it), and for a scene the revision
+it was written for, fetched by id and never swapped under the reader. A
+revision the relay no longer retains, or an image that fails to load, is
+said in the settings line and drawn with the current settings or the
+bundled fallback. Below 720px the frame stacks (collaborator, portrait,
+Front's box) and the history takes the whole width.
 
 ### Settings repository (`front_desk` p2)
 

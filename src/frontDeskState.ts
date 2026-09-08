@@ -119,16 +119,73 @@ export interface DeskDetail {
 export interface SendResult {
   sent: boolean
   message_id?: number
+  // The topic carried a ✔ and was un-resolved so the post would land in it.
+  // The related work it closed is *not* reopened by that, which the screen
+  // has to say out loud.
+  resumed?: boolean
   duplicate?: boolean
   uncertain?: boolean
   error?: string
   note?: string
 }
 
+// --- finishing a conversation (`front_desk` p3) -------------------------------
+
+// One thing closing this conversation would do, or would not. Every word of
+// it is the relay's: this view never decides that a Work may be closed or
+// that a channel is finished with.
+export type CloseKind = 'work' | 'topic' | 'channel' | 'conversation'
+export type CloseState = 'ready' | 'done' | 'blocked' | 'kept'
+export type CloseOutcome = 'applied' | 'already' | 'failed' | 'skipped'
+
+export interface CloseAction {
+  kind: CloseKind
+  // Stable across previews and retries: what a result is matched to.
+  key: string
+  label: string
+  state: CloseState
+  reason: string
+  detail: Record<string, unknown>
+}
+
+export interface CloseResult {
+  key: string
+  kind: CloseKind
+  label: string
+  outcome: CloseOutcome
+  note: string
+}
+
+export interface ClosePlan {
+  schema: string
+  generated_at: number
+  conversation: string
+  topic: string
+  channel: string
+  // What the human approves. A close carries it back and the relay refuses
+  // with a fresh plan if the targets have changed since.
+  fingerprint: string
+  status: { zulip_read: boolean; zulip_write: boolean; plane: boolean; reason: string }
+  actions: CloseAction[]
+  counts: { ready: number; blocked: number; done: number; kept: number }
+  blocked: CloseAction[]
+  excluded: { channel: string; topic: string; reason: string }[]
+  gaps: { truncated: boolean; unread: string[]; bounded: string[]; errors: unknown[]; plane: string[] }
+  results: CloseResult[]
+  note: string
+  // Only on the answer to a close.
+  applied?: boolean
+  partial?: boolean
+  refused?: boolean
+  error?: string
+}
+
 export interface DeskSource {
   board: () => Promise<DeskBoard | { error: string }>
   detail: (id: string) => Promise<DeskDetail | { error: string }>
   send: (id: string, text: string, token: string) => Promise<SendResult>
+  closePlan: (id: string) => Promise<ClosePlan | { error: string }>
+  close: (id: string, fingerprint: string) => Promise<ClosePlan | { error: string }>
 }
 
 // A conversation id is what follows `front-desk-` in the topic. Kept to a
@@ -164,6 +221,27 @@ async function read<T>(path: string): Promise<T | { error: string }> {
 export const relaySource: DeskSource = {
   board: () => read<DeskBoard>('/frontdesk'),
   detail: (id) => read<DeskDetail>(`/frontdesk/${encodeURIComponent(id)}`),
+  closePlan: (id) => read<ClosePlan>(`/frontdesk/${encodeURIComponent(id)}/close-plan`),
+  async close(id, fingerprint) {
+    let response: Response
+    try {
+      response = await fetch(`${BASE}/frontdesk/${encodeURIComponent(id)}/close`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ fingerprint }),
+        signal: AbortSignal.timeout(60000),
+      })
+    } catch {
+      // No answer: some targets may already have moved. The panel refreshes
+      // rather than guessing, which is also what a retry does.
+      return { error: `the agentroom relay did not answer; ask for the plan again to see what moved` }
+    }
+    const payload = (await response.json().catch(() => undefined)) as ClosePlan | undefined
+    // 409 is the refusal that carries the fresh plan — a payload, not an error.
+    if (!payload || typeof payload !== 'object') return { error: `agentroom answered ${response.status}` }
+    if (!response.ok && !payload.refused) return { error: payload.error ?? `agentroom answered ${response.status}` }
+    return payload
+  },
   async send(id, text, token) {
     let response: Response
     try {
@@ -247,6 +325,47 @@ const DEMO_SCENES: (DeskDialogue | { error: string } | null)[] = [
   },
 ]
 
+// --- the demo's completion plan ------------------------------------------------
+
+const DEMO_FLAKY = 'topic:agforge-agstudio1/assetrun-title'
+const demoClosed = new Set<string>()
+let demoFailedOnce = false
+
+function resultRow(action: CloseAction): Omit<CloseResult, 'outcome' | 'note'> {
+  return { key: action.key, kind: action.kind, label: action.label }
+}
+
+function demoPlan(id: string, closed: Set<string>, _failed: boolean): ClosePlan {
+  const make = (kind: CloseKind, key: string, label: string, state: CloseState, reason: string): CloseAction =>
+    ({ kind, key, label, state: closed.has(key) ? 'done' : state, reason: closed.has(key) ? 'closed in this session' : reason, detail: {} })
+  const actions: CloseAction[] = [
+    make('work', 'work:demo-mission', 'G-13 Cover a new GitHub-trending repository', 'ready', 'every one of its 1 sub-works is completed'),
+    make('work', 'work:demo-task', 'G-14 Pick and summarize a new trending repo', 'done', 'already Done; closing it again changes nothing'),
+    make('work', 'work:demo-open', 'F2-31 Title картина, still rendering', 'blocked', '1 of 2 sub-works are not completed'),
+    make('topic', 'topic:pj-ghtrends/workplan-trend6', '#pj-ghtrends › workplan-trend6', 'ready', 'will be marked ✔'),
+    make('topic', DEMO_FLAKY, '#agforge-agstudio1 › assetrun-title', 'ready', 'will be marked ✔'),
+    make('channel', 'channel:work-g-13', '#work-g-13', 'ready', 'will be archived — every one of its 1 topics belongs to this conversation'),
+    make('channel', 'channel:work-g-9', '#work-g-9', 'kept', 'kept — the channel holds topics this conversation did not reach: workrun-task2-g-9'),
+    make('conversation', `topic:front/front-desk-${id}`, `#front › front-desk-${id}`, 'ready', 'will be marked ✔ once everything above is done'),
+  ]
+  const counts = {
+    ready: actions.filter((one) => one.state === 'ready').length,
+    blocked: actions.filter((one) => one.state === 'blocked').length,
+    done: actions.filter((one) => one.state === 'done').length,
+    kept: actions.filter((one) => one.state === 'kept').length,
+  }
+  return {
+    schema: 'ag.frontdesk-close.v1', generated_at: Date.now() / 1000, conversation: id,
+    topic: `front-desk-${id}`, channel: 'front',
+    fingerprint: actions.map((one) => `${one.key}=${one.state}`).join('|'),
+    status: { zulip_read: true, zulip_write: true, plane: true, reason: '' },
+    actions, counts, blocked: actions.filter((one) => one.state === 'blocked'),
+    excluded: [{ channel: 'pj-ghtrends', topic: 'workplan-trend5', reason: 'anchored to another Front Desk conversation (front-desk-20260907-0900)' }],
+    gaps: { truncated: false, unread: [], bounded: [], errors: [], plane: [] },
+    results: [], note: 'this closes work; it does not stop a running agent',
+  }
+}
+
 export function demoSource(revision = 'demo'): DeskSource {
   const posts: DeskPost[] = []
   let next = 1
@@ -286,6 +405,46 @@ export function demoSource(revision = 'demo'): DeskSource {
           posts: [...posts], latest_reply: latest, zulip_url: null,
         },
       }
+    },
+    // The completion panel, playable with no relay: a plan with one of each
+    // state, one target that fails the first time, and a retry that finishes
+    // it — the four things the screen has to be able to show.
+    async closePlan(id) {
+      return demoPlan(id, demoClosed, demoFailedOnce)
+    },
+    async close(id, fingerprint) {
+      const plan = demoPlan(id, demoClosed, demoFailedOnce)
+      if (fingerprint !== plan.fingerprint) {
+        return { ...plan, refused: true, error: 'the targets have changed since this preview was made; nothing was closed' }
+      }
+      const results: CloseResult[] = []
+      let trouble = false
+      for (const action of plan.actions) {
+        if (action.state === 'done') { results.push({ ...resultRow(action), outcome: 'already', note: action.reason }); continue }
+        if (action.state !== 'ready') {
+          trouble = trouble || action.state === 'blocked'
+          results.push({ ...resultRow(action), outcome: 'skipped', note: action.reason })
+          continue
+        }
+        if (action.key === DEMO_FLAKY && !demoFailedOnce) {
+          demoFailedOnce = true
+          trouble = true
+          results.push({ ...resultRow(action), outcome: 'failed', note: 'ConnectionError: the realm refused the rename' })
+          continue
+        }
+        if (action.kind === 'conversation' && trouble) {
+          results.push({ ...resultRow(action), outcome: 'skipped', note: 'kept open: related work is still blocked or failed, and a ✔ here would say the whole thing is finished' })
+          continue
+        }
+        demoClosed.add(action.key)
+        results.push({
+          ...resultRow(action), outcome: 'applied',
+          note: action.kind === 'work' ? 'is Done'
+            : action.kind === 'channel' ? 'is archived' : 'is ✔',
+        })
+      }
+      const after = demoPlan(id, demoClosed, demoFailedOnce)
+      return { ...after, results, applied: true, partial: results.some((one) => one.outcome === 'failed') || after.counts.blocked > 0 }
     },
     async send(_id, text) {
       push('Developer', 8, text, 'developer')

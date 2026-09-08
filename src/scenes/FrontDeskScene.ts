@@ -24,6 +24,7 @@
 // relay-backed view in this app follows.
 
 import Phaser from 'phaser'
+import { FrontDeskClosePanel } from '../frontDeskClosePanel'
 import { createFrontDeskInput, type FrontDeskInputHandle } from '../frontDeskInput'
 import {
   atEnd,
@@ -84,6 +85,10 @@ type SendPhase =
   | { kind: 'sending'; at: number }
   | { kind: 'failed'; text: string }
   | { kind: 'uncertain'; text: string }
+  // The post re-opened a ✔'d conversation. Said once, because what was
+  // closed with it — the resolved work topics, an archived channel, a Done
+  // Work — did **not** come back, and a bare "resumed" would imply it did.
+  | { kind: 'resumed' }
 
 interface Rect { x: number; y: number; width: number; height: number }
 
@@ -154,6 +159,8 @@ export class FrontDeskScene extends Phaser.Scene {
   private historyButton!: Phaser.GameObjects.Text
   private newButton!: Phaser.GameObjects.Text
   private settingsButton!: Phaser.GameObjects.Text
+  private finishButton!: Phaser.GameObjects.Text
+  private closePanel!: FrontDeskClosePanel
   private historyPanel!: Phaser.GameObjects.Container
   private historyBackdrop!: Phaser.GameObjects.Graphics
   private historyTitle!: Phaser.GameObjects.Text
@@ -222,6 +229,15 @@ export class FrontDeskScene extends Phaser.Scene {
     this.historyButton = this.button('history', () => this.toggleHistory())
     this.newButton = this.button('new conversation', () => this.startConversation())
     this.settingsButton = this.button('settings ⟳', () => void this.settings.refresh())
+    // Finishing the conversation: a preview first, always. The button opens
+    // the panel; only the panel's own button writes anything.
+    this.finishButton = this.button('finish ✔', () => this.toggleClose(), COLOR.live)
+    this.closePanel = new FrontDeskClosePanel({
+      scene: this,
+      source: this.source,
+      conversationId: () => this.conversationId,
+      onChanged: () => { void this.refresh(); void this.refreshBoard() },
+    })
 
     this.historyPanel = this.add.container(0, 0).setVisible(false)
     this.historyBackdrop = this.add.graphics()
@@ -235,17 +251,23 @@ export class FrontDeskScene extends Phaser.Scene {
         this.renderPrompt()
       },
       onSubmit: () => void this.submit(),
-      onEscape: () => { if (this.historyOpen) this.toggleHistory() },
+      onEscape: () => {
+        if (this.closePanel.open) this.closePanel.close()
+        else if (this.historyOpen) this.toggleHistory()
+      },
     })
     // Clicking anywhere on the frame puts the keyboard back in the bar.
     this.keys.focus()
     this.input.on('pointerdown', (pointer: Phaser.Input.Pointer, over: unknown[]) => {
       this.keys.focus()
       // A click on the frame itself advances; a click on a button is the button's.
+      if (this.closePanel.contains(pointer)) return
       if (over.length === 0 && (this.inside(pointer, this.dialogueRect) || this.inside(pointer, this.coRect))) this.turn(1)
     })
     this.input.on('wheel', (pointer: Phaser.Input.Pointer, _objects: unknown, _dx: number, dy: number) => {
-      if (this.historyOpen && this.inside(pointer, this.historyViewport)) {
+      if (this.closePanel.contains(pointer)) {
+        this.closePanel.scrollBy(dy)
+      } else if (this.historyOpen && this.inside(pointer, this.historyViewport)) {
         this.scrollHistory(dy)
       } else if (this.inside(pointer, this.dialogueRect) || this.inside(pointer, this.coRect)) {
         this.turn(dy > 0 ? 1 : -1)
@@ -260,7 +282,7 @@ export class FrontDeskScene extends Phaser.Scene {
     link.textContent = 'Operation room ↗'
     link.style.cssText = 'position:fixed;top:10px;right:16px;z-index:20;color:#8dccff;font:12px system-ui;background:rgba(13,20,32,0.85);padding:6px 10px;border-radius:6px;text-decoration:none'
     document.body.append(link)
-    this.events.once('shutdown', () => { link.remove(); this.keys.destroy() })
+    this.events.once('shutdown', () => { link.remove(); this.keys.destroy(); this.closePanel.destroy() })
 
     this.layout(this.scale.width, this.scale.height)
     this.scale.on('resize', (size: Phaser.Structs.Size) => this.layout(size.width, size.height))
@@ -359,7 +381,7 @@ export class FrontDeskScene extends Phaser.Scene {
     this.sending = false
     this.keys.setDisabled(false)
     if (result.sent) {
-      this.send = { kind: 'idle' }
+      this.send = result.resumed ? { kind: 'resumed' } : { kind: 'idle' }
       this.keys.set('')
       // The developer just spoke: the next reply is what they are waiting
       // for, so the reader moves to the newest reply and the answer will
@@ -387,6 +409,9 @@ export class FrontDeskScene extends Phaser.Scene {
 
   private openConversation(id: string) {
     if (id === this.conversationId) return
+    // A plan is one conversation's. Switching drops it rather than leaving
+    // another conversation's targets on the screen.
+    this.closePanel.close()
     this.conversationId = id
     const url = new URL(location.href)
     url.searchParams.set('conv', id)
@@ -529,7 +554,9 @@ export class FrontDeskScene extends Phaser.Scene {
     const buttonsY = this.narrow ? 68 : 44
     this.historyButton.setPosition(width - MARGIN, buttonsY).setOrigin(1, 0)
     this.newButton.setPosition(this.historyButton.x - this.historyButton.width - 8, buttonsY).setOrigin(1, 0)
-    this.settingsButton.setPosition(this.newButton.x - this.newButton.width - 8, buttonsY).setOrigin(1, 0)
+    this.finishButton.setPosition(this.newButton.x - this.newButton.width - 8, buttonsY).setOrigin(1, 0)
+    this.settingsButton.setPosition(this.finishButton.x - this.finishButton.width - 8, buttonsY).setOrigin(1, 0)
+    this.closePanel.layout(width, barY)
 
     // History panel: right side, above the bar; the whole frame when narrow.
     const panelX = width - MARGIN - historyWidth
@@ -782,6 +809,9 @@ export class FrontDeskScene extends Phaser.Scene {
     } else if (this.send.kind === 'uncertain') {
       text = `? uncertain — ${this.send.text}`
       color = COLOR.warn
+    } else if (this.send.kind === 'resumed') {
+      text = '↩ reopened this conversation — the work it closed stays closed'
+      color = COLOR.warn
     } else if (this.unreadable || (this.detail && this.detail.health.state !== 'live')) {
       text = '⚠ state unknown — the relay cannot be read; nothing here is current'
       color = COLOR.warn
@@ -801,7 +831,7 @@ export class FrontDeskScene extends Phaser.Scene {
           color = COLOR.live
           break
         case 'done':
-          text = '✔ resolved — posting here resumes the conversation'
+          text = '✔ resolved — posting here reopens the conversation, not the work it closed'
           color = COLOR.dim
           break
         case 'quiet':
@@ -1019,6 +1049,12 @@ export class FrontDeskScene extends Phaser.Scene {
     this.renderDialogue()
     this.renderCaption()
     this.renderStatus()
+  }
+
+  private toggleClose() {
+    this.closePanel.toggle()
+    this.closePanel.layout(this.scale.width, this.scale.height - BAR_HEIGHT - MARGIN)
+    this.keys.focus()
   }
 
   private toggleHistory() {

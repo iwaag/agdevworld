@@ -30,17 +30,19 @@ from urllib.parse import parse_qs, unquote, urlparse
 from .budget import Budget
 from .chat import Chat
 from .cost import Cost
+from .frontdesk import FrontDesk
 from .inflight import ROOTS_VARIABLE
 from .ops import Ops
 from .room import Room
 
 ROUTES = ("/healthz", "/agents", "/work", "/ops", "/routines", "/routines/<name>",
-          "/inflight/<name>", "/cost", "/budget")
-WRITE_ROUTES = ("/ops/confirm", "/chat", "/routines/<name>/start")
+          "/inflight/<name>", "/cost", "/budget", "/frontdesk", "/frontdesk/<id>")
+WRITE_ROUTES = ("/ops/confirm", "/chat", "/routines/<name>/start", "/frontdesk/<id>/post")
 
 
 def make_handler(room: Room, ops: Ops | None = None, chat: Chat | None = None,
-                 cost: Cost | None = None, budget: Budget | None = None):
+                 cost: Cost | None = None, budget: Budget | None = None,
+                 desk: FrontDesk | None = None):
     class Handler(BaseHTTPRequestHandler):
         server_version = "agentroom/0.1.0"
 
@@ -169,6 +171,20 @@ def make_handler(room: Room, ops: Ops | None = None, chat: Chat | None = None,
                         self._write_json(503, {"error": "the budget read is not configured"})
                     else:
                         self._write_json(200, budget.snapshot())
+                elif path == "/frontdesk":
+                    # The Front Desk's conversations (`front_desk` p1). The
+                    # engine's memory when it has them, the realm when not;
+                    # the payload says which, and `unknown` when neither.
+                    if desk is None:
+                        self._write_json(503, {"error": "the Front Desk is not configured"})
+                    else:
+                        self._write_json(200, desk.board())
+                elif path.startswith("/frontdesk/"):
+                    if desk is None:
+                        self._write_json(503, {"error": "the Front Desk is not configured"})
+                    else:
+                        found = desk.conversation(unquote(path[len("/frontdesk/"):]))
+                        self._write_json(400 if found.get("error") else 200, found)
                 elif path.startswith("/inflight/"):
                     # The one route a view may poll at a few seconds. It reads
                     # this host's directories and never Zulip.
@@ -280,10 +296,41 @@ def make_handler(room: Room, ops: Ops | None = None, chat: Chat | None = None,
             else:
                 self._write_json(409, found)
 
+        def _desk_post(self, ident: str) -> None:
+            """The Front Desk's write: as the Developer, into
+            `#front` › `front-desk-<id>`, once per submit token."""
+            if desk is None:
+                self._write_json(503, {"sent": False, "error": "the Front Desk is not configured"})
+                return
+            if chat is None or not chat.configured:
+                reason = (chat.status()["reason"] if chat else
+                          "this relay was built without a chat credential")
+                self._write_json(503, {"sent": False, "uncertain": False, "error": reason})
+                return
+            body = self._body()
+            if body is None:
+                return
+            text = str(body.get("text") or "")
+            token = str(body.get("token") or "")
+            refused = desk.check(ident, text, token)
+            if refused is not None:
+                self._write_json(403, {"sent": False, "uncertain": False, "error": refused})
+                return
+            found = desk.post(ident, text, token)
+            if found.get("sent"):
+                self._write_json(200, found)
+            elif found.get("uncertain"):
+                self._write_json(502, found)
+            else:
+                self._write_json(403, found)
+
         def do_POST(self) -> None:  # noqa: N802
             path = urlparse(self.path).path.rstrip("/") or "/"
             if path == "/chat":
                 self._chat()
+                return
+            if path.startswith("/frontdesk/") and path.endswith("/post"):
+                self._desk_post(unquote(path[len("/frontdesk/"):-len("/post")]))
                 return
             if path.startswith("/routines/") and path.endswith("/start"):
                 self._start(unquote(path[len("/routines/"):-len("/start")]))
@@ -333,6 +380,8 @@ def make_handler(room: Room, ops: Ops | None = None, chat: Chat | None = None,
 
 def build_server(
     host: str, port: int, room: Room, ops: Ops | None = None, chat: Chat | None = None,
-    cost: Cost | None = None, budget: Budget | None = None,
+    cost: Cost | None = None, budget: Budget | None = None, desk: FrontDesk | None = None,
 ) -> ThreadingHTTPServer:
-    return ThreadingHTTPServer((host, port), make_handler(room, ops, chat, cost, budget))
+    return ThreadingHTTPServer(
+        (host, port), make_handler(room, ops, chat, cost, budget, desk)
+    )

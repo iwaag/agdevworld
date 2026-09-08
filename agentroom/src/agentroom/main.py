@@ -12,9 +12,12 @@ import sys
 import time
 from pathlib import Path
 
+from agag.zulip import ZulipClient
+
 from .budget import budget_from_env
 from .chat import CHAT_ENV_VARIABLE, DEFAULT_MAX_CHARS, Chat
 from .cost import PRICES_VARIABLE, Cost, prices_path_from_env
+from .frontdesk import FrontDesk
 from .inflight import ROOTS_VARIABLE, parse_roots
 from .ops import DEFAULT_STALLED_SECONDS, Ops
 from .room import Room
@@ -141,9 +144,14 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"budget {harness:<12} unknown — {card['error']}")
         return 0
 
+    # The Front Desk reads the engine's memory and, for a conversation it
+    # does not hold, the realm with the relay's own read credential; it
+    # writes with the chat's. No fourth credential.
+    desk = FrontDesk(ops=ops, chat=chat, reader_factory=lambda: ZulipClient.from_env(path))
+
     if ops is not None:
         ops.start()
-    server = build_server(host, port, room, ops, chat, cost, budget)
+    server = build_server(host, port, room, ops, chat, cost, budget, desk)
     print(
         f"agentroom listening on http://{host}:{port} (cache {ttl:g}s, "
         + (f"ops on, stalled at {stalled:g}s, " if ops else "ops off, ")

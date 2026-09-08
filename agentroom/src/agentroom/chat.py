@@ -107,6 +107,10 @@ class Chat:
                 f"({STANDING_PREFIX}<name> or {FIRE_PREFIX}<name>-<stamp>); "
                 f"{topic!r} is not one of them"
             )
+        return self.text_check(text)
+
+    def text_check(self, text: str) -> str | None:
+        """The guards on the *text* alone, shared with the Front Desk door."""
         body = text.strip()
         if not body:
             return "nothing to send"

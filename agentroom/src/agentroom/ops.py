@@ -55,6 +55,7 @@ from agag.intro import (
 from agag.selfnote import Conversation, is_selfnote, parse_rootchat, parse_served
 from agag.zulip import RESOLVED_TOPIC_PREFIX, QueueExpired, RateLimited, ZulipClient
 
+from .frontdesk import is_desk_topic, newest_desk_topics
 from .inflight import Inflight
 from .room import SYSTEM_REALM, bare_topic
 from .routines import (
@@ -475,6 +476,10 @@ class Ops:
     #: memory only, and deliberately — it must die with the `done` rows it
     #: hides, or a restart would show a board of debts already seen.
     _confirmed: dict[tuple[str, str], int] = field(default_factory=dict, repr=False)
+    #: Every topic name the sweep saw in `#front`, bare → live, resolved ones
+    #: included. The Front Desk lists its conversations from it: a resolved
+    #: conversation older than the deep window is not held, but it is known.
+    _front_names: dict[str, str] = field(default_factory=dict, repr=False)
     _live: bool = False
     _reason: str = "starting"
     _error: str | None = None
@@ -581,6 +586,7 @@ class Ops:
         by_id = {r.bot_id: i for i, r in rosters.items() if r is not None and r.bot_id is not None}
         by_name = {r.bot: i for i, r in rosters.items() if r is not None}
 
+        front_names: dict[str, str] = {}
         for name in names:
             try:
                 found = self._patient(client, client.channel_topics, stream_ids[name])
@@ -597,9 +603,13 @@ class Ops:
             deep_names: set[str] = set()
             if name == ROUTINE_CHANNEL:
                 bare_names = [bare_topic(live) for live in found]
+                # The Front Desk's newest conversations are read the same
+                # way: whole, and under ✔, so a reload after a restart shows
+                # them (`front_desk` p1).
                 deep_names = newest_run_topics(bare_names) | {
                     bare for bare in bare_names if bare.startswith(STANDING_PREFIX)
-                }
+                } | newest_desk_topics(bare_names)
+                front_names = {bare_topic(live): live for live in found}
             for live in found:
                 key = (name, bare_topic(live))
                 deep = key[1] in deep_names
@@ -612,7 +622,7 @@ class Ops:
                 # A routine's topics keep their history — the chat view *is*
                 # that history — and a topic costs one call whatever depth it
                 # is read at.
-                keep = is_routine_topic(name, key[1])
+                keep = is_routine_topic(name, key[1]) or is_desk_topic(name, key[1])
                 depth = ROUTINE_HISTORY if deep else TOPIC_LOOKBACK
                 topic = Topic(
                     channel=name, topic=key[1], live_topic=live, keep_history=keep,
@@ -641,6 +651,7 @@ class Ops:
             self._rosters = rosters
             self._retired = retired
             self._topics = topics
+            self._front_names = front_names
             self._marks = marks
             self._errors = errors
             self._queue_id = queue_id
@@ -825,9 +836,11 @@ class Ops:
             if topic is None:
                 topic = Topic(
                     channel=channel, topic=key[1], live_topic=live,
-                    keep_history=is_routine_topic(channel, key[1]),
+                    keep_history=is_routine_topic(channel, key[1]) or is_desk_topic(channel, key[1]),
                 )
                 self._topics[key] = topic
+            if channel == ROUTINE_CHANNEL:
+                self._front_names[key[1]] = live
             topic.live_topic = live
             topic.resolved = live.startswith(RESOLVED_TOPIC_PREFIX)
             topic.add(message)
@@ -870,6 +883,9 @@ class Ops:
                 self._topics[new_key] = topic
             topic.live_topic = str(renamed)
             topic.resolved = str(renamed).startswith(RESOLVED_TOPIC_PREFIX)
+            if channel == ROUTINE_CHANNEL:
+                self._front_names.pop(old_key[1], None)
+                self._front_names[new_key[1]] = str(renamed)
 
     def _channel_of(self, stream_id) -> str | None:
         """An update event names a stream by id; the sweep knows the names."""

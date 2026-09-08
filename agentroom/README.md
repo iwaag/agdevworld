@@ -107,6 +107,10 @@ writes only to this process's memory (see `POST /ops/confirm`).
   `{sent, channel, topic, message_id}`, `403` with the reason for anything the
   rules decline, `503` when no chat credential is configured. See below.
 
+- `GET /frontdesk`, `GET /frontdesk/<id>`, `POST /frontdesk/<id>/post` → the
+  Front Desk's conversations, one conversation's history, and a post into it
+  as the Developer (`front_desk` p1). See below.
+
 - `POST /routines/<name>/start` → the other write (`operation_room` p6, p7):
   start a new run of one routine by posting the trigger-shaped fire line,
   marked "started by hand from the operation room", into a **new run topic**
@@ -225,6 +229,39 @@ that hides a box is a habit and not a rule:
 - **No selfnote may be typed by hand**, and there is **no retry**: a post here
   starts a paid Front run, and a retry would buy a second one for a request the
   human made once — in exactly the case where the first post may have landed.
+
+## `/frontdesk` — the Front Desk (`front_desk` p1)
+
+agdevworld's Front Desk scene talks to Front in `#front` › `front-desk-<id>`,
+inside Front's own `front-` sweep. Three routes, in `frontdesk.py`:
+
+- `GET /frontdesk` → `ag.frontdesk.v1`: every Front Desk conversation the
+  relay knows, newest first, each with its `status` (`waiting` — the
+  Developer spoke last; `received` — Front's ack is the newest post;
+  `answered`; `done` — ✔; `quiet`; `unknown` while the queue is dead, with
+  `stale_state`) and the evidence it was read from. Conversations the sweep
+  saw by name but does not hold are listed too, as name-only rows.
+- `GET /frontdesk/<id>` → the conversation: `posts` (real posts only, each
+  with `kind` — `developer`, `agent`, `ack`, `other`), `latest_reply`,
+  `status`, `history` (post count, whether it is a window), a `zulip_url`
+  into the topic, and **`known`**: `held` (the engine's event-queue memory —
+  the newest `DESK_DEEP` (8) conversations are read whole and under ✔ on the
+  sweep, and every open one is kept current by the queue), `read` (a direct
+  read of Zulip with the relay's read credential, under both the bare and
+  the ✔ name, cached 30 s — how an old resolved conversation comes back after
+  a relay restart), or `unknown` (neither could be done; nothing is invented
+  and the view keeps what it last knew).
+- `POST /frontdesk/<id>/post` `{text, token}` → a post as the Developer into
+  `front-desk-<id>`, on the chat credential and with `chat.py`'s guards
+  (configured, length, no selfnote), plus two of its own: the id has one
+  shape (`^[a-z0-9][a-z0-9-]{0,47}$`, so nothing else ever becomes part of a
+  topic name) and the **token** is remembered — a repeated submit (double
+  click, second Enter, retry after a timeout) answers the first result with
+  `duplicate: true` and posts nothing. A ✔'d conversation is **resumed in
+  place**: the topic is un-resolved (renamed back) before the post, because
+  Front's sweep never reads a resolved topic. `403` for a refusal, `502`
+  with `uncertain: true` when the post left and Zulip did not confirm it;
+  never a retry, because a post here starts a paid run.
 
 ## `/cost` — what the backends cost (`gauge_panel`)
 

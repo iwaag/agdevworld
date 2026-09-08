@@ -315,7 +315,10 @@ How each target is decided:
   finished conversation, and blocks.
 - **A channel** only when it is `work-<label>` for a mission of *this*
   conversation and every topic it actually holds is one of these targets.
-  `#front`, project and agent channels are never candidates.
+  `#front`, project and agent channels are never candidates. An **archived**
+  channel is `done`, not a gap: archiving is what makes a channel unlistable,
+  so a second preview asks the realm's channel list which of the two it is
+  looking at.
 - **The Front conversation last**, and only if nothing above is blocked or
   failed — a ✔ there is the claim that the whole thing is finished.
 

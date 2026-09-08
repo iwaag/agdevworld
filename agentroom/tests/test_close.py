@@ -242,6 +242,19 @@ def test_a_channel_that_cannot_be_archived_is_reported_per_target():
     assert row["outcome"] == FAILED and "administrator" in row["note"]
 
 
+def test_an_archived_channel_reads_as_done_rather_than_unreadable():
+    """The live run met this: an archived channel is gone from every listing,
+    so its topics stop being readable and the second preview must not report
+    this operation's own finished work as a gap."""
+    door, realm, _ = closer(realm=WritingRealm(open_chain()))
+    door.close(DESK)
+    again = door.plan(DESK)
+    row = next(one for one in again["actions"] if one["kind"] == "channel")
+    assert row["state"] == DONE
+    assert row["reason"] == "already archived: the realm no longer lists this channel"
+    assert again["counts"]["ready"] == 0
+
+
 def test_a_retry_finishes_what_is_left_and_repeats_nothing():
     realm = WritingRealm(open_chain(), fail=("assetrun-robot",))
     door, realm, plane = closer(realm=realm)

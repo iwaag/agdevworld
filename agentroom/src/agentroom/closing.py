@@ -222,6 +222,7 @@ class Reader:
     _live: dict[Key, str] = field(default_factory=dict, repr=False)
     _topics: dict[str, list[str] | None] = field(default_factory=dict, repr=False)
     _streams: dict[str, int | None] = field(default_factory=dict, repr=False)
+    _channels: set[str] | None = field(default=None, repr=False)
     calls: int = 0
 
     def history(self, key: Key) -> tuple[list[dict], str | None] | None:
@@ -271,6 +272,38 @@ class Reader:
                                         "error": f"{type(error).__name__}: {error}"})
                     self._streams[channel] = None
         return self._streams[channel]
+
+    def channel_exists(self, channel: str) -> bool | None:
+        """Whether the realm still lists this channel, or None if it could
+        not be asked.
+
+        An **archived** channel leaves every listing, so its topics stop
+        being readable — and "could not be read" and "already archived" are
+        different answers, the second of which is this operation's own work
+        seen a second time. Asked once per discovery, and only when a topic
+        list has already failed.
+        """
+        if self._channels is None:
+            if self.realm is None:
+                return None
+            try:
+                self.calls += 1
+                self._channels = {str(row.get("name")) for row in self.realm.channels()}
+            except Exception as error:  # noqa: BLE001
+                self.errors.append({"channel": channel, "topic": None,
+                                    "error": f"{type(error).__name__}: {error}"})
+                return None
+        return channel in self._channels
+
+    def forget_errors(self, channel: str) -> None:
+        """Drop the recorded failures of one channel's own lookups.
+
+        Only for the case where a later, better answer explains them — an
+        archived channel's unlistable topics. Nothing else in this module
+        removes a gap once it is recorded.
+        """
+        self.errors = [error for error in self.errors
+                       if not (error["channel"] == channel and error["topic"] is None)]
 
     def channel_topics(self, channel: str) -> list[str] | None:
         """Every topic name in a channel, or None when it could not be asked.
@@ -852,9 +885,23 @@ def _channels(
         names = reader.channel_topics(channel)
         bound = label in mission_labels
         row = {"channel": channel, "label": label, "bound_to_mission": bound,
-               "topics": None, "unaccounted": [], "archivable": False, "reason": ""}
+               "topics": None, "unaccounted": [], "archivable": False, "archived": False,
+               "reason": ""}
         if names is None:
-            row["reason"] = "the channel's topics could not be read"
+            # Archiving is what makes a channel unlistable, so this operation's
+            # own finished work looks exactly like a read failure until the
+            # realm's channel list is asked which one it is.
+            exists = reader.channel_exists(channel)
+            if exists is False:
+                row["archived"] = True
+                row["reason"] = "already archived: the realm no longer lists this channel"
+                # The failed lookup was the *question* this answered, so it
+                # stops being a gap: a preview that reports its own finished
+                # work as something it could not read is the lie this whole
+                # payload exists to avoid.
+                reader.forget_errors(channel)
+            else:
+                row["reason"] = "the channel's topics could not be read"
             rows.append(row)
             continue
         bare = sorted({bare_topic(name) for name in names})

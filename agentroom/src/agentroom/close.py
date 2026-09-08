@@ -145,7 +145,9 @@ def plan_actions(found: Discovery) -> list[Action]:
     for row in found.channels:
         key = f"channel:{row['channel']}"
         label = f"#{row['channel']}"
-        if row["archivable"]:
+        if row.get("archived"):
+            actions.append(Action("channel", key, label, DONE, row["reason"], row))
+        elif row["archivable"]:
             actions.append(Action("channel", key, label, READY,
                                   f"will be archived — {row['reason']}", row))
         else:

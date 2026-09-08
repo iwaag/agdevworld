@@ -57,6 +57,8 @@ class Realm:
     def channel_topics(self, stream_id):
         for name, ident in self.streams.items():
             if ident == stream_id:
+                if name in self.fail:
+                    raise ConnectionError("realm down")
                 return list(self.topics.get(name, []))
         raise KeyError(stream_id)
 
@@ -395,9 +397,25 @@ def test_a_channel_with_no_mission_of_ours_behind_it_is_not_archivable():
 
 
 def test_a_channel_whose_topics_cannot_be_listed_is_reported():
+    """The realm still lists it, so silence here is a read failure."""
+    realm = chain_realm()
+    realm.fail.add("work-g-17")
+    found = discover({}, DESK, realm=realm, plane=board())
+    row = next(one for one in found.channels if one["channel"] == "work-g-17")
+    assert row["archivable"] is False and row["topics"] is None
+    assert row["archived"] is False
+    assert row["reason"] == "the channel's topics could not be read"
+
+
+def test_a_channel_already_archived_is_not_a_read_failure():
+    """Archiving is what makes a channel unlistable, so this operation's own
+    finished work looks exactly like a read failure until the realm's channel
+    list is asked which one it is."""
     realm = chain_realm()
     realm.streams.pop("work-g-17")
     found = discover({}, DESK, realm=realm, plane=board())
     row = next(one for one in found.channels if one["channel"] == "work-g-17")
-    assert row["archivable"] is False and row["topics"] is None
-    assert row["reason"] == "the channel's topics could not be read"
+    assert row["archived"] is True and row["archivable"] is False
+    assert row["reason"] == "already archived: the realm no longer lists this channel"
+    # And it stops being a gap: the failed lookup is what this answered.
+    assert found.gaps["errors"] == []

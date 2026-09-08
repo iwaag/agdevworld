@@ -16,6 +16,29 @@ const BASE = (import.meta.env.VITE_AGENTROOM_URL as string | undefined) ?? 'http
 
 export type PostKind = 'developer' | 'agent' | 'ack' | 'other'
 
+// One line of a scene: spoken by a character of the settings revision the
+// dialogue names, with the posts it was drawn from when Front cited them.
+export interface DeskCitation {
+  channel: string
+  topic: string
+  message_id: number | null
+}
+
+export interface DeskTurn {
+  character: string
+  text: string
+  sources: DeskCitation[]
+}
+
+// A short exchange between characters that agfront wrote beside Front's
+// reply (`ag.frontdesk-dialogue.v1`), already validated there. The relay
+// splits it off the post: `content` is the reply alone, this is the scene.
+export interface DeskDialogue {
+  schema: string
+  settings_revision: string
+  turns: DeskTurn[]
+}
+
 export interface DeskPost {
   message_id: number
   at: number
@@ -23,6 +46,10 @@ export interface DeskPost {
   sender_id: number
   content: string
   kind: PostKind
+  dialogue?: DeskDialogue | null
+  // What agfront (or the relay) found wrong with a block that could not be
+  // used: the reply is shown on its own and the issue is recorded here.
+  dialogue_error?: string | null
 }
 
 // The relay's verdict on where the conversation stands. `waiting` is the
@@ -194,13 +221,35 @@ const DEMO_REPLIES = [
     'では今日もおつかれさま〜〜🌙💤 またなんでも言ってね💌',
 ]
 
+// The scenes the demo replies play: the third reply is an exchange with
+// Autolab (the collaborator in the upper left), the fourth is Front-only
+// with an unusable block, so both paths of the screen can be looked at.
+const DEMO_SCENES: (DeskDialogue | { error: string } | null)[] = [
+  null,
+  null,
+  {
+    schema: 'ag.frontdesk-dialogue.v1', settings_revision: 'demo',
+    turns: [
+      { character: 'front', text: '親方〜！ghtrends の件、どうなった？✨', sources: [] },
+      { character: 'autolab', text: '終わった。example/awesome-tool。コミット a99625f。', sources: [{ channel: 'work-g-13', topic: 'workrun-task1-g-13', message_id: 5203 }] },
+      { character: 'front', text: 'さすが親方〜！😆💕 じゃあ開発者さんに報告しとくね📣', sources: [] },
+      { character: 'autolab', text: '…机、片付けろって言うなよ。', sources: [] },
+    ],
+  },
+  { error: "turn 2: character 'forge' is not in settings revision demo (known: autolab, front)" },
+]
+
 export function demoSource(): DeskSource {
   const posts: DeskPost[] = []
   let next = 1
   let reply = 0
   let pending: number | undefined
-  const push = (by: string, sender_id: number, content: string, kind: PostKind) => {
-    posts.push({ message_id: next++, at: Date.now() / 1000, by, sender_id, content, kind })
+  const push = (by: string, sender_id: number, content: string, kind: PostKind, scene: (typeof DEMO_SCENES)[number] = null) => {
+    posts.push({
+      message_id: next++, at: Date.now() / 1000, by, sender_id, content, kind,
+      dialogue: scene && 'turns' in scene ? scene : null,
+      dialogue_error: scene && 'error' in scene ? scene.error : null,
+    })
   }
   const status = (): DeskStatus => {
     const last = posts[posts.length - 1]
@@ -236,7 +285,8 @@ export function demoSource(): DeskSource {
       pending = window.setTimeout(() => {
         push('Front', 15, 'Message received. Please wait for the reply.', 'ack')
         pending = window.setTimeout(() => {
-          push('Front', 15, DEMO_REPLIES[Math.min(reply, DEMO_REPLIES.length - 1)], 'agent')
+          const index = Math.min(reply, DEMO_REPLIES.length - 1)
+          push('Front', 15, DEMO_REPLIES[index], 'agent', DEMO_SCENES[index] ?? null)
           reply += 1
         }, 2500)
       }, 800)

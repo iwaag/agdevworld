@@ -33,10 +33,22 @@ resolved topic and would never see the post otherwise. What Zulip's own
 Nothing here decides what a post *is* beyond the two facts the realm gives:
 `agag.agent.is_ack` for Front's transport ack, and the Front roster's bot id
 for "Front said it". Selfnotes never enter the history (`ops.is_real`).
+
+**Since `front_desk` p2 step 3 a Front post may carry a dialogue.** agfront
+ends such a reply with a fenced `ag-dialogue` JSON block
+(`ag.frontdesk-dialogue.v1`: the settings revision and ordered turns, each
+a character id, a text and optional source posts), validated and
+re-serialized there. Here the block is split off again: `content` is the
+reply without it, `dialogue` the parsed turns, and `dialogue_error` what
+agfront recorded in an `ag-dialogue-error` fence when the run's block was
+unusable — so the screen shows the reply either way and never a machine
+block. Zulip remains the record; nothing about a dialogue is kept anywhere
+else.
 """
 
 from __future__ import annotations
 
+import json
 import re
 import threading
 import time
@@ -73,10 +85,14 @@ READ_DEPTH = 200
 #: The turn-taking mention `serve_topic` puts in front of every reply
 #: (`@**Developer**`). Transport, like the ack: shown to nobody.
 HANDOFF = re.compile(r"^\s*@\*\*[^*\n]+\*\*\s*\n+")
+#: agfront's dialogue block and its error fence (`agfront.dialogue`).
+DIALOGUE_SCHEMA = "ag.frontdesk-dialogue.v1"
+DIALOGUE_FENCE = re.compile(r"```[ \t]*ag-dialogue[ \t]*\n(.*?)\n[ \t]*```[ \t]*", re.DOTALL)
+DIALOGUE_ERROR_FENCE = re.compile(r"```[ \t]*ag-dialogue-error[ \t]*\n(.*?)\n[ \t]*```[ \t]*", re.DOTALL)
 
 __all__ = [
     "DESK_DEEP", "DESK_PREFIX", "FrontDesk", "ID_PATTERN", "SCHEMA",
-    "is_desk_topic", "newest_desk_topics", "post_kind", "shown_content", "status_of",
+    "is_desk_topic", "newest_desk_topics", "post_kind", "shown_content", "split_dialogue", "status_of",
 ]
 
 
@@ -84,6 +100,61 @@ def shown_content(content: str) -> str:
     """The post as the developer should read it: without the leading
     handoff mention the skeleton prefixes to a reply."""
     return HANDOFF.sub("", content, count=1)
+
+
+def _dialogue(body: str) -> dict:
+    """The block's JSON as the screen gets it, checked for shape only: the
+    block was validated against the settings when agfront wrote it."""
+    data = json.loads(body)
+    if not isinstance(data, dict) or data.get("schema") != DIALOGUE_SCHEMA:
+        raise ValueError(f"not an {DIALOGUE_SCHEMA} block")
+    turns = data.get("turns")
+    if not isinstance(turns, list) or not turns:
+        raise ValueError("no turns")
+    shaped = []
+    for turn in turns:
+        if not isinstance(turn, dict) or not str(turn.get("character") or "").strip() or not str(turn.get("text") or "").strip():
+            raise ValueError("a turn without a character or a text")
+        sources = [
+            {"channel": str(s.get("channel") or ""), "topic": str(s.get("topic") or ""),
+             "message_id": (int(s["message_id"]) if s.get("message_id") is not None else None)}
+            for s in (turn.get("sources") or []) if isinstance(s, dict)
+        ]
+        shaped.append({"character": str(turn["character"]).strip(), "text": str(turn["text"]).strip(),
+                       "sources": sources})
+    return {"schema": DIALOGUE_SCHEMA, "settings_revision": str(data.get("settings_revision") or ""),
+            "turns": shaped}
+
+
+def split_dialogue(content: str) -> tuple[str, dict | None, str | None]:
+    """`(shown text, dialogue, error)` for one post's content.
+
+    The reply is what remains once the last `ag-dialogue` block (or the
+    `ag-dialogue-error` fence) is removed. A block that does not parse here
+    is reported as an error too, so a machine block never reaches the
+    rendered conversation whatever state it is in.
+    """
+    text = shown_content(content)
+    error: str | None = None
+    dialogue: dict | None = None
+    found = list(DIALOGUE_ERROR_FENCE.finditer(text))
+    if found:
+        last = found[-1]
+        try:
+            record = json.loads(last.group(1))
+            error = str(record.get("error") or "the run's dialogue block was unusable")
+        except (ValueError, AttributeError):
+            error = "the run's dialogue block was unusable"
+        text = (text[:last.start()] + text[last.end():]).strip()
+    found = list(DIALOGUE_FENCE.finditer(text))
+    if found:
+        last = found[-1]
+        try:
+            dialogue = _dialogue(last.group(1))
+        except (ValueError, TypeError) as failure:
+            error = f"the dialogue block could not be read: {failure}"
+        text = (text[:last.start()] + text[last.end():]).strip()
+    return text, dialogue, error
 
 
 def is_desk_topic(channel: str, topic: str) -> bool:
@@ -226,6 +297,18 @@ class FrontDesk:
             names = dict(self.ops._front_names)
         return topics, {bare: live for bare, live in names.items() if bare.startswith(DESK_PREFIX)}
 
+    @staticmethod
+    def _post(m, front_id, developer_id) -> dict:
+        kind = post_kind(m, front_id, developer_id)
+        if kind == "agent":
+            content, dialogue, error = split_dialogue(m.content)
+        else:
+            content, dialogue, error = shown_content(m.content), None, None
+        return {
+            "message_id": m.id, "at": m.timestamp, "by": m.sender, "sender_id": m.sender_id,
+            "content": content, "kind": kind, "dialogue": dialogue, "dialogue_error": error,
+        }
+
     def _row(self, ident: str, held, live: str | None, front_id, developer_id) -> dict:
         topic = desk_topic(ident)
         if held is None:
@@ -333,10 +416,7 @@ class FrontDesk:
                     if self.reader() is None else "Zulip could not be read; nothing is known of this conversation")
         else:
             row = self._row(ident, held, held.live_topic, front_id, developer_id)
-            posts = [{
-                "message_id": m.id, "at": m.timestamp, "by": m.sender, "sender_id": m.sender_id,
-                "content": shown_content(m.content), "kind": post_kind(m, front_id, developer_id),
-            } for m in sorted(held.history, key=lambda m: m.id)]
+            posts = [self._post(m, front_id, developer_id) for m in sorted(held.history, key=lambda m: m.id)]
             note = ("the newest posts were read; older ones are in Zulip" if bounded
                     else "every real post of this conversation is here")
         latest = next((p for p in reversed(posts) if p["kind"] == "agent"), None)

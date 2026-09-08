@@ -263,6 +263,18 @@ inside Front's own `front-` sweep. Three routes, in `frontdesk.py`:
   with `uncertain: true` when the post left and Zulip did not confirm it;
   never a retry, because a post here starts a paid run.
 
+Since `front_desk` p2 step 3 each post of Front's also carries **`dialogue`**
+and **`dialogue_error`**. agfront ends a reply that reports on another agent
+with a fenced `ag-dialogue` JSON block (`ag.frontdesk-dialogue.v1`: the
+settings revision it was written for and ordered `turns`, each a character
+id, a text and the source posts it was drawn from), validated and
+re-serialized there. The relay splits it off: `content` is the reply
+without the block, `dialogue` the parsed scene (`null` for a Front-only
+reply), and `dialogue_error` the reason recorded in an `ag-dialogue-error`
+fence when the run's block was unusable — the reply is shown on its own
+then. A machine block never reaches the rendered conversation. The
+Developer's posts are shown as typed, fences included.
+
 ## `/settings` — the settings repository (`front_desk` p2)
 
 The Front Desk's characters (display names, lore, portraits, which agents

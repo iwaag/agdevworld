@@ -32,6 +32,7 @@ read static snapshots or their existing sample fallbacks.
 - `src/agentRoomState.ts` — the agent room's two reads, through the `agentroom` relay.
 - `src/opsState.ts` — the operation room's one read, `/ops` on the same relay.
 - `src/viewSwitcher.ts` — the single seam for changing the visible view.
+- `src/frontDesk.ts` / `src/scenes/FrontDeskScene.ts` — the Front Desk (`/?view=frontdesk`), a graphic-novel scene for one `#front` › `front-desk-<id>` conversation with Front; `src/frontDeskInput.ts` is its hidden IME textarea, `src/textLayout.ts` the grapheme-safe wrap and pagination, `src/frontDeskState.ts` its relay reads/writes and a `&demo=1` source that never touches the realm.
 - `src/chatPanel.ts` — one routine fire topic and the existing `POST /chat` door; dashboard mode receives shared detail payloads, while world mode owns its selected-topic refresh.
 - `src/detailPopup.ts` — the detail overlay, incl. the per-iteration `summary` button.
 - `src/clusterState.ts` / `src/autolabState.ts` / `src/planeState.ts` — snapshot, gateway, and Plane reads/actions for the panels.
@@ -185,6 +186,31 @@ selected directly. The older Phaser `routines` view is retained as a compact
 board with its existing detail popup; the dashboard is the primary routine
 workflow. Each world view links back to the dashboard. No eighth scene is added.
 `/?parts=graph` remains the standalone snapshot/explicit-refresh graph workbench.
+
+## Front Desk (`front_desk` p1)
+
+`/?view=frontdesk` is its own Phaser game rather than an eighth
+`PanelGridScene` view: the background fills the frame, Front's portrait
+stands in the lower left, the latest reply is the dialogue beside it, a prompt
+bar runs along the bottom and the history is a panel that can be shown or
+hidden. Everything visible is Phaser; the one DOM element is a hidden
+textarea under the bar, because a canvas cannot host an IME. The conversation
+is `#front` › `front-desk-<id>` (`?conv=<id>`; a new id is minted when none
+is given), which Front's existing `front-` sweep serves.
+
+Three things learned by looking rather than by design:
+
+- **Phaser's word wrap splits UTF-16 units.** A Japanese sentence is one
+  "word" to it and an emoji is two units, so `textLayout.ts` wraps with
+  `Intl.Segmenter` (words, then graphemes) and hands Phaser explicit lines.
+- **The Enter that confirms a composition is decided by the event**, not by a
+  flag of our own: `isComposing` / keyCode 229. A CDP probe that never sent
+  `compositionend` showed the flag version would have blocked sending forever.
+- **`?demo=1`** answers from a script in the Front Desk voice so the frame can
+  be checked without buying a run or needing the relay.
+
+`.local/deskshot.mjs` (ignored) is the CDP driver that types, presses keys,
+sets an IME composition, wheels and screenshots it.
 
 ### Two windows (`operation_room` p8)
 

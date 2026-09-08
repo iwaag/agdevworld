@@ -34,7 +34,7 @@ function element<K extends keyof HTMLElementTagNameMap>(tag: K, text: string, cl
 // One controller owns the selection and supplies every pane, including chat.
 export async function initOperationDashboard(): Promise<void> {
   const host = element('main', '', 'operation-parts parts-shell dashboard')
-  host.innerHTML = `<header class="dashboard-header"><div><span class="eyebrow">AGDEVWORLD</span><h1>Operation room</h1></div><nav class="parts-toolbar"><a href="/?parts=gauge" target="_blank" rel="opener">Cost gauge ↗</a><a href="/?view=ops">Ops board</a><a href="/?view=nodes">World views</a><button class="refresh">Refresh</button></nav><p class="parts-health" role="status">Reading relay…</p></header>
+  host.innerHTML = `<header class="dashboard-header"><div><span class="eyebrow">AGDEVWORLD</span><h1>Operation room</h1></div><nav class="parts-toolbar"><a href="/?parts=gauge" target="_blank" rel="opener">Cost gauge ↗</a><a href="/?view=frontdesk">Front Desk</a><a href="/?view=ops">Ops board</a><a href="/?view=nodes">World views</a><button class="refresh">Refresh</button></nav><p class="parts-health" role="status">Reading relay…</p></header>
     <div class="parts-grid"><aside class="routine-pane"><h2>Routines</h2><div class="routine-list"></div></aside>
     <section class="session-pane"><div class="pane-head"><h2>Recent sessions <small>up to 3 visible · history, not capacity</small></h2><label class="show-resolved"><input type="checkbox"> Show resolved</label></div>
       <details class="new-session"><summary>New session</summary>

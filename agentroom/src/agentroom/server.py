@@ -29,7 +29,7 @@ from urllib.parse import parse_qs, unquote, urlparse
 
 from .budget import Budget
 from .chat import Chat
-from .close import Closer
+from .close import Closer, parse_key
 from .cost import Cost
 from .frontdesk import FrontDesk
 from .inflight import ROOTS_VARIABLE
@@ -40,9 +40,11 @@ from .settings import Settings
 ROUTES = ("/healthz", "/agents", "/work", "/ops", "/routines", "/routines/<name>",
           "/inflight/<name>", "/cost", "/budget", "/frontdesk", "/frontdesk/<id>",
           "/frontdesk/<id>/close-plan",
+          "/complete/plan?channel=<channel>&topic=<topic>",
+          "/complete/history?channel=<channel>&topic=<topic>",
           "/settings", "/settings/<revision>", "/settings/<revision>/<path>")
 WRITE_ROUTES = ("/ops/confirm", "/chat", "/routines/<name>/start", "/frontdesk/<id>/post",
-                "/frontdesk/<id>/close")
+                "/frontdesk/<id>/close", "/complete")
 
 
 def make_handler(room: Room, ops: Ops | None = None, chat: Chat | None = None,
@@ -224,12 +226,37 @@ def make_handler(room: Room, ops: Ops | None = None, chat: Chat | None = None,
                     # What closing this conversation would change (`front_desk`
                     # p3). A read: it touches Zulip and Plane and writes to
                     # neither, and it is the *only* thing the button's final
-                    # click approves.
+                    # click approves. Since p4 the Front Desk is one caller of
+                    # the shared operation below; its id names the topic.
                     if closer is None:
                         self._write_json(503, {"error": "conversation completion is not configured"})
                     else:
-                        found = closer.plan(unquote(path[len("/frontdesk/"):-len("/close-plan")]))
+                        ident = unquote(path[len("/frontdesk/"):-len("/close-plan")])
+                        found = closer.plan(Closer.desk_key(ident))
                         self._write_json(400 if found.get("error") else 200, found)
+                elif path == "/complete/plan" or path == "/complete/history":
+                    # The shared completion preview for any selected request
+                    # (`front_desk` p4): `?channel=…&topic=…`. History is the
+                    # relay's own memory of what it carried out, per request
+                    # or for all of them when neither is named.
+                    if closer is None:
+                        self._write_json(503, {"error": "conversation completion is not configured"})
+                    else:
+                        query = parse_qs(urlparse(self.path).query)
+                        channel = (query.get("channel") or [None])[0]
+                        topic = (query.get("topic") or [None])[0]
+                        if path == "/complete/history" and channel is None and topic is None:
+                            self._write_json(200, {"history": closer.records()})
+                        else:
+                            key = parse_key(channel, topic)
+                            if isinstance(key, dict):
+                                self._write_json(400, key)
+                            elif path == "/complete/history":
+                                self._write_json(200, {"channel": key[0], "topic": key[1],
+                                                       "history": closer.records(key)})
+                            else:
+                                found = closer.plan(key)
+                                self._write_json(400 if found.get("error") else 200, found)
                 elif path.startswith("/frontdesk/"):
                     if desk is None:
                         self._write_json(503, {"error": "the Front Desk is not configured"})
@@ -377,13 +404,14 @@ def make_handler(room: Room, ops: Ops | None = None, chat: Chat | None = None,
             else:
                 self._write_json(403, found)
 
-        def _desk_close(self, ident: str) -> None:
-            """Close this conversation and the work it opened.
+        def _complete(self, key) -> None:
+            """Close the selected request and the work it opened.
 
-            The body carries the conversation's own id and the fingerprint of
-            the preview the human approved — never a list of destinations.
-            The targets are re-derived here, and a plan that no longer matches
-            is answered 409 with the fresh one rather than written against.
+            The body carries the fingerprint of the preview the human
+            approved — never a list of destinations. The targets are
+            re-derived here, and a plan that no longer matches is answered
+            409 with the fresh one rather than written against. `key` is what
+            the route named, or the refusal it produced instead.
             """
             if closer is None:
                 self._write_json(503, {"error": "conversation completion is not configured"})
@@ -391,14 +419,18 @@ def make_handler(room: Room, ops: Ops | None = None, chat: Chat | None = None,
             body = self._body()
             if body is None:
                 return
+            if key is None:
+                key = parse_key(body.get("channel"), body.get("topic"))
+            if isinstance(key, dict):
+                self._write_json(400, key)
+                return
             expected = body.get("fingerprint")
             if expected is not None and not isinstance(expected, str):
                 self._write_json(400, {"error": "fingerprint must be the string the plan carried"})
                 return
-            found = closer.close(ident, expected)
+            found = closer.close(key, expected)
             if found.get("error") and not found.get("refused"):
-                self._write_json(400 if "is not a Front Desk" in str(found["error"]) else 503,
-                                 found)
+                self._write_json(503, found)
             elif found.get("refused"):
                 self._write_json(409, found)
             else:
@@ -413,7 +445,11 @@ def make_handler(room: Room, ops: Ops | None = None, chat: Chat | None = None,
                 self._desk_post(unquote(path[len("/frontdesk/"):-len("/post")]))
                 return
             if path.startswith("/frontdesk/") and path.endswith("/close"):
-                self._desk_close(unquote(path[len("/frontdesk/"):-len("/close")]))
+                ident = unquote(path[len("/frontdesk/"):-len("/close")])
+                self._complete(Closer.desk_key(ident))
+                return
+            if path == "/complete":
+                self._complete(None)
                 return
             if path.startswith("/routines/") and path.endswith("/start"):
                 self._start(unquote(path[len("/routines/"):-len("/start")]))

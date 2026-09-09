@@ -1,8 +1,12 @@
-"""Closing a Front Desk conversation: the plan, and carrying it out.
+"""Completing a request: the plan, and carrying it out.
 
-`closing.py` answers *what* finishing this conversation would touch.
+`closing.py` answers *what* finishing the selected request would touch.
 This module answers *what would change*, and — on a second, explicit
-request — changes it.
+request — changes it. The request is any conversation `closing.classify`
+accepts as a root, named by channel and topic; the Front Desk's
+`front-desk-<id>` is one caller of it (`Closer.desk_key`), the operation
+room's routine runs and the agent room's conversations are the others
+(`front_desk` p4).
 
 **The human's click is the acceptance.** Nothing here judges whether the
 work was any good; it decides only whether each target is in a state this
@@ -27,11 +31,11 @@ Front topic last is what makes a half-finished run visible — if anything
 related is blocked or failed, the Front conversation **stays open**, which
 is the only way the screen can honestly say "partially closed".
 
-**The browser never names a destination.** A request carries the
-conversation id and the fingerprint of the preview the human looked at;
-every target is re-derived here from the realm and from Plane, and a
-material change since the preview is a refusal with a fresh plan rather
-than a write against a stale picture.
+**The browser never names a destination.** A request carries the selected
+conversation and the fingerprint of the preview the human looked at; every
+target is re-derived here from the realm and from Plane, and a material
+change since the preview is a refusal with a fresh plan rather than a write
+against a stale picture.
 
 **Retrying is re-running.** Every action is idempotent in the realm's own
 terms — a resolved topic resolves to `already`, a Done Work to `already` —
@@ -52,13 +56,17 @@ from hashlib import sha256
 from typing import Any, Callable, Protocol
 
 from agag.plane import ALREADY_COMPLETED, reason_not_completed, sub_works
-from agag.zulip import RESOLVED_TOPIC_PREFIX, ZulipClient
+from agag.zulip import ZulipClient
 
-from .closing import Discovery, PlaneBoard, Realm, WorkTarget, discover
+from .closing import Discovery, Key, PlaneBoard, Realm, WorkTarget, discover
 from .frontdesk import ID_PATTERN, desk_topic
+from .room import bare_topic
 from .routines import ROUTINE_CHANNEL
 
-SCHEMA = "ag.frontdesk-close.v1"
+SCHEMA = "ag.completion.v1"
+#: A channel or topic name this door will look up: Zulip's own limits, so a
+#: request cannot make the relay build a narrow out of anything else.
+NAME_MAX = 200
 #: Plane's state groups, used as their own mapping so the shared rule can be
 #: asked about a target whose states were already reduced to their groups by
 #: discovery. One rule, two shapes of input.
@@ -73,8 +81,26 @@ RECORD_MEMORY = 20
 
 __all__ = [
     "ALREADY", "APPLIED", "Action", "BLOCKED", "Closer", "DONE", "FAILED", "KEPT",
-    "READY", "SCHEMA", "SKIPPED", "fingerprint", "plan_actions",
+    "READY", "SCHEMA", "SKIPPED", "fingerprint", "parse_key", "plan_actions",
 ]
+
+
+def parse_key(channel: object, topic: object) -> Key | dict:
+    """`(channel, bare topic)` from what a request named, or the refusal.
+
+    A ✔ name is accepted and read bare, so a link copied from a resolved
+    topic still names the same conversation.
+    """
+    if not isinstance(channel, str) or not isinstance(topic, str):
+        return {"error": "channel and topic must both be strings"}
+    channel, topic = channel.strip(), bare_topic(topic.strip())
+    if not channel or not topic:
+        return {"error": "channel and topic must both be named"}
+    if len(channel) > NAME_MAX or len(topic) > NAME_MAX:
+        return {"error": f"channel and topic are at most {NAME_MAX} characters"}
+    if any(ch in channel for ch in "\n\r") or any(ch in topic for ch in "\n\r"):
+        return {"error": "channel and topic are one line each"}
+    return (channel, topic)
 
 
 @dataclass
@@ -123,9 +149,18 @@ def plan_actions(found: Discovery) -> list[Action]:
     """Every action, in the order execution applies them.
 
     Plane first — a Work is the record the chat cannot rebuild — then the
-    related topics, then the dedicated channels, then the Front conversation
+    related topics, then the dedicated channels, then the selected request
     itself, last so that anything left undone keeps it open.
+
+    A root that may not be completed (an execution topic, a standing
+    request, an introduction) is one blocked action carrying the scope's
+    reason: the panel shows why, and there is nothing to approve.
     """
+    scope = found.scope
+    if not scope.closable:
+        return [Action("conversation", f"topic:{found.root[0]}/{found.root[1]}",
+                       f"#{found.root[0]} › {found.root[1]}", BLOCKED, scope.reason,
+                       {"parents": scope.parents, "kind": scope.kind})]
     actions: list[Action] = [_work_action(work) for work in found.works]
 
     for node in found.topics:
@@ -162,7 +197,9 @@ def plan_actions(found: Discovery) -> list[Action]:
                               root.as_dict() if root else {}))
     elif root is None or not root.last_post_id:
         actions.append(Action("conversation", key, label, BLOCKED,
-                              "this conversation has no post to resolve", {}))
+                              "this conversation has no post to resolve" if root is None
+                              or root.known != "note-only" else
+                              "this conversation could not be read", {}))
     else:
         actions.append(Action("conversation", key, label, READY,
                               "will be marked ✔ once everything above is done", root.as_dict()))
@@ -187,7 +224,7 @@ class PlaneOps(PlaneBoard, Protocol):  # pragma: no cover - structural typing on
 
 @dataclass
 class Closer:
-    """The Front Desk's completion door: preview, and carry out.
+    """The completion door: preview, and carry out.
 
     Both halves derive their targets the same way and from the same places.
     The realm read uses the relay's read credential; the writes use the
@@ -203,10 +240,19 @@ class Closer:
     writer_factory: Callable[[], ZulipClient] | None = None
     plane_factory: Callable[[], PlaneOps] | None = None
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
-    _locks: dict[str, threading.Lock] = field(default_factory=dict, repr=False)
+    _locks: dict[Key, threading.Lock] = field(default_factory=dict, repr=False)
     _records: list[dict] = field(default_factory=list, repr=False)
     _reader: ZulipClient | None = field(default=None, repr=False)
     _writer: ZulipClient | None = field(default=None, repr=False)
+
+    # -- the Front Desk, as one caller -------------------------------------
+
+    @staticmethod
+    def desk_key(ident: str) -> Key | dict:
+        """The conversation a Front Desk id names, or the refusal."""
+        if not ID_PATTERN.match(ident or ""):
+            return {"error": f"{ident!r} is not a Front Desk conversation id"}
+        return (ROUTINE_CHANNEL, desk_topic(ident))
 
     # -- what is configured -------------------------------------------------
 
@@ -236,30 +282,36 @@ class Closer:
             self._writer = self.writer_factory()
         return self._writer
 
-    def _conversation_lock(self, ident: str) -> threading.Lock:
+    def _conversation_lock(self, key: Key) -> threading.Lock:
         with self._lock:
-            return self._locks.setdefault(ident, threading.Lock())
+            return self._locks.setdefault(key, threading.Lock())
 
     # -- the preview --------------------------------------------------------
 
-    def plan(self, ident: str, now: float | None = None) -> dict:
-        """What closing this conversation would change, with the evidence."""
+    def plan(self, key: Key | dict, now: float | None = None) -> dict:
+        """What closing this request would change, with the evidence.
+
+        `key` is `(channel, topic)` or the refusal `parse_key`/`desk_key`
+        answered instead, passed through so a caller can chain them.
+        """
         now = time.time() if now is None else now
-        if not ID_PATTERN.match(ident or ""):
-            return {"error": f"{ident!r} is not a Front Desk conversation id"}
+        if isinstance(key, dict):
+            return key
         realm: Realm | None = self._reader_client()
         plane: PlaneOps | None = self.plane_factory() if self.plane_factory else None
-        found = discover(self.topics(), ident, realm=realm, plane=plane)
+        found = discover(self.topics(), key, realm=realm, plane=plane)
         actions = plan_actions(found)
-        return self._payload(ident, now, found, actions)
+        return self._payload(now, found, actions)
 
-    def _payload(self, ident: str, now: float, found: Discovery, actions: list[Action],
+    def _payload(self, now: float, found: Discovery, actions: list[Action],
                  results: list[dict] | None = None) -> dict:
         ready = [action for action in actions if action.state == READY]
         blocked = [action for action in actions if action.state == BLOCKED]
         return {
-            "schema": SCHEMA, "generated_at": now, "conversation": ident,
-            "topic": desk_topic(ident), "channel": ROUTINE_CHANNEL,
+            "schema": SCHEMA, "generated_at": now,
+            "channel": found.root[0], "topic": found.root[1],
+            "root": {"channel": found.root[0], "topic": found.root[1]},
+            "scope": found.scope.as_dict(),
             "fingerprint": fingerprint(actions),
             "status": self.status(),
             "actions": [action.as_dict() for action in actions],
@@ -270,12 +322,14 @@ class Closer:
             "excluded": found.excluded,
             "gaps": found.gaps,
             "results": results or [],
+            "history": self.records(found.root),
             "note": ("this closes work; it does not stop a running agent"),
         }
 
     # -- carrying it out ----------------------------------------------------
 
-    def close(self, ident: str, expected: str | None = None, now: float | None = None) -> dict:
+    def close(self, key: Key | dict, expected: str | None = None,
+              now: float | None = None) -> dict:
         """Apply the plan, in order, and report every target's outcome.
 
         The plan is re-derived here: `expected` says which preview the human
@@ -283,32 +337,33 @@ class Closer:
         write at all.
         """
         now = time.time() if now is None else now
-        if not ID_PATTERN.match(ident or ""):
-            return {"error": f"{ident!r} is not a Front Desk conversation id"}
+        if isinstance(key, dict):
+            return key
         client = self._writer_client()
         if client is None:
             return {"error": self.status()["reason"], "status": self.status()}
-        with self._conversation_lock(ident):
+        with self._conversation_lock(key):
             realm: Realm | None = self._reader_client()
             plane: PlaneOps | None = self.plane_factory() if self.plane_factory else None
-            found = discover(self.topics(), ident, realm=realm, plane=plane)
+            found = discover(self.topics(), key, realm=realm, plane=plane)
             actions = plan_actions(found)
             current = fingerprint(actions)
             if expected is not None and expected != current:
-                payload = self._payload(ident, now, found, actions)
+                payload = self._payload(now, found, actions)
                 payload["refused"] = True
                 payload["error"] = ("the targets have changed since this preview was made; "
                                     "nothing was closed — read the refreshed plan and approve it")
                 return payload
             results = self._apply(client, plane, actions)
-            payload = self._payload(ident, now, found, actions, results)
+            with self._lock:
+                self._records.append({"at": now, "channel": found.root[0],
+                                      "topic": found.root[1], "kind": found.scope.kind,
+                                      "fingerprint": current, "results": results})
+                del self._records[:-RECORD_MEMORY]
+            payload = self._payload(now, found, actions, results)
             payload["applied"] = True
             payload["partial"] = any(row["outcome"] == FAILED for row in results) or bool(
                 payload["counts"]["blocked"])
-            with self._lock:
-                self._records.append({"at": now, "conversation": ident,
-                                      "fingerprint": current, "results": results})
-                del self._records[:-RECORD_MEMORY]
             return payload
 
     def _apply(self, client: ZulipClient, plane: PlaneOps | None,
@@ -369,7 +424,10 @@ class Closer:
 
     # -- for the screen -----------------------------------------------------
 
-    def records(self, ident: str | None = None) -> list[dict]:
+    def records(self, key: Key | None = None) -> list[dict]:
+        """Operations this relay carried out, newest last, for one request
+        or for all of them. Memory only: a restart forgets them, and the
+        realm and Plane are the record that matters."""
         with self._lock:
             return [row for row in self._records
-                    if ident is None or row["conversation"] == ident]
+                    if key is None or (row["channel"], row["topic"]) == key]

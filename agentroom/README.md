@@ -107,10 +107,12 @@ writes only to this process's memory (see `POST /ops/confirm`).
   `{sent, channel, topic, message_id}`, `403` with the reason for anything the
   rules decline, `503` when no chat credential is configured. See below.
 
-- `GET /frontdesk/<id>/close-plan`, `POST /frontdesk/<id>/close` → what
-  finishing one Front Desk conversation would change, and doing it
-  (`front_desk` p3). The **second** route that writes to the realm, and the
-  only one that writes to Plane. See below.
+- `GET /complete/plan?channel=…&topic=…`, `POST /complete` → what
+  finishing one request would change, and doing it (`front_desk` p3, p4).
+  The **second** route that writes to the realm, and the only one that
+  writes to Plane. `GET /complete/history` is what this relay carried out.
+  `GET /frontdesk/<id>/close-plan` and `POST /frontdesk/<id>/close` are the
+  same operation with the Front Desk id naming the topic. See below.
 
 - `GET /frontdesk`, `GET /frontdesk/<id>`, `POST /frontdesk/<id>/post` → the
   Front Desk's conversations, one conversation's history, and a post into it
@@ -280,27 +282,60 @@ fence when the run's block was unusable — the reply is shown on its own
 then. A machine block never reaches the rendered conversation. The
 Developer's posts are shown as typed, fences included.
 
-## `/frontdesk/<id>/close` — finishing a conversation (`front_desk` p3)
+## `/complete` — finishing a request (`front_desk` p3, p4)
 
-A Front Desk conversation is rarely one topic: Front opens a workplan topic,
-autolab plans a Plane Work with a Sub-Work per task and a `work-<label>`
-channel per mission, forge runs an `assetrun-` beside its `assetplan-`. When
-the thing is done, all of that is still open — including the mission Work,
-which nothing ever closed. Two routes close it, in `closing.py` (what the
-targets *are*) and `close.py` (what would change, and doing it):
+A request is rarely one topic: Front opens a workplan topic, autolab plans
+a Plane Work with a Sub-Work per task and a `work-<label>` channel per
+mission, forge runs an `assetrun-` beside its `assetplan-`. When the thing
+is done, all of that is still open — including the mission Work, which
+nothing ever closed. Two routes close it, in `closing.py` (what the targets
+*are*) and `close.py` (what would change, and doing it). The request is any
+conversation named by `channel` and `topic` (a ✔ name is read bare):
 
-- `GET /frontdesk/<id>/close-plan` → `ag.frontdesk-close.v1`: the ordered
-  `actions`, each with a `kind` (`work`, `topic`, `channel`, `conversation`),
-  a stable `key`, a `state` (`ready`, `done`, `blocked`, `kept`), the
-  `reason` it is in that state and the `detail` it was decided from; plus
-  `counts`, `excluded`, `gaps`, `status` (which credentials this relay has)
-  and a `fingerprint`. It writes nothing.
-- `POST /frontdesk/<id>/close` `{fingerprint}` → applies it and answers the
-  same payload with `results` (one row per target: `applied`, `already`,
+- `GET /complete/plan?channel=…&topic=…` → `ag.completion.v1`: `root`, a
+  `scope` block, the ordered `actions`, each with a `kind` (`work`, `topic`,
+  `channel`, `conversation`), a stable `key`, a `state` (`ready`, `done`,
+  `blocked`, `kept`), the `reason` it is in that state and the `detail` it
+  was decided from; plus `counts`, `excluded`, `gaps`, `status` (which
+  credentials this relay has), `history` (this relay's earlier operations on
+  the same request) and a `fingerprint`. It writes nothing.
+- `POST /complete` `{channel, topic, fingerprint}` → applies it and answers
+  the same payload with `results` (one row per target: `applied`, `already`,
   `failed`, `skipped`) and `partial`. `409` when the plan has changed since
   the preview — the refusal carries the fresh plan and **nothing is
-  written**. The body carries the approved fingerprint and nothing else: the
-  server closes what it derived, never what a browser named.
+  written**. The body carries the request and the approved fingerprint and
+  nothing else: the server closes what it derived, never what a browser
+  named.
+- `GET /complete/history[?channel=…&topic=…]` → the operations this relay
+  carried out, newest last; memory only, forgotten on restart.
+- `GET /frontdesk/<id>/close-plan`, `POST /frontdesk/<id>/close
+  {fingerprint}` → the same two, with the Front Desk id naming
+  `#front` › `front-desk-<id>`.
+
+**What a root is, and what it owns** (`closing.classify`, `Scope`,
+`_ownership`, p4). A conversation's *kind* is its name — `desk`, `front`,
+`routine-run`, `routine-standing`, `workplan`, `workrun`, `assetplan`,
+`assetrun`, `intro`, or `topic` — and only the request kinds (the first two,
+a run, a plan) may be completed. A task or run topic answers with its
+`scope.parents` and one blocked action; a standing request or an
+introduction is refused, because a ✔ there retires the routine or the agent.
+Whose a reached topic is comes from its root notes: all naming this request
+(or something it owns, or what the root itself was opened for) → owned;
+naming anything else → *anchored to another request*, excluded with the
+note's message id. An execution topic is decided by its **structural** home
+only (autolab's `workplan-` for a `workrun-`, forge's `assetplan-` for an
+`assetrun-`); other root notes there are Front's visits on behalf of another
+request and are carried as `visitors`, shown, never obeyed. A topic with no
+root note is owned when something owned reached it — unless it is itself a
+request, which no served note can claim. A routine run's `scope` also names
+its standing request and the previous run its fire line mentions as
+`context`: untouched, and said so.
+
+The walk (`related_topics`) follows both link notes to a fixed point, reads
+every reached topic's unread home once (a plan Front never served is found
+through the task that names it), and reads the whole `work-<label>` channel
+of every owned autolab mission, because a plan carries no note naming its
+tasks. Every read is under both names; what could not be read is a gap.
 
 How each target is decided:
 

@@ -1,12 +1,24 @@
-"""What finishing one Front Desk conversation actually means, discovered.
+"""What finishing one request actually means, discovered.
 
-A conversation at the Front Desk is rarely one topic. The Developer asks
-Front for something; Front opens a workplan topic in a project channel;
-autolab plans it into a Plane Work with one Sub-Work per task and opens a
-`work-<label>` channel with one `workrun-` topic per task; Front follows the
-callbacks back. When the thing is done, five conversations, one channel and
-two Plane issues are all still open, and the human closes them by hand or
-not at all — the braindump this module answers.
+A request is rarely one topic. The Developer asks Front for something; Front
+opens a workplan topic in a project channel; autolab plans it into a Plane
+Work with one Sub-Work per task and opens a `work-<label>` channel with one
+`workrun-` topic per task; Front follows the callbacks back. When the thing
+is done, five conversations, one channel and two Plane issues are all still
+open, and the human closes them by hand or not at all — the braindump this
+module answers.
+
+**The selected request is any conversation, named by channel and topic**
+(`front_desk` p4). The Front Desk's `front-desk-<id>` was the first caller;
+an ordinary `front-*` conversation, one run of a routine
+(`front-routine-<name>-<stamp>`), an Autolab `workplan-` and a Forge
+`assetplan-` are the others, and `classify()` says which one a root is. What
+differs between them is only the **boundary**: which reached conversations
+are *this* request's and which are somebody else's — see `Scope` and
+`_ownership`. An execution topic (`workrun-`, `assetrun-`, anything that
+carries a root note of its own) is never a root: selecting it names its
+parent request instead, so a click there cannot close the parent and its
+siblings by accident.
 
 **Nothing here decides that the work is good.** The human's click is the
 acceptance; this module only answers *what would be closed*, and it answers
@@ -35,11 +47,13 @@ hold it, under both its names. What still could not be read is returned as a
 **gap**, never as an absence of work.
 
 **Ambiguity is returned, never resolved.** A topic anchored to a different
-`front-desk-` conversation is another conversation's work — p2 met a reused
-plan topic whose first root note still named an older Front conversation —
-and it leaves this module as an *exclusion with its evidence*, for the
-preview to show and the human to see, rather than as something quietly
-closed or quietly dropped.
+request is that request's work — p2 met a reused plan topic whose first
+root note still named an older Front conversation — and it leaves this
+module as an *exclusion with its evidence*, for the preview to show and the
+human to see, rather than as something quietly closed or quietly dropped.
+The same rule keeps another Front conversation, another run of a routine, a
+routine's standing request and another agent's request outside the closure,
+whatever link reached them from here.
 
 Nothing here writes. Execution is `close.py`'s (p3 step 2).
 """
@@ -53,9 +67,11 @@ from typing import Any, Callable, Iterable, Protocol
 from agag.selfnote import Conversation, parse_note, parse_rootchat, parse_served
 from agag.zulip import RESOLVED_TOPIC_PREFIX
 
-from .frontdesk import DESK_PREFIX, desk_topic, is_desk_topic
-from .room import bare_topic
-from .routines import ROUTINE_CHANNEL, children_of
+from .frontdesk import DESK_PREFIX, desk_id
+from .room import AGENTS_CHANNEL, INTRO_PREFIX, bare_topic
+from .routines import (
+    ROUTINE_CHANNEL, STANDING_PREFIX, children_of, parse_run_topic, previous_of,
+)
 
 #: One conversation, keyed the way the ops engine keys them: bare topic name.
 Key = tuple[str, str]
@@ -72,6 +88,29 @@ WORK_CHANNEL_PREFIX = "work-"
 #: The topic a mission is planned in, inside its project channel. Its
 #: `<channel>/<topic>` is the mission Work's `external_id`.
 WORKPLAN_PREFIX = "workplan-"
+#: autolab's execution topics, one per task, inside the mission's `work-`
+#: channel; forge's plan and run topics, inside its own channel. Only the
+#: prefixes each agent's own code writes (`agautolab.anchor`,
+#: `agforge.anchor`) — a name is what says *what a topic is*, never whose.
+WORKRUN_PREFIX = "workrun-"
+ASSETPLAN_PREFIX = "assetplan-"
+ASSETRUN_PREFIX = "assetrun-"
+#: Front's own sweep prefix: every `front-*` topic in `#front` is a request
+#: to Front, the Front Desk's and the routines' included.
+FRONT_PREFIX = "front-"
+
+#: What a conversation is, by name. The **request** kinds may be selected as
+#: the root of a completion; the **execution** kinds are somebody's task
+#: topics and name their parent instead; the two **retiring** kinds carry a
+#: ✔ that means something else entirely and are never a target.
+DESK, FRONT, ROUTINE_RUN, WORKPLAN, ASSETPLAN = (
+    "desk", "front", "routine-run", "workplan", "assetplan")
+WORKRUN, ASSETRUN = "workrun", "assetrun"
+ROUTINE_STANDING, INTRO = "routine-standing", "intro"
+TOPIC = "topic"
+REQUEST_KINDS = frozenset({DESK, FRONT, ROUTINE_RUN, WORKPLAN, ASSETPLAN})
+EXECUTION_KINDS = frozenset({WORKRUN, ASSETRUN})
+RETIRING_KINDS = frozenset({ROUTINE_STANDING, INTRO})
 #: How much of an unheld topic one read fetches. A `workrun-` topic is a
 #: conversation, not a log; 400 is far past any this realm has produced, and
 #: hitting it is reported as a gap rather than assumed to be the whole.
@@ -86,10 +125,93 @@ MAX_NODES = 120
 AUTO_MARKER = "[AUTO]"
 
 __all__ = [
-    "AUTOLAB_SOURCE", "Discovery", "MAX_NODES", "PlaneBoard", "PlaneReader", "READ_DEPTH",
-    "Related", "WORK_CHANNEL_PREFIX", "WORK_TAG", "WorkNote", "WorkTarget",
-    "discover", "parse_work_note", "related_topics", "work_notes",
+    "AUTOLAB_SOURCE", "Discovery", "EXECUTION_KINDS", "MAX_NODES", "PlaneBoard", "PlaneReader",
+    "READ_DEPTH", "REQUEST_KINDS", "RETIRING_KINDS", "Related", "Scope", "WORK_CHANNEL_PREFIX",
+    "WORK_TAG", "WorkNote", "WorkTarget", "classify", "describe_kind", "discover",
+    "parse_work_note", "related_topics", "work_notes",
 ]
+
+
+# --- what a conversation is ----------------------------------------------------
+
+
+def classify(channel: str, topic: str) -> str:
+    """The kind of one conversation, from its channel and bare name.
+
+    Names decide *what* a topic is because the writers' own code makes them
+    (`routines.run_topic`, `frontdesk.desk_topic`, the anchors); they never
+    decide *whose* it is — that is the link notes' job (`_ownership`).
+    """
+    topic = bare_topic(topic)
+    if channel == ROUTINE_CHANNEL:
+        if topic.startswith(DESK_PREFIX):
+            return DESK
+        if parse_run_topic(topic) is not None:
+            return ROUTINE_RUN
+        if topic.startswith(STANDING_PREFIX):
+            return ROUTINE_STANDING
+        if topic.startswith(FRONT_PREFIX):
+            return FRONT
+        return TOPIC
+    if channel == AGENTS_CHANNEL and topic.startswith(INTRO_PREFIX):
+        return INTRO
+    if topic.startswith(WORKPLAN_PREFIX):
+        return WORKPLAN
+    if topic.startswith(WORKRUN_PREFIX):
+        return WORKRUN
+    if topic.startswith(ASSETPLAN_PREFIX):
+        return ASSETPLAN
+    if topic.startswith(ASSETRUN_PREFIX):
+        return ASSETRUN
+    return TOPIC
+
+
+def describe_kind(kind: str, topic: str = "") -> str:
+    """One noun phrase per kind, for a reason a human reads."""
+    if kind == ROUTINE_RUN or kind == ROUTINE_STANDING:
+        parsed = parse_run_topic(bare_topic(topic))
+        name = parsed[0] if parsed else bare_topic(topic)[len(STANDING_PREFIX):]
+        return (f"a run of routine {name}" if kind == ROUTINE_RUN
+                else f"the standing request of routine {name}")
+    return {
+        DESK: "a Front Desk conversation", FRONT: "a Front conversation",
+        WORKPLAN: "an Autolab request", ASSETPLAN: "a Forge request",
+        WORKRUN: "an Autolab task topic", ASSETRUN: "a Forge run topic",
+        INTRO: "an agent's introduction",
+    }.get(kind, "a conversation")
+
+
+@dataclass
+class Scope:
+    """The boundary around the selected request, said out loud.
+
+    `closable` is whether this root may be completed at all; when it is not,
+    `reason` says why and `parents` names where to go instead. `context` is
+    what the records *mention* without owning — a routine run's previous run,
+    its standing request — listed so the preview can say they are untouched
+    rather than leaving the reader to wonder.
+    """
+
+    root: Key
+    kind: str
+    closable: bool
+    reason: str
+    description: str
+    #: Request conversations this root was opened for, by its own root notes:
+    #: `{channel, topic, kind, by, by_id, message_id}`. Navigation, and — for
+    #: an execution topic — the only answer.
+    parents: list[dict] = field(default_factory=list)
+    #: `{channel, topic, relation, reason}` — mentioned, not owned.
+    context: list[dict] = field(default_factory=list)
+    routine: dict | None = None
+
+    def as_dict(self) -> dict:
+        return {
+            "root": {"channel": self.root[0], "topic": self.root[1]},
+            "kind": self.kind, "closable": self.closable, "reason": self.reason,
+            "description": self.description, "parents": self.parents,
+            "context": self.context, "routine": self.routine,
+        }
 
 
 # --- the `[work]` note ------------------------------------------------------
@@ -178,12 +300,17 @@ class Related:
     #: The read came back full: there may be older posts, and older notes.
     history_bounded: bool = False
     last_post_id: int = 0
+    #: Root notes written *in* an execution topic by a visitor — Front,
+    #: serving some other request, posting here — that name a conversation
+    #: outside this request. Not ownership (`_ownership`), but shown: the
+    #: reader should know another request was served from this topic.
+    visitors: list[dict] = field(default_factory=list)
 
     def as_dict(self) -> dict:
         return {
             "channel": self.channel, "topic": self.topic, "live_topic": self.live_topic,
             "resolved": self.resolved, "known": self.known, "depth": self.depth,
-            "links": self.links, "homes": self.homes,
+            "links": self.links, "homes": self.homes, "visitors": self.visitors,
             "works": [note.as_dict() for note in self.works],
             "history_bounded": self.history_bounded,
             # The id a resolve renames from: Zulip resolves a topic by moving
@@ -386,6 +513,7 @@ def _stem(topic: str) -> str:
 
 def related_topics(
     topics: dict, root: Key, *, reader: Reader | None = None, max_nodes: int = MAX_NODES,
+    seed_channels: Iterable[str] = (),
 ) -> tuple[dict[Key, Related], dict]:
     """Every conversation related to `root`, and what could not be reached.
 
@@ -394,6 +522,12 @@ def related_topics(
     repeated until no node is added. The realm is read only for topics the
     engine does not hold with a history — which, resolved topics never being
     swept, is most of a finished session.
+
+    `seed_channels` are channels whose every topic is *read* as a candidate
+    — a mission's dedicated `work-` channel, named by the Plane Work rather
+    than by any note. Reading is all it buys: a candidate joins the graph on
+    its own root note naming something already reached, exactly like every
+    other node, or not at all.
     """
     reader = reader if reader is not None else Reader(realm=None)
     working: dict[Key, Any] = dict(topics)
@@ -485,6 +619,45 @@ def related_topics(
     register(root, 0, None)
     while sweep():
         pass
+    # **Upward, once.** A reached topic's root note names the conversation
+    # it was opened for; when nothing here has read that conversation, its
+    # own notes are unknown — and it may well name *this* root (a plan Front
+    # served a task of, but never the plan). Read every such home; a home
+    # joins the graph only if a sweep then links it from something reached,
+    # otherwise it stays outside and ownership names it as somebody else's.
+    asked: set[Key] = set()
+
+    def read_homes() -> bool:
+        added = False
+        for node in list(found.values()):
+            for home in node.homes:
+                key = (home["channel"], home["topic"])
+                if key == root or key in found or key in asked:
+                    continue
+                asked.add(key)
+                if ensure(key) is not None:
+                    added = True
+        return added
+
+    while read_homes():
+        while sweep():
+            pass
+    # **A mission's own channel, read whole.** autolab's `workplan-` topic
+    # carries no note naming its `workrun-` topics — each task topic names
+    # the plan, not the other way round — so from a plan (or from anything
+    # that reached the plan only by a note) the tasks are invisible until
+    # something reads them. The Plane Work names the channel; its topics are
+    # read here and admitted by their own root notes, or not at all.
+    seeded = False
+    for channel in seed_channels:
+        names = reader.channel_topics(channel)
+        for name in names or []:
+            key = (channel, bare_topic(name))
+            if key not in found and ensure(key) is not None:
+                seeded = True
+    if seeded:
+        while sweep():
+            pass
     # **The blind spot of both notes, closed with the realm's own topic list.**
     # A topic an agent opened *for its own* conversation carries a root note
     # naming that conversation — and nothing anywhere names the new topic, so
@@ -518,7 +691,7 @@ def related_topics(
                          if node.known == "note-only"),
         "bounded": sorted(f"{node.channel}/{node.topic}" for node in found.values()
                           if node.history_bounded),
-        "errors": list(reader.errors),
+        "errors": _unique(reader.errors),
         "zulip_calls": reader.calls,
     }
     return found, gaps
@@ -616,12 +789,15 @@ class WorkTarget:
     evidence: list[dict] = field(default_factory=list)
     parent_id: str | None = None
     children: list[dict] = field(default_factory=list)
+    #: The issue's `external_source`: which agent registered it. autolab's
+    #: missions have a dedicated `work-` channel; nobody else's do.
+    source: str | None = None
 
     def as_dict(self) -> dict:
         return {"project_id": self.project_id, "project": self.project_name,
                 "issue_id": self.issue_id, "label": self.label, "title": self.title,
                 "state": self.state_group, "role": self.role, "evidence": self.evidence,
-                "parent_id": self.parent_id, "children": self.children}
+                "parent_id": self.parent_id, "children": self.children, "source": self.source}
 
 
 def _project_slug(row: dict) -> str | None:
@@ -647,19 +823,22 @@ def _issue_label(project: dict, issue: dict) -> str:
 
 @dataclass
 class Discovery:
-    """What closing this conversation would touch, and what it would not."""
+    """What closing this request would touch, and what it would not."""
 
-    conversation: str
-    root: Key
+    scope: Scope
     topics: list[Related]
     excluded: list[dict]
     works: list[WorkTarget]
     channels: list[dict]
     gaps: dict
 
+    @property
+    def root(self) -> Key:
+        return self.scope.root
+
     def as_dict(self) -> dict:
         return {
-            "conversation": self.conversation,
+            "scope": self.scope.as_dict(),
             "root": {"channel": self.root[0], "topic": self.root[1]},
             "topics": [node.as_dict() for node in self.topics],
             "excluded": self.excluded,
@@ -672,89 +851,267 @@ class Discovery:
 def _exclude(node: Related, reason: str, evidence: list[dict] | None = None) -> dict:
     return {"channel": node.channel, "topic": node.topic, "live_topic": node.live_topic,
             "resolved": node.resolved, "reason": reason, "evidence": evidence or [],
-            "known": node.known}
+            "known": node.known, "kind": classify(node.channel, node.topic)}
+
+
+def _root_messages(topics: dict, root: Key, reader: Reader) -> list[dict]:
+    """The root's own posts, from the engine when it holds them and from
+    the reader's cache otherwise (never a second call)."""
+    held = topics.get(root)
+    if held is not None and getattr(held, "history", None):
+        return [{"id": m.id, "sender_id": m.sender_id, "sender_full_name": m.sender,
+                 "content": m.content} for m in held.history]
+    read = reader.history(root)
+    return read[0] if read is not None else []
+
+
+def _scope(topics: dict, root: Key, node: Related, reader: Reader) -> Scope:
+    """The boundary the selected root draws, from its kind and its own notes."""
+    kind = classify(*root)
+    structural_kind = STRUCTURAL_HOME.get(kind)
+    parents = [{**home, "kind": classify(home["channel"], home["topic"]),
+                "structural": structural_kind is None
+                or classify(home["channel"], home["topic"]) == structural_kind}
+               for home in node.homes if (home["channel"], home["topic"]) != root]
+    parents.sort(key=lambda p: (not p["structural"], p["message_id"]))
+    label = f"#{root[0]} › {root[1]}"
+    if kind in RETIRING_KINDS:
+        what = ("a ✔ on a standing request retires the routine; complete one of its runs instead"
+                if kind == ROUTINE_STANDING else
+                "a ✔ on an introduction retires the agent; this is not a request")
+        return Scope(root, kind, False, what, f"{label} is {describe_kind(kind, root[1])}",
+                     parents=parents)
+    if kind in EXECUTION_KINDS or (kind not in REQUEST_KINDS and parents):
+        structural = [p for p in parents if p["structural"]] or parents
+        named = ", ".join(f"#{p['channel']} › {p['topic']}" for p in structural)
+        served = ", ".join(f"#{p['channel']} › {p['topic']}" for p in parents if p not in structural)
+        return Scope(
+            root, kind, False,
+            (f"this is {describe_kind(kind, root[1])} of {named}; select that request "
+             "to complete it and its work together"
+             + (f" (it was also served on behalf of {served})" if served else "") if parents else
+             f"this is {describe_kind(kind, root[1])} and its records name no parent request; "
+             "nothing here says what it belongs to"),
+            f"{label} is an execution topic, not a request", parents=parents)
+    context: list[dict] = []
+    routine: dict | None = None
+    if kind == ROUTINE_RUN:
+        name, stamp = parse_run_topic(root[1])  # type: ignore[misc]
+        standing = f"{STANDING_PREFIX}{name}"
+        context.append({"channel": ROUTINE_CHANNEL, "topic": standing, "relation": "standing request",
+                        "reason": "the routine's standing request and schedule stay as they are; "
+                                  "a ✔ there would retire the routine"})
+        previous = None
+        for message in _root_messages(topics, root, reader):
+            previous = previous_of(str(message.get("content") or "")) or previous
+        if previous:
+            context.append({"channel": ROUTINE_CHANNEL, "topic": bare_topic(previous),
+                            "relation": "previous run",
+                            "reason": "named by this run's fire line as context, not owned by it; "
+                                      "earlier runs are completed on their own"})
+        routine = {"name": name, "stamp": stamp, "standing_topic": standing,
+                   "previous_run": bare_topic(previous) if previous else None}
+        description = (f"run {stamp} of routine {name} and the work it opened; "
+                       f"the standing request, the schedule and earlier runs are not touched")
+    elif kind == DESK:
+        description = f"Front Desk conversation {desk_id(root[1])} and the work it opened"
+    elif kind == FRONT:
+        description = f"{label}, a whole Front conversation, and the work it opened"
+    elif kind == WORKPLAN:
+        description = f"{label}, an Autolab request, its tasks, its Plane Work and its work channel"
+    elif kind == ASSETPLAN:
+        description = f"{label}, a Forge request, its run and its Plane Work"
+    else:
+        description = f"{label} and the work its records link to it"
+    if parents:
+        description += ("; it was opened for " +
+                        ", ".join(f"#{p['channel']} › {p['topic']}" for p in parents) +
+                        ", which stays open")
+    return Scope(root, kind, True, "", description, parents=parents, context=context,
+                 routine=routine)
+
+
+#: The home an execution topic *belongs* to, by kind: autolab anchors a
+#: `workrun-` to its `workplan-`, forge an `assetrun-` to its `assetplan-`.
+#: Any other root note in such a topic is a visitor's — Front, posting there
+#: on behalf of whatever it was serving — and says who was served from it,
+#: not whose it is. The live realm has both in one topic: a task re-run for a
+#: later routine run carries autolab's note naming the plan and Front's note
+#: naming the later run (`front_desk` p4 step 1).
+STRUCTURAL_HOME = {WORKRUN: WORKPLAN, ASSETRUN: ASSETPLAN}
+
+
+def _ownership(
+    root: Key, found: dict[Key, Related], lineage: Iterable[Key] = (),
+) -> tuple[list[Related], list[dict]]:
+    """Which reached conversations are this request's, and why the rest are not.
+
+    A **root note** is a topic saying which conversation it was opened for,
+    and it decides: a topic whose every home is this request or something
+    this request owns is owned, and one naming anything else is somebody
+    else's — with that note's message id as the evidence (p2's reused plan
+    topic, met head-on). For an execution topic only its *structural* home
+    counts (`STRUCTURAL_HOME`); a visitor's note naming another request is
+    kept on the node as `visitors`, shown and not obeyed. A topic with no
+    root note is owned only when a link from something owned reached it —
+    unless it is itself a *request* (another Front conversation, another
+    run, an agent's own plan topic), which no served note can claim. The two
+    retiring kinds are never owned. `lineage` is what the root itself was
+    opened for: a note naming it is not a note naming a stranger. Decided to
+    a fixed point, so the order the walk found things in does not matter.
+    """
+    order = sorted(found.items(), key=lambda item: (item[1].depth, item[0]))
+    owned: set[Key] = {root}
+    known: set[Key] = set(lineage)
+    excluded: dict[Key, dict] = {}
+    pending = [key for key, _ in order if key != root]
+
+    def settle(key: Key, node: Related) -> str | None:
+        kind = classify(node.channel, node.topic)
+        if kind in RETIRING_KINDS:
+            excluded[key] = _exclude(
+                node, f"{describe_kind(kind, node.topic)}: a ✔ there means something else",
+                node.links)
+            return "excluded"
+        if node.homes:
+            structural_kind = STRUCTURAL_HOME.get(kind)
+            deciding = [home for home in node.homes
+                        if structural_kind is None
+                        or classify(home["channel"], home["topic"]) == structural_kind]
+            if not deciding:
+                deciding = list(node.homes)
+            homes = [(h["channel"], h["topic"]) for h in deciding]
+            foreign = [h for h, home in zip(homes, deciding)
+                       if h != root and h not in owned and h not in found and h not in known]
+            if foreign:
+                names = sorted({f"{h[0]}/{h[1]}" for h in foreign})
+                excluded[key] = _exclude(
+                    node, f"anchored to another request ({', '.join(names)})",
+                    [home for h, home in zip(homes, deciding) if h in foreign])
+                return "excluded"
+            through = sorted({h[1] for h in homes if h in excluded})
+            if through:
+                excluded[key] = _exclude(
+                    node, "reached only through a conversation this one does not own "
+                          f"({', '.join(through)})", node.links)
+                return "excluded"
+            if all(h == root or h in owned or h in known for h in homes):
+                owned.add(key)
+                return "owned"
+            return None
+        if kind in REQUEST_KINDS:
+            excluded[key] = _exclude(node, f"another request: {describe_kind(kind, node.topic)}",
+                                     node.links)
+            return "excluded"
+        froms = [(l["from"]["channel"], l["from"]["topic"]) for l in node.links]
+        if any(f in owned for f in froms):
+            owned.add(key)
+            return "owned"
+        if froms and all(f in excluded for f in froms):
+            excluded[key] = _exclude(
+                node, "reached only through a conversation this one does not own "
+                      f"({', '.join(sorted({f[1] for f in froms}))})", node.links)
+            return "excluded"
+        return None
+
+    progress = True
+    while pending and progress:
+        progress = False
+        still: list[Key] = []
+        for key in pending:
+            if settle(key, found[key]) is None:
+                still.append(key)
+            else:
+                progress = True
+        pending = still
+    for key in pending:
+        node = found[key]
+        through = sorted({l["from"]["topic"] for l in node.links})
+        excluded[key] = _exclude(
+            node, "reached only through a conversation this one does not own "
+                  f"({', '.join(through)})" if through else
+                  "nothing links this request to it", node.links)
+    kept = [node for key, node in order if key in owned]
+    for node in kept:
+        structural_kind = STRUCTURAL_HOME.get(classify(node.channel, node.topic))
+        node.visitors = [
+            home for home in node.homes
+            if structural_kind is not None
+            and classify(home["channel"], home["topic"]) != structural_kind
+            and (home["channel"], home["topic"]) not in owned | known]
+    return kept, sorted(excluded.values(), key=lambda row: (row["channel"], row["topic"]))
 
 
 def discover(
     topics: dict,
-    ident: str,
+    root: Key,
     *,
     realm: Realm | None = None,
     plane: PlaneBoard | None = None,
     max_nodes: int = MAX_NODES,
 ) -> Discovery:
-    """Everything closing the Front Desk conversation `ident` would touch.
+    """Everything closing the request at `root` would touch.
 
-    Read-only, and every answer carries the record it came from. Three
+    Read-only, and every answer carries the record it came from. Four
     questions, in the order the evidence allows:
 
-    1. **which conversations** — the link-note walk, to a fixed point;
-    2. **which Plane Works** — the workplan topics' `external_id` and the
+    1. **what the root is** — `classify` and its own root notes (`Scope`).
+       An execution topic answers with its parent and nothing else;
+    2. **which conversations** — the link-note walk, to a fixed point, and
+       then `_ownership` over what it reached;
+    3. **which Plane Works** — the workplan topics' `external_id` and the
        execution topics' `[work]` notes, looked up in the projects those
        topics name;
-    3. **which channels** — a `work-` channel whose *whole* topic list is
-       accounted for by this conversation's targets. A channel with anything
+    4. **which channels** — a `work-` channel whose *whole* topic list is
+       accounted for by this request's targets. A channel with anything
        else in it is reported and kept.
     """
-    root: Key = (ROUTINE_CHANNEL, desk_topic(ident))
+    root = (root[0], bare_topic(root[1]))
     reader = Reader(realm=realm)
     found, gaps = related_topics(topics, root, reader=reader, max_nodes=max_nodes)
-
-    order = sorted(found.items(), key=lambda item: (item[1].depth, item[0]))
-    excluded: list[dict] = []
-    disqualified: set[Key] = set()
-    for key, node in order:
-        if key == root:
-            continue
-        if is_desk_topic(node.channel, node.topic):
-            excluded.append(_exclude(node, "another Front Desk conversation", node.links))
-            disqualified.add(key)
-            continue
-        # A root note is a topic saying which conversation it belongs to. One
-        # naming a *different* desk conversation makes this somebody else's
-        # work, whatever reached it from here (p2's reused plan topic).
-        others = [home for home in node.homes
-                  if home["channel"] == ROUTINE_CHANNEL
-                  and home["topic"].startswith(DESK_PREFIX)
-                  and (home["channel"], home["topic"]) != root]
-        if others:
-            excluded.append(_exclude(
-                node, f"anchored to another Front Desk conversation "
-                      f"({', '.join(sorted({home['topic'] for home in others}))})", others))
-            disqualified.add(key)
-    # Excluding a conversation excludes what only *it* reached: the work
-    # under somebody else's plan topic is that conversation's to close, and
-    # a path back to here through it is not this conversation's claim on it.
-    # A target this conversation also reached by a link of its own stays.
-    reachable = {root}
-    growing = True
-    while growing:
-        growing = False
-        for key, node in order:
-            if key in reachable or key in disqualified:
-                continue
-            if any((link["from"]["channel"], link["from"]["topic"]) in reachable
-                   for link in node.links):
-                reachable.add(key)
-                growing = True
-    kept: list[Related] = []
-    for key, node in order:
-        if key in disqualified:
-            continue
-        if key not in reachable:
-            through = sorted({link["from"]["topic"] for link in node.links})
-            excluded.append(_exclude(
-                node, "reached only through a conversation this one does not own "
-                      f"({', '.join(through)})" if through else
-                      "nothing links this conversation to it", node.links))
-            continue
-        kept.append(node)
-    excluded.sort(key=lambda row: (row["channel"], row["topic"]))
-
+    scope = _scope(topics, root, found[root], reader)
+    if not scope.closable:
+        # Nothing reached from here is a target: the walk was paid for the
+        # root's own notes, and what it found beyond them is the parent's to
+        # close. Said as exclusions so a preview can still show the shape.
+        excluded = [_exclude(node, "belongs to the parent request", node.links)
+                    for key, node in sorted(found.items(), key=lambda i: (i[1].depth, i[0]))
+                    if key != root]
+        gaps = {**gaps, "plane": [], "zulip_calls": reader.calls, "errors": _unique(reader.errors)}
+        return Discovery(scope=scope, topics=[found[root]], excluded=excluded, works=[],
+                         channels=[], gaps=gaps)
+    lineage = [(p["channel"], p["topic"]) for p in scope.parents]
+    kept, excluded = _ownership(root, found, lineage)
     works, channels, plane_gaps = _plane_and_channels(kept, reader, plane)
-    gaps = {**gaps, **plane_gaps, "zulip_calls": reader.calls, "errors": list(reader.errors)}
-    return Discovery(conversation=ident, root=root, topics=kept, excluded=excluded,
-                     works=works, channels=channels, gaps=gaps)
+    # A mission Work this request owns names its dedicated channel, and the
+    # channel may hold task topics no note from here reached. Read them and
+    # walk once more; every read is cached, so what was already known costs
+    # nothing, and ownership is decided again over the larger graph.
+    seeds = []
+    for work in works:
+        if work.role != "mission" or work.source != AUTOLAB_SOURCE:
+            continue
+        channel = f"{WORK_CHANNEL_PREFIX}{work.label.lower()}"
+        names = reader.channel_topics(channel) or []
+        if any((channel, bare_topic(name)) not in found for name in names):
+            seeds.append(channel)
+    if seeds:
+        found, gaps = related_topics(topics, root, reader=reader, max_nodes=max_nodes,
+                                     seed_channels=sorted(set(seeds)))
+        kept, excluded = _ownership(root, found, lineage)
+        works, channels, plane_gaps = _plane_and_channels(kept, reader, plane)
+    gaps = {**gaps, **plane_gaps, "zulip_calls": reader.calls, "errors": _unique(reader.errors)}
+    return Discovery(scope=scope, topics=kept, excluded=excluded, works=works,
+                     channels=channels, gaps=gaps)
+
+
+def _unique(rows: list[dict]) -> list[dict]:
+    """The same failure met twice is one gap."""
+    seen: list[dict] = []
+    for row in rows:
+        if row not in seen:
+            seen.append(row)
+    return seen
 
 
 def _plane_and_channels(
@@ -809,6 +1166,7 @@ def _plane_and_channels(
                 title=str(issue.get("name") or ""),
                 state_group=groups.get(pid, {}).get(str(issue.get("state") or "")) or "unknown",
                 role=role, parent_id=str(issue.get("parent") or "") or None,
+                source=str(issue.get("external_source") or "") or None,
             )
             targets[ident] = existing
         elif existing.role == "task" and role == "mission":

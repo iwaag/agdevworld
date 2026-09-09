@@ -23,7 +23,7 @@ from agentroom.room import Room
 from agentroom.server import build_server
 
 from test_closing import (
-    DESK, DESK_TOPIC, FREEFORGE, GHTRENDS, MISSION, TASK, Board, board, chain_realm, issue,
+    DESK, DESK_TOPIC, ROOT, FREEFORGE, GHTRENDS, MISSION, TASK, Board, board, chain_realm, issue,
     post, selfnote,
 )
 
@@ -112,7 +112,7 @@ def closer(realm=None, plane=None, topics=None, write=True):
 
 def test_the_plan_is_plane_then_topics_then_channels_then_the_conversation():
     door, _, _ = closer()
-    found = door.plan(DESK)
+    found = door.plan(ROOT)
     kinds = [action["kind"] for action in found["actions"]]
     assert kinds == ["work", "work", "work", "topic", "topic", "topic", "topic",
                      "channel", "conversation"]
@@ -121,7 +121,7 @@ def test_the_plan_is_plane_then_topics_then_channels_then_the_conversation():
 
 def test_a_mission_with_every_sub_work_completed_is_ready_and_says_why():
     door, _, _ = closer()
-    work = next(a for a in door.plan(DESK)["actions"] if a["key"] == f"work:{MISSION}")
+    work = next(a for a in door.plan(ROOT)["actions"] if a["key"] == f"work:{MISSION}")
     assert work["state"] == READY
     assert work["reason"] == "every one of its 1 sub-works is completed"
 
@@ -130,7 +130,7 @@ def test_an_unfinished_sub_work_blocks_its_mission():
     plane = writing_board(extra_ghtrends=(
         issue("open", sequence=19, name="Still running", state="s-started", parent=MISSION),))
     door, _, _ = closer(plane=plane)
-    found = door.plan(DESK)
+    found = door.plan(ROOT)
     work = next(a for a in found["actions"] if a["key"] == f"work:{MISSION}")
     assert work["state"] == BLOCKED
     assert work["reason"] == "1 of 2 sub-works are not completed"
@@ -138,14 +138,14 @@ def test_an_unfinished_sub_work_blocks_its_mission():
 
 def test_a_standalone_work_is_blocked_rather_than_completed_by_this_button():
     door, _, _ = closer()
-    work = next(a for a in door.plan(DESK)["actions"] if a["label"].startswith("F2-28"))
+    work = next(a for a in door.plan(ROOT)["actions"] if a["label"].startswith("F2-28"))
     # F2-28 is already Done; a standalone Work that is not would be blocked.
     assert work["state"] == DONE
     plane = writing_board()
     plane._issues[FREEFORGE][0]["state"] = "f-open"
     plane._groups[FREEFORGE]["f-open"] = "started"
     door, _, _ = closer(plane=plane)
-    work = next(a for a in door.plan(DESK)["actions"] if a["label"].startswith("F2-28"))
+    work = next(a for a in door.plan(ROOT)["actions"] if a["label"].startswith("F2-28"))
     assert (work["state"], work["reason"]) == (BLOCKED, "no sub-work: this is not a mission")
 
 
@@ -153,15 +153,15 @@ def test_a_cancelled_work_is_kept_exactly_as_it_is():
     plane = writing_board()
     plane._issues[GHTRENDS][0]["state"] = "s-cancel"
     door, _, _ = closer(plane=plane)
-    work = next(a for a in door.plan(DESK)["actions"] if a["key"] == f"work:{MISSION}")
+    work = next(a for a in door.plan(ROOT)["actions"] if a["key"] == f"work:{MISSION}")
     assert work["state"] == KEPT and "never moves a cancelled Work" in work["reason"]
-    door.close(DESK)
+    door.close(ROOT)
     assert plane.completed == []
 
 
 def test_an_already_resolved_topic_is_a_no_op_not_a_target():
     door, _, _ = closer()
-    found = door.plan(DESK)
+    found = door.plan(ROOT)
     run = next(a for a in found["actions"] if a["key"].endswith("workrun-task1-g-17"))
     assert (run["state"], run["reason"]) == (DONE, "already ✔")
 
@@ -169,28 +169,28 @@ def test_an_already_resolved_topic_is_a_no_op_not_a_target():
 def test_a_topic_that_could_not_be_read_blocks_instead_of_resolving():
     realm = WritingRealm(chain_realm(fail=("work-g-17",)))
     door, _, _ = closer(realm=realm)
-    found = door.plan(DESK)
+    found = door.plan(ROOT)
     run = next(a for a in found["actions"] if a["key"].endswith("workrun-task1-g-17"))
     assert run["state"] == BLOCKED and "could not be read" in run["reason"]
 
 
 def test_the_preview_says_what_this_operation_is_not():
     door, _, _ = closer()
-    assert door.plan(DESK)["note"] == "this closes work; it does not stop a running agent"
+    assert door.plan(ROOT)["note"] == "this closes work; it does not stop a running agent"
 
 
 def test_an_unconfigured_write_credential_is_said_at_preview_time():
     door, _, _ = closer(write=False)
-    found = door.plan(DESK)
+    found = door.plan(ROOT)
     assert found["status"]["zulip_write"] is False
     assert "no write credential" in found["status"]["reason"]
-    assert door.close(DESK)["error"] == found["status"]["reason"]
+    assert door.close(ROOT)["error"] == found["status"]["reason"]
 
 
 def test_a_bad_conversation_id_is_refused_by_both_halves():
     door, _, _ = closer()
-    assert "not a Front Desk conversation id" in door.plan("../etc")["error"]
-    assert "not a Front Desk conversation id" in door.close("../etc")["error"]
+    assert "not a Front Desk conversation id" in door.plan(Closer.desk_key("../etc"))["error"]
+    assert "not a Front Desk conversation id" in door.close(Closer.desk_key("../etc"))["error"]
 
 
 # --- carrying it out ---------------------------------------------------------
@@ -198,7 +198,7 @@ def test_a_bad_conversation_id_is_refused_by_both_halves():
 
 def test_everything_closes_in_order_and_the_conversation_last():
     door, realm, plane = closer(realm=WritingRealm(open_chain()))
-    found = door.close(DESK)
+    found = door.close(ROOT)
     assert found["applied"] is True and found["partial"] is False
     assert plane.completed == [(GHTRENDS, MISSION)]
     assert [topic for _, topic in realm.resolved] == [
@@ -214,7 +214,7 @@ def test_a_blocked_target_keeps_the_front_conversation_open():
     plane = writing_board(extra_ghtrends=(
         issue("open", sequence=19, name="Still running", state="s-started", parent=MISSION),))
     door, realm, _ = closer(plane=plane)
-    found = door.close(DESK)
+    found = door.close(ROOT)
     assert found["partial"] is True
     front = next(row for row in found["results"] if row["key"] == f"topic:front/{DESK_TOPIC}")
     assert front["outcome"] == SKIPPED and "kept open" in front["note"]
@@ -224,7 +224,7 @@ def test_a_blocked_target_keeps_the_front_conversation_open():
 def test_a_failed_target_is_reported_and_the_others_still_close():
     realm = WritingRealm(open_chain(), fail=("assetrun-robot",))
     door, realm, plane = closer(realm=realm)
-    found = door.close(DESK)
+    found = door.close(ROOT)
     assert found["partial"] is True
     failed = next(row for row in found["results"] if row["key"].endswith("assetrun-robot"))
     assert failed["outcome"] == FAILED and "realm refused" in failed["note"]
@@ -237,7 +237,7 @@ def test_a_failed_target_is_reported_and_the_others_still_close():
 def test_a_channel_that_cannot_be_archived_is_reported_per_target():
     realm = WritingRealm(open_chain(), fail=(122,))
     door, realm, _ = closer(realm=realm)
-    found = door.close(DESK)
+    found = door.close(ROOT)
     row = next(one for one in found["results"] if one["kind"] == "channel")
     assert row["outcome"] == FAILED and "administrator" in row["note"]
 
@@ -247,8 +247,8 @@ def test_an_archived_channel_reads_as_done_rather_than_unreadable():
     so its topics stop being readable and the second preview must not report
     this operation's own finished work as a gap."""
     door, realm, _ = closer(realm=WritingRealm(open_chain()))
-    door.close(DESK)
-    again = door.plan(DESK)
+    door.close(ROOT)
+    again = door.plan(ROOT)
     row = next(one for one in again["actions"] if one["kind"] == "channel")
     assert row["state"] == DONE
     assert row["reason"] == "already archived: the realm no longer lists this channel"
@@ -258,10 +258,10 @@ def test_an_archived_channel_reads_as_done_rather_than_unreadable():
 def test_a_retry_finishes_what_is_left_and_repeats_nothing():
     realm = WritingRealm(open_chain(), fail=("assetrun-robot",))
     door, realm, plane = closer(realm=realm)
-    door.close(DESK)
+    door.close(ROOT)
     assert len(plane.completed) == 1
     realm.fail.clear()
-    again = door.close(DESK)
+    again = door.close(ROOT)
     assert again["partial"] is False
     # The Work was Done already, so Plane was not written a second time.
     assert plane.completed == [(GHTRENDS, MISSION)]
@@ -270,14 +270,14 @@ def test_a_retry_finishes_what_is_left_and_repeats_nothing():
     assert outcomes["topic:pj-ghtrends/workplan-trend8"] == ALREADY
     assert outcomes["topic:agforge-agstudio1/assetrun-robot"] == APPLIED
     assert outcomes[f"topic:front/{DESK_TOPIC}"] == APPLIED
-    assert door.records(DESK) and len(door.records(DESK)) == 2
+    assert door.records(ROOT) and len(door.records(ROOT)) == 2
 
 
 def test_closing_an_already_closed_conversation_writes_nothing():
     door, realm, plane = closer(realm=WritingRealm(open_chain()))
-    door.close(DESK)
+    door.close(ROOT)
     resolved, completed, archived = len(realm.resolved), len(plane.completed), len(realm.archived)
-    again = door.close(DESK)
+    again = door.close(ROOT)
     assert (len(realm.resolved), len(plane.completed), len(realm.archived)) == (
         resolved, completed, archived)
     assert {row["outcome"] for row in again["results"]} <= {ALREADY, SKIPPED}
@@ -288,11 +288,11 @@ def test_closing_an_already_closed_conversation_writes_nothing():
 
 def test_a_plan_that_changed_since_the_preview_refuses_and_writes_nothing():
     door, realm, plane = closer(realm=WritingRealm(open_chain()))
-    stale = door.plan(DESK)["fingerprint"]
+    stale = door.plan(ROOT)["fingerprint"]
     # A Sub-Work opened after the human looked: the mission is no longer ready.
     plane._issues[GHTRENDS].append(
         issue("late", sequence=19, name="Opened since", state="s-started", parent=MISSION))
-    found = door.close(DESK, stale)
+    found = door.close(ROOT, stale)
     assert found["refused"] is True and "nothing was closed" in found["error"]
     assert plane.completed == [] and realm.resolved == [] and realm.archived == []
     # The refusal carries the plan to approve instead.
@@ -302,18 +302,18 @@ def test_a_plan_that_changed_since_the_preview_refuses_and_writes_nothing():
 
 def test_the_fingerprint_ignores_a_new_post_and_notices_a_new_state():
     door, _, plane = closer()
-    first = door.plan(DESK)
+    first = door.plan(ROOT)
     realm = WritingRealm(chain_realm())
     realm.realm.histories[("pj-ghtrends", "workplan-trend8")].append(post(99, "one more word"))
     door_two, _, _ = closer(realm=realm, plane=plane)
-    assert door_two.plan(DESK)["fingerprint"] == first["fingerprint"]
+    assert door_two.plan(ROOT)["fingerprint"] == first["fingerprint"]
     plane._issues[GHTRENDS][0]["state"] = "s-cancel"
-    assert door.plan(DESK)["fingerprint"] != first["fingerprint"]
+    assert door.plan(ROOT)["fingerprint"] != first["fingerprint"]
 
 
 def test_the_approved_fingerprint_is_optional():
     door, _, plane = closer()
-    assert door.close(DESK, None)["applied"] is True
+    assert door.close(ROOT, None)["applied"] is True
     assert plane.completed == [(GHTRENDS, MISSION)]
 
 
@@ -322,7 +322,7 @@ def test_two_clicks_do_not_both_close():
     results = []
 
     def click():
-        results.append(door.close(DESK))
+        results.append(door.close(ROOT))
 
     threads = [threading.Thread(target=click) for _ in range(2)]
     for thread in threads:
@@ -362,7 +362,7 @@ def request(port, method, path, body=None):
 def test_the_plan_route_reads_and_the_close_route_writes(relay):
     port, _, realm, plane = relay
     status, found = request(port, "GET", f"/frontdesk/{DESK}/close-plan")
-    assert status == 200 and found["conversation"] == DESK
+    assert status == 200 and found["topic"] == DESK_TOPIC and found["scope"]["kind"] == "desk"
     assert plane.completed == [] and realm.resolved == []
     status, applied = request(port, "POST", f"/frontdesk/{DESK}/close",
                               {"fingerprint": found["fingerprint"]})

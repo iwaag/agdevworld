@@ -182,3 +182,15 @@ def test_front_s_conversations_are_filed_under_front_by_its_declared_prefix():
     found = room._read_work(True)
     assert [(row["group"], row["topic"], row["resolved"]) for row in found["topics"]][1:] == [
         ("front-agstudio1", "front-p2-greet-agecho", False), ("front-agstudio1", "✔ front-desk-1", True)]
+
+
+def test_forget_drops_the_cache_so_the_next_read_sees_the_realm():
+    room = Room.__new__(Room)
+    from threading import Lock
+    room._lock, room._cache, room.ttl_seconds = Lock(), {}, 30.0
+    calls = []
+    assert room._cached("k", lambda: calls.append(1) or "one") == "one"
+    assert room._cached("k", lambda: calls.append(2) or "two") == "one"
+    room.forget()
+    assert room._cached("k", lambda: calls.append(3) or "three") == "three"
+    assert calls == [1, 3]

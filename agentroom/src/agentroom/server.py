@@ -438,6 +438,9 @@ def make_handler(room: Room, ops: Ops | None = None, chat: Chat | None = None,
             elif found.get("refused"):
                 self._write_json(409, found)
             else:
+                # The realm changed: the room's cached boards are stale and
+                # the view reloads them right after this answer.
+                room.forget()
                 self._write_json(200, found)
 
         def do_POST(self) -> None:  # noqa: N802

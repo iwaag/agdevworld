@@ -120,6 +120,17 @@ class Room:
             self._cache[key] = (time.monotonic(), value)
         return value
 
+    def forget(self) -> None:
+        """Drop the cache, so the next read sees the realm as it is now.
+
+        Called after a completion wrote to the realm: a board re-read
+        within the 30-second window would otherwise still list the topics
+        that were just resolved, and the view's own reload would look like
+        the close had done nothing (`front_desk` p4 follow-up).
+        """
+        with self._lock:
+            self._cache.clear()
+
     def agents(self) -> dict:
         return self._cached("agents", self._read_agents)
 

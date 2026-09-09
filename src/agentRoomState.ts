@@ -33,12 +33,15 @@ export interface RoomWorkRow {
   kind: 'project' | 'agent'
   group: string
   stream_id: number
+  // Zulip's ✔. Only present in a listing that asked for resolved topics too.
+  resolved?: boolean
 }
 
 export interface RoomWork {
   channels: string[]
   topics: RoomWorkRow[]
   errors: Array<{ channel: string; error: string }>
+  include_resolved?: boolean
 }
 
 async function read<T>(path: string): Promise<T> {
@@ -71,8 +74,10 @@ export async function loadRoomAgents(): Promise<RoomRoster> {
   return { agents: found.agents, retired: found.retired ?? [] }
 }
 
-export async function loadRoomWork(): Promise<RoomWork> {
-  return await read<RoomWork>('/work')
+// `includeResolved` lists the ✔ topics too (`front_desk` p4): a finished
+// request is completed from here, and finished means resolved.
+export async function loadRoomWork(includeResolved = false): Promise<RoomWork> {
+  return await read<RoomWork>(includeResolved ? '/work?resolved=1' : '/work')
 }
 
 // The open topics filed under one agent's own channel. Project work is not

@@ -85,7 +85,9 @@ writes only to this process's memory (see `POST /ops/confirm`).
   the `work-<label>` channels filed in the same channel folder, flat, with the
   project each belongs to. "Unresolved" is the absence of Zulip's `✔ `
   prefix (`agag.zulip.RESOLVED_TOPIC_PREFIX`) and nothing else: topic naming
-  differs per agent, resolution does not.
+  differs per agent, resolution does not. `?resolved=1` lists the ✔ topics
+  too, each row carrying `resolved` (`front_desk` p4): a finished request is
+  completed from the agent room, and finished means resolved.
 
 - `GET /routines` → the routine board (`operation_room` p3): one row per
   routine, carrying its standing request, its schedule, its last fire and

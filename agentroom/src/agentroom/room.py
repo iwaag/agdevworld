@@ -117,7 +117,12 @@ class Room:
     def agents(self) -> dict:
         return self._cached("agents", self._read_agents)
 
-    def work(self) -> dict:
+    def work(self, include_resolved: bool = False) -> dict:
+        """Every board's open topics; with `include_resolved`, its ✔ ones
+        too, each row saying which (`front_desk` p4: a finished request is
+        completed from the agent room, and finished means resolved)."""
+        if include_resolved:
+            return self._cached("work+resolved", lambda: self._read_work(True))
         return self._cached("work", self._read_work)
 
     # -- reads -----------------------------------------------------------
@@ -175,7 +180,7 @@ class Room:
             "calls": client.calls,
         }
 
-    def _read_work(self) -> dict:
+    def _read_work(self, include_resolved: bool = False) -> dict:
         """Every unresolved topic of every board an agent works on, flat.
 
         Two kinds of board, because work lives in two places:
@@ -227,7 +232,7 @@ class Room:
                 errors.append({"channel": channel["name"], "error": str(error)})
                 continue
             for topic in topics:
-                if not unresolved(topic):
+                if not unresolved(topic) and not include_resolved:
                     continue
                 rows.append({
                     "channel": channel["name"],
@@ -235,10 +240,12 @@ class Room:
                     "kind": kind,
                     "group": group,
                     "stream_id": int(channel["stream_id"]),
+                    "resolved": not unresolved(topic),
                 })
         return {
             "channels": [channel["name"] for channel, _, _ in watched],
             "topics": rows,
             "errors": errors,
             "calls": client.calls,
+            "include_resolved": include_resolved,
         }

@@ -120,3 +120,23 @@ def test_a_retired_agents_channel_is_not_walked_for_open_work():
     found = room._read_work()
     assert found["channels"] == ["agforge-agstudio1"]
     assert [row["topic"] for row in found["topics"]] == ["assetplan-a-poster"]
+
+
+def test_resolved_work_is_listed_only_when_asked_and_says_so():
+    """`front_desk` p4: a finished request is completed from the agent room,
+    and finished means ✔ — so the board can list resolved topics too, each
+    row saying which it is, and never by default."""
+    room = Room.__new__(Room)
+    room.client = lambda: client
+    client = FakeClient(
+        ["intro-agforge-agstudio1"],
+        channels=[{"name": "agforge-agstudio1", "stream_id": 7, "folder_id": None}],
+        by_stream={7: ["assetplan-a-poster", "✔ assetplan-done"]},
+    )
+    found = room._read_work()
+    assert [row["topic"] for row in found["topics"]] == ["assetplan-a-poster"]
+    assert found["topics"][0]["resolved"] is False and found["include_resolved"] is False
+    found = room._read_work(True)
+    assert [(row["topic"], row["resolved"]) for row in found["topics"]] == [
+        ("assetplan-a-poster", False), ("✔ assetplan-done", True)]
+    assert found["include_resolved"] is True

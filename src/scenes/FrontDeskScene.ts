@@ -292,6 +292,9 @@ export class FrontDeskScene extends Phaser.Scene {
     void this.settings.refresh()
     void this.refresh()
     void this.refreshBoard()
+    // `&finish=1` opens the completion panel on arrival: a fixture's door
+    // (the demo plays the whole flow), never a shortcut past the preview.
+    if (new URLSearchParams(location.search).get('finish') === '1') this.toggleClose()
   }
 
   // --- reads -----------------------------------------------------------------

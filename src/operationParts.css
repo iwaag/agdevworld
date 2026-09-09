@@ -140,3 +140,10 @@
    listed, plain text otherwise. */
 .session-card .session-prev { color: #9fb6ff; }
 .session-card .session-prev[role="link"] { text-decoration: underline; cursor: pointer; }
+
+/* Completion (front_desk p4): one button for the selected run, its reason
+   beside it, the panel itself is the shared overlay (completionPanel.ts). */
+.session-finish { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin: 0 0 10px; font-size: 11px; color: #b2c3d3; }
+.session-finish .finish-run { padding: 5px 10px; font-size: 12px; color: #6ee0b0; border-color: #3d7a5e; }
+.session-finish .finish-run:disabled { opacity: .55; cursor: default; color: #b2c3d3; }
+.session-finish .finish-why { flex: 1; min-width: 140px; }

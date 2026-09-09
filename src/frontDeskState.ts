@@ -12,6 +12,15 @@
 // relay running (`?view=frontdesk&demo=1`): it answers in the Front Desk
 // voice from a script and never touches the realm.
 
+import {
+  relayCompletion,
+  type CompletionAction,
+  type CompletionKind,
+  type CompletionPlan,
+  type CompletionResult,
+  type CompletionState,
+} from './completionState'
+
 const BASE = (import.meta.env.VITE_AGENTROOM_URL as string | undefined) ?? 'http://localhost:8094'
 
 export type PostKind = 'developer' | 'agent' | 'ack' | 'other'
@@ -129,56 +138,15 @@ export interface SendResult {
   note?: string
 }
 
-// --- finishing a conversation (`front_desk` p3) -------------------------------
+// --- finishing a conversation (`front_desk` p3, p4) ---------------------------
 
-// One thing closing this conversation would do, or would not. Every word of
-// it is the relay's: this view never decides that a Work may be closed or
-// that a channel is finished with.
-export type CloseKind = 'work' | 'topic' | 'channel' | 'conversation'
-export type CloseState = 'ready' | 'done' | 'blocked' | 'kept'
-export type CloseOutcome = 'applied' | 'already' | 'failed' | 'skipped'
-
-export interface CloseAction {
-  kind: CloseKind
-  // Stable across previews and retries: what a result is matched to.
-  key: string
-  label: string
-  state: CloseState
-  reason: string
-  detail: Record<string, unknown>
-}
-
-export interface CloseResult {
-  key: string
-  kind: CloseKind
-  label: string
-  outcome: CloseOutcome
-  note: string
-}
-
-export interface ClosePlan {
-  schema: string
-  generated_at: number
-  conversation: string
-  topic: string
-  channel: string
-  // What the human approves. A close carries it back and the relay refuses
-  // with a fresh plan if the targets have changed since.
-  fingerprint: string
-  status: { zulip_read: boolean; zulip_write: boolean; plane: boolean; reason: string }
-  actions: CloseAction[]
-  counts: { ready: number; blocked: number; done: number; kept: number }
-  blocked: CloseAction[]
-  excluded: { channel: string; topic: string; reason: string }[]
-  gaps: { truncated: boolean; unread: string[]; bounded: string[]; errors: unknown[]; plane: string[] }
-  results: CloseResult[]
-  note: string
-  // Only on the answer to a close.
-  applied?: boolean
-  partial?: boolean
-  refused?: boolean
-  error?: string
-}
+// The plan is the relay's shared completion payload (`completionState.ts`);
+// the Front Desk is one caller of it, naming `#front` › `front-desk-<id>`.
+export type ClosePlan = CompletionPlan
+export type CloseAction = CompletionAction
+export type CloseResult = CompletionResult
+export type CloseKind = CompletionKind
+export type CloseState = CompletionState
 
 export interface DeskSource {
   board: () => Promise<DeskBoard | { error: string }>
@@ -221,27 +189,8 @@ async function read<T>(path: string): Promise<T | { error: string }> {
 export const relaySource: DeskSource = {
   board: () => read<DeskBoard>('/frontdesk'),
   detail: (id) => read<DeskDetail>(`/frontdesk/${encodeURIComponent(id)}`),
-  closePlan: (id) => read<ClosePlan>(`/frontdesk/${encodeURIComponent(id)}/close-plan`),
-  async close(id, fingerprint) {
-    let response: Response
-    try {
-      response = await fetch(`${BASE}/frontdesk/${encodeURIComponent(id)}/close`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ fingerprint }),
-        signal: AbortSignal.timeout(60000),
-      })
-    } catch {
-      // No answer: some targets may already have moved. The panel refreshes
-      // rather than guessing, which is also what a retry does.
-      return { error: `the agentroom relay did not answer; ask for the plan again to see what moved` }
-    }
-    const payload = (await response.json().catch(() => undefined)) as ClosePlan | undefined
-    // 409 is the refusal that carries the fresh plan — a payload, not an error.
-    if (!payload || typeof payload !== 'object') return { error: `agentroom answered ${response.status}` }
-    if (!response.ok && !payload.refused) return { error: payload.error ?? `agentroom answered ${response.status}` }
-    return payload
-  },
+  closePlan: (id) => relayCompletion.plan({ channel: 'front', topic: `front-desk-${id}` }),
+  close: (id, fingerprint) => relayCompletion.apply({ channel: 'front', topic: `front-desk-${id}` }, fingerprint),
   async send(id, text, token) {
     let response: Response
     try {
@@ -354,13 +303,20 @@ function demoPlan(id: string, closed: Set<string>, _failed: boolean): ClosePlan 
     done: actions.filter((one) => one.state === 'done').length,
     kept: actions.filter((one) => one.state === 'kept').length,
   }
+  const root = { channel: 'front', topic: `front-desk-${id}` }
   return {
-    schema: 'ag.frontdesk-close.v1', generated_at: Date.now() / 1000, conversation: id,
-    topic: `front-desk-${id}`, channel: 'front',
+    schema: 'ag.completion.v1', generated_at: Date.now() / 1000,
+    topic: root.topic, channel: root.channel, root,
+    scope: {
+      root, kind: 'desk', closable: true, reason: '',
+      description: `Front Desk conversation ${id} and the work it opened`,
+      parents: [], context: [], routine: null,
+    },
+    history: [],
     fingerprint: actions.map((one) => `${one.key}=${one.state}`).join('|'),
     status: { zulip_read: true, zulip_write: true, plane: true, reason: '' },
     actions, counts, blocked: actions.filter((one) => one.state === 'blocked'),
-    excluded: [{ channel: 'pj-ghtrends', topic: 'workplan-trend5', reason: 'anchored to another Front Desk conversation (front-desk-20260907-0900)' }],
+    excluded: [{ channel: 'pj-ghtrends', topic: 'workplan-trend5', reason: 'anchored to another request (front/front-desk-20260907-0900)' }],
     gaps: { truncated: false, unread: [], bounded: [], errors: [], plane: [] },
     results: [], note: 'this closes work; it does not stop a running agent',
   }

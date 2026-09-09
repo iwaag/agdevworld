@@ -38,6 +38,7 @@ import {
   type RoomWork,
   type RoomWorkRow,
 } from './agentRoomState'
+import { COMPLETED_EVENT } from './completionState'
 import {
   healthLine,
   confirmDone,
@@ -432,10 +433,14 @@ function clipped(text: string, limit: number): string {
 
 export function agentRoomViewConfig(onSelect: (selection: PanelSelection) => void): PanelGridConfig {
   let mode: 'agents' | 'work' = 'agents'
+  // Resolved topics too (`front_desk` p4): off by default, because the room
+  // is about what is open; on when a finished request is to be completed.
+  let withResolved = false
   let agents: RoomAgent[] = []
   let retired: string[] = []
   let work: RoomWork | undefined
   let api: PanelGridApi | undefined
+  window.addEventListener(COMPLETED_EVENT, () => api?.reload())
 
   return {
     key: 'agentroom',
@@ -451,7 +456,7 @@ export function agentRoomViewConfig(onSelect: (selection: PanelSelection) => voi
       mode === 'agents'
         ? `${count} agents have introduced themselves` +
           (retired.length > 0 ? ` · ${retired.length} retired` : '')
-        : `${count} boards have work still open`,
+        : withResolved ? `${count} boards with open or resolved work` : `${count} boards have work still open`,
     footer: 'live from Zulip: introductions from #agents, open work from every project and agent channel',
     switchTo: { key: 'ops', label: 'operation room' },
     bind: (bound) => {
@@ -475,19 +480,24 @@ export function agentRoomViewConfig(onSelect: (selection: PanelSelection) => voi
           api?.reload()
         },
       }))
+      chips.push({
+        id: 'resolved', label: withResolved ? '✔ resolved: shown' : '✔ resolved: hidden',
+        active: withResolved,
+        onClick: () => { withResolved = !withResolved; api?.reload() },
+      })
       chips.push({ id: 'refresh', label: '⟳ refresh', onClick: () => api?.reload() })
       return chips
     },
     loadRows: async () => {
       // Both reads on every load: the agent cards carry an open-work count, so
       // neither answer is complete without the other.
-      const [foundAgents, foundWork] = await Promise.all([loadRoomAgents(), loadRoomWork()])
+      const [foundAgents, foundWork] = await Promise.all([loadRoomAgents(), loadRoomWork(withResolved)])
       agents = foundAgents.agents
       retired = foundAgents.retired
       work = foundWork
       if (mode === 'agents') {
         return agents.map((agent) => {
-          const open = agentWork(foundWork, agent.instance)
+          const open = agentWork(foundWork, agent.instance).filter((row) => !row.resolved)
           // The card is 84px tall and the status line wraps at ~28 characters,
           // so `detail` gets two lines and no more — measured, after a first
           // attempt spilled five lines of introduction over the row below.
@@ -520,7 +530,9 @@ export function agentRoomViewConfig(onSelect: (selection: PanelSelection) => voi
           name: clipped(group, 24),
           status: {
             ...(board.kind === 'project' ? TOPIC_PROJECT : TOPIC_AGENT),
-            label: `${board.rows.length} OPEN`,
+            label: withResolved
+              ? `${board.rows.filter((row) => !row.resolved).length} OPEN · ${board.rows.filter((row) => row.resolved).length} ✔`
+              : `${board.rows.length} OPEN`,
           },
           detail:
             channels.size === 1
@@ -592,6 +604,7 @@ export function opsViewConfig(onSelect: (selection: PanelSelection) => void): Pa
   let working = false
 
   const doneRows = () => (board?.rows ?? []).filter((row) => shownState(row) === 'done')
+  window.addEventListener(COMPLETED_EVENT, () => api?.reload())
 
   const confirm = async (target?: { channel: string; topic: string }) => {
     if (working) return

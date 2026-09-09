@@ -2,6 +2,8 @@ import { loadOpsBoard } from './opsState'
 import { initChatPanel } from './chatPanel'
 import { renderSessionGraph, type GraphMode } from './sessionGraph'
 import { loadRoutines, loadRoutine, loadInflight, startSession, routineHeadline, ago, at, type RoutineBoard, type RoutineDetail, type RoutineSession } from './routineState'
+import { closeCompletionPanel, completionPanelRoot, openCompletionPanel } from './completionPanel'
+import { COMPLETED_EVENT } from './completionState'
 import './operationParts.css'
 
 // A session is a run topic (relay: `session.topic`), which is its identity.
@@ -45,7 +47,7 @@ export async function initOperationDashboard(): Promise<void> {
       </details>
       <div class="session-list"></div><p class="session-history"></p></section>
     <section class="flow-pane"><div class="pane-head"><h2>Conversation flow</h2><div class="graph-mode" role="radiogroup" aria-label="Flow rendering"><button type="button" data-mode="compact">Compact</button><button type="button" data-mode="detailed">Detailed</button></div></div><div class="standing-request"></div><div class="parts-graph"></div><div class="parts-inflight">Host observation not loaded.</div></section>
-    <aside class="chat-pane"><h2>Run conversation</h2><p class="chat-span-note"></p><div class="chat-mount"></div></aside></div>`
+    <aside class="chat-pane"><h2>Run conversation</h2><p class="chat-span-note"></p><p class="session-finish"><button type="button" class="finish-run">finish ✔ this run</button><small class="finish-why"></small></p><div class="chat-mount"></div></aside></div>`
   document.body.append(host)
   const find = (selector: string) => host.querySelector<HTMLElement>(selector)!
   const health = find('.parts-health'), graph = find('.parts-graph')
@@ -77,6 +79,25 @@ export async function initOperationDashboard(): Promise<void> {
   showResolved.checked = readPref('showResolved', false)
   let pendingFire: { routine: string; id: number; topic: string; at: number } | undefined
   const chat = initChatPanel({ mount: find('.chat-mount'), managed: true, onRefresh: () => { void refresh() } })
+  // Completion (`front_desk` p4): the selected run and the work it opened,
+  // previewed and applied by the relay's shared operation. Distinct from the
+  // ops board's "confirmed", which only dismisses a row from a display.
+  const finishButton = find('.finish-run') as HTMLButtonElement
+  finishButton.onclick = () => {
+    const session = detail?.sessions.find(one => sessionKey(one) === selection.session)
+    if (!session) return
+    openCompletionPanel({ channel: 'front', topic: session.topic }, { onChanged: () => { void refresh() } })
+  }
+  window.addEventListener(COMPLETED_EVENT, () => { void refresh() })
+  function drawFinish(session: RoutineSession | undefined) {
+    const why = find('.finish-why')
+    if (!session) { finishButton.disabled = true; why.textContent = 'no run selected'; return }
+    if (detail?.health.state !== 'live') { finishButton.disabled = true; why.textContent = 'unknown — a completion needs a live relay'; return }
+    finishButton.disabled = false
+    why.textContent = session.resolution.state === 'resolved'
+      ? 'this run carries ✔ already; the preview says what of its work is still open'
+      : 'previews first; closes this run, its topics, channels and Plane Works — not the routine'
+  }
 
   function drawSession(scroll = false) { refocus(find('.session-list'), 'session', () => drawSessionCards(scroll)) }
   function drawSessionCards(scroll: boolean) {
@@ -156,11 +177,15 @@ export async function initOperationDashboard(): Promise<void> {
       find('.chat-span-note').textContent = session.resolution.state === 'resolved'
         ? `#front › ${session.topic} · ✔ resolved. Front does not sweep a resolved topic; un-resolve it in Zulip to continue, or start a new session.`
         : `#front › ${session.topic} · chat posts into this run's topic.`
+      drawFinish(session)
+      const shown = completionPanelRoot()
+      if (shown && (shown.channel !== 'front' || shown.topic !== session.topic)) closeCompletionPanel()
     } else if (stillPending && pendingFire) {
       graphSignature = ''
       graph.textContent = `Waiting for the relay to list ${pendingFire.topic}. Its conversations appear here once the event queue reflects the post.`
       chat.show(detail, undefined, `Waiting for the event queue to carry ${pendingFire.topic} back…`)
       find('.chat-span-note').textContent = `#front › ${pendingFire.topic} · fire #${pendingFire.id} posted from here.`
+      drawFinish(undefined)
     } else {
       const hidden = detail.history?.hidden_resolved ?? 0
       graph.textContent = detail.health.state !== 'live' ? 'Unknown — no current session evidence.'
@@ -169,6 +194,7 @@ export async function initOperationDashboard(): Promise<void> {
         : hidden > 0 ? `Every listed run is resolved and hidden (${hidden}). Turn on Show resolved to read one.` : 'No run to show — start a new session to open one.')
       find('.chat-span-note').textContent = 'No run selected.'
       find('.parts-inflight').textContent = 'Host observation attaches to the latest run; none is selected.'
+      drawFinish(undefined)
     }
     host.dataset.routine = selection.routine; host.dataset.session = selection.session
     if (session && !isLatest(session)) find('.parts-inflight').textContent = 'Host observation is latest-only; it is not attached to this older run.'

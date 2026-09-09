@@ -7,23 +7,34 @@
 // and where they see what happened afterwards.
 //
 // **Nothing here decides anything.** Which targets exist, which may move and
-// why is entirely the relay's `close-plan`; this file draws those words and
-// sends back the fingerprint of the plan that was actually read. A row that
-// is blocked or failed stays on screen with its reason, and the panel
-// distinguishes a partial run from a finished one — a screen that shows only
-// successes is the same lie as an empty board.
+// why is entirely the relay's plan; this file draws the lines
+// `completionState.planLines` produces — the same lines the DOM overlay of
+// the operation room and the agent room draws — and sends back the
+// fingerprint of the plan that was actually read. A row that is blocked or
+// failed stays on screen with its reason, and the panel distinguishes a
+// partial run from a finished one — a screen that shows only successes is
+// the same lie as an empty board.
 //
 // It is a Phaser container rather than DOM, like everything else in the
 // scene, and it lays out for a narrow window by taking the whole frame.
 
 import Phaser from 'phaser'
-import type { CloseResult, ClosePlan, DeskSource } from './frontDeskState'
+import {
+  isCompletionPlan,
+  planButtons,
+  planLines,
+  summaryLine,
+  summaryTone,
+  titleLine,
+  type Tone,
+} from './completionState'
+import type { ClosePlan, DeskSource } from './frontDeskState'
 
 const MONO = 'ui-monospace, SFMono-Regular, Menlo, monospace'
 const FONT = '"Hiragino Sans", "Hiragino Kaku Gothic ProN", "Helvetica Neue", Arial, sans-serif'
 const NARROW = 720
 
-const COLOR = {
+const COLOR: Record<Tone, string> = {
   ink: '#f7f4ff',
   muted: '#b9bdd6',
   dim: '#7d8199',
@@ -31,19 +42,6 @@ const COLOR = {
   ready: '#67e8a5',
   warn: '#ffc56d',
   bad: '#ff8aa8',
-}
-
-// One glyph per state, so a row reads before it is read.
-const MARK: Record<string, string> = {
-  ready: '▶', done: '✔', blocked: '⨯', kept: '·',
-  applied: '✔', already: '·', failed: '⨯', skipped: '—',
-}
-const TINT: Record<string, string> = {
-  ready: COLOR.ready, done: COLOR.dim, blocked: COLOR.bad, kept: COLOR.muted,
-  applied: COLOR.ready, already: COLOR.dim, failed: COLOR.bad, skipped: COLOR.warn,
-}
-const KIND: Record<string, string> = {
-  work: 'Work', topic: 'topic', channel: 'channel', conversation: 'this conversation',
 }
 
 type Phase =
@@ -133,9 +131,9 @@ export class FrontDeskClosePanel {
     const found = await this.source.closePlan(id)
     this.inFlight -= 1
     if (id !== this.conversationId()) return
-    this.phase = 'error' in found
-      ? { kind: 'unreadable', text: found.error ?? 'the plan could not be read' }
-      : { kind: 'preview', plan: found }
+    this.phase = isCompletionPlan(found)
+      ? { kind: 'preview', plan: found }
+      : { kind: 'unreadable', text: found.error ?? 'the plan could not be read' }
     this.render()
   }
 
@@ -150,7 +148,7 @@ export class FrontDeskClosePanel {
     const found = await this.source.close(id, plan.fingerprint)
     this.inFlight -= 1
     if (id !== this.conversationId()) return
-    if ('error' in found) {
+    if (!isCompletionPlan(found)) {
       this.phase = { kind: 'unreadable', text: found.error ?? 'the relay did not answer' }
       this.render()
       this.onChanged()
@@ -227,77 +225,22 @@ export class FrontDeskClosePanel {
       line('Nothing was changed by this attempt unless a result below says so.', 11.5, COLOR.dim)
     } else {
       const plan = phase.plan
-      const working = phase.kind === 'working'
-      const finished = phase.kind === 'done'
-      this.title.setText(finished && !plan.partial ? 'CLOSED' : 'FINISH THIS CONVERSATION')
-      this.summary.setText(this.summaryLine(plan, phase.kind)).setColor(
-        plan.refused ? COLOR.warn
-          : finished ? (plan.partial ? COLOR.warn : COLOR.ready)
-            : plan.counts.blocked ? COLOR.warn : COLOR.muted,
-      )
-      if (plan.refused && plan.error) line(plan.error, 12, COLOR.warn)
-      if (!plan.status.zulip_write) line(plan.status.reason, 12, COLOR.bad)
-      if (!plan.status.plane && plan.actions.some((one) => one.kind === 'work')) {
-        line('No Plane credential: the Work states below are what the relay could not read.', 11.5, COLOR.warn)
+      this.title.setText(titleLine(plan, phase.kind))
+      this.summary.setText(summaryLine(plan, phase.kind)).setColor(COLOR[summaryTone(plan, phase.kind)])
+      // The same lines the DOM overlay draws (`completionState.planLines`):
+      // a body line at the margin starts a new row, so the rows breathe.
+      let previousBody = false
+      for (const entry of planLines(plan, phase.kind)) {
+        if (entry.size === 'body' && entry.indent === 0 && previousBody) cursor += 4
+        line(entry.text, entry.size === 'body' ? 12.5 : entry.indent >= 18 ? 11 : 10.5,
+             COLOR[entry.tone], entry.indent, entry.size === 'body' ? FONT : MONO)
+        previousBody = previousBody || entry.size === 'body'
       }
-
-      const results = new Map<string, CloseResult>(plan.results.map((one) => [one.key, one]))
-      for (const action of plan.actions) {
-        const result = results.get(action.key)
-        const state = result ? result.outcome : action.state
-        const color = TINT[state] ?? COLOR.muted
-        line(`${MARK[state] ?? '·'} ${KIND[action.kind] ?? action.kind} · ${action.label}`,
-             12.5, state === 'ready' ? COLOR.ink : color, 0, FONT)
-        line(result ? result.note : action.reason, 11, color, 18)
-        const unreached = (action.detail?.unreached_children as string[] | undefined) ?? []
-        if (unreached.length) {
-          line(`sub-works this conversation never reached: ${unreached.join(', ')}`, 10.5, COLOR.warn, 18)
-        }
-        cursor += 4
-      }
-
-      if (plan.excluded.length) {
-        cursor += 6
-        line('not this conversation’s — left alone', 11, COLOR.accent)
-        for (const row of plan.excluded) {
-          line(`· #${row.channel} › ${row.topic}`, 11.5, COLOR.muted, 8, FONT)
-          line(row.reason, 10.5, COLOR.dim, 20)
-        }
-      }
-      const gaps = [
-        ...plan.gaps.unread.map((one) => `${one} could not be read`),
-        ...plan.gaps.bounded.map((one) => `${one} was read as a window; older posts are in Zulip`),
-        ...plan.gaps.plane,
-        ...(plan.gaps.truncated ? ['the walk hit its node cap; there may be more'] : []),
-      ]
-      if (gaps.length) {
-        cursor += 6
-        line('what is not known', 11, COLOR.warn)
-        for (const gap of gaps) line(`· ${gap}`, 10.5, COLOR.warn, 8)
-      }
-      cursor += 6
-      line(plan.note, 10.5, COLOR.dim)
-      if (working) line('closing…', 12, COLOR.accent)
     }
 
     this.contentHeight = cursor - this.viewport.y
     this.renderButtons()
     this.scrollBy(0)
-  }
-
-  private summaryLine(plan: ClosePlan, phase: Phase['kind']): string {
-    const counts = plan.counts
-    if (phase === 'working') return 'closing…'
-    if (phase === 'done') {
-      const applied = plan.results.filter((one) => one.outcome === 'applied').length
-      const failed = plan.results.filter((one) => one.outcome === 'failed').length
-      const skipped = plan.results.filter((one) => one.outcome === 'skipped').length
-      if (plan.partial) {
-        return `partially closed — ${applied} changed, ${failed} failed, ${skipped} left; the conversation stays open`
-      }
-      return `closed — ${applied} changed, ${plan.results.length - applied} already were`
-    }
-    return `${counts.ready} to change · ${counts.done} already · ${counts.blocked} blocked · ${counts.kept} kept`
   }
 
   private renderButtons() {
@@ -314,16 +257,14 @@ export class FrontDeskClosePanel {
       this.buttons.push(button)
       this.container.add(button)
     }
-    add('close panel', () => this.close())
-    if (this.phase.kind === 'preview' || this.phase.kind === 'done' || this.phase.kind === 'unreadable') {
-      add('refresh', () => void this.load())
-    }
-    if (this.phase.kind === 'preview' && this.phase.plan.counts.ready > 0 && this.phase.plan.status.zulip_write) {
-      add(`close ${this.phase.plan.counts.ready} target${this.phase.plan.counts.ready > 1 ? 's' : ''}`,
-          () => void this.apply(), COLOR.ready)
-    }
-    if (this.phase.kind === 'done' && this.phase.plan.partial && this.phase.plan.counts.ready > 0) {
-      add('try the rest again', () => void this.apply(), COLOR.warn)
+    const plan = 'plan' in this.phase ? this.phase.plan : undefined
+    const phase = this.phase.kind === 'closed' ? 'loading' : this.phase.kind
+    for (const button of planButtons(plan, phase)) {
+      add(button.label, () => {
+        if (button.id === 'close') this.close()
+        else if (button.id === 'refresh') void this.load()
+        else void this.apply()
+      }, COLOR[button.tone])
     }
   }
 

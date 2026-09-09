@@ -360,7 +360,17 @@ class Closer:
                                       "topic": found.root[1], "kind": found.scope.kind,
                                       "fingerprint": current, "results": results})
                 del self._records[:-RECORD_MEMORY]
-            payload = self._payload(now, found, actions, results)
+            # The answer is the plan **as it now stands**, re-derived after the
+            # writes, with the results laid over it: its fingerprint is what a
+            # retry approves, and a retry that carried the pre-write
+            # fingerprint would only ever be refused (p4 step 2 met exactly
+            # that in a browser fixture). What was archived reads `done`, what
+            # failed reads `ready` again, and `partial` is judged on what is
+            # still left to do rather than on what was attempted.
+            plane = self.plane_factory() if self.plane_factory else None
+            after = discover(self.topics(), key, realm=realm, plane=plane)
+            actions_after = plan_actions(after)
+            payload = self._payload(now, after, actions_after, results)
             payload["applied"] = True
             payload["partial"] = any(row["outcome"] == FAILED for row in results) or bool(
                 payload["counts"]["blocked"])

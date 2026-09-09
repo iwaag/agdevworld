@@ -30,6 +30,7 @@ import {
   type SessionNode,
 } from './routineState'
 import type { PanelSelection } from './views'
+import { openCompletionPanel } from './completionPanel'
 
 const POPUP_CSS = `
 #detail-popup {
@@ -155,6 +156,14 @@ const POPUP_CSS = `
 .dp-flight { color: #67e8a5; }
 .dp-flight.idle { color: #777a91; }
 .dp-flight.unknown { color: #ffc56d; }
+.dp-finish {
+  margin-left: auto; border: 1px solid #3d7a5e; border-radius: 8px; background: #1b2030;
+  color: #67e8a5; font-size: 11px; padding: 2px 9px; cursor: pointer; white-space: nowrap;
+}
+.dp-finish:hover { background: #232a3d; }
+.dp-topic-row { display: flex; align-items: center; gap: 8px; margin: 5px 0 0; }
+.dp-topic-row .dp-msg { margin: 0; flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.dp-topic-row .dp-resolved { color: #777a91; font-size: 10px; letter-spacing: 1px; }
 `
 
 const STATUS_COLOR: Record<string, string> = {
@@ -224,6 +233,19 @@ function el<K extends keyof HTMLElementTagNameMap>(
   if (className) node.className = className
   if (text !== undefined) node.textContent = text
   return node
+}
+
+// The completion door (`front_desk` p4): previews first, in the shared
+// overlay; the relay decides what the request owns. A task topic is told
+// which request to go to instead. The popup stays open underneath.
+function finishButton(channel: string, topic: string): HTMLButtonElement {
+  const button = el('button', 'dp-finish', 'finish ✔')
+  button.title = `preview what finishing #${channel} › ${topic} would change`
+  button.addEventListener('click', (event) => {
+    event.stopPropagation()
+    openCompletionPanel({ channel, topic })
+  })
+  return button
 }
 
 function jsonPre(value: unknown): HTMLPreElement {
@@ -622,13 +644,14 @@ function renderRoomAgent(agent: RoomAgent, open: RoomWorkRow[]): void {
       const box = el('div', 'dp-diff')
       const head = el('div', 'dp-diff-head')
       head.append(el('span', undefined, row.topic))
+      head.append(finishButton(row.channel, row.topic))
       box.append(head)
       work.append(box)
     }
   }
   // Project work is not attributed to an agent on purpose: a `pj-` channel is
   // the project's board, and no topic name says whose task it is.
-  work.append(el('p', 'dp-summary-meta', 'project work is listed under its project, in the open-work mode'))
+  work.append(el('p', 'dp-summary-meta', 'project work is listed under its project, in the open-work mode; finish ✔ previews a request’s completion — an agent’s own plan here, a project’s workplan there'))
   body!.append(work)
 
   if (agent.history.length > 1) {
@@ -647,7 +670,8 @@ function renderRoomAgent(agent: RoomAgent, open: RoomWorkRow[]): void {
 function renderRoomBoard(group: string, kind: 'project' | 'agent', rows: RoomWorkRow[]): void {
   headerName.textContent = group
   headerKind.textContent = kind
-  headerStatus.textContent = `${rows.length} OPEN`
+  const open = rows.filter((row) => !row.resolved).length
+  headerStatus.textContent = open === rows.length ? `${rows.length} OPEN` : `${open} OPEN · ${rows.length - open} ✔`
   headerStatus.style.color = kind === 'project' ? '#9b8cff' : '#70c7ff'
 
   // The flat list the plan asks for: channel name and raw topic name, nothing
@@ -664,11 +688,19 @@ function renderRoomBoard(group: string, kind: 'project' | 'agent', rows: RoomWor
     head.append(el('span', undefined, channel))
     head.append(el('span', 'dp-sev info', `${channelRows.length}`))
     box.append(head)
-    for (const row of channelRows) box.append(el('p', 'dp-msg', row.topic))
+    for (const row of channelRows) {
+      const line = el('div', 'dp-topic-row')
+      line.append(el('p', 'dp-msg', row.topic))
+      if (row.resolved) line.append(el('span', 'dp-resolved', 'RESOLVED'))
+      line.append(finishButton(row.channel, row.topic))
+      box.append(line)
+    }
     section.append(box)
   }
   section.append(
-    el('p', 'dp-summary-meta', 'open means the topic carries no ✔ prefix — nothing else is read'),
+    el('p', 'dp-summary-meta', 'open means the topic carries no ✔ prefix — nothing else is read. ' +
+      'finish ✔ previews what completing that request would change (its topics, channels and Plane Works); ' +
+      'a task topic answers with the request to go to instead'),
   )
   body!.append(section)
 }
@@ -760,6 +792,21 @@ function renderOpsRow(row: OpsRow, board: OpsBoard): void {
     ),
   )
   body!.append(why)
+  if (row.channel && row.topic) {
+    // Two different verbs, kept apart on purpose: the board's "confirmed"
+    // dismisses a done row from this display and writes nothing; finishing
+    // changes Zulip and Plane, after a preview (`front_desk` p4).
+    const finish = el('section')
+    finish.append(el('h3', undefined, 'FINISH THIS REQUEST'))
+    const line = el('div', 'dp-topic-row')
+    line.append(el('p', 'dp-msg', `${row.channel}/${row.topic}`))
+    line.append(finishButton(row.channel, row.topic))
+    finish.append(line)
+    finish.append(el('p', 'dp-summary-meta',
+      '“confirmed” on the board only hides a done row here and writes nothing; ' +
+      'finish ✔ previews and then resolves this request’s topics, archives its work channel and marks its Plane Work Done'))
+    body!.append(finish)
+  }
   body!.append(opsHealthSection(board))
 }
 

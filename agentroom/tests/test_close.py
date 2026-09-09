@@ -395,3 +395,26 @@ def test_a_bad_id_is_400_over_http(relay):
     port = relay[0]
     assert request(port, "GET", "/frontdesk/NOT%20AN%20ID/close-plan")[0] == 400
     assert request(port, "POST", "/frontdesk/NOT%20AN%20ID/close", {})[0] == 400
+
+
+def test_the_answer_to_a_close_is_the_plan_as_it_now_stands():
+    """p4 step 2, met in a browser fixture: a retry that carried the
+    pre-write fingerprint was always refused. The answer's fingerprint is
+    the post-write plan's, so 'try the rest again' approves what is left."""
+    realm = WritingRealm(open_chain(), fail=("assetrun-robot",))
+    door, realm, plane = closer(realm=realm)
+    first = door.close(ROOT)
+    assert first["partial"] is True
+    by_key = {row["key"]: row for row in first["actions"]}
+    # What was done reads done; what failed is ready again; the root waits.
+    assert by_key[f"work:{MISSION}"]["state"] == DONE
+    assert by_key["topic:pj-ghtrends/workplan-trend8"]["state"] == DONE
+    assert by_key["channel:work-g-17"]["state"] == DONE
+    assert by_key["topic:agforge-agstudio1/assetrun-robot"]["state"] == READY
+    assert by_key[f"topic:front/{DESK_TOPIC}"]["state"] == READY
+    assert first["counts"]["ready"] == 2
+    assert first["fingerprint"] == door.plan(ROOT)["fingerprint"]
+    realm.fail.clear()
+    again = door.close(ROOT, first["fingerprint"])
+    assert again.get("refused") is None and again["partial"] is False
+    assert again["counts"]["ready"] == 0

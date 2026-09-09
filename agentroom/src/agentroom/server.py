@@ -37,7 +37,7 @@ from .ops import Ops
 from .room import Room
 from .settings import Settings
 
-ROUTES = ("/healthz", "/agents", "/work", "/ops", "/routines", "/routines/<name>",
+ROUTES = ("/healthz", "/agents", "/work", "/work?resolved=1", "/ops", "/routines", "/routines/<name>",
           "/inflight/<name>", "/cost", "/budget", "/frontdesk", "/frontdesk/<id>",
           "/frontdesk/<id>/close-plan",
           "/complete/plan?channel=<channel>&topic=<topic>",
@@ -134,7 +134,11 @@ def make_handler(room: Room, ops: Ops | None = None, chat: Chat | None = None,
                 elif path == "/agents":
                     self._write_json(200, room.agents())
                 elif path == "/work":
-                    self._write_json(200, room.work())
+                    # `?resolved=1` lists the ✔ topics too, so a finished
+                    # request can be reached for completion (`front_desk` p4).
+                    query = parse_qs(urlparse(self.path).query)
+                    resolved = (query.get("resolved") or ["0"])[0] in ("1", "true", "yes")
+                    self._write_json(200, room.work(include_resolved=resolved))
                 elif path == "/ops":
                     # Without a credential of its own the engine does not run,
                     # and the view must be told that rather than shown an

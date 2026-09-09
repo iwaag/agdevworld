@@ -643,7 +643,10 @@ function renderRoomAgent(agent: RoomAgent, open: RoomWorkRow[]): void {
     for (const row of open) {
       const box = el('div', 'dp-diff')
       const head = el('div', 'dp-diff-head')
-      head.append(el('span', undefined, row.topic))
+      // Front's conversations are in `#front`, not in a channel of its own
+      // name, so a row outside the heading's channel says where it is.
+      head.append(el('span', undefined, row.channel === (agent.entrance ?? agent.instance) ? row.topic : `${row.channel}/${row.topic}`))
+      if (row.resolved) head.append(el('span', 'dp-resolved', 'RESOLVED'))
       head.append(finishButton(row.channel, row.topic))
       box.append(head)
       work.append(box)

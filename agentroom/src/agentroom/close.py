@@ -170,6 +170,10 @@ def plan_actions(found: Discovery) -> list[Action]:
         label = f"#{node.channel} › {node.topic}"
         if node.resolved:
             actions.append(Action("topic", key, label, DONE, "already ✔", node.as_dict()))
+        elif node.channel_archived:
+            actions.append(Action("topic", key, label, KEPT,
+                                  f"kept — #{node.channel} is archived: the realm refuses to move "
+                                  "its posts, and nothing there is open to anybody", node.as_dict()))
         elif node.known == "note-only" or not node.last_post_id:
             actions.append(Action("topic", key, label, BLOCKED,
                                   "this topic could not be read, so nothing here says it is "
@@ -370,7 +374,30 @@ class Closer:
             plane = self.plane_factory() if self.plane_factory else None
             after = discover(self.topics(), key, realm=realm, plane=plane)
             actions_after = plan_actions(after)
-            payload = self._payload(now, after, actions_after, results)
+            # A target this operation made unreadable — the topics of a
+            # channel it archived — is not in the plan as it now stands, and
+            # a result row with no action to sit under would be lost. The
+            # pre-write plan's order is kept, each row wearing its post-write
+            # state where there is one and its outcome where there is not;
+            # the fingerprint is the post-write plan's alone, because that is
+            # what a fresh preview would answer.
+            by_key = {action.key: action for action in actions_after}
+            shown: list[Action] = []
+            for action in actions:
+                found_after = by_key.pop(action.key, None)
+                if found_after is not None:
+                    shown.append(found_after)
+                    continue
+                outcome = next((row for row in results if row["key"] == action.key), None)
+                if outcome is not None and outcome["outcome"] in (APPLIED, ALREADY):
+                    shown.append(Action(action.kind, action.key, action.label, DONE,
+                                        "closed by this operation; no longer readable from the realm",
+                                        action.detail))
+                else:
+                    shown.append(action)
+            shown.extend(by_key.values())
+            payload = self._payload(now, after, shown, results)
+            payload["fingerprint"] = fingerprint(actions_after)
             payload["applied"] = True
             payload["partial"] = any(row["outcome"] == FAILED for row in results) or bool(
                 payload["counts"]["blocked"])

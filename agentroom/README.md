@@ -87,7 +87,11 @@ writes only to this process's memory (see `POST /ops/confirm`).
   prefix (`agag.zulip.RESOLVED_TOPIC_PREFIX`) and nothing else: topic naming
   differs per agent, resolution does not. `?resolved=1` lists the ✔ topics
   too, each row carrying `resolved` (`front_desk` p4): a finished request is
-  completed from the agent room, and finished means resolved.
+  completed from the agent room, and finished means resolved. `#front` is
+  walked as well, and its topics are filed under the instance whose
+  **roster prefix** they carry (`front-` → `front-agstudio1`), because Front's
+  declared channel does not exist and its conversations live here; a topic
+  no live roster claims (`routine-…`) is nobody's and is not listed.
 
 - `GET /routines` → the routine board (`operation_room` p3): one row per
   routine, carrying its standing request, its schedule, its last fire and
@@ -349,7 +353,10 @@ How each target is decided:
   standalone Work with none, → `blocked`. A Sub-Work the walk never reached
   is listed as `unreached_children` and still counted.
 - **A topic** by whether it was actually read. `note-only` is a gap, not a
-  finished conversation, and blocks.
+  finished conversation, and blocks. A topic whose channel the realm no
+  longer lists is `kept`: its posts read fine and cannot be moved (a resolve
+  is a PATCH the realm answers 400), and nothing there is open to anybody —
+  met live in p4 on a retired agent's archived channel.
 - **A channel** only when it is `work-<label>` for a mission of *this*
   conversation and every topic it actually holds is one of these targets.
   `#front`, project and agent channels are never candidates. An **archived**

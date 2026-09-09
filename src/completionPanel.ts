@@ -127,7 +127,9 @@ export function completionPanelRoot(): CompletionRef | undefined {
 export function openCompletionPanel(root: CompletionRef, given: CompletionPanelOptions = {}): void {
   ensurePanel()
   options = { ...options, ...given }
-  current = { channel: root.channel, topic: root.topic }
+  // A row copied from a resolved topic carries Zulip's ✔; the request is
+  // the bare name, which is also what the relay reads.
+  current = { channel: root.channel, topic: root.topic.replace(/^✔ /, '') }
   void load()
 }
 

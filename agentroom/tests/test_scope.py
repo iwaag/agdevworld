@@ -565,3 +565,32 @@ def test_a_plan_the_walk_never_named_is_read_upward_and_joins_by_its_own_note():
     assert plan.depth == 1 and [l["via"] for l in plan.links] == ["rootchat"]
     assert ("work-g-17", "workrun-task1-g-17") in topic_keys(found)
     assert {work.label for work in found.works} >= {"G-17", "G-18"}
+
+
+def test_a_topic_in_an_archived_channel_is_kept_and_the_request_still_closes():
+    """Met live: `front-p2-greet-agecho` reached `#agecho-agstudio1 › hello`,
+    readable, unresolved — and the channel is archived, so the resolve was a
+    400 and the conversation stayed open. Now it is kept, said so, and the
+    request closes over it."""
+    realm = Realm({
+        ("front", FRONT_TOPIC): [
+            post(1, "say hello to agecho", sender_id=DEVELOPER, sender="Developer"),
+            selfnote(2, "served", "agecho-agstudio1/hello 9"),
+            post(3, "it said hello back"),
+        ],
+        ("agecho-agstudio1", "hello"): [
+            selfnote(8, "rootchat", f"front/{FRONT_TOPIC}"),
+            post(9, "hello", sender_id=99, sender="agecho"),
+        ],
+    }, topics={"front": [FRONT_TOPIC]}, streams={"front": 24})
+    door, _, _ = closer(realm=WritingRealm(realm), plane=writing_board())
+    found = door.plan(("front", FRONT_TOPIC))
+    by_key = {a["key"]: a for a in found["actions"]}
+    hello = by_key["topic:agecho-agstudio1/hello"]
+    assert hello["state"] == "kept" and "is archived" in hello["reason"]
+    assert by_key[f"topic:front/{FRONT_TOPIC}"]["state"] == READY
+    applied = door.close(("front", FRONT_TOPIC), found["fingerprint"])
+    assert applied["partial"] is False
+    outcomes = {row["key"]: row["outcome"] for row in applied["results"]}
+    assert outcomes["topic:agecho-agstudio1/hello"] == "skipped"
+    assert outcomes[f"topic:front/{FRONT_TOPIC}"] == "applied"

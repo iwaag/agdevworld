@@ -23,6 +23,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from threading import Lock
 
+from agag.intro import parse_roster
 from agag.selfnote import SELFNOTE_MARKER, is_selfnote
 from agag.zulip import RESOLVED_TOPIC_PREFIX, ZulipClient
 
@@ -33,6 +34,11 @@ INTRO_PREFIX = "intro-"
 #: A project's own channel, and the channels its work is carried out in.
 PROJECT_PREFIX = "pj-"
 WORK_PREFIX = "work-"
+#: The channel Front answers in by *prefix* rather than by name: its roster
+#: declares a channel of its own instance name that does not exist, and
+#: every `front-*` topic here is one of its conversations (`front_desk` p4:
+#: an ordinary Front conversation has to be reachable from the agent room).
+FRONT_CHANNEL = "front"
 #: Zulip's own bots (Notification Bot and friends) live in this realm string.
 SYSTEM_REALM = "zulipinternal"
 
@@ -222,6 +228,20 @@ class Room:
             channel = by_name.get(instance)
             if channel is not None:
                 watched.append((channel, "agent", instance))
+        # `#front` belongs to whoever declares a prefix its topics carry —
+        # Front's `front-` — read off the roster block of each live
+        # introduction, never guessed from the instance name.
+        prefixed: list[tuple[str, tuple[str, ...]]] = []
+        front = by_name.get(FRONT_CHANNEL)
+        if front is not None:
+            for topic, instance in introduced:
+                try:
+                    posts = client.topic_history(AGENTS_CHANNEL, topic, num_before=1)
+                except Exception:  # noqa: BLE001 - an unread roster is no prefixes, said below
+                    continue
+                roster = parse_roster(posts[-1].get("content", "")) if posts else None
+                if roster is not None and roster.prefixes:
+                    prefixed.append((instance, tuple(roster.prefixes)))
 
         rows: list[dict] = []
         errors: list[dict] = []
@@ -242,8 +262,26 @@ class Room:
                     "stream_id": int(channel["stream_id"]),
                     "resolved": not unresolved(topic),
                 })
+        if front is not None:
+            try:
+                topics = client.channel_topics(int(front["stream_id"]))
+            except Exception as error:  # noqa: BLE001
+                errors.append({"channel": FRONT_CHANNEL, "error": str(error)})
+                topics = []
+            for topic in topics:
+                if not unresolved(topic) and not include_resolved:
+                    continue
+                owner = next((instance for instance, prefixes in prefixed
+                              if bare_topic(topic).startswith(prefixes)), None)
+                if owner is None:
+                    continue
+                rows.append({
+                    "channel": FRONT_CHANNEL, "topic": topic, "kind": "agent", "group": owner,
+                    "stream_id": int(front["stream_id"]), "resolved": not unresolved(topic),
+                })
         return {
-            "channels": [channel["name"] for channel, _, _ in watched],
+            "channels": [channel["name"] for channel, _, _ in watched]
+                        + ([FRONT_CHANNEL] if front is not None else []),
             "topics": rows,
             "errors": errors,
             "calls": client.calls,

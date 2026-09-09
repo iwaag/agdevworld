@@ -205,7 +205,8 @@ export function summaryLine(plan: CompletionPlan, phase: PlanPhase): string {
     if (plan.partial) {
       return `partially closed — ${applied} changed, ${failed} failed, ${skipped} left; the request stays open`
     }
-    return `closed — ${applied} changed, ${plan.results.length - applied} already were`
+    const kept = plan.results.filter((one) => one.outcome === 'skipped').length
+    return `closed — ${applied} changed, ${plan.results.length - applied - kept} already were${kept ? `, ${kept} kept` : ''}`
   }
   if (!plan.scope.closable) return 'nothing to close here'
   return `${counts.ready} to change · ${counts.done} already · ${counts.blocked} blocked · ${counts.kept} kept`

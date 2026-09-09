@@ -300,6 +300,10 @@ class Related:
     #: The read came back full: there may be older posts, and older notes.
     history_bounded: bool = False
     last_post_id: int = 0
+    #: The realm no longer lists this topic's channel: archived, so its posts
+    #: can still be read but never moved (a resolve is a PATCH the realm
+    #: refuses with 400). Met live in p4 on a retired fixture agent's channel.
+    channel_archived: bool = False
     #: Root notes written *in* an execution topic by a visitor — Front,
     #: serving some other request, posting here — that name a conversation
     #: outside this request. Not ownership (`_ownership`), but shown: the
@@ -311,6 +315,7 @@ class Related:
             "channel": self.channel, "topic": self.topic, "live_topic": self.live_topic,
             "resolved": self.resolved, "known": self.known, "depth": self.depth,
             "links": self.links, "homes": self.homes, "visitors": self.visitors,
+            "channel_archived": self.channel_archived,
             "works": [note.as_dict() for note in self.works],
             "history_bounded": self.history_bounded,
             # The id a resolve renames from: Zulip resolves a topic by moving
@@ -1082,6 +1087,7 @@ def discover(
                          channels=[], gaps=gaps)
     lineage = [(p["channel"], p["topic"]) for p in scope.parents]
     kept, excluded = _ownership(root, found, lineage)
+    _mark_archived(kept, root, reader)
     works, channels, plane_gaps = _plane_and_channels(kept, reader, plane)
     # A mission Work this request owns names its dedicated channel, and the
     # channel may hold task topics no note from here reached. Read them and
@@ -1099,10 +1105,27 @@ def discover(
         found, gaps = related_topics(topics, root, reader=reader, max_nodes=max_nodes,
                                      seed_channels=sorted(set(seeds)))
         kept, excluded = _ownership(root, found, lineage)
+        _mark_archived(kept, root, reader)
         works, channels, plane_gaps = _plane_and_channels(kept, reader, plane)
     gaps = {**gaps, **plane_gaps, "zulip_calls": reader.calls, "errors": _unique(reader.errors)}
     return Discovery(scope=scope, topics=kept, excluded=excluded, works=works,
                      channels=channels, gaps=gaps)
+
+
+def _mark_archived(kept: list[Related], root: Key, reader: Reader) -> None:
+    """Say which related topics sit in a channel the realm no longer lists.
+
+    Their history reads fine, so the walk finds them like any other topic —
+    and a resolve there is refused (HTTP 400 on the move), which p4 met live
+    on a retired agent's channel. One channel-list call, only when an
+    unresolved related topic exists to ask it for.
+    """
+    channels = {node.channel for node in kept if node.key != root and not node.resolved}
+    for channel in sorted(channels):
+        if reader.channel_exists(channel) is False:
+            for node in kept:
+                if node.channel == channel and node.key != root:
+                    node.channel_archived = True
 
 
 def _unique(rows: list[dict]) -> list[dict]:

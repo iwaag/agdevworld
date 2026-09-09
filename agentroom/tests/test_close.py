@@ -418,3 +418,18 @@ def test_the_answer_to_a_close_is_the_plan_as_it_now_stands():
     again = door.close(ROOT, first["fingerprint"])
     assert again.get("refused") is None and again["partial"] is False
     assert again["counts"]["ready"] == 0
+
+
+def test_a_target_the_close_made_unreadable_still_has_its_row():
+    """Archiving `work-g-17` makes its task topic unreadable, so the plan as
+    it now stands has no row for either — the live p4 run lost the archived
+    channel from its own answer. The row stays, marked done, and the
+    fingerprint is still the fresh plan's."""
+    door, realm, plane = closer(realm=WritingRealm(open_chain()))
+    found = door.close(ROOT)
+    keys = [action["key"] for action in found["actions"]]
+    assert "channel:work-g-17" in keys and "topic:work-g-17/workrun-task1-g-17" in keys
+    channel = next(a for a in found["actions"] if a["key"] == "channel:work-g-17")
+    assert channel["state"] == DONE
+    assert found["fingerprint"] == door.plan(ROOT)["fingerprint"]
+    assert found["partial"] is False

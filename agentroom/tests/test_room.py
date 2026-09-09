@@ -79,6 +79,11 @@ class FakeClient:
             return list(self._topics)
         return list(self._by_stream.get(stream_id, ()))
 
+    intros = {}
+
+    def topic_history(self, channel, topic, num_before=50):
+        return [{"id": 1, "content": self.intros.get(topic, "")}] if topic in self.intros else []
+
 
 def test_a_resolved_introduction_retires_its_agent_from_the_room():
     # `operation_room` p2 ex2 step C. An introduction is the contract that
@@ -140,3 +145,40 @@ def test_resolved_work_is_listed_only_when_asked_and_says_so():
     assert [(row["topic"], row["resolved"]) for row in found["topics"]] == [
         ("assetplan-a-poster", False), ("✔ assetplan-done", True)]
     assert found["include_resolved"] is True
+
+
+ROSTER = """```agag-roster
+schema: ag.agent-roster.v1
+instance: front-agstudio1
+agent: front
+bot: Front
+bot_id: 15
+channel: front-agstudio1
+prefixes: front-
+```"""
+
+
+def test_front_s_conversations_are_filed_under_front_by_its_declared_prefix():
+    """`front_desk` p4: Front's own channel does not exist, so its
+    conversations live in `#front` and are its by the `front-` prefix the
+    roster block declares — the standing `routine-` requests are nobody's."""
+    room = Room.__new__(Room)
+    room.client = lambda: client
+    client = FakeClient(
+        ["intro-front-agstudio1", "intro-agforge-agstudio1"],
+        channels=[
+            {"name": "front", "stream_id": 5, "folder_id": None},
+            {"name": "agforge-agstudio1", "stream_id": 7, "folder_id": None},
+        ],
+        by_stream={5: ["front-p2-greet-agecho", "✔ front-desk-1", "routine-ghtrends"],
+                   7: ["assetplan-a-poster"]},
+    )
+    client.intros = {"intro-front-agstudio1": "hello\n" + ROSTER,
+                     "intro-agforge-agstudio1": "no block here"}
+    found = room._read_work()
+    assert [(row["group"], row["topic"]) for row in found["topics"]] == [
+        ("agforge-agstudio1", "assetplan-a-poster"), ("front-agstudio1", "front-p2-greet-agecho")]
+    assert "front" in found["channels"]
+    found = room._read_work(True)
+    assert [(row["group"], row["topic"], row["resolved"]) for row in found["topics"]][1:] == [
+        ("front-agstudio1", "front-p2-greet-agecho", False), ("front-agstudio1", "✔ front-desk-1", True)]

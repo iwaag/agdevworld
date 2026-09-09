@@ -58,10 +58,9 @@ export interface CompletionScope {
   reason: string
   description: string
   parents: CompletionParent[]
-  // Mentioned by the records, not owned: a routine run's standing request
-  // and the previous run its fire line names.
+  // Mentioned by the records, not owned: a routine run's guide.
   context: Array<CompletionRef & { relation: string; reason: string }>
-  routine: { name: string; stamp: string; standing_topic: string; previous_run: string | null } | null
+  routine: { name: string; channel: string; run_topic: string; guide_topic: string } | null
 }
 
 export interface CompletionRecord {
@@ -183,7 +182,7 @@ const KIND: Record<string, string> = {
 const ROOT_KIND: Record<string, string> = {
   desk: 'Front Desk conversation', front: 'Front conversation', 'routine-run': 'routine run',
   workplan: 'Autolab request', assetplan: 'Forge request', workrun: 'Autolab task topic',
-  assetrun: 'Forge run topic', 'routine-standing': 'standing request', intro: 'introduction',
+  assetrun: 'Forge run topic', 'routine-guide': 'routine guide', intro: 'introduction',
   topic: 'conversation',
 }
 

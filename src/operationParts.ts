@@ -20,7 +20,7 @@ export async function initOperationParts(): Promise<void> {
       return
     }
     health.textContent = `${routineHeadline(detail)} · observed ${at(detail.generated_at)}`
-    detail.sessions.slice(0, 3).forEach((session, index) => sessions.add(new Option(session.fire ? `Fire #${session.fire.message_id}` : 'Manual activity', String(index))))
+    detail.sessions.slice(0, 3).forEach((session, index) => sessions.add(new Option(`${session.topic} · ${session.run.state}`, String(index))))
     const draw = () => {
       const session = detail.sessions[Number(sessions.value)]
       if (session) renderSessionGraph(graph, detail, session)

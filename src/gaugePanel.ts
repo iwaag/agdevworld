@@ -183,7 +183,7 @@ function routines(board: CostBoard): HTMLElement {
       const agents = session.agents.map(agent =>
         `<li><span class="swatch" style="background:${harnessHue(agent.harness)}"></span>${esc(agent.instance)} · ${esc(agent.role)} · ${agent.runs} runs · ${esc(money(agent))}</li>`).join('')
       const guessed = session.attribution.window ? ` · ${session.attribution.window} of ${session.runs} matched by mtime window` : ''
-      row.innerHTML = `<div class="session-head"><strong>${esc(session.stamp ?? session.topic)}</strong><span class="state-chip ${session.resolution === 'resolved' ? 'done' : 'awaiting'}">${esc(session.resolution ?? 'unknown')}</span></div>
+      row.innerHTML = `<div class="session-head"><strong>${esc(session.topic)}</strong><span class="state-chip ${session.resolution === 'resolved' ? 'done' : 'awaiting'}">${esc(session.resolution ?? 'unknown')}</span></div>
         <div class="session-money">${esc(money(session))} <small>${session.runs} runs${esc(uncovered(session) ? ' · ' + uncovered(session) : '')}${esc(guessed)}</small></div>
         <ul class="session-agents">${agents || '<li class="muted">no run matched yet</li>'}</ul>
         <small class="muted">${session.conversations.map(c => `${esc(c.channel)} › ${esc(c.topic)} (${c.runs})`).join(' · ')}</small>`

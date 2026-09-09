@@ -169,7 +169,7 @@ def test_new_records_carry_their_conversation_and_old_ones_are_windowed(tmp_path
     assert rows["run-0003"].attribution == "none"
 
     sessions = {"x": [{
-        "topic": "front-routine-x-1", "stamp": "s", "fire": {"at": NOW - 600},
+        "channel": "front", "topic": "front-routine-x-1", "opened": {"at": NOW - 600},
         "resolution": {"state": "open"},
         "nodes": [{"channel": "pj-x", "topic": "workplan-1"}],
     }]}

@@ -28,9 +28,9 @@ export interface TableRow extends Bucket {
 export interface SessionAgent extends Bucket { instance: string; role: string; harness: string }
 
 export interface SessionCost extends Bucket {
+  channel: string | null
   topic: string | null
-  stamp: string | null
-  fire_at: number | null
+  opened_at: number | null
   resolution: string | null
   conversations: { channel: string; topic: string; runs: number }[]
   attribution: { fields: number; window: number }

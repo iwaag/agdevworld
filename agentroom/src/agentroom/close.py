@@ -59,9 +59,8 @@ from agag.plane import ALREADY_COMPLETED, reason_not_completed, sub_works
 from agag.zulip import ZulipClient
 
 from .closing import Discovery, Key, PlaneBoard, Realm, WorkTarget, discover
-from .frontdesk import ID_PATTERN, desk_topic
+from .frontdesk import FRONT_CHANNEL, ID_PATTERN, desk_topic
 from .room import bare_topic
-from .routines import ROUTINE_CHANNEL
 
 SCHEMA = "ag.completion.v1"
 #: A channel or topic name this door will look up: Zulip's own limits, so a
@@ -268,7 +267,7 @@ class Closer:
         """The conversation a Front Desk id names, or the refusal."""
         if not ID_PATTERN.match(ident or ""):
             return {"error": f"{ident!r} is not a Front Desk conversation id"}
-        return (ROUTINE_CHANNEL, desk_topic(ident))
+        return (FRONT_CHANNEL, desk_topic(ident))
 
     # -- what is configured -------------------------------------------------
 

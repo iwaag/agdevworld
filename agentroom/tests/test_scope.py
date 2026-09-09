@@ -19,11 +19,10 @@ import pytest
 
 from agentroom.close import BLOCKED, DONE, READY, Closer, parse_key, plan_actions
 from agentroom.closing import (
-    ASSETPLAN, ASSETRUN, DESK, FRONT, INTRO, ROUTINE_RUN, ROUTINE_STANDING, TOPIC, WORKPLAN,
+    ASSETPLAN, ASSETRUN, DESK, FRONT, INTRO, ROUTINE_GUIDE, ROUTINE_RUN, TOPIC, WORKPLAN,
     WORKRUN, classify, discover,
 )
 from agentroom.room import Room
-from agentroom.routines import fire_line, run_topic
 from agentroom.server import build_server
 
 from test_close import WritingRealm, closer, open_chain, writing_board
@@ -34,9 +33,13 @@ from test_closing import (
 
 FRONT_TOPIC = "front-ask-20260909-0900"
 ROUTINE = "ghtrends"
-STAMP, EARLIER = "2026-09-09T01:00Z", "2026-09-08T01:00Z"
-RUN_TOPIC, EARLIER_TOPIC = run_topic(ROUTINE, STAMP), run_topic(ROUTINE, EARLIER)
-STANDING = f"routine-{ROUTINE}"
+RUN_CHANNEL = f"routine-{ROUTINE}"
+RUN_TOPIC, EARLIER_TOPIC = "routinerun-20260909-0100", "routinerun-20260908-0100"
+GUIDE = "guide"
+#: A run's opening post, by Front (`refine_routine` p1): the request, the
+#: conditions, the guide post read, and where the request came from.
+OPENING = ("Routine run opened. Requested in #front › front-desk-20260909-0059 (message 1): "
+           "\"run ghtrends\". Guide: #routine-ghtrends › guide, message 100.")
 
 
 def topic_keys(found):
@@ -54,8 +57,11 @@ def test_a_conversation_is_classified_by_its_channel_and_bare_name():
     assert classify("front", DESK_TOPIC) == DESK
     assert classify("front", f"✔ {DESK_TOPIC}") == DESK
     assert classify("front", FRONT_TOPIC) == FRONT
-    assert classify("front", RUN_TOPIC) == ROUTINE_RUN
-    assert classify("front", STANDING) == ROUTINE_STANDING
+    assert classify(RUN_CHANNEL, RUN_TOPIC) == ROUTINE_RUN
+    assert classify(RUN_CHANNEL, f"✔ {RUN_TOPIC}") == ROUTINE_RUN
+    assert classify(RUN_CHANNEL, GUIDE) == ROUTINE_GUIDE
+    assert classify(RUN_CHANNEL, "anything else") == TOPIC
+    assert classify("front", "routine-ghtrends") == TOPIC  # the pre-p1 standing request
     assert classify("front", "front-routine-ghtrends") == FRONT  # the pre-p7 shared topic
     assert classify("pj-ghtrends", "workplan-trend8") == WORKPLAN
     assert classify("work-g-17", "workrun-task1-g-17") == WORKRUN
@@ -99,30 +105,29 @@ def routine_realm(**kwargs):
     """One run of a routine, with the run before it and the standing request
     all on the realm, each with work of its own."""
     histories = {
-        ("front", STANDING): [
+        (RUN_CHANNEL, GUIDE): [
             post(100, "Summarise trending repos.", sender_id=DEVELOPER, sender="Developer"),
         ],
-        ("front", RUN_TOPIC): [
-            post(200, fire_line(ROUTINE, STAMP, previous=EARLIER_TOPIC),
-                 sender_id=DEVELOPER, sender="Developer"),
+        (RUN_CHANNEL, RUN_TOPIC): [
+            post(200, OPENING),
             selfnote(201, "served", "pj-ghtrends/workplan-trend8 1"),
             post(202, "Done — G-18 is written up."),
         ],
         ("pj-ghtrends", "workplan-trend8"): [
-            selfnote(10, "rootchat", f"front/{RUN_TOPIC}"),
+            selfnote(10, "rootchat", f"{RUN_CHANNEL}/{RUN_TOPIC}"),
             post(11, "Planned as G-17.", sender_id=AUTOLAB_BOT, sender="autolab-agstudio1"),
         ],
-        ("front", f"✔ {EARLIER_TOPIC}"): [
-            post(150, fire_line(ROUTINE, EARLIER), sender_id=DEVELOPER, sender="Developer"),
+        (RUN_CHANNEL, f"✔ {EARLIER_TOPIC}"): [
+            post(150, OPENING),
             selfnote(151, "served", "pj-ghtrends/workplan-trend7 1"),
             post(152, "Done — G-16 is written up."),
         ],
         ("pj-ghtrends", "✔ workplan-trend7"): [
-            selfnote(20, "rootchat", f"front/{EARLIER_TOPIC}"),
+            selfnote(20, "rootchat", f"{RUN_CHANNEL}/{EARLIER_TOPIC}"),
             post(21, "Planned as G-15.", sender_id=AUTOLAB_BOT, sender="autolab-agstudio1"),
         ],
     }
-    topics = {"front": [STANDING, RUN_TOPIC, f"✔ {EARLIER_TOPIC}"],
+    topics = {RUN_CHANNEL: [GUIDE, RUN_TOPIC, f"✔ {EARLIER_TOPIC}"],
               "pj-ghtrends": ["workplan-trend8", "✔ workplan-trend7"]}
     histories.update(kwargs.pop("histories", {}))
     topics.update(kwargs.pop("topics", {}))
@@ -130,50 +135,48 @@ def routine_realm(**kwargs):
 
 
 def test_a_routine_run_closes_that_run_and_its_work_only():
-    found = discover({}, ("front", RUN_TOPIC), realm=routine_realm(), plane=board())
+    found = discover({}, (RUN_CHANNEL, RUN_TOPIC), realm=routine_realm(), plane=board())
     assert found.scope.kind == ROUTINE_RUN and found.scope.closable
-    assert found.scope.routine == {"name": ROUTINE, "stamp": STAMP, "standing_topic": STANDING,
-                                   "previous_run": EARLIER_TOPIC}
+    assert found.scope.routine == {"name": ROUTINE, "channel": RUN_CHANNEL, "run_topic": RUN_TOPIC,
+                                   "guide_topic": GUIDE}
     assert topic_keys(found) == [
-        ("front", RUN_TOPIC), ("pj-ghtrends", "workplan-trend8"),
+        (RUN_CHANNEL, RUN_TOPIC), ("pj-ghtrends", "workplan-trend8"),
         ("work-g-17", "workrun-task1-g-17"),
         ("agforge-agstudio1", "assetplan-robot"), ("agforge-agstudio1", "assetrun-robot"),
     ]
-    # The standing request and the previous run are named as context —
-    # untouched, and said so — never reached, never targets.
-    assert [(row["topic"], row["relation"]) for row in found.scope.context] == [
-        (STANDING, "standing request"), (EARLIER_TOPIC, "previous run")]
-    assert "earlier runs are not touched" in found.scope.description
-    assert all(row["topic"] not in {STANDING, EARLIER_TOPIC, "workplan-trend7"}
+    # The guide is named as context — untouched, and said so — never
+    # reached, never a target; the earlier run is simply not this run's.
+    assert [(row["topic"], row["relation"]) for row in found.scope.context] == [(GUIDE, "guide")]
+    assert "other runs are not touched" in found.scope.description
+    assert all(row["topic"] not in {GUIDE, EARLIER_TOPIC, "workplan-trend7"}
                for row in found.excluded)
     keys = {action.key for action in plan_actions(found)}
-    assert f"topic:front/{STANDING}" not in keys and f"topic:front/{EARLIER_TOPIC}" not in keys
-    assert f"topic:front/{RUN_TOPIC}" in keys and "topic:pj-ghtrends/workplan-trend7" not in keys
+    assert f"topic:{RUN_CHANNEL}/{GUIDE}" not in keys and f"topic:{RUN_CHANNEL}/{EARLIER_TOPIC}" not in keys
+    assert f"topic:{RUN_CHANNEL}/{RUN_TOPIC}" in keys and "topic:pj-ghtrends/workplan-trend7" not in keys
 
 
 def test_a_previous_run_reached_by_a_link_is_still_another_request():
     """Even when a note *does* name the earlier run — say Front served a
     late callback from it — it is another run, and its work is its own."""
     realm = routine_realm(histories={
-        ("front", RUN_TOPIC): [
-            post(200, fire_line(ROUTINE, STAMP, previous=EARLIER_TOPIC),
-                 sender_id=DEVELOPER, sender="Developer"),
+        (RUN_CHANNEL, RUN_TOPIC): [
+            post(200, OPENING),
             selfnote(201, "served", "pj-ghtrends/workplan-trend8 1"),
-            selfnote(203, "served", f"front/{EARLIER_TOPIC} 152"),
-            selfnote(204, "served", f"front/{STANDING} 100"),
+            selfnote(203, "served", f"{RUN_CHANNEL}/{EARLIER_TOPIC} 152"),
+            selfnote(204, "served", f"{RUN_CHANNEL}/{GUIDE} 100"),
         ],
     })
-    found = discover({}, ("front", RUN_TOPIC), realm=realm, plane=board())
+    found = discover({}, (RUN_CHANNEL, RUN_TOPIC), realm=realm, plane=board())
     assert excluded_of(found, EARLIER_TOPIC)["reason"] == (
         f"another request: a run of routine {ROUTINE}")
-    assert excluded_of(found, STANDING)["reason"] == (
-        f"the standing request of routine {ROUTINE}: a ✔ there means something else")
+    assert excluded_of(found, GUIDE)["reason"] == (
+        f"the guide of routine {ROUTINE}: a ✔ there means something else")
     assert "workplan-trend7" not in {node.topic for node in found.topics}
     assert {work.label for work in found.works} == {"G-17", "G-18", "F2-28"}
 
 
-def test_the_standing_request_is_never_a_root():
-    found = discover({}, ("front", STANDING), realm=routine_realm(), plane=board())
+def test_the_guide_is_never_a_root():
+    found = discover({}, (RUN_CHANNEL, GUIDE), realm=routine_realm(), plane=board())
     assert found.scope.closable is False and "retires the routine" in found.scope.reason
     assert found.works == [] and found.channels == []
     [action] = plan_actions(found)
@@ -307,7 +310,7 @@ def test_another_request_of_every_kind_is_outside_the_closure():
     note of its own naming us, is excluded as *another request*."""
     others = {
         ("front", FRONT_TOPIC): "a Front conversation",
-        ("front", RUN_TOPIC): f"a run of routine {ROUTINE}",
+        (RUN_CHANNEL, RUN_TOPIC): f"a run of routine {ROUTINE}",
         ("pj-ghtrends", "workplan-other"): "an Autolab request",
         ("agforge-agstudio1", "assetplan-other"): "a Forge request",
     }
@@ -320,6 +323,7 @@ def test_another_request_of_every_kind_is_outside_the_closure():
     realm = chain_realm(histories=histories, topics={
         "pj-ghtrends": ["workplan-trend8", "workplan-other"],
         "agforge-agstudio1": ["✔ assetplan-robot", "✔ assetrun-robot", "assetplan-other"],
+        RUN_CHANNEL: [RUN_TOPIC],
     })
     found = discover({}, ROOT, realm=realm, plane=board())
     assert topic_keys(found) == [ROOT]
@@ -330,7 +334,7 @@ def test_another_request_of_every_kind_is_outside_the_closure():
 def test_nested_delegation_is_owned_to_the_bottom_from_a_routine_run():
     """run → workplan → workrun → assetplan → assetrun: every level carries a
     root note naming the level above, and the walk owns all of it."""
-    found = discover({}, ("front", RUN_TOPIC), realm=routine_realm(), plane=board())
+    found = discover({}, (RUN_CHANNEL, RUN_TOPIC), realm=routine_realm(), plane=board())
     depths = {node.topic: node.depth for node in found.topics}
     assert depths == {RUN_TOPIC: 0, "workplan-trend8": 1, "workrun-task1-g-17": 2,
                       "assetplan-robot": 3, "assetrun-robot": 4}
@@ -484,8 +488,7 @@ def test_an_execution_topic_over_http_is_a_plan_with_nothing_to_approve(relay):
 # --- a task re-run for a later routine run (the live shape) --------------------------
 
 
-LATER = "2026-09-09T02:00Z"
-LATER_TOPIC = run_topic(ROUTINE, LATER)
+LATER_TOPIC = "routinerun-20260909-0200"
 
 
 def rerun_realm():
@@ -495,9 +498,8 @@ def rerun_realm():
     served note names the re-run topic — exactly what the realm held on
     2026-09-08 for `work-s4-5/workrun-rerun-task1-s4-5`."""
     return routine_realm(histories={
-        ("front", LATER_TOPIC): [
-            post(300, fire_line(ROUTINE, LATER, previous=RUN_TOPIC),
-                 sender_id=DEVELOPER, sender="Developer"),
+        (RUN_CHANNEL, LATER_TOPIC): [
+            post(300, OPENING),
             selfnote(301, "served", "work-g-17/workrun-rerun-task1-g-17 1"),
             post(302, "Re-ran the task."),
         ],
@@ -505,17 +507,17 @@ def rerun_realm():
             selfnote(80, "rootchat", "pj-ghtrends/workplan-trend8",
                      sender_id=AUTOLAB_BOT, sender="autolab-agstudio1"),
             selfnote(81, "work", TASK, sender_id=AUTOLAB_BOT, sender="autolab-agstudio1"),
-            selfnote(82, "rootchat", f"front/{LATER_TOPIC}"),
+            selfnote(82, "rootchat", f"{RUN_CHANNEL}/{LATER_TOPIC}"),
             post(83, "re-run done", sender_id=AUTOLAB_BOT, sender="autolab-agstudio1"),
         ],
-    }, topics={"front": [STANDING, RUN_TOPIC, LATER_TOPIC, f"✔ {EARLIER_TOPIC}"],
+    }, topics={RUN_CHANNEL: [GUIDE, RUN_TOPIC, LATER_TOPIC, f"✔ {EARLIER_TOPIC}"],
                "work-g-17": ["✔ workrun-task1-g-17", "workrun-rerun-task1-g-17"]})
 
 
 def test_a_task_rerun_for_a_later_run_belongs_to_its_plan_s_run():
     """From the run that planned it: the re-run is owned by autolab's note,
     and Front's later visit is shown as a visitor, not obeyed."""
-    found = discover({}, ("front", RUN_TOPIC), realm=rerun_realm(), plane=board())
+    found = discover({}, (RUN_CHANNEL, RUN_TOPIC), realm=rerun_realm(), plane=board())
     rerun = next(node for node in found.topics if node.topic == "workrun-rerun-task1-g-17")
     assert [v["topic"] for v in rerun.visitors] == [LATER_TOPIC]
     assert rerun.visitors[0]["message_id"] == 82
@@ -525,13 +527,13 @@ def test_a_task_rerun_for_a_later_run_belongs_to_its_plan_s_run():
 
 
 def test_the_later_run_does_not_own_the_task_it_had_re_run():
-    found = discover({}, ("front", LATER_TOPIC), realm=rerun_realm(), plane=board())
-    assert topic_keys(found) == [("front", LATER_TOPIC)]
+    found = discover({}, (RUN_CHANNEL, LATER_TOPIC), realm=rerun_realm(), plane=board())
+    assert topic_keys(found) == [(RUN_CHANNEL, LATER_TOPIC)]
     row = excluded_of(found, "workrun-rerun-task1-g-17")
     assert row["reason"] == "anchored to another request (pj-ghtrends/workplan-trend8)"
     assert [e["message_id"] for e in row["evidence"]] == [80]
     assert found.works == [] and found.channels == []
-    assert [c["topic"] for c in found.scope.context if c["relation"] == "previous run"] == [RUN_TOPIC]
+    assert [c["topic"] for c in found.scope.context] == [GUIDE]
 
 
 def test_the_plan_owns_its_re_run_task_and_names_the_visit():
@@ -548,19 +550,19 @@ def test_a_re_run_topic_names_its_plan_first_and_the_visit_second():
     assert [(p["topic"], p["structural"]) for p in found.scope.parents] == [
         ("workplan-trend8", True), (LATER_TOPIC, False)]
     assert found.scope.reason.startswith("this is an Autolab task topic of #pj-ghtrends › workplan-trend8;")
-    assert f"also served on behalf of #front › {LATER_TOPIC}" in found.scope.reason
+    assert f"also served on behalf of #{RUN_CHANNEL} › {LATER_TOPIC}" in found.scope.reason
 
 
 def test_a_plan_the_walk_never_named_is_read_upward_and_joins_by_its_own_note():
     """Front served a task but never the plan: the plan is reached only by
     reading the task's home, and it joins because *its* note names the run."""
     realm = routine_realm(histories={
-        ("front", RUN_TOPIC): [
-            post(200, fire_line(ROUTINE, STAMP), sender_id=DEVELOPER, sender="Developer"),
+        (RUN_CHANNEL, RUN_TOPIC): [
+            post(200, OPENING),
             selfnote(201, "served", "work-g-17/workrun-task1-g-17 1"),
         ],
     })
-    found = discover({}, ("front", RUN_TOPIC), realm=realm, plane=board())
+    found = discover({}, (RUN_CHANNEL, RUN_TOPIC), realm=realm, plane=board())
     plan = next(node for node in found.topics if node.topic == "workplan-trend8")
     assert plan.depth == 1 and [l["via"] for l in plan.links] == ["rootchat"]
     assert ("work-g-17", "workrun-task1-g-17") in topic_keys(found)

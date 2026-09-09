@@ -6,14 +6,14 @@
 // it would come back as "a thin wrapper over the Front agent's own Zulip
 // conversation in a later phase"; this is that phase.
 //
-// What it shows is one run's topic, `#front` › `front-routine-<name>-<stamp>`
-// (operation_room p7: a session is a topic), exactly as the realm holds it:
-// real posts only, nobody's summary, no local history of its own. What it
-// sends is one post into that topic **as the Developer**, which serves Front
-// and starts a paid run — that is not a side effect to be hidden, it is what
-// a chat with an agent is, so the panel says so on the button. A ✔'d run is
-// shown but not written into: Front's sweep skips resolved topics, so a post
-// there would buy nothing.
+// What it shows is one run's topic, `#routine-<name>` › `routinerun-<id>`
+// (refine_routine p1: a run is a topic Front owns), exactly as the realm holds
+// it: Front's own record — the opening post and its entries — real posts
+// only, no local history of its own. What it sends is one post into that
+// topic **as the Developer**, which serves Front there and starts a paid run
+// — that is not a side effect to be hidden, it is what a word into an
+// agent's run is, so the panel says so on the button. A ✔'d run is shown but
+// not written into: Front's sweep skips resolved topics.
 //
 // Selfnotes never arrive here: the relay drops them before the history exists,
 // and refuses one typed by hand.
@@ -100,7 +100,6 @@ const PANEL_CSS = `
 // Front's own ack, spelled here because the panel styles it differently. It is
 // `agag.agent.SWEEP_ACK`; the relay says the same thing about it in its states.
 const ACK = 'Message received. Please wait for the reply.'
-const FIRE = /^\s*Routine\s+`?[^`\s,]+`?,\s*run of\b/
 // The realm side needs no timer — the relay holds an event queue — but the
 // browser still has to ask. Five seconds against a loopback relay that answers
 // from memory, and no Zulip call is made by any of it.
@@ -133,13 +132,13 @@ export function initChatPanel(options: { mount?: HTMLElement; managed?: boolean;
   panel.id = 'chat-panel'
   panel.innerHTML = `
     <header>
-      <span class="cp-kind">routine chat</span>
+      <span class="cp-kind">run record</span>
       <span class="cp-topic"></span>
       <span class="cp-note"></span>
     </header>
     <div id="chat-messages"></div>
     <form id="chat-form">
-      <textarea id="chat-input" rows="3" placeholder="Say something to Front in this topic…"></textarea>
+      <textarea id="chat-input" rows="3" placeholder="Say something to Front in this run…"></textarea>
       <div id="chat-actions">
         <span id="chat-count"></span>
         <button id="chat-send" type="submit">Send · buys a run</button>
@@ -158,8 +157,9 @@ export function initChatPanel(options: { mount?: HTMLElement; managed?: boolean;
 
   let selected: string | undefined
   // The run topic the panel shows and writes into; null while the routine
-  // has no run to show.
+  // has no run to show. The channel is the routine's own.
   let sessionTopic: string | null = null
+  let sessionChannel: string | null = null
   let sessionResolved = false
   let status: ChatStatus | undefined
   let timer: number | undefined
@@ -189,9 +189,9 @@ export function initChatPanel(options: { mount?: HTMLElement; managed?: boolean;
     messagesEl.append(node)
   }
 
-  function classOf(post: RoutinePost & { content: string }): string {
-    if (FIRE.test(post.content)) return 'fire'
+  function classOf(post: RoutinePost & { content: string }, opening: number | null): string {
     if (post.content.trim() === ACK) return 'ack'
+    if (opening !== null && post.message_id === opening) return 'fire'
     return post.by === 'Developer' ? 'developer' : 'agent'
   }
 
@@ -222,9 +222,9 @@ export function initChatPanel(options: { mount?: HTMLElement; managed?: boolean;
       return
     }
     for (const post of posts) {
-      const kind = classOf(post)
-      const who = kind === 'ack' ? undefined : `${post.by} · ${ago(detail.generated_at - post.at)} ago`
-      bubble(kind, who, kind === 'ack' ? 'ack — Front received it' : post.content).dataset.messageId = String(post.message_id)
+      const kind = classOf(post, session.opened?.message_id ?? null)
+      const who = kind === 'ack' ? undefined : kind === 'fire' ? `opening post · ${post.by} · ${ago(detail.generated_at - post.at)} ago` : `${post.by} · ${ago(detail.generated_at - post.at)} ago`
+      bubble(kind, who, kind === 'ack' ? 'ack — a serving is under way' : post.content).dataset.messageId = String(post.message_id)
     }
     if (atBottom) messagesEl.scrollTop = messagesEl.scrollHeight
   }
@@ -232,16 +232,11 @@ export function initChatPanel(options: { mount?: HTMLElement; managed?: boolean;
   function renderStatus(detail: RoutineDetail, session: RoutineSession | undefined) {
     status = detail.chat
     const live = detail.health.state === 'live'
-    const answer = session?.answer ?? detail.routine.answer
     const parts = [
       live ? `realm live · observed ${at(detail.generated_at)}` : `Unknown — ${detail.health.reason}; last known history`,
-      !live ? 'Current answer unknown' : !session ? 'no run selected' : answer.state === 'answered'
-        ? `fire answered in ${ago(answer.answered_after ?? null)}`
-        : answer.state === 'no fire'
-          ? 'opened by hand, no fire line'
-          : `fire ${ago(answer.age_seconds)} ago, ${answer.state}`,
+      !live ? 'Current state unknown' : !session ? 'no run selected' : `${session.run.state} — ${session.run.evidence}`,
     ]
-    if (session?.resolution.state === 'resolved') parts.push('✔ resolved — Front does not sweep a resolved topic; un-resolve it in Zulip or start a new session to talk')
+    if (session?.resolution.state === 'resolved') parts.push('✔ resolved — this run is finished; ask Front for another run to continue')
     if (!status?.configured) parts.push(status?.reason ?? 'chat is read-only')
     noteEl.className = `cp-note${live ? (status?.configured && session && !sessionResolved ? ' live' : ' warn') : ' warn'}`
     noteEl.textContent = parts.join(' · ')
@@ -268,8 +263,9 @@ export function initChatPanel(options: { mount?: HTMLElement; managed?: boolean;
 
   function show(detail: RoutineDetail, session: RoutineSession | undefined, reason?: string) {
     sessionTopic = session?.topic ?? null
+    sessionChannel = session?.channel ?? null
     sessionResolved = session?.resolution.state === 'resolved'
-    topicEl.textContent = session ? `#front › ${session.topic}` : selected ? `${selected} · no run` : ''
+    topicEl.textContent = session ? `#${session.channel} › ${session.topic}` : selected ? `${selected} · no run` : ''
     renderChat(detail, session, reason)
     renderStatus(detail, session)
   }
@@ -285,6 +281,7 @@ export function initChatPanel(options: { mount?: HTMLElement; managed?: boolean;
     started = true
     selected = name
     sessionTopic = null
+    sessionChannel = null
     sessionResolved = false
     lastIds = ''
     status = undefined
@@ -311,14 +308,14 @@ export function initChatPanel(options: { mount?: HTMLElement; managed?: boolean;
   }
 
   async function send(text: string) {
-    if (!selected || sending || sessionTopic === null || sessionResolved) return
-    const destination = sessionTopic
+    if (!selected || sending || sessionTopic === null || sessionChannel === null || sessionResolved) return
+    const destination = sessionTopic, channel = sessionChannel
     sending = true
     sendButton.disabled = true
     input.disabled = true
-    const pending = bubble('pending', undefined, 'posting to #front…')
+    const pending = bubble('pending', undefined, `posting to #${channel}…`)
     messagesEl.scrollTop = messagesEl.scrollHeight
-    const found = await sendChat(destination, text)
+    const found = await sendChat(channel, destination, text)
     pending.remove()
     sending = false
     if (sessionTopic !== destination) { await refresh(); return }

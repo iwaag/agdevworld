@@ -470,7 +470,10 @@ class Cost:
         for name, sessions in (routine_sessions or {}).items():
             listed = []
             for session in sessions:
-                topics = [("front", session.get("topic"))] if session.get("topic") else []
+                # A session names its own channel (`routines.session_of`);
+                # before `refine_routine` p1 every run lived in `#front`.
+                topics = ([(session.get("channel") or "front", session.get("topic"))]
+                          if session.get("topic") else [])
                 for node in session.get("nodes") or []:
                     if node.get("channel") and node.get("topic"):
                         topics.append((node["channel"], node["topic"]))
@@ -480,10 +483,10 @@ class Cost:
                 by_instance: dict[tuple[str, str, str], list[Row]] = defaultdict(list)
                 for row in matched:
                     by_instance[(row.instance, row.role, row.harness or "unknown")].append(row)
-                fire = session.get("fire") or {}
+                opened = session.get("opened") or {}
                 listed.append({
-                    "topic": session.get("topic"), "stamp": session.get("stamp"),
-                    "fire_at": fire.get("at"), "resolution": (session.get("resolution") or {}).get("state"),
+                    "channel": session.get("channel") or "front", "topic": session.get("topic"),
+                    "opened_at": opened.get("at"), "resolution": (session.get("resolution") or {}).get("state"),
                     "conversations": [{"channel": c, "topic": t, "runs": len(by_topic.get((c, t), []))}
                                       for c, t in topics],
                     "attribution": {

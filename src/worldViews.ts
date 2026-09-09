@@ -50,8 +50,8 @@ setAskHandler((selection) => {
     ? `\n\nThe last run touched: ${owed.map((node) => `${node.channel}/${node.topic}`).join(', ')}.`
     : ''
   chat.compose(
-    `About the \`${routine.name}\` routine: its last fire was ` +
-      `${routine.answer.state === 'answered' ? 'answered' : routine.answer.state}.${where}`,
+    `About the \`${routine.name}\` routine: its latest run is ` +
+      `${routine.latest ? `${routine.latest.run.state} (${routine.latest.topic})` : 'not there — no run yet'}.${where}`,
   )
 })
 

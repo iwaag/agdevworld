@@ -29,6 +29,12 @@ from agag.zulip import RESOLVED_TOPIC_PREFIX, ZulipClient
 
 #: The shared channel every agent posts its own introduction to.
 AGENTS_CHANNEL = "agents"
+#: Front's entrance channel and the Front Desk's topic prefix, here so the
+#: modules that write there (`chat`) and the one that reads it (`frontdesk`)
+#: share them without importing each other.
+FRONT_CHANNEL = "front"
+DESK_PREFIX = "front-desk-"
+
 #: The append-only topic prefix that introduction lives under.
 INTRO_PREFIX = "intro-"
 #: A project's own channel, and the channels its work is carried out in.

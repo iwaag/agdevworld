@@ -67,10 +67,10 @@ from typing import Any, Callable, Iterable, Protocol
 from agag.selfnote import Conversation, parse_note, parse_rootchat, parse_served
 from agag.zulip import RESOLVED_TOPIC_PREFIX
 
-from .frontdesk import DESK_PREFIX, desk_id
+from .frontdesk import DESK_PREFIX, FRONT_CHANNEL, desk_id
 from .room import AGENTS_CHANNEL, INTRO_PREFIX, bare_topic
 from .routines import (
-    ROUTINE_CHANNEL, STANDING_PREFIX, children_of, parse_run_topic, previous_of,
+    GUIDE_TOPIC, children_of, is_guide_topic, is_routine_channel, is_run_topic, routine_name,
 )
 
 #: One conversation, keyed the way the ops engine keys them: bare topic name.
@@ -106,11 +106,11 @@ FRONT_PREFIX = "front-"
 DESK, FRONT, ROUTINE_RUN, WORKPLAN, ASSETPLAN = (
     "desk", "front", "routine-run", "workplan", "assetplan")
 WORKRUN, ASSETRUN = "workrun", "assetrun"
-ROUTINE_STANDING, INTRO = "routine-standing", "intro"
+ROUTINE_GUIDE, INTRO = "routine-guide", "intro"
 TOPIC = "topic"
 REQUEST_KINDS = frozenset({DESK, FRONT, ROUTINE_RUN, WORKPLAN, ASSETPLAN})
 EXECUTION_KINDS = frozenset({WORKRUN, ASSETRUN})
-RETIRING_KINDS = frozenset({ROUTINE_STANDING, INTRO})
+RETIRING_KINDS = frozenset({ROUTINE_GUIDE, INTRO})
 #: How much of an unheld topic one read fetches. A `workrun-` topic is a
 #: conversation, not a log; 400 is far past any this realm has produced, and
 #: hitting it is reported as a gap rather than assumed to be the whole.
@@ -143,15 +143,17 @@ def classify(channel: str, topic: str) -> str:
     decide *whose* it is — that is the link notes' job (`_ownership`).
     """
     topic = bare_topic(topic)
-    if channel == ROUTINE_CHANNEL:
+    if channel == FRONT_CHANNEL:
         if topic.startswith(DESK_PREFIX):
             return DESK
-        if parse_run_topic(topic) is not None:
-            return ROUTINE_RUN
-        if topic.startswith(STANDING_PREFIX):
-            return ROUTINE_STANDING
         if topic.startswith(FRONT_PREFIX):
             return FRONT
+        return TOPIC
+    if is_routine_channel(channel):
+        if is_run_topic(topic):
+            return ROUTINE_RUN
+        if is_guide_topic(topic):
+            return ROUTINE_GUIDE
         return TOPIC
     if channel == AGENTS_CHANNEL and topic.startswith(INTRO_PREFIX):
         return INTRO
@@ -166,13 +168,13 @@ def classify(channel: str, topic: str) -> str:
     return TOPIC
 
 
-def describe_kind(kind: str, topic: str = "") -> str:
+def describe_kind(kind: str, topic: str = "", channel: str = "") -> str:
     """One noun phrase per kind, for a reason a human reads."""
-    if kind == ROUTINE_RUN or kind == ROUTINE_STANDING:
-        parsed = parse_run_topic(bare_topic(topic))
-        name = parsed[0] if parsed else bare_topic(topic)[len(STANDING_PREFIX):]
+    if kind == ROUTINE_RUN or kind == ROUTINE_GUIDE:
+        name = routine_name(channel) if channel else None
+        name = name or "?"
         return (f"a run of routine {name}" if kind == ROUTINE_RUN
-                else f"the standing request of routine {name}")
+                else f"the guide of routine {name}")
     return {
         DESK: "a Front Desk conversation", FRONT: "a Front conversation",
         WORKPLAN: "an Autolab request", ASSETPLAN: "a Forge request",
@@ -187,9 +189,9 @@ class Scope:
 
     `closable` is whether this root may be completed at all; when it is not,
     `reason` says why and `parents` names where to go instead. `context` is
-    what the records *mention* without owning — a routine run's previous run,
-    its standing request — listed so the preview can say they are untouched
-    rather than leaving the reader to wonder.
+    what the records *mention* without owning — a routine run's guide and
+    channel — listed so the preview can say they are untouched rather than
+    leaving the reader to wonder.
     """
 
     root: Key
@@ -924,10 +926,10 @@ def _scope(topics: dict, root: Key, node: Related, reader: Reader) -> Scope:
     parents.sort(key=lambda p: (not p["structural"], p["message_id"]))
     label = f"#{root[0]} › {root[1]}"
     if kind in RETIRING_KINDS:
-        what = ("a ✔ on a standing request retires the routine; complete one of its runs instead"
-                if kind == ROUTINE_STANDING else
+        what = ("a ✔ on a guide retires the routine; complete one of its runs instead"
+                if kind == ROUTINE_GUIDE else
                 "a ✔ on an introduction retires the agent; this is not a request")
-        return Scope(root, kind, False, what, f"{label} is {describe_kind(kind, root[1])}",
+        return Scope(root, kind, False, what, f"{label} is {describe_kind(kind, root[1], root[0])}",
                      parents=parents)
     if kind in EXECUTION_KINDS or (kind not in REQUEST_KINDS and parents):
         structural = [p for p in parents if p["structural"]] or parents
@@ -935,32 +937,22 @@ def _scope(topics: dict, root: Key, node: Related, reader: Reader) -> Scope:
         served = ", ".join(f"#{p['channel']} › {p['topic']}" for p in parents if p not in structural)
         return Scope(
             root, kind, False,
-            (f"this is {describe_kind(kind, root[1])} of {named}; select that request "
+            (f"this is {describe_kind(kind, root[1], root[0])} of {named}; select that request "
              "to complete it and its work together"
              + (f" (it was also served on behalf of {served})" if served else "") if parents else
-             f"this is {describe_kind(kind, root[1])} and its records name no parent request; "
+             f"this is {describe_kind(kind, root[1], root[0])} and its records name no parent request; "
              "nothing here says what it belongs to"),
             f"{label} is an execution topic, not a request", parents=parents)
     context: list[dict] = []
     routine: dict | None = None
     if kind == ROUTINE_RUN:
-        name, stamp = parse_run_topic(root[1])  # type: ignore[misc]
-        standing = f"{STANDING_PREFIX}{name}"
-        context.append({"channel": ROUTINE_CHANNEL, "topic": standing, "relation": "standing request",
-                        "reason": "the routine's standing request and schedule stay as they are; "
-                                  "a ✔ there would retire the routine"})
-        previous = None
-        for message in _root_messages(topics, root, reader):
-            previous = previous_of(str(message.get("content") or "")) or previous
-        if previous:
-            context.append({"channel": ROUTINE_CHANNEL, "topic": bare_topic(previous),
-                            "relation": "previous run",
-                            "reason": "named by this run's fire line as context, not owned by it; "
-                                      "earlier runs are completed on their own"})
-        routine = {"name": name, "stamp": stamp, "standing_topic": standing,
-                   "previous_run": bare_topic(previous) if previous else None}
-        description = (f"run {stamp} of routine {name} and the work it opened; "
-                       f"the standing request, the schedule and earlier runs are not touched")
+        name = routine_name(root[0]) or "?"
+        context.append({"channel": root[0], "topic": GUIDE_TOPIC, "relation": "guide",
+                        "reason": "the routine's guide and its channel stay as they are; "
+                                  "a ✔ on the guide would retire the routine"})
+        routine = {"name": name, "channel": root[0], "run_topic": root[1], "guide_topic": GUIDE_TOPIC}
+        description = (f"run {root[1]} of routine {name} and the work it opened; "
+                       f"the guide, the channel and the routine's other runs are not touched")
     elif kind == DESK:
         description = f"Front Desk conversation {desk_id(root[1])} and the work it opened"
     elif kind == FRONT:
@@ -1018,7 +1010,7 @@ def _ownership(
         kind = classify(node.channel, node.topic)
         if kind in RETIRING_KINDS:
             excluded[key] = _exclude(
-                node, f"{describe_kind(kind, node.topic)}: a ✔ there means something else",
+                node, f"{describe_kind(kind, node.topic, node.channel)}: a ✔ there means something else",
                 node.links)
             return "excluded"
         if node.homes:
@@ -1048,7 +1040,7 @@ def _ownership(
                 return "owned"
             return None
         if kind in REQUEST_KINDS:
-            excluded[key] = _exclude(node, f"another request: {describe_kind(kind, node.topic)}",
+            excluded[key] = _exclude(node, f"another request: {describe_kind(kind, node.topic, node.channel)}",
                                      node.links)
             return "excluded"
         froms = [(l["from"]["channel"], l["from"]["topic"]) for l in node.links]

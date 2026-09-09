@@ -61,15 +61,16 @@ from agag.agent import is_ack
 from agag.zulip import RESOLVED_TOPIC_PREFIX, ZulipClient
 
 from .chat import Chat
-from .room import bare_topic
-from .routines import ROUTINE_CHANNEL
+from .room import DESK_PREFIX, FRONT_CHANNEL, bare_topic
 
 if TYPE_CHECKING:  # pragma: no cover - typing only; ops imports this module
     from .ops import Ops, Topic
 
 SCHEMA = "ag.frontdesk.v1"
-#: `#front` › `front-desk-<id>`: inside Front's `front-` sweep by design.
-DESK_PREFIX = "front-desk-"
+#: Front's entrance channel. Every Front conversation — the desk's, an
+#: ordinary `front-*` one — lives here. (Until `refine_routine` p1 the routine
+#: topics did too, and this was `routines.FRONT_CHANNEL`.)
+FRONT_CHANNEL = "front"
 #: How many Front Desk conversations the sweep reads whole and under ✔. The
 #: rest are read from Zulip on request; the event queue still carries every
 #: new post of every open one.
@@ -158,7 +159,7 @@ def split_dialogue(content: str) -> tuple[str, dict | None, str | None]:
 
 
 def is_desk_topic(channel: str, topic: str) -> bool:
-    return channel == ROUTINE_CHANNEL and bare_topic(topic).startswith(DESK_PREFIX)
+    return channel == FRONT_CHANNEL and bare_topic(topic).startswith(DESK_PREFIX)
 
 
 def desk_id(topic: str) -> str:
@@ -273,10 +274,10 @@ class FrontDesk:
             return None
         if self._front_stream is None:
             try:
-                self._front_stream = client.stream_id(ROUTINE_CHANNEL)
+                self._front_stream = client.stream_id(FRONT_CHANNEL)
             except Exception:  # noqa: BLE001
                 return None
-        return (f"{client.base_url}/#narrow/channel/{self._front_stream}-{ROUTINE_CHANNEL}"
+        return (f"{client.base_url}/#narrow/channel/{self._front_stream}-{FRONT_CHANNEL}"
                 f"/topic/{quote(live_topic, safe='')}")
 
     # -- reads --------------------------------------------------------------
@@ -349,7 +350,7 @@ class FrontDesk:
                                  "evidence": f"{health['reason']}; last known: {row['status']['evidence']}"}
         return {
             "schema": SCHEMA, "generated_at": now, "health": health,
-            "chat": self.chat.status(), "channel": ROUTINE_CHANNEL, "prefix": DESK_PREFIX,
+            "chat": self.chat.status(), "channel": FRONT_CHANNEL, "prefix": DESK_PREFIX,
             "conversations": rows,
         }
 
@@ -366,11 +367,11 @@ class FrontDesk:
             return None
         from .ops import Topic  # local: ops imports this module
         topic = desk_topic(ident)
-        found = Topic(channel=ROUTINE_CHANNEL, topic=topic, live_topic=topic, keep_history=True)
+        found = Topic(channel=FRONT_CHANNEL, topic=topic, live_topic=topic, keep_history=True)
         try:
-            history = client.topic_history(ROUTINE_CHANNEL, topic, num_before=READ_DEPTH)
+            history = client.topic_history(FRONT_CHANNEL, topic, num_before=READ_DEPTH)
             resolved = client.topic_history(
-                ROUTINE_CHANNEL, f"{RESOLVED_TOPIC_PREFIX}{topic}", num_before=READ_DEPTH,
+                FRONT_CHANNEL, f"{RESOLVED_TOPIC_PREFIX}{topic}", num_before=READ_DEPTH,
             )
         except Exception:  # noqa: BLE001 - unknown is the answer, never an empty history
             return None
@@ -396,7 +397,7 @@ class FrontDesk:
         health = self._health(now)
         topics, names = self._held()
         front_id, developer_id = self.front_id(), self.developer_id()
-        held = topics.get((ROUTINE_CHANNEL, desk_topic(ident)))
+        held = topics.get((FRONT_CHANNEL, desk_topic(ident)))
         known = "held"
         bounded = False
         if held is not None and held.keep_history:
@@ -468,16 +469,16 @@ class FrontDesk:
         if live is not None and live.startswith(RESOLVED_TOPIC_PREFIX):
             resumed = self._unresolve(client, ident, live)
         try:
-            message_id = client.send_to_channel(ROUTINE_CHANNEL, topic, body)
+            message_id = client.send_to_channel(FRONT_CHANNEL, topic, body)
         except Exception as error:  # noqa: BLE001 - reported, never retried
             result = {
                 "sent": False, "uncertain": True,
                 "error": f"{type(error).__name__}: {error}",
-                "note": f"the post may have landed; check #{ROUTINE_CHANNEL} › {topic} before sending again",
+                "note": f"the post may have landed; check #{FRONT_CHANNEL} › {topic} before sending again",
             }
         else:
             result = {
-                "sent": True, "uncertain": False, "channel": ROUTINE_CHANNEL, "topic": topic,
+                "sent": True, "uncertain": False, "channel": FRONT_CHANNEL, "topic": topic,
                 "message_id": message_id, "resumed": resumed,
                 "note": "the post is live in the realm; the event queue will carry it back",
             }
@@ -490,14 +491,14 @@ class FrontDesk:
 
     def _live_name(self, ident: str) -> str | None:
         topics, names = self._held()
-        held = topics.get((ROUTINE_CHANNEL, desk_topic(ident)))
+        held = topics.get((FRONT_CHANNEL, desk_topic(ident)))
         if held is not None:
             return held.live_topic
         return names.get(desk_topic(ident))
 
     def _last_id(self, ident: str) -> int | None:
         topics, _ = self._held()
-        held = topics.get((ROUTINE_CHANNEL, desk_topic(ident)))
+        held = topics.get((FRONT_CHANNEL, desk_topic(ident)))
         if held is not None and held.last is not None:
             return held.last.id
         client = self.reader()
@@ -505,7 +506,7 @@ class FrontDesk:
             return None
         try:
             found = client.topic_history(
-                ROUTINE_CHANNEL, f"{RESOLVED_TOPIC_PREFIX}{desk_topic(ident)}", num_before=1,
+                FRONT_CHANNEL, f"{RESOLVED_TOPIC_PREFIX}{desk_topic(ident)}", num_before=1,
             )
         except Exception:  # noqa: BLE001
             return None

@@ -34,12 +34,6 @@ ENV_VARIABLE = "AGENTROOM_ZULIP_ENV"
 #: 183 calls against the same realm quota the agents' listeners spend, so the
 #: observer holds an identity of its own or does not run (plan constraint 2).
 OPS_ENV_VARIABLE = "OPSROOM_ZULIP_ENV"
-#: The routine dispatcher's `schedule.json`, read as a **local file**. The
-#: routine GUI on `:8093` serves the same clone over HTTP but answers no CORS
-#: header, so a browser cannot read it and this relay is the only path there
-#: is. A path, in the environment, for the same reason the credentials are
-#: (`devpolicy/styles.md`): it is an absolute local path.
-SCHEDULE_VARIABLE = "AGENTROOM_SCHEDULE_JSON"
 #: The chat's own credential (the Developer's). Deliberately a third variable
 #: with no fallback in either direction: the observer that reads the realm
 #: never posts, and a relay without this one is read-only for chat and says so.
@@ -90,16 +84,7 @@ def main(argv: list[str] | None = None) -> int:
         if not ops_path.is_file():
             print(f"{OPS_ENV_VARIABLE}={ops_path} is not a file", file=sys.stderr)
             return 2
-        schedule_env = os.environ.get(SCHEDULE_VARIABLE, "")
-        schedule_path = Path(schedule_env).expanduser() if schedule_env else None
-        # Not fatal when it is missing: a routine board without the schedule
-        # still has the realm's half, and the payload says which half is gone.
-        # A relay that refuses to start over a file the dispatcher rewrites
-        # several times a fire would be the more fragile arrangement.
-        ops = Ops(
-            env_path=ops_path, stalled_seconds=stalled, schedule_path=schedule_path,
-            agent_roots=roots,
-        )
+        ops = Ops(env_path=ops_path, stalled_seconds=stalled, agent_roots=roots)
 
     chat_env = os.environ.get(CHAT_VARIABLE, "")
     chat_path = Path(chat_env).expanduser() if chat_env else None
@@ -134,12 +119,12 @@ def main(argv: list[str] | None = None) -> int:
         for summary in found["instances"]:
             print(f"  {summary['instance']:<24} roster={summary['roster']:<7} {summary['counts']}")
         routines = ops.routines()
-        schedule = routines["schedule"]
-        print(f"routines: {len(routines['routines'])} — schedule "
-              + ("ok" if schedule["ok"] else f"unreadable ({schedule['error']})"))
+        print(f"routines: {len(routines['routines'])}")
         for row in routines["routines"]:
-            print(f"  {row['name']:<12} {row['state']:<9} {row['answer']['state']:<11} "
-                  f"{row['posts']} posts")
+            latest = row["latest"]
+            print(f"  {row['name']:<16} {row['state']:<10} runs {row['runs']} "
+                  f"({row['open_runs']} open)"
+                  + (f" · latest {latest['topic']} {latest['run']['state']}" if latest else ""))
         print("chat: " + ("configured" if chat.configured else chat.status()["reason"]))
         if cost is None:
             print(f"cost: not configured ({ROOTS_VARIABLE} unset)")

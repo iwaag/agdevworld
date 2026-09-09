@@ -534,30 +534,30 @@ def test_a_resolve_elsewhere_retires_nobody():
 
 
 def test_the_routine_detail_filters_resolved_sessions_only_when_asked():
-    # operation_room p7: a session is a run topic, its ✔ is the resolution,
-    # the filter is applied before the three-session limit, and the payload
-    # names the actual latest run whichever way it was asked.
+    # refine_routine p1: a session is a `routinerun-` topic in the routine's
+    # channel, its ✔ is the resolution, the filter is applied before the
+    # three-session limit, and the payload names the actual latest run.
     ops = Ops(env_path=__file__)
     ops._live = True
-    fire = "Routine `papers`, run of {stamp}. The standing request is the latest post in #front › `routine-papers`. Do it."
-    posts = [(10, "2026-09-06T00:00Z", "✔ front-routine-papers-2026-09-06T00:00Z"),
-             (20, "2026-09-07T00:00Z", "front-routine-papers-2026-09-07T00:00Z")]
-    for ident, stamp, subject in posts:
-        ops._apply_message({"type": "stream", "display_recipient": "front", "subject": subject,
-                            "id": ident, "sender_id": 8, "sender_full_name": "Developer",
-                            "sender_realm_str": "agdev", "timestamp": ident, "content": fire.format(stamp=stamp)})
+    opening = "Routine run opened. Requested in #front › front-desk-1 (message 1): run papers. Guide: message 5."
+    posts = [(10, "✔ routinerun-20260906-0000"), (20, "routinerun-20260907-0000")]
+    for ident, subject in posts:
+        ops._apply_message({"type": "stream", "display_recipient": "routine-papers", "subject": subject,
+                            "id": ident, "sender_id": 15, "sender_full_name": "Front",
+                            "sender_realm_str": "agdev", "timestamp": ident, "content": opening})
     shown = ops.routine("papers")
     assert [session["id"] for session in shown["sessions"]] == [20, 10]
     assert [session["resolution"]["state"] for session in shown["sessions"]] == ["open", "resolved"]
-    assert shown["latest_topic"] == "front-routine-papers-2026-09-07T00:00Z"
+    assert [session["run"]["state"] for session in shown["sessions"]] == ["unstarted", "finished"]
+    assert shown["latest_topic"] == "routinerun-20260907-0000"
     assert shown["routine"]["latest_topic"] == shown["latest_topic"]
     assert shown["sessions"][0]["chat"][0]["message_id"] == 20
+    assert shown["sessions"][0]["channel"] == "routine-papers"
     hidden = ops.routine("papers", include_resolved=False)
     assert [session["id"] for session in hidden["sessions"]] == [20]
-    assert hidden["history"]["hidden_resolved"] == 1
-    assert hidden["latest_fire"]["message_id"] == 20 and hidden["filter"] == {"include_resolved": False}
+    assert hidden["history"]["hidden_resolved"] == 1 and hidden["filter"] == {"include_resolved": False}
     # A ✔ arriving on the event queue flips the run without a resync.
-    ops._stream_names = {1: "front"}
-    ops._apply_update({"stream_id": 1, "orig_subject": "front-routine-papers-2026-09-07T00:00Z",
-                       "subject": "✔ front-routine-papers-2026-09-07T00:00Z"})
+    ops._stream_names = {1: "routine-papers"}
+    ops._apply_update({"stream_id": 1, "orig_subject": "routinerun-20260907-0000",
+                       "subject": "✔ routinerun-20260907-0000"})
     assert ops.routine("papers")["sessions"][0]["resolution"]["state"] == "resolved"

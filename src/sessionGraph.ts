@@ -97,7 +97,7 @@ export function renderSessionGraph(
   viewport.setAttribute('aria-label', `Conversation flow, ${mode}, scrollable`)
   const surface = document.createElement('div')
   surface.className = `graph-surface ${mode}`
-  const root = { channel: detail.chat.channel ?? 'front', topic: session.topic }
+  const root = { channel: session.channel, topic: session.topic }
   const points = graphLayout(session, root, metrics)
   const width = Math.max(...points.map(p => p.x)) + metrics.width + metrics.pad + 2
   const height = Math.max(...points.map(p => p.y)) + metrics.height + metrics.pad
@@ -146,7 +146,7 @@ export function renderSessionGraph(
     card.setAttribute('aria-label', `${label}, ${node ? state : 'session origin'}`)
     const mark = node ? (marks[state] ?? '?') : '🔥'
     const provenanceText = detail.health.state !== 'live' ? `Unknown — ${detail.health.reason}; last known evidence available` :
-      node ? nodeEvidence(node) : session.fire ? `Fire #${session.fire.message_id} · ${at(session.fire.at)} · ${session.resolution.state}` : `${session.origin_evidence} · ${session.resolution.state}`
+      node ? nodeEvidence(node) : `${session.opened ? `Opened #${session.opened.message_id} · ${at(session.opened.at)}` : 'opening post not held'} · ${session.run.state} · ${session.resolution.state}`
     if (mode === 'compact') {
       const icon = document.createElement('span'); icon.className = 'gn-icon'; icon.textContent = mark
       icon.style.color = node ? colors[state] : '#f4bd57'
@@ -167,7 +167,7 @@ export function renderSessionGraph(
       for (const other of surface.querySelectorAll('.graph-node')) other.setAttribute('aria-pressed', 'false')
       card.setAttribute('aria-pressed', 'true')
       selected.textContent = `Selected · ${label} · ${node ? state : 'session origin'} · ${provenanceText}`
-      pre.textContent = JSON.stringify(node ?? { ...root, fire: session.fire, origin: session.origin, origin_evidence: session.origin_evidence, previous: session.previous, resolution: session.resolution, history: session.history }, null, 2)
+      pre.textContent = JSON.stringify(node ?? { ...root, opened: session.opened, origin: session.origin, run: session.run, finish: session.finish, resolution: session.resolution, history: session.history }, null, 2)
       summary.textContent = `Node evidence · ${label}`
       evidence.open = true
     }

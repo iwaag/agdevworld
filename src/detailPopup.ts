@@ -906,7 +906,7 @@ function renderOpsHealth(board: OpsBoard): void {
 
 // --- the routine board -----------------------------------------------------
 //
-// The tree is the point here: one fire, and every conversation it opened. Each
+// The tree is the point here: one run, and every conversation it opened. Each
 // node wears the state the ops relay gave it and says which selfnote named it,
 // because a link the reader cannot account for is indistinguishable from a
 // guess — and this whole view is built out of other people's leftovers.
@@ -963,97 +963,72 @@ function renderRoutine(
   headerKind.textContent = routine.retired ? 'retired routine' : 'routine'
   headerStatus.textContent = routine.state.toUpperCase()
   headerStatus.style.color = OPS_COLOR[routine.state] ?? '#b7b5d8'
+  const now = detail?.generated_at ?? Date.now() / 1000
 
-  const now = el('section')
-  now.append(el('h3', undefined, 'THE LAST FIRE'))
-  now.append(el('p', 'dp-msg', routineDetail(routine)))
-  now.append(
+  const latest = el('section')
+  latest.append(el('h3', undefined, 'THE LATEST RUN'))
+  latest.append(el('p', 'dp-msg', routineDetail(routine, now)))
+  const run = routine.latest
+  latest.append(
     kvList([
-      ['fired at', at(routine.last_fire?.at)],
-      ['fired by', routine.last_fire?.by],
-      ['answer', routine.answer.state],
-      ['answered by', routine.answer.answer?.by],
-      ['ack', routine.answer.ack ? at(routine.answer.ack.at) : undefined],
-      ['latest run', routine.latest_topic ? `#front › ${routine.latest_topic}` : 'none on the realm'],
+      ['run topic', run ? `#${run.channel} › ${run.topic}` : 'none on the realm'],
+      ['opened at', at(run?.opened?.at)],
+      ['opened by', run?.opened?.by],
+      ['requested from', run?.origin ? `#${run.origin.channel} › ${run.origin.topic}` : run ? 'opened by hand' : undefined],
+      ['state', run ? `${run.run.state} — ${run.run.evidence}` : undefined],
+      ['finished', run?.finish ? `${run.finish.achieved ? 'goal reached' : 'goal not reached'} — ${run.finish.reason}` : undefined],
+      ['resolution', run?.resolution.state],
       ['runs held', `${routine.runs} (${routine.open_runs} open)`],
-      ['posts in it', routine.posts],
     ]),
   )
-  if (routine.answer.answer) {
-    now.append(el('p', 'dp-summary-text', routine.answer.answer.excerpt))
-  }
-  body!.append(now)
+  body!.append(latest)
 
-  const schedule = el('section')
-  schedule.append(el('h3', undefined, 'SCHEDULE'))
-  schedule.append(
-    kvList([
-      ['events for this routine', routine.schedule.events],
-      ['next fire', routine.schedule.next ? at(routine.schedule.next.at) : 'none scheduled'],
-      ['last fired', routine.schedule.last ? at(routine.schedule.last.fired_at) : '—'],
-      [
-        'overdue',
-        routine.schedule.overdue.length > 0
-          ? `${routine.schedule.overdue.length} due and unfired — the dispatcher runs every 5 min`
-          : undefined,
-      ],
-    ]),
-  )
-  body!.append(schedule)
-
-  const request = el('section')
-  request.append(el('h3', undefined, 'STANDING REQUEST'))
-  if (routine.request) {
-    request.append(
-      el('p', 'dp-summary-meta', `#${routine.request.message_id} by ${routine.request.by}, ${at(routine.request.at)}`),
+  const guide = el('section')
+  guide.append(el('h3', undefined, 'GUIDE'))
+  if (routine.guide) {
+    guide.append(
+      el('p', 'dp-summary-meta', `#${routine.channel} › guide · #${routine.guide.message_id} by ${routine.guide.by}, ${at(routine.guide.at)} · ${routine.guide.posts} version${routine.guide.posts === 1 ? '' : 's'}`),
     )
-    request.append(el('p', 'dp-summary-text', routine.request.text))
-  } else {
-    request.append(el('p', 'dp-msg', 'no `routine-` topic on the realm for this name'))
-  }
-  if (routine.request_strays.length > 0) {
-    // The ghtrends defect: an agent answered in the request topic, so the
-    // "latest post" the trigger tells Front to read is a report about the
-    // routine rather than the request for it.
-    const strays = el('details')
-    strays.append(
-      el('summary', undefined, `POSTS BY SOMEBODY ELSE (${routine.request_strays.length})`),
-    )
-    strays.append(
-      el(
-        'p',
-        'dp-msg',
-        'The trigger tells Front the standing request is "the latest post" in this topic. ' +
-          'These posts are not the request, and the newest of them would be read as one.',
-      ),
-    )
-    for (const stray of routine.request_strays) {
-      strays.append(el('p', 'dp-summary-meta', `#${stray.message_id} by ${stray.by}, ${at(stray.at)}`))
+    guide.append(el('p', 'dp-summary-text', routine.guide.text))
+    if (routine.guide.authors.length > 1) {
+      guide.append(el('p', 'dp-msg', `Posted by more than one author (${routine.guide.authors.join(', ')}): the newest post is the guide whoever wrote it, so check that it is one.`))
     }
-    request.append(strays)
+  } else {
+    guide.append(el('p', 'dp-msg', `no post in #${routine.channel} › guide`))
   }
-  body!.append(request)
+  body!.append(guide)
 
   const sessions = el('section')
-  sessions.append(el('h3', undefined, 'SESSIONS (LAST 3 FIRES)'))
+  sessions.append(el('h3', undefined, 'RUNS (LAST 3)'))
   if (!detail) {
-    sessions.append(el('p', 'dp-msg', 'reading the session tree…'))
+    sessions.append(el('p', 'dp-msg', 'reading the runs…'))
   } else if (detail.sessions.length === 0) {
-    sessions.append(el('p', 'dp-msg', 'no fire and no conversation for this routine'))
+    sessions.append(el('p', 'dp-msg', 'no run of this routine is held'))
   }
   for (const session of detail?.sessions ?? []) {
     const card = el('div', 'dp-session')
     const head = el('div', 'dp-session-head')
     head.append(
-      el('span', undefined, session.stamp ? `run ${session.stamp}` : session.topic),
-      el('span', undefined, session.fire ? `fire #${session.fire.message_id}` : 'no fire line'),
+      el('span', undefined, session.topic),
+      el('span', undefined, session.run.state),
       el('span', undefined, session.resolution.state),
     )
-    head.append(el('span', 'dp-session-when', session.fire ? at(session.fire.at) : ''))
+    head.append(el('span', 'dp-session-when', session.opened ? at(session.opened.at) : ''))
     card.append(head)
-    if (!session.fire) card.append(el('p', 'dp-msg', session.origin_evidence))
+    if (session.opened) card.append(el('p', 'dp-summary-text', session.opened.text))
+    card.append(el('p', 'dp-summary-meta', session.origin
+      ? `requested from #${session.origin.channel} › ${session.origin.topic} (note #${session.origin.message_id})`
+      : 'opened by hand — no requesting conversation'))
+    if (session.last_entry) {
+      card.append(el('p', 'dp-summary-meta', `last entry #${session.last_entry.message_id}, ${at(session.last_entry.at)} · ${session.entries} entries`))
+      card.append(el('p', 'dp-summary-text', session.last_entry.excerpt))
+    }
+    if (session.finish) {
+      card.append(el('p', 'dp-summary-meta', `${session.finish.achieved ? 'goal reached' : 'goal not reached'} — ${session.finish.reason}`))
+      card.append(el('p', 'dp-summary-text', session.finish.report))
+    }
     if (session.nodes.length === 0) {
-      card.append(el('p', 'dp-msg', 'nothing was opened on behalf of this fire'))
+      card.append(el('p', 'dp-msg', 'nothing was opened on behalf of this run'))
     }
     for (const node of session.nodes) card.append(renderSessionNode(node, flight))
     sessions.append(card)
@@ -1082,7 +1057,7 @@ function renderRoutine(
       )
     }
     if (flight.agents.length === 0) {
-      host.append(el('p', 'dp-msg', 'no agent of this realm owns any topic of this session'))
+      host.append(el('p', 'dp-msg', 'no agent of this realm owns any topic of this run'))
     }
     body!.append(host)
   }

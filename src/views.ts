@@ -766,11 +766,17 @@ export function opsViewConfig(onSelect: (selection: PanelSelection) => void): Pa
   }
 }
 
+// A routine's state is its latest run's (relay `routines.run_state`), or
+// `idle` with no run and `retired` with a ✔ on its guide.
 const ROUTINE_STATUS: Record<string, PanelRowStatus> = {
   stalled: { emoji: '🔴', color: 0xff8aa8, label: 'STALLED' },
   awaiting: { emoji: '🕓', color: 0x70c7ff, label: 'AWAITING' },
-  acked: { emoji: '🌀', color: 0x9b8cff, label: 'ACKED' },
-  done: { emoji: '✅', color: 0x67e8a5, label: 'ANSWERED' },
+  acked: { emoji: '🌀', color: 0x9b8cff, label: 'SERVING' },
+  waiting: { emoji: '⏳', color: 0x9b8cff, label: 'WAITING' },
+  unstarted: { emoji: '🕓', color: 0x70c7ff, label: 'OPENED' },
+  finished: { emoji: '✅', color: 0x67e8a5, label: 'FINISHED' },
+  idle: { emoji: '▫️', color: 0x9a9db5, label: 'IDLE' },
+  retired: { emoji: '✔', color: 0x9a9db5, label: 'RETIRED' },
   unknown: { emoji: '❓', color: 0xffc56d, label: 'UNKNOWN' },
 }
 
@@ -803,7 +809,7 @@ export function routinesViewConfig(
 
   return {
     key: 'routines',
-    title: 'routines / standing requests and their runs',
+    title: 'routines / guides and their runs',
     nameFontSize: 15,
     panelHeight: 132,
     loadingText: 'reading the routine board…',
@@ -814,16 +820,17 @@ export function routinesViewConfig(
         if (board.routines.length === 0) return 'the routine board cannot be read'
         return `${count} ${plural(count, 'routine')} — state unknown`
       }
-      const owed = board.routines.filter(
-        (row) => row.state === 'stalled' || row.state === 'awaiting' || row.state === 'acked',
+      const running = board.routines.filter(
+        (row) => row.state === 'unstarted' || row.state === 'acked' || row.state === 'waiting',
       ).length
-      const never = board.routines.filter((row) => row.answer.state === 'no fire').length
-      const tail = never > 0 ? ` · ${never} never fired by the dispatcher` : ''
-      if (owed === 0) return `every routine's last fire was answered${tail}`
-      return `${owed} ${plural(owed, 'fire')} still unanswered${tail}`
+      const owed = board.routines.filter((row) => row.state === 'stalled' || row.state === 'awaiting').length
+      const idle = board.routines.filter((row) => row.state === 'idle').length
+      const tail = idle > 0 ? ` · ${idle} never run` : ''
+      if (running === 0 && owed === 0) return `no run in progress${tail}`
+      return `${running} ${plural(running, 'run')} in progress${owed ? ` · ${owed} owed an answer` : ''}${tail}`
     },
     footer:
-      'a routine is a standing request, a fire topic and a schedule — click one to talk to Front about it',
+      'a routine is a guide in its own channel and the runs Front made of it — click one to see its runs and ask Front for another',
     switchTo: { key: 'nodes', label: 'nodes' },
     bind: (bound) => {
       api = bound
@@ -847,13 +854,13 @@ export function routinesViewConfig(
         id: `routine/${row.name}`,
         name: clipped(row.retired ? `✔ ${row.name}` : row.name, 24),
         status: {
-          ...ROUTINE_STATUS[row.state],
+          ...(ROUTINE_STATUS[row.state] ?? ROUTINE_STATUS.unknown),
           label:
             row.state === 'unknown' && row.stale_state
               ? `UNKNOWN (was ${row.stale_state.toUpperCase()})`
-              : ROUTINE_STATUS[row.state].label,
+              : (ROUTINE_STATUS[row.state] ?? ROUTINE_STATUS.unknown).label,
         },
-        detail: clipped(routineDetail(row), 76),
+        detail: clipped(routineDetail(row, found.generated_at), 76),
         actions: [{
           label: '💬 chat',
           color: 0x70c7ff,

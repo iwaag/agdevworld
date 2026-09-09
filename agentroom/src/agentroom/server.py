@@ -325,15 +325,16 @@ def make_handler(room: Room, ops: Ops | None = None, chat: Chat | None = None,
             body = self._body()
             if body is None:
                 return
+            channel = str(body.get("channel") or "")
             topic = str(body.get("topic") or "")
             text = str(body.get("text") or "")
             names = {row["name"] for row in ops.routines()["routines"]}
-            refused = chat.check(topic, text, names)
+            refused = chat.check(channel, topic, text, names)
             if refused is not None:
                 self._write_json(403, {"sent": False, "error": refused})
                 return
             try:
-                found = chat.send(topic, text, names)
+                found = chat.send(channel, topic, text, names)
             except Exception as error:
                 # No retry: the post may well have landed, and a second one
                 # buys a second paid run for a thing the human asked once.
@@ -343,12 +344,13 @@ def make_handler(room: Room, ops: Ops | None = None, chat: Chat | None = None,
             self._write_json(200, found)
 
         def _start(self, name: str) -> None:
-            """Start a new session of one routine (`operation_room` p6).
+            """Ask Front to run a routine (`refine_routine` p1 step 4).
 
-            The same door as `/chat` — the Developer's credential, `#front`
-            only — posting the fire line the dispatcher would have posted,
-            with the operation room's mark. Refusals are 409 because the
-            request was well formed and the routine's *state* declined it.
+            The same door as `/chat` — the Developer's credential — posting
+            the request at Front's ordinary entrance, a Front Desk
+            conversation of its own; Front reads the guide and opens the run.
+            Refusals are 409 because the request was well formed and the
+            routine's *state* declined it.
             """
             if chat is None or not chat.configured:
                 reason = (chat.status()["reason"] if chat else
@@ -370,9 +372,10 @@ def make_handler(room: Room, ops: Ops | None = None, chat: Chat | None = None,
                 return
             rows = ops.routines()["routines"]
             row = next((one for one in rows if one["name"] == name), None)
-            stamp = time.strftime("%Y-%m-%dT%H:%MZ", time.gmtime())
-            found = chat.start(row, name, instruction, stamp=stamp,
-                               names={one["name"] for one in rows})
+            # A Front Desk conversation id, the way the desk screen mints
+            # them, so the request is a conversation the desk can show.
+            stamp = time.strftime("%Y%m%d-%H%M%S", time.gmtime())
+            found = chat.request(row, name, instruction, stamp=stamp)
             if found["sent"]:
                 self._write_json(200, found)
             elif found.get("uncertain"):

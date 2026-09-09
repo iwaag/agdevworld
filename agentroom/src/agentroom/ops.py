@@ -56,17 +56,15 @@ from agag.selfnote import Conversation, is_selfnote, parse_rootchat, parse_serve
 from agag.zulip import RESOLVED_TOPIC_PREFIX, QueueExpired, RateLimited, ZulipClient
 
 from .closing import parse_work_note
-from .frontdesk import is_desk_topic, newest_desk_topics
+from .frontdesk import FRONT_CHANNEL, is_desk_topic, newest_desk_topics
 from .inflight import Inflight
 from .room import SYSTEM_REALM, bare_topic
 from .routines import (
-    ROUTINE_CHANNEL,
+    GUIDE_TOPIC,
     ROUTINE_HISTORY,
-    STANDING_PREFIX,
-    Schedule,
+    is_routine_channel,
     is_routine_topic,
     newest_run_topics,
-    read_schedule,
     routine_rows,
     session_list,
     sessions_of,
@@ -75,7 +73,7 @@ from .routines import (
 #: The payload's own version. The view is built against this shape.
 SCHEMA = "ag.ops.v1"
 #: The routine board's own version (`operation_room` p3).
-ROUTINES_SCHEMA = "ag.routines.v1"
+ROUTINES_SCHEMA = "ag.routines.v2"
 #: The host-side in-flight signal's version. A separate payload because it is
 #: the only one that may be polled fast, and it must be obvious that nothing
 #: in it came from Zulip.
@@ -462,9 +460,6 @@ class Ops:
 
     env_path: Path
     stalled_seconds: float = DEFAULT_STALLED_SECONDS
-    #: The dispatcher's own `schedule.json`, read as a local file. None when
-    #: unconfigured, which the payload says rather than showing no fires.
-    schedule_path: Path | None = None
     #: `instance -> project root` for the in-flight signal. Empty is an
     #: answer: every instance then reports `known: false`.
     agent_roots: dict = field(default_factory=dict)
@@ -613,21 +608,21 @@ class Ops:
                 errors.append({"channel": name, "error": str(error)})
                 continue
             # The routine topics read *deep* and read even under ✔: every
-            # standing request (a ✔ there retires the routine) and the newest
-            # `DEEP_RUNS` run topics of each routine (`operation_room` p7).
-            # Every other topic, a routine's older runs included, follows the
-            # realm's rule: shallow while open, not read once resolved. This
-            # is what keeps one topic per run from being one deep call per
-            # run per resync, forever.
+            # guide (a ✔ there retires the routine) and the newest
+            # `DEEP_RUNS` run topics of each routine channel — a finished run
+            # is resolved by Front's listener, so a board that skipped ✔ runs
+            # would never show one finishing. Every other topic, a routine's
+            # older runs included, follows the realm's rule: shallow while
+            # open, not read once resolved.
             deep_names: set[str] = set()
-            if name == ROUTINE_CHANNEL:
-                bare_names = [bare_topic(live) for live in found]
+            if is_routine_channel(name):
+                deep_names = newest_run_topics(found) | {GUIDE_TOPIC}
+            if name == FRONT_CHANNEL:
                 # The Front Desk's newest conversations are read the same
                 # way: whole, and under ✔, so a reload after a restart shows
                 # them (`front_desk` p1).
-                deep_names = newest_run_topics(bare_names) | {
-                    bare for bare in bare_names if bare.startswith(STANDING_PREFIX)
-                } | newest_desk_topics(bare_names)
+                bare_names = [bare_topic(live) for live in found]
+                deep_names = newest_desk_topics(bare_names)
                 front_names = {bare_topic(live): live for live in found}
             for live in found:
                 key = (name, bare_topic(live))
@@ -858,7 +853,7 @@ class Ops:
                     keep_history=is_routine_topic(channel, key[1]) or is_desk_topic(channel, key[1]),
                 )
                 self._topics[key] = topic
-            if channel == ROUTINE_CHANNEL:
+            if channel == FRONT_CHANNEL:
                 self._front_names[key[1]] = live
             topic.live_topic = live
             topic.resolved = live.startswith(RESOLVED_TOPIC_PREFIX)
@@ -902,7 +897,7 @@ class Ops:
                 self._topics[new_key] = topic
             topic.live_topic = str(renamed)
             topic.resolved = str(renamed).startswith(RESOLVED_TOPIC_PREFIX)
-            if channel == ROUTINE_CHANNEL:
+            if channel == FRONT_CHANNEL:
                 self._front_names.pop(old_key[1], None)
                 self._front_names[new_key[1]] = str(renamed)
 
@@ -989,24 +984,22 @@ class Ops:
     # -- routines ----------------------------------------------------------
 
     def routines(self, now: float | None = None) -> dict:
-        """The routine board: the standing request, the schedule, the last fire.
+        """The routine board: every routine channel, its guide, its latest run.
 
         It reuses `snapshot()` for health and for the conversation states
-        rather than deciding either again — one engine, one verdict. The realm
-        half costs no Zulip call at all: these topics are already in memory,
-        read by the same sweep and kept current by the same queue.
+        rather than deciding either again — one engine, one verdict. It costs
+        no Zulip call at all: these topics are already in memory, read by the
+        same sweep and kept current by the same queue.
         """
         now = time.time() if now is None else now
         board = self.snapshot(now)
         with self._lock:
             topics = dict(self._topics)
-        schedule = read_schedule(self.schedule_path)
-        rows = routine_rows(topics, schedule, now, stalled_seconds=self.stalled_seconds)
+            channels = set(self._channels)
+        rows = routine_rows(topics, now, stalled_seconds=self.stalled_seconds, channels=channels)
         if board["health"]["state"] != "live":
             # The same rule the ops board obeys: while the queue is dead this
-            # is the last thing known and not the state now. The schedule is
-            # exempt — it is a local file, read a moment ago, and its own
-            # freshness does not depend on Zulip.
+            # is the last thing known and not the state now.
             for row in rows:
                 row["stale_state"] = row["state"]
                 row["state"] = "unknown"
@@ -1015,7 +1008,6 @@ class Ops:
             "generated_at": now,
             "settings": {"stalled_seconds": self.stalled_seconds},
             "health": board["health"],
-            "schedule": schedule.payload(),
             "routines": rows,
         }
 
@@ -1032,8 +1024,8 @@ class Ops:
         board = self.snapshot(now)
         with self._lock:
             topics = dict(self._topics)
-        schedule = read_schedule(self.schedule_path)
-        rows = routine_rows(topics, schedule, now, stalled_seconds=self.stalled_seconds)
+            channels = set(self._channels)
+        rows = routine_rows(topics, now, stalled_seconds=self.stalled_seconds, channels=channels)
         row = next((one for one in rows if one["name"] == name), None)
         if row is None:
             return {"error": f"no routine named {name}", "routines": [one["name"] for one in rows]}
@@ -1043,7 +1035,8 @@ class Ops:
                 continue
             by_topic.setdefault((one["channel"], one["topic"]), []).append(one)
         listed = session_list(
-            topics, name, by_topic, schedule=schedule, include_resolved=include_resolved,
+            topics, name, by_topic, include_resolved=include_resolved, now=now,
+            stalled_seconds=self.stalled_seconds,
         )
         if board["health"]["state"] != "live":
             row["stale_state"] = row["state"]
@@ -1053,18 +1046,15 @@ class Ops:
             "generated_at": now,
             "settings": {"stalled_seconds": self.stalled_seconds},
             "health": board["health"],
-            "schedule": schedule.payload(),
             "routine": row,
             # Each session carries its own `chat` (the run topic, whole): the
             # server adds a top-level `chat` block saying whether this relay
-            # may post at all, and the two must not share a key (p6 found the
-            # panel reading the status as the history).
+            # may post at all, and the two must not share a key.
             "sessions": listed["sessions"],
             # The routine's actual newest run, whatever the filter left
             # visible: host observation and "is this the latest" both hang
-            # off it (`operation_room` p6).
+            # off it.
             "latest_topic": listed["latest_topic"],
-            "latest_fire": listed["latest_fire"],
             "history": listed["history"],
             "filter": {"include_resolved": include_resolved},
         }
@@ -1091,7 +1081,7 @@ class Ops:
         session = sessions[0] if sessions else None
         watched: list[tuple[str, str]] = []
         if session is not None:
-            watched.append((ROUTINE_CHANNEL, session["topic"]))
+            watched.append((session["channel"], session["topic"]))
         for node in (session or {}).get("nodes", []):
             watched.append((node["channel"], node["topic"]))
         look = Inflight(roots=self.agent_roots)

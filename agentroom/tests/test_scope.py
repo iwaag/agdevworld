@@ -594,3 +594,53 @@ def test_a_topic_in_an_archived_channel_is_kept_and_the_request_still_closes():
     outcomes = {row["key"]: row["outcome"] for row in applied["results"]}
     assert outcomes["topic:agecho-agstudio1/hello"] == "skipped"
     assert outcomes[f"topic:front/{FRONT_TOPIC}"] == "applied"
+
+
+# --- a resolved topic with an open twin -------------------------------------------
+
+
+def twin_realm():
+    """`front-routine-publish-2026-09-08T17:09Z` on 2026-09-09: Front resolved
+    the run and its last reply landed under the bare name, which Zulip made
+    a second, open topic. The agent room lists the open one; the plan must
+    see it too, and a ✔ must fold it rather than say *already ✔*."""
+    realm = chain_realm(histories={
+        ("front", f"✔ {DESK_TOPIC}"): [
+            post(1, "Please cover a new trending repo.", sender_id=DEVELOPER, sender="Developer"),
+            selfnote(2, "served", "pj-ghtrends/workplan-trend8 1"),
+            post(4, "Done — G-18 is written up."),
+        ],
+        ("front", DESK_TOPIC): [
+            post(7, "Both topics are resolved."),
+        ],
+    })
+    realm.topics["front"] = [f"✔ {DESK_TOPIC}", DESK_TOPIC]
+    return realm
+
+
+def test_a_resolved_topic_with_an_open_twin_is_open_and_the_twin_is_folded():
+    door, realm, _ = closer(realm=WritingRealm(twin_realm()))
+    found = door.plan(ROOT)
+    root_action = found["actions"][-1]
+    assert root_action["state"] == READY
+    assert "opened a twin" in root_action["reason"] and "1 post " in root_action["reason"]
+    assert root_action["detail"]["twin"] is True and root_action["detail"]["last_post_id"] == 7
+    # The walk still saw the served note under the ✔ name.
+    assert ("pj-ghtrends", "workplan-trend8") in topic_keys(discover({}, ROOT, realm=twin_realm(), plane=board()))
+    applied = door.close(ROOT, found["fingerprint"])
+    assert applied["partial"] is False
+    # The resolve moves the twin's own post, never one already under ✔.
+    assert (7, DESK_TOPIC) in realm.resolved
+
+
+def test_a_held_resolved_topic_is_asked_once_for_a_twin():
+    from agentroom.ops import Topic
+    held = Topic(channel="front", topic=DESK_TOPIC, live_topic=f"✔ {DESK_TOPIC}", resolved=True,
+                 keep_history=True)
+    for message in twin_realm().histories[("front", f"✔ {DESK_TOPIC}")]:
+        held.add(message)
+    realm = twin_realm()
+    found = discover({ROOT: held}, ROOT, realm=realm, plane=board())
+    root = found.topics[0]
+    assert root.twin is True and root.resolved is False and root.last_post_id == 7
+    assert realm.reads.count(("front", DESK_TOPIC)) == 1

@@ -304,6 +304,11 @@ class Related:
     #: can still be read but never moved (a resolve is a PATCH the realm
     #: refuses with 400). Met live in p4 on a retired fixture agent's channel.
     channel_archived: bool = False
+    #: The topic carries a ✔ **and** posts under its bare name — a twin Zulip
+    #: opened when somebody posted after the resolve. It is open, and a ✔
+    #: here folds the twin's posts into the resolved topic.
+    twin: bool = False
+    twin_posts: int = 0
     #: Root notes written *in* an execution topic by a visitor — Front,
     #: serving some other request, posting here — that name a conversation
     #: outside this request. Not ownership (`_ownership`), but shown: the
@@ -316,6 +321,7 @@ class Related:
             "resolved": self.resolved, "known": self.known, "depth": self.depth,
             "links": self.links, "homes": self.homes, "visitors": self.visitors,
             "channel_archived": self.channel_archived,
+            "twin": self.twin, "twin_posts": self.twin_posts,
             "works": [note.as_dict() for note in self.works],
             "history_bounded": self.history_bounded,
             # The id a resolve renames from: Zulip resolves a topic by moving
@@ -352,6 +358,10 @@ class Reader:
     errors: list[dict] = field(default_factory=list)
     _histories: dict[Key, list[dict]] = field(default_factory=dict, repr=False)
     _live: dict[Key, str] = field(default_factory=dict, repr=False)
+    #: Message ids read under the **bare** name of a topic whose ✔ name also
+    #: answered: a post made after the resolve opened a twin (the
+    #: `resolve_leaves_a_stray_twin` shape), and the twin is what is open.
+    _twins: dict[Key, list[int]] = field(default_factory=dict, repr=False)
     _topics: dict[str, list[str] | None] = field(default_factory=dict, repr=False)
     _streams: dict[str, int | None] = field(default_factory=dict, repr=False)
     _channels: set[str] | None = field(default=None, repr=False)
@@ -368,6 +378,7 @@ class Reader:
         merged: dict[int, dict] = {}
         live: str | None = None
         answered = 0
+        by_name: dict[str, list[int]] = {}
         for name in (topic, resolved_name):
             try:
                 self.calls += 1
@@ -379,17 +390,31 @@ class Reader:
             answered += 1
             if found:
                 live = name
+            by_name[name] = [int(message.get("id") or 0) for message in found]
             for message in found:
                 merged[int(message.get("id") or 0)] = message
         # Neither name could be asked: unknown, which is not the same answer
         # as an empty topic and must never be reported as one.
         if answered == 0:
             return None
+        # Both names answered with posts: the topic was resolved and then
+        # posted into under its bare name, which Zulip makes a second, open
+        # topic. The bare one is what is open, and what a ✔ must fold.
+        if by_name.get(topic) and by_name.get(resolved_name):
+            live = topic
+            self._twins[key] = sorted(by_name[topic])
         messages = [merged[ident] for ident in sorted(merged)]
         self._histories[key] = messages
         if live is not None:
             self._live[key] = live
         return messages, live
+
+    def open_twin(self, key: Key) -> list[int]:
+        """The ids posted under the bare name of a ✔ topic — its open twin —
+        or nothing. Reads the topic if nothing has yet."""
+        if key not in self._histories:
+            self.history(key)
+        return list(self._twins.get(key, []))
 
     def stream_id(self, channel: str) -> int | None:
         if channel not in self._streams:
@@ -578,6 +603,22 @@ def related_topics(
                                   issue_id=issue_id, by_id=by_id, by=by, message_id=note_id)
                          for project_id, issue_id, by_id, by, note_id
                          in (getattr(held, "works", None) or [])]
+            # A ✔ topic may have an open twin under its bare name (a post
+            # made after the resolve). The engine keys both as one and shows
+            # whichever name it saw last, so a resolved node is read once
+            # more to ask; the answer is cached with the history.
+            if isinstance(node, _ReadTopic):
+                twin_ids = reader.open_twin(key)  # cached with the read
+            elif live.startswith(RESOLVED_TOPIC_PREFIX):
+                # A held ✔ topic is read again only when the channel's own
+                # topic list carries both names — one cached call per
+                # channel, and no history read for the common case.
+                names = set(reader.channel_topics(key[0]) or [])
+                twin_ids = reader.open_twin(key) if key[1] in names and live in names else []
+            else:
+                twin_ids = []
+            if twin_ids:
+                live = key[1]
             existing = Related(
                 channel=key[0], topic=key[1], live_topic=live,
                 resolved=live.startswith(RESOLVED_TOPIC_PREFIX),
@@ -585,7 +626,9 @@ def related_topics(
                 homes=_homes_of(node) if node is not None else [],
                 works=works,
                 history_bounded=len(messages) >= READ_DEPTH,
-                last_post_id=max((int(m.get("id") or 0) for m in messages), default=0),
+                last_post_id=(max(twin_ids) if twin_ids else
+                              max((int(m.get("id") or 0) for m in messages), default=0)),
+                twin=bool(twin_ids), twin_posts=len(twin_ids),
             )
             found[key] = existing
         else:

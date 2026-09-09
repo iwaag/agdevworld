@@ -178,6 +178,8 @@ def plan_actions(found: Discovery) -> list[Action]:
             actions.append(Action("topic", key, label, BLOCKED,
                                   "this topic could not be read, so nothing here says it is "
                                   "finished", node.as_dict()))
+        elif node.twin:
+            actions.append(Action("topic", key, label, READY, _twin_reason(node), node.as_dict()))
         else:
             actions.append(Action("topic", key, label, READY, "will be marked ✔", node.as_dict()))
 
@@ -204,10 +206,20 @@ def plan_actions(found: Discovery) -> list[Action]:
                               "this conversation has no post to resolve" if root is None
                               or root.known != "note-only" else
                               "this conversation could not be read", {}))
+    elif root.twin:
+        actions.append(Action("conversation", key, label, READY,
+                              _twin_reason(root) + ", once everything above is done",
+                              root.as_dict()))
     else:
         actions.append(Action("conversation", key, label, READY,
                               "will be marked ✔ once everything above is done", root.as_dict()))
     return actions
+
+
+def _twin_reason(node) -> str:
+    """Why a topic that already carries a ✔ is still a target."""
+    return (f"will be marked ✔ — {node.twin_posts} post{'s' if node.twin_posts != 1 else ''} "
+            "made under the bare name after it was resolved opened a twin; folding it in")
 
 
 def fingerprint(actions: list[Action]) -> str:

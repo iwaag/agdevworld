@@ -194,7 +194,7 @@ export interface InflightBoard {
   generated_at: number
   routine: string
   configured: boolean
-  session: { fire: RoutinePost | null; nodes: number } | null
+  session: { channel: string; topic: string; opened: (RoutinePost & { text: string }) | null; nodes: number } | null
   topics: InflightTopic[]
   agents: Array<{
     instance: string

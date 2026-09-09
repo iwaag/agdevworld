@@ -561,3 +561,16 @@ def test_the_routine_detail_filters_resolved_sessions_only_when_asked():
     ops._apply_update({"stream_id": 1, "orig_subject": "routinerun-20260907-0000",
                        "subject": "✔ routinerun-20260907-0000"})
     assert ops.routine("papers")["sessions"][0]["resolution"]["state"] == "resolved"
+
+
+def test_the_inflight_signal_names_the_latest_run_by_its_channel_and_opening():
+    """Met live in refine_routine p1 step 5: the payload still read the old
+    `fire` field and the screen said `KeyError: 'fire'`."""
+    ops = Ops(env_path=__file__)
+    ops._live = True
+    ops._apply_message({"type": "stream", "display_recipient": "routine-papers", "subject": "routinerun-1",
+                        "id": 20, "sender_id": 15, "sender_full_name": "Front",
+                        "sender_realm_str": "agdev", "timestamp": 20, "content": "Opening a run."})
+    found = ops.inflight("papers")
+    assert found["session"]["channel"] == "routine-papers" and found["session"]["topic"] == "routinerun-1"
+    assert found["session"]["opened"]["message_id"] == 20 and found["session"]["nodes"] == 0

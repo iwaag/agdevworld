@@ -1105,8 +1105,8 @@ class Ops:
             "routine": name,
             "configured": bool(self.agent_roots),
             "session": None if session is None else {
-                "topic": session["topic"], "fire": session["fire"],
-                "nodes": len(session["nodes"]),
+                "channel": session["channel"], "topic": session["topic"],
+                "opened": session["opened"], "nodes": len(session["nodes"]),
             },
             "topics": rows,
             "agents": sorted(agents.values(), key=lambda row: row["instance"]),

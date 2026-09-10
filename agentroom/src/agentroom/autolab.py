@@ -69,11 +69,20 @@ WORK_CHANNEL_PREFIX = "work-"
 #: Said when a mission is already done, so a caller can recognise the no-op.
 ALREADY_DONE = "it is already done"
 
+#: The two state words somebody **other than the record's own author** may
+#: write. Every other state is the agent reporting its own work. These two are
+#: a *person* accepting it — and the person accepts it from here, with their
+#: own credential, so reading them from anyone is what makes this room's own
+#: write visible to the record it was written into. `refactor` p1 step 4 met
+#: the alternative live: the acceptance landed and the next preview read the
+#: mission as unfinished.
+EXTERNAL_STATES = (TASK_ACCEPTED, MISSION_DONE)
+
 __all__ = [
     "ALREADY_DONE", "MISSION_CANCELLED", "MISSION_DONE", "MISSION_PLANNED",
     "MISSION_REPLACED", "MISSION_STARTED", "Mission", "Note", "TAGS",
     "TASK_ACCEPTED", "TASK_CANCELLED", "TASK_COMPLETED", "TASK_FINISHED",
-    "TASK_OPEN", "Task", "WORK_CHANNEL_PREFIX", "mission_label",
+    "EXTERNAL_STATES", "TASK_OPEN", "Task", "WORK_CHANNEL_PREFIX", "mission_label",
     "notes_in", "read_record", "reason_not_finished", "work_channel_name",
 ]
 
@@ -223,12 +232,19 @@ def read_record(channel: str, topic: str, notes: list[Note]) -> Mission | Task |
     somebody else's work has got to — the writer asks the same question of
     its own history as `self_id` (`agautolab.anchor`), and this is that rule
     from outside, where the author is discovered rather than known.
+
+    The exception is `EXTERNAL_STATES`, and it is the reason this room can
+    write at all: acceptance is somebody else's word by definition.
     """
     identity = _earliest(notes, MISSION_TAG) or _earliest(notes, TASK_TAG)
     if identity is None:
         return None
     own = [note for note in notes if note.by_id == identity.by_id]
-    state = _newest_value(own, STATE_TAG)
+    state = _newest_value(
+        [note for note in notes
+         if note.by_id == identity.by_id or note.value.strip().lower() in EXTERNAL_STATES],
+        STATE_TAG,
+    )
     document_id = _int(_newest_value(own, DOC_TAG))
     replaces = _int(_newest_value(own, REPLACES_TAG))
     mission = _earliest(own, MISSION_TAG)

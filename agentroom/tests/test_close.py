@@ -23,7 +23,7 @@ from agentroom.room import Room
 from agentroom.server import build_server
 
 from test_closing import (
-    AUTOLAB, AUTOLAB_BOT, DESK, DESK_TOPIC, FREEFORGE, MISSION, MISSION_LABEL, PLAN_TOPIC,
+    AUTOLAB, AUTOLAB_BOT, DESK, DESK_TOPIC, DEVELOPER, FREEFORGE, MISSION, MISSION_LABEL, PLAN_TOPIC,
     PROJECT_CHANNEL, ROOT, RUN_TOPIC, TASK, TASK_LABEL, WORK_CHANNEL, Board, board,
     chain_realm, issue, post, selfnote,
 )
@@ -55,13 +55,18 @@ class WritingRealm:
 
     def send_to_channel(self, channel, topic, content):
         """The write autolab's half of a completion makes: a state note in a
-        conversation. Kept in the history so a second preview reads it back."""
+        conversation, kept in the history so a second preview reads it back.
+
+        Posted **as the Developer**, because that is whose credential this
+        room writes with (`AGENTROOM_CHAT_ZULIP_ENV`) — and it is the whole
+        point of the acceptance: a person's word, not the agent's.
+        """
         if channel in self.fail:
             raise ConnectionError("realm refused the post")
         self.next_id += 1
         self.posted.append((channel, topic, content))
         self.realm.histories.setdefault((channel, topic), []).append(
-            post(self.next_id, content, sender_id=AUTOLAB_BOT, sender=AUTOLAB))
+            post(self.next_id, content, sender_id=DEVELOPER, sender="Developer"))
         return self.next_id
 
     def archive_channel(self, stream_id):
@@ -532,3 +537,25 @@ def test_a_target_the_close_made_unreadable_still_has_its_row():
     assert channel["state"] == DONE
     assert found["fingerprint"] == door.plan(ROOT)["fingerprint"]
     assert found["partial"] is False
+
+
+def test_the_acceptance_this_button_writes_is_visible_to_its_own_next_preview():
+    """`refactor` p1 step 4, met live. This room accepts with the **human's**
+    credential, and the record's other notes are read only from the record's
+    own author — so the acceptance landed and the next preview read the
+    mission as unfinished, which made a finished operation report `partial`.
+
+    `accepted` and `done` are a person's word by definition, so they are read
+    from anyone.
+    """
+    door, realm, _ = closer(realm=WritingRealm(open_chain()))
+
+    first = door.close(ROOT)
+    assert first["partial"] is False
+
+    again = door.plan(ROOT)
+    work = next((a for a in again["actions"] if a["kind"] == "work"
+                 and a["key"] == f"work:{MISSION_LABEL}"), None)
+    assert work is not None
+    assert work["state"] == DONE and "already done" in work["reason"]
+    assert again["counts"]["blocked"] == 0

@@ -559,3 +559,115 @@ def test_the_acceptance_this_button_writes_is_visible_to_its_own_next_preview():
     assert work is not None
     assert work["state"] == DONE and "already done" in work["reason"]
     assert again["counts"]["blocked"] == 0
+
+
+# --- unfinished work stays reachable (`refactor` p2 step 1) -------------------
+
+
+def unfinished_chain(**kwargs):
+    """The same request with a second task nobody has finished.
+
+    forge's half is left open so there is an independent branch to watch:
+    an unfinished autolab task must not hold back a conversation no work
+    record of this request says anything about.
+    """
+    realm = open_chain(
+        topics={WORK_CHANNEL: [f"✔ {RUN_TOPIC}", "workrun-task2-m10"]},
+        histories={(WORK_CHANNEL, "workrun-task2-m10"): [
+            selfnote(50, "task", f"{MISSION}#2", sender_id=AUTOLAB_BOT, sender=AUTOLAB),
+            selfnote(51, "rootchat", f"{PROJECT_CHANNEL}/{PLAN_TOPIC}",
+                     sender_id=AUTOLAB_BOT, sender=AUTOLAB),
+            post(52, "# Summarize the second repo\n\nbody", sender_id=AUTOLAB_BOT, sender=AUTOLAB),
+        ]},
+        **kwargs)
+    return realm
+
+
+def test_an_unfinished_task_holds_back_its_own_conversations_and_channel():
+    """The defect `refactor` p1 recorded: the mission was blocked, the work
+    was not accepted — and the conversation the unfinished task lives in was
+    resolved anyway, then archived along with its channel."""
+    door, realm, _ = closer(realm=WritingRealm(unfinished_chain()))
+
+    found = door.plan(ROOT)
+
+    held = {a["key"]: a for a in found["actions"] if a["state"] == KEPT}
+    assert set(held) == {f"topic:{PROJECT_CHANNEL}/{PLAN_TOPIC}",
+                         f"topic:{WORK_CHANNEL}/workrun-task2-m10",
+                         f"channel:{WORK_CHANNEL}"}
+    assert all(f"{MISSION_LABEL} is not finished" in row["reason"] for row in held.values())
+
+
+def test_an_independent_branch_still_closes_while_a_mission_is_blocked():
+    door, realm, _ = closer(realm=WritingRealm(unfinished_chain()))
+
+    found = door.close(ROOT)
+
+    assert found["partial"] is True
+    # forge's Work is its own record and its conversations are its own; they
+    # close. The mission's do not, and neither does the request itself.
+    assert [topic for _, topic in realm.resolved] == ["assetplan-robot", "assetrun-robot"]
+    assert realm.archived == []
+    assert DESK_TOPIC not in [topic for _, topic in realm.resolved]
+
+
+def test_the_unfinished_conversation_is_still_usable_afterwards():
+    """Usable means two things the realm can be asked: the topic is not ✔,
+    so a post there is not a twin, and its channel still exists to post in."""
+    door, realm, _ = closer(realm=WritingRealm(unfinished_chain()))
+
+    door.close(ROOT)
+
+    assert (WORK_CHANNEL, "workrun-task2-m10") in realm.realm.histories
+    assert "workrun-task2-m10" in realm.realm.topics[WORK_CHANNEL]
+    assert realm.realm.streams[WORK_CHANNEL] == 122
+
+
+def test_an_acceptance_that_fails_during_apply_holds_the_same_targets():
+    """The preview said READY — the mission's tasks are all finished — and
+    the write failed anyway. The dependency rule is the same one, learned a
+    moment later, and the plan's fixed order is what makes acting on it
+    possible: the work record runs before anything it is about."""
+    realm = WritingRealm(open_chain(), fail=(PROJECT_CHANNEL,))
+    door, realm, _ = closer(realm=realm)
+
+    found = door.close(ROOT)
+
+    outcomes = {row["key"]: row for row in found["results"]}
+    assert outcomes[f"work:{MISSION_LABEL}"]["outcome"] == FAILED
+    for key in (f"topic:{PROJECT_CHANNEL}/{PLAN_TOPIC}", f"channel:{WORK_CHANNEL}"):
+        assert outcomes[key]["outcome"] == SKIPPED
+        assert "could not be accepted" in outcomes[key]["note"]
+    assert PLAN_TOPIC not in [topic for _, topic in realm.resolved]
+    assert realm.archived == []
+    assert found["partial"] is True
+
+
+def test_a_retry_after_a_failed_acceptance_finishes_the_request():
+    realm = WritingRealm(open_chain(), fail=(PROJECT_CHANNEL,))
+    door, realm, _ = closer(realm=realm)
+    door.close(ROOT)
+    realm.fail.clear()
+
+    again = door.close(ROOT)
+
+    assert again["partial"] is False
+    assert (PROJECT_CHANNEL, PLAN_TOPIC, "[selfnote][state] done") in realm.posted
+    assert PLAN_TOPIC in [topic for _, topic in realm.resolved]
+    assert realm.archived == [122]
+    assert DESK_TOPIC in [topic for _, topic in realm.resolved]
+
+
+def test_a_retry_after_the_unfinished_task_is_done_closes_everything():
+    realm = WritingRealm(unfinished_chain())
+    door, realm, _ = closer(realm=realm)
+    door.close(ROOT)
+    realm.realm.histories[(WORK_CHANNEL, "workrun-task2-m10")].append(
+        selfnote(53, "state", "completed", sender_id=AUTOLAB_BOT, sender=AUTOLAB))
+
+    again = door.close(ROOT)
+
+    assert again["partial"] is False
+    assert PLAN_TOPIC in [topic for _, topic in realm.resolved]
+    assert "workrun-task2-m10" in [topic for _, topic in realm.resolved]
+    assert realm.archived == [122]

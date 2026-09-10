@@ -68,7 +68,9 @@ from .autolab import (
     TASK_ACCEPTED,
     TASK_CANCELLED,
     Task as AutolabTask,
+    WORK_CHANNEL_PREFIX,
     reason_not_finished,
+    work_channel_name,
 )
 from .closing import AUTOLAB_SOURCE, Discovery, Key, PlaneBoard, Realm, WorkTarget, discover
 from .frontdesk import FRONT_CHANNEL, ID_PATTERN, desk_topic
@@ -92,7 +94,8 @@ RECORD_MEMORY = 20
 
 __all__ = [
     "ALREADY", "APPLIED", "Action", "BLOCKED", "Closer", "DONE", "FAILED", "KEPT",
-    "READY", "SCHEMA", "SKIPPED", "fingerprint", "parse_key", "plan_actions",
+    "READY", "SCHEMA", "SKIPPED", "dependents", "fingerprint", "parse_key",
+    "plan_actions",
 ]
 
 
@@ -220,6 +223,65 @@ def _plane_work_action(work: WorkTarget) -> Action:
     return Action("work", work.key, label, BLOCKED, reason, detail)
 
 
+def dependents(action: Action) -> set[str]:
+    """The action keys whose closure this work record decides.
+
+    A work record is the answer to *is this finished?*, and the
+    conversations it is made of are the place the unfinished part is still
+    being worked. So a blocked mission holds back its own plan topic, the
+    topic of every task under it, and the dedicated `work-` channel named
+    after it — closing those would archive a conversation somebody still has
+    to post in, which is the defect `refactor` p1 recorded and left standing.
+
+    Keys, not coordinates, because that is what a result row is matched to
+    and what `_apply` walks. A record in Plane names its channel by label,
+    one kept in the chat by the anchor id that *is* it; both are asked for,
+    and a name that matches no target simply holds nothing.
+    """
+    detail = action.detail
+    keys: set[str] = set()
+    pairs = [(str(detail.get("channel") or ""), str(detail.get("topic") or ""))]
+    pairs += [(str(row.get("channel") or ""), str(row.get("topic") or ""))
+              for row in detail.get("children") or []]
+    for channel, topic in pairs:
+        if channel and topic:
+            keys.add(f"topic:{channel}/{topic}")
+    label = str(detail.get("label") or "").strip()
+    if label:
+        keys.add(f"channel:{WORK_CHANNEL_PREFIX}{label}")
+    anchor_id = int(detail.get("anchor_id") or 0)
+    if anchor_id:
+        keys.add(f"channel:{work_channel_name(anchor_id)}")
+    return keys
+
+
+def _hold_dependents(actions: list[Action]) -> None:
+    """Keep open what a blocked work record is still about.
+
+    Only a `READY` target is moved, and only a topic or a channel: an
+    already-✔ topic stays `DONE` (there is nothing to hold), and the
+    selected request's own conversation is held by `_apply`'s rule instead,
+    because *anything* left undone keeps that one open. An independent
+    branch of the same request — another mission, forge's Work, a topic no
+    blocked record names — is untouched and still closes.
+    """
+    held: dict[str, str] = {}
+    for action in actions:
+        if action.kind != "work" or action.state != BLOCKED:
+            continue
+        for key in dependents(action):
+            held.setdefault(key, action.label)
+    for action in actions:
+        if action.state != READY or action.kind not in {"topic", "channel"}:
+            continue
+        label = held.get(action.key)
+        if label is None:
+            continue
+        action.state = KEPT
+        action.reason = (f"kept — {label} is not finished, so this stays open for the rest of "
+                         "the work; complete it and close the request again")
+
+
 def plan_actions(found: Discovery) -> list[Action]:
     """Every action, in the order execution applies them.
 
@@ -230,6 +292,10 @@ def plan_actions(found: Discovery) -> list[Action]:
     A root that may not be completed (an execution topic, a standing
     request, an introduction) is one blocked action carrying the scope's
     reason: the panel shows why, and there is nothing to approve.
+
+    A blocked work record then holds back what it is *about*
+    (`_hold_dependents`): unfinished work stays reachable, and its channel
+    is not archived out from under it.
     """
     scope = found.scope
     if not scope.closable:
@@ -288,6 +354,7 @@ def plan_actions(found: Discovery) -> list[Action]:
     else:
         actions.append(Action("conversation", key, label, READY,
                               "will be marked ✔ once everything above is done", root.as_dict()))
+    _hold_dependents(actions)
     return actions
 
 
@@ -538,14 +605,25 @@ class Closer:
                actions: list[Action]) -> list[dict]:
         """Run the ready actions in order. Nothing rolls back.
 
-        A failure stops nothing except the Front topic: the other targets are
-        independent of one another, and leaving four of five closed with the
-        fifth named is more useful than leaving all five open. The Front
-        conversation is the exception, because its ✔ is the claim that the
-        whole thing is finished.
+        A failure stops nothing except the Front topic and whatever the
+        failed target was *about*: the other targets are independent of one
+        another, and leaving four of five closed with the fifth named is
+        more useful than leaving all five open. Two exceptions. A work
+        record whose acceptance failed holds back its own conversations and
+        its dedicated channel, the same rule the preview applies to one it
+        already knew was blocked — an unaccepted mission whose channel is
+        archived leaves its unfinished task nowhere to continue. And the
+        Front conversation, because its ✔ is the claim that the whole thing
+        is finished.
         """
         results: list[dict] = []
         trouble = False
+        #: Targets a work record that failed *here* is still about. The
+        #: preview applied the same rule to what it already knew was
+        #: blocked; a write that fails mid-operation is the same fact
+        #: learned later, and the plan's order — work first — is what makes
+        #: acting on it possible without a second pass.
+        held: dict[str, str] = {}
         for action in actions:
             if action.state in {DONE, ALREADY}:
                 results.append(self._result(action, ALREADY, action.reason))
@@ -553,6 +631,12 @@ class Closer:
             if action.state in {BLOCKED, KEPT}:
                 trouble = trouble or action.state == BLOCKED
                 results.append(self._result(action, SKIPPED, action.reason))
+                continue
+            if action.key in held:
+                results.append(self._result(
+                    action, SKIPPED,
+                    f"kept open: {held[action.key]} could not be accepted, so the work it is "
+                    "about is not finished; retry once that is resolved"))
                 continue
             if action.kind == "conversation" and trouble:
                 results.append(self._result(
@@ -564,6 +648,9 @@ class Closer:
                 note = self._run(client, plane, action)
             except Exception as error:  # noqa: BLE001 - reported per target, never raised
                 trouble = True
+                if action.kind == "work":
+                    for key in dependents(action):
+                        held.setdefault(key, action.label)
                 results.append(self._result(action, FAILED, f"{type(error).__name__}: {error}"))
                 continue
             results.append(self._result(action, APPLIED, note))

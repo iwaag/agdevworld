@@ -92,12 +92,12 @@ export interface CompletionPlan {
   // What the human approves. A close carries it back and the relay refuses
   // with a fresh plan if the targets have changed since.
   fingerprint: string
-  status: { zulip_read: boolean; zulip_write: boolean; plane: boolean; reason: string }
+  status: { zulip_read: boolean; zulip_write: boolean; reason: string }
   actions: CompletionAction[]
   counts: { ready: number; blocked: number; done: number; kept: number }
   blocked: CompletionAction[]
   excluded: Array<CompletionRef & { reason: string; kind?: string }>
-  gaps: { truncated: boolean; unread: string[]; bounded: string[]; errors: unknown[]; plane: string[] }
+  gaps: { truncated: boolean; unread: string[]; bounded: string[]; errors: unknown[] }
   results: CompletionResult[]
   history: CompletionRecord[]
   note: string
@@ -261,13 +261,9 @@ export function planLines(plan: CompletionPlan, phase: PlanPhase): PlanLine[] {
     }
   }
   if (!plan.status.zulip_write) line(plan.status.reason, 'bad', 0, 'body')
-  // Only a Plane-backed row can be missing because Plane is: autolab's work
-  // record is the conversation itself (`refactor` p1), and a warning about a
-  // credential it never uses would read as a gap where there is none.
-  if (!plan.status.plane && plan.actions.some(
-    (one) => one.kind === 'work' && one.detail?.source !== 'agautolab')) {
-    line('No Plane credential: the Work states below are what the relay could not read.', 'warn', 0, 'small')
-  }
+  // No Plane warning any more: since `refactor` p2 both agents keep their
+  // work record in the conversations, so there is no credential this panel
+  // could be missing and no row it could fail to read.
 
   const results = new Map<string, CompletionResult>(plan.results.map((one) => [one.key, one]))
   if (scope.closable) {
@@ -313,7 +309,6 @@ export function planLines(plan: CompletionPlan, phase: PlanPhase): PlanLine[] {
   const gaps = [
     ...plan.gaps.unread.map((one) => `${one} could not be read`),
     ...plan.gaps.bounded.map((one) => `${one} was read as a window; older posts are in Zulip`),
-    ...plan.gaps.plane,
     ...(plan.gaps.truncated ? ['the walk hit its node cap; there may be more'] : []),
   ]
   if (gaps.length) {

@@ -12,13 +12,11 @@ import sys
 import time
 from pathlib import Path
 
-from agag.plane import load_plane_config
 from agag.zulip import ZulipClient
 
 from .budget import budget_from_env
 from .chat import CHAT_ENV_VARIABLE, DEFAULT_MAX_CHARS, Chat
 from .close import Closer
-from .closing import PlaneReader
 from .cost import PRICES_VARIABLE, Cost, prices_path_from_env
 from .frontdesk import FrontDesk
 from .inflight import ROOTS_VARIABLE, parse_roots
@@ -38,15 +36,10 @@ OPS_ENV_VARIABLE = "OPSROOM_ZULIP_ENV"
 #: with no fallback in either direction: the observer that reads the realm
 #: never posts, and a relay without this one is read-only for chat and says so.
 CHAT_VARIABLE = CHAT_ENV_VARIABLE
-#: Plane credentials for the Front Desk's completion button (`front_desk` p3):
-#: a path to an ignored `KEY=value` file (`agag.plane.load_plane_config`).
-#: A fourth variable and no fallback, because it is the one credential here
-#: that is *not* Zulip and because a relay without it must still close the
-#: chat half — the preview says which Works it could not see. The key needs
-#: read and write access to the projects the conversations reach; planning
-#: measured a per-agent key that could read one project and was refused
-#: another, so this is deliberately configurable rather than derived.
-PLANE_VARIABLE = "AGENTROOM_PLANE_ENV"
+# `AGENTROOM_PLANE_ENV` is gone (`refactor` p2 step 4). It existed for the one
+# record this relay read outside Zulip — forge's Plane Work — and forge's
+# record is a conversation now. The relay holds three credentials, all Zulip:
+# the read, the observer's, and the Developer's for what it writes.
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8094
 DEFAULT_CACHE_SECONDS = 30.0
@@ -153,13 +146,9 @@ def main(argv: list[str] | None = None) -> int:
     desk = FrontDesk(ops=ops, chat=chat, reader_factory=lambda: ZulipClient.from_env(path))
 
     # The completion door (`front_desk` p3). It reads with the relay's own
-    # credential, writes to Zulip with the Developer's — the one that already
-    # posts here — and touches Plane only when it has been given a key.
-    plane_env = os.environ.get(PLANE_VARIABLE, "")
-    plane_path = Path(plane_env).expanduser() if plane_env else None
-    if plane_path is not None and not plane_path.is_file():
-        print(f"{PLANE_VARIABLE}={plane_path} is not a file", file=sys.stderr)
-        return 2
+    # credential and writes with the Developer's — the one that already posts
+    # here. Since `refactor` p2 both halves of what it closes are Zulip, so
+    # there is no third system to be configured for.
     def held_topics() -> dict:
         """The engine's memory, copied under its lock: a preview must not
         read a dict a sweep is writing."""
@@ -172,8 +161,6 @@ def main(argv: list[str] | None = None) -> int:
         topics=held_topics,
         reader_factory=lambda: ZulipClient.from_env(path),
         writer_factory=(lambda: chat.client()) if chat.configured else None,
-        plane_factory=((lambda: PlaneReader(load_plane_config(plane_path)))
-                       if plane_path is not None else None),
     )
 
     # The settings repository (`front_desk` p2): read per request from the
@@ -192,8 +179,7 @@ def main(argv: list[str] | None = None) -> int:
         + (f"cost over {len(roots)} roots, " if cost else "cost off, ")
         + f"budget of {len(budget.providers)} harnesses, "
         + f"settings from {settings.config_path.name}, "
-        + ("completion with Plane" if plane_path is not None else
-           "completion without Plane") + ")",
+        + ("completion on" if chat.configured else "completion read-only") + ")",
         flush=True,
     )
     try:

@@ -12,12 +12,14 @@ room's routine runs and the agent room's conversations are the others
 work was any good; it decides only whether each target is in a state this
 operation may move, and it decides that by counting:
 
-- a mission **Work** may be closed when every one of its live Sub-Works is
-  completed. That is `agag.plane.reason_not_completed`, the same rule
-  `agautolab.mission_done` applies, called here for one named Work instead
-  of a whole board. A Work already Done is a successful no-op; a cancelled
-  one is left exactly as it is; a Work with unfinished children, or a
-  standalone Work with no children at all, is **blocked** and says so.
+- a **work record** may be closed when its own agent's rule says it is
+  finished — autolab's mission when every one of its live tasks is
+  completed (`autolab.reason_not_finished`), forge's request when something
+  has been delivered (`forge.reason_not_accepted`). Two lifecycles, each the
+  writer's own and neither re-invented here. An already-accepted record is a
+  successful no-op; a cancelled or retired one is left exactly as it is;
+  anything else is **blocked**, says so, and holds its own conversations
+  open (`_hold_dependents`).
 - a **topic** may be resolved when the walk actually read it. A topic known
   only by the note that named it is a gap, not a finished conversation.
 - a **channel** may be archived when it is `work-<label>` for a mission of
@@ -25,20 +27,23 @@ operation may move, and it decides that by counting:
   targets (`closing._channels`). The shared `#front`, project and agent
   channels are never candidates.
 
-**Order matters and is fixed**: Plane first, then the related topics, then
-the dedicated channels, then the Front conversation itself. Resolving the
-Front topic last is what makes a half-finished run visible — if anything
-related is blocked or failed, the Front conversation **stays open**, which
-is the only way the screen can honestly say "partially closed".
+**Order matters and is fixed**: the work records first, then the related
+topics, then the dedicated channels, then the Front conversation itself.
+Resolving the Front topic last is what makes a half-finished run visible —
+if anything related is blocked or failed, the Front conversation **stays
+open**, which is the only way the screen can honestly say "partially
+closed". Records first is also what lets a failed acceptance hold back the
+conversations it is about in the same pass.
 
 **The browser never names a destination.** A request carries the selected
 conversation and the fingerprint of the preview the human looked at; every
-target is re-derived here from the realm and from Plane, and a material
-change since the preview is a refusal with a fresh plan rather than a write
-against a stale picture.
+target is re-derived here from the realm, and a material change since the
+preview is a refusal with a fresh plan rather than a write against a stale
+picture.
 
 **Retrying is re-running.** Every action is idempotent in the realm's own
-terms — a resolved topic resolves to `already`, a Done Work to `already` —
+terms — a resolved topic resolves to `already`, an accepted record to
+`already` —
 so a second click after a partial failure repeats nothing and finishes what
 is left. The operation record kept here is for the screen, not for
 correctness.
@@ -55,7 +60,6 @@ from dataclasses import dataclass, field
 from hashlib import sha256
 from typing import Any, Callable, Protocol
 
-from agag.plane import ALREADY_COMPLETED, reason_not_completed, sub_works
 from agag.selfnote import note as selfnote
 from agag.zulip import ZulipClient, live_topic_name
 
@@ -72,7 +76,16 @@ from .autolab import (
     reason_not_finished,
     work_channel_name,
 )
-from .closing import AUTOLAB_SOURCE, Discovery, Key, PlaneBoard, Realm, WorkTarget, discover
+from .closing import AUTOLAB_SOURCE, Discovery, Key, Realm, WorkTarget, discover
+from .forge import (
+    ALREADY_ACCEPTED,
+    REQUEST_ACCEPTED,
+    REQUEST_RETIRED,
+    STATE_TAG as FORGE_STATE_TAG,
+    Request as ForgeRequest,
+    Run as ForgeRun,
+    reason_not_accepted,
+)
 from .frontdesk import FRONT_CHANNEL, ID_PATTERN, desk_topic
 from .room import bare_topic
 
@@ -80,11 +93,6 @@ SCHEMA = "ag.completion.v1"
 #: A channel or topic name this door will look up: Zulip's own limits, so a
 #: request cannot make the relay build a narrow out of anything else.
 NAME_MAX = 200
-#: Plane's state groups, used as their own mapping so the shared rule can be
-#: asked about a target whose states were already reduced to their groups by
-#: discovery. One rule, two shapes of input.
-GROUP_IDENTITY = {name: name for name in
-                  ("backlog", "unstarted", "started", "completed", "cancelled", "unknown")}
 #: What an action may be before it runs.
 READY, DONE, BLOCKED, KEPT = "ready", "done", "blocked", "kept"
 #: What it was after.
@@ -136,13 +144,14 @@ class Action:
 
 
 def _work_action(work: WorkTarget) -> Action:
-    """One work record, judged by its own storage's counting rule.
+    """One work record, judged by its own agent's rule.
 
-    Two storages, one question — *is every piece of this finished?* — and
-    the rule is the writer's in both cases, never re-invented here.
+    One question — *is this finished?* — and two different right answers,
+    because the two agents do different work. The rule is the writer's in
+    both cases and is never re-invented here.
     """
     return (_autolab_action(work) if work.source == AUTOLAB_SOURCE
-            else _plane_work_action(work))
+            else _forge_action(work))
 
 
 def _autolab_action(work: WorkTarget) -> Action:
@@ -196,30 +205,48 @@ def _autolab_action(work: WorkTarget) -> Action:
     return Action("work", work.key, label, BLOCKED, reason, detail)
 
 
-def _plane_work_action(work: WorkTarget) -> Action:
-    """One Plane Work, judged by the shared parent/child rule.
+def _forge_action(work: WorkTarget) -> Action:
+    """One forge request, judged from the conversations it is made of.
 
-    forge's records only, since `refactor` p1: autolab keeps none.
+    `forge.reason_not_accepted` is forge's lifecycle, not autolab's counting
+    rule: what finishes a request is that **something was delivered**, not
+    that every run of it completed. A second attempt after a failure is the
+    same request trying again.
+
+    What this operation would *write* keeps the same three things apart that
+    `refactor` p1 separated for autolab:
+
+    - the generation succeeded and the asset reached the requester — the
+      **run** said so, in both conversations, and it is never written here;
+    - a person accepted it — this operation, `[state] accepted`, and the only
+      thing that writes that word;
+    - the ✔ on each topic is neither, and happens afterwards.
+
+    A run orphaned from its request is shown and never moved.
     """
-    issue = {"id": work.issue_id, "state": work.state}
-    children = sub_works(
-        [{"id": row["issue_id"], "parent": work.issue_id, "state": row["state"],
-          "sequence_id": index} for index, row in enumerate(work.children)],
-        work.issue_id, GROUP_IDENTITY,
-    )
-    reason = reason_not_completed(issue, children, GROUP_IDENTITY)
-    detail = {**work.as_dict(),
-              "unreached_children": [row["label"] for row in work.children if not row["reached"]]}
+    detail = {**work.as_dict(), "unreached_children": []}
     label = f"{work.label} {work.title}".strip()
+    if work.role != "request":
+        return Action("work", work.key, label, KEPT,
+                      f"kept — this run's request ({work.parent_id}) is not part of this "
+                      "request, so nothing here decides whether it is accepted", detail)
+    runs = [
+        ForgeRun(anchor_id=int(row.get("anchor_id") or 0), request_id=work.anchor_id,
+                 channel=str(row.get("channel") or ""), topic=str(row.get("topic") or ""),
+                 state=str(row.get("state") or ""))
+        for row in work.children
+    ]
+    request = ForgeRequest(anchor_id=work.anchor_id, stem=work.title, channel=work.channel,
+                           topic=work.topic, state=work.state)
+    reason = reason_not_accepted(request, runs)
     if reason is None:
         return Action("work", work.key, label, READY,
-                      f"every one of its {len(children)} sub-works is completed", detail)
-    if reason == ALREADY_COMPLETED:
+                      "its asset was delivered; accepting it", detail)
+    if reason == ALREADY_ACCEPTED:
         return Action("work", work.key, label, DONE,
-                      "already Done; closing it again changes nothing", detail)
-    if reason == "cancelled":
-        return Action("work", work.key, label, KEPT,
-                      "cancelled: this operation never moves a cancelled Work", detail)
+                      "already accepted; accepting it again changes nothing", detail)
+    if request.state == REQUEST_RETIRED:
+        return Action("work", work.key, label, KEPT, f"kept — {reason}", detail)
     return Action("work", work.key, label, BLOCKED, reason, detail)
 
 
@@ -234,9 +261,10 @@ def dependents(action: Action) -> set[str]:
     to post in, which is the defect `refactor` p1 recorded and left standing.
 
     Keys, not coordinates, because that is what a result row is matched to
-    and what `_apply` walks. A record in Plane names its channel by label,
-    one kept in the chat by the anchor id that *is* it; both are asked for,
-    and a name that matches no target simply holds nothing.
+    and what `_apply` walks. A record names its channel by its label and by
+    the anchor id that *is* it; both are asked for, and a name that matches
+    no target simply holds nothing — forge keeps no dedicated channel, so
+    its requests hold their conversations and nothing else.
     """
     detail = action.detail
     keys: set[str] = set()
@@ -285,8 +313,8 @@ def _hold_dependents(actions: list[Action]) -> None:
 def plan_actions(found: Discovery) -> list[Action]:
     """Every action, in the order execution applies them.
 
-    Plane first — a Work is the record the chat cannot rebuild — then the
-    related topics, then the dedicated channels, then the selected request
+    The work records first — so a blocked or failed one can hold back what
+    it is about — then the related topics, then the dedicated channels, then the selected request
     itself, last so that anything left undone keeps it open.
 
     A root that may not be completed (an execution topic, a standing
@@ -412,8 +440,29 @@ def _accept_mission(client: ZulipClient, detail: dict) -> str:
     return f"{detail.get('label')} is done{accepted}"
 
 
-class PlaneOps(PlaneBoard, Protocol):  # pragma: no cover - structural typing only
-    def complete(self, project_id: str, issue_id: str) -> None: ...
+def _accept_request(client: ZulipClient, detail: dict) -> str:
+    """Write the human's acceptance into the request it is about.
+
+    One `[selfnote][state] accepted` note, in the request's conversation.
+    Not in its runs: a run is an *attempt*, and a person accepting the asset
+    is saying something about the request, not about each try that led to
+    it. Appended, never edited, and a selfnote so nobody is served by it —
+    writing the record must not buy a run.
+
+    Written under the topic's **live** name, because a request's
+    conversation is often already resolved by the time somebody accepts it,
+    and a post under the bare name of a ✔ topic opens a twin beside it.
+    Whatever fails here raises, and `_apply` reports it against this one
+    target — and holds back the conversations it is about.
+    """
+    channel, topic = str(detail.get("channel") or ""), str(detail.get("topic") or "")
+    if not channel or not topic:
+        raise RuntimeError("this request's conversation is not known, so nothing can be written")
+    client.send_to_channel(channel, live_topic_name(client, channel, topic),
+                           selfnote(FORGE_STATE_TAG, REQUEST_ACCEPTED))
+    keys = [str(key) for key in (detail.get("results") or []) if str(key).strip()]
+    delivered = f"; its asset is {', '.join(keys)}" if keys else ""
+    return f"{detail.get('label')} is accepted{delivered}"
 
 
 @dataclass
@@ -432,7 +481,6 @@ class Closer:
     topics: Callable[[], dict]
     reader_factory: Callable[[], ZulipClient] | None = None
     writer_factory: Callable[[], ZulipClient] | None = None
-    plane_factory: Callable[[], PlaneOps] | None = None
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
     _locks: dict[Key, threading.Lock] = field(default_factory=dict, repr=False)
     _records: list[dict] = field(default_factory=list, repr=False)
@@ -459,7 +507,6 @@ class Closer:
         return {
             "zulip_read": self.reader_factory is not None,
             "zulip_write": self.writer_factory is not None,
-            "plane": self.plane_factory is not None,
             "reason": ("" if self.reader_factory and self.writer_factory else
                        "this relay has no write credential, so nothing can be closed"
                        if self.reader_factory else
@@ -492,8 +539,7 @@ class Closer:
         if isinstance(key, dict):
             return key
         realm: Realm | None = self._reader_client()
-        plane: PlaneOps | None = self.plane_factory() if self.plane_factory else None
-        found = discover(self.topics(), key, realm=realm, plane=plane)
+        found = discover(self.topics(), key, realm=realm)
         actions = plan_actions(found)
         return self._payload(now, found, actions)
 
@@ -538,8 +584,7 @@ class Closer:
             return {"error": self.status()["reason"], "status": self.status()}
         with self._conversation_lock(key):
             realm: Realm | None = self._reader_client()
-            plane: PlaneOps | None = self.plane_factory() if self.plane_factory else None
-            found = discover(self.topics(), key, realm=realm, plane=plane)
+            found = discover(self.topics(), key, realm=realm)
             actions = plan_actions(found)
             current = fingerprint(actions)
             if expected is not None and expected != current:
@@ -548,7 +593,7 @@ class Closer:
                 payload["error"] = ("the targets have changed since this preview was made; "
                                     "nothing was closed — read the refreshed plan and approve it")
                 return payload
-            results = self._apply(client, plane, actions)
+            results = self._apply(client, actions)
             with self._lock:
                 self._records.append({"at": now, "channel": found.root[0],
                                       "topic": found.root[1], "kind": found.scope.kind,
@@ -561,8 +606,7 @@ class Closer:
             # that in a browser fixture). What was archived reads `done`, what
             # failed reads `ready` again, and `partial` is judged on what is
             # still left to do rather than on what was attempted.
-            plane = self.plane_factory() if self.plane_factory else None
-            after = discover(self.topics(), key, realm=realm, plane=plane)
+            after = discover(self.topics(), key, realm=realm)
             actions_after = plan_actions(after)
             # A target this operation made unreadable — the topics of a
             # channel it archived — is not in the plan as it now stands, and
@@ -601,8 +645,7 @@ class Closer:
                                   or bool(payload["counts"]["blocked"]) or root_kept)
             return payload
 
-    def _apply(self, client: ZulipClient, plane: PlaneOps | None,
-               actions: list[Action]) -> list[dict]:
+    def _apply(self, client: ZulipClient, actions: list[Action]) -> list[dict]:
         """Run the ready actions in order. Nothing rolls back.
 
         A failure stops nothing except the Front topic and whatever the
@@ -645,7 +688,7 @@ class Closer:
                     "say the whole thing is finished"))
                 continue
             try:
-                note = self._run(client, plane, action)
+                note = self._run(client, action)
             except Exception as error:  # noqa: BLE001 - reported per target, never raised
                 trouble = True
                 if action.kind == "work":
@@ -661,14 +704,11 @@ class Closer:
         return {"key": action.key, "kind": action.kind, "label": action.label,
                 "outcome": outcome, "note": note}
 
-    def _run(self, client: ZulipClient, plane: PlaneOps | None, action: Action) -> str:
+    def _run(self, client: ZulipClient, action: Action) -> str:
         if action.kind == "work":
             if action.detail.get("source") == AUTOLAB_SOURCE:
                 return _accept_mission(client, action.detail)
-            if plane is None:
-                raise RuntimeError("no Plane credential is configured")
-            plane.complete(action.detail["project_id"], action.detail["issue_id"])
-            return f"{action.detail['label']} is Done"
+            return _accept_request(client, action.detail)
         if action.kind == "channel":
             stream = client.stream_id(action.detail["channel"])
             client.archive_channel(int(stream))
@@ -684,7 +724,7 @@ class Closer:
     def records(self, key: Key | None = None) -> list[dict]:
         """Operations this relay carried out, newest last, for one request
         or for all of them. Memory only: a restart forgets them, and the
-        realm and Plane are the record that matters."""
+        realm is the record that matters."""
         with self._lock:
             return [row for row in self._records
                     if key is None or (row["channel"], row["topic"]) == key]

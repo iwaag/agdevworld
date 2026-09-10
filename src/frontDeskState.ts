@@ -314,10 +314,10 @@ function demoPlan(id: string, closed: Set<string>, _failed: boolean): ClosePlan 
     },
     history: [],
     fingerprint: actions.map((one) => `${one.key}=${one.state}`).join('|'),
-    status: { zulip_read: true, zulip_write: true, plane: true, reason: '' },
+    status: { zulip_read: true, zulip_write: true, reason: '' },
     actions, counts, blocked: actions.filter((one) => one.state === 'blocked'),
     excluded: [{ channel: 'pj-ghtrends', topic: 'workplan-trend5', reason: 'anchored to another request (front/front-desk-20260907-0900)' }],
-    gaps: { truncated: false, unread: [], bounded: [], errors: [], plane: [] },
+    gaps: { truncated: false, unread: [], bounded: [], errors: [] },
     results: [], note: 'this closes work; it does not stop a running agent',
   }
 }

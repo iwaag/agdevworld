@@ -56,7 +56,7 @@ from agag.selfnote import Conversation, is_selfnote, parse_rootchat, parse_serve
 from agag.zulip import RESOLVED_TOPIC_PREFIX, QueueExpired, RateLimited, ZulipClient
 
 from .autolab import notes_in
-from .closing import parse_work_note
+from .forge import notes_in as forge_notes_in
 from .frontdesk import FRONT_CHANNEL, is_desk_topic, newest_desk_topics
 from .inflight import Inflight
 from .room import SYSTEM_REALM, bare_topic
@@ -184,20 +184,18 @@ class Topic:
     #: first note is when this conversation started working there, which is
     #: what attributes a child to one fire rather than another.
     served: dict[tuple[str, str], dict] = field(default_factory=dict)
-    #: `[selfnote][work]` written *in* this topic: the Plane issue an
-    #: execution topic was anchored to, with who wrote it and where
-    #: (`closing.parse_work_note`). The third link note, retained for the
-    #: same reason as the other two and rendered as little: `front_desk` p3
-    #: needs it to say which Work a finished conversation owns, and it is not
-    #: in `history` — a selfnote is never a real post.
-    works: list[tuple[str | None, str, int, str, int]] = field(default_factory=list)
     #: autolab's own notes written in this topic — what mission or task this
     #: conversation *is*, and how far it has got (`autolab.notes_in`). The
-    #: fourth link note, retained for the same reason as `works` was and in
-    #: its place: since `refactor` p1 there is no Plane issue for a
-    #: `[work]` note to name, so this is where an autolab conversation says
-    #: what it is. Not in `history` — a selfnote is never a real post.
+    #: third link note, retained for the same reason as the other two: since
+    #: `refactor` p1 there is no Plane issue for a `[work]` note to name, so
+    #: this is where an autolab conversation says what it is. Not in
+    #: `history` — a selfnote is never a real post.
     autolab: list[tuple[str, str, int, int, str]] = field(default_factory=list)
+    #: forge's own notes, the same shape and the same reason one phase later
+    #: (`refactor` p2, `forge.notes_in`): what request or run this
+    #: conversation *is*. The `[work]` note both agents used to write named a
+    #: Plane issue and is gone; nothing retains it, because nothing writes it.
+    forge: list[tuple[str, str, int, int, str]] = field(default_factory=list)
     #: Whether `history` is known to be a *window* rather than the whole topic:
     #: the sweep's read came back full, or a later post pushed an older one out.
     #: A session list built on a window must say so instead of implying that
@@ -246,17 +244,16 @@ class Topic:
             # a home of their own.
             self.roots.append((home, sender_id, sender, int(message.get("id") or 0)))
             self.roots.sort(key=lambda root: root[3])
-        work = parse_work_note(content)
-        if work is not None:
-            entry = (work[0], work[1], sender_id, sender, int(message.get("id") or 0))
-            if not any(kept[:3] == entry[:3] for kept in self.works):
-                self.works.append(entry)
-                self.works.sort(key=lambda kept: kept[4])
         for note in notes_in([message]):
             entry = note.as_tuple()
             if entry not in self.autolab:
                 self.autolab.append(entry)
                 self.autolab.sort(key=lambda kept: kept[2])
+        for note in forge_notes_in([message]):
+            entry = note.as_tuple()
+            if entry not in self.forge:
+                self.forge.append(entry)
+                self.forge.sort(key=lambda kept: kept[2])
         parsed = parse_served(content)
         if parsed is not None:
             remote, ident = parsed

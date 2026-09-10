@@ -113,8 +113,9 @@ writes only to this process's memory (see `POST /ops/confirm`).
 
 - `GET /complete/plan?channel=…&topic=…`, `POST /complete` → what
   finishing one request would change, and doing it (`front_desk` p3, p4).
-  The **second** route that writes to the realm, and the only one that can
-  write to Plane (for forge's records; autolab's are the conversations).
+  The **second** route that writes to the realm. Since `refactor` p2 both
+  agents keep their record in the conversations, so it is the only system it
+  writes to at all.
   `GET /complete/history` is what this relay carried out.
   `GET /frontdesk/<id>/close-plan` and `POST /frontdesk/<id>/close` are the
   same operation with the Front Desk id naming the topic. See below.
@@ -279,17 +280,29 @@ nothing ever closed. Two routes close it, in `closing.py` (what the targets
 *are*) and `close.py` (what would change, and doing it). The request is any
 conversation named by `channel` and `topic` (a ✔ name is read bare):
 
-Since `refactor` p1 the two agents keep their records in different places,
-and the `work` actions say which: **autolab's is the conversation**
-(`autolab.py` reads its `[mission]`/`[task]`/`[state]` notes; a task belongs
-to a mission by the anchor **id** its note names, so a reused display name
-never hands one request another's work), and **forge's is still a Plane
-issue**. Completing an autolab request writes the human's acceptance where
-the work happened — `accepted` on each finished task, `done` on the mission —
-and only then resolves the topics. The three stay distinguishable on purpose:
-`completed` is the run's word, `accepted` is a person's, and the ✔ is neither
-— it closes the conversation. A mission that was **replaced** (`refactor` p2)
-is another request and is never closed alongside its replacement.
+Since `refactor` p1 (autolab) and p2 (forge) **both agents keep their record
+in the conversation**, and the `work` actions say whose. `autolab.py` reads
+the `[mission]`/`[task]`/`[state]` notes; `forge.py` reads the
+`[asset]`/`[assetrun]`/`[state]`/`[result]` ones. In both, a child belongs to
+its parent by the anchor **id** its note names, so a reused display name
+never hands one request another's work.
+
+**The two lifecycles are different and are not merged.** A mission is
+finished when every one of its live tasks is (`autolab.reason_not_finished`);
+a request is finished when something has been **delivered**
+(`forge.reason_not_accepted`) — a second attempt after a failure is the same
+request trying again, not another child that must also finish. A request
+whose run is still `pending` on a ComfyUI job is blocked, which is what keeps
+its conversations reachable.
+
+Completing writes the human's acceptance where the work happened —
+`accepted` on each finished task and `done` on the mission, `accepted` on the
+request (not on its runs: a run is an attempt, and a person accepts the
+request) — and only then resolves the topics. The three stay distinguishable
+on purpose: `completed`/`delivered` is the run's word, `accepted` is a
+person's, and the ✔ is neither — it closes the conversation. A mission that
+was **replaced**, or a request that was **retired**, is another request and is
+never closed alongside its replacement.
 
 - `GET /complete/plan?channel=…&topic=…` → `ag.completion.v1`: `root`, a
   `scope` block, the ordered `actions`, each with a `kind` (`work`, `topic`,
@@ -364,14 +377,14 @@ idempotent in the realm's own terms (a resolved topic → `already`, a mission
 already `done` → `already`), so clicking again after a partial failure
 finishes what is left and repeats nothing.
 
-Credentials: reads use `AGENTROOM_ZULIP_ENV`, Zulip writes use
-`AGENTROOM_CHAT_ZULIP_ENV` (the Developer — the credential that already
-posts here), and Plane uses **`AGENTROOM_PLANE_ENV`**, a path to an ignored
-`KEY=value` file. Plane is needed only for forge's records now: an autolab
-request previews and closes completely without it. Unset, or refused a
-project, is reported in the preview's `status`/`gaps` rather than discovered
-on submit. This operation closes
-work; it does not stop a running agent.
+Credentials: reads use `AGENTROOM_ZULIP_ENV` and writes use
+`AGENTROOM_CHAT_ZULIP_ENV` (the Developer — the credential that already posts
+here). **`AGENTROOM_PLANE_ENV` is gone** (`refactor` p2 step 4): it existed
+for the one record this relay read outside Zulip, and there is none left, so
+a request previews and closes completely with three Zulip credentials and
+nothing else. A missing write credential is reported in the preview's
+`status` rather than discovered on submit. This operation closes work; it
+does not stop a running agent.
 
 ## `/settings` — the settings repository (`front_desk` p2)
 

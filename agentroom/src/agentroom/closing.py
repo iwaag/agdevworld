@@ -36,9 +36,11 @@ it from the realm's own records rather than from prose:
   to its mission by that **id**, never by the name its root note carries —
   which is what keeps a reused display name (`refactor` p2) from handing one
   request another's work.
-- the `[work]` note forge writes into an execution topic
-  (`agforge.anchor`): `<project id>/<issue id>`, the only Plane record this
-  traversal still reads.
+- **forge's own record, which is also the conversation** (`forge.py`, and
+  `refactor` p2 for why): an `assetplan-` topic carrying an `[asset]` note
+  *is* a request, an `assetrun-` topic carrying an `[assetrun]` note is one
+  of its runs, and the note's own message id is the identity. Nothing in
+  this traversal reads Plane any more.
 
 **The display graph is not this graph.** `routines.session_tree` caps depth
 and node count because a board is not where a cycle should be discovered,
@@ -80,6 +82,14 @@ from .autolab import (
     read_record,
     work_channel_name,
 )
+from .forge import (
+    REQUEST_RETIRED,
+    Note as ForgeNote,
+    Request as ForgeRequest,
+    Run as ForgeRun,
+    notes_in as forge_notes_in,
+    read_record as forge_read_record,
+)
 from .frontdesk import DESK_PREFIX, FRONT_CHANNEL, desk_id
 from .room import AGENTS_CHANNEL, INTRO_PREFIX, bare_topic
 from .routines import (
@@ -89,11 +99,10 @@ from .routines import (
 #: One conversation, keyed the way the ops engine keys them: bare topic name.
 Key = tuple[str, str]
 
-#: The selfnote tag both autolab and forge anchor an execution topic with.
-#: One tag, two shapes, and the shape says which agent wrote it.
-WORK_TAG = "work"
-#: `external_source` on every issue autolab registers (`mission.EXTERNAL_SOURCE`).
+#: Which agent's record a `WorkTarget` came out of. Both are conversations
+#: now, and the source is what says whose lifecycle judges it.
 AUTOLAB_SOURCE = "agautolab"
+FORGE_SOURCE = "agforge"
 #: autolab's channel names, as its listener builds them: `pj-<slug>` for a
 #: project, `work-<label>` for one mission's dedicated channel.
 PROJECT_CHANNEL_PREFIX = "pj-"
@@ -138,10 +147,9 @@ MAX_NODES = 120
 AUTO_MARKER = "[AUTO]"
 
 __all__ = [
-    "AUTOLAB_SOURCE", "Discovery", "EXECUTION_KINDS", "MAX_NODES", "PlaneBoard", "PlaneReader",
+    "AUTOLAB_SOURCE", "Discovery", "EXECUTION_KINDS", "FORGE_SOURCE", "MAX_NODES",
     "READ_DEPTH", "REQUEST_KINDS", "RETIRING_KINDS", "Related", "Scope", "WORK_CHANNEL_PREFIX",
-    "WORK_TAG", "WorkNote", "WorkTarget", "classify", "describe_kind", "discover",
-    "parse_work_note", "related_topics", "work_notes",
+    "WorkTarget", "classify", "describe_kind", "discover", "related_topics",
 ]
 
 
@@ -232,63 +240,11 @@ class Scope:
 # --- the `[work]` note ------------------------------------------------------
 
 
-def parse_work_note(content) -> tuple[str | None, str] | None:
-    """`(project id or None, issue id)` of a `[selfnote][work]`, or None.
-
-    Two writers, one tag. forge writes `<project id>/<issue id>` because an
-    `assetrun-` topic's channel says nothing about which Plane project it
-    runs in; autolab writes the bare `<issue id>` because its topic's root
-    note already names the `pj-<slug>` channel the project is derived from.
-    The presence of a separator is therefore the whole discriminator, and it
-    is the writers' own format rather than a heuristic.
-    """
-    value = (parse_note(content, WORK_TAG) or "").strip()
-    if not value:
-        return None
-    if "/" in value:
-        project_id, issue_id = (part.strip() for part in value.split("/", 1))
-        return (project_id, issue_id) if project_id and issue_id else None
-    return (None, value)
-
-
-@dataclass(frozen=True)
-class WorkNote:
-    """One `[work]` note, with who wrote it and where."""
-
-    channel: str
-    topic: str
-    project_id: str | None
-    issue_id: str
-    by_id: int
-    by: str
-    message_id: int
-
-    def as_dict(self) -> dict:
-        return {"channel": self.channel, "topic": self.topic, "project_id": self.project_id,
-                "issue_id": self.issue_id, "by": self.by, "by_id": self.by_id,
-                "message_id": self.message_id}
-
-
-def work_notes(channel: str, topic: str, messages: Iterable[dict]) -> list[WorkNote]:
-    """Every `[work]` note in one topic's history, oldest first.
-
-    Both anchors say the earliest note wins for *their own* bot; a topic can
-    carry notes from two agents, so nothing is picked here — every note is
-    returned with its author and the caller decides what it is party to.
-    """
-    found: list[WorkNote] = []
-    for message in messages:
-        parsed = parse_work_note(message.get("content"))
-        if parsed is None:
-            continue
-        found.append(WorkNote(
-            channel=channel, topic=topic, project_id=parsed[0], issue_id=parsed[1],
-            by_id=int(message.get("sender_id") or 0),
-            by=str(message.get("sender_full_name") or ""),
-            message_id=int(message.get("id") or 0),
-        ))
-    found.sort(key=lambda note: note.message_id)
-    return found
+# The `[selfnote][work]` note is gone. It named a Plane issue, and neither
+# agent keeps one: autolab stopped writing it in `refactor` p1 and forge in
+# p2. Nothing here reads it, and no reader is kept for the old format — an
+# abstraction preserved only for records nothing writes is the cost this
+# whole phase is removing.
 
 
 # --- one related conversation ----------------------------------------------
@@ -311,7 +267,6 @@ class Related:
     #: `[rootchat]` notes written *in* it: the conversations it was opened
     #: for, with who said so. This is what makes a topic somebody else's.
     homes: list[dict] = field(default_factory=list)
-    works: list[WorkNote] = field(default_factory=list)
     #: autolab's own notes written in this topic, and what they make it: a
     #: `Mission`, a `Task`, or None for a conversation that is neither. Since
     #: `refactor` p1 this is autolab's whole record — there is no Plane issue
@@ -319,6 +274,13 @@ class Related:
     #: `workrun-` topic belongs to and how far the work has got.
     notes: list[Note] = field(default_factory=list)
     record: Any | None = None
+    #: forge's own notes, and what they make this topic: a `Request`, a
+    #: `Run`, or None. The same shape and the same reason, one phase later
+    #: (`refactor` p2). Two readers rather than one because the two agents
+    #: share three tag names (`doc`, `state`, `replaces`) and each identifies
+    #: its own records by its own identity note.
+    forge_notes: list[ForgeNote] = field(default_factory=list)
+    forge_record: Any | None = None
     #: The read came back full: there may be older posts, and older notes.
     history_bounded: bool = False
     last_post_id: int = 0
@@ -344,8 +306,9 @@ class Related:
             "links": self.links, "homes": self.homes, "visitors": self.visitors,
             "channel_archived": self.channel_archived,
             "twin": self.twin, "twin_posts": self.twin_posts,
-            "works": [note.as_dict() for note in self.works],
             "record": self.record.as_dict() if self.record is not None else None,
+            "forge_record": (self.forge_record.as_dict()
+                             if self.forge_record is not None else None),
             "history_bounded": self.history_bounded,
             # The id a resolve renames from: Zulip resolves a topic by moving
             # its messages, so closing one needs a post of it to move.
@@ -556,12 +519,21 @@ def _homes_of(node: Any) -> list[dict]:
             for home, by, sender, note_id in (getattr(node, "roots", None) or [])]
 
 
+#: The identity suffix a writer appends to a name it minted from an anchor
+#: id: `assetrun-red-apple-a5912`, `workrun-task1-m5512`. Dropped when
+#: pairing siblings, because the two halves of one request wear the same
+#: stem and only one of them wears the id.
+ANCHOR_SUFFIX = re.compile(r"-[am]\d+$")
+
+
 def _stem(topic: str) -> str:
-    """A topic name without its writer's prefix: `assetrun-red-apple` and
-    `assetplan-red-apple` share `red-apple`, which is how their author pairs
-    them. Never evidence on its own — only a reason to read."""
+    """A topic name without its writer's prefix or its anchor suffix:
+    `assetrun-red-apple-a5912` and `assetplan-red-apple` share `red-apple`,
+    which is how their author pairs them. Never evidence on its own — only a
+    reason to read."""
     _, separator, rest = topic.partition("-")
-    return rest if separator and rest else topic
+    stem = rest if separator and rest else topic
+    return ANCHOR_SUFFIX.sub("", stem) or stem
 
 
 def related_topics(
@@ -577,7 +549,7 @@ def related_topics(
     swept, is most of a finished session.
 
     `seed_channels` are channels whose every topic is *read* as a candidate
-    — a mission's dedicated `work-` channel, named by the Plane Work rather
+    — a mission's dedicated `work-` channel, named by the mission rather
     than by any note. Reading is all it buys: a candidate joins the graph on
     its own root note naming something already reached, exactly like every
     other node, or not at all.
@@ -617,22 +589,17 @@ def related_topics(
             known = ("read" if isinstance(node, _ReadTopic)
                      else "held" if held is not None and getattr(held, "history", None)
                      else "note-only")
-            # A held topic's history holds no selfnotes — they are not real
-            # posts — so its `[work]` notes come from the binding the engine
-            # retains (`ops.Topic.works`), not from re-reading the history.
-            works = work_notes(key[0], key[1], messages)
-            if not works and held is not None:
-                works = [WorkNote(channel=key[0], topic=key[1], project_id=project_id,
-                                  issue_id=issue_id, by_id=by_id, by=by, message_id=note_id)
-                         for project_id, issue_id, by_id, by, note_id
-                         in (getattr(held, "works", None) or [])]
-            # autolab's notes, from the same two places and for the same
-            # reason: a read gives the raw messages, a held topic gives the
-            # binding the engine retained, because its `history` has the
-            # selfnotes filtered out of it.
+            # autolab's notes, from two places: a read gives the raw
+            # messages, a held topic gives the binding the engine retained,
+            # because its `history` has the selfnotes filtered out of it.
             notes = notes_in(messages)
             if not notes and held is not None:
                 notes = [Note.of(entry) for entry in (getattr(held, "autolab", None) or [])]
+            # forge's, from the same two places and for the same reason.
+            forge_notes = forge_notes_in(messages)
+            if not forge_notes and held is not None:
+                forge_notes = [ForgeNote.of(entry)
+                               for entry in (getattr(held, "forge", None) or [])]
             # A ✔ topic may have an open twin under its bare name (a post
             # made after the resolve). The engine keys both as one and shows
             # whichever name it saw last, so a resolved node is read once
@@ -654,9 +621,10 @@ def related_topics(
                 resolved=live.startswith(RESOLVED_TOPIC_PREFIX),
                 known=known, depth=depth,
                 homes=_homes_of(node) if node is not None else [],
-                works=works,
                 notes=notes,
                 record=read_record(key[0], key[1], notes),
+                forge_notes=forge_notes,
+                forge_record=forge_read_record(key[0], key[1], forge_notes),
                 history_bounded=len(messages) >= READ_DEPTH,
                 last_post_id=(max(twin_ids) if twin_ids else
                               max((int(m.get("id") or 0) for m in messages), default=0)),
@@ -726,7 +694,7 @@ def related_topics(
     # carries no note naming its `workrun-` topics — each task topic names
     # the plan, not the other way round — so from a plan (or from anything
     # that reached the plan only by a note) the tasks are invisible until
-    # something reads them. The Plane Work names the channel; its topics are
+    # something reads them. The mission names the channel; its topics are
     # read here and admitted by their own root notes, or not at all.
     seeded = False
     for channel in seed_channels:
@@ -777,112 +745,41 @@ def related_topics(
     return found, gaps
 
 
-# --- Plane ------------------------------------------------------------------
-
-
-class PlaneBoard(Protocol):  # pragma: no cover - structural typing only
-    """What discovery needs of Plane: projects, issues and state groups.
-
-    A protocol rather than the adapter itself so a fixture can answer it —
-    the plan's requirement that this be verifiable without paid runs applies
-    to Plane just as much, and one 403 on one project is a state the tests
-    have to be able to produce (`plane_credential_note`).
-    """
-
-    def projects(self) -> list[dict]: ...
-    def issues(self, project_id: str) -> list[dict]: ...
-    def state_groups(self, project_id: str) -> dict[str, str]: ...
-
-
-@dataclass
-class PlaneReader:
-    """`agag.plane` behind `PlaneBoard`, each project asked for once.
-
-    Errors are kept rather than raised: a credential that can read one
-    project and is refused another is a *reported* condition at preview time
-    (planning met exactly that), not a failure of the whole preview.
-    """
-
-    config: Any
-    errors: list[dict] = field(default_factory=list)
-    _projects: list[dict] | None = field(default=None, repr=False)
-    _issues: dict[str, list[dict]] = field(default_factory=dict, repr=False)
-    _groups: dict[str, dict[str, str]] = field(default_factory=dict, repr=False)
-
-    def projects(self) -> list[dict]:
-        if self._projects is None:
-            from agag.plane import list_projects
-            try:
-                self._projects = list_projects(self.config)
-            except Exception as error:  # noqa: BLE001
-                self.errors.append({"project_id": None, "error": f"{type(error).__name__}: {error}"})
-                self._projects = []
-        return self._projects
-
-    def issues(self, project_id: str) -> list[dict]:
-        if project_id not in self._issues:
-            from agag.plane import list_issues
-            try:
-                self._issues[project_id] = list_issues(self.config, project_id)
-            except Exception as error:  # noqa: BLE001
-                self.errors.append({"project_id": project_id, "error": f"{type(error).__name__}: {error}"})
-                self._issues[project_id] = []
-        return self._issues[project_id]
-
-    def state_groups(self, project_id: str) -> dict[str, str]:
-        if project_id not in self._groups:
-            from agag.plane import state_groups
-            try:
-                self._groups[project_id] = state_groups(self.config, project_id)
-            except Exception as error:  # noqa: BLE001
-                self.errors.append({"project_id": project_id, "error": f"{type(error).__name__}: {error}"})
-                self._groups[project_id] = {}
-        return self._groups[project_id]
-
-    def complete(self, project_id: str, issue_id: str) -> None:
-        """Move one issue into the project's `completed` state.
-
-        The **only** write this whole feature makes to Plane, and it is the
-        one `agautolab.mission_done` makes: the state group is asked of the
-        project rather than assumed, because a project's states are its own.
-        """
-        from agag.plane import state_id_for_group, update_issue
-        update_issue(self.config, project_id, issue_id,
-                     {"state": state_id_for_group(self.config, project_id, "completed")})
-
-
 @dataclass
 class WorkTarget:
     """One work record this request is responsible for.
 
-    Two storages now, because two agents. **autolab's is the conversation**
-    (`refactor` p1): a mission is a `workplan-` topic, its identity is the
-    message id of its own `[selfnote][mission]` note, and its tasks are the
-    `workrun-` topics carrying a `[task]` note that names it. **forge's is
-    still a Plane issue**, named outright by a `[work]` note.
+    One storage now — **the conversations** — and two agents keeping records
+    in it. autolab's mission is a `workplan-` topic whose identity is the
+    message id of its own `[selfnote][mission]` note, with its tasks in
+    `workrun-` topics that name it (`refactor` p1); forge's request is an
+    `assetplan-` topic anchored by an `[asset]` note, with its runs in
+    `assetrun-` topics that name it (p2).
 
-    `source` is the only thing a caller branches on. The Plane coordinates
-    are empty for a record kept in the chat, and the conversation
-    coordinates are empty for one kept in Plane; `key` is what both are
-    addressed by, so a preview and the operation that follows it agree on
-    which row is which whichever storage it came from.
+    `source` is the only thing a caller branches on, and it selects a
+    *lifecycle*, not a storage: a mission is finished when every one of its
+    tasks is, a request when something has been delivered. `key` is what
+    both are addressed by, so a preview and the operation that follows it
+    agree on which row is which.
+
+    The Plane coordinates are kept as empty strings rather than removed:
+    they are what the payload's shape has always been, and a consumer
+    reading `issue_id` gets the honest answer that there is none.
     """
 
-    #: Which agent's record this is: `AUTOLAB_SOURCE`, or the Plane
-    #: `external_source` of the issue.
+    #: Which agent's record this is: `AUTOLAB_SOURCE` or `FORGE_SOURCE`.
     source: str | None
     label: str
     title: str
-    #: Where the work has got to, in its own storage's vocabulary: a Plane
-    #: state group, or one of autolab's own state words.
+    #: Where the work has got to, in its own agent's vocabulary.
     state: str
-    #: `mission` (the request as a whole) or `task` (one piece of it).
+    #: autolab: `mission` or `task`. forge: `request` or `run`.
     role: str
-    #: Plane's coordinates. Empty for a record kept in the chat.
+    #: Empty. Nothing this room reads keeps a Plane issue any more.
     project_id: str = ""
     project_name: str = ""
     issue_id: str = ""
-    #: The conversation's coordinates. Empty for a record kept in Plane.
+    #: The conversation's coordinates.
     channel: str = ""
     topic: str = ""
     #: The message id that *is* this record, for a chat-kept one.
@@ -892,6 +789,10 @@ class WorkTarget:
     evidence: list[dict] = field(default_factory=list)
     parent_id: str | None = None
     children: list[dict] = field(default_factory=list)
+    #: Durable object keys this record has delivered (forge only). What an
+    #: acceptance is *of*, and the reference that outlives every presigned
+    #: URL the delivery carried.
+    results: list[str] = field(default_factory=list)
 
     @property
     def key(self) -> str:
@@ -904,7 +805,8 @@ class WorkTarget:
                 "project_id": self.project_id, "project": self.project_name,
                 "issue_id": self.issue_id, "channel": self.channel, "topic": self.topic,
                 "anchor_id": self.anchor_id, "evidence": self.evidence,
-                "parent_id": self.parent_id, "children": self.children}
+                "parent_id": self.parent_id, "children": self.children,
+                "results": self.results}
 
 
 def _issue_label(project: dict, issue: dict) -> str:
@@ -1013,7 +915,7 @@ def _scope(topics: dict, root: Key, node: Related, reader: Reader) -> Scope:
             description += (f"; it replaced mission {older}, which is retired and is not "
                             "touched by finishing this one")
     elif kind == ASSETPLAN:
-        description = f"{label}, a Forge request, its run and its Plane Work"
+        description = f"{label}, a Forge request and its runs"
     else:
         description = f"{label} and the work its records link to it"
     if parents:
@@ -1187,7 +1089,6 @@ def discover(
     root: Key,
     *,
     realm: Realm | None = None,
-    plane: PlaneBoard | None = None,
     max_nodes: int = MAX_NODES,
 ) -> Discovery:
     """Everything closing the request at `root` would touch.
@@ -1199,9 +1100,8 @@ def discover(
        An execution topic answers with its parent and nothing else;
     2. **which conversations** — the link-note walk, to a fixed point, and
        then `_ownership` over what it reached;
-    3. **which Plane Works** — the workplan topics' `external_id` and the
-       execution topics' `[work]` notes, looked up in the projects those
-       topics name;
+    3. **which work records** — autolab's missions and their tasks, forge's
+       requests and their runs, all out of the topics already read;
     4. **which channels** — a `work-` channel whose *whole* topic list is
        accounted for by this request's targets. A channel with anything
        else in it is reported and kept.
@@ -1217,13 +1117,13 @@ def discover(
         excluded = [_exclude(node, "belongs to the parent request", node.links)
                     for key, node in sorted(found.items(), key=lambda i: (i[1].depth, i[0]))
                     if key != root]
-        gaps = {**gaps, "plane": [], "zulip_calls": reader.calls, "errors": _unique(reader.errors)}
+        gaps = {**gaps, "zulip_calls": reader.calls, "errors": _unique(reader.errors)}
         return Discovery(scope=scope, topics=[found[root]], excluded=excluded, works=[],
                          channels=[], gaps=gaps)
     lineage = [(p["channel"], p["topic"]) for p in scope.parents]
     kept, excluded = _ownership(root, found, lineage)
     _mark_archived(kept, root, reader)
-    works, channels, plane_gaps = _works(kept, reader, plane)
+    works, channels = _works(kept, reader)
     # A mission this request owns names its dedicated channel — `work-m<id>`,
     # from the anchor id that *is* the mission — and the channel may hold
     # task topics no note from here reached. Read them and walk once more;
@@ -1242,8 +1142,8 @@ def discover(
                                      seed_channels=sorted(set(seeds)))
         kept, excluded = _ownership(root, found, lineage)
         _mark_archived(kept, root, reader)
-        works, channels, plane_gaps = _works(kept, reader, plane)
-    gaps = {**gaps, **plane_gaps, "zulip_calls": reader.calls, "errors": _unique(reader.errors)}
+        works, channels = _works(kept, reader)
+    gaps = {**gaps, "zulip_calls": reader.calls, "errors": _unique(reader.errors)}
     return Discovery(scope=scope, topics=kept, excluded=excluded, works=works,
                      channels=channels, gaps=gaps)
 
@@ -1274,28 +1174,26 @@ def _unique(rows: list[dict]) -> list[dict]:
 
 
 def _works(
-    kept: list[Related], reader: Reader, plane: PlaneBoard | None,
-) -> tuple[list[WorkTarget], list[dict], dict]:
+    kept: list[Related], reader: Reader,
+) -> tuple[list[WorkTarget], list[dict]]:
     """Every work record these topics account for, and the channels they fill.
 
-    Two sources, asked separately because they are two systems:
+    Two agents, two readers, one place: **the conversations**. autolab's
+    `workplan-` topic carrying a `[mission]` note *is* a mission and its
+    `workrun-` topics are its tasks; forge's `assetplan-` topic carrying an
+    `[asset]` note *is* a request and its `assetrun-` topics are its runs.
+    Nothing is looked up anywhere else, because since `refactor` p2 there is
+    nowhere else to look — which is the whole of these two phases seen from
+    this side.
 
-    - **autolab's is the chat itself.** A `workplan-` topic carrying a
-      `[mission]` note *is* a mission; the `workrun-` topics carrying a
-      `[task]` note that names it are its tasks. Nothing is looked up
-      anywhere, because there is nowhere else to look — which is the whole
-      of `refactor` p1 seen from this side.
-    - **forge's is still Plane**, reached by the `[work]` notes that name a
-      project and an issue outright. A credential that cannot be asked is a
-      reported gap, not an empty answer.
+    They are read separately because their lifecycles differ, not because
+    their storage does: a mission is finished when every task is, a request
+    when something has been delivered.
     """
-    missions, tasks = _autolab_works(kept)
-    plane_targets, missing_plane = _plane_works(kept, plane)
-    targets = [*missions, *plane_targets]
+    missions, mission_targets = _autolab_works(kept)
+    requests = _forge_works(kept)
     labels = {target.label.lower(): True for target in missions}
-    return (targets,
-            _channels(kept, reader, labels, missing_plane),
-            {"plane": missing_plane})
+    return [*missions, *requests], _channels(kept, reader, labels)
 
 
 def _autolab_works(kept: list[Related]) -> tuple[list[WorkTarget], list[WorkTarget]]:
@@ -1352,109 +1250,66 @@ def _autolab_works(kept: list[Related]) -> tuple[list[WorkTarget], list[WorkTarg
     return [*mission_targets, *orphans], mission_targets
 
 
-def _plane_works(
-    kept: list[Related], plane: PlaneBoard | None,
-) -> tuple[list[WorkTarget], list[str]]:
-    """The Plane issues these topics' `[work]` notes name.
+def _forge_works(kept: list[Related]) -> list[WorkTarget]:
+    """forge's requests and their runs, read out of the conversations.
 
-    forge's, and only forge's, since `refactor` p1: a note that names no
-    project is a record in a format nothing writes any more and is reported
-    rather than guessed at. The projects asked for are the ones the notes
-    name outright — there is no longer a channel-name-to-project rule to
-    apply, because the agent that needed one keeps no Plane issues.
+    A run belongs to a request by the **anchor id** its `[assetrun]` note
+    names, never by the topic name it wears — which is what keeps a stem the
+    requester reused from handing one request another's runs, and a retired
+    request's leftovers visible as somebody else's.
+
+    A request's `runs` are its children for the *hold* rule
+    (`close._hold_dependents`), not for a counting rule: forge has none. A
+    run this walk never reached is not a gap either, because no run of a
+    request has to have finished for the request to be finished — only
+    something has to have been delivered.
+
+    A run whose request is not among the kept topics is returned as a target
+    of its own, so it is still shown: a request that reached a run without
+    reaching its plan is a real shape, and saying nothing about it would be
+    worse than saying it is orphaned.
     """
-    notes = [note for node in kept for note in node.works]
-    named = {note.project_id for note in notes if note.project_id}
-    missing_plane: list[str] = []
-    for note in notes:
-        if not note.project_id:
-            missing_plane.append(
-                f"the [work] note in {note.channel}/{note.topic} names issue "
-                f"{note.issue_id} with no project: a record in a format nothing "
-                "writes any more")
-    if not named:
-        return [], missing_plane
-    if plane is None:
-        missing_plane.append("no Plane credential is configured, so no Work is known")
-        return [], missing_plane
-
-    projects = {str(row["id"]): row for row in plane.projects() if row.get("id")}
-    wanted = {pid: row for pid, row in projects.items() if pid in named}
-    for pid in sorted(named - set(projects)):
-        missing_plane.append(
-            f"a [work] note names Plane project {pid}, which this credential cannot see")
-
-    issues: dict[str, dict] = {}
-    groups: dict[str, dict[str, str]] = {}
-    for pid in wanted:
-        groups[pid] = plane.state_groups(pid)
-        if not groups[pid]:
-            missing_plane.append(
-                f"the states of project {wanted[pid].get('name') or pid} could not be read")
-        for issue in plane.issues(pid):
-            issues[str(issue["id"])] = {**issue, "_project": pid}
-
-    targets: dict[str, WorkTarget] = {}
-
-    def add(issue: dict, role: str, evidence: dict) -> None:
-        ident = str(issue["id"])
-        pid = str(issue["_project"])
-        existing = targets.get(ident)
-        if existing is None:
-            existing = WorkTarget(
-                source=str(issue.get("external_source") or "") or None,
-                label=_issue_label(wanted[pid], issue), title=str(issue.get("name") or ""),
-                state=groups.get(pid, {}).get(str(issue.get("state") or "")) or "unknown",
-                role=role, project_id=pid, project_name=str(wanted[pid].get("name") or pid),
-                issue_id=ident, parent_id=str(issue.get("parent") or "") or None,
-            )
-            targets[ident] = existing
-        elif existing.role == "task" and role == "mission":
-            existing.role = role
-        if evidence not in existing.evidence:
-            existing.evidence.append(evidence)
-
-    for note in notes:
-        if not note.project_id:
-            continue
-        issue = issues.get(note.issue_id)
-        if issue is None:
-            missing_plane.append(
-                f"the [work] note in {note.channel}/{note.topic} names issue {note.issue_id}, "
-                "which is not in any project this conversation reaches")
-            continue
-        add(issue, "mission" if not issue.get("parent") else "task",
-            {"how": "work note", **note.as_dict()})
-        parent = issues.get(str(issue.get("parent") or ""))
+    records = [node.forge_record for node in kept if node.forge_record is not None]
+    requests = {record.anchor_id: record for record in records
+                if isinstance(record, ForgeRequest)}
+    runs = [record for record in records if isinstance(record, ForgeRun)]
+    for record in runs:
+        parent = requests.get(record.request_id)
         if parent is not None:
-            add(parent, "mission", {"how": "parent of a [work] note's Sub-Work",
-                                    "child": note.issue_id, "channel": note.channel,
-                                    "topic": note.topic})
+            parent.runs.append(record)
+    targets = []
+    for record in sorted(requests.values(), key=lambda one: one.anchor_id):
+        targets.append(WorkTarget(
+            source=FORGE_SOURCE, label=record.label, title=record.stem, state=record.state,
+            role="request", channel=record.channel, topic=record.topic,
+            anchor_id=record.anchor_id, results=list(record.results),
+            evidence=[{"how": "asset note", "channel": record.channel,
+                       "topic": record.topic, "message_id": record.anchor_id,
+                       "by": record.by}],
+            children=[
+                {"issue_id": "", "anchor_id": run.anchor_id, "label": run.label,
+                 "title": "", "state": run.state, "serial": 0,
+                 "channel": run.channel, "topic": run.topic, "reached": True,
+                 "results": run.results}
+                for run in sorted(record.runs, key=lambda one: one.anchor_id)
+            ],
+        ))
+    targets.extend(
+        WorkTarget(
+            source=FORGE_SOURCE, label=record.label, title="", state=record.state,
+            role="run", channel=record.channel, topic=record.topic,
+            anchor_id=record.anchor_id, parent_id=f"a{record.request_id}",
+            evidence=[{"how": "assetrun note", "channel": record.channel,
+                       "topic": record.topic, "message_id": record.anchor_id,
+                       "by": record.by}],
+        )
+        for record in sorted(runs, key=lambda one: one.anchor_id)
+        if record.request_id not in requests
+    )
+    return targets
 
-    # Every child of a mission, whether or not this conversation reached its
-    # topic: the completion rule is about *all* the children, and one this
-    # walk never saw is exactly what must block rather than be assumed done.
-    for target in list(targets.values()):
-        if target.role != "mission":
-            continue
-        group = groups.get(target.project_id, {})
-        target.children = [
-            {"issue_id": str(row["id"]), "label": _issue_label(wanted[target.project_id], row),
-             "title": str(row.get("name") or ""),
-             "state": group.get(str(row.get("state") or "")) or "unknown",
-             "reached": str(row["id"]) in targets}
-            for row in issues.values()
-            if str(row.get("parent") or "") == target.issue_id
-            and str(row["_project"]) == target.project_id
-        ]
-        target.children.sort(key=lambda row: row["label"])
 
-    return sorted(targets.values(), key=lambda t: (t.project_name, t.label)), missing_plane
-
-
-def _channels(
-    kept: list[Related], reader: Reader, mission_labels: dict, notes: list[str],
-) -> list[dict]:
+def _channels(kept: list[Related], reader: Reader, mission_labels: dict) -> list[dict]:
     """The `work-` channels these topics live in, and whether each is done.
 
     A channel is archivable when *everything in it* is a topic this

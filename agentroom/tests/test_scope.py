@@ -25,11 +25,12 @@ from agentroom.closing import (
 from agentroom.room import Room
 from agentroom.server import build_server
 
-from test_close import WritingRealm, closer, open_chain, writing_board
+from test_close import WritingRealm, closer, open_chain
 from test_closing import (
-    AUTOLAB, AUTOLAB_BOT, DESK_TOPIC, DEVELOPER, FORGE_BOT, FREEFORGE, MISSION, MISSION_LABEL,
+    ASSETPLAN_TOPIC, ASSETRUN_TOPIC, AUTOLAB, AUTOLAB_BOT, DESK_TOPIC, DEVELOPER,
+    FORGE_BOT, FORGE_CHANNEL, MISSION, MISSION_LABEL, REQUEST_LABEL,
     PLAN_TOPIC, PROJECT_CHANNEL, ROOT, RUN_TOPIC as WORKRUN_TOPIC, TASK, TASK_LABEL,
-    WORK_CHANNEL, Realm, board, chain_realm, issue, post, selfnote,
+    WORK_CHANNEL, Realm, chain_realm, post, selfnote,
 )
 
 FRONT_TOPIC = "front-ask-20260909-0900"
@@ -66,8 +67,8 @@ def test_a_conversation_is_classified_by_its_channel_and_bare_name():
     assert classify("front", "front-routine-ghtrends") == FRONT  # the pre-p7 shared topic
     assert classify("pj-ghtrends", "workplan-trend8") == WORKPLAN
     assert classify("work-m10", "workrun-task1-m10") == WORKRUN
-    assert classify("agforge-agstudio1", "assetplan-robot") == ASSETPLAN
-    assert classify("agforge-agstudio1", "assetrun-robot") == ASSETRUN
+    assert classify(FORGE_CHANNEL, ASSETPLAN_TOPIC) == ASSETPLAN
+    assert classify(FORGE_CHANNEL, ASSETRUN_TOPIC) == ASSETRUN
     assert classify("agents", "intro-agforge-agstudio1") == INTRO
     assert classify("agautolab-agstudio1", "how is the board") == TOPIC
     assert classify("front", "something else") == TOPIC
@@ -94,15 +95,15 @@ def test_an_ordinary_front_conversation_is_a_root_with_the_whole_chain():
         selfnote(14, "state", "started", sender_id=AUTOLAB_BOT, sender=AUTOLAB),
         ],
     })
-    found = discover({}, ("front", FRONT_TOPIC), realm=realm, plane=board())
+    found = discover({}, ("front", FRONT_TOPIC), realm=realm)
     assert found.scope.kind == FRONT and found.scope.closable
     assert "whole Front conversation" in found.scope.description
     assert topic_keys(found) == [
         ("front", FRONT_TOPIC), ("pj-ghtrends", "workplan-trend8"),
         ("work-m10", "workrun-task1-m10"),
-        ("agforge-agstudio1", "assetplan-robot"), ("agforge-agstudio1", "assetrun-robot"),
+        (FORGE_CHANNEL, ASSETPLAN_TOPIC), (FORGE_CHANNEL, ASSETRUN_TOPIC),
     ]
-    assert {work.label for work in found.works} == {MISSION_LABEL, "F2-28"}
+    assert {work.label for work in found.works} == {MISSION_LABEL, REQUEST_LABEL}
     assert [row["channel"] for row in found.channels if row["archivable"]] == ["work-m10"]
 
 
@@ -147,14 +148,14 @@ def routine_realm(**kwargs):
 
 
 def test_a_routine_run_closes_that_run_and_its_work_only():
-    found = discover({}, (RUN_CHANNEL, RUN_TOPIC), realm=routine_realm(), plane=board())
+    found = discover({}, (RUN_CHANNEL, RUN_TOPIC), realm=routine_realm())
     assert found.scope.kind == ROUTINE_RUN and found.scope.closable
     assert found.scope.routine == {"name": ROUTINE, "channel": RUN_CHANNEL, "run_topic": RUN_TOPIC,
                                    "guide_topic": GUIDE}
     assert topic_keys(found) == [
         (RUN_CHANNEL, RUN_TOPIC), ("pj-ghtrends", "workplan-trend8"),
         ("work-m10", "workrun-task1-m10"),
-        ("agforge-agstudio1", "assetplan-robot"), ("agforge-agstudio1", "assetrun-robot"),
+        (FORGE_CHANNEL, ASSETPLAN_TOPIC), (FORGE_CHANNEL, ASSETRUN_TOPIC),
     ]
     # The guide is named as context — untouched, and said so — never
     # reached, never a target; the earlier run is simply not this run's.
@@ -178,17 +179,17 @@ def test_a_previous_run_reached_by_a_link_is_still_another_request():
             selfnote(204, "served", f"{RUN_CHANNEL}/{GUIDE} 100"),
         ],
     })
-    found = discover({}, (RUN_CHANNEL, RUN_TOPIC), realm=realm, plane=board())
+    found = discover({}, (RUN_CHANNEL, RUN_TOPIC), realm=realm)
     assert excluded_of(found, EARLIER_TOPIC)["reason"] == (
         f"another request: a run of routine {ROUTINE}")
     assert excluded_of(found, GUIDE)["reason"] == (
         f"the guide of routine {ROUTINE}: a ✔ there means something else")
     assert "workplan-trend7" not in {node.topic for node in found.topics}
-    assert {work.label for work in found.works} == {MISSION_LABEL, "F2-28"}
+    assert {work.label for work in found.works} == {MISSION_LABEL, REQUEST_LABEL}
 
 
 def test_the_guide_is_never_a_root():
-    found = discover({}, (RUN_CHANNEL, GUIDE), realm=routine_realm(), plane=board())
+    found = discover({}, (RUN_CHANNEL, GUIDE), realm=routine_realm())
     assert found.scope.closable is False and "retires the routine" in found.scope.reason
     assert found.works == [] and found.channels == []
     [action] = plan_actions(found)
@@ -198,7 +199,7 @@ def test_the_guide_is_never_a_root():
 def test_an_introduction_is_never_a_root():
     realm = Realm({("agents", "intro-agforge-agstudio1"): [post(1, "hello", sender_id=FORGE_BOT)]},
                   streams={"agents": 3})
-    found = discover({}, ("agents", "intro-agforge-agstudio1"), realm=realm, plane=board())
+    found = discover({}, ("agents", "intro-agforge-agstudio1"), realm=realm)
     assert found.scope.kind == INTRO and found.scope.closable is False
     assert "retires the agent" in found.scope.reason
 
@@ -207,7 +208,7 @@ def test_an_autolab_request_is_a_root_and_its_front_parent_stays_open():
     """`pj-ghtrends/workplan-trend8` was opened for the desk conversation;
     completing it from the agent room closes the plan, its task, its Work
     and its channel — and names the desk as where it came from."""
-    found = discover({}, ("pj-ghtrends", "workplan-trend8"), realm=chain_realm(), plane=board())
+    found = discover({}, ("pj-ghtrends", "workplan-trend8"), realm=chain_realm())
     assert found.scope.kind == WORKPLAN and found.scope.closable
     assert [(p["channel"], p["topic"], p["kind"]) for p in found.scope.parents] == [
         ("front", DESK_TOPIC, DESK)]
@@ -215,7 +216,7 @@ def test_an_autolab_request_is_a_root_and_its_front_parent_stays_open():
     assert "which stays open" in found.scope.description
     assert topic_keys(found) == [
         ("pj-ghtrends", "workplan-trend8"), ("work-m10", "workrun-task1-m10"),
-        ("agforge-agstudio1", "assetplan-robot"), ("agforge-agstudio1", "assetrun-robot"),
+        (FORGE_CHANNEL, ASSETPLAN_TOPIC), (FORGE_CHANNEL, ASSETRUN_TOPIC),
     ]
     assert ("front", DESK_TOPIC) not in topic_keys(found)
     assert all(row["topic"] != DESK_TOPIC for row in found.excluded)
@@ -227,14 +228,14 @@ def test_an_autolab_request_is_a_root_and_its_front_parent_stays_open():
 
 
 def test_a_forge_request_is_a_root_with_its_run_beside_it():
-    found = discover({}, ("agforge-agstudio1", "assetplan-robot"),
-                     realm=chain_realm(), plane=board())
+    found = discover({}, (FORGE_CHANNEL, ASSETPLAN_TOPIC),
+                     realm=chain_realm())
     assert found.scope.kind == ASSETPLAN and found.scope.closable
     assert [(p["topic"], p["kind"]) for p in found.scope.parents] == [
         ("workrun-task1-m10", WORKRUN)]
     assert topic_keys(found) == [
-        ("agforge-agstudio1", "assetplan-robot"), ("agforge-agstudio1", "assetrun-robot")]
-    assert [work.label for work in found.works] == ["F2-28"]
+        (FORGE_CHANNEL, ASSETPLAN_TOPIC), (FORGE_CHANNEL, ASSETRUN_TOPIC)]
+    assert [work.label for work in found.works] == [REQUEST_LABEL]
     assert found.channels == []
 
 
@@ -242,7 +243,7 @@ def test_a_forge_request_is_a_root_with_its_run_beside_it():
 
 
 def test_a_task_topic_offers_its_parent_and_closes_nothing():
-    found = discover({}, ("work-m10", "workrun-task1-m10"), realm=chain_realm(), plane=board())
+    found = discover({}, ("work-m10", "workrun-task1-m10"), realm=chain_realm())
     assert found.scope.kind == WORKRUN and found.scope.closable is False
     assert [(p["channel"], p["topic"], p["kind"], p["message_id"]) for p in found.scope.parents] == [
         (PROJECT_CHANNEL, PLAN_TOPIC, WORKPLAN, 21)]
@@ -256,9 +257,9 @@ def test_a_task_topic_offers_its_parent_and_closes_nothing():
 
 
 def test_a_forge_run_topic_offers_its_plan():
-    found = discover({}, ("agforge-agstudio1", "assetrun-robot"), realm=chain_realm(), plane=board())
+    found = discover({}, (FORGE_CHANNEL, ASSETRUN_TOPIC), realm=chain_realm())
     assert found.scope.closable is False
-    assert [p["topic"] for p in found.scope.parents] == ["assetplan-robot"]
+    assert [p["topic"] for p in found.scope.parents] == [ASSETPLAN_TOPIC]
 
 
 def test_an_unknown_topic_with_a_root_note_is_somebody_s_child():
@@ -269,7 +270,7 @@ def test_an_unknown_topic_with_a_root_note_is_somebody_s_child():
         ],
     }, topics={"agautolab-agstudio1": ["probe-1"]}, )
     realm.streams["agautolab-agstudio1"] = 40
-    found = discover({}, ("agautolab-agstudio1", "probe-1"), realm=realm, plane=board())
+    found = discover({}, ("agautolab-agstudio1", "probe-1"), realm=realm)
     assert found.scope.kind == TOPIC and found.scope.closable is False
     assert [p["topic"] for p in found.scope.parents] == [DESK_TOPIC]
 
@@ -279,21 +280,22 @@ def test_an_unknown_topic_without_a_root_note_is_its_own_request():
         post(1, "how is the board?", sender_id=DEVELOPER, sender="Developer"),
         post(2, "three plans open.", sender_id=AUTOLAB_BOT, sender="autolab-agstudio1"),
     ]}, streams={"agautolab-agstudio1": 40}, topics={"agautolab-agstudio1": ["how is the board"]})
-    found = discover({}, ("agautolab-agstudio1", "how is the board"), realm=realm, plane=board())
+    found = discover({}, ("agautolab-agstudio1", "how is the board"), realm=realm)
     assert found.scope.kind == TOPIC and found.scope.closable
     [action] = plan_actions(found)
     assert action.kind == "conversation" and action.state == READY
 
 
 def test_closing_the_selected_request_never_touches_its_parent(tmp_path):
-    door, realm, plane = closer(realm=WritingRealm(open_chain()))
+    door, realm, _ = closer(realm=WritingRealm(open_chain()))
     found = door.close(("pj-ghtrends", "workplan-trend8"))
     assert found["applied"] is True and found["partial"] is False
     assert [topic for _, topic in realm.resolved] == [
-        "assetplan-robot", "assetrun-robot", "workplan-trend8"]
+        ASSETPLAN_TOPIC, ASSETRUN_TOPIC, "workplan-trend8"]
     assert DESK_TOPIC not in [topic for _, topic in realm.resolved]
     assert [content for _, _, content in realm.posted] == [
-        "[selfnote][state] accepted", "[selfnote][state] done"]
+        "[selfnote][state] accepted", "[selfnote][state] done",
+        "[selfnote][state] accepted"]
 
 
 # --- ownership, generalised ----------------------------------------------------------
@@ -309,7 +311,7 @@ def test_a_plan_anchored_to_another_front_conversation_is_not_this_one_s():
             selfnote(12, "served", "work-m10/workrun-task1-m10 1"),
         ],
     })
-    found = discover({}, ROOT, realm=realm, plane=board())
+    found = discover({}, ROOT, realm=realm)
     shared = excluded_of(found, "workplan-trend8")
     assert shared["reason"] == f"anchored to another request (front/{FRONT_TOPIC})"
     assert [row["message_id"] for row in shared["evidence"]] == [9]
@@ -335,10 +337,10 @@ def test_another_request_of_every_kind_is_outside_the_closure():
         histories[(channel, topic)] = [post(50, "somebody's conversation")]
     realm = chain_realm(histories=histories, topics={
         "pj-ghtrends": ["workplan-trend8", "workplan-other"],
-        "agforge-agstudio1": ["✔ assetplan-robot", "✔ assetrun-robot", "assetplan-other"],
+        "agforge-agstudio1": [f"✔ {ASSETPLAN_TOPIC}", f"✔ {ASSETRUN_TOPIC}", "assetplan-other"],
         RUN_CHANNEL: [RUN_TOPIC],
     })
-    found = discover({}, ROOT, realm=realm, plane=board())
+    found = discover({}, ROOT, realm=realm)
     assert topic_keys(found) == [ROOT]
     for (channel, topic), what in others.items():
         assert excluded_of(found, topic)["reason"] == f"another request: {what}"
@@ -347,10 +349,10 @@ def test_another_request_of_every_kind_is_outside_the_closure():
 def test_nested_delegation_is_owned_to_the_bottom_from_a_routine_run():
     """run → workplan → workrun → assetplan → assetrun: every level carries a
     root note naming the level above, and the walk owns all of it."""
-    found = discover({}, (RUN_CHANNEL, RUN_TOPIC), realm=routine_realm(), plane=board())
+    found = discover({}, (RUN_CHANNEL, RUN_TOPIC), realm=routine_realm())
     depths = {node.topic: node.depth for node in found.topics}
     assert depths == {RUN_TOPIC: 0, "workplan-trend8": 1, "workrun-task1-m10": 2,
-                      "assetplan-robot": 3, "assetrun-robot": 4}
+                      ASSETPLAN_TOPIC: 3, ASSETRUN_TOPIC: 4}
     assert found.excluded == []
 
 
@@ -365,7 +367,7 @@ def test_a_resolved_intermediate_is_walked_through():
         ],
     }, topics={"pj-ghtrends": ["✔ workplan-trend8"]})
     realm.histories.pop(("pj-ghtrends", "workplan-trend8"))
-    found = discover({}, ROOT, realm=realm, plane=board())
+    found = discover({}, ROOT, realm=realm)
     plan = next(node for node in found.topics if node.topic == "workplan-trend8")
     assert plan.resolved is True
     assert ("work-m10", "workrun-task1-m10") in topic_keys(found)
@@ -379,7 +381,7 @@ def test_a_task_nothing_links_is_not_this_request_s():
     realm = chain_realm(topics={"work-m10": ["✔ workrun-task1-m10", "workrun-task2-m10"]})
     realm.histories[("work-m10", "workrun-task2-m10")] = [
         post(60, "a task with no anchor", sender_id=AUTOLAB_BOT, sender="autolab-agstudio1")]
-    found = discover({}, ROOT, realm=realm, plane=board())
+    found = discover({}, ROOT, realm=realm)
     assert ("work-m10", "workrun-task2-m10") not in topic_keys(found)
     row = next(one for one in found.channels if one["channel"] == "work-m10")
     assert row["archivable"] is False and row["unaccounted"] == ["workrun-task2-m10"]
@@ -404,9 +406,9 @@ def test_a_topic_anchored_to_an_owned_request_is_owned_whatever_reached_it():
             selfnote(21, "work", TASK, sender_id=AUTOLAB_BOT, sender="autolab-agstudio1"),
         ],
     })
-    found = discover({}, ROOT, realm=realm, plane=board())
+    found = discover({}, ROOT, realm=realm)
     assert excluded_of(found, FRONT_TOPIC)["reason"] == "another request: a Front conversation"
-    assert ("agforge-agstudio1", "assetplan-robot") in topic_keys(found)
+    assert (FORGE_CHANNEL, ASSETPLAN_TOPIC) in topic_keys(found)
 
 
 # --- the door and its routes ------------------------------------------------------------
@@ -444,11 +446,11 @@ def test_a_history_of_operations_is_kept_per_request():
 
 @pytest.fixture()
 def relay():
-    door, realm, plane = closer(realm=WritingRealm(open_chain()))
+    door, realm, _ = closer(realm=WritingRealm(open_chain()))
     server = build_server("127.0.0.1", 0, Room(env_path=__file__), closer=door)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
-    yield server.server_address[1], door, realm, plane
+    yield server.server_address[1], door, realm
     server.shutdown()
     server.server_close()
 
@@ -464,15 +466,16 @@ def request(port, method, path, body=None):
 
 
 def test_the_shared_routes_take_a_channel_and_a_topic(relay):
-    port, _, realm, plane = relay
+    port, _, realm = relay
     status, found = request(port, "GET", "/complete/plan?channel=pj-ghtrends&topic=workplan-trend8")
     assert status == 200 and found["scope"]["kind"] == WORKPLAN
-    assert plane.completed == [] and realm.resolved == []
+    assert realm.posted == [] and realm.resolved == []
     status, applied = request(port, "POST", "/complete", {
         "channel": "pj-ghtrends", "topic": "workplan-trend8", "fingerprint": found["fingerprint"]})
     assert status == 200 and applied["applied"] is True
     assert [content for _, _, content in realm.posted] == [
-        "[selfnote][state] accepted", "[selfnote][state] done"]
+        "[selfnote][state] accepted", "[selfnote][state] done",
+        "[selfnote][state] accepted"]
     assert DESK_TOPIC not in [topic for _, topic in realm.resolved]
     status, history = request(port, "GET", "/complete/history?channel=pj-ghtrends&topic=workplan-trend8")
     assert status == 200 and len(history["history"]) == 1
@@ -481,17 +484,17 @@ def test_the_shared_routes_take_a_channel_and_a_topic(relay):
 
 
 def test_a_malformed_key_is_400_and_a_stale_approval_409(relay):
-    port, _, realm, plane = relay
+    port, _, realm = relay
     assert request(port, "GET", "/complete/plan?channel=front")[0] == 400
     assert request(port, "POST", "/complete", {"topic": "x"})[0] == 400
     status, found = request(port, "POST", "/complete", {
         "channel": "front", "topic": DESK_TOPIC, "fingerprint": "0000000000000000"})
     assert status == 409 and found["refused"] is True
-    assert plane.completed == [] and realm.resolved == []
+    assert realm.posted == [] and realm.resolved == []
 
 
 def test_an_execution_topic_over_http_is_a_plan_with_nothing_to_approve(relay):
-    port, _, realm, plane = relay
+    port, _, realm = relay
     status, found = request(port, "GET", "/complete/plan?channel=work-m10&topic=workrun-task1-m10")
     assert status == 200 and found["scope"]["closable"] is False
     assert found["counts"] == {"ready": 0, "blocked": 1, "done": 0, "kept": 0}
@@ -499,7 +502,7 @@ def test_an_execution_topic_over_http_is_a_plan_with_nothing_to_approve(relay):
     status, applied = request(port, "POST", "/complete", {
         "channel": "work-m10", "topic": "workrun-task1-m10", "fingerprint": found["fingerprint"]})
     assert status == 200 and applied["partial"] is True
-    assert plane.completed == [] and realm.resolved == [] and realm.archived == []
+    assert realm.posted == [] and realm.resolved == [] and realm.archived == []
 
 
 # --- a task re-run for a later routine run (the live shape) --------------------------
@@ -534,7 +537,7 @@ def rerun_realm():
 def test_a_task_rerun_for_a_later_run_belongs_to_its_plan_s_run():
     """From the run that planned it: the re-run is owned by autolab's note,
     and Front's later visit is shown as a visitor, not obeyed."""
-    found = discover({}, (RUN_CHANNEL, RUN_TOPIC), realm=rerun_realm(), plane=board())
+    found = discover({}, (RUN_CHANNEL, RUN_TOPIC), realm=rerun_realm())
     rerun = next(node for node in found.topics if node.topic == "workrun-rerun-task1-g-17")
     assert [v["topic"] for v in rerun.visitors] == [LATER_TOPIC]
     assert rerun.visitors[0]["message_id"] == 82
@@ -544,7 +547,7 @@ def test_a_task_rerun_for_a_later_run_belongs_to_its_plan_s_run():
 
 
 def test_the_later_run_does_not_own_the_task_it_had_re_run():
-    found = discover({}, (RUN_CHANNEL, LATER_TOPIC), realm=rerun_realm(), plane=board())
+    found = discover({}, (RUN_CHANNEL, LATER_TOPIC), realm=rerun_realm())
     assert topic_keys(found) == [(RUN_CHANNEL, LATER_TOPIC)]
     row = excluded_of(found, "workrun-rerun-task1-g-17")
     assert row["reason"] == "anchored to another request (pj-ghtrends/workplan-trend8)"
@@ -554,7 +557,7 @@ def test_the_later_run_does_not_own_the_task_it_had_re_run():
 
 
 def test_the_plan_owns_its_re_run_task_and_names_the_visit():
-    found = discover({}, ("pj-ghtrends", "workplan-trend8"), realm=rerun_realm(), plane=board())
+    found = discover({}, ("pj-ghtrends", "workplan-trend8"), realm=rerun_realm())
     names = {node.topic for node in found.topics}
     assert {"workrun-task1-m10", "workrun-rerun-task1-g-17"} <= names
     rerun = next(node for node in found.topics if node.topic == "workrun-rerun-task1-g-17")
@@ -563,7 +566,7 @@ def test_the_plan_owns_its_re_run_task_and_names_the_visit():
 
 
 def test_a_re_run_topic_names_its_plan_first_and_the_visit_second():
-    found = discover({}, ("work-m10", "workrun-rerun-task1-g-17"), realm=rerun_realm(), plane=board())
+    found = discover({}, ("work-m10", "workrun-rerun-task1-g-17"), realm=rerun_realm())
     assert [(p["topic"], p["structural"]) for p in found.scope.parents] == [
         ("workplan-trend8", True), (LATER_TOPIC, False)]
     assert found.scope.reason.startswith("this is an Autolab task topic of #pj-ghtrends › workplan-trend8;")
@@ -579,7 +582,7 @@ def test_a_plan_the_walk_never_named_is_read_upward_and_joins_by_its_own_note():
             selfnote(201, "served", "work-m10/workrun-task1-m10 1"),
         ],
     })
-    found = discover({}, (RUN_CHANNEL, RUN_TOPIC), realm=realm, plane=board())
+    found = discover({}, (RUN_CHANNEL, RUN_TOPIC), realm=realm)
     plan = next(node for node in found.topics if node.topic == "workplan-trend8")
     assert plan.depth == 1 and [l["via"] for l in plan.links] == ["rootchat"]
     assert ("work-m10", "workrun-task1-m10") in topic_keys(found)
@@ -602,7 +605,7 @@ def test_a_topic_in_an_archived_channel_is_kept_and_the_request_still_closes():
             post(9, "hello", sender_id=99, sender="agecho"),
         ],
     }, topics={"front": [FRONT_TOPIC]}, streams={"front": 24})
-    door, _, _ = closer(realm=WritingRealm(realm), plane=writing_board())
+    door, _, _ = closer(realm=WritingRealm(realm))
     found = door.plan(("front", FRONT_TOPIC))
     by_key = {a["key"]: a for a in found["actions"]}
     hello = by_key["topic:agecho-agstudio1/hello"]
@@ -645,7 +648,7 @@ def test_a_resolved_topic_with_an_open_twin_is_open_and_the_twin_is_folded():
     assert "opened a twin" in root_action["reason"] and "1 post " in root_action["reason"]
     assert root_action["detail"]["twin"] is True and root_action["detail"]["last_post_id"] == 7
     # The walk still saw the served note under the ✔ name.
-    assert ("pj-ghtrends", "workplan-trend8") in topic_keys(discover({}, ROOT, realm=twin_realm(), plane=board()))
+    assert ("pj-ghtrends", "workplan-trend8") in topic_keys(discover({}, ROOT, realm=twin_realm()))
     applied = door.close(ROOT, found["fingerprint"])
     assert applied["partial"] is False
     # The resolve moves the twin's own post, never one already under ✔.
@@ -659,7 +662,7 @@ def test_a_held_resolved_topic_is_asked_once_for_a_twin():
     for message in twin_realm().histories[("front", f"✔ {DESK_TOPIC}")]:
         held.add(message)
     realm = twin_realm()
-    found = discover({ROOT: held}, ROOT, realm=realm, plane=board())
+    found = discover({ROOT: held}, ROOT, realm=realm)
     root = found.topics[0]
     assert root.twin is True and root.resolved is False and root.last_post_id == 7
     assert realm.reads.count(("front", DESK_TOPIC)) == 1
@@ -696,7 +699,7 @@ def replacement_realm():
 
 
 def test_a_replacement_request_says_what_it_replaced_and_owns_only_its_own():
-    found = discover({}, (PROJECT_CHANNEL, PLAN_TOPIC), realm=replacement_realm(), plane=board())
+    found = discover({}, (PROJECT_CHANNEL, PLAN_TOPIC), realm=replacement_realm())
 
     assert found.scope.kind == WORKPLAN and found.scope.closable
     assert "mission m80" in found.scope.description
@@ -717,7 +720,7 @@ def test_the_retired_missions_task_is_not_the_replacements_to_close():
     the name says it belongs here and the **id** says it does not. The id
     decides, and the reason is shown rather than the topic quietly closed.
     """
-    found = discover({}, ("front", DESK_TOPIC), realm=replacement_realm(), plane=board())
+    found = discover({}, ("front", DESK_TOPIC), realm=replacement_realm())
 
     stale = next(row for row in found.excluded if row["topic"] == WORKRUN_TOPIC)
     assert "the name was reused and this is the older work" in stale["reason"]
@@ -727,17 +730,17 @@ def test_the_retired_missions_task_is_not_the_replacements_to_close():
     assert [row["channel"] for row in found.channels if row["archivable"]] == []
 
 
-def test_an_autolab_request_reads_whole_with_no_plane_at_all():
-    """The plan's own check: new autolab work must not look broken merely
-    because it has no Plane issue."""
-    found = discover({}, (PROJECT_CHANNEL, PLAN_TOPIC), realm=chain_realm(), plane=None)
+def test_a_request_reads_whole_with_no_second_system_at_all():
+    """The plan's own check, one phase on: neither agent's work looks broken
+    for want of a Plane issue, because neither keeps one."""
+    found = discover({}, (PROJECT_CHANNEL, PLAN_TOPIC), realm=chain_realm())
     mission = next(work for work in found.works if work.role == "mission")
     assert mission.label == MISSION_LABEL and mission.state == "started"
     assert [row["state"] for row in mission.children] == ["completed"]
     actions = plan_actions(found)
     work = next(action for action in actions if action.kind == "work")
     assert work.state == READY
-    # Only forge's row is missing, and it is missing because forge's record is
-    # in Plane — nothing about the autolab request is reported as a gap.
-    assert found.gaps["plane"] == ["no Plane credential is configured, so no Work is known"]
+    # And no Plane gap exists to report, because the relay no longer has a
+    # Plane question to ask (`refactor` p2 step 4).
+    assert "plane" not in found.gaps
     assert found.gaps["unread"] == [] and found.gaps["errors"] == []

@@ -319,19 +319,17 @@ def test_the_mission_and_its_task_are_read_out_of_their_own_conversations():
     assert mission.source == "agautolab" and mission.role == "mission"
     assert (mission.channel, mission.topic) == (PROJECT_CHANNEL, PLAN_TOPIC)
     assert mission.anchor_id == MISSION and mission.state == "started"
-    assert mission.project_id == "" and mission.issue_id == ""
     assert [row["how"] for row in mission.evidence] == ["mission note"]
     # Its task is a child of the mission rather than a target of its own: the
     # task *is* a conversation, and the conversation already has its own row.
     assert mission.children == [
-        {"issue_id": "", "anchor_id": TASK, "label": TASK_LABEL, "title": "",
+        {"anchor_id": TASK, "label": TASK_LABEL, "title": "",
          "state": "completed", "serial": 1, "channel": WORK_CHANNEL,
          "topic": RUN_TOPIC, "reached": True}]
     # forge's request, read the same way out of its own conversation. There
     # is no Plane record left in this traversal at all.
     request = by_label[REQUEST_LABEL]
     assert request.source == "agforge" and request.role == "request"
-    assert request.project_id == "" and request.issue_id == ""
 
 
 def test_a_task_is_attributed_by_the_mission_id_its_note_names():

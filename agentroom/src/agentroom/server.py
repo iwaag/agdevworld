@@ -228,8 +228,8 @@ def make_handler(room: Room, ops: Ops | None = None, chat: Chat | None = None,
                         self._write_json(200, desk.board())
                 elif path.startswith("/frontdesk/") and path.endswith("/close-plan"):
                     # What closing this conversation would change (`front_desk`
-                    # p3). A read: it touches Zulip and Plane and writes to
-                    # neither, and it is the *only* thing the button's final
+                    # p3). A read: it touches Zulip and writes nothing, and
+                    # it is the *only* thing the button's final
                     # click approves. Since p4 the Front Desk is one caller of
                     # the shared operation below; its id names the topic.
                     if closer is None:

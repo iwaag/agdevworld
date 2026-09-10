@@ -351,13 +351,13 @@ tasks. Every read is under both names; what could not be read is a gap.
 
 How each target is decided:
 
-- **A Work** by `agag.plane.reason_not_completed` — the same rule
-  `agautolab.mission_done` applies, moved into pyagag in p3 so the button
-  could ask it about one named Work instead of running a whole-board CLI.
-  Every live Sub-Work completed → `ready`; already Done → `done`, a
-  successful no-op; cancelled → `kept`, untouched; unfinished children, or a
-  standalone Work with none, → `blocked`. A Sub-Work the walk never reached
-  is listed as `unreached_children` and still counted.
+- **A Work** by the same completion rule `agautolab.mission_done` applies.
+  (It lived in `agag.plane.reason_not_completed` while there was a Plane
+  client; `refactor` p3 deleted that module and the rule stayed where the
+  records are.) Every live child completed → `ready`; already Done → `done`,
+  a successful no-op; cancelled → `kept`, untouched; unfinished children, or
+  a standalone Work with none, → `blocked`. A child the walk never reached is
+  listed as `unreached_children` and still counted.
 - **A topic** by whether it was actually read. `note-only` is a gap, not a
   finished conversation, and blocks. A topic whose channel the realm no
   longer lists is `kept`: its posts read fine and cannot be moved (a resolve

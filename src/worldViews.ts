@@ -6,7 +6,6 @@ import {
   nodesViewConfig,
   opsViewConfig,
   routinesViewConfig,
-  tasksViewConfig,
   workspacesViewConfig,
   type PanelSelection,
 } from './views'
@@ -71,7 +70,6 @@ const game = new Phaser.Game({
     new PanelGridScene(nodesViewConfig(handleSelection)),
     new PanelGridScene(workspacesViewConfig(handleSelection)),
     new PanelGridScene(autolabViewConfig(handleSelection)),
-    new PanelGridScene(tasksViewConfig()),
     new PanelGridScene(agentRoomViewConfig(handleSelection)),
     new PanelGridScene(opsViewConfig(handleSelection)),
     new PanelGridScene(routinesViewConfig(handleSelection)),

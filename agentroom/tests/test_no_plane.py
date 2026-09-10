@@ -3,7 +3,8 @@
 `AGENTROOM_PLANE_ENV` existed for the one record this room read outside
 Zulip — forge's Plane Work — and forge's record is a conversation now. An
 import-graph assertion, which is stronger than a rejecting client: the code
-cannot call Plane because the module is never loaded.
+cannot call Plane because the module is never loaded — and since `refactor`
+p3 there is no `agag.plane` to load.
 """
 
 import subprocess

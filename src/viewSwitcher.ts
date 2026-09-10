@@ -4,11 +4,14 @@
 
 import type Phaser from 'phaser'
 
-// Seven views, cycled in this order by the ⇄ label and the V key: each view's
+// Six views, cycled in this order by the ⇄ label and the V key: each view's
 // `switchTo` names the next one, so the nav stays a one-control cycle instead
-// of growing a menu.
+// of growing a menu. `refactor` p3 removed a seventh, `tasks / plane`: it
+// dispatched a Plane issue as an autolab mission through an `/api` gateway
+// that `modernize_agdevworld` p1 had already deleted, so it was a screen that
+// could only fail.
 export const VIEW_KEYS = [
-  'nodes', 'workspaces', 'autolab', 'tasks', 'agentroom', 'ops', 'routines',
+  'nodes', 'workspaces', 'autolab', 'agentroom', 'ops', 'routines',
 ] as const
 export type ViewKey = (typeof VIEW_KEYS)[number]
 

@@ -28,8 +28,8 @@ read static snapshots or their existing sample fallbacks.
 - `src/worldViews.ts` — Phaser scene wiring, the legacy chat overlay and detail path.
 - `src/operationDashboard.ts` — dashboard selection and refresh controller.
 - `src/sessionGraph.ts` — bounded conversation graph and node evidence.
-- `src/scenes/PanelGridScene.ts` — one config-driven grid scene, shared by all seven world views.
-- `src/views.ts` — the seven view configs (`nodes`, `workspaces`, `autolab`, `tasks`, `agentroom`, `ops`, `routines`).
+- `src/scenes/PanelGridScene.ts` — one config-driven grid scene, shared by all six world views.
+- `src/views.ts` — the six view configs (`nodes`, `workspaces`, `autolab`, `agentroom`, `ops`, `routines`).
 - `src/agentRoomState.ts` — the agent room's two reads, through the `agentroom` relay.
 - `src/opsState.ts` — the operation room's one read, `/ops` on the same relay.
 - `src/viewSwitcher.ts` — the single seam for changing the visible view.
@@ -37,7 +37,7 @@ read static snapshots or their existing sample fallbacks.
 - `src/settingsState.ts` — the settings repository as the relay serves it (`/settings`, `/settings/<revision>`): characters, lore, revision-addressed portraits and backgrounds.
 - `src/chatPanel.ts` — one routine fire topic and the existing `POST /chat` door; dashboard mode receives shared detail payloads, while world mode owns its selected-topic refresh.
 - `src/detailPopup.ts` — the detail overlay, incl. the per-iteration `summary` button.
-- `src/clusterState.ts` / `src/autolabState.ts` / `src/planeState.ts` — snapshot, gateway, and Plane reads/actions for the panels.
+- `src/clusterState.ts` / `src/autolabState.ts` — snapshot and gateway reads for the panels.
 - `scripts/fetch-cluster-state.mjs` — snapshot refresh through cagent. The one piece of JavaScript outside `src/`; it is a developer command, not part of the service.
 - `public/cluster/*.json` — live snapshots, git-ignored; `public/*.sample.json` is the fallback. The Docker build copies whatever is in `public/` at build time, so move a live snapshot out first if a sample-only image is wanted.
 
@@ -47,7 +47,7 @@ read static snapshots or their existing sample fallbacks.
 `GET` only, loopback) that reads Zulip live and answers three routes —
 `/healthz`, `/agents`, `/work`. Its own `README.md` is the reference.
 
-The view is the fifth entry in the `nodes → workspaces → autolab → tasks →
+The view is the fourth entry in the `nodes → workspaces → autolab →
 agentroom` cycle, and it has two modes:
 
 - **agents** — one card per `intro-<instance>` topic of `#agents`: the
@@ -131,8 +131,8 @@ The consequences are deliberate and temporary:
   assistant conversation") names a conversation that no longer exists here.
   It moves with the chat panel in the same later phase.
 
-Project starts (Gitea → Plane → Zulip) were also served here; they are
-agautolab-side only from now on (`agautolab/init_project.py`).
+Project starts (Gitea → Zulip) were also served here; they are agautolab-side
+only from now on (`agautolab/init_project.py`).
 
 ## Autolab project profiles
 
@@ -147,22 +147,21 @@ There is deliberately no selector or direct settings-write route in
 agdevworld. Which agent answers is being re-decided this episode; until the
 route is restored, this view reads sample data.
 
-## Plane task dispatch
+## The retired `tasks / plane` view (`refactor` p3)
 
-The `tasks` view lists only Backlog and Ready issues from the configured Plane
-project. Node chips come from the node list; their marker distinguishes
-unreachable, reachable/idle, and busy nodes when `/status` is available.
-Backlog is display-only. A Ready card has Execute and Cancel controls.
+There were seven views; there are six. The `tasks` view listed Backlog and
+Ready Plane issues and dispatched a Ready one to an autolab node's `/window`
+as a mission carrying the issue id.
 
-Execute first moves the issue to In Progress, then asks the selected node's
-`/window` to start a mission containing the Plane issue ID, title, and full
-description. A definite refusal returns the issue to Ready. A transport timeout
-is deliberately left In Progress because the remote window can finish and
-launch after the browser's connection has gone away; the UI reports that
-ambiguous outcome instead of creating a Ready + running split. Cancel only
-moves a not-yet-dispatched Ready issue to Cancelled.
-
-This is the behaviour the view implements; it has no backend this phase.
+It is deleted, along with `src/planeState.ts`. Two independent reasons, and
+the second is the one worth remembering: Plane is being retired, **and the
+screen had had no backend since `modernize_agdevworld` p1** — every route it
+called (`/api/plane/*`, `/api/autolab/<node>/window`) went through the
+assistant gateway that phase deleted, and nginx serves static files only. A
+view whose every action could only fail is not a feature waiting for a
+backend; it is a promise the application cannot keep. Existing agent and
+operation room views are how work is inspected, and no replacement dashboard
+was built.
 
 ## cagent convention (agcluster)
 
@@ -182,7 +181,7 @@ conversation graph, and the selected routine's fire conversation on the right.
 source evidence make it the default entrance. Phaser is loaded only for a world
 view, rather than being downloaded with the dashboard.
 
-`/?view=ops` opens the retained stalled-first Ops board. The existing seven-view
+`/?view=ops` opens the retained stalled-first Ops board. The existing six-view
 cycle remains available at `/?view=nodes`, and any existing view key may be
 selected directly. The older Phaser `routines` view is retained as a compact
 board with its existing detail popup; the dashboard is the primary routine

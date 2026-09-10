@@ -762,9 +762,11 @@ class WorkTarget:
     both are addressed by, so a preview and the operation that follows it
     agree on which row is which.
 
-    The Plane coordinates are kept as empty strings rather than removed:
-    they are what the payload's shape has always been, and a consumer
-    reading `issue_id` gets the honest answer that there is none.
+    `refactor` p3 removed the last Plane coordinates. They had been kept as
+    empty strings so a consumer reading `issue_id` got an honest "there is
+    none"; with Plane gone there is nobody left to be honest *to*, and a
+    field nothing can ever fill is a shape that invites a reader to look for
+    the system behind it.
     """
 
     #: Which agent's record this is: `AUTOLAB_SOURCE` or `FORGE_SOURCE`.
@@ -775,10 +777,6 @@ class WorkTarget:
     state: str
     #: autolab: `mission` or `task`. forge: `request` or `run`.
     role: str
-    #: Empty. Nothing this room reads keeps a Plane issue any more.
-    project_id: str = ""
-    project_name: str = ""
-    issue_id: str = ""
     #: The conversation's coordinates.
     channel: str = ""
     topic: str = ""
@@ -797,22 +795,15 @@ class WorkTarget:
     @property
     def key(self) -> str:
         """What an action is addressed by, stable across previews."""
-        return f"work:{self.issue_id or self.label}"
+        return f"work:{self.label}"
 
     def as_dict(self) -> dict:
         return {"source": self.source, "label": self.label, "title": self.title,
                 "state": self.state, "role": self.role,
-                "project_id": self.project_id, "project": self.project_name,
-                "issue_id": self.issue_id, "channel": self.channel, "topic": self.topic,
+                "channel": self.channel, "topic": self.topic,
                 "anchor_id": self.anchor_id, "evidence": self.evidence,
                 "parent_id": self.parent_id, "children": self.children,
                 "results": self.results}
-
-
-def _issue_label(project: dict, issue: dict) -> str:
-    identifier = str(project.get("identifier") or "").strip()
-    sequence = issue.get("sequence_id")
-    return f"{identifier}-{sequence}" if identifier and sequence is not None else str(issue.get("id"))
 
 
 # --- the whole answer -------------------------------------------------------
@@ -1228,7 +1219,7 @@ def _autolab_works(kept: list[Related]) -> tuple[list[WorkTarget], list[WorkTarg
                        "topic": record.topic, "message_id": record.anchor_id,
                        "by": record.by}],
             children=[
-                {"issue_id": "", "anchor_id": task.anchor_id, "label": task.label,
+                {"anchor_id": task.anchor_id, "label": task.label,
                  "title": "", "state": task.state, "serial": task.serial,
                  "channel": task.channel, "topic": task.topic, "reached": True}
                 for task in sorted(record.tasks, key=lambda one: (one.serial, one.anchor_id))
@@ -1287,7 +1278,7 @@ def _forge_works(kept: list[Related]) -> list[WorkTarget]:
                        "topic": record.topic, "message_id": record.anchor_id,
                        "by": record.by}],
             children=[
-                {"issue_id": "", "anchor_id": run.anchor_id, "label": run.label,
+                {"anchor_id": run.anchor_id, "label": run.label,
                  "title": "", "state": run.state, "serial": 0,
                  "channel": run.channel, "topic": run.topic, "reached": True,
                  "results": run.results}

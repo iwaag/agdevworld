@@ -2,7 +2,6 @@ import Phaser from 'phaser'
 import { PanelGridScene } from './scenes/PanelGridScene'
 import {
   agentRoomViewConfig,
-  autolabViewConfig,
   nodesViewConfig,
   opsViewConfig,
   routinesViewConfig,
@@ -69,7 +68,6 @@ const game = new Phaser.Game({
   scene: [
     new PanelGridScene(nodesViewConfig(handleSelection)),
     new PanelGridScene(workspacesViewConfig(handleSelection)),
-    new PanelGridScene(autolabViewConfig(handleSelection)),
     new PanelGridScene(agentRoomViewConfig(handleSelection)),
     new PanelGridScene(opsViewConfig(handleSelection)),
     new PanelGridScene(routinesViewConfig(handleSelection)),

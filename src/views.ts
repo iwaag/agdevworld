@@ -7,19 +7,6 @@ import {
   type WorkspaceRow,
 } from './clusterState'
 import {
-  jobDetailLine,
-  loadAutolabJobs,
-  loadAutolabNodes,
-  loadAutolabProjects,
-  loadAutolabStatus,
-  statusHeadline,
-  type AutolabJobDetail,
-  type AutolabJobRow,
-  type AutolabNode,
-  type AutolabProject,
-  type AutolabStatus,
-} from './autolabState'
-import {
   agentWork,
   introHeadline,
   loadRoomAgents,
@@ -65,16 +52,6 @@ import type {
 export type PanelSelection =
   | { view: 'nodes'; target: DriftTarget; device?: ActualDeviceModel }
   | { view: 'workspaces'; row: WorkspaceRow }
-  | { view: 'autolab-project'; node: string; project: AutolabProject; profiles: string[] }
-  // `detail` and `summary` are attached by the popup once the drill-down has
-  // loaded, so "ask the agent" carries what the user is actually looking at.
-  | {
-      view: 'autolab'
-      node: string
-      job: AutolabJobRow
-      detail?: AutolabJobDetail
-      summary?: { iter: string; text: string }
-    }
   // The agent room carries the agent's whole introduction and the open topics
   // of its own channel, so the popup renders without a second fetch.
   | { view: 'agent-room'; agent: RoomAgent; work: RoomWorkRow[] }
@@ -129,7 +106,7 @@ export function workspacesViewConfig(onSelect: (selection: PanelSelection) => vo
     unavailableText: 'workspace snapshot unavailable',
     subtitle: (count) => `${count} workspaces are present`,
     footer: 'desired workspaces and their activity',
-    switchTo: { key: 'autolab', label: 'autolab' },
+    switchTo: { key: 'agentroom', label: 'agent room' },
     loadRows: async () =>
       (await loadWorkspaceRows()).map((row) => ({
         id: row.slug,
@@ -139,142 +116,6 @@ export function workspacesViewConfig(onSelect: (selection: PanelSelection) => vo
         payload: row,
       })),
     onSelect: (row) => onSelect({ view: 'workspaces', row: row.payload as WorkspaceRow }),
-  }
-}
-
-// autolab: the job status vocabulary of agautolab's state.json, mapped onto
-// the same panel-status shape the cluster views use.
-const JOB_STATUS_STYLE: Record<string, PanelRowStatus> = {
-  converged: { emoji: '✅', color: 0x67e8a5, label: 'CONVERGED' },
-  running: { emoji: '🔄', color: 0x70c7ff, label: 'RUNNING' },
-  pending: { emoji: '⏳', color: 0xb7b5d8, label: 'PENDING' },
-  awaiting_approval: { emoji: '🙋', color: 0xffc56d, label: 'AWAITING APPROVAL' },
-  stuck: { emoji: '🧱', color: 0xffc56d, label: 'STUCK' },
-  error: { emoji: '💥', color: 0xff8aa8, label: 'ERROR' },
-}
-const JOB_STATUS_UNKNOWN: PanelRowStatus = { emoji: '❓', color: 0xb7b5d8, label: 'UNKNOWN' }
-const JOB_NOT_STARTED: PanelRowStatus = { emoji: '🌱', color: 0xb7b5d8, label: 'NOT STARTED' }
-const PROJECT_STATUS: PanelRowStatus = { emoji: '🧭', color: 0x9b8cff, label: 'PROJECT' }
-const PROJECT_ERROR: PanelRowStatus = { emoji: '💥', color: 0xff8aa8, label: 'PROJECT ERROR' }
-
-function jobStatusStyle(job: AutolabJobRow): PanelRowStatus {
-  if (job.error) return { emoji: '💥', color: 0xff8aa8, label: 'UNREADABLE' }
-  if (job.not_started) return JOB_NOT_STARTED
-  return JOB_STATUS_STYLE[String(job.status)] ?? JOB_STATUS_UNKNOWN
-}
-
-// The picked node lives here rather than in the scene: the scene stays a
-// config-driven grid, and this closure is what the chips mutate.
-export function autolabViewConfig(onSelect: (selection: PanelSelection) => void): PanelGridConfig {
-  let mode: 'projects' | 'jobs' = 'projects'
-  let nodes: AutolabNode[] = []
-  let selected = ''
-  let status: AutolabStatus | undefined
-  let statusError: string | undefined
-  let api: PanelGridApi | undefined
-  let availableProfiles: string[] = []
-
-  const projectRow = (project: AutolabProject) => ({
-    id: `${selected}/project/${project.name}`,
-    name: `project / ${project.name}`,
-    status: project.error ? PROJECT_ERROR : PROJECT_STATUS,
-    detail: project.error
-      ? project.error
-      : `coding ${project.roles?.coding?.profile ?? '?'} · director ${project.roles?.director?.profile ?? '?'}`,
-    payload: { kind: 'project' as const, project },
-    interactive: true,
-  })
-
-  return {
-    key: 'autolab',
-    title: 'autolab / now',
-    loadingText: 'asking the autolab nodes…',
-    unavailableText: 'autolab unavailable',
-    subtitle: (count) => (selected ? `${count} ${mode} on ${selected}` : 'no autolab node selected'),
-    footer: 'projects and jobs are separate views; changes go through conversation',
-    switchTo: { key: 'agentroom', label: 'agent room' },
-    bind: (bound) => {
-      api = bound
-    },
-    headline: () => (selected ? statusHeadline(selected, status, statusError) : undefined),
-    chips: () => {
-      const chips: PanelChip[] = (['projects', 'jobs'] as const).map((value) => ({
-        id: `mode-${value}`,
-        label: value,
-        active: mode === value,
-        onClick: () => {
-          if (mode === value) return
-          mode = value
-          api?.reload()
-        },
-      }))
-      chips.push(...nodes.map((node) => ({
-        id: node.name,
-        // An unreachable node stays clickable and says so: picking it and
-        // reading the real error beats a disabled control that explains
-        // nothing.
-        label: `${node.reachable ? '●' : '○'} ${node.name}`,
-        active: node.name === selected,
-        onClick: () => {
-          if (node.name === selected) return
-          selected = node.name
-          api?.reload()
-        },
-      })))
-      if (selected) chips.push({ id: 'refresh', label: '⟳ refresh', onClick: () => api?.reload() })
-      return chips
-    },
-    loadRows: async () => {
-      nodes = await loadAutolabNodes()
-      if (nodes.length === 0) throw new Error('no autolab nodes are configured')
-      // First entry point: pick the first reachable node, else the first one,
-      // so the view lands on something rather than an empty picker.
-      if (!nodes.some((node) => node.name === selected)) {
-        selected = (nodes.find((node) => node.reachable) ?? nodes[0]).name
-      }
-      status = undefined
-      statusError = undefined
-      // The mediator headline must not decide whether either grid renders:
-      // /status can fail on a node whose project or job route answers.
-      const statusPromise = loadAutolabStatus(selected).catch((error: unknown) => {
-        statusError = error instanceof Error ? error.message : 'status unavailable'
-        return undefined
-      })
-      if (mode === 'projects') {
-        const [projects, statusResult] = await Promise.all([
-          loadAutolabProjects(selected),
-          statusPromise,
-        ])
-        status = statusResult
-        availableProfiles = projects.profiles
-        return projects.projects.map(projectRow)
-      }
-      const [jobs, statusResult] = await Promise.all([loadAutolabJobs(selected), statusPromise])
-      status = statusResult
-      return jobs.map((job) => ({
-          id: `${selected}/${job.name}`,
-          name: job.name,
-          status: jobStatusStyle(job),
-          detail: jobDetailLine(job),
-          payload: { kind: 'job' as const, job },
-          interactive: true,
-      }))
-    },
-    onSelect: (row) => {
-      const payload = row.payload as
-        | { kind: 'project'; project: AutolabProject }
-        | { kind: 'job'; job: AutolabJobRow }
-      if (payload.kind === 'project') {
-        onSelect({
-          view: 'autolab-project',
-          node: selected,
-          project: payload.project,
-          profiles: availableProfiles,
-        })
-        return
-      }
-      onSelect({ view: 'autolab', node: selected, job: payload.job })
-    },
   }
 }
 

@@ -4,14 +4,16 @@
 
 import type Phaser from 'phaser'
 
-// Six views, cycled in this order by the ⇄ label and the V key: each view's
+// Five views, cycled in this order by the ⇄ label and the V key: each view's
 // `switchTo` names the next one, so the nav stays a one-control cycle instead
-// of growing a menu. `refactor` p3 removed a seventh, `tasks / plane`: it
-// dispatched a Plane issue as an autolab mission through an `/api` gateway
-// that `modernize_agdevworld` p1 had already deleted, so it was a screen that
-// could only fail.
+// of growing a menu. Two screens have been removed for the same reason, one
+// phase apart: `tasks / plane` (`refactor` p3) and `autolab / now` (p3 ex1).
+// Both drove the `/api` assistant gateway `modernize_agdevworld` p1 deleted,
+// so every action on them had been failing silently. What autolab is doing is
+// read from the realm itself now — the agent room, the operation room, and
+// autolab's own conversations.
 export const VIEW_KEYS = [
-  'nodes', 'workspaces', 'autolab', 'agentroom', 'ops', 'routines',
+  'nodes', 'workspaces', 'agentroom', 'ops', 'routines',
 ] as const
 export type ViewKey = (typeof VIEW_KEYS)[number]
 

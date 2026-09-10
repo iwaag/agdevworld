@@ -28,16 +28,16 @@ read static snapshots or their existing sample fallbacks.
 - `src/worldViews.ts` — Phaser scene wiring, the legacy chat overlay and detail path.
 - `src/operationDashboard.ts` — dashboard selection and refresh controller.
 - `src/sessionGraph.ts` — bounded conversation graph and node evidence.
-- `src/scenes/PanelGridScene.ts` — one config-driven grid scene, shared by all six world views.
-- `src/views.ts` — the six view configs (`nodes`, `workspaces`, `autolab`, `agentroom`, `ops`, `routines`).
+- `src/scenes/PanelGridScene.ts` — one config-driven grid scene, shared by all five world views.
+- `src/views.ts` — the five view configs (`nodes`, `workspaces`, `agentroom`, `ops`, `routines`).
 - `src/agentRoomState.ts` — the agent room's two reads, through the `agentroom` relay.
 - `src/opsState.ts` — the operation room's one read, `/ops` on the same relay.
 - `src/viewSwitcher.ts` — the single seam for changing the visible view.
 - `src/frontDesk.ts` / `src/scenes/FrontDeskScene.ts` — the Front Desk (`/?view=frontdesk`), a graphic-novel scene for one `#front` › `front-desk-<id>` conversation with Front; `src/frontDeskInput.ts` is its hidden IME textarea, `src/textLayout.ts` the grapheme-safe wrap and pagination, `src/frontDeskState.ts` its relay reads/writes and a `&demo=1` source that never touches the realm (`&demorev=<sha>` makes the demo's scenes claim a settings revision), `src/frontDeskPlayback.ts` the replies-as-turns model and cursor, `src/frontDeskSettings.ts` which settings revision draws what.
 - `src/settingsState.ts` — the settings repository as the relay serves it (`/settings`, `/settings/<revision>`): characters, lore, revision-addressed portraits and backgrounds.
 - `src/chatPanel.ts` — one routine fire topic and the existing `POST /chat` door; dashboard mode receives shared detail payloads, while world mode owns its selected-topic refresh.
-- `src/detailPopup.ts` — the detail overlay, incl. the per-iteration `summary` button.
-- `src/clusterState.ts` / `src/autolabState.ts` — snapshot and gateway reads for the panels.
+- `src/detailPopup.ts` — the detail overlay for a clicked card.
+- `src/clusterState.ts` — snapshot reads for the cluster panels.
 - `scripts/fetch-cluster-state.mjs` — snapshot refresh through cagent. The one piece of JavaScript outside `src/`; it is a developer command, not part of the service.
 - `public/cluster/*.json` — live snapshots, git-ignored; `public/*.sample.json` is the fallback. The Docker build copies whatever is in `public/` at build time, so move a live snapshot out first if a sample-only image is wanted.
 
@@ -47,8 +47,8 @@ read static snapshots or their existing sample fallbacks.
 `GET` only, loopback) that reads Zulip live and answers three routes —
 `/healthz`, `/agents`, `/work`. Its own `README.md` is the reference.
 
-The view is the fourth entry in the `nodes → workspaces → autolab →
-agentroom` cycle, and it has two modes:
+The view is the third entry in the `nodes → workspaces → agentroom` cycle,
+and it has two modes:
 
 - **agents** — one card per `intro-<instance>` topic of `#agents`: the
   instance, its own channel, the first line of its introduction, and a badge
@@ -124,44 +124,47 @@ The consequences are deliberate and temporary:
 
 - The **chat panel now uses `POST /chat` on the relay**, as the Developer
   in the selected routine fire topic. It does not use the removed assistant.
-- The `workspaces`, `autolab` and `tasks` views fall back to their sample
-  JSON where they read `/api/*`. The `nodes` view is unaffected — it reads
-  the cagent snapshot from `public/`, which never went through the assistant.
-- The **detail popup's profile note** ("Profile changes go through the
-  assistant conversation") names a conversation that no longer exists here.
-  It moves with the chat panel in the same later phase.
+- The `workspaces` view falls back to its sample JSON where it read `/api/*`.
+  The `nodes` view is unaffected — it reads the cagent snapshot from
+  `public/`, which never went through the assistant. Every other screen that
+  read `/api/*` has since been deleted rather than repaired.
 
 Project starts (Gitea → Zulip) were also served here; they are agautolab-side
 only from now on (`agautolab/init_project.py`).
 
-## Autolab project profiles
+## The retired `tasks / plane` and `autolab / now` views
 
-The autolab view fetches `/api/autolab/<node>/projects` alongside jobs and
-status. Its `projects` and `jobs` tabs keep the two record types in separate
-grids while sharing the selected node. Read-only project cards show the
-effective `coding` and `director` profiles; clicking one opens its profile
-detail and the common ask-agent action.
+There were seven views; there are five. Both removals have the same shape and
+the same lesson, one phase apart.
 
-Changing a profile stays conversational — ask an agent in ordinary words.
-There is deliberately no selector or direct settings-write route in
-agdevworld. Which agent answers is being re-decided this episode; until the
-route is restored, this view reads sample data.
+`tasks / plane` (`refactor` p3) listed Backlog and Ready Plane issues and
+dispatched a Ready one to an autolab node's `/window` as a mission carrying
+the issue id. It is deleted with `src/planeState.ts`.
 
-## The retired `tasks / plane` view (`refactor` p3)
+`autolab / now` (`refactor` p3 ex1) had a `projects` tab and a `jobs` tab over
+`/api/autolab/<node>/…`: a node picker, a mediator headline, per-job iteration
+evidence, and a paid per-iteration `summary` button. It is deleted with
+`src/autolabState.ts` and the popup's job and project renderers.
 
-There were seven views; there are six. The `tasks` view listed Backlog and
-Ready Plane issues and dispatched a Ready one to an autolab node's `/window`
-as a mission carrying the issue id.
+**Neither was a working feature being retired.** Every route both screens
+called went through the assistant gateway `modernize_agdevworld` p1 deleted a
+month earlier, and nginx serves static files only — so every action on them
+had been failing silently, and the `autolab` view's own documentation admitted
+it was reading sample data "until the route is restored". A view whose every
+action can only fail is not a feature waiting for a backend; it is a promise
+the application cannot keep.
 
-It is deleted, along with `src/planeState.ts`. Two independent reasons, and
-the second is the one worth remembering: Plane is being retired, **and the
-screen had had no backend since `modernize_agdevworld` p1** — every route it
-called (`/api/plane/*`, `/api/autolab/<node>/window`) went through the
-assistant gateway that phase deleted, and nginx serves static files only. A
-view whose every action could only fail is not a feature waiting for a
-backend; it is a promise the application cannot keep. Existing agent and
-operation room views are how work is inspected, and no replacement dashboard
-was built.
+What autolab is doing is read from the realm instead — the agent room, the
+operation room, and autolab's own conversations, all of which are live. No
+replacement dashboard was built, and profile changes stay conversational.
+
+On the node's side, the gateway kept a **stub** `/status`, `/log`, `/jobs…`,
+`/projects`, `/game` and `/monitor` surface alive for exactly this browser
+caller (`agautolab/agent/gateway.py`); with the caller gone those routes are
+gone too. `POST /window` and `GET /healthz` are not: `/window` is a real
+conversational entrance that runs the `front` role and records the run, and
+`/healthz` is what the deployment probes. A dead browser caller does not make
+a whole service dead.
 
 ## cagent convention (agcluster)
 

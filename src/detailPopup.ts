@@ -8,18 +8,6 @@ import {
   type DriftTarget,
   type WorkspaceRow,
 } from './clusterState'
-import {
-  gateText,
-  iterationText,
-  loadAutolabJob,
-  loadIterationSummary,
-  moneyText,
-  requestIterationSummary,
-  type AutolabIteration,
-  type AutolabJobRow,
-  type AutolabProject,
-  type AutolabSummary,
-} from './autolabState'
 import { postedAt, type RoomAgent, type RoomWorkRow } from './agentRoomState'
 import { ago, at, healthLine, type OpsBoard, type OpsInstance, type OpsRow } from './opsState'
 import {
@@ -109,24 +97,6 @@ const POPUP_CSS = `
   font-weight: 700; font-size: 13px; padding: 7px 16px; cursor: pointer;
 }
 #dp-ask:hover { background: #9ad8ff; }
-.dp-iter {
-  border: 1px solid #262b3d; border-radius: 10px; padding: 8px 12px; margin-bottom: 8px;
-  background: #12151f;
-}
-.dp-iter-head { display: flex; align-items: baseline; gap: 10px; }
-.dp-iter-name {
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; color: #f4f1ff;
-}
-.dp-iter-meta {
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; color: #9a9db5;
-}
-.dp-iter-btn {
-  margin-left: auto; border: 1px solid #2c3450; border-radius: 8px; background: #1b2030;
-  color: #70c7ff; font-size: 11px; padding: 3px 10px; cursor: pointer; white-space: nowrap;
-}
-.dp-iter-btn:hover:enabled { background: #232a3d; }
-.dp-iter-btn:disabled { color: #777a91; cursor: default; }
-.dp-summary.collapsed { display: none; }
 .dp-summary-text {
   margin: 8px 0 0; font-size: 13px; line-height: 1.55; color: #e8e5f7; white-space: pre-wrap;
 }
@@ -135,11 +105,6 @@ const POPUP_CSS = `
   font-size: 10.5px; color: #777a91;
 }
 .dp-summary-error { margin: 8px 0 0; font-size: 12.5px; color: #ff8aa8; }
-.dp-iter-ask {
-  margin-top: 8px; border: none; border-radius: 8px; background: #232a3d; color: #70c7ff;
-  font-size: 11.5px; padding: 5px 11px; cursor: pointer;
-}
-.dp-iter-ask:hover { background: #2c3450; }
 .dp-node {
   border-left: 2px solid #262b3d; padding: 5px 0 5px 10px; margin: 0 0 6px 0;
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11.5px;
@@ -192,12 +157,8 @@ function selectionKey(selection: PanelSelection): string {
     const t = selection.target.target
     return `nodes:${t.id ?? t.slug ?? t.name ?? 'unnamed'}`
   }
-  if (selection.view === 'autolab') return `autolab:${selection.node}/${selection.job.name}`
   if (selection.view === 'agent-room') return `agent-room:${selection.agent.instance}`
   if (selection.view === 'agent-room-board') return `agent-room-board:${selection.group}`
-  if (selection.view === 'autolab-project') {
-    return `autolab-project:${selection.node}/${selection.project.name}`
-  }
   if (selection.view === 'ops-row') {
     return `ops-row:${selection.row.instance}/${selection.row.channel}/${selection.row.topic}`
   }
@@ -211,10 +172,6 @@ function selectionPayload(selection: PanelSelection): unknown {
   if (selection.view === 'agent-room') return { agent: selection.agent, open: selection.work }
   if (selection.view === 'agent-room-board') return selection.rows
   if (selection.view === 'nodes') return selection.target
-  if (selection.view === 'autolab') return selection.job
-  if (selection.view === 'autolab-project') {
-    return { project: selection.project, profiles: selection.profiles }
-  }
   if (selection.view === 'ops-row') return selection.row
   if (selection.view === 'ops-instance') return selection.instance
   if (selection.view === 'ops-health') return selection.board.health
@@ -423,189 +380,6 @@ function renderWorkspace(row: WorkspaceRow): void {
   )
   body!.append(section)
 }
-
-function iterationLine(entry: AutolabIteration): string {
-  const gates = entry.gates?.length
-    ? `${entry.gates.filter((gate) => gate.exit_code === 0).length}/${entry.gates.length} gates`
-    : undefined
-  return [
-    typeof entry.exit_code === 'number' ? `exit ${entry.exit_code}` : undefined,
-    entry.is_error ? 'errored' : undefined,
-    entry.timed_out ? 'timed out' : undefined,
-    typeof entry.num_turns === 'number' ? `${entry.num_turns} turns` : undefined,
-    gates,
-    moneyText(entry.cost_usd),
-  ]
-    .filter(Boolean)
-    .join(' · ')
-}
-
-// One iteration row: the numbers from the envelope, and a summary the user can
-// ask for. The summary itself is produced on the node — this side never sees
-// the evidence files it was written from.
-function renderIteration(node: string, job: string, entry: AutolabIteration): HTMLDivElement {
-  const box = el('div', 'dp-iter')
-  const head = el('div', 'dp-iter-head')
-  head.append(el('span', 'dp-iter-name', entry.iter))
-  head.append(el('span', 'dp-iter-meta', iterationLine(entry)))
-  const button = el('button', 'dp-iter-btn')
-  head.append(button)
-  box.append(head)
-  const out = el('div', 'dp-summary')
-  box.append(out)
-
-  let state: 'idle' | 'loading' | 'done' | 'error' = 'idle'
-
-  function setButton() {
-    button.textContent =
-      state === 'loading' ? 'summarizing…' : state === 'done' ? 'summary ↑' : 'summary'
-    button.disabled = state === 'loading'
-  }
-
-  function showSummary(result: AutolabSummary) {
-    state = 'done'
-    setButton()
-    out.replaceChildren()
-    // Unabridged, verbatim: this text is Claude's, and re-summarizing it
-    // through the small local model would lose exactly what it is for.
-    out.append(el('p', 'dp-summary-text', result.summary ?? ''))
-    const cost = moneyText(result.summarizer?.cost_usd)
-    if (cost) out.append(el('p', 'dp-summary-meta', `summarizer cost ${cost}`))
-    const ask = el('button', 'dp-iter-ask', 'Ask agent about this iteration')
-    ask.addEventListener('click', () => {
-      if (currentSelection?.view !== 'autolab') return
-      currentSelection.summary = { iter: entry.iter, text: result.summary ?? '' }
-      askHandler?.(currentSelection)
-    })
-    out.append(ask)
-  }
-
-  function fail(message: string) {
-    state = 'error'
-    setButton()
-    out.replaceChildren(el('p', 'dp-summary-error', message))
-  }
-
-  // Pending is the normal case for a first request: a paid Claude run takes
-  // ~15 s. Poll it the way the forge image flow does, and keep saying so.
-  async function poll(attempt: number) {
-    if (currentKey !== `autolab:${node}/${job}`) return
-    if (attempt > 40) return fail('the summarizer is still running after two minutes — try again later')
-    try {
-      const result = await loadIterationSummary(node, job, entry.iter)
-      if (result.status === 'done') return showSummary(result)
-      if (result.status === 'error') return fail(result.error ?? 'the summarizer failed on the node')
-      window.setTimeout(() => void poll(attempt + 1), 3000)
-    } catch (error) {
-      fail(error instanceof Error ? error.message : 'summary request failed')
-    }
-  }
-
-  button.addEventListener('click', async () => {
-    if (state === 'done') {
-      out.classList.toggle('collapsed')
-      return
-    }
-    state = 'loading'
-    setButton()
-    out.replaceChildren(el('p', 'dp-summary-meta', 'asking the node to summarize this iteration…'))
-    try {
-      const result = await requestIterationSummary(node, job, entry.iter)
-      if (result.status === 'done') return showSummary(result)
-      if (result.status === 'error') return fail(result.error ?? 'the summarizer failed on the node')
-      void poll(1)
-    } catch (error) {
-      // A 409 means another summary is being produced right now; the node's
-      // own message says so, so show it rather than a generic failure.
-      fail(error instanceof Error ? error.message : 'summary request failed')
-    }
-  })
-
-  setButton()
-  return box
-}
-
-function renderIterations(node: string, job: string, section: HTMLElement): void {
-  const key = currentKey
-  loadAutolabJob(node, job)
-    .then((detail) => {
-      if (currentKey !== key) return
-      if (currentSelection?.view === 'autolab') currentSelection.detail = detail
-      section.replaceChildren(el('h3', undefined, `ITERATIONS (${detail.evidence.length})`))
-      if (detail.evidence.length === 0) {
-        section.append(el('p', 'dp-msg', 'No iteration evidence on disk yet.'))
-        return
-      }
-      for (const entry of [...detail.evidence].reverse()) {
-        section.append(renderIteration(node, job, entry))
-      }
-    })
-    .catch((error: unknown) => {
-      if (currentKey !== key) return
-      section.replaceChildren(
-        el('h3', undefined, 'ITERATIONS'),
-        el('p', 'dp-summary-error', error instanceof Error ? error.message : 'iteration list unavailable'),
-      )
-    })
-}
-
-function renderJob(node: string, job: AutolabJobRow): void {
-  headerName.textContent = job.name
-  headerKind.textContent = `autolab job @ ${node}`
-  const status = job.not_started ? 'not started' : (job.status ?? 'unknown')
-  headerStatus.textContent = status.toUpperCase().replace(/_/g, ' ')
-  headerStatus.style.color = STATUS_COLOR[status] ?? '#b7b5d8'
-
-  const section = el('section')
-  section.append(el('h3', undefined, 'JOB'))
-  section.append(
-    kvList([
-      ['node', node],
-      ['project', job.project],
-      ['status', status],
-      ['phase', job.phase],
-      ['iteration', iterationText(job)],
-      ['adapter', job.adapter],
-      ['no progress', job.consecutive_no_progress],
-      ['gates', gateText(job.last_gate_summary)],
-      ['failing gates', job.last_gate_summary?.failing?.join('; ')],
-      ['cost', moneyText(job.cost_usd)],
-      ['iterations on disk', job.iterations_on_disk],
-      ['job error', job.error],
-      ['state error', job.state_error],
-    ]),
-  )
-  body!.append(section)
-
-  const iterations = el('section')
-  iterations.append(el('h3', undefined, 'ITERATIONS'), el('p', 'dp-msg', 'loading iterations…'))
-  body!.append(iterations)
-  renderIterations(node, job.name, iterations)
-}
-
-function renderProject(node: string, project: AutolabProject, profiles: string[]): void {
-  headerName.textContent = project.name
-  headerKind.textContent = `autolab project @ ${node}`
-  headerStatus.textContent = project.error ? 'ERROR' : 'PROJECT'
-  headerStatus.style.color = project.error ? '#ff8aa8' : '#9b8cff'
-
-  const section = el('section')
-  section.append(el('h3', undefined, 'PROJECT PROFILES'))
-  section.append(
-    kvList([
-      ['node', node],
-      ['coding', project.roles?.coding?.profile],
-      ['coding source', project.roles?.coding?.source],
-      ['director', project.roles?.director?.profile],
-      ['director source', project.roles?.director?.source],
-      ['available profiles', profiles.join(', ')],
-      ['settings error', project.error],
-    ]),
-  )
-  section.append(el('p', 'dp-msg', 'Profile changes go through the assistant conversation.'))
-  body!.append(section)
-}
-
 
 // The agent room. An introduction is a contract other agents act on, so it is
 // shown as it was posted — no summarising, no re-ordering, and no harness or
@@ -1076,9 +850,9 @@ export function showDetailPopup(selection: PanelSelection): void {
   }
   dismissed = null
 
-  // Set before rendering, not after: the autolab drill-down fetches while it
-  // renders and checks `currentKey` to know whether its result is still the
-  // popup the user is looking at.
+  // Set before rendering, not after: a drill-down that fetches while it
+  // renders checks `currentKey` to know whether its result is still the popup
+  // the user is looking at.
   currentKey = key
   currentSelection = selection
 
@@ -1088,10 +862,6 @@ export function showDetailPopup(selection: PanelSelection): void {
     renderRoomBoard(selection.group, selection.kind, selection.rows)
   }
   else if (selection.view === 'nodes') renderNode(selection.target, selection.device)
-  else if (selection.view === 'autolab') renderJob(selection.node, selection.job)
-  else if (selection.view === 'autolab-project') {
-    renderProject(selection.node, selection.project, selection.profiles)
-  }
   else if (selection.view === 'ops-row') renderOpsRow(selection.row, selection.board)
   else if (selection.view === 'ops-instance') renderOpsInstance(selection.instance, selection.board)
   else if (selection.view === 'ops-health') renderOpsHealth(selection.board)

@@ -14,6 +14,16 @@
 const BASE = (import.meta.env.VITE_AGENTROOM_URL as string | undefined) ?? 'http://localhost:8094'
 
 export type CompletionKind = 'work' | 'topic' | 'channel' | 'conversation'
+
+// One piece of a work record: an autolab task (a conversation of its own) or
+// a forge Sub-Work. `state` is in its own storage's vocabulary.
+export interface CompletionChild {
+  label: string
+  state: string
+  channel?: string
+  topic?: string
+  reached?: boolean
+}
 export type CompletionState = 'ready' | 'done' | 'blocked' | 'kept'
 export type CompletionOutcome = 'applied' | 'already' | 'failed' | 'skipped'
 
@@ -177,7 +187,7 @@ export const TINT: Record<string, Tone> = {
   applied: 'ready', already: 'dim', failed: 'bad', skipped: 'warn',
 }
 const KIND: Record<string, string> = {
-  work: 'Work', topic: 'topic', channel: 'channel', conversation: 'this request',
+  work: 'work', topic: 'topic', channel: 'channel', conversation: 'this request',
 }
 const ROOT_KIND: Record<string, string> = {
   desk: 'Front Desk conversation', front: 'Front conversation', 'routine-run': 'routine run',
@@ -251,7 +261,11 @@ export function planLines(plan: CompletionPlan, phase: PlanPhase): PlanLine[] {
     }
   }
   if (!plan.status.zulip_write) line(plan.status.reason, 'bad', 0, 'body')
-  if (!plan.status.plane && plan.actions.some((one) => one.kind === 'work')) {
+  // Only a Plane-backed row can be missing because Plane is: autolab's work
+  // record is the conversation itself (`refactor` p1), and a warning about a
+  // credential it never uses would read as a gap where there is none.
+  if (!plan.status.plane && plan.actions.some(
+    (one) => one.kind === 'work' && one.detail?.source !== 'agautolab')) {
     line('No Plane credential: the Work states below are what the relay could not read.', 'warn', 0, 'small')
   }
 
@@ -266,7 +280,14 @@ export function planLines(plan: CompletionPlan, phase: PlanPhase): PlanLine[] {
       line(result ? result.note : action.reason, tone, 18)
       const unreached = (action.detail?.unreached_children as string[] | undefined) ?? []
       if (unreached.length) {
-        line(`sub-works this request never reached: ${unreached.join(', ')}`, 'warn', 18)
+        line(`pieces of this work the request never reached: ${unreached.join(', ')}`, 'warn', 18)
+      }
+      // An autolab mission is made of conversations, and each one's state is
+      // the thing a reader is judging: `completed` is the run's word,
+      // `accepted` is a person's, and neither is the ✔ on the topic below.
+      for (const child of (action.detail?.children as CompletionChild[] | undefined) ?? []) {
+        if (action.detail?.source !== 'agautolab') continue
+        line(`${child.label} · ${child.state} — #${child.channel} › ${child.topic}`, 'muted', 18)
       }
       const visitors = (action.detail?.visitors as CompletionParent[] | undefined) ?? []
       for (const visitor of visitors) {

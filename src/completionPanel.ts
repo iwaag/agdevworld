@@ -200,9 +200,9 @@ function render(): void {
   if (phase.kind === 'loading') {
     planPhase = 'loading'
     title.textContent = 'FINISH THIS REQUEST'
-    summary.textContent = 'reading the realm and Plane…'
+    summary.textContent = 'reading the realm…'
     summary.className = 'cm-summary cm-dim'
-    add('Nothing is changed by asking. This reads Zulip and Plane and writes to neither.', 'dim', 'body')
+    add('Nothing is changed by asking. This reads the realm and writes nothing.', 'dim', 'body')
   } else if (phase.kind === 'unreadable') {
     planPhase = 'unreadable'
     title.textContent = 'FINISH THIS REQUEST'

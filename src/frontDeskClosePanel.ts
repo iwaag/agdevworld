@@ -1,7 +1,7 @@
 // The Front Desk's completion panel: the preview, the click, the outcomes.
 //
 // A Front Desk conversation is rarely one topic — Front opens a workplan,
-// autolab plans a Plane Work with a Sub-Work per task and a `work-` channel
+// autolab plans a mission whose record is the conversation, with a `work-` channel
 // per mission, forge runs an `assetrun-` beside its `assetplan-`. This panel
 // is where a human sees all of that named before deciding it is finished,
 // and where they see what happened afterwards.
@@ -217,8 +217,8 @@ export class FrontDeskClosePanel {
 
     if (phase.kind === 'loading') {
       this.title.setText('FINISH THIS CONVERSATION')
-      this.summary.setText('reading the realm and Plane…').setColor(COLOR.dim)
-      line('Nothing is changed by asking. This reads Zulip and Plane and writes to neither.', 11.5, COLOR.dim)
+      this.summary.setText('reading the realm…').setColor(COLOR.dim)
+      line('Nothing is changed by asking. This reads the realm and writes nothing.', 11.5, COLOR.dim)
     } else if (phase.kind === 'unreadable') {
       this.summary.setText('the plan could not be read').setColor(COLOR.warn)
       line(phase.text, 12, COLOR.warn)

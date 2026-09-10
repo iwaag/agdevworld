@@ -55,6 +55,7 @@ from agag.intro import (
 from agag.selfnote import Conversation, is_selfnote, parse_rootchat, parse_served
 from agag.zulip import RESOLVED_TOPIC_PREFIX, QueueExpired, RateLimited, ZulipClient
 
+from .autolab import notes_in
 from .closing import parse_work_note
 from .frontdesk import FRONT_CHANNEL, is_desk_topic, newest_desk_topics
 from .inflight import Inflight
@@ -190,6 +191,13 @@ class Topic:
     #: needs it to say which Work a finished conversation owns, and it is not
     #: in `history` — a selfnote is never a real post.
     works: list[tuple[str | None, str, int, str, int]] = field(default_factory=list)
+    #: autolab's own notes written in this topic — what mission or task this
+    #: conversation *is*, and how far it has got (`autolab.notes_in`). The
+    #: fourth link note, retained for the same reason as `works` was and in
+    #: its place: since `refactor` p1 there is no Plane issue for a
+    #: `[work]` note to name, so this is where an autolab conversation says
+    #: what it is. Not in `history` — a selfnote is never a real post.
+    autolab: list[tuple[str, str, int, int, str]] = field(default_factory=list)
     #: Whether `history` is known to be a *window* rather than the whole topic:
     #: the sweep's read came back full, or a later post pushed an older one out.
     #: A session list built on a window must say so instead of implying that
@@ -244,6 +252,11 @@ class Topic:
             if not any(kept[:3] == entry[:3] for kept in self.works):
                 self.works.append(entry)
                 self.works.sort(key=lambda kept: kept[4])
+        for note in notes_in([message]):
+            entry = note.as_tuple()
+            if entry not in self.autolab:
+                self.autolab.append(entry)
+                self.autolab.sort(key=lambda kept: kept[2])
         parsed = parse_served(content)
         if parsed is not None:
             remote, ident = parsed

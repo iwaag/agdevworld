@@ -702,7 +702,7 @@ function renderRoomBoard(group: string, kind: 'project' | 'agent', rows: RoomWor
   }
   section.append(
     el('p', 'dp-summary-meta', 'open means the topic carries no ✔ prefix — nothing else is read. ' +
-      'finish ✔ previews what completing that request would change (its topics, channels and Plane Works); ' +
+      'finish ✔ previews what completing that request would change (its topics, channels and work records); ' +
       'a task topic answers with the request to go to instead'),
   )
   body!.append(section)
@@ -798,7 +798,8 @@ function renderOpsRow(row: OpsRow, board: OpsBoard): void {
   if (row.channel && row.topic) {
     // Two different verbs, kept apart on purpose: the board's "confirmed"
     // dismisses a done row from this display and writes nothing; finishing
-    // changes Zulip and Plane, after a preview (`front_desk` p4).
+    // writes the acceptance into the conversations and then closes them,
+    // after a preview (`front_desk` p4, `refactor` p1).
     const finish = el('section')
     finish.append(el('h3', undefined, 'FINISH THIS REQUEST'))
     const line = el('div', 'dp-topic-row')
@@ -807,7 +808,7 @@ function renderOpsRow(row: OpsRow, board: OpsBoard): void {
     finish.append(line)
     finish.append(el('p', 'dp-summary-meta',
       '“confirmed” on the board only hides a done row here and writes nothing; ' +
-      'finish ✔ previews and then resolves this request’s topics, archives its work channel and marks its Plane Work Done'))
+      'finish ✔ previews and then accepts this request’s work, resolves its topics and archives its work channel'))
     body!.append(finish)
   }
   body!.append(opsHealthSection(board))

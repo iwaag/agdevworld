@@ -113,8 +113,9 @@ writes only to this process's memory (see `POST /ops/confirm`).
 
 - `GET /complete/plan?channel=…&topic=…`, `POST /complete` → what
   finishing one request would change, and doing it (`front_desk` p3, p4).
-  The **second** route that writes to the realm, and the only one that
-  writes to Plane. `GET /complete/history` is what this relay carried out.
+  The **second** route that writes to the realm, and the only one that can
+  write to Plane (for forge's records; autolab's are the conversations).
+  `GET /complete/history` is what this relay carried out.
   `GET /frontdesk/<id>/close-plan` and `POST /frontdesk/<id>/close` are the
   same operation with the Front Desk id naming the topic. See below.
 
@@ -270,13 +271,25 @@ Developer's posts are shown as typed, fences included.
 
 ## `/complete` — finishing a request (`front_desk` p3, p4)
 
-A request is rarely one topic: Front opens a workplan topic, autolab plans
-a Plane Work with a Sub-Work per task and a `work-<label>` channel per
-mission, forge runs an `assetrun-` beside its `assetplan-`. When the thing
-is done, all of that is still open — including the mission Work, which
+A request is rarely one topic: Front opens a workplan topic, autolab plans a
+mission there and opens a `work-m<id>` channel with one `workrun-` topic per
+task, forge runs an `assetrun-` beside its `assetplan-`. When the thing is
+done, all of that is still open — including the mission itself, which
 nothing ever closed. Two routes close it, in `closing.py` (what the targets
 *are*) and `close.py` (what would change, and doing it). The request is any
 conversation named by `channel` and `topic` (a ✔ name is read bare):
+
+Since `refactor` p1 the two agents keep their records in different places,
+and the `work` actions say which: **autolab's is the conversation**
+(`autolab.py` reads its `[mission]`/`[task]`/`[state]` notes; a task belongs
+to a mission by the anchor **id** its note names, so a reused display name
+never hands one request another's work), and **forge's is still a Plane
+issue**. Completing an autolab request writes the human's acceptance where
+the work happened — `accepted` on each finished task, `done` on the mission —
+and only then resolves the topics. The three stay distinguishable on purpose:
+`completed` is the run's word, `accepted` is a person's, and the ✔ is neither
+— it closes the conversation. A mission that was **replaced** (`refactor` p2)
+is another request and is never closed alongside its replacement.
 
 - `GET /complete/plan?channel=…&topic=…` → `ag.completion.v1`: `root`, a
   `scope` block, the ordered `actions`, each with a `kind` (`work`, `topic`,
@@ -347,15 +360,17 @@ How each target is decided:
   failed — a ✔ there is the claim that the whole thing is finished.
 
 Nothing rolls back and nothing is retried automatically: every action is
-idempotent in the realm's own terms (a resolved topic → `already`, a Done
-Work → `already`), so clicking again after a partial failure finishes what
-is left and repeats nothing.
+idempotent in the realm's own terms (a resolved topic → `already`, a mission
+already `done` → `already`), so clicking again after a partial failure
+finishes what is left and repeats nothing.
 
 Credentials: reads use `AGENTROOM_ZULIP_ENV`, Zulip writes use
 `AGENTROOM_CHAT_ZULIP_ENV` (the Developer — the credential that already
 posts here), and Plane uses **`AGENTROOM_PLANE_ENV`**, a path to an ignored
-`KEY=value` file. Unset, or refused a project, is reported in the preview's
-`status`/`gaps` rather than discovered on submit. This operation closes
+`KEY=value` file. Plane is needed only for forge's records now: an autolab
+request previews and closes completely without it. Unset, or refused a
+project, is reported in the preview's `status`/`gaps` rather than discovered
+on submit. This operation closes
 work; it does not stop a running agent.
 
 ## `/settings` — the settings repository (`front_desk` p2)

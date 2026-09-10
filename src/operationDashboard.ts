@@ -97,7 +97,7 @@ export async function initOperationDashboard(): Promise<void> {
     finishButton.disabled = false
     why.textContent = session.resolution.state === 'resolved'
       ? 'this run carries ✔ already (Front resolves a run it finished); the preview says what of its work is still open'
-      : 'previews first; closes this run, its topics, channels and Plane Works — never the guide, the channel or another run'
+      : 'previews first; closes this run, its topics, channels and work records — never the guide, the channel or another run'
   }
 
   function drawSession(scroll = false) { refocus(find('.session-list'), 'session', () => drawSessionCards(scroll)) }

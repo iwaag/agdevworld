@@ -56,9 +56,21 @@ from hashlib import sha256
 from typing import Any, Callable, Protocol
 
 from agag.plane import ALREADY_COMPLETED, reason_not_completed, sub_works
-from agag.zulip import ZulipClient
+from agag.selfnote import note as selfnote
+from agag.zulip import ZulipClient, live_topic_name
 
-from .closing import Discovery, Key, PlaneBoard, Realm, WorkTarget, discover
+from .autolab import (
+    ALREADY_DONE,
+    MISSION_DONE,
+    MISSION_REPLACED,
+    Mission as AutolabMission,
+    STATE_TAG,
+    TASK_ACCEPTED,
+    TASK_CANCELLED,
+    Task as AutolabTask,
+    reason_not_finished,
+)
+from .closing import AUTOLAB_SOURCE, Discovery, Key, PlaneBoard, Realm, WorkTarget, discover
 from .frontdesk import FRONT_CHANNEL, ID_PATTERN, desk_topic
 from .room import bare_topic
 
@@ -121,8 +133,72 @@ class Action:
 
 
 def _work_action(work: WorkTarget) -> Action:
-    """One Plane Work, judged by the shared parent/child rule."""
-    issue = {"id": work.issue_id, "state": work.state_group}
+    """One work record, judged by its own storage's counting rule.
+
+    Two storages, one question — *is every piece of this finished?* — and
+    the rule is the writer's in both cases, never re-invented here.
+    """
+    return (_autolab_action(work) if work.source == AUTOLAB_SOURCE
+            else _plane_work_action(work))
+
+
+def _autolab_action(work: WorkTarget) -> Action:
+    """One autolab mission, judged from the conversations it is made of.
+
+    `autolab.reason_not_finished` is `agautolab.mission_done`'s rule, and
+    what this operation would *write* is what makes the three things the
+    plan asks to keep apart actually distinct in the record:
+
+    - a task is `completed` by the **run** that did it — execution success,
+      already written, never written here;
+    - a task becomes `accepted` and its mission `done` when the **human**
+      clicks — this operation, and the only thing that writes those words;
+    - the ✔ on each topic is neither: it closes the **conversation**, and it
+      happens afterwards as its own action.
+
+    A task orphaned from its mission is shown and never moved: accepting one
+    piece of a request nobody here can see the whole of is not this button's
+    decision to make.
+    """
+    detail = {**work.as_dict(),
+              "unreached_children": [row["label"] for row in work.children
+                                     if not row.get("reached", True)]}
+    label = f"{work.label} {work.title}".strip()
+    if work.role != "mission":
+        return Action("work", work.key, label, KEPT,
+                      f"kept — this task's mission ({work.parent_id}) is not part of this "
+                      "request, so nothing here decides whether it is accepted", detail)
+    tasks = [
+        AutolabTask(anchor_id=int(row.get("anchor_id") or 0), mission_id=work.anchor_id,
+                    serial=int(row.get("serial") or 0), channel=str(row.get("channel") or ""),
+                    topic=str(row.get("topic") or ""), state=str(row.get("state") or ""))
+        for row in work.children
+    ]
+    mission = AutolabMission(anchor_id=work.anchor_id, slug="", channel=work.channel,
+                             topic=work.topic, state=work.state)
+    reason = reason_not_finished(mission, tasks)
+    live = [task for task in tasks if task.state != TASK_CANCELLED]
+    if reason is None:
+        return Action("work", work.key, label, READY,
+                      f"every one of its {len(live)} tasks is finished; accepting them and "
+                      "marking the mission done", detail)
+    if reason == ALREADY_DONE:
+        return Action("work", work.key, label, DONE,
+                      "already done; closing it again changes nothing", detail)
+    if reason == "it is cancelled":
+        return Action("work", work.key, label, KEPT,
+                      "cancelled: this operation never moves a cancelled mission", detail)
+    if mission.state == MISSION_REPLACED:
+        return Action("work", work.key, label, KEPT, f"kept — {reason}", detail)
+    return Action("work", work.key, label, BLOCKED, reason, detail)
+
+
+def _plane_work_action(work: WorkTarget) -> Action:
+    """One Plane Work, judged by the shared parent/child rule.
+
+    forge's records only, since `refactor` p1: autolab keeps none.
+    """
+    issue = {"id": work.issue_id, "state": work.state}
     children = sub_works(
         [{"id": row["issue_id"], "parent": work.issue_id, "state": row["state"],
           "sequence_id": index} for index, row in enumerate(work.children)],
@@ -133,15 +209,15 @@ def _work_action(work: WorkTarget) -> Action:
               "unreached_children": [row["label"] for row in work.children if not row["reached"]]}
     label = f"{work.label} {work.title}".strip()
     if reason is None:
-        return Action("work", f"work:{work.issue_id}", label, READY,
+        return Action("work", work.key, label, READY,
                       f"every one of its {len(children)} sub-works is completed", detail)
     if reason == ALREADY_COMPLETED:
-        return Action("work", f"work:{work.issue_id}", label, DONE,
+        return Action("work", work.key, label, DONE,
                       "already Done; closing it again changes nothing", detail)
     if reason == "cancelled":
-        return Action("work", f"work:{work.issue_id}", label, KEPT,
+        return Action("work", work.key, label, KEPT,
                       "cancelled: this operation never moves a cancelled Work", detail)
-    return Action("work", f"work:{work.issue_id}", label, BLOCKED, reason, detail)
+    return Action("work", work.key, label, BLOCKED, reason, detail)
 
 
 def plan_actions(found: Discovery) -> list[Action]:
@@ -231,6 +307,42 @@ def fingerprint(actions: list[Action]) -> str:
     material = "\n".join(f"{action.key}={action.state}" for action in sorted(
         actions, key=lambda one: one.key))
     return sha256(material.encode("utf-8")).hexdigest()[:16]
+
+
+def _accept_mission(client: ZulipClient, detail: dict) -> str:
+    """Write the human's acceptance into the conversations it is about.
+
+    One `[selfnote][state]` note per topic, and they say different things on
+    purpose: each finished task becomes `accepted`, and the mission becomes
+    `done`. Appended, never edited — the sequence of notes is the history of
+    the work, and this is the entry that says a person looked at it.
+
+    A selfnote, so nobody is served by it: writing the record must not buy a
+    run. Written under each topic's **live** name, because a task topic is
+    very often already resolved by the run that finished it, and a post
+    under the bare name of a ✔ topic opens a twin beside it.
+
+    A task that was cancelled is left alone: it was called off, and
+    accepting it would say a person approved work nobody did. Whatever
+    fails here raises, and `_apply` reports it against this one target.
+    """
+    moved = []
+    for row in detail.get("children") or []:
+        if str(row.get("state") or "") == TASK_CANCELLED:
+            continue
+        channel, topic = str(row.get("channel") or ""), str(row.get("topic") or "")
+        if not channel or not topic:
+            continue
+        client.send_to_channel(channel, live_topic_name(client, channel, topic),
+                               selfnote(STATE_TAG, TASK_ACCEPTED))
+        moved.append(str(row.get("label") or topic))
+    channel, topic = str(detail.get("channel") or ""), str(detail.get("topic") or "")
+    if not channel or not topic:
+        raise RuntimeError("this mission's conversation is not known, so nothing can be written")
+    client.send_to_channel(channel, live_topic_name(client, channel, topic),
+                           selfnote(STATE_TAG, MISSION_DONE))
+    accepted = f"; accepted {', '.join(moved)}" if moved else ""
+    return f"{detail.get('label')} is done{accepted}"
 
 
 class PlaneOps(PlaneBoard, Protocol):  # pragma: no cover - structural typing only
@@ -410,8 +522,16 @@ class Closer:
             payload = self._payload(now, after, shown, results)
             payload["fingerprint"] = fingerprint(actions_after)
             payload["applied"] = True
-            payload["partial"] = any(row["outcome"] == FAILED for row in results) or bool(
-                payload["counts"]["blocked"])
+            # "Partially closed" is judged on the request itself as much as on
+            # the counts: an operation that kept the Front topic open because
+            # something was blocked is partial even when the blocked target
+            # has since gone out of the post-write plan — archiving a channel
+            # takes its topics with it, and the honest answer must not depend
+            # on which targets survived their own closure.
+            root_kept = any(row["kind"] == "conversation" and row["outcome"] == SKIPPED
+                            for row in results)
+            payload["partial"] = (any(row["outcome"] == FAILED for row in results)
+                                  or bool(payload["counts"]["blocked"]) or root_kept)
             return payload
 
     def _apply(self, client: ZulipClient, plane: PlaneOps | None,
@@ -456,6 +576,8 @@ class Closer:
 
     def _run(self, client: ZulipClient, plane: PlaneOps | None, action: Action) -> str:
         if action.kind == "work":
+            if action.detail.get("source") == AUTOLAB_SOURCE:
+                return _accept_mission(client, action.detail)
             if plane is None:
                 raise RuntimeError("no Plane credential is configured")
             plane.complete(action.detail["project_id"], action.detail["issue_id"])

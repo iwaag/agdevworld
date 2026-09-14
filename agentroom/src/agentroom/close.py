@@ -618,7 +618,7 @@ class Closer:
             actions = plan_actions(found)
             evidence = self._evidence_of(found)
             listings = self._listings_of(found)
-            if not self._dependencies_changed(revision, evidence, listings):
+            if self.mirror is None or not self._dependencies_changed(revision, evidence, listings):
                 break
         found.gaps["zulip_calls"] = self._zulip_calls() - spent
         # Keep the revision from before the walk. Advancing it to a newer
@@ -747,15 +747,19 @@ class Closer:
         is the realm itself — a fresh walk is the revalidation."""
         mirror = self.mirror
         if mirror is None:
-            return {"channels": [], "changed": [], "zulip_calls": 0, "note": "no mirror; the plan was re-derived from the realm"}
+            return {"ok": True, "channels": [], "changed": [], "failures": [],
+                    "zulip_calls": 0, "note": "no mirror; the plan was re-derived from the realm"}
         spent = self._zulip_calls()
         changed: list[tuple[str, str]] = []
+        failures: list[dict[str, str]] = []
         for channel in sorted(plan.listings):
             try:
                 changed.extend(mirror.refresh_listing(channel))
-            except Exception as error:  # noqa: BLE001 - a failed check is not a changed plan
-                changed.append((channel, f"<unread: {type(error).__name__}: {error}>"))
-        return {"channels": sorted(plan.listings), "changed": [f"{c}/{t}" for c, t in changed],
+            except Exception as error:  # noqa: BLE001 - uncertainty is returned explicitly
+                failures.append({"channel": channel,
+                                 "reason": f"{type(error).__name__}: {error}"})
+        return {"ok": not failures, "channels": sorted(plan.listings),
+                "changed": [f"{c}/{t}" for c, t in changed], "failures": failures,
                 "zulip_calls": self._zulip_calls() - spent}
 
     def _payload(self, now: float, found: Discovery, actions: list[Action],
@@ -808,6 +812,16 @@ class Closer:
         with self._conversation_lock(key):
             plan = self._current_plan(key, now)
             checked = self._revalidate(plan)
+            if not checked["ok"]:
+                payload = self._payload(now, plan.found, plan.actions, plan=plan)
+                payload["verification_failed"] = True
+                payload["retryable"] = True
+                payload["applied"] = False
+                payload["revalidated"] = checked
+                channels = ", ".join(row["channel"] for row in checked["failures"])
+                payload["error"] = ("pre-write verification failed for " + channels
+                                    + "; nothing was closed — retry after the reads recover")
+                return payload
             if checked["changed"] or not self._unchanged(plan):
                 plan = self._discover(key, now)
             if expected is not None and expected != plan.fingerprint:

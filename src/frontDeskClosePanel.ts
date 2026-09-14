@@ -154,9 +154,10 @@ export class FrontDeskClosePanel {
       this.onChanged()
       return
     }
-    // A refusal is a preview again — the targets changed and nothing moved,
-    // so what the human sees next is the plan to approve, not a result.
-    this.phase = found.refused ? { kind: 'preview', plan: found } : { kind: 'done', plan: found }
+    // A refusal or failed verification is a preview again: neither wrote.
+    this.phase = found.refused || found.verification_failed
+      ? { kind: 'preview', plan: found }
+      : { kind: 'done', plan: found }
     this.scroll = 0
     this.render()
     this.onChanged()

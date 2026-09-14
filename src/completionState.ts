@@ -105,6 +105,8 @@ export interface CompletionPlan {
   applied?: boolean
   partial?: boolean
   refused?: boolean
+  verification_failed?: boolean
+  retryable?: boolean
   error?: string
 }
 
@@ -131,10 +133,15 @@ async function readJson<T>(url: string, init?: RequestInit): Promise<T | { error
       ? 'the agentroom relay did not answer in time; ask for the plan again to see what moved'
       : `the agentroom relay is not answering on ${BASE}` }
   }
-  const payload = (await response.json().catch(() => undefined)) as (T & { error?: string; refused?: boolean }) | undefined
+  const payload = (await response.json().catch(() => undefined)) as
+    (T & { error?: string; refused?: boolean; verification_failed?: boolean }) | undefined
   if (!payload || typeof payload !== 'object') return { error: `agentroom answered ${response.status}` }
-  // 409 is the refusal that carries the fresh plan — a payload, not an error.
-  if (!response.ok && !payload.refused) return { error: payload.error ?? `agentroom answered ${response.status}` }
+  // A changed-plan refusal and a retryable verification failure both carry
+  // the useful preview. They are payloads even though the HTTP status is not
+  // successful.
+  if (!response.ok && !payload.refused && !payload.verification_failed) {
+    return { error: payload.error ?? `agentroom answered ${response.status}` }
+  }
   return payload
 }
 
@@ -207,6 +214,7 @@ export function refLabel(ref: CompletionRef): string {
 export function summaryLine(plan: CompletionPlan, phase: PlanPhase): string {
   const counts = plan.counts
   if (phase === 'working') return 'closing…'
+  if (plan.verification_failed) return 'verification failed — nothing was closed; retry when reads recover'
   if (phase === 'done') {
     const applied = plan.results.filter((one) => one.outcome === 'applied').length
     const failed = plan.results.filter((one) => one.outcome === 'failed').length
@@ -222,6 +230,7 @@ export function summaryLine(plan: CompletionPlan, phase: PlanPhase): string {
 }
 
 export function summaryTone(plan: CompletionPlan, phase: PlanPhase): Tone {
+  if (plan.verification_failed) return 'bad'
   if (plan.refused) return 'warn'
   if (phase === 'done') return plan.partial ? 'warn' : 'ready'
   if (!plan.scope.closable) return 'warn'
@@ -229,6 +238,7 @@ export function summaryTone(plan: CompletionPlan, phase: PlanPhase): Tone {
 }
 
 export function titleLine(plan: CompletionPlan, phase: PlanPhase): string {
+  if (plan.verification_failed) return 'VERIFICATION FAILED'
   if (phase === 'done' && !plan.partial) return 'CLOSED'
   if (!plan.scope.closable) return 'NOT A REQUEST'
   return `FINISH THIS ${rootKindLabel(plan.scope.kind).toUpperCase()}`
@@ -247,7 +257,8 @@ export function planLines(plan: CompletionPlan, phase: PlanPhase): PlanLine[] {
   const finished = phase === 'done'
 
   line(scope.description, 'muted', 0, 'body')
-  if (plan.refused && plan.error) line(plan.error, 'warn', 0, 'body')
+  if (plan.verification_failed && plan.error) line(plan.error, 'bad', 0, 'body')
+  else if (plan.refused && plan.error) line(plan.error, 'warn', 0, 'body')
   if (!scope.closable) {
     line(scope.reason, 'warn', 0, 'body')
     for (const parent of scope.parents) {
@@ -340,7 +351,9 @@ export function planButtons(plan: CompletionPlan | undefined, phase: PlanPhase |
     buttons.push({ id: 'refresh', label: 'refresh', tone: 'muted' })
   }
   if (plan && phase === 'preview' && plan.scope.closable && plan.counts.ready > 0 && plan.status.zulip_write) {
-    buttons.push({ id: 'apply', label: `close ${plan.counts.ready} target${plan.counts.ready > 1 ? 's' : ''}`, tone: 'ready' })
+    buttons.push({ id: 'apply',
+      label: plan.verification_failed ? 'retry verification' : `close ${plan.counts.ready} target${plan.counts.ready > 1 ? 's' : ''}`,
+      tone: plan.verification_failed ? 'warn' : 'ready' })
   }
   if (plan && phase === 'done' && plan.partial && plan.counts.ready > 0) {
     buttons.push({ id: 'retry', label: 'try the rest again', tone: 'warn' })

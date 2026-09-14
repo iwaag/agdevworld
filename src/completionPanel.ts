@@ -169,9 +169,10 @@ async function apply(): Promise<void> {
     announceCompleted(root)
     return
   }
-  // A refusal is a preview again — the targets changed and nothing moved,
-  // so what the human sees next is the plan to approve, not a result.
-  phase = found.refused ? { kind: 'preview', plan: found } : { kind: 'done', plan: found }
+  // A refusal or failed verification is a preview again: neither wrote.
+  phase = found.refused || found.verification_failed
+    ? { kind: 'preview', plan: found }
+    : { kind: 'done', plan: found }
   render()
   if (body) body.scrollTop = 0
   options.onChanged?.(root)

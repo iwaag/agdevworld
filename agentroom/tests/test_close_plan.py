@@ -14,6 +14,7 @@ from __future__ import annotations
 import time
 
 from agag.mirror.testing import FakeRealm
+from agag.zulip import RateLimited
 from conftest import mirror_over
 
 from agentroom.close import ALREADY, APPLIED, BLOCKED, DONE, FAILED, KEPT, READY, SKIPPED, Closer
@@ -287,6 +288,89 @@ def test_a_failed_pre_write_listing_leaves_completion_unapplied(monkeypatch):
     assert failed["verification_failed"] is True
     assert failed["applied"] is False
     assert failed["revalidated"]["ok"] is False
+    assert [row["channel"] for row in failed["revalidated"]["failures"]] == failed["revalidated"]["channels"]
+    assert writer.resolved == [] and writer.archived == [] and writer.posted == []
+    mirror.stop()
+
+
+def test_one_failed_scoped_listing_stops_every_completion_write(monkeypatch):
+    realm, _, _, _ = chain()
+    door, writer, mirror = door_over(realm)
+    plan = door.plan(ROOT)
+    refresh = mirror.refresh_listing
+
+    def one_unreadable(channel):
+        if channel == "pj-x":
+            raise ConnectionError("only this channel is unavailable")
+        return refresh(channel)
+
+    monkeypatch.setattr(mirror, "refresh_listing", one_unreadable)
+    failed = door.close(ROOT, plan["fingerprint"])
+
+    assert failed["verification_failed"] is True
+    assert failed["revalidated"]["failures"] == [
+        {"channel": "pj-x", "reason": "ConnectionError: only this channel is unavailable"}
+    ]
+    assert writer.resolved == [] and writer.archived == [] and writer.posted == []
+    mirror.stop()
+
+
+def test_a_rate_limit_is_a_retryable_verification_failure(monkeypatch):
+    realm, _, _, _ = chain()
+    door, writer, mirror = door_over(realm)
+    plan = door.plan(ROOT)
+    monkeypatch.setattr(
+        mirror, "refresh_listing",
+        lambda _channel: (_ for _ in ()).throw(RateLimited("quota paused", retry_after=1)),
+    )
+
+    failed = door.close(ROOT, plan["fingerprint"])
+
+    assert failed["verification_failed"] is True and failed["retryable"] is True
+    assert all(row["reason"].startswith("RateLimited:") for row in failed["revalidated"]["failures"])
+    assert writer.resolved == [] and writer.archived == [] and writer.posted == []
+    mirror.stop()
+
+
+def test_retry_after_verification_recovers_and_completes(monkeypatch):
+    realm, _, _, _ = chain()
+    door, writer, mirror = door_over(realm)
+    plan = door.plan(ROOT)
+    refresh = mirror.refresh_listing
+    monkeypatch.setattr(
+        mirror, "refresh_listing",
+        lambda _channel: (_ for _ in ()).throw(ConnectionError("temporary outage")),
+    )
+    failed = door.close(ROOT, plan["fingerprint"])
+    assert failed["verification_failed"] is True and writer.posted == []
+
+    monkeypatch.setattr(mirror, "refresh_listing", refresh)
+    closed = door.close(ROOT, plan["fingerprint"])
+
+    assert closed["applied"] is True and not closed.get("refused")
+    assert closed["revalidated"]["ok"] is True
+    assert not closed["partial"]
+    mirror.stop()
+
+
+def test_retry_refuses_old_approval_when_work_changed_during_failed_verification(monkeypatch):
+    realm, mission, work, task_topic = chain()
+    door, writer, mirror = door_over(realm)
+    plan = door.plan(ROOT)
+    refresh = mirror.refresh_listing
+    monkeypatch.setattr(
+        mirror, "refresh_listing",
+        lambda _channel: (_ for _ in ()).throw(ConnectionError("temporary outage")),
+    )
+    failed = door.close(ROOT, plan["fingerprint"])
+    assert failed["verification_failed"] is True
+
+    selfnote(realm, work, f"✔ {task_topic}", "state", "open")
+    monkeypatch.setattr(mirror, "refresh_listing", refresh)
+    refused = door.close(ROOT, plan["fingerprint"])
+
+    assert refused["refused"] is True
+    assert by_key(refused)[f"work:m{mission}"] == BLOCKED
     assert writer.resolved == [] and writer.archived == [] and writer.posted == []
     mirror.stop()
 

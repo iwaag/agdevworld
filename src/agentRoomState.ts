@@ -2,8 +2,10 @@
 // through the `agentroom` relay (`agentroom/README.md`).
 //
 // Nothing here is cached in the browser and nothing is fetched at build time —
-// the whole point of this view is that it shows the realm as it is now. The
-// relay holds a 30-second in-memory cache so a reload does not re-sweep.
+// the whole point of this view is that it shows the realm as it is now. Since
+// `better_zulip_call` p1 the relay answers from its mirror — a persisted,
+// event-updated copy of the realm — so a reload costs no Zulip call, and the
+// payload's `health` says whether that copy is live or the last good one.
 
 // The relay listens on loopback beside the browser: the same address whether
 // the page came from vite (:5173) or the nginx image (:8090). Override with
@@ -37,11 +39,28 @@ export interface RoomWorkRow {
   resolved?: boolean
 }
 
+// The mirror's freshness, beside every payload: a stale copy is still
+// shown, and this is what lets the headline say so instead of pretending.
+export interface RoomHealth {
+  state: 'live' | 'stale' | 'unknown'
+  reason: string
+  stale_since: number | null
+  revision: number
+  last_event_at: number | null
+  resyncs: number
+}
+
 export interface RoomWork {
   channels: string[]
   topics: RoomWorkRow[]
-  errors: Array<{ channel: string; error: string }>
   include_resolved?: boolean
+  health: RoomHealth
+}
+
+export function roomHealthLine(health: RoomHealth | undefined): string | undefined {
+  if (!health || health.state === 'live') return undefined
+  const since = health.stale_since ? new Date(health.stale_since * 1000).toLocaleTimeString() : 'an unknown time'
+  return `⚠ the mirror is ${health.state} since ${since} — ${health.reason}; showing the last good copy`
 }
 
 async function read<T>(path: string): Promise<T> {
@@ -63,6 +82,7 @@ async function read<T>(path: string): Promise<T> {
 
 export interface RoomRoster {
   agents: RoomAgent[]
+  health?: RoomHealth
   // Instances whose `intro-` topic carries Zulip's ✔ — retired, and so not in
   // `agents`. Kept so the room can say an agent left rather than letting the
   // card quietly stop being drawn.
@@ -71,7 +91,7 @@ export interface RoomRoster {
 
 export async function loadRoomAgents(): Promise<RoomRoster> {
   const found = await read<RoomRoster>('/agents')
-  return { agents: found.agents, retired: found.retired ?? [] }
+  return { agents: found.agents, retired: found.retired ?? [], health: found.health }
 }
 
 // `includeResolved` lists the ✔ topics too (`front_desk` p4): a finished

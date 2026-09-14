@@ -27,13 +27,12 @@ preference:
   135 false pending rows for Front, and the p9 incident reproduced as a
   metric.
 
-Nothing is written to disk: a restart is a re-sweep, which is the same
-decision the agent room made and for the same reason.
-
-The one thing this engine writes to the realm is a **subscription**. A bot can
-*read* any public channel unsubscribed, but an event queue only delivers the
-channels it is in (measured in step 2), so watching the realm incrementally
-means joining it. It never posts.
+**Since `better_zulip_call` p1 this engine reads nothing itself.** The
+sweep, the queue and the subscription writes are gone: every conversation
+comes from the process's `agag.mirror` (one persisted, event-updated copy of
+the realm on the relay's own credential), and the rows are derived from it
+on demand, once per mirror revision. What is left here is the *judgement* —
+who owes whom, and for how long — which is the part p1 was actually about.
 """
 
 from __future__ import annotations
@@ -42,8 +41,6 @@ import json
 import threading
 import time
 from dataclasses import dataclass, field
-from pathlib import Path
-from typing import Callable
 
 from agag.agent import is_ack
 from agag.intro import (
@@ -52,24 +49,16 @@ from agag.intro import (
     Roster,
     parse_roster,
 )
-from agag.selfnote import Conversation, is_selfnote, parse_rootchat, parse_served
-from agag.zulip import RESOLVED_TOPIC_PREFIX, QueueExpired, RateLimited, ZulipClient
+from agag.selfnote import Conversation, is_selfnote, parse_rootchat, parse_served, note as selfnote
+from agag.mirror import Mirror
+from agag.zulip import RESOLVED_TOPIC_PREFIX
 
 from .autolab import notes_in
 from .forge import notes_in as forge_notes_in
-from .frontdesk import FRONT_CHANNEL, is_desk_topic, newest_desk_topics
+from .frontdesk import FRONT_CHANNEL
 from .inflight import Inflight
 from .room import SYSTEM_REALM, bare_topic
-from .routines import (
-    GUIDE_TOPIC,
-    ROUTINE_HISTORY,
-    is_routine_channel,
-    is_routine_topic,
-    newest_run_topics,
-    routine_rows,
-    session_list,
-    sessions_of,
-)
+from .routines import ROUTINE_HISTORY, routine_rows, session_list, sessions_of
 
 #: The payload's own version. The view is built against this shape.
 SCHEMA = "ag.ops.v1"
@@ -83,20 +72,18 @@ INFLIGHT_SCHEMA = "ag.inflight.v1"
 #: p1 proposed 15 minutes; the p9 incident it exists to catch was 26. A number
 #: to tune, never a finding — which is why it is configuration.
 DEFAULT_STALLED_SECONDS = 900.0
-#: Messages read per topic on a sweep. `agag.zulip.LAST_SPEAKER_LOOKBACK` is
-#: the listener's own depth for the same question.
-TOPIC_LOOKBACK = 50
-#: Served notes read per channel. p1 found 326 for Front alone, and #front
-#: answers 354 to this narrow today.
-SERVED_LOOKBACK = 400
-#: Calls left in the realm quota below which the sweep waits. `agag.zulip`
-#: reserves the same for the listeners (`SWEEP_BUDGET_RESERVE`), and the point
-#: is the same: the observer must never be the reason an agent is throttled.
-BUDGET_RESERVE = 40.0
-#: A dead queue must not become a hot retry loop against the realm.
-RESYNC_BACKOFF = 30.0
+#: How long a `done` row stays a receipt. A resolve the mirror watched
+#: happen within this window is on the board until somebody confirms it;
+#: older resolves are history. The old engine kept receipts for as long as
+#: the process lived and lost them at every restart; the mirror persists,
+#: so the window is what bounds the board now.
+DEFAULT_DONE_SECONDS = 24 * 3600.0
+#: The mirror's meta key the confirmations persist under, so a relay restart
+#: does not resurrect every receipt a human already dismissed.
+CONFIRMED_KEY = "ops.confirmed"
 
 __all__ = [
+    "DEFAULT_DONE_SECONDS",
     "DEFAULT_STALLED_SECONDS",
     "INFLIGHT_SCHEMA",
     "Ops",
@@ -201,6 +188,11 @@ class Topic:
     #: A session list built on a window must say so instead of implying that
     #: every run of the routine was searched.
     history_bounded: bool = False
+    #: When this engine watched the topic being resolved, or None when the
+    #: resolve predates what the mirror's change feed remembers. A `done` row
+    #: is a receipt for a transition somebody may still want to see; a topic
+    #: resolved long ago is history, not a receipt.
+    resolved_at: float | None = None
 
     def add(self, message: dict) -> None:
         self.link(message)
@@ -462,457 +454,184 @@ def describe(row: dict, instance: str, stalled_minutes: float) -> str:
 
 @dataclass
 class Ops:
-    """The live reconstruction, refreshed by a Zulip event queue.
+    """The rows, derived from the mirror whenever it has moved.
 
-    `start()` puts one daemon thread on it. Everything the HTTP side touches
-    is read under `_lock`; the thread is the only writer.
+    Every attribute a reader looks at (`_topics`, `_rosters`, `_marks`, …)
+    is rebuilt by `refresh()` when the mirror's revision has changed since
+    the last derivation, and left alone otherwise — so a board read costs a
+    revision check and nothing else while the realm is quiet. `pin()` is the
+    tests' seam: it sets those attributes directly and stops `refresh()`
+    from overwriting them.
     """
 
-    env_path: Path
+    mirror: Mirror | None = None
     stalled_seconds: float = DEFAULT_STALLED_SECONDS
     #: `instance -> project root` for the in-flight signal. Empty is an
     #: answer: every instance then reports `known: false`.
     agent_roots: dict = field(default_factory=dict)
-    client_factory: Callable[[Path], ZulipClient] | None = None
-    _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
-    _stop: threading.Event = field(default_factory=threading.Event, repr=False)
-    _thread: threading.Thread | None = field(default=None, repr=False)
+    done_seconds: float = DEFAULT_DONE_SECONDS
+    _lock: threading.RLock = field(default_factory=threading.RLock, repr=False)
 
-    # -- state, all of it under _lock
+    # -- state, all of it under _lock, derived from the mirror
     _topics: dict[tuple[str, str], Topic] = field(default_factory=dict, repr=False)
     _rosters: dict[str, Roster | None] = field(default_factory=dict, repr=False)
-    #: Instances whose `intro-` topic carries Zulip's ✔ — **retired**. An
-    #: introduction is the contract that says an agent exists and how to reach
-    #: it, so resolving that topic is how the realm says the agent is gone. It
-    #: is the only retirement signal there is: a project can vanish from every
-    #: machine without the realm noticing, which is exactly what left
-    #: `agping-agstudio1` amber on this board for a phase (`p2 ex2` step C).
     _retired: set[str] = field(default_factory=set, repr=False)
     _marks: dict[str, dict[tuple[str, str], int]] = field(default_factory=dict, repr=False)
     _channels: set[str] = field(default_factory=set, repr=False)
-    #: An `update_message` event names its channel by id and nothing else, so
-    #: the sweep's own name/id mapping is what turns a resolve into a row.
     _stream_names: dict[int, str] = field(default_factory=dict, repr=False)
     #: `(channel, bare topic)` a human has said they have seen, and the id of
-    #: the last post at the moment they said it. Not a delete: `_topics` keeps
-    #: the conversation, so an unresolve rename still finds its `old_key` in
-    #: `_apply_update` and the row comes back rather than being lost. In
-    #: memory only, and deliberately — it must die with the `done` rows it
-    #: hides, or a restart would show a board of debts already seen.
+    #: the last post at the moment they said it. Persisted in the mirror's
+    #: store, so a restart does not show a board of debts already seen.
     _confirmed: dict[tuple[str, str], int] = field(default_factory=dict, repr=False)
-    #: Every topic name the sweep saw in `#front`, bare → live, resolved ones
-    #: included. The Front Desk lists its conversations from it: a resolved
-    #: conversation older than the deep window is not held, but it is known.
     _front_names: dict[str, str] = field(default_factory=dict, repr=False)
     _live: bool = False
     _reason: str = "starting"
     _error: str | None = None
-    _queue_id: str | None = None
-    _last_event_at: float | None = None
-    _last_sweep_at: float | None = None
-    _sweeps: int = 0
-    _sweep_calls: int = 0
-    _errors: list[dict] = field(default_factory=list, repr=False)
+    _revision: int = -1
+    _pinned: bool = False
+    _loaded: bool = False
 
-    def client(self) -> ZulipClient:
-        factory = self.client_factory or ZulipClient.from_env
-        return factory(self.env_path)
+    # -- the tests' seam ------------------------------------------------------
 
-    def _patient(self, client: ZulipClient, call, *args, **kwargs):
-        """One Zulip call that waits rather than failing the sweep.
+    def pin(self, *, rosters=None, topics=(), channels=(), live=True, retired=(), reason=None,
+            front_names=None, stream_names=None) -> "Ops":
+        """Set the derived state by hand and keep it. For tests."""
+        with self._lock:
+            self._rosters = dict(rosters or {})
+            self._retired = set(retired)
+            self._topics = {(t.channel, t.topic): t for t in topics}
+            self._channels = set(channels)
+            self._front_names = dict(front_names or {})
+            self._stream_names = dict(stream_names or {})
+            self._live = live
+            self._reason = reason or ("live" if live else "event queue expired; resyncing")
+            self._error = None if live else self._reason
+            self._pinned = True
+        return self
 
-        A sweep is ~250 calls and p1 measured HTTP 429 on an immediate repeat
-        of one. Two guards, both of them `agag.zulip`'s own discipline: stay
-        off the last of the quota so the agents' listeners keep theirs, and
-        when 429 comes anyway, wait exactly as long as Zulip asked.
-        """
-        for attempt in range(4):
-            remaining = client.rate_limit_remaining
-            if remaining is not None and remaining < BUDGET_RESERVE:
-                self._stop.wait(RESYNC_BACKOFF)
-            try:
-                return call(*args, **kwargs)
-            except RateLimited as limited:
-                if attempt == 3:
-                    raise
-                self._stop.wait(max(1.0, limited.retry_after))
-        raise RuntimeError("unreachable")
+    # -- derivation ---------------------------------------------------------------
 
-    # -- lifecycle -------------------------------------------------------
-
-    def start(self) -> None:
-        if self._thread is not None:
+    def refresh(self) -> None:
+        """Rebuild the derived state when the mirror has moved."""
+        mirror = self.mirror
+        if self._pinned or mirror is None:
             return
-        self._thread = threading.Thread(target=self._run, name="ops", daemon=True)
-        self._thread.start()
-
-    def stop(self) -> None:
-        self._stop.set()
-
-    def _run(self) -> None:
-        while not self._stop.is_set():
-            try:
-                client = self.client()
-                # The queue is registered *before* the sweep, so a message
-                # that lands mid-sweep is replayed rather than lost. The
-                # alternative loses exactly the messages that arrive while
-                # the 183 calls are in flight.
-                queue_id, last_event_id = self._register(client)
-                self._resync(client, queue_id)
-                self._poll_forever(client, queue_id, last_event_id)
-            except Exception as error:  # a dead relay must say so, not exit
-                self._fail(f"{type(error).__name__}: {error}")
-                self._stop.wait(RESYNC_BACKOFF)
-
-    def _register(self, client: ZulipClient) -> tuple[str, int]:
-        # `update_message` is not in `ZulipClient.register`'s event set and is
-        # the whole of the `done` path: a resolve arrives as one event
-        # carrying both `orig_subject` and `subject`.
-        result = client.call(
-            "POST", "register", {"event_types": ["message", "update_message", "subscription"]}
-        )
-        return result["queue_id"], int(result["last_event_id"])
-
-    def _fail(self, reason: str) -> None:
+        health = mirror.health()
+        revision = int(health["revision"])
         with self._lock:
-            self._live = False
-            self._reason = reason
-            self._error = reason
-            self._queue_id = None
-
-    # -- the full sweep --------------------------------------------------
-
-    def _resync(self, client: ZulipClient, queue_id: str) -> None:
-        before = client.calls
-        errors: list[dict] = []
-
-        channels = self._patient(client, client.channels)
-        names = sorted(str(channel["name"]) for channel in channels)
-        stream_ids = {str(c["name"]): int(c["stream_id"]) for c in channels}
-
-        # Subscribe to everything public. A read needs no subscription; the
-        # event queue does (step 2), and `work-` channels appear whenever
-        # autolab opens a task. This is the only write this service makes.
-        subscribed = {str(s.get("name", "")) for s in self._patient(client, client.subscriptions)}
-        missing = [name for name in names if name not in subscribed]
-        if missing:
-            try:
-                self._patient(client, client.subscribe_channels, missing)
-            except Exception as error:
-                errors.append({"channel": ", ".join(missing), "error": f"subscribe: {error}"})
-
-        rosters, retired = self._read_rosters(client, errors)
-
-        topics: dict[tuple[str, str], Topic] = {}
-        marks: dict[str, dict[tuple[str, str], int]] = {
-            instance: {} for instance, roster in rosters.items() if roster is not None
-        }
-        by_id = {r.bot_id: i for i, r in rosters.items() if r is not None and r.bot_id is not None}
-        by_name = {r.bot: i for i, r in rosters.items() if r is not None}
-
-        front_names: dict[str, str] = {}
-        for name in names:
-            try:
-                found = self._patient(client, client.channel_topics, stream_ids[name])
-            except Exception as error:
-                errors.append({"channel": name, "error": str(error)})
-                continue
-            # The routine topics read *deep* and read even under ✔: every
-            # guide (a ✔ there retires the routine) and the newest
-            # `DEEP_RUNS` run topics of each routine channel — a finished run
-            # is resolved by Front's listener, so a board that skipped ✔ runs
-            # would never show one finishing. Every other topic, a routine's
-            # older runs included, follows the realm's rule: shallow while
-            # open, not read once resolved.
-            deep_names: set[str] = set()
-            if is_routine_channel(name):
-                deep_names = newest_run_topics(found) | {GUIDE_TOPIC}
-            if name == FRONT_CHANNEL:
-                # The Front Desk's newest conversations are read the same
-                # way: whole, and under ✔, so a reload after a restart shows
-                # them (`front_desk` p1).
-                bare_names = [bare_topic(live) for live in found]
-                deep_names = newest_desk_topics(bare_names)
-                front_names = {bare_topic(live): live for live in found}
-            for live in found:
-                key = (name, bare_topic(live))
-                deep = key[1] in deep_names
-                # Resolved topics are not read on a sweep. `done` is a
-                # transition this engine watches happen, not a history it
-                # reconstructs — and reading every ✔ topic on the realm would
-                # multiply the one cost the plan caps.
-                if live.startswith(RESOLVED_TOPIC_PREFIX) and not deep:
-                    continue
-                # A routine's topics keep their history — the chat view *is*
-                # that history — and a topic costs one call whatever depth it
-                # is read at.
-                keep = is_routine_topic(name, key[1]) or is_desk_topic(name, key[1])
-                depth = ROUTINE_HISTORY if deep else TOPIC_LOOKBACK
-                topic = Topic(
-                    channel=name, topic=key[1], live_topic=live, keep_history=keep,
-                    resolved=live.startswith(RESOLVED_TOPIC_PREFIX),
-                )
-                try:
-                    history = self._patient(
-                        client, client.topic_history, name, live, num_before=depth,
-                    )
-                except Exception as error:
-                    errors.append({"channel": f"{name}/{live}", "error": str(error)})
-                    continue
-                for message in history:
-                    topic.add(message)
-                # A read that came back full may have left older posts behind;
-                # the session says so rather than calling the window the
-                # whole history.
-                if keep and len(history) >= depth:
-                    topic.history_bounded = True
-                topics[key] = topic
-            self._served_marks(client, name, marks, by_id, by_name, errors)
-
+            if not self._loaded:
+                self._confirmed = self._load_confirmed()
+                self._loaded = True
+            if revision == self._revision:
+                self._live = health["state"] == "live"
+                self._reason = health["reason"]
+                self._error = None if self._live else health["reason"]
+                return
+        derived = self._derive(mirror)
         with self._lock:
-            self._channels = set(names)
-            self._stream_names = {int(v): k for k, v in stream_ids.items()}
-            self._rosters = rosters
-            self._retired = retired
-            self._topics = topics
-            self._front_names = front_names
-            self._marks = marks
-            self._errors = errors
-            self._queue_id = queue_id
-            self._live = True
-            self._reason = "live"
-            self._error = None
-            self._last_sweep_at = time.time()
-            self._sweeps += 1
-            self._sweep_calls = client.calls - before
+            (self._topics, self._rosters, self._retired, self._marks, self._channels,
+             self._stream_names, self._front_names) = derived
+            self._revision = revision
+            self._live = health["state"] == "live"
+            self._reason = health["reason"]
+            self._error = None if self._live else health["reason"]
 
-    def _read_rosters(
-        self, client: ZulipClient, errors: list[dict]
-    ) -> tuple[dict[str, Roster | None], set[str]]:
-        """Every instance on the board, the routing it declares, and which of
-        them are retired.
-
-        `None` is kept as an answer: an introduction with no roster block is an
-        instance whose routing is *unknown*, and a default here would be the
-        guessed roster p1 charged 66 phantom stalls for.
-
-        A ✔ on the `intro-` topic is the second answer, and a different one:
-        the agent is **retired**. Matching is still on the bare name, so the
-        instance is recognised either way — resolution is a flag on the agent,
-        never a topic the reader fails to see (the p9 rename lesson).
-        """
-        found: dict[str, Roster | None] = {}
+    def _derive(self, mirror: Mirror):
+        channels = mirror.channels()
+        names = {c.stream_id: c.name for c in mirror.channels(include_archived=True)}
+        intros = mirror.intros()
+        rosters: dict[str, Roster | None] = {}
         retired: set[str] = set()
-        try:
-            stream_id = client.stream_id(AGENTS_CHANNEL)
-            board = client.channel_topics(stream_id)
-        except Exception as error:
-            errors.append({"channel": AGENTS_CHANNEL, "error": str(error)})
-            return found, retired
-        for live in board:
-            name = bare_topic(live)
-            if not name.startswith(INTRO_TOPIC_PREFIX):
-                continue
-            instance = name[len(INTRO_TOPIC_PREFIX):]
-            if live.startswith(RESOLVED_TOPIC_PREFIX):
-                # Retired: its introduction is not read, and no history call is
-                # spent on it. `found` still carries the instance so an
-                # unresolve has something to bring back.
+        for instance, intro in intros.items():
+            rosters[instance] = intro.roster if not intro.retired else None
+            if intro.retired:
                 retired.add(instance)
-                found[instance] = None
+        by_id = {r.bot_id: i for i, r in rosters.items() if r is not None and r.bot_id is not None}
+        resolved_at = mirror.resolved_times()
+        topics: dict[tuple[str, str], Topic] = {}
+        front_names: dict[str, str] = {}
+        for index in mirror.topics():
+            key = (index.channel, index.name)
+            held = topics.get(key)
+            if held is None:
+                held = Topic(channel=index.channel, topic=index.name, live_topic=index.live_name,
+                             keep_history=True, resolved=index.resolved)
+                topics[key] = held
+            elif not index.resolved:
+                # An open twin beside a ✔ topic: the conversation is open.
+                held.live_topic, held.resolved = index.live_name, False
+            for message in mirror.messages(index.channel, index.live_name, across_resolve=False):
+                held.add(message.as_zulip())
+            if index.resolved:
+                held.resolved_at = resolved_at.get((index.channel, index.live_name))
+            if index.channel == FRONT_CHANNEL:
+                front_names[index.name] = held.live_topic
+        marks: dict[str, dict[tuple[str, str], int]] = {i: {} for i, r in rosters.items() if r is not None}
+        for note in mirror.notes(tag="served"):
+            parsed = parse_served(selfnote("served", note.value))
+            instance = by_id.get(note.sender_id)
+            if parsed is None or instance is None:
                 continue
-            try:
-                history = client.topic_history(AGENTS_CHANNEL, live, num_before=1)
-            except Exception as error:
-                errors.append({"channel": f"{AGENTS_CHANNEL}/{live}", "error": str(error)})
-                found[instance] = None
-                continue
-            found[instance] = parse_roster(history[-1].get("content", "")) if history else None
-        return found, retired
-
-    def _served_marks(
-        self,
-        client: ZulipClient,
-        channel: str,
-        marks: dict[str, dict[tuple[str, str], int]],
-        by_id: dict[int, str],
-        by_name: dict[str, str],
-        errors: list[dict],
-    ) -> None:
-        """Every agent's `[selfnote][served]` notes written in one channel.
-
-        One call per channel rather than one per agent, and **channel-scoped
-        rather than global**, which is not a choice: a narrow with no channel
-        operator returns nothing at all for this bot. Zulip answers a global
-        search from the reader's own per-user index, and a credential created
-        yesterday has no rows in it for anything posted before — an observer
-        that searched the realm the way p1's probe did (as the Developer, an
-        owner subscribed since the realm was built) would read every answered
-        callback as never answered. Scoping by channel reads the channel's own
-        messages and is correct for an identity of any age.
-
-        A served note is written **into home**, and home is always a
-        conversation the agent owns, so the channels worth asking are the
-        channels — which is every one this sweep already walks.
-        """
-        narrow = [
-            {"operator": "channel", "operand": channel},
-            {"operator": "search", "operand": "served"},
-        ]
-        try:
-            messages = self._patient(
-                client, client.call, "GET", "messages",
-                {
-                    "anchor": "newest",
-                    "num_before": str(SERVED_LOOKBACK),
-                    "num_after": "0",
-                    "apply_markdown": "false",
-                    "narrow": json.dumps(narrow),
-                },
-            ).get("messages", [])
-        except Exception as error:
-            errors.append({"channel": f"served:{channel}", "error": str(error)})
-            return
-        for message in messages:
-            parsed = parse_served(message.get("content"))
-            if parsed is None:
-                continue
-            instance = by_id.get(int(message.get("sender_id") or 0)) or by_name.get(
-                str(message.get("sender_full_name") or "")
-            )
-            if instance is None:
-                continue  # a note by somebody with no roster explains nothing
             remote, message_id = parsed
-            key = (remote.channel, bare_topic(remote.topic))
+            remote_key = (remote.channel, bare_topic(remote.topic))
             agent = marks.setdefault(instance, {})
-            if message_id > agent.get(key, 0):
-                agent[key] = message_id
+            if message_id > agent.get(remote_key, 0):
+                agent[remote_key] = message_id
+        return (topics, rosters, retired, marks, {c.name for c in channels}, names, front_names)
 
-    # -- the incremental half --------------------------------------------
+    def held_topics(self) -> dict[tuple[str, str], Topic]:
+        """The engine's memory, copied: what a completion preview walks."""
+        self.refresh()
+        with self._lock:
+            return dict(self._topics)
 
-    def _poll_forever(self, client: ZulipClient, queue_id: str, last_event_id: int) -> None:
-        while not self._stop.is_set():
+    def hydrate_topic(self, channel: str, topic: str) -> Topic | None:
+        """One conversation read whole through the mirror, under both its
+        names, as a `Topic`; None without a mirror or when nothing is
+        there. The Front Desk's read for a conversation the index does not
+        hold complete."""
+        mirror = self.mirror
+        if mirror is None:
+            return None
+        messages = mirror.messages(channel, topic, hydrate=True)
+        if not messages:
+            return None
+        found = Topic(channel=channel, topic=bare_topic(topic), live_topic=bare_topic(topic), keep_history=True)
+        for message in messages:
+            found.add(message.as_zulip())
+        live = mirror.live_name(channel, topic) or found.live_topic
+        found.live_topic = live
+        found.resolved = live.startswith(RESOLVED_TOPIC_PREFIX)
+        found.history_bounded = len(messages) > ROUTINE_HISTORY
+        return found
+
+    # -- confirmations, persisted ------------------------------------------------
+
+    def _load_confirmed(self) -> dict[tuple[str, str], int]:
+        if self.mirror is None:
+            return {}
+        raw = self.mirror.store.get_meta(CONFIRMED_KEY)
+        if not raw:
+            return {}
+        try:
+            rows = json.loads(raw)
+        except ValueError:
+            return {}
+        found: dict[tuple[str, str], int] = {}
+        for row in rows if isinstance(rows, list) else []:
             try:
-                events = client.poll(queue_id, last_event_id)
-            except RateLimited as limited:
-                # Not a dead queue: the sweep that just ran spent the budget.
-                # Waiting keeps the data live; resyncing would spend it again.
-                self._stop.wait(max(1.0, limited.retry_after))
+                found[(str(row["channel"]), str(row["topic"]))] = int(row["message_id"])
+            except (KeyError, TypeError, ValueError):
                 continue
-            except QueueExpired:
-                # The documented way back is a re-sweep, and the only one.
-                self._fail("event queue expired; resyncing")
-                return
-            for event in events:
-                last_event_id = max(last_event_id, int(event.get("id", last_event_id)))
-                self._apply(event)
-            with self._lock:
-                if events:
-                    self._last_event_at = time.time()
-                self._live = True
-                self._reason = "live"
+        return found
 
-    def _apply(self, event: dict) -> None:
-        kind = event.get("type")
-        if kind == "message":
-            self._apply_message(event.get("message") or {})
-        elif kind == "update_message":
-            self._apply_update(event)
-        elif kind == "subscription":
-            # A channel this service just joined; its topics arrive as events
-            # from here on, and its history at the next resync.
-            pass
-
-    def _apply_message(self, message: dict) -> None:
-        if message.get("type") != "stream":
+    def _save_confirmed(self) -> None:
+        if self.mirror is None:
             return
-        channel = str(message.get("display_recipient") or "")
-        live = str(message.get("subject") or "")
-        if not channel or not live:
-            return
-        key = (channel, bare_topic(live))
-
-        with self._lock:
-            # An introduction re-posted while this runs updates the roster in
-            # place: the contract says re-post after a behavior change, and an
-            # observer that needs a restart to notice has not honoured it.
-            if channel == AGENTS_CHANNEL and key[1].startswith(INTRO_TOPIC_PREFIX):
-                instance = key[1][len(INTRO_TOPIC_PREFIX):]
-                self._rosters[instance] = parse_roster(str(message.get("content") or ""))
-
-            # A served note is the mention route's memory, and it is a post
-            # like any other — so the marks stay current without a re-sweep.
-            parsed = parse_served(message.get("content"))
-            if parsed is not None:
-                remote, message_id = parsed
-                sender = str(message.get("sender_full_name") or "")
-                sender_id = int(message.get("sender_id") or 0)
-                for instance, roster in self._rosters.items():
-                    if roster is None:
-                        continue
-                    if roster.bot_id == sender_id or roster.bot == sender:
-                        marks = self._marks.setdefault(instance, {})
-                        remote_key = (remote.channel, bare_topic(remote.topic))
-                        if message_id > marks.get(remote_key, 0):
-                            marks[remote_key] = message_id
-
-            topic = self._topics.get(key)
-            if topic is None:
-                topic = Topic(
-                    channel=channel, topic=key[1], live_topic=live,
-                    keep_history=is_routine_topic(channel, key[1]) or is_desk_topic(channel, key[1]),
-                )
-                self._topics[key] = topic
-            if channel == FRONT_CHANNEL:
-                self._front_names[key[1]] = live
-            topic.live_topic = live
-            topic.resolved = live.startswith(RESOLVED_TOPIC_PREFIX)
-            topic.add(message)
-
-    def _apply_update(self, event: dict) -> None:
-        """A topic rename, which is how `done` arrives.
-
-        Keys are bare names, so a ✔ is a flag on the row rather than a new
-        row beside it — the whole point of bare-topic keying. A rename to a
-        genuinely different name moves the entry instead.
-        """
-        original = event.get("orig_subject")
-        renamed = event.get("subject")
-        if original is None or renamed is None:
-            return
-        channel = self._channel_of(event.get("stream_id"))
-        if channel is None:
-            return
-        old_key = (channel, bare_topic(str(original)))
-        new_key = (channel, bare_topic(str(renamed)))
-        if channel == AGENTS_CHANNEL and new_key[1].startswith(INTRO_TOPIC_PREFIX):
-            # An introduction resolved or un-resolved while this runs retires
-            # or restores the agent without a re-sweep — the same courtesy
-            # `_apply_message` pays a re-posted introduction. `#agents` topics
-            # are not in `_topics` (no roster owns them), so this is deliberately
-            # before the lookup that returns early for them.
-            instance = new_key[1][len(INTRO_TOPIC_PREFIX):]
-            with self._lock:
-                if str(renamed).startswith(RESOLVED_TOPIC_PREFIX):
-                    self._retired.add(instance)
-                else:
-                    self._retired.discard(instance)
-        with self._lock:
-            topic = self._topics.get(old_key)
-            if topic is None:
-                return
-            if old_key != new_key:
-                del self._topics[old_key]
-                topic.channel, topic.topic = new_key
-                self._topics[new_key] = topic
-            topic.live_topic = str(renamed)
-            topic.resolved = str(renamed).startswith(RESOLVED_TOPIC_PREFIX)
-            if channel == FRONT_CHANNEL:
-                self._front_names.pop(old_key[1], None)
-                self._front_names[new_key[1]] = str(renamed)
+        rows = [{"channel": c, "topic": t, "message_id": i} for (c, t), i in sorted(self._confirmed.items())]
+        self.mirror.store.set_meta(CONFIRMED_KEY, json.dumps(rows))
 
     def _channel_of(self, stream_id) -> str | None:
-        """An update event names a stream by id; the sweep knows the names."""
         if stream_id is None:
             return None
         with self._lock:
@@ -982,6 +701,7 @@ class Ops:
             for key, ident in marks.items():
                 if ident >= self._confirmed.get(key, 0):
                     self._confirmed[key] = ident
+            self._save_confirmed()
         return {
             "confirmed": len(here),
             "topics": [
@@ -998,8 +718,7 @@ class Ops:
 
         It reuses `snapshot()` for health and for the conversation states
         rather than deciding either again — one engine, one verdict. It costs
-        no Zulip call at all: these topics are already in memory, read by the
-        same sweep and kept current by the same queue.
+        no Zulip call at all: these topics are in the mirror.
         """
         now = time.time() if now is None else now
         board = self.snapshot(now)
@@ -1008,8 +727,8 @@ class Ops:
             channels = set(self._channels)
         rows = routine_rows(topics, now, stalled_seconds=self.stalled_seconds, channels=channels)
         if board["health"]["state"] != "live":
-            # The same rule the ops board obeys: while the queue is dead this
-            # is the last thing known and not the state now.
+            # The same rule the ops board obeys: while the mirror is stale
+            # this is the last thing known and not the state now.
             for row in rows:
                 row["stale_state"] = row["state"]
                 row["state"] = "unknown"
@@ -1074,15 +793,14 @@ class Ops:
 
         This is the only thing in this service that may be polled at a few
         seconds, and it is allowed because it touches no realm: every answer
-        below is a `stat` of this host's own directories. The Zulip side is
-        already real-time on the event queue, so polling it would spend the
-        agents' quota to learn nothing (plan constraint 3).
+        below is a `stat` of this host's own directories.
 
         Who is looked at is decided by the **roster**, not by who happens to
         owe a reply: an agent with no open row is exactly the one a human wants
         to know is still running.
         """
         now = time.time() if now is None else now
+        self.refresh()
         with self._lock:
             topics = dict(self._topics)
             rosters = {i: r for i, r in self._rosters.items() if r is not None}
@@ -1124,6 +842,34 @@ class Ops:
 
     # -- what the view reads ---------------------------------------------
 
+    def _health(self) -> dict:
+        """The board's health block: the mirror's, in the words the views
+        already read (`state`, `reason`, `error`, `queue`, …)."""
+        base = self.mirror.health() if self.mirror is not None and not self._pinned else None
+        with self._lock:
+            live, reason, error = self._live, self._reason, self._error
+            channels, topics = len(self._channels), len(self._topics)
+        return {
+            "state": "live" if live else "unknown",
+            "reason": reason,
+            "error": error,
+            "queue": bool(base and base.get("queue")),
+            "last_event_at": base.get("last_event_at") if base else None,
+            "last_resync_at": base.get("last_resync_at") if base else None,
+            "resyncs": int(base.get("resyncs") or 0) if base else 0,
+            "resync_calls": int(base.get("resync_calls") or 0) if base else 0,
+            "revision": int(base.get("revision") or 0) if base else 0,
+            "stale_since": base.get("stale_since") if base else None,
+            "channels": channels,
+            "topics": topics,
+        }
+
+    def _recent_done(self, topic: Topic, now: float) -> bool:
+        """Whether a resolved topic is still a receipt rather than history."""
+        if self._pinned and topic.resolved_at is None:
+            return True  # a pinned fixture says nothing about time
+        return topic.resolved_at is not None and now - topic.resolved_at <= self.done_seconds
+
     def snapshot(self, now: float | None = None) -> dict:
         """The whole payload, computed on demand.
 
@@ -1131,22 +877,17 @@ class Ops:
         so a test that cannot fix the clock can only assert the shape.
         """
         now = time.time() if now is None else now
+        self.refresh()
         with self._lock:
             live = self._live
             reason = self._reason
-            error = self._error
             rosters = dict(self._rosters)
             retired = set(self._retired)
             marks = {k: dict(v) for k, v in self._marks.items()}
             topics = list(self._topics.values())
             channels = set(self._channels)
-            queue_id = self._queue_id
-            last_event_at = self._last_event_at
-            last_sweep_at = self._last_sweep_at
-            sweeps = self._sweeps
-            sweep_calls = self._sweep_calls
-            errors = list(self._errors)
             confirmed = dict(self._confirmed)
+        health = self._health()
 
         stalled_minutes = self.stalled_seconds / 60
         rows: list[dict] = []
@@ -1210,6 +951,8 @@ class Ops:
                 found = row_state(topic, roster, mark, now, self.stalled_seconds)
                 if found is None:
                     continue
+                if found["state"] == "done" and not self._recent_done(topic, now):
+                    continue  # resolved long ago: history, not a receipt
                 summary["counts"][found["state"]] += 1
                 rows.append(self._row(instance, roster, topic, found, stalled_minutes))
             # `acked` is not "owed a reply", so it is not one of the routes; it
@@ -1234,10 +977,10 @@ class Ops:
             instances.append(summary)
 
         if not live:
-            # The plan's rule 3, applied to the whole payload: while the queue
-            # is dead this data is of unknown age, and p9's 26 silent minutes
-            # looked exactly like a quiet board. The last known state is kept
-            # as evidence, never as the answer.
+            # The plan's rule 3, applied to the whole payload: while the
+            # mirror is stale this data is of unknown age, and p9's 26 silent
+            # minutes looked exactly like a quiet board. The last known state
+            # is kept as evidence, never as the answer.
             for row in rows:
                 row["stale_state"] = row["state"]
                 row["state"] = "unknown"
@@ -1283,8 +1026,7 @@ class Ops:
         # is by *mark*, not by deletion: the row is dropped only while it is
         # still done and no post newer than the confirmed one has landed, so an
         # unresolve — or any reply into a closed topic — brings it straight
-        # back. A `del` from `_topics` could not do that: the later rename
-        # would arrive with an `orig_subject` this engine no longer knows.
+        # back.
         hidden = 0
         if confirmed:
             summaries = {summary["instance"]: summary for summary in instances}
@@ -1308,19 +1050,8 @@ class Ops:
         return {
             "schema": SCHEMA,
             "generated_at": now,
-            "settings": {"stalled_seconds": self.stalled_seconds},
-            "health": {
-                "state": "live" if live else "unknown",
-                "reason": reason,
-                "error": error,
-                "queue": queue_id is not None,
-                "last_event_at": last_event_at,
-                "last_sweep_at": last_sweep_at,
-                "sweeps": sweeps,
-                "sweep_calls": sweep_calls,
-                "channels": len(channels),
-                "topics": len(topics),
-            },
+            "settings": {"stalled_seconds": self.stalled_seconds, "done_seconds": self.done_seconds},
+            "health": health,
             "confirmed": {"rows": hidden, "topics": len(confirmed)},
             #: Instances the realm has retired (a ✔ on their `intro-` topic).
             #: Named rather than merely absent: a reader must be able to tell
@@ -1328,7 +1059,7 @@ class Ops:
             "retired": sorted(retired),
             "instances": instances,
             "rows": rows,
-            "errors": errors,
+            "errors": [],
         }
 
     def _row(

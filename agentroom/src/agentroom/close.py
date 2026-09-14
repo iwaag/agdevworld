@@ -99,6 +99,10 @@ READY, DONE, BLOCKED, KEPT = "ready", "done", "blocked", "kept"
 APPLIED, ALREADY, FAILED, SKIPPED = "applied", "already", "failed", "skipped"
 #: Operations remembered for the screen, newest last.
 RECORD_MEMORY = 20
+#: How long the answer waits for the mirror to carry the writes back. Zulip
+#: delivers an event within a second of the write on this realm; the wait is
+#: bounded because a stale mirror must not hold a completion hostage.
+CONFIRM_SECONDS = 5.0
 
 __all__ = [
     "ALREADY", "APPLIED", "Action", "BLOCKED", "Closer", "DONE", "FAILED", "KEPT",
@@ -481,6 +485,12 @@ class Closer:
     topics: Callable[[], dict]
     reader_factory: Callable[[], ZulipClient] | None = None
     writer_factory: Callable[[], ZulipClient] | None = None
+    #: The process's mirror (`better_zulip_call` p1). After the writes, the
+    #: answer waits for the mirror to carry them back as events — briefly —
+    #: and each result says whether the realm has confirmed it, so a pending
+    #: write and a confirmed change are told apart rather than assumed equal.
+    mirror: Any | None = None
+    confirm_seconds: float = CONFIRM_SECONDS
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
     _locks: dict[Key, threading.Lock] = field(default_factory=dict, repr=False)
     _records: list[dict] = field(default_factory=list, repr=False)
@@ -523,6 +533,15 @@ class Closer:
             self._writer = self.writer_factory()
         return self._writer
 
+    def _zulip_calls(self) -> int:
+        """What the mirror has spent on Zulip so far: hydrations, verifies.
+        A discovery's cost is the difference across it. Without a mirror the
+        reader is the realm itself and its own count is the answer."""
+        if self.mirror is not None:
+            return int(self.mirror.health().get("calls") or 0)
+        reader = self._reader
+        return int(getattr(reader, "calls", 0) or 0)
+
     def _conversation_lock(self, key: Key) -> threading.Lock:
         with self._lock:
             return self._locks.setdefault(key, threading.Lock())
@@ -539,7 +558,9 @@ class Closer:
         if isinstance(key, dict):
             return key
         realm: Realm | None = self._reader_client()
+        spent = self._zulip_calls()
         found = discover(self.topics(), key, realm=realm)
+        found.gaps["zulip_calls"] = self._zulip_calls() - spent
         actions = plan_actions(found)
         return self._payload(now, found, actions)
 
@@ -584,7 +605,9 @@ class Closer:
             return {"error": self.status()["reason"], "status": self.status()}
         with self._conversation_lock(key):
             realm: Realm | None = self._reader_client()
+            spent = self._zulip_calls()
             found = discover(self.topics(), key, realm=realm)
+            found.gaps["zulip_calls"] = self._zulip_calls() - spent
             actions = plan_actions(found)
             current = fingerprint(actions)
             if expected is not None and expected != current:
@@ -593,7 +616,9 @@ class Closer:
                 payload["error"] = ("the targets have changed since this preview was made; "
                                     "nothing was closed — read the refreshed plan and approve it")
                 return payload
+            revision = self.mirror.revision() if self.mirror is not None else 0
             results = self._apply(client, actions)
+            self._confirm(results, actions, revision)
             with self._lock:
                 self._records.append({"at": now, "channel": found.root[0],
                                       "topic": found.root[1], "kind": found.scope.kind,
@@ -606,7 +631,9 @@ class Closer:
             # that in a browser fixture). What was archived reads `done`, what
             # failed reads `ready` again, and `partial` is judged on what is
             # still left to do rather than on what was attempted.
+            spent = self._zulip_calls()
             after = discover(self.topics(), key, realm=realm)
+            after.gaps["zulip_calls"] = self._zulip_calls() - spent
             actions_after = plan_actions(after)
             # A target this operation made unreadable — the topics of a
             # channel it archived — is not in the plan as it now stands, and
@@ -644,6 +671,46 @@ class Closer:
             payload["partial"] = (any(row["outcome"] == FAILED for row in results)
                                   or bool(payload["counts"]["blocked"]) or root_kept)
             return payload
+
+    def _confirm(self, results: list[dict], actions: list[Action], revision: int) -> None:
+        """Wait, briefly, for the mirror to carry the writes back, and stamp
+        every applied result `confirmed` (True / False); None without a
+        mirror, and for anything that was not written."""
+        mirror = self.mirror
+        by_key = {action.key: action for action in actions}
+        pending = [row for row in results if row["outcome"] == APPLIED]
+        for row in results:
+            row["confirmed"] = None
+        if mirror is None or not pending:
+            return
+        deadline = time.time() + self.confirm_seconds
+        while True:
+            unconfirmed = [row for row in pending if not self._is_confirmed(row, by_key[row["key"]])]
+            if not unconfirmed:
+                break
+            remaining = deadline - time.time()
+            if remaining <= 0:
+                break
+            revision = mirror.wait(revision, timeout=remaining)
+        for row in pending:
+            row["confirmed"] = self._is_confirmed(row, by_key[row["key"]])
+
+    def _is_confirmed(self, row: dict, action: Action) -> bool:
+        """Whether the store already shows what this write changed."""
+        mirror = self.mirror
+        detail = action.detail
+        if action.kind in ("topic", "conversation"):
+            found = mirror.topic(detail.get("channel", ""), detail.get("topic", ""))
+            return bool(found) and all(t.resolved for t in found)
+        if action.kind == "channel":
+            return mirror.channel(detail.get("channel", "")) is None
+        if action.kind == "work":
+            word = MISSION_DONE if detail.get("source") == AUTOLAB_SOURCE else REQUEST_ACCEPTED
+            tag = STATE_TAG if detail.get("source") == AUTOLAB_SOURCE else FORGE_STATE_TAG
+            notes = mirror.notes(tag=tag, channel=detail.get("channel", ""))
+            here = [n for n in notes if bare_topic(n.topic) == bare_topic(detail.get("topic", ""))]
+            return bool(here) and here[-1].value == word
+        return False
 
     def _apply(self, client: ZulipClient, actions: list[Action]) -> list[dict]:
         """Run the ready actions in order. Nothing rolls back.

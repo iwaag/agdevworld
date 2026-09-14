@@ -2,67 +2,74 @@
 
 A small relay that lets agdevworld show what Zulip already knows:
 which agents exist, which of their work is still open, and — since
-`operation_room` p2 — **who owes a reply and for how long**. It only ever
-reads the realm; the one thing it can be told is which of its own rows a human
-has already seen.
+`operation_room` p2 — **who owes a reply and for how long**. It reads the
+realm through one **mirror** and writes to it with the Developer's
+credential on the two doors that write (a chat post, a completion).
 
-Two halves with different disciplines, deliberately:
+**Since `better_zulip_call` p1 every read is a query of the mirror.**
+`agag.mirror` keeps a persisted, event-updated copy of every public
+conversation on the relay's own credential: one registration of an event
+queue for all public channels, one paged read of the realm (62 calls for
+this realm, one second), and events from then on. `/agents`, `/work`,
+`/ops`, `/routines`, `/frontdesk` and every completion preview are computed
+from that copy, so a board reload costs **no Zulip call**, a completion's
+discovery costs none, and a restart within Zulip's queue lifetime resumes
+the same queue and reads nothing. There is no per-request read and no
+30-second cache any more; there is nothing to clear after a write, because
+the write comes back as an event and the next read sees it.
 
-- `/agents` and `/work` read Zulip **live on every request**, with a 30-second
-  in-memory cache. No snapshot file, by design.
-- `/ops` is a **running reconstruction**: one full sweep at startup, then a
-  Zulip event queue. A full sweep is ~240 calls and p1 measured HTTP 429 on an
-  immediate repeat, out of the quota the agents' own listeners spend — this
-  half cannot be polled, so it is not.
+Every payload carries a `health` block: `live`, or `stale` (or `unknown`)
+with the reason and `stale_since`. A stale mirror keeps answering with the
+last good copy and the views say so beside the data instead of replacing
+the board with errors.
 
 ## Run
 
 ```sh
-AGENTROOM_ZULIP_ENV=/path/to/zulip.env service/serve.sh
+OPSROOM_ZULIP_ENV=/path/to/opsroom.env service/serve.sh
 ```
 
-`AGENTROOM_ZULIP_ENV` points at a `KEY=value` file with `ZULIP_URL`,
+`OPSROOM_ZULIP_ENV` points at a `KEY=value` file with `ZULIP_URL`,
 `ZULIP_EMAIL`, `ZULIP_API_KEY` (and optionally `ZULIP_CA_BUNDLE`) — the format
-`agag.zulip.ZulipClient.from_env` reads. Any existing bot credential works;
-Zulip has no read-only API key, so nothing here can be narrowed by permission.
-**Never commit one.**
+`agag.zulip.ZulipClient.from_env` reads — for the **mirror's** bot. It is
+its own identity with its own quota (`Opsroom Observer` on agstudio), so
+reading the realm never competes with the agents' listeners or with what
+the Developer does. **Never commit one.** `AGENTROOM_ZULIP_ENV`, the former
+per-request read credential, is no longer read; a plist that still sets it
+is told so at startup.
 
 Other environment values: `AGENTROOM_HOST` (default `127.0.0.1`),
-`AGENTROOM_PORT` (default `8094`), `AGENTROOM_CACHE_SECONDS` (default `30`;
-`0` disables the in-memory cache).
+`AGENTROOM_PORT` (default `8094`), `AGENTROOM_MIRROR_DIR` (where the
+mirror's SQLite store lives; default `.local/mirror/` in this directory —
+ignored and disposable: delete it and the next start rebuilds it),
+`AGENTROOM_STALLED_SECONDS` (default `900`) is when an owed reply becomes
+`stalled`, `AGENTROOM_DONE_SECONDS` (default a day) is how long a `done`
+receipt stays on the ops board before it is history.
 
-`/ops` needs a **second, separate credential**:
+The writes need the **Developer's** credential, `AGENTROOM_CHAT_ZULIP_ENV`;
+without it the relay is read-only for chat and completion and says so.
 
-```sh
-OPSROOM_ZULIP_ENV=/path/to/opsroom.env \
-AGENTROOM_ZULIP_ENV=/path/to/zulip.env service/serve.sh
-```
-
-There is no fallback to `AGENTROOM_ZULIP_ENV` — with `OPSROOM_ZULIP_ENV`
-unset, `/ops` answers `503` and says so. That is the plan's constraint: the
-sweep must not come out of the agents' own quota, so the observer has an
-identity of its own (`Opsroom Observer`) or none. `AGENTROOM_STALLED_SECONDS`
-(default `900`) is when an owed reply becomes `stalled`.
-
-`service/serve.sh check` does one read and prints the counts instead of
-listening — the fastest way to tell a credentials problem from a UI one.
+`service/serve.sh check` fills the mirror, prints every board from it, the
+mirror's call ledger by purpose, and how many Zulip calls the whole check
+made — the fastest way to tell a credentials problem from a UI one, and the
+honest measurement of what a first fill costs.
 
 ## Always on
 
 On agstudio the relay is a launchd agent, `com.agdev.agentroom`
-(`pj-agdev/devenv/launchd/com.agdev.agentroom.plist.in`), because `/ops` is a
-*running* reconstruction: a restart costs a 241-call sweep and about half a
-minute during which every row honestly reads `unknown`. A relay somebody has
-to remember to start is a board that is not there when it matters.
+(`pj-agdev/devenv/launchd/com.agdev.agentroom.plist.in`). It is always on
+because `/ops` is a *running* reconstruction: the mirror's queue delivers
+events only while somebody polls it, and a relay somebody has to remember to
+start is a board that is not there when it matters.
 
 - Reload after a code change: `launchctl kickstart -k gui/$(id -u)/com.agdev.agentroom`.
+  A restart within Zulip's queue lifetime (ten minutes) resumes the queue
+  and reads nothing; a longer outage costs one paged read of the realm.
 - The log is `.local/out/agentroom.log`.
-- `KeepAlive` is on, with `ThrottleInterval` at 30 s — deliberately slower than
-  launchd's default 10 s, because each respawn re-sweeps the realm and a crash
-  loop would spend the agents' quota as fast as it could.
+- `KeepAlive` is on, with `ThrottleInterval` at 30 s.
 - The plist must set `PATH`: `serve.sh` execs `uv`, and launchd's own PATH does
-  not have it. It passes `AGENTROOM_ZULIP_ENV`, `OPSROOM_ZULIP_ENV` and
-  `AGENTROOM_STALLED_SECONDS` — the credential **paths**, never their values.
+  not have it. It passes `OPSROOM_ZULIP_ENV`, `AGENTROOM_CHAT_ZULIP_ENV` and
+  the rest — the credential **paths**, never their values.
 
 `serve.sh check` is worth running *from the job's own domain* before trusting
 the daemon, because macOS grants Local Network permission per binary and a
@@ -77,7 +84,7 @@ writes only to this process's memory (see `POST /ops/confirm`).
 
 - `GET /healthz` → `{"ok": true}`
 - `GET /agents` → the `intro-<instance>` topics of `#agents`, each with its
-  latest introduction post and the topic's history. `[selfnote]` posts and
+  latest introduction post and the topic's history, from the mirror. `[selfnote]` posts and
   lines, and Zulip's own notices, are removed here — the view never sees them.
 - `GET /work` → every **unresolved** topic of every `pj-<slug>` channel and of
   the `work-<label>` channels filed in the same channel folder, flat, with the
@@ -143,8 +150,10 @@ sweep's rule: the newest `DEEP_RUNS` (3) run topics of a routine are read
 whole and read even under ✔; older runs are read shallow while open and not
 at all once resolved, so a resolved run older than that is in Zulip, not here.
 
-A Zulip failure answers `502` with the error text, so the view can say the
-room is unreadable instead of showing an empty one.
+A relay failure answers `502` with the error text, so the view can say the
+room is unreadable instead of showing an empty one. A Zulip failure does
+not reach the reads at all: the mirror keeps its last good copy and every
+payload's `health` says it is stale and since when.
 
 ## `/routines` — the routine board
 
@@ -155,11 +164,10 @@ is the whole guide**; and one `routinerun-<id>` topic per run, opened by
 Front with a single opening post and then owned by Front. There is no
 schedule and no fire line any more — the dispatcher and its GUI are gone —
 and the old `#front › routine-<name>` / `front-routine-<name>-<stamp>` layout
-with them. This board costs **no extra Zulip call**: the routine channels are
-public, so the `/ops` sweep and its queue already carry them; the guide and
-the newest `DEEP_RUNS` run topics of each routine are read deep and read
-under ✔ (a finished run is resolved by Front's listener, so a board that
-skipped ✔ runs would never show one finishing).
+with them. This board costs **no Zulip call**: the routine channels are public, so
+the mirror holds every one of their topics whole, resolved ones included (a
+finished run is resolved by Front's listener, so a board that skipped ✔ runs
+would never show one finishing).
 
 `GET /routines` answers `ag.routines.v2`: one row per routine channel —
 `name`, `channel`, `display` (a `display:` line or heading in the guide,
@@ -239,13 +247,11 @@ inside Front's own `front-` sweep. Three routes, in `frontdesk.py`:
 - `GET /frontdesk/<id>` → the conversation: `posts` (real posts only, each
   with `kind` — `developer`, `agent`, `ack`, `other`), `latest_reply`,
   `status`, `history` (post count, whether it is a window), a `zulip_url`
-  into the topic, and **`known`**: `held` (the engine's event-queue memory —
-  the newest `DESK_DEEP` (8) conversations are read whole and under ✔ on the
-  sweep, and every open one is kept current by the queue), `read` (a direct
-  read of Zulip with the relay's read credential, under both the bare and
-  the ✔ name, cached 30 s — how an old resolved conversation comes back after
-  a relay restart), or `unknown` (neither could be done; nothing is invented
-  and the view keeps what it last knew).
+  into the topic, and **`known`**: `held` (the mirror holds the conversation
+  whole, resolved or not, and keeps it current by its queue), `read` (the
+  mirror hydrated it once because its coverage was not complete), or
+  `unknown` (no mirror, or the read failed; nothing is invented and the view
+  keeps what it last knew).
 - `POST /frontdesk/<id>/post` `{text, token}` → a post as the Developer into
   `front-desk-<id>`, on the chat credential and with `chat.py`'s guards
   (configured, length, no selfnote), plus two of its own: the id has one
@@ -377,14 +383,19 @@ idempotent in the realm's own terms (a resolved topic → `already`, a mission
 already `done` → `already`), so clicking again after a partial failure
 finishes what is left and repeats nothing.
 
-Credentials: reads use `AGENTROOM_ZULIP_ENV` and writes use
-`AGENTROOM_CHAT_ZULIP_ENV` (the Developer — the credential that already posts
-here). **`AGENTROOM_PLANE_ENV` is gone** (`refactor` p2 step 4): it existed
-for the one record this relay read outside Zulip, and there is none left, so
-a request previews and closes completely with three Zulip credentials and
-nothing else. A missing write credential is reported in the preview's
-`status` rather than discovered on submit. This operation closes work; it
-does not stop a running agent.
+Credentials: the discovery reads the mirror (`OPSROOM_ZULIP_ENV`'s copy;
+a topic whose coverage is not complete — one in an archived channel, say —
+is hydrated once and kept) and the writes use `AGENTROOM_CHAT_ZULIP_ENV`
+(the Developer — the credential that already posts here).
+**`AGENTROOM_PLANE_ENV` is gone** (`refactor` p2 step 4): it existed for the
+one record this relay read outside Zulip, and there is none left. A missing
+write credential is reported in the preview's `status` rather than
+discovered on submit. After the writes the answer waits — at most
+`CONFIRM_SECONDS` (5) — for the mirror to carry them back as events, and
+every applied result says `confirmed: true` or `false`; the preview's
+`gaps.zulip_calls` is what the discovery actually spent on Zulip
+(hydrations), beside `gaps.reads` for what it read from the copy. This
+operation closes work; it does not stop a running agent.
 
 ## `/settings` — the settings repository (`front_desk` p2)
 
@@ -544,20 +555,20 @@ introduction (`pyagag/docs/agent-roster-v1.md`). An introduction with no such
 block is served as `unknown`, never as an agent with nothing to do: p1 guessed
 two rosters and produced 66 phantom stalled rows.
 
-**It subscribes.** A bot can *read* any public channel unsubscribed, but an
-event queue only delivers the channels it is in — measured — and `work-`
-channels appear whenever autolab opens a task. Subscribing is the only write
-this service makes; it never posts.
+**It subscribes to nothing.** The mirror's queue is registered for *all
+public streams*, so every public channel's events reach it whether or not
+the bot is in the channel — `work-` channels appear the moment autolab
+opens one. The relay makes no write of its own on the mirror's credential.
 
-**Served notes are read per channel, not globally.** A narrow with no channel
-operator returns *nothing at all* for a young credential: Zulip answers a
-global search from the reader's own per-user index, which has no rows for
-messages posted before the account subscribed. Scoped per channel it reads the
-channel's own messages and is right for an identity of any age. Getting this
-wrong reported 53 phantom stalls for Front on the first live run.
+**Served notes come from the mirror's notes index.** Every
+`[selfnote][served]` line in the realm is indexed as it is read or as it
+arrives, attributed to the instance whose roster carries the sender's bot id.
+(The old per-channel search existed because a global search answered nothing
+for a young credential — Zulip searches the reader's own index; the mirror
+reads channels whole and never searches.)
 
-**When the queue dies, every row is `unknown`.** The last known state is kept
-in `stale_state` as evidence and never as the answer. p9's 26 silent minutes
+**When the mirror is stale, every row is `unknown`.** The last known state
+is kept in `stale_state` as evidence and never as the answer. p9's 26 silent minutes
 looked exactly like a quiet board, and a screen that renders unknown as idle
 cannot show the one failure it exists to catch.
 

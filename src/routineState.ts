@@ -161,8 +161,8 @@ export interface RoutineBoard {
   health: {
     state: 'live' | 'unknown'
     reason: string
-    sweeps: number
-    sweep_calls: number
+    resyncs: number
+    resync_calls: number
     channels: number
     topics: number
     last_event_at: number | null
@@ -211,7 +211,7 @@ export function unreadableRoutines(reason: string): RoutineBoard {
     generated_at: Date.now() / 1000,
     settings: { stalled_seconds: 0 },
     health: {
-      state: 'unknown', reason, sweeps: 0, sweep_calls: 0, channels: 0, topics: 0,
+      state: 'unknown', reason, resyncs: 0, resync_calls: 0, channels: 0, topics: 0,
       last_event_at: null,
     },
     routines: [],

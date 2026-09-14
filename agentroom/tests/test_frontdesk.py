@@ -13,6 +13,7 @@ import threading
 from http.client import HTTPConnection
 
 from agag.intro import Roster
+from conftest import FakeRealm, empty_room, mirror_over
 
 from agentroom.chat import Chat
 from agentroom.frontdesk import (
@@ -67,41 +68,46 @@ class RecordingClient:
         return {}
 
 
-class ReadingClient:
-    """The relay's read credential: histories under either name."""
-
-    base_url = "https://zulip.invalid"
-
-    def __init__(self, histories=None, fail=False):
-        self.histories, self.fail, self.reads = dict(histories or {}), fail, []
-
-    def stream_id(self, name):
-        return 24
-
-    def topic_history(self, channel, topic, num_before=50):
-        self.reads.append((channel, topic, num_before))
-        if self.fail:
-            raise ConnectionError("realm down")
-        return list(self.histories.get((channel, topic), []))
+ROSTER = """```agag-roster
+schema: ag.agent-roster.v1
+instance: front-agstudio1
+agent: front
+bot: Front
+bot_id: 15
+channel: front-agstudio1
+prefixes: front-
+```"""
 
 
 def engine(*topics, live=True, names=None):
-    ops = Ops(env_path=__file__)
-    ops._rosters = {"front-agstudio1": FRONT}
-    ops._topics = {(t.channel, t.topic): t for t in topics}
-    ops._front_names = {t.topic: t.live_topic for t in topics}
-    ops._front_names.update(names or {})
-    ops._channels = {"front"}
-    ops._live = live
-    ops._reason = "live" if live else "event queue expired; resyncing"
-    return ops
+    front_names = {t.topic: t.live_topic for t in topics}
+    front_names.update(names or {})
+    return Ops().pin(rosters={"front-agstudio1": FRONT}, topics=topics, front_names=front_names,
+                     channels={"front"}, live=live)
 
 
-def desk_with(*topics, live=True, names=None, chat_client=None, reader=None, configured=True):
+def mirrored_desk(*posts, resolved=False, chat_client=None):
+    """A real mirror holding one Front Desk conversation, and the desk over
+    it. `posts` are `(sender_id, sender, content)`."""
+    realm = FakeRealm()
+    realm.base_url = "https://zulip.invalid"
+    realm.add_channel(35, "agents")
+    realm.add_channel(5, "front")
+    realm.post("agents", "intro-front-agstudio1", "hello\n" + ROSTER, sender_id=FRONT_BOT, sender_name="Front", quiet=True)
+    ids = [realm.post("front", DESK, content, sender_id=sender_id, sender_name=sender, quiet=True)
+           for sender_id, sender, content in posts]
+    if resolved:
+        realm.resolve("front", DESK, quiet=True)
+    mirror = mirror_over(realm)
+    client = chat_client or RecordingClient()
+    chat = Chat(env_path=__file__, client_factory=lambda path: client)
+    return FrontDesk(ops=Ops(mirror=mirror), chat=chat), client, ids
+
+
+def desk_with(*topics, live=True, names=None, chat_client=None, configured=True):
     client = chat_client or RecordingClient()
     chat = Chat(env_path=(__file__ if configured else None), client_factory=lambda path: client)
-    desk = FrontDesk(ops=engine(*topics, live=live, names=names), chat=chat,
-                     reader_factory=(lambda: reader) if reader is not None else None)
+    desk = FrontDesk(ops=engine(*topics, live=live, names=names), chat=chat)
     return desk, client
 
 
@@ -180,30 +186,26 @@ def test_a_held_conversation_comes_from_the_engine_with_acks_marked_and_the_late
     assert found["chat"]["configured"] is True
 
 
-def test_an_unheld_resolved_conversation_is_read_from_zulip_under_its_resolved_name():
-    """After a relay restart an old ✔'d conversation is not in memory; the
-    Front Desk still shows it, read once from the realm, and says so."""
-    reader = ReadingClient({
-        ("front", f"✔ {DESK}"): [message("hi", ident=1), by_front("bye✨", ident=2)],
-    })
-    desk, _ = desk_with(names={DESK: f"✔ {DESK}"}, reader=reader)
+def test_a_resolved_conversation_is_held_by_the_mirror_under_its_resolved_name():
+    """After a relay restart an old ✔'d conversation used to be read once
+    from the realm; the mirror holds every conversation, resolved ones
+    included, so it is simply held."""
+    desk, _, _ = mirrored_desk((DEVELOPER, "Developer", "hi"), (FRONT_BOT, "Front", "bye✨"), resolved=True)
     found = desk.conversation("20260908-1600", now=NOW)["conversation"]
-    assert found["known"] == "read"
+    assert found["known"] == "held"
     assert found["resolved"] is True and found["live_topic"] == f"✔ {DESK}"
     assert [p["content"] for p in found["posts"]] == ["hi", "bye✨"]
     assert found["status"]["state"] == "done"
-    assert found["zulip_url"].startswith("https://zulip.invalid/#narrow/channel/24-front/topic/")
-    # Both names were tried, once; a second ask within the TTL reads nothing.
-    assert [r[1] for r in reader.reads] == [DESK, f"✔ {DESK}"]
-    desk.conversation("20260908-1600", now=NOW + 1)
-    assert len(reader.reads) == 2
+    assert found["zulip_url"].startswith("https://zulip.invalid/#narrow/channel/5-front/topic/")
+    # No Zulip call was made for any of it.
+    assert desk.mirror.health()["ledger"].get("hydrate GET messages") is None
 
 
 def test_a_conversation_nobody_can_read_is_unknown_not_empty():
-    desk, _ = desk_with(reader=ReadingClient(fail=True))
+    desk, _ = desk_with()
     found = desk.conversation("20260908-1600", now=NOW)["conversation"]
     assert found["known"] == "unknown" and found["posts"] == []
-    assert "could not be read" in found["history"]["note"]
+    assert "cannot be read" in found["history"]["note"]
     without = FrontDesk(ops=engine(), chat=Chat(env_path=None))
     assert without.conversation("20260908-1600", now=NOW)["conversation"]["known"] == "unknown"
 
@@ -294,11 +296,10 @@ def test_a_resolved_conversation_is_unresolved_in_place_before_the_post():
     assert client.sent == [("front", DESK, "one more thing")]
 
 
-def test_resuming_an_unheld_resolved_conversation_finds_its_last_post_in_the_realm():
-    reader = ReadingClient({("front", f"✔ {DESK}"): [message("hi", ident=1), by_front("bye", ident=7)]})
-    desk, client = desk_with(names={DESK: f"✔ {DESK}"}, reader=reader)
+def test_resuming_a_resolved_conversation_finds_its_last_post_in_the_mirror():
+    desk, client, ids = mirrored_desk((DEVELOPER, "Developer", "hi"), (FRONT_BOT, "Front", "bye"), resolved=True)
     found = desk.post("20260908-1600", "again", "tok-1")
-    assert found["resumed"] is True and client.patched[0][1] == "messages/7"
+    assert found["resumed"] is True and client.patched[0][1] == f"messages/{ids[-1]}"
 
 
 # --- over HTTP, once ----------------------------------------------------------
@@ -307,7 +308,7 @@ def test_resuming_an_unheld_resolved_conversation_finds_its_last_post_in_the_rea
 def test_the_three_routes_answer_over_http(tmp_path):
     held = topic(DESK, message("hi", ident=1), by_front(ACK, ident=2), by_front("yo✨", ident=3))
     desk, client = desk_with(held)
-    room = Room(env_path=tmp_path / "unused.env", ttl_seconds=0)
+    room = empty_room()
     server = build_server("127.0.0.1", 0, room, desk.ops, desk.chat, None, None, desk)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()

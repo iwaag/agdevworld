@@ -13,8 +13,7 @@ import {
   loadRoomWork,
   type RoomAgent,
   type RoomWork,
-  type RoomWorkRow,
-} from './agentRoomState'
+  type RoomWorkRow, roomHealthLine } from './agentRoomState'
 import { COMPLETED_EVENT } from './completionState'
 import {
   healthLine,
@@ -183,12 +182,13 @@ export function agentRoomViewConfig(onSelect: (selection: PanelSelection) => voi
     bind: (bound) => {
       api = bound
     },
-    // One unreadable channel must be said out loud: the alternative is a
-    // shorter list that looks exactly like a quieter realm.
+    // A stale copy must be said out loud: the alternative is a board that
+    // looks exactly like a quieter realm. The rows stay — they are the last
+    // good copy — and the headline says how old that is.
     headline: () => {
-      const failed = work?.errors ?? []
-      if (failed.length > 0) return `${failed.length} channel(s) could not be read: ${failed.map((e) => e.channel).join(', ')}`
-      return work ? `${work.channels.length} channels swept` : undefined
+      const stale = roomHealthLine(work?.health)
+      if (stale) return stale
+      return work ? `${work.channels.length} channels mirrored · live` : undefined
     },
     chips: () => {
       const chips: PanelChip[] = (['agents', 'work'] as const).map((value) => ({

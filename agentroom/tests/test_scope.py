@@ -17,6 +17,7 @@ from http.client import HTTPConnection
 
 import pytest
 
+from conftest import empty_room
 from agentroom.close import BLOCKED, DONE, READY, Closer, parse_key, plan_actions
 from agentroom.closing import (
     ASSETPLAN, ASSETRUN, DESK, FRONT, INTRO, ROUTINE_GUIDE, ROUTINE_RUN, TOPIC, WORKPLAN,
@@ -447,7 +448,7 @@ def test_a_history_of_operations_is_kept_per_request():
 @pytest.fixture()
 def relay():
     door, realm, _ = closer(realm=WritingRealm(open_chain()))
-    server = build_server("127.0.0.1", 0, Room(env_path=__file__), closer=door)
+    server = build_server("127.0.0.1", 0, empty_room(), closer=door)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     yield server.server_address[1], door, realm

@@ -7,8 +7,8 @@ the cluster; this one reads a chat realm the browser's own user can read
 anyway, on a loopback port in a private lab, so the window's shape is the whole
 of what it needs.
 
-There is now exactly one POST, and it is worth being precise about why it did
-not buy cagent's other doors. `POST /ops/confirm` writes to **this process's
+There is now exactly one POST that touches only memory, and it is worth
+being precise about why it did not buy cagent's other doors. `POST /ops/confirm` writes to **this process's
 own memory**: it marks which `done` rows a human has looked at. It reaches
 neither Zulip nor any node — the observer still never posts (`operation_room`
 p2 constraint 5) — and its effect dies with the relay, along with the rows it
@@ -34,7 +34,7 @@ from .cost import Cost
 from .frontdesk import FrontDesk
 from .inflight import ROOTS_VARIABLE
 from .ops import Ops
-from .room import Room
+from .room import Room, health_block
 from .settings import Settings
 
 ROUTES = ("/healthz", "/agents", "/work", "/work?resolved=1", "/ops", "/routines", "/routines/<name>",
@@ -124,7 +124,7 @@ def make_handler(room: Room, ops: Ops | None = None, chat: Chat | None = None,
             path = urlparse(self.path).path.rstrip("/") or "/"
             try:
                 if path == "/healthz":
-                    self._write_json(200, {"ok": True})
+                    self._write_json(200, {"ok": True, "mirror": health_block(room.mirror)})
                 elif path == "/":
                     self._write_json(200, {
                         "service": "agentroom",
@@ -441,9 +441,9 @@ def make_handler(room: Room, ops: Ops | None = None, chat: Chat | None = None,
             elif found.get("refused"):
                 self._write_json(409, found)
             else:
-                # The realm changed: the room's cached boards are stale and
-                # the view reloads them right after this answer.
-                room.forget()
+                # The realm changed, and the mirror carries the change back
+                # as events; the answer above waited for them, so the view's
+                # reload right after this reads the new state from the copy.
                 self._write_json(200, found)
 
         def do_POST(self) -> None:  # noqa: N802

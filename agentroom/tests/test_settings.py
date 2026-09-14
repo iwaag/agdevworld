@@ -19,6 +19,7 @@ from pathlib import Path
 
 import pytest
 
+from conftest import empty_room
 from agentroom.room import Room
 from agentroom.server import build_server
 from agentroom.settings import MANIFEST_SCHEMA, Settings, SettingsError, read_manifest
@@ -267,7 +268,7 @@ def test_local_overrides_extend_the_agent_mapping_without_touching_the_repositor
 def served(fixture):
     _, settings = fixture
     settings.sync()
-    server = build_server("127.0.0.1", 0, Room(env_path=Path(__file__)), settings=settings)
+    server = build_server("127.0.0.1", 0, empty_room(), settings=settings)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:

@@ -14,6 +14,7 @@ from http.client import HTTPConnection
 
 import pytest
 
+from conftest import empty_room
 from agentroom.close import (
     ALREADY, APPLIED, BLOCKED, DONE, FAILED, KEPT, READY, SKIPPED, Closer, fingerprint,
     plan_actions,
@@ -474,7 +475,7 @@ def test_two_clicks_do_not_both_close():
 @pytest.fixture()
 def relay():
     door, realm, _ = closer(realm=WritingRealm(open_chain()))
-    server = build_server("127.0.0.1", 0, Room(env_path=__file__), closer=door)
+    server = build_server("127.0.0.1", 0, empty_room(), closer=door)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     yield server.server_address[1], door, realm
@@ -722,3 +723,73 @@ def test_a_retry_after_the_unfinished_task_is_done_closes_everything():
     assert PLAN_TOPIC in [topic for _, topic in realm.resolved]
     assert "workrun-task2-m10" in [topic for _, topic in realm.resolved]
     assert realm.archived == [122]
+
+
+# --- the mirror confirms the writes (better_zulip_call p1 step 3) ---------------
+
+
+def test_each_applied_write_is_confirmed_once_the_mirror_carries_it_back():
+    """The answer to a close waits, briefly, for the mirror's copy to show
+    what was written, and every applied result says whether it did."""
+    import time as _time
+
+    from agag.mirror import Mirror
+    from agag.mirror.testing import FakeRealm
+    from agentroom.realm import MirrorRealm
+    from conftest import mirror_over
+
+    realm = FakeRealm()
+    realm.add_channel(35, "agents")
+    realm.add_channel(5, "front")
+    realm.post("front", "front-desk-1", "please do a thing", sender_id=DEVELOPER, sender_name="Developer", quiet=True)
+    realm.post("front", "front-desk-1", "done.", sender_id=FRONT_BOT if "FRONT_BOT" in globals() else 15,
+               sender_name="Front", quiet=True)
+    mirror = mirror_over(realm)
+    mirror.start()  # the ingest thread applies what the writer changes
+
+    class Writer:
+        """The Developer's credential: its resolve is a real rename in the
+        realm, which the mirror learns of through its queue."""
+
+        def __init__(self, touch_realm=True):
+            self.touch_realm, self.resolved = touch_realm, []
+
+        def resolve_topic(self, message_id, topic):
+            self.resolved.append((message_id, topic))
+            if self.touch_realm:
+                realm.resolve("front", topic)
+
+        def send_to_channel(self, channel, topic, content):
+            return 999
+
+        def stream_id(self, name):
+            return 5
+
+        def archive_channel(self, stream_id):
+            return {}
+
+    writer = Writer()
+    door = Closer(topics=lambda: {}, reader_factory=lambda: MirrorRealm(mirror),
+                  writer_factory=lambda: writer, mirror=mirror, confirm_seconds=3.0)
+    plan = door.plan(("front", "front-desk-1"))
+    assert plan["counts"]["ready"] == 1 and plan["gaps"]["zulip_calls"] == 0
+    started = _time.time()
+    closed = door.close(("front", "front-desk-1"), plan["fingerprint"])
+    assert closed["applied"] and not closed["partial"]
+    assert [(row["outcome"], row["confirmed"]) for row in closed["results"]] == [(APPLIED, True)]
+    assert _time.time() - started < 3.0  # confirmed as soon as the event landed, not at the deadline
+    assert closed["actions"][0]["state"] == DONE  # the post-write plan read the resolve off the copy
+    mirror.stop()
+
+    # A write the realm never carried back stays unconfirmed, and says so.
+    realm2 = FakeRealm()
+    realm2.add_channel(35, "agents")
+    realm2.add_channel(5, "front")
+    realm2.post("front", "front-desk-2", "please", sender_id=DEVELOPER, sender_name="Developer", quiet=True)
+    mirror2 = mirror_over(realm2)
+    silent = Writer(touch_realm=False)
+    door2 = Closer(topics=lambda: {}, reader_factory=lambda: MirrorRealm(mirror2),
+                   writer_factory=lambda: silent, mirror=mirror2, confirm_seconds=0.3)
+    plan2 = door2.plan(("front", "front-desk-2"))
+    closed2 = door2.close(("front", "front-desk-2"), plan2["fingerprint"])
+    assert [(row["outcome"], row["confirmed"]) for row in closed2["results"]] == [(APPLIED, False)]

@@ -507,9 +507,10 @@ function opsHealthSection(board: OpsBoard): HTMLElement {
       ['reason', board.health.reason],
       ['event queue', board.health.queue ? 'registered' : 'none'],
       ['last event', at(board.health.last_event_at)],
-      ['last full sweep', at(board.health.last_sweep_at)],
-      ['sweeps', board.health.sweeps],
-      ['sweep cost', `${board.health.sweep_calls} Zulip calls`],
+      ['last full read of the realm', at(board.health.last_resync_at)],
+      ['full reads', board.health.resyncs],
+      ['last full read cost', `${board.health.resync_calls} Zulip calls`],
+      ['mirror revision', board.health.revision],
       ['stalled after', `${Math.round(board.settings.stalled_seconds / 60)} min`],
     ]),
   )

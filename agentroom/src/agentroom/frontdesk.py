@@ -231,22 +231,17 @@ def status_of(topic, front_id: int | None, developer_id: int | None) -> dict:
 class FrontDesk:
     ops: "Ops | None"
     chat: Chat
-    #: The relay's read credential (`AGENTROOM_ZULIP_ENV`), for a conversation
-    #: the engine does not hold. None leaves such a conversation `unknown`.
-    reader_factory: Callable[[], ZulipClient] | None = None
-    _reader: ZulipClient | None = field(default=None, repr=False)
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
     _tokens: "OrderedDict[str, dict]" = field(default_factory=OrderedDict, repr=False)
-    _reads: dict[str, tuple[float, dict]] = field(default_factory=dict, repr=False)
     _developer_id: int | None = field(default=None, repr=False)
-    _front_stream: int | None = field(default=None, repr=False)
 
     # -- credentials and ids --------------------------------------------
 
-    def reader(self) -> ZulipClient | None:
-        if self._reader is None and self.reader_factory is not None:
-            self._reader = self.reader_factory()
-        return self._reader
+    @property
+    def mirror(self):
+        """The process's mirror, through the engine; None without one. Since
+        `better_zulip_call` p1 it is the only reader this door has."""
+        return self.ops.mirror if self.ops is not None else None
 
     def developer_id(self) -> int | None:
         """The Developer is whoever the chat credential is; asked once."""
@@ -260,6 +255,7 @@ class FrontDesk:
     def front_id(self) -> int | None:
         if self.ops is None:
             return None
+        self.ops.refresh()
         with self.ops._lock:
             rosters = dict(self.ops._rosters)
         for roster in rosters.values():
@@ -268,16 +264,14 @@ class FrontDesk:
         return None
 
     def zulip_url(self, live_topic: str) -> str | None:
-        """A narrow link into the topic, from the read credential's realm."""
-        client = self.reader()
-        if client is None:
+        """A narrow link into the topic, from the mirror's realm."""
+        mirror = self.mirror
+        if mirror is None or not mirror.base_url:
             return None
-        if self._front_stream is None:
-            try:
-                self._front_stream = client.stream_id(FRONT_CHANNEL)
-            except Exception:  # noqa: BLE001
-                return None
-        return (f"{client.base_url}/#narrow/channel/{self._front_stream}-{FRONT_CHANNEL}"
+        front = mirror.channel(FRONT_CHANNEL)
+        if front is None:
+            return None
+        return (f"{mirror.base_url}/#narrow/channel/{front.stream_id}-{FRONT_CHANNEL}"
                 f"/topic/{quote(live_topic, safe='')}")
 
     # -- reads --------------------------------------------------------------
@@ -292,6 +286,7 @@ class FrontDesk:
         """Every Front Desk topic the engine holds, and every name it saw."""
         if self.ops is None:
             return {}, {}
+        self.ops.refresh()
         with self.ops._lock:
             topics = {key: held for key, held in self.ops._topics.items()
                       if is_desk_topic(key[0], key[1])}
@@ -355,40 +350,19 @@ class FrontDesk:
         }
 
     def _read(self, ident: str, now: float) -> dict | None:
-        """One direct read of a conversation the engine does not hold, under
-        both its names, cached briefly. None when there is no reader or the
-        read failed."""
-        with self._lock:
-            hit = self._reads.get(ident)
-            if hit and now - hit[0] < READ_TTL_SECONDS:
-                return hit[1]
-        client = self.reader()
-        if client is None:
+        """One conversation the index does not hold complete, hydrated once
+        through the mirror under both its names. None without a mirror or
+        when the read failed — unknown, never an empty history."""
+        del now
+        if self.ops is None or self.mirror is None:
             return None
-        from .ops import Topic  # local: ops imports this module
-        topic = desk_topic(ident)
-        found = Topic(channel=FRONT_CHANNEL, topic=topic, live_topic=topic, keep_history=True)
         try:
-            history = client.topic_history(FRONT_CHANNEL, topic, num_before=READ_DEPTH)
-            resolved = client.topic_history(
-                FRONT_CHANNEL, f"{RESOLVED_TOPIC_PREFIX}{topic}", num_before=READ_DEPTH,
-            )
+            found = self.ops.hydrate_topic(FRONT_CHANNEL, desk_topic(ident))
         except Exception:  # noqa: BLE001 - unknown is the answer, never an empty history
             return None
-        for message in resolved:
-            found.add(message)
-        for message in history:
-            found.add(message)
-        # The resolved name is what exists when the bare one is empty.
-        if resolved and not history:
-            found.live_topic = f"{RESOLVED_TOPIC_PREFIX}{topic}"
-            found.resolved = True
-        if len(history) + len(resolved) >= READ_DEPTH:
-            found.history_bounded = True
-        payload = {"topic": found, "bounded": found.history_bounded}
-        with self._lock:
-            self._reads[ident] = (now, payload)
-        return payload
+        if found is None:
+            return None
+        return {"topic": found, "bounded": found.history_bounded}
 
     def conversation(self, ident: str, now: float | None = None) -> dict:
         now = time.time() if now is None else now
@@ -413,8 +387,8 @@ class FrontDesk:
             live = names.get(desk_topic(ident))
             row = self._row(ident, None, live, front_id, developer_id)
             posts: list[dict] = []
-            note = ("no reader is configured, so an unheld conversation cannot be read"
-                    if self.reader() is None else "Zulip could not be read; nothing is known of this conversation")
+            note = ("no mirror is configured, so an unheld conversation cannot be read"
+                    if self.mirror is None else "Zulip could not be read; nothing is known of this conversation")
         else:
             row = self._row(ident, held, held.live_topic, front_id, developer_id)
             posts = [self._post(m, front_id, developer_id) for m in sorted(held.history, key=lambda m: m.id)]
@@ -486,7 +460,6 @@ class FrontDesk:
             self._tokens[token] = result
             while len(self._tokens) > TOKEN_MEMORY:
                 self._tokens.popitem(last=False)
-            self._reads.pop(ident, None)
         return result
 
     def _live_name(self, ident: str) -> str | None:
@@ -501,16 +474,15 @@ class FrontDesk:
         held = topics.get((FRONT_CHANNEL, desk_topic(ident)))
         if held is not None and held.last is not None:
             return held.last.id
-        client = self.reader()
-        if client is None:
+        mirror = self.mirror
+        if mirror is None:
             return None
         try:
-            found = client.topic_history(
-                FRONT_CHANNEL, f"{RESOLVED_TOPIC_PREFIX}{desk_topic(ident)}", num_before=1,
-            )
+            found = mirror.messages(FRONT_CHANNEL, f"{RESOLVED_TOPIC_PREFIX}{desk_topic(ident)}",
+                                    across_resolve=False, hydrate=True)
         except Exception:  # noqa: BLE001
             return None
-        return int(found[-1]["id"]) if found else None
+        return found[-1].id if found else None
 
     def _unresolve(self, client: ZulipClient, ident: str, live: str) -> bool:
         message_id = self._last_id(ident)

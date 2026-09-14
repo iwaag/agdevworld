@@ -740,7 +740,10 @@ def related_topics(
         "bounded": sorted(f"{node.channel}/{node.topic}" for node in found.values()
                           if node.history_bounded),
         "errors": _unique(reader.errors),
-        "zulip_calls": reader.calls,
+        # Reads of the realm *interface* — since `better_zulip_call` p1 the
+        # mirror, so these are local. `Closer` adds `zulip_calls` beside it
+        # from the mirror's own ledger: what actually left the host.
+        "reads": reader.calls,
     }
     return found, gaps
 
@@ -1108,7 +1111,7 @@ def discover(
         excluded = [_exclude(node, "belongs to the parent request", node.links)
                     for key, node in sorted(found.items(), key=lambda i: (i[1].depth, i[0]))
                     if key != root]
-        gaps = {**gaps, "zulip_calls": reader.calls, "errors": _unique(reader.errors)}
+        gaps = {**gaps, "reads": reader.calls, "errors": _unique(reader.errors)}
         return Discovery(scope=scope, topics=[found[root]], excluded=excluded, works=[],
                          channels=[], gaps=gaps)
     lineage = [(p["channel"], p["topic"]) for p in scope.parents]
@@ -1134,7 +1137,7 @@ def discover(
         kept, excluded = _ownership(root, found, lineage)
         _mark_archived(kept, root, reader)
         works, channels = _works(kept, reader)
-    gaps = {**gaps, "zulip_calls": reader.calls, "errors": _unique(reader.errors)}
+    gaps = {**gaps, "reads": reader.calls, "errors": _unique(reader.errors)}
     return Discovery(scope=scope, topics=kept, excluded=excluded, works=works,
                      channels=channels, gaps=gaps)
 

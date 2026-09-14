@@ -5,6 +5,8 @@ happen to contain no selfnote and no Zulip notice, so a broken filter would
 read exactly like a working one. These are the messages that would break it.
 """
 
+from conftest import FakeRealm, mirror_over, pump
+
 from agentroom.room import Room, _readable, bare_topic, strip_selfnotes, unresolved
 
 
@@ -58,95 +60,6 @@ def test_a_post_that_was_only_a_note_leaves_nothing_behind():
 # --- retirement: a ✔ on an introduction ------------------------------------
 
 
-class FakeClient:
-    """Just enough of `ZulipClient` for `_intro_topics` and `_read_work`."""
-
-    calls = 0
-
-    def __init__(self, topics, channels=(), by_stream=None):
-        self._topics = topics
-        self._channels = list(channels)
-        self._by_stream = by_stream or {}
-
-    def stream_id(self, name):
-        return 35
-
-    def channels(self):
-        return list(self._channels)
-
-    def channel_topics(self, stream_id):
-        if stream_id == 35:
-            return list(self._topics)
-        return list(self._by_stream.get(stream_id, ()))
-
-    intros = {}
-
-    def topic_history(self, channel, topic, num_before=50):
-        return [{"id": 1, "content": self.intros.get(topic, "")}] if topic in self.intros else []
-
-
-def test_a_resolved_introduction_retires_its_agent_from_the_room():
-    # `operation_room` p2 ex2 step C. An introduction is the contract that
-    # says an agent exists and how to reach it, so resolving that topic is the
-    # realm's only way to say the agent is gone — a project can be deleted
-    # from every machine without Zulip noticing, which is what left
-    # `agping-agstudio1` on the board after its fixture stopped existing.
-    room = Room.__new__(Room)
-    live, retired = room._intro_topics(FakeClient([
-        "intro-agforge-agstudio1",
-        "✔ intro-agping-agstudio1",
-        "✔ front-greet-agecho",
-    ]))
-    assert live == [("intro-agforge-agstudio1", "agforge-agstudio1")]
-    assert retired == ["agping-agstudio1"]
-
-
-def test_a_resolved_topic_that_is_not_an_introduction_is_neither():
-    room = Room.__new__(Room)
-    live, retired = room._intro_topics(FakeClient(["✔ front-greet-agecho"]))
-    assert live == [] and retired == []
-
-
-def test_a_retired_agents_channel_is_not_walked_for_open_work():
-    # The signature change that retires an agent has two callers, and the
-    # second one is the agent room's work half. Missed once, live: the view
-    # said "the agent room is unreadable · ValueError" and only a screenshot
-    # said so — `/agents` alone answered perfectly well.
-    room = Room.__new__(Room)
-    room.client = lambda: client
-    client = FakeClient(
-        ["intro-agforge-agstudio1", "\u2714 intro-agping-agstudio1"],
-        channels=[
-            {"name": "agforge-agstudio1", "stream_id": 7, "folder_id": None},
-            {"name": "agping-agstudio1", "stream_id": 8, "folder_id": None},
-        ],
-        by_stream={7: ["assetplan-a-poster"], 8: ["agpingplan-something"]},
-    )
-    found = room._read_work()
-    assert found["channels"] == ["agforge-agstudio1"]
-    assert [row["topic"] for row in found["topics"]] == ["assetplan-a-poster"]
-
-
-def test_resolved_work_is_listed_only_when_asked_and_says_so():
-    """`front_desk` p4: a finished request is completed from the agent room,
-    and finished means ✔ — so the board can list resolved topics too, each
-    row saying which it is, and never by default."""
-    room = Room.__new__(Room)
-    room.client = lambda: client
-    client = FakeClient(
-        ["intro-agforge-agstudio1"],
-        channels=[{"name": "agforge-agstudio1", "stream_id": 7, "folder_id": None}],
-        by_stream={7: ["assetplan-a-poster", "✔ assetplan-done"]},
-    )
-    found = room._read_work()
-    assert [row["topic"] for row in found["topics"]] == ["assetplan-a-poster"]
-    assert found["topics"][0]["resolved"] is False and found["include_resolved"] is False
-    found = room._read_work(True)
-    assert [(row["topic"], row["resolved"]) for row in found["topics"]] == [
-        ("assetplan-a-poster", False), ("✔ assetplan-done", True)]
-    assert found["include_resolved"] is True
-
-
 ROSTER = """```agag-roster
 schema: ag.agent-roster.v1
 instance: front-agstudio1
@@ -158,39 +71,113 @@ prefixes: front-
 ```"""
 
 
+def realm_with(*, intros=(), channels=(), topics=()):
+    """`intros`: `(instance, text, resolved)`; `channels`: `(id, name)`;
+    `topics`: `(channel, topic, resolved)`. `#agents` is always there."""
+    realm = FakeRealm()
+    realm.add_channel(35, "agents")
+    for stream_id, name in channels:
+        realm.add_channel(stream_id, name)
+    for instance, text, resolved in intros:
+        realm.post("agents", f"intro-{instance}", text, quiet=True)
+        if resolved:
+            realm.resolve("agents", f"intro-{instance}", quiet=True)
+    for channel, topic, resolved in topics:
+        realm.post(channel, topic, "a post", quiet=True)
+        if resolved:
+            realm.resolve(channel, topic, quiet=True)
+    return realm
+
+
+def room_over(realm) -> Room:
+    return Room(mirror=mirror_over(realm))
+
+
+def test_a_resolved_introduction_retires_its_agent_from_the_room():
+    # `operation_room` p2 ex2 step C. An introduction is the contract that
+    # says an agent exists and how to reach it, so resolving that topic is the
+    # realm's only way to say the agent is gone — a project can be deleted
+    # from every machine without Zulip noticing, which is what left
+    # `agping-agstudio1` on the board after its fixture stopped existing.
+    realm = realm_with(intros=[("agforge-agstudio1", "hello", False), ("agping-agstudio1", "hello", True)])
+    realm.post("agents", "front-greet-agecho", "not an introduction", quiet=True)
+    realm.resolve("agents", "front-greet-agecho", quiet=True)
+    found = room_over(realm).agents()
+    assert [agent["instance"] for agent in found["agents"]] == ["agforge-agstudio1"]
+    assert found["retired"] == ["agping-agstudio1"]
+    assert found["health"]["state"] == "live"
+
+
+def test_a_resolved_topic_that_is_not_an_introduction_is_neither():
+    realm = realm_with()
+    realm.post("agents", "front-greet-agecho", "x", quiet=True)
+    realm.resolve("agents", "front-greet-agecho", quiet=True)
+    found = room_over(realm).agents()
+    assert found["agents"] == [] and found["retired"] == []
+
+
+def test_a_retired_agents_channel_is_not_walked_for_open_work():
+    # The signature change that retires an agent has two callers, and the
+    # second one is the agent room's work half. Missed once, live: the view
+    # said "the agent room is unreadable · ValueError" and only a screenshot
+    # said so — `/agents` alone answered perfectly well.
+    realm = realm_with(
+        intros=[("agforge-agstudio1", "hello", False), ("agping-agstudio1", "hello", True)],
+        channels=[(7, "agforge-agstudio1"), (8, "agping-agstudio1")],
+        topics=[("agforge-agstudio1", "assetplan-a-poster", False), ("agping-agstudio1", "agpingplan-something", False)],
+    )
+    found = room_over(realm).work()
+    assert found["channels"] == ["agforge-agstudio1"]
+    assert [row["topic"] for row in found["topics"]] == ["assetplan-a-poster"]
+
+
+def test_resolved_work_is_listed_only_when_asked_and_says_so():
+    """`front_desk` p4: a finished request is completed from the agent room,
+    and finished means ✔ — so the board can list resolved topics too, each
+    row saying which it is, and never by default."""
+    realm = realm_with(
+        intros=[("agforge-agstudio1", "hello", False)], channels=[(7, "agforge-agstudio1")],
+        topics=[("agforge-agstudio1", "assetplan-a-poster", False), ("agforge-agstudio1", "assetplan-done", True)],
+    )
+    room = room_over(realm)
+    found = room.work()
+    assert [row["topic"] for row in found["topics"]] == ["assetplan-a-poster"]
+    assert found["topics"][0]["resolved"] is False and found["include_resolved"] is False
+    found = room.work(True)
+    assert [(row["topic"], row["resolved"]) for row in found["topics"]] == [
+        ("assetplan-a-poster", False), ("✔ assetplan-done", True)]
+    assert found["include_resolved"] is True
+
+
 def test_front_s_conversations_are_filed_under_front_by_its_declared_prefix():
     """`front_desk` p4: Front's own channel does not exist, so its
     conversations live in `#front` and are its by the `front-` prefix the
     roster block declares — the standing `routine-` requests are nobody's."""
-    room = Room.__new__(Room)
-    room.client = lambda: client
-    client = FakeClient(
-        ["intro-front-agstudio1", "intro-agforge-agstudio1"],
-        channels=[
-            {"name": "front", "stream_id": 5, "folder_id": None},
-            {"name": "agforge-agstudio1", "stream_id": 7, "folder_id": None},
-        ],
-        by_stream={5: ["front-p2-greet-agecho", "✔ front-desk-1", "routine-ghtrends"],
-                   7: ["assetplan-a-poster"]},
+    realm = realm_with(
+        intros=[("front-agstudio1", "hello\n" + ROSTER, False), ("agforge-agstudio1", "no block here", False)],
+        channels=[(5, "front"), (7, "agforge-agstudio1")],
+        topics=[("front", "front-p2-greet-agecho", False), ("front", "front-desk-1", True),
+                ("front", "routine-ghtrends", False), ("agforge-agstudio1", "assetplan-a-poster", False)],
     )
-    client.intros = {"intro-front-agstudio1": "hello\n" + ROSTER,
-                     "intro-agforge-agstudio1": "no block here"}
-    found = room._read_work()
+    room = room_over(realm)
+    found = room.work()
     assert [(row["group"], row["topic"]) for row in found["topics"]] == [
         ("agforge-agstudio1", "assetplan-a-poster"), ("front-agstudio1", "front-p2-greet-agecho")]
     assert "front" in found["channels"]
-    found = room._read_work(True)
-    assert [(row["group"], row["topic"], row["resolved"]) for row in found["topics"]][1:] == [
+    found = room.work(True)
+    assert sorted((row["group"], row["topic"], row["resolved"]) for row in found["topics"] if row["channel"] == "front") == [
         ("front-agstudio1", "front-p2-greet-agecho", False), ("front-agstudio1", "✔ front-desk-1", True)]
 
 
-def test_forget_drops_the_cache_so_the_next_read_sees_the_realm():
-    room = Room.__new__(Room)
-    from threading import Lock
-    room._lock, room._cache, room.ttl_seconds = Lock(), {}, 30.0
-    calls = []
-    assert room._cached("k", lambda: calls.append(1) or "one") == "one"
-    assert room._cached("k", lambda: calls.append(2) or "two") == "one"
-    room.forget()
-    assert room._cached("k", lambda: calls.append(3) or "three") == "three"
-    assert calls == [1, 3]
+def test_a_change_in_the_realm_reaches_the_next_read_with_no_cache_to_clear():
+    # What `forget()` used to be for. There is no cache now: the mirror
+    # applies the event and the next read sees the realm as it is.
+    realm = realm_with(intros=[("agforge-agstudio1", "hello", False)], channels=[(7, "agforge-agstudio1")])
+    room = room_over(realm)
+    assert room.work()["topics"] == []
+    realm.post("agforge-agstudio1", "assetplan-new", "please")
+    pump(room.mirror)
+    assert [row["topic"] for row in room.work()["topics"]] == ["assetplan-new"]
+    realm.resolve("agforge-agstudio1", "assetplan-new")
+    pump(room.mirror)
+    assert room.work()["topics"] == []

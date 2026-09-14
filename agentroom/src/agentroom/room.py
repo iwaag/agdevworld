@@ -1,8 +1,13 @@
-"""What the agent room knows, read live from Zulip on every request.
+"""What the agent room knows, answered from the mirror.
 
-Nothing here is written to disk. The plan for this view rules out the
-snapshot-file shape the cluster views use (`public/cluster/*.json`), so the
-only state is the process-lifetime cache in `Room`.
+Until `better_zulip_call` p1 this module read Zulip live on every request
+behind a 30-second cache that every completion cleared: a cold reload was
+36 calls on the Developer's 200-a-minute quota, and nine closes in twelve
+minutes were 1,800 calls and 250 refusals. Now every read here is a query
+of the process's `agag.mirror` — the persisted, event-updated copy of the
+realm — and costs no Zulip call at all. There is no cache to forget, because
+there is nothing to re-read: a completion's writes come back as events and
+the next read sees them.
 
 Two things are deliberately *not* re-implemented:
 
@@ -18,14 +23,11 @@ Two things are deliberately *not* re-implemented:
 
 from __future__ import annotations
 
-import time
-from dataclasses import dataclass, field
-from pathlib import Path
-from threading import Lock
+from dataclasses import dataclass
 
-from agag.intro import parse_roster
+from agag.mirror import Mirror
 from agag.selfnote import SELFNOTE_MARKER, is_selfnote
-from agag.zulip import RESOLVED_TOPIC_PREFIX, ZulipClient
+from agag.zulip import RESOLVED_TOPIC_PREFIX
 
 #: The shared channel every agent posts its own introduction to.
 AGENTS_CHANNEL = "agents"
@@ -40,11 +42,6 @@ INTRO_PREFIX = "intro-"
 #: A project's own channel, and the channels its work is carried out in.
 PROJECT_PREFIX = "pj-"
 WORK_PREFIX = "work-"
-#: The channel Front answers in by *prefix* rather than by name: its roster
-#: declares a channel of its own instance name that does not exist, and
-#: every `front-*` topic here is one of its conversations (`front_desk` p4:
-#: an ordinary Front conversation has to be reachable from the agent room).
-FRONT_CHANNEL = "front"
 #: Zulip's own bots (Notification Bot and friends) live in this realm string.
 SYSTEM_REALM = "zulipinternal"
 
@@ -94,117 +91,71 @@ def _readable(messages: list[dict]) -> list[dict]:
     return [post for post in posts if post["content"]]
 
 
+def health_block(mirror: Mirror | None) -> dict:
+    """What a view needs to know before it trusts a payload: whether the
+    copy is live, and since when it is not. A stale mirror still answers —
+    with the last good copy — and the block says so beside the data."""
+    if mirror is None:
+        return {"state": "unknown", "reason": "no mirror is configured", "stale_since": None,
+                "revision": 0, "last_event_at": None, "resyncs": 0}
+    found = mirror.health()
+    return {
+        "state": "live" if found["state"] == "live" else "stale",
+        "reason": found["reason"],
+        "stale_since": found["stale_since"],
+        "revision": found["revision"],
+        "last_event_at": found["last_event_at"],
+        "resyncs": found["resyncs"],
+    }
+
+
 @dataclass
 class Room:
-    """A Zulip reader with a short process-lifetime cache.
+    """The agent room's two boards, from the mirror."""
 
-    The cache is not a snapshot: it is only there so a browser that reloads
-    the view twice in a row does not spend a second full sweep of the realm.
-    `ttl_seconds = 0` turns it off.
-    """
-
-    env_path: Path
-    ttl_seconds: float = 30.0
+    mirror: Mirror
     intro_history: int = 20
-    _lock: Lock = field(default_factory=Lock, repr=False)
-    _cache: dict = field(default_factory=dict, repr=False)
-
-    def client(self) -> ZulipClient:
-        return ZulipClient.from_env(self.env_path)
-
-    # -- caching ---------------------------------------------------------
-
-    def _cached(self, key: str, build):
-        if self.ttl_seconds <= 0:
-            return build()
-        with self._lock:
-            hit = self._cache.get(key)
-            if hit and time.monotonic() - hit[0] < self.ttl_seconds:
-                return hit[1]
-        value = build()
-        with self._lock:
-            self._cache[key] = (time.monotonic(), value)
-        return value
-
-    def forget(self) -> None:
-        """Drop the cache, so the next read sees the realm as it is now.
-
-        Called after a completion wrote to the realm: a board re-read
-        within the 30-second window would otherwise still list the topics
-        that were just resolved, and the view's own reload would look like
-        the close had done nothing (`front_desk` p4 follow-up).
-        """
-        with self._lock:
-            self._cache.clear()
 
     def agents(self) -> dict:
-        return self._cached("agents", self._read_agents)
+        """Every live introduction in `#agents`, and the retired instances.
 
-    def work(self, include_resolved: bool = False) -> dict:
-        """Every board's open topics; with `include_resolved`, its ✔ ones
-        too, each row saying which (`front_desk` p4: a finished request is
-        completed from the agent room, and finished means resolved)."""
-        if include_resolved:
-            return self._cached("work+resolved", lambda: self._read_work(True))
-        return self._cached("work", self._read_work)
-
-    # -- reads -----------------------------------------------------------
-
-    def _intro_topics(self, client: ZulipClient) -> tuple[list[tuple[str, str]], list[str]]:
-        """`(topic, instance)` for every live introduction in `#agents`, and
-        the instances that have been retired.
-
-        Matched after the `\u2714 ` prefix is removed, so a resolved
-        introduction topic is still recognised as an agent — but since
-        `operation_room` p2 ex2 it is recognised as a **retired** one. An
+        Matched after the `✔ ` prefix is removed, so a resolved introduction
+        topic is still recognised as an agent — but as a **retired** one. An
         introduction is the contract that says an agent exists and how to
         reach it, so the realm's way of saying an agent is gone is to resolve
-        that topic; there is no other signal, because a project can disappear
-        from every machine without the realm noticing.
+        that topic; there is no other signal.
         """
-        stream_id = client.stream_id(AGENTS_CHANNEL)
-        found: list[tuple[str, str]] = []
-        retired: list[str] = []
-        for topic in client.channel_topics(stream_id):
-            name = bare_topic(topic)
-            if not name.startswith(INTRO_PREFIX):
-                continue
-            instance = name[len(INTRO_PREFIX):]
-            if unresolved(topic):
-                found.append((topic, instance))
-            else:
-                retired.append(instance)
-        return found, sorted(retired)
-
-    def _read_agents(self) -> dict:
-        client = self.client()
-        channel_names = {channel["name"] for channel in client.channels()}
+        channel_names = {channel.name for channel in self.mirror.channels()}
         agents = []
-        live, retired = self._intro_topics(client)
-        for topic, instance in live:
-            posts = _readable(client.topic_history(AGENTS_CHANNEL, topic, self.intro_history))
+        retired = []
+        for instance, intro in sorted(self.mirror.intros(AGENTS_CHANNEL, INTRO_PREFIX).items()):
+            if intro.retired:
+                retired.append(instance)
+                continue
+            posts = _readable([m.as_zulip() for m in intro.history])[-self.intro_history:]
             agents.append({
                 "instance": instance,
-                "topic": topic,
+                "topic": intro.topic,
                 # The entrance is the instance's own channel where one exists.
                 # It is stated in the introduction too; this is only the link.
                 "entrance": instance if instance in channel_names else None,
                 "intro": posts[-1] if posts else None,
                 "history": posts,
             })
-        agents.sort(key=lambda agent: agent["instance"])
-        # `retired` is named rather than merely missing: a reader has to be
-        # able to tell an agent that was retired on purpose from one that was
-        # never there.
         return {
             "channel": AGENTS_CHANNEL,
             "agents": agents,
-            "retired": retired,
-            "calls": client.calls,
+            # `retired` is named rather than merely missing: a reader has to be
+            # able to tell an agent that was retired on purpose from one that
+            # was never there.
+            "retired": sorted(retired),
+            "health": health_block(self.mirror),
         }
 
-    def _read_work(self, include_resolved: bool = False) -> dict:
-        """Every unresolved topic of every board an agent works on, flat.
+    def work(self, include_resolved: bool = False) -> dict:
+        """Every board's open topics; with `include_resolved`, its ✔ ones
+        too, each row saying which (`front_desk` p4: a finished request is
+        completed from the agent room, and finished means resolved).
 
         Two kinds of board, because work lives in two places:
 
@@ -212,95 +163,68 @@ class Room:
           channels autolab opens for its tasks. Those are linked to the project
           by their **channel folder**, not by their name — a project channel
           files itself and its `work-` channels inherit the folder — which is
-          the only machine-readable link back (see `agautolab/project_archive.py`
-          for the naming rules themselves).
+          the only machine-readable link back.
         - an **agent**: the instance's own channel, where forge's
           `assetplan-`/`assetrun-` topics and every question put to an agent
           live. Nothing in a `pj-` channel would ever show those.
 
-        What counts as open is Zulip's `\u2714 ` rename and nothing else. Topic
-        naming differs per agent; resolution does not.
+        `#front` belongs to whoever declares a prefix its topics carry — read
+        off the roster block of each live introduction, never guessed.
+
+        What counts as open is Zulip's `✔ ` rename and nothing else.
         """
-        client = self.client()
-        channels = client.channels()
-        by_name = {channel["name"]: channel for channel in channels}
+        channels = self.mirror.channels()
+        by_name = {channel.name: channel for channel in channels}
         projects = {
-            channel["folder_id"]: channel["name"]
+            channel.folder_id: channel.name
             for channel in channels
-            if channel["name"].startswith(PROJECT_PREFIX) and channel.get("folder_id") is not None
+            if channel.name.startswith(PROJECT_PREFIX) and channel.folder_id is not None
         }
         # (channel, kind, group) — `group` is what the row is filed under.
-        watched: list[tuple[dict, str, str]] = []
-        for channel in sorted(channels, key=lambda c: c["name"]):
-            name = channel["name"]
-            if name.startswith(PROJECT_PREFIX):
-                watched.append((channel, "project", name))
-            elif name.startswith(WORK_PREFIX) and channel.get("folder_id") in projects:
-                watched.append((channel, "project", projects[channel["folder_id"]]))
+        watched: list[tuple] = []
+        for channel in sorted(channels, key=lambda c: c.name):
+            if channel.name.startswith(PROJECT_PREFIX):
+                watched.append((channel, "project", channel.name))
+            elif channel.name.startswith(WORK_PREFIX) and channel.folder_id in projects:
+                watched.append((channel, "project", projects[channel.folder_id]))
+        intros = self.mirror.intros(AGENTS_CHANNEL, INTRO_PREFIX)
+        live = {instance: intro for instance, intro in intros.items() if not intro.retired}
         # A retired agent's channel is not a board any more: its introduction
-        # is resolved, so nothing is expected to answer there. The live half
-        # is the only half this walks.
-        introduced, _retired = self._intro_topics(client)
-        for _, instance in introduced:
+        # is resolved, so nothing is expected to answer there.
+        for instance in sorted(live):
             channel = by_name.get(instance)
             if channel is not None:
                 watched.append((channel, "agent", instance))
-        # `#front` belongs to whoever declares a prefix its topics carry —
-        # Front's `front-` — read off the roster block of each live
-        # introduction, never guessed from the instance name.
-        prefixed: list[tuple[str, tuple[str, ...]]] = []
+        prefixed = [(instance, tuple(intro.roster.prefixes))
+                    for instance, intro in sorted(live.items())
+                    if intro.roster is not None and intro.roster.prefixes]
         front = by_name.get(FRONT_CHANNEL)
-        if front is not None:
-            for topic, instance in introduced:
-                try:
-                    posts = client.topic_history(AGENTS_CHANNEL, topic, num_before=1)
-                except Exception:  # noqa: BLE001 - an unread roster is no prefixes, said below
-                    continue
-                roster = parse_roster(posts[-1].get("content", "")) if posts else None
-                if roster is not None and roster.prefixes:
-                    prefixed.append((instance, tuple(roster.prefixes)))
 
         rows: list[dict] = []
-        errors: list[dict] = []
         for channel, kind, group in watched:
-            try:
-                topics = client.channel_topics(int(channel["stream_id"]))
-            except Exception as error:  # one unreadable channel must not empty the view
-                errors.append({"channel": channel["name"], "error": str(error)})
-                continue
-            for topic in topics:
-                if not unresolved(topic) and not include_resolved:
-                    continue
+            for index in self.mirror.topics(channel.name, include_resolved=include_resolved):
                 rows.append({
-                    "channel": channel["name"],
-                    "topic": topic,
+                    "channel": channel.name,
+                    "topic": index.live_name,
                     "kind": kind,
                     "group": group,
-                    "stream_id": int(channel["stream_id"]),
-                    "resolved": not unresolved(topic),
+                    "stream_id": channel.stream_id,
+                    "resolved": index.resolved,
                 })
         if front is not None:
-            try:
-                topics = client.channel_topics(int(front["stream_id"]))
-            except Exception as error:  # noqa: BLE001
-                errors.append({"channel": FRONT_CHANNEL, "error": str(error)})
-                topics = []
-            for topic in topics:
-                if not unresolved(topic) and not include_resolved:
-                    continue
+            for index in self.mirror.topics(FRONT_CHANNEL, include_resolved=include_resolved):
                 owner = next((instance for instance, prefixes in prefixed
-                              if bare_topic(topic).startswith(prefixes)), None)
+                              if index.name.startswith(prefixes)), None)
                 if owner is None:
                     continue
                 rows.append({
-                    "channel": FRONT_CHANNEL, "topic": topic, "kind": "agent", "group": owner,
-                    "stream_id": int(front["stream_id"]), "resolved": not unresolved(topic),
+                    "channel": FRONT_CHANNEL, "topic": index.live_name, "kind": "agent", "group": owner,
+                    "stream_id": front.stream_id, "resolved": index.resolved,
                 })
         return {
-            "channels": [channel["name"] for channel, _, _ in watched]
+            "channels": [channel.name for channel, _, _ in watched]
                         + ([FRONT_CHANNEL] if front is not None else []),
             "topics": rows,
-            "errors": errors,
-            "calls": client.calls,
             "include_resolved": include_resolved,
+            "health": health_block(self.mirror),
         }

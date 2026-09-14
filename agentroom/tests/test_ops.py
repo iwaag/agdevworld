@@ -6,6 +6,7 @@ reads exactly like a board with nothing on it.
 """
 
 from agag.intro import Roster
+from conftest import FakeRealm, mirror_over, pump
 
 from agentroom.ops import Ops, Topic, acked, describe, named_in, owns, row_state
 
@@ -27,6 +28,32 @@ FRONT = Roster(
     prefixes=("front-",),
 )
 STALL = 900.0
+FORGE_BLOCK = """```agag-roster
+schema: ag.agent-roster.v1
+instance: agforge-agstudio1
+agent: agforge
+bot: agforge-agstudio1
+bot_id: 13
+channel: agforge-agstudio1
+prefixes: assetplan-
+```"""
+
+
+def forge_realm(*posts):
+    """A realm with forge introduced and its channel holding `posts`
+    (`(topic, content)` pairs), mirrored and judged by an engine."""
+    realm = FakeRealm()
+    realm.add_channel(35, "agents")
+    realm.add_channel(7, "agforge-agstudio1")
+    realm.post("agents", "intro-agforge-agstudio1", "hello\n" + FORGE_BLOCK,
+               sender_id=13, sender_name="agforge-agstudio1", quiet=True)
+    for topic_name, content in posts:
+        realm.post("agforge-agstudio1", topic_name, content, quiet=True, timestamp=int(NOW - 60))
+    mirror = mirror_over(realm)
+    # `done_seconds` wide open: these tests fix `now` far from the clock the
+    # mirror stamps its resolves with, and the receipt window is not the
+    # thing under test here.
+    return realm, mirror, Ops(mirror=mirror, stalled_seconds=STALL, done_seconds=1e12)
 
 
 def message(content, *, ident=1, sender_id=8, sender="Developer", ago=0.0, system=False):
@@ -201,39 +228,44 @@ def test_a_rename_flips_the_row_it_does_not_open_a_second_one():
     # Bare-topic keying, which is the p9 lesson: 36% of Front's served notes
     # and 90% of autolab's name a topic that today exists only under its ✔
     # name, and matching verbatim turns each into a call never answered.
-    ops = Ops(env_path=__file__)  # never connected; only the event path is used
-    ops._stream_names = {7: "agforge-agstudio1"}
-    ops._topics = {("agforge-agstudio1", "assetplan-poster"):
-                   topic("agforge-agstudio1", "assetplan-poster", message("please"))}
-    ops._apply({"type": "update_message", "stream_id": 7,
-                "orig_subject": "assetplan-poster", "subject": "✔ assetplan-poster"})
-    assert list(ops._topics) == [("agforge-agstudio1", "assetplan-poster")]
-    only = ops._topics[("agforge-agstudio1", "assetplan-poster")]
+    realm, mirror, ops = forge_realm(("assetplan-poster", "please"))
+    assert states(ops.snapshot(now=NOW)) == {"assetplan-poster": "awaiting"}
+    realm.resolve("agforge-agstudio1", "assetplan-poster")
+    pump(mirror)
+    held = ops.held_topics()
+    assert [key for key in held if key[0] == "agforge-agstudio1"] == [("agforge-agstudio1", "assetplan-poster")]
+    only = held[("agforge-agstudio1", "assetplan-poster")]
     assert only.resolved and only.live_topic == "✔ assetplan-poster"
+    assert states(ops.snapshot(now=NOW)) == {"assetplan-poster": "done"}
 
 
 def test_a_real_rename_moves_the_row_rather_than_duplicating_it():
-    ops = Ops(env_path=__file__)
-    ops._stream_names = {7: "agforge-agstudio1"}
-    ops._topics = {("agforge-agstudio1", "old-name"):
-                   topic("agforge-agstudio1", "old-name", message("please"))}
-    ops._apply({"type": "update_message", "stream_id": 7,
-                "orig_subject": "old-name", "subject": "new-name"})
-    assert list(ops._topics) == [("agforge-agstudio1", "new-name")]
+    realm, mirror, ops = forge_realm(("old-name", "please"))
+    realm.move(realm._topic_ids("agforge-agstudio1", "old-name"), "new-name")
+    pump(mirror)
+    assert [key for key in ops.held_topics() if key[0] == "agforge-agstudio1"] == [("agforge-agstudio1", "new-name")]
+
+
+def test_a_resolve_older_than_the_receipt_window_is_history_not_a_done_row():
+    # The old engine showed a `done` row for every resolve it watched, for
+    # as long as it lived; the mirror persists, so the window is the bound.
+    realm, mirror, ops = forge_realm(("assetplan-poster", "please"))
+    realm.resolve("agforge-agstudio1", "assetplan-poster")
+    pump(mirror)
+    ops.done_seconds = 60.0
+    assert states(ops.snapshot()) == {"assetplan-poster": "done"}
+    ops.done_seconds = 0.0
+    assert states(ops.snapshot(now=NOW)) == {}
 
 
 # --- the roster is not guessed --------------------------------------------
 
 
 def ops_with(rosters, topics=(), live=True, retired=()):
-    ops = Ops(env_path=__file__, stalled_seconds=STALL)
-    ops._rosters = rosters
-    ops._retired = set(retired)
-    ops._topics = {(t.channel, t.topic): t for t in topics}
-    ops._channels = {"agforge-agstudio1", "pj-mediagen", "front"}
-    ops._live = live
-    ops._reason = "live" if live else "event queue expired; resyncing"
-    return ops
+    return Ops(stalled_seconds=STALL).pin(
+        rosters=rosters, topics=topics, live=live, retired=retired,
+        channels={"agforge-agstudio1", "pj-mediagen", "front"},
+    )
 
 
 def snapshot_with(rosters, topics=(), live=True, retired=()):
@@ -447,14 +479,17 @@ def test_a_new_post_floats_a_confirmed_row_back_up():
 
 
 def test_an_unresolve_brings_the_row_back_even_with_no_new_post():
-    # The trap the plan names: a plain `del` from `_topics` would leave the
-    # later rename with an `orig_subject` this engine no longer knows, and
-    # `_apply_update` would drop it — a re-opened conversation nobody sees.
-    ops = done_board()
-    ops._stream_names = {7: "agforge-agstudio1"}
+    # The trap the plan names: a confirmation is a mark, never a deletion, so
+    # a re-opened conversation is a row again the moment the mirror sees the
+    # rename back — nobody has to post into it first.
+    realm, mirror, ops = forge_realm(("assetplan-poster", "please"))
+    realm.resolve("agforge-agstudio1", "assetplan-poster")
+    pump(mirror)
+    assert states(ops.snapshot(now=NOW)) == {"assetplan-poster": "done"}
     ops.confirm(now=NOW)
-    ops._apply({"type": "update_message", "stream_id": 7,
-                "orig_subject": "✔ assetplan-poster", "subject": "assetplan-poster"})
+    assert states(ops.snapshot(now=NOW)) == {}
+    realm.move(realm._topic_ids("agforge-agstudio1", "✔ assetplan-poster"), "assetplan-poster")
+    pump(mirror)
     assert states(ops.snapshot(now=NOW))["assetplan-poster"] == "awaiting"
 
 
@@ -500,77 +535,86 @@ def test_retiring_an_agent_does_not_retire_the_rest():
 
 
 def test_resolving_an_introduction_retires_the_agent_without_a_resweep():
-    # The same courtesy `_apply_message` pays a re-posted introduction: the
-    # contract says the realm is the authority, and an observer that needs a
-    # restart to notice has not honoured it.
-    ops = ops_with({"agping-agstudio1": None})
-    ops._stream_names = {35: "agents"}
-    ops._apply({"type": "update_message", "stream_id": 35,
-                "orig_subject": "intro-agping-agstudio1",
-                "subject": "✔ intro-agping-agstudio1"})
-    assert ops._retired == {"agping-agstudio1"}
-    assert ops.snapshot(now=NOW)["rows"] == []
+    # The contract says the realm is the authority, and an observer that
+    # needs a restart to notice has not honoured it: the resolve arrives as
+    # one event and the next board read shows the agent gone.
+    realm = FakeRealm()
+    realm.add_channel(35, "agents")
+    realm.post("agents", "intro-agping-agstudio1", "no roster block here", quiet=True)
+    mirror = mirror_over(realm)
+    ops = Ops(mirror=mirror, stalled_seconds=STALL)
+    assert [row["instance"] for row in ops.snapshot(now=NOW)["rows"]] == ["agping-agstudio1"]
+    realm.resolve("agents", "intro-agping-agstudio1")
+    pump(mirror)
+    board = ops.snapshot(now=NOW)
+    assert board["retired"] == ["agping-agstudio1"] and board["rows"] == []
 
 
 def test_un_resolving_an_introduction_brings_the_agent_back():
     # Retirement is a flag read off the realm, not a deletion — the mistake
     # `confirm` avoided for the same reason in ex1.
-    ops = ops_with({"agping-agstudio1": None}, retired=["agping-agstudio1"])
-    ops._stream_names = {35: "agents"}
-    ops._apply({"type": "update_message", "stream_id": 35,
-                "orig_subject": "✔ intro-agping-agstudio1",
-                "subject": "intro-agping-agstudio1"})
-    assert ops._retired == set()
-    assert [row["instance"] for row in ops.snapshot(now=NOW)["rows"]] == ["agping-agstudio1"]
+    realm = FakeRealm()
+    realm.add_channel(35, "agents")
+    realm.post("agents", "intro-agping-agstudio1", "no roster block here", quiet=True)
+    realm.resolve("agents", "intro-agping-agstudio1", quiet=True)
+    mirror = mirror_over(realm)
+    ops = Ops(mirror=mirror, stalled_seconds=STALL)
+    assert ops.snapshot(now=NOW)["retired"] == ["agping-agstudio1"]
+    realm.move(realm._topic_ids("agents", "✔ intro-agping-agstudio1"), "intro-agping-agstudio1")
+    pump(mirror)
+    board = ops.snapshot(now=NOW)
+    assert board["retired"] == [] and [row["instance"] for row in board["rows"]] == ["agping-agstudio1"]
 
 
 def test_a_resolve_elsewhere_retires_nobody():
-    ops = ops_with({"agforge-agstudio1": FORGE},
-                   [topic("agforge-agstudio1", "assetplan-poster", message("please"))])
-    ops._stream_names = {7: "agforge-agstudio1"}
-    ops._apply({"type": "update_message", "stream_id": 7,
-                "orig_subject": "assetplan-poster", "subject": "✔ assetplan-poster"})
-    assert ops._retired == set()
+    realm, mirror, ops = forge_realm(("assetplan-poster", "please"))
+    realm.resolve("agforge-agstudio1", "assetplan-poster")
+    pump(mirror)
+    assert ops.snapshot(now=NOW)["retired"] == []
+
+
+def routine_realm():
+    realm = FakeRealm()
+    realm.add_channel(35, "agents")
+    realm.add_channel(1, "routine-papers")
+    return realm
 
 
 def test_the_routine_detail_filters_resolved_sessions_only_when_asked():
     # refine_routine p1: a session is a `routinerun-` topic in the routine's
     # channel, its ✔ is the resolution, the filter is applied before the
     # three-session limit, and the payload names the actual latest run.
-    ops = Ops(env_path=__file__)
-    ops._live = True
+    realm = routine_realm()
     opening = "Routine run opened. Requested in #front › front-desk-1 (message 1): run papers. Guide: message 5."
-    posts = [(10, "✔ routinerun-20260906-0000"), (20, "routinerun-20260907-0000")]
-    for ident, subject in posts:
-        ops._apply_message({"type": "stream", "display_recipient": "routine-papers", "subject": subject,
-                            "id": ident, "sender_id": 15, "sender_full_name": "Front",
-                            "sender_realm_str": "agdev", "timestamp": ident, "content": opening})
+    older = realm.post("routine-papers", "routinerun-20260906-0000", opening, sender_id=15, sender_name="Front", quiet=True)
+    realm.resolve("routine-papers", "routinerun-20260906-0000", quiet=True)
+    newer = realm.post("routine-papers", "routinerun-20260907-0000", opening, sender_id=15, sender_name="Front", quiet=True)
+    mirror = mirror_over(realm)
+    ops = Ops(mirror=mirror)
     shown = ops.routine("papers")
-    assert [session["id"] for session in shown["sessions"]] == [20, 10]
+    assert [session["id"] for session in shown["sessions"]] == [newer, older]
     assert [session["resolution"]["state"] for session in shown["sessions"]] == ["open", "resolved"]
     assert [session["run"]["state"] for session in shown["sessions"]] == ["unstarted", "finished"]
     assert shown["latest_topic"] == "routinerun-20260907-0000"
     assert shown["routine"]["latest_topic"] == shown["latest_topic"]
-    assert shown["sessions"][0]["chat"][0]["message_id"] == 20
+    assert shown["sessions"][0]["chat"][0]["message_id"] == newer
     assert shown["sessions"][0]["channel"] == "routine-papers"
     hidden = ops.routine("papers", include_resolved=False)
-    assert [session["id"] for session in hidden["sessions"]] == [20]
+    assert [session["id"] for session in hidden["sessions"]] == [newer]
     assert hidden["history"]["hidden_resolved"] == 1 and hidden["filter"] == {"include_resolved": False}
     # A ✔ arriving on the event queue flips the run without a resync.
-    ops._stream_names = {1: "routine-papers"}
-    ops._apply_update({"stream_id": 1, "orig_subject": "routinerun-20260907-0000",
-                       "subject": "✔ routinerun-20260907-0000"})
+    realm.resolve("routine-papers", "routinerun-20260907-0000")
+    pump(mirror)
     assert ops.routine("papers")["sessions"][0]["resolution"]["state"] == "resolved"
+    assert mirror.health()["resyncs"] == 1
 
 
 def test_the_inflight_signal_names_the_latest_run_by_its_channel_and_opening():
     """Met live in refine_routine p1 step 5: the payload still read the old
     `fire` field and the screen said `KeyError: 'fire'`."""
-    ops = Ops(env_path=__file__)
-    ops._live = True
-    ops._apply_message({"type": "stream", "display_recipient": "routine-papers", "subject": "routinerun-1",
-                        "id": 20, "sender_id": 15, "sender_full_name": "Front",
-                        "sender_realm_str": "agdev", "timestamp": 20, "content": "Opening a run."})
+    realm = routine_realm()
+    opened = realm.post("routine-papers", "routinerun-1", "Opening a run.", sender_id=15, sender_name="Front", quiet=True)
+    ops = Ops(mirror=mirror_over(realm))
     found = ops.inflight("papers")
     assert found["session"]["channel"] == "routine-papers" and found["session"]["topic"] == "routinerun-1"
-    assert found["session"]["opened"]["message_id"] == 20 and found["session"]["nodes"] == 0
+    assert found["session"]["opened"]["message_id"] == opened and found["session"]["nodes"] == 0

@@ -71,9 +71,13 @@ export interface OpsHealth {
   error: string | null
   queue: boolean
   last_event_at: number | null
-  last_sweep_at: number | null
-  sweeps: number
-  sweep_calls: number
+  // The mirror's last full read of the realm (its first fill, or the
+  // recovery after its event queue expired), and what that cost.
+  last_resync_at: number | null
+  resyncs: number
+  resync_calls: number
+  revision: number
+  stale_since: number | null
   channels: number
   topics: number
 }
@@ -108,9 +112,11 @@ export function unreadableBoard(reason: string): OpsBoard {
       error: reason,
       queue: false,
       last_event_at: null,
-      last_sweep_at: null,
-      sweeps: 0,
-      sweep_calls: 0,
+      last_resync_at: null,
+      resyncs: 0,
+      resync_calls: 0,
+      revision: 0,
+      stale_since: null,
       channels: 0,
       topics: 0,
     },
@@ -204,7 +210,7 @@ export function healthLine(board: OpsBoard): string {
   }
   const seen = health.last_event_at ? `last event ${at(health.last_event_at)}` : 'no event yet'
   return (
-    `event queue live · ${seen} · swept ${health.topics} topics in ${health.channels} channels ` +
-    `for ${health.sweep_calls} calls · stalled at ${Math.round(board.settings.stalled_seconds / 60)} min`
+    `mirror live · ${seen} · ${health.topics} topics in ${health.channels} channels ` +
+    `(revision ${health.revision}) · stalled at ${Math.round(board.settings.stalled_seconds / 60)} min`
   )
 }

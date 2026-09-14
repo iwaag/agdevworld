@@ -185,6 +185,48 @@ def test_a_changed_work_state_refuses_the_stale_approval():
     mirror.stop()
 
 
+def test_an_edit_already_received_by_the_mirror_refuses_the_stale_approval():
+    realm, mission, work, task_topic = chain()
+    door, writer, mirror = door_over(realm)
+    plan = door.plan(ROOT)
+    assert by_key(plan)[f"work:m{mission}"] == READY
+    state_id = next(
+        ident for ident, message in realm.messages.items()
+        if message["display_recipient"] == work
+        and message["subject"] == f"✔ {task_topic}"
+        and message["content"] == "[selfnote][state] completed"
+    )
+    revision = mirror.revision()
+    realm.edit(state_id, "[selfnote][state] open")
+    mirror.wait(revision, timeout=3.0)
+    assert mirror.message(state_id).content == "[selfnote][state] open"
+
+    refused = door.close(ROOT, plan["fingerprint"])
+
+    assert refused["refused"] is True
+    assert by_key(refused)[f"work:m{mission}"] == BLOCKED
+    assert writer.resolved == [] and writer.archived == [] and writer.posted == []
+    mirror.stop()
+
+
+def test_a_failed_pre_write_listing_leaves_completion_unapplied(monkeypatch):
+    realm, _, _, _ = chain()
+    door, writer, mirror = door_over(realm)
+    plan = door.plan(ROOT)
+
+    def unreadable(_channel):
+        raise ConnectionError("the scoped listing is unavailable")
+
+    monkeypatch.setattr(mirror, "refresh_listing", unreadable)
+    failed = door.close(ROOT, plan["fingerprint"])
+
+    assert failed["verification_failed"] is True
+    assert failed["applied"] is False
+    assert failed["revalidated"]["ok"] is False
+    assert writer.resolved == [] and writer.archived == [] and writer.posted == []
+    mirror.stop()
+
+
 def test_a_partial_failure_is_reported_per_target_and_the_retry_finishes_it():
     realm, mission, work, task_topic = chain()
     door, writer, mirror = door_over(realm, fail={("channel", work)})

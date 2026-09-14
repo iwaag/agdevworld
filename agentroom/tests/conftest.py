@@ -24,7 +24,7 @@ def mirror_over(realm: FakeRealm | None = None) -> Mirror:
     """A live, filled mirror of `realm` with no thread behind it."""
     realm = realm if realm is not None else FakeRealm()
     store = Store(Path(tempfile.mkdtemp(prefix="agentroom-mirror-")) / "mirror.sqlite")
-    mirror = Mirror(store, lambda: realm, log=lambda line: None)
+    mirror = Mirror(store, realm.facet, log=lambda line: None)
     client = mirror._client()
     mirror._self = dict(client.whoami())
     queue_id, last = client.register(list(__import__("agag.mirror", fromlist=["EVENT_TYPES"]).EVENT_TYPES),

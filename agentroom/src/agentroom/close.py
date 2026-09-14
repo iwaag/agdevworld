@@ -36,17 +36,24 @@ closed". Records first is also what lets a failed acceptance hold back the
 conversations it is about in the same pass.
 
 **The browser never names a destination.** A request carries the selected
-conversation and the fingerprint of the preview the human looked at; every
-target is re-derived here from the realm, and a material change since the
-preview is a refusal with a fresh plan rather than a write against a stale
-picture.
+conversation and the fingerprint of the preview the human looked at. Since
+`better_zulip_call` p1 step 4 the preview is **remembered** with what it
+depends on — every conversation it reached and every channel whose listing
+it consulted — and a close **reuses** it when the mirror shows none of that
+moved, rather than walking the graph again. The fingerprint is the human's
+decision token, never a freshness check: before anything is written the
+scoped channels' listings are read from Zulip once each (event lag is
+possible, and an unchanged local revision proves nothing about the realm),
+whatever moved is hydrated, and a plan that changed is a refusal with the
+fresh one rather than a write against a stale picture.
 
 **Retrying is re-running.** Every action is idempotent in the realm's own
 terms — a resolved topic resolves to `already`, an accepted record to
-`already` —
-so a second click after a partial failure repeats nothing and finishes what
-is left. The operation record kept here is for the screen, not for
-correctness.
+`already` — so a second click after a partial failure repeats nothing and
+finishes what is left. The post-write answer is built from the results and
+the mirror's confirmation of them, not from a third walk; a retry reads the
+copy, which now carries what was written. The operation record kept here is
+for the screen, not for correctness.
 
 This operation closes work. It does not stop a running agent, and it says
 so rather than implying otherwise.
@@ -145,6 +152,28 @@ class Action:
     def as_dict(self) -> dict:
         return {"kind": self.kind, "key": self.key, "label": self.label,
                 "state": self.state, "reason": self.reason, "detail": self.detail}
+
+
+@dataclass
+class Plan:
+    """One preview, remembered: what it decided and what it rested on.
+
+    `evidence` is `(live name, last post id, resolved)` per conversation the
+    walk reached or excluded; `listings` is every channel whose topic
+    names the walk consulted, with the names it saw. Both are compared
+    against the mirror before the plan is reused, and the channels are what
+    the pre-write revalidation reads.
+    """
+
+    key: Key
+    fingerprint: str
+    revision: int
+    found: Discovery
+    actions: list[Action]
+    evidence: dict[Key, tuple[str, int, bool]]
+    listings: dict[str, frozenset[str]]
+    at: float
+    zulip_calls: int = 0
 
 
 def _work_action(work: WorkTarget) -> Action:
@@ -496,6 +525,11 @@ class Closer:
     _records: list[dict] = field(default_factory=list, repr=False)
     _reader: ZulipClient | None = field(default=None, repr=False)
     _writer: ZulipClient | None = field(default=None, repr=False)
+    #: The last preview per root, with its dependencies (`Plan`).
+    _plans: dict[Key, Plan] = field(default_factory=dict, repr=False)
+    #: How many graph walks this door has made — the measurement step 4
+    #: is about, so a test can say "one, not three".
+    discoveries: int = 0
 
     # -- the Front Desk, as one caller -------------------------------------
 
@@ -534,11 +568,15 @@ class Closer:
         return self._writer
 
     def _zulip_calls(self) -> int:
-        """What the mirror has spent on Zulip so far: hydrations, verifies.
-        A discovery's cost is the difference across it. Without a mirror the
-        reader is the realm itself and its own count is the answer."""
+        """What the mirror has spent on Zulip *for questions* so far —
+        hydrations, verifies, listing refreshes — by purpose, so the ingest
+        thread's own polling never counts against a preview. A discovery's
+        cost is the difference across it. Without a mirror the reader is the
+        realm itself and its own count is the answer."""
         if self.mirror is not None:
-            return int(self.mirror.health().get("calls") or 0)
+            ledger = self.mirror.health().get("ledger") or {}
+            return sum(int(n) for key, n in ledger.items()
+                       if key.split(" ", 1)[0] in ("hydrate", "verify"))
         reader = self._reader
         return int(getattr(reader, "calls", 0) or 0)
 
@@ -552,20 +590,123 @@ class Closer:
         """What closing this request would change, with the evidence.
 
         `key` is `(channel, topic)` or the refusal `parse_key`/`desk_key`
-        answered instead, passed through so a caller can chain them.
+        answered instead, passed through so a caller can chain them. The
+        plan is remembered; a second preview while nothing it depends on has
+        moved is answered from memory without a walk.
         """
         now = time.time() if now is None else now
         if isinstance(key, dict):
             return key
+        plan = self._current_plan(key, now)
+        return self._payload(now, plan.found, plan.actions, plan=plan)
+
+    # -- the remembered plan ----------------------------------------------------
+
+    def _discover(self, key: Key, now: float) -> Plan:
+        """One walk, remembered with everything it rested on."""
         realm: Realm | None = self._reader_client()
         spent = self._zulip_calls()
         found = discover(self.topics(), key, realm=realm)
         found.gaps["zulip_calls"] = self._zulip_calls() - spent
+        self.discoveries += 1
         actions = plan_actions(found)
-        return self._payload(now, found, actions)
+        plan = Plan(key=key, fingerprint=fingerprint(actions), revision=self._revision(),
+                    found=found, actions=actions, evidence=self._evidence_of(found),
+                    listings=self._listings_of(found), at=now, zulip_calls=found.gaps["zulip_calls"])
+        with self._lock:
+            self._plans[key] = plan
+        return plan
+
+    def _current_plan(self, key: Key, now: float) -> Plan:
+        """The remembered plan when the mirror shows nothing it depends on
+        moved, else a fresh walk."""
+        with self._lock:
+            remembered = self._plans.get(key)
+        if remembered is not None and self._unchanged(remembered):
+            return remembered
+        return self._discover(key, now)
+
+    def _revision(self) -> int:
+        return int(self.mirror.revision()) if self.mirror is not None else 0
+
+    def _evidence_of(self, found: Discovery) -> dict[Key, tuple[str, int, bool]]:
+        evidence: dict[Key, tuple[str, int, bool]] = {}
+        for node in found.topics:
+            evidence[node.key] = (node.live_topic, node.last_post_id, node.resolved)
+        for row in found.excluded:
+            evidence[(row["channel"], row["topic"])] = (row["live_topic"], 0, row["resolved"])
+        return evidence
+
+    def _listings_of(self, found: Discovery) -> dict[str, frozenset[str]]:
+        """The channels whose topic names the walk depends on: every channel
+        a reached conversation is in (the stem and seed rules read their
+        listings), the dedicated `work-` channel of each mission, and the
+        root's own — with the names the mirror holds for each now."""
+        channels = {found.root[0]}
+        channels.update(node.channel for node in found.topics)
+        channels.update(row["channel"] for row in found.excluded)
+        for work in found.works:
+            if work.source == AUTOLAB_SOURCE and work.anchor_id:
+                channels.add(work_channel_name(work.anchor_id))
+        for row in found.channels:
+            channels.add(row["channel"])
+        return {channel: self._names_now(channel) for channel in sorted(channels)}
+
+    def _names_now(self, channel: str) -> frozenset[str]:
+        if self.mirror is None:
+            return frozenset()
+        return frozenset(t.live_name for t in self.mirror.topics(channel))
+
+    def _unchanged(self, plan: Plan) -> bool:
+        """Whether the mirror still shows every conversation and listing the
+        plan rested on exactly as the plan saw them. Local, no Zulip call;
+        without a mirror nothing can be compared and the plan is rebuilt."""
+        mirror = self.mirror
+        if mirror is None:
+            return False
+        if mirror.revision() == plan.revision:
+            return True
+        for channel, names in plan.listings.items():
+            if self._names_now(channel) != names:
+                return False
+        for (channel, topic), (live, last_id, resolved) in plan.evidence.items():
+            found = mirror.topic(channel, topic)
+            if not found:
+                # Not listed: an archived channel's topic, which the mirror
+                # hydrated on demand and holds, or a topic that is gone.
+                held = mirror.messages(channel, topic)
+                if (held[-1].id if held else 0) != last_id:
+                    return False
+                continue
+            open_ones = [t for t in found if not t.resolved]
+            now_live = (open_ones or found)[0].live_name
+            now_last = max(t.last_id for t in found)
+            now_resolved = not open_ones
+            if (now_live, now_last, now_resolved) != (live, last_id, resolved):
+                return False
+        return True
+
+    def _revalidate(self, plan: Plan) -> dict:
+        """The targeted reads before a write: one listing per channel the
+        plan depends on, straight from Zulip, folded into the mirror. What
+        the listings say moved is hydrated; the caller re-plans if anything
+        did. Without a mirror there is nothing to fold into, and the reader
+        is the realm itself — a fresh walk is the revalidation."""
+        mirror = self.mirror
+        if mirror is None:
+            return {"channels": [], "changed": [], "zulip_calls": 0, "note": "no mirror; the plan was re-derived from the realm"}
+        spent = self._zulip_calls()
+        changed: list[tuple[str, str]] = []
+        for channel in sorted(plan.listings):
+            try:
+                changed.extend(mirror.refresh_listing(channel))
+            except Exception as error:  # noqa: BLE001 - a failed check is not a changed plan
+                changed.append((channel, f"<unread: {type(error).__name__}: {error}>"))
+        return {"channels": sorted(plan.listings), "changed": [f"{c}/{t}" for c, t in changed],
+                "zulip_calls": self._zulip_calls() - spent}
 
     def _payload(self, now: float, found: Discovery, actions: list[Action],
-                 results: list[dict] | None = None) -> dict:
+                 results: list[dict] | None = None, plan: Plan | None = None) -> dict:
         ready = [action for action in actions if action.state == READY]
         blocked = [action for action in actions if action.state == BLOCKED]
         return {
@@ -574,6 +715,12 @@ class Closer:
             "root": {"channel": found.root[0], "topic": found.root[1]},
             "scope": found.scope.as_dict(),
             "fingerprint": fingerprint(actions),
+            # What the preview rests on, so a reader can see how wide the
+            # pre-write check will be and how fresh the copy was.
+            "depends_on": ({"revision": plan.revision, "channels": sorted(plan.listings),
+                            "topics": len(plan.evidence), "planned_at": plan.at,
+                            "walk_zulip_calls": plan.zulip_calls}
+                           if plan is not None else None),
             "status": self.status(),
             "actions": [action.as_dict() for action in actions],
             "counts": {"ready": len(ready), "blocked": len(blocked),
@@ -593,9 +740,11 @@ class Closer:
               now: float | None = None) -> dict:
         """Apply the plan, in order, and report every target's outcome.
 
-        The plan is re-derived here: `expected` says which preview the human
-        approved, and a different one is answered with the new plan and no
-        write at all.
+        The remembered plan is reused when the mirror shows nothing it
+        depends on moved; the scoped channels are then read from Zulip once
+        each and whatever moved is folded in; a plan that changed under the
+        human is answered with the new one and no write at all. `expected`
+        is the preview the human approved.
         """
         now = time.time() if now is None else now
         if isinstance(key, dict):
@@ -604,73 +753,71 @@ class Closer:
         if client is None:
             return {"error": self.status()["reason"], "status": self.status()}
         with self._conversation_lock(key):
-            realm: Realm | None = self._reader_client()
-            spent = self._zulip_calls()
-            found = discover(self.topics(), key, realm=realm)
-            found.gaps["zulip_calls"] = self._zulip_calls() - spent
-            actions = plan_actions(found)
-            current = fingerprint(actions)
-            if expected is not None and expected != current:
-                payload = self._payload(now, found, actions)
+            plan = self._current_plan(key, now)
+            checked = self._revalidate(plan)
+            if checked["changed"] or not self._unchanged(plan):
+                plan = self._discover(key, now)
+            if expected is not None and expected != plan.fingerprint:
+                payload = self._payload(now, plan.found, plan.actions, plan=plan)
                 payload["refused"] = True
+                payload["revalidated"] = checked
                 payload["error"] = ("the targets have changed since this preview was made; "
                                     "nothing was closed — read the refreshed plan and approve it")
                 return payload
-            revision = self.mirror.revision() if self.mirror is not None else 0
-            results = self._apply(client, actions)
-            self._confirm(results, actions, revision)
+            revision = self._revision()
+            results = self._apply(client, plan.actions)
+            self._confirm(results, plan.actions, revision)
             with self._lock:
-                self._records.append({"at": now, "channel": found.root[0],
-                                      "topic": found.root[1], "kind": found.scope.kind,
-                                      "fingerprint": current, "results": results})
+                self._records.append({"at": now, "channel": plan.key[0],
+                                      "topic": plan.key[1], "kind": plan.found.scope.kind,
+                                      "fingerprint": plan.fingerprint, "results": results,
+                                      "revalidated": checked})
                 del self._records[:-RECORD_MEMORY]
-            # The answer is the plan **as it now stands**, re-derived after the
-            # writes, with the results laid over it: its fingerprint is what a
-            # retry approves, and a retry that carried the pre-write
-            # fingerprint would only ever be refused (p4 step 2 met exactly
-            # that in a browser fixture). What was archived reads `done`, what
-            # failed reads `ready` again, and `partial` is judged on what is
-            # still left to do rather than on what was attempted.
-            spent = self._zulip_calls()
-            after = discover(self.topics(), key, realm=realm)
-            after.gaps["zulip_calls"] = self._zulip_calls() - spent
-            actions_after = plan_actions(after)
-            # A target this operation made unreadable — the topics of a
-            # channel it archived — is not in the plan as it now stands, and
-            # a result row with no action to sit under would be lost. The
-            # pre-write plan's order is kept, each row wearing its post-write
-            # state where there is one and its outcome where there is not;
-            # the fingerprint is the post-write plan's alone, because that is
-            # what a fresh preview would answer.
-            by_key = {action.key: action for action in actions_after}
-            shown: list[Action] = []
-            for action in actions:
-                found_after = by_key.pop(action.key, None)
-                if found_after is not None:
-                    shown.append(found_after)
-                    continue
-                outcome = next((row for row in results if row["key"] == action.key), None)
-                if outcome is not None and outcome["outcome"] in (APPLIED, ALREADY):
-                    shown.append(Action(action.kind, action.key, action.label, DONE,
-                                        "closed by this operation; no longer readable from the realm",
-                                        action.detail))
-                else:
-                    shown.append(action)
-            shown.extend(by_key.values())
-            payload = self._payload(now, after, shown, results)
-            payload["fingerprint"] = fingerprint(actions_after)
+                # The plan is spent: a retry re-reads the copy, which now
+                # carries what was written, and finds the rest.
+                self._plans.pop(key, None)
+            shown = self._after(plan.actions, results)
+            payload = self._payload(now, plan.found, shown, results)
             payload["applied"] = True
+            payload["revalidated"] = checked
             # "Partially closed" is judged on the request itself as much as on
             # the counts: an operation that kept the Front topic open because
             # something was blocked is partial even when the blocked target
-            # has since gone out of the post-write plan — archiving a channel
-            # takes its topics with it, and the honest answer must not depend
-            # on which targets survived their own closure.
+            # has since gone out of the plan.
             root_kept = any(row["kind"] == "conversation" and row["outcome"] == SKIPPED
                             for row in results)
             payload["partial"] = (any(row["outcome"] == FAILED for row in results)
                                   or bool(payload["counts"]["blocked"]) or root_kept)
             return payload
+
+    @staticmethod
+    def _after(actions: list[Action], results: list[dict]) -> list[Action]:
+        """The plan as it stands after the writes, from the results.
+
+        No third walk: an applied target is done (and says whether the
+        mirror has confirmed it), a failed one is ready again with the error
+        as its reason, and everything skipped or already done is as it was.
+        The fingerprint of this list is what a retry approves.
+        """
+        by_key = {row["key"]: row for row in results}
+        shown: list[Action] = []
+        for action in actions:
+            row = by_key.get(action.key)
+            if row is None:
+                shown.append(action)
+                continue
+            if row["outcome"] == APPLIED:
+                confirmed = row.get("confirmed")
+                note = ("closed by this operation; the mirror has confirmed it" if confirmed
+                        else "closed by this operation; the mirror has not carried it back yet"
+                        if confirmed is False else "closed by this operation")
+                shown.append(Action(action.kind, action.key, action.label, DONE, note, action.detail))
+            elif row["outcome"] == FAILED:
+                shown.append(Action(action.kind, action.key, action.label, READY,
+                                    f"failed — {row['note']}; retry closes it", action.detail))
+            else:
+                shown.append(action)
+        return shown
 
     def _confirm(self, results: list[dict], actions: list[Action], revision: int) -> None:
         """Wait, briefly, for the mirror to carry the writes back, and stamp
@@ -703,7 +850,8 @@ class Closer:
             found = mirror.topic(detail.get("channel", ""), detail.get("topic", ""))
             return bool(found) and all(t.resolved for t in found)
         if action.kind == "channel":
-            return mirror.channel(detail.get("channel", "")) is None
+            found = mirror.channel(detail.get("channel", ""))
+            return found is None or found.archived
         if action.kind == "work":
             word = MISSION_DONE if detail.get("source") == AUTOLAB_SOURCE else REQUEST_ACCEPTED
             tag = STATE_TAG if detail.get("source") == AUTOLAB_SOURCE else FORGE_STATE_TAG

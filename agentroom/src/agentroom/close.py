@@ -603,16 +603,31 @@ class Closer:
     # -- the remembered plan ----------------------------------------------------
 
     def _discover(self, key: Key, now: float) -> Plan:
-        """One walk, remembered with everything it rested on."""
+        """One coherent walk, remembered with everything it rested on.
+
+        Ingestion is deliberately not stopped while a preview is built. If a
+        relevant change overlaps the walk, repeat it; unrelated traffic may
+        advance the global revision without making the evidence incoherent.
+        """
         realm: Realm | None = self._reader_client()
         spent = self._zulip_calls()
-        found = discover(self.topics(), key, realm=realm)
+        while True:
+            revision = self._revision()
+            found = discover(self.topics(), key, realm=realm)
+            self.discoveries += 1
+            actions = plan_actions(found)
+            evidence = self._evidence_of(found)
+            listings = self._listings_of(found)
+            if not self._dependencies_changed(revision, evidence, listings):
+                break
         found.gaps["zulip_calls"] = self._zulip_calls() - spent
-        self.discoveries += 1
-        actions = plan_actions(found)
-        plan = Plan(key=key, fingerprint=fingerprint(actions), revision=self._revision(),
-                    found=found, actions=actions, evidence=self._evidence_of(found),
-                    listings=self._listings_of(found), at=now, zulip_calls=found.gaps["zulip_calls"])
+        # Keep the revision from before the walk. Advancing it to a newer
+        # unrelated event would risk claiming that an event arriving after
+        # the evidence read was part of the snapshot; `_unchanged()` can
+        # cheaply inspect those extra feed entries later.
+        plan = Plan(key=key, fingerprint=fingerprint(actions), revision=revision,
+                    found=found, actions=actions, evidence=evidence,
+                    listings=listings, at=now, zulip_calls=found.gaps["zulip_calls"])
         with self._lock:
             self._plans[key] = plan
         return plan
@@ -666,25 +681,63 @@ class Closer:
             return False
         if mirror.revision() == plan.revision:
             return True
-        for channel, names in plan.listings.items():
+        return not self._dependencies_changed(plan.revision, plan.evidence, plan.listings)
+
+    def _dependencies_changed(self, revision: int,
+                              evidence: dict[Key, tuple[str, int, bool]],
+                              listings: dict[str, frozenset[str]]) -> bool:
+        """Whether dependency evidence moved after ``revision``.
+
+        The index tuple catches posts, moves and resolves. The change feed is
+        also required: an edit or deletion of an older message changes the
+        meaning of a conversation without changing its last id. A lost or
+        truncated feed is uncertainty, so the remembered discovery is not
+        reused.
+        """
+        mirror = self.mirror
+        if mirror is None:
+            return True
+        for channel, names in listings.items():
             if self._names_now(channel) != names:
-                return False
-        for (channel, topic), (live, last_id, resolved) in plan.evidence.items():
+                return True
+        for (channel, topic), (live, last_id, resolved) in evidence.items():
             found = mirror.topic(channel, topic)
             if not found:
                 # Not listed: an archived channel's topic, which the mirror
                 # hydrated on demand and holds, or a topic that is gone.
                 held = mirror.messages(channel, topic)
                 if (held[-1].id if held else 0) != last_id:
-                    return False
+                    return True
                 continue
             open_ones = [t for t in found if not t.resolved]
             now_live = (open_ones or found)[0].live_name
             now_last = max(t.last_id for t in found)
             now_resolved = not open_ones
             if (now_live, now_last, now_resolved) != (live, last_id, resolved):
-                return False
-        return True
+                return True
+        current = mirror.revision()
+        changes = mirror.changes(revision)
+        if changes is None:
+            return True
+        if current > revision and not changes:
+            return True
+        if changes and changes[-1].revision < current:
+            return True
+        relevant = {(channel, bare_topic(topic)) for channel, topic in evidence}
+        for change in changes:
+            if change.kind == "resync":
+                return True
+            if change.kind == "channel" and change.channel in listings:
+                return True
+            if (change.channel, bare_topic(change.topic)) in relevant:
+                return True
+            if change.kind == "move":
+                old_topic = bare_topic(str(change.detail.get("from_topic") or ""))
+                old_stream = change.detail.get("from_stream_id")
+                old_channel = mirror.store.channel_by_id(int(old_stream)) if old_stream is not None else None
+                if old_channel is not None and (old_channel.name, old_topic) in relevant:
+                    return True
+        return False
 
     def _revalidate(self, plan: Plan) -> dict:
         """The targeted reads before a write: one listing per channel the

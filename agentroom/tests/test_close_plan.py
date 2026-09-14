@@ -209,6 +209,70 @@ def test_an_edit_already_received_by_the_mirror_refuses_the_stale_approval():
     mirror.stop()
 
 
+def test_deleting_an_older_state_note_invalidates_evidence_without_moving_the_topic_maximum():
+    realm, mission, work, task_topic = chain()
+    realm.post(work, f"✔ {task_topic}", "[selfnote][evidence] retained-later-message", quiet=True)
+    door, writer, mirror = door_over(realm)
+    plan = door.plan(ROOT)
+    state_id = next(
+        ident for ident, message in realm.messages.items()
+        if message["display_recipient"] == work
+        and message["subject"] == f"✔ {task_topic}"
+        and message["content"] == "[selfnote][state] completed"
+    )
+    maximum = mirror.topic(work, task_topic)[0].max_id
+    revision = mirror.revision()
+
+    realm.delete(state_id)
+    mirror.wait(revision, timeout=3.0)
+
+    assert mirror.message(state_id) is None
+    assert mirror.topic(work, task_topic)[0].max_id == maximum
+    refused = door.close(ROOT, plan["fingerprint"])
+    assert refused["refused"] is True
+    assert by_key(refused)[f"work:m{mission}"] == BLOCKED
+    assert writer.resolved == [] and writer.archived == [] and writer.posted == []
+    mirror.stop()
+
+
+def test_an_edit_in_an_unrelated_conversation_keeps_the_remembered_discovery():
+    realm, _, _, _ = chain()
+    realm.add_channel(9, "pj-other")
+    older = realm.post("pj-other", "workplan-other", "old", quiet=True)
+    realm.post("pj-other", "workplan-other", "newer", quiet=True)
+    door, _, mirror = door_over(realm)
+    plan = door.plan(ROOT)
+    revision = mirror.revision()
+
+    realm.edit(older, "harmless edit elsewhere")
+    mirror.wait(revision, timeout=3.0)
+    closed = door.close(ROOT, plan["fingerprint"])
+
+    assert not closed.get("refused")
+    assert door.discoveries == 1
+    mirror.stop()
+
+
+def test_lost_change_feed_coverage_rebuilds_the_discovery():
+    realm, _, _, _ = chain()
+    realm.add_channel(9, "pj-other")
+    first = realm.post("pj-other", "workplan-other", "first", quiet=True)
+    second = realm.post("pj-other", "workplan-other", "second", quiet=True)
+    door, _, mirror = door_over(realm)
+    plan = door.plan(ROOT)
+    revision = mirror.revision()
+
+    realm.edit(first, "first edited")
+    realm.edit(second, "second edited")
+    mirror.wait(revision, timeout=3.0)
+    mirror.store.prune_changes(keep=1)
+
+    again = door.plan(ROOT)
+    assert again["fingerprint"] == plan["fingerprint"]
+    assert door.discoveries == 2
+    mirror.stop()
+
+
 def test_a_failed_pre_write_listing_leaves_completion_unapplied(monkeypatch):
     realm, _, _, _ = chain()
     door, writer, mirror = door_over(realm)

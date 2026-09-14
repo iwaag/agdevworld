@@ -618,7 +618,8 @@ class Closer:
             actions = plan_actions(found)
             evidence = self._evidence_of(found)
             listings = self._listings_of(found)
-            if self.mirror is None or not self._dependencies_changed(revision, evidence, listings):
+            if self.mirror is None or not self._dependencies_changed(
+                    revision, evidence, listings, compare_evidence=False):
                 break
         found.gaps["zulip_calls"] = self._zulip_calls() - spent
         # Keep the revision from before the walk. Advancing it to a newer
@@ -649,7 +650,8 @@ class Closer:
         for node in found.topics:
             evidence[node.key] = (node.live_topic, node.last_post_id, node.resolved)
         for row in found.excluded:
-            evidence[(row["channel"], row["topic"])] = (row["live_topic"], 0, row["resolved"])
+            evidence[(row["channel"], row["topic"])] = (
+                row["live_topic"], int(row.get("last_post_id") or 0), row["resolved"])
         return evidence
 
     def _listings_of(self, found: Discovery) -> dict[str, frozenset[str]]:
@@ -685,7 +687,8 @@ class Closer:
 
     def _dependencies_changed(self, revision: int,
                               evidence: dict[Key, tuple[str, int, bool]],
-                              listings: dict[str, frozenset[str]]) -> bool:
+                              listings: dict[str, frozenset[str]], *,
+                              compare_evidence: bool = True) -> bool:
         """Whether dependency evidence moved after ``revision``.
 
         The index tuple catches posts, moves and resolves. The change feed is
@@ -700,21 +703,22 @@ class Closer:
         for channel, names in listings.items():
             if self._names_now(channel) != names:
                 return True
-        for (channel, topic), (live, last_id, resolved) in evidence.items():
-            found = mirror.topic(channel, topic)
-            if not found:
-                # Not listed: an archived channel's topic, which the mirror
-                # hydrated on demand and holds, or a topic that is gone.
-                held = mirror.messages(channel, topic)
-                if (held[-1].id if held else 0) != last_id:
+        if compare_evidence:
+            for (channel, topic), (live, last_id, resolved) in evidence.items():
+                found = mirror.topic(channel, topic)
+                if not found:
+                    # Not listed: an archived channel's topic, which the mirror
+                    # hydrated on demand and holds, or a topic that is gone.
+                    held = mirror.messages(channel, topic)
+                    if (held[-1].id if held else 0) != last_id:
+                        return True
+                    continue
+                open_ones = [t for t in found if not t.resolved]
+                now_live = (open_ones or found)[0].live_name
+                now_last = max(t.last_id for t in found)
+                now_resolved = not open_ones
+                if (now_live, now_last, now_resolved) != (live, last_id, resolved):
                     return True
-                continue
-            open_ones = [t for t in found if not t.resolved]
-            now_live = (open_ones or found)[0].live_name
-            now_last = max(t.last_id for t in found)
-            now_resolved = not open_ones
-            if (now_live, now_last, now_resolved) != (live, last_id, resolved):
-                return True
         current = mirror.revision()
         changes = mirror.changes(revision)
         if changes is None:

@@ -274,6 +274,27 @@ def test_lost_change_feed_coverage_rebuilds_the_discovery():
     mirror.stop()
 
 
+def test_an_edit_in_an_excluded_conversation_invalidates_its_evidence():
+    realm, _, _, _ = chain()
+    other = realm.post("front", "front-desk-other", "another request", quiet=True)
+    selfnote(
+        realm, "front", "front-desk-1", "served", f"front/front-desk-other {other}",
+        sender_id=FRONT_BOT, sender="Front",
+    )
+    door, _, mirror = door_over(realm)
+    plan = door.plan(ROOT)
+    assert any(row["topic"] == "front-desk-other" for row in plan["excluded"])
+    revision = mirror.revision()
+
+    realm.edit(other, "another request, edited")
+    mirror.wait(revision, timeout=3.0)
+    again = door.plan(ROOT)
+
+    assert again["fingerprint"] == plan["fingerprint"]
+    assert door.discoveries == 2
+    mirror.stop()
+
+
 def test_a_failed_pre_write_listing_leaves_completion_unapplied(monkeypatch):
     realm, _, _, _ = chain()
     door, writer, mirror = door_over(realm)

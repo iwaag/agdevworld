@@ -841,7 +841,8 @@ class Discovery:
 
 def _exclude(node: Related, reason: str, evidence: list[dict] | None = None) -> dict:
     return {"channel": node.channel, "topic": node.topic, "live_topic": node.live_topic,
-            "resolved": node.resolved, "reason": reason, "evidence": evidence or [],
+            "last_post_id": node.last_post_id, "resolved": node.resolved,
+            "reason": reason, "evidence": evidence or [],
             "known": node.known, "kind": classify(node.channel, node.topic)}
 
 

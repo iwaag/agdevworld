@@ -28,7 +28,8 @@ import {
   titleLine,
   type Tone,
 } from './completionState'
-import type { ClosePlan, DeskSource } from './frontDeskState'
+import type { CompletionPlan as ClosePlan } from './completionState'
+import type { RoomCompletion } from './roomState'
 
 const MONO = 'ui-monospace, SFMono-Regular, Menlo, monospace'
 const FONT = '"Hiragino Sans", "Hiragino Kaku Gothic ProN", "Helvetica Neue", Arial, sans-serif'
@@ -54,7 +55,7 @@ type Phase =
 
 export interface ClosePanelOptions {
   scene: Phaser.Scene
-  source: DeskSource
+  source: RoomCompletion
   // The conversation the panel is for, asked at every step: a request that
   // comes back after the user switched conversations is dropped, never drawn.
   conversationId: () => string
@@ -65,7 +66,7 @@ export interface ClosePanelOptions {
 
 export class FrontDeskClosePanel {
   private readonly scene: Phaser.Scene
-  private readonly source: DeskSource
+  private readonly source: RoomCompletion
   private readonly conversationId: () => string
   private readonly onChanged: () => void
 

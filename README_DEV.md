@@ -33,7 +33,7 @@ read static snapshots or their existing sample fallbacks.
 - `src/agentRoomState.ts` — the agent room's two reads, through the `agentroom` relay.
 - `src/opsState.ts` — the operation room's one read, `/ops` on the same relay.
 - `src/viewSwitcher.ts` — the single seam for changing the visible view.
-- `src/frontDesk.ts` / `src/scenes/FrontDeskScene.ts` — the Front Desk (`/?view=frontdesk`), a graphic-novel scene for one `#front` › `front-desk-<id>` conversation with Front; `src/frontDeskInput.ts` is its hidden IME textarea, `src/textLayout.ts` the grapheme-safe wrap and pagination, `src/frontDeskState.ts` its relay reads/writes and a `&demo=1` source that never touches the realm (`&demorev=<sha>` makes the demo's scenes claim a settings revision), `src/frontDeskPlayback.ts` the replies-as-turns model and cursor, `src/frontDeskSettings.ts` which settings revision draws what.
+- `src/frontDesk.ts` / `src/scenes/FrontDeskScene.ts` — the two rooms on one scene: the Front Desk (`/?view=frontdesk`, one `#front` › `front-desk-<id>` conversation with Front) and the Arguing Room (`/?view=argue`, one `#argue` › `argue-<stem>` discussion a human leads). `src/roomState.ts` is what differs between them — the adapter (list, open, post, ask for an interpretation, background) and the relay's shared `presentation` types; `src/roomDemo.ts` a `&demo=1` adapter for either room that never touches the realm (`&demorev=<sha>` makes its interpretations claim a settings revision); `src/frontDeskPlayback.ts` the agent-posts-as-turns model (dialogue or original view, which interpretation, the pending/failed fallback) and cursor; `src/frontDeskSettings.ts` which settings revision draws what and which room's background; `src/frontDeskInput.ts` the hidden IME textarea, `src/textLayout.ts` the grapheme-safe wrap and pagination.
 - `src/settingsState.ts` — the settings repository as the relay serves it (`/settings`, `/settings/<revision>`): characters, lore, revision-addressed portraits and backgrounds.
 - `src/chatPanel.ts` — one routine fire topic and the existing `POST /chat` door; dashboard mode receives shared detail payloads, while world mode owns its selected-topic refresh.
 - `src/detailPopup.ts` — the detail overlay for a clicked card.
@@ -216,19 +216,37 @@ Three things learned by looking rather than by design:
 `.local/deskshot.mjs` (ignored) is the CDP driver that types, presses keys,
 sets an IME composition, wheels and screenshots it.
 
-### Scenes and portraits (`front_desk` p2)
+### Speech and its dialogue (`argue` p2)
 
-A reply from Front is turns: one turn when it is a plain reply, the turns
-of its `dialogue` when agfront wrote one (see `agentroom/README.md` ›
-`/frontdesk`). Front speaks from the lower left; any other character from a
-portrait and box in the upper left, the one not speaking dimmed with its
-last line. ▶/◀, a click on a box or the wheel step through pages, then
-turns, then replies; a reply that arrives while an earlier one is being read
-queues behind it with a `▶ n new replies waiting` chip, and a reader who had
-finished the newest reply is taken to the next one as it lands. History rows
-are portrait, name (nickname) and text per turn, a user icon for the
-Developer, a common icon for a speaker the settings do not know, acks as
-receipt lines, source citations and link chips kept.
+The discussion is plain; the character dialogue is Front's re-voicing of
+it, made afterwards and saved in a memo topic (see `agentroom/README.md` ›
+`presentation`). Every **agent post** is a reply to page through — Front's,
+and in an argue every specialist's. `view: dialogue ⇄ original` chooses what
+its turns are: the turns of a saved interpretation (each by one character of
+the revision the interpretation names, each citing its posts), or the post
+as written. A post with no usable rendering — still pending, failed, a
+speaker without a character such as `sage:arxiv` — is shown as written with
+the reason in the status line, so reading never waits for a rendering.
+**The composer always posts into the source conversation**, whichever view
+is on. `interpretation: …` steps through the saved interpretations (each
+keeps the faces of its own revision) and back to following the active
+settings; `reinterpret ⟳` asks Front for one at the settings current now and
+leaves the earlier ones alone. A 📎 source chip — in the box and in the
+history — opens the cited post as written, marked `◀ cited`.
+
+Front speaks from the lower left; any other speaker from a portrait and box
+in the upper left, the one not speaking dimmed with its last line. ▶/◀, a
+click on a box or the wheel step through pages, then turns, then replies; a
+reply that arrives while an earlier one is being read queues behind it with
+a `▶ n new replies waiting` chip, and a rendering that lands under the
+reader keeps their place. History rows are portrait, name (nickname) and
+text per turn, a user icon for the human, a common icon under its own label
+for a speaker the settings do not know, acks as receipt lines.
+
+In the Arguing Room `?argue=<anchor>` names the open argue by its anchor
+message id; with none, the history panel lists the argues and the first
+post in the bar opens a new one. There is no finish button there: an argue
+ends by Front's checked outcome.
 
 Faces, names and the background come from the settings revision: the active
 one for new content (`settings ⟳` re-reads it), and for a scene the revision

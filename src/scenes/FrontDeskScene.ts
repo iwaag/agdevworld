@@ -1,7 +1,11 @@
-// Front Desk: a graphic-novel scene for talking with Front.
+// A room: a graphic-novel scene for talking in one Zulip conversation.
 //
-// One Zulip conversation, `#front` › `front-desk-<id>`, drawn as a visual
-// novel frame: the background fills the screen, Front's portrait stands in
+// Two rooms share it (`roomState.ts`): the Front Desk — `#front` ›
+// `front-desk-<id>`, talking with Front — and, since `argue` p2, the Arguing
+// Room — `#argue` › `argue-<stem>`, where a human leads a discussion with
+// every agent. The room is an adapter and a background; the scene is one.
+//
+// The conversation is drawn as a visual novel frame: the background fills the screen, Front's portrait stands in
 // the lower left with the dialogue beside it, another character speaks from
 // a portrait and text box in the upper left, a prompt bar runs along the
 // bottom, and the whole history is a panel that can be shown or hidden.
@@ -16,9 +20,19 @@
 // Replies that arrive while the user is reading queue behind the one on
 // show, with a visible way to advance.
 //
+// **The discussion is plain, and the dialogue is a rendering of it.** Every
+// agent post is a reply to page through. In the *dialogue* view its turns
+// are Front's saved re-voicing (an interpretation, at one settings
+// revision, each line citing the posts it came from); in the *original*
+// view it is the post as written. A post with no rendering yet — or a failed
+// one — is shown as written with the reason, so reading never waits for a
+// rendering, and the composer always posts into the source conversation
+// whichever view is on. An interpretation can be chosen, and another one
+// asked for with the current settings; earlier ones keep their own faces.
+//
 // Nothing here decides what a post *is*. The relay says which posts are the
-// Developer's, which are Front's acks and which are replies, what a reply's
-// dialogue is and whether one was unusable; this scene renders those words.
+// human's, which are acks and which are agents' speech, who spoke and which
+// renderings exist; this scene renders those words.
 // When the relay cannot be read the last known history stays on screen
 // under an amber `unknown`, never a blank frame — the rule every
 // relay-backed view in this app follows.
@@ -30,6 +44,7 @@ import {
   atEnd,
   citation,
   queuedAfter,
+  renderingOf,
   repliesOf,
   settle,
   START,
@@ -37,18 +52,10 @@ import {
   type Cursor,
   type PlayReply,
   type PlayTurn,
+  type ViewMode,
 } from '../frontDeskPlayback'
 import { FrontDeskSettings } from '../frontDeskSettings'
-import {
-  ago,
-  clock,
-  newConversationId,
-  submitToken,
-  type DeskBoard,
-  type DeskConversationRow,
-  type DeskDetail,
-  type DeskSource,
-} from '../frontDeskState'
+import { ago, clock, submitToken, type Citation, type RoomAdapter, type RoomDetail, type RoomRow } from '../roomState'
 import { assetUrl, type SettingsCharacter, type SettingsManifest } from '../settingsState'
 import { linksIn, paginate, wrapText, type FoundLink, type Measure } from '../textLayout'
 
@@ -93,15 +100,23 @@ type SendPhase =
 interface Rect { x: number; y: number; width: number; height: number }
 
 export interface FrontDeskOptions {
-  source: DeskSource
-  conversationId: string
+  adapter: RoomAdapter
+  // The open conversation; null is a room with none open yet (a new argue
+  // is opened by its first post).
+  conversationKey: string | null
 }
 
 export class FrontDeskScene extends Phaser.Scene {
-  private readonly source: DeskSource
-  private conversationId: string
-  private detail: DeskDetail | undefined
-  private board: DeskBoard | undefined
+  private readonly adapter: RoomAdapter
+  private conversationId: string | null
+  private detail: RoomDetail | undefined
+  private board: RoomRow[] | undefined
+  // What the dialogue box plays: Front's re-voicing, or the posts as written.
+  private mode: ViewMode = 'dialogue'
+  // The interpretation asked for by revision; null follows the active settings.
+  private wanted: string | null = null
+  private renderNote: { text: string; color: string; until: number } | undefined
+  private asking = false
   private signature = ''
   private unreadable: string | undefined
   private send: SendPhase = { kind: 'idle' }
@@ -160,7 +175,10 @@ export class FrontDeskScene extends Phaser.Scene {
   private newButton!: Phaser.GameObjects.Text
   private settingsButton!: Phaser.GameObjects.Text
   private finishButton!: Phaser.GameObjects.Text
-  private closePanel!: FrontDeskClosePanel
+  private viewButton!: Phaser.GameObjects.Text
+  private interpretationButton!: Phaser.GameObjects.Text
+  private reinterpretButton!: Phaser.GameObjects.Text
+  private closePanel: FrontDeskClosePanel | undefined
   private historyPanel!: Phaser.GameObjects.Container
   private historyBackdrop!: Phaser.GameObjects.Graphics
   private historyTitle!: Phaser.GameObjects.Text
@@ -169,8 +187,8 @@ export class FrontDeskScene extends Phaser.Scene {
 
   constructor(options: FrontDeskOptions) {
     super({ key: 'frontdesk' })
-    this.source = options.source
-    this.conversationId = options.conversationId
+    this.adapter = options.adapter
+    this.conversationId = options.conversationKey
   }
 
   preload() {
@@ -227,17 +245,28 @@ export class FrontDeskScene extends Phaser.Scene {
     this.sendButton = this.button('Send ⏎ · buys a run', () => void this.submit(), COLOR.accent2)
     this.counter = this.text(0, 0, '', MONO, 10.5, COLOR.dim)
     this.historyButton = this.button('history', () => this.toggleHistory())
-    this.newButton = this.button('new conversation', () => this.startConversation())
+    this.newButton = this.button(this.adapter.words.newButton, () => this.startConversation())
     this.settingsButton = this.button('settings ⟳', () => void this.settings.refresh())
     // Finishing the conversation: a preview first, always. The button opens
     // the panel; only the panel's own button writes anything.
     this.finishButton = this.button('finish ✔', () => this.toggleClose(), COLOR.live)
-    this.closePanel = new FrontDeskClosePanel({
-      scene: this,
-      source: this.source,
-      conversationId: () => this.conversationId,
-      onChanged: () => { void this.refresh(); void this.refreshBoard() },
-    })
+    const completion = this.adapter.completion
+    if (completion) {
+      this.closePanel = new FrontDeskClosePanel({
+        scene: this,
+        source: completion,
+        conversationId: () => this.conversationId ?? '',
+        onChanged: () => { void this.refresh(); void this.refreshBoard() },
+      })
+    } else {
+      // A room without a completion door of its own (an argue ends by its
+      // outcome) shows no button that could not do anything.
+      this.finishButton.setVisible(false)
+    }
+    // The view, the interpretation on show, and asking for another one.
+    this.viewButton = this.button('', () => this.toggleView(), COLOR.accent)
+    this.interpretationButton = this.button('', () => this.cycleInterpretation())
+    this.reinterpretButton = this.button('reinterpret ⟳', () => void this.reinterpret(), COLOR.other)
 
     this.historyPanel = this.add.container(0, 0).setVisible(false)
     this.historyBackdrop = this.add.graphics()
@@ -252,7 +281,7 @@ export class FrontDeskScene extends Phaser.Scene {
       },
       onSubmit: () => void this.submit(),
       onEscape: () => {
-        if (this.closePanel.open) this.closePanel.close()
+        if (this.closePanel?.open) this.closePanel.close()
         else if (this.historyOpen) this.toggleHistory()
       },
     })
@@ -261,11 +290,11 @@ export class FrontDeskScene extends Phaser.Scene {
     this.input.on('pointerdown', (pointer: Phaser.Input.Pointer, over: unknown[]) => {
       this.keys.focus()
       // A click on the frame itself advances; a click on a button is the button's.
-      if (this.closePanel.contains(pointer)) return
+      if (this.closePanel?.contains(pointer)) return
       if (over.length === 0 && (this.inside(pointer, this.dialogueRect) || this.inside(pointer, this.coRect))) this.turn(1)
     })
     this.input.on('wheel', (pointer: Phaser.Input.Pointer, _objects: unknown, _dx: number, dy: number) => {
-      if (this.closePanel.contains(pointer)) {
+      if (this.closePanel?.contains(pointer)) {
         this.closePanel.scrollBy(dy)
       } else if (this.historyOpen && this.inside(pointer, this.historyViewport)) {
         this.scrollHistory(dy)
@@ -277,12 +306,18 @@ export class FrontDeskScene extends Phaser.Scene {
       this.failedTextures.add(file.key)
     })
 
-    const link = document.createElement('a')
-    link.href = '/'
-    link.textContent = 'Operation room ↗'
-    link.style.cssText = 'position:fixed;top:10px;right:16px;z-index:20;color:#8dccff;font:12px system-ui;background:rgba(13,20,32,0.85);padding:6px 10px;border-radius:6px;text-decoration:none'
-    document.body.append(link)
-    this.events.once('shutdown', () => { link.remove(); this.keys.destroy(); this.closePanel.destroy() })
+    // The ways out: the other room, and the dashboard.
+    const nav = document.createElement('nav')
+    nav.style.cssText = 'position:fixed;top:10px;right:16px;z-index:20;display:flex;gap:8px'
+    for (const [label, href] of [[this.adapter.other.label, this.adapter.other.href], ['Operation room ↗', '/']]) {
+      const link = document.createElement('a')
+      link.href = href
+      link.textContent = label
+      link.style.cssText = 'color:#8dccff;font:12px system-ui;background:rgba(13,20,32,0.85);padding:6px 10px;border-radius:6px;text-decoration:none'
+      nav.append(link)
+    }
+    document.body.append(nav)
+    this.events.once('shutdown', () => { nav.remove(); this.keys.destroy(); this.closePanel?.destroy() })
 
     this.layout(this.scale.width, this.scale.height)
     this.scale.on('resize', (size: Phaser.Structs.Size) => this.layout(size.width, size.height))
@@ -295,13 +330,22 @@ export class FrontDeskScene extends Phaser.Scene {
     // `&finish=1` opens the completion panel on arrival: a fixture's door
     // (the demo plays the whole flow), never a shortcut past the preview.
     if (new URLSearchParams(location.search).get('finish') === '1') this.toggleClose()
+    // `&mode=original` opens on the posts as written.
+    if (new URLSearchParams(location.search).get('mode') === 'original') this.mode = 'original'
   }
 
   // --- reads -----------------------------------------------------------------
 
   private async refresh() {
     const id = this.conversationId
-    const found = await this.source.detail(id)
+    if (id === null) {
+      // No conversation is open: the room's list is all there is to read.
+      this.renderCaption()
+      this.renderStatus()
+      this.renderPrompt()
+      return
+    }
+    const found = await this.adapter.detail(id)
     if (id !== this.conversationId) return
     if ('error' in found) {
       this.unreadable = found.error
@@ -312,11 +356,14 @@ export class FrontDeskScene extends Phaser.Scene {
     this.unreadable = undefined
     this.detail = found
     const conversation = found.conversation
-    // Content and dialogue are part of the signature, so an edit is visible
-    // too, not only a new post.
+    // Content and every rendering are part of the signature, so an edit and
+    // an interpretation that lands later are visible too, not only a new post.
+    const shown = conversation.presentation
     const signature = JSON.stringify([
       found.health.state, conversation.known, conversation.resolved, conversation.status,
-      conversation.posts.map((post) => [post.message_id, post.content, post.dialogue, post.dialogue_error]),
+      conversation.posts.map((post) => [post.message_id, post.content]),
+      shown && [shown.active_revision, shown.pending, shown.failed.map((one) => one.job), shown.renderer.state,
+        Object.entries(shown.renderings).map(([id, list]) => [id, list.map((one) => [one.job, one.stale])])],
       found.chat.configured,
     ])
     if (signature !== this.signature) {
@@ -326,7 +373,7 @@ export class FrontDeskScene extends Phaser.Scene {
       // what arrived queues behind with a visible way forward.
       const finished = this.cursor.reply < 0 || (queuedAfter(this.cursor, this.replies) === 0
         && atEnd(this.cursor, this.replies, (r, t) => this.pagesOf(r, t)))
-      this.replies = repliesOf(conversation.posts)
+      this.replies = repliesOf(conversation.posts, conversation.presentation, this.mode, this.wanted)
       this.pageCache.clear()
       this.cursor = settle(this.cursor, this.replies, this.shownId)
       if (finished && queuedAfter(this.cursor, this.replies) > 0) {
@@ -342,7 +389,7 @@ export class FrontDeskScene extends Phaser.Scene {
   }
 
   private async refreshBoard() {
-    const found = await this.source.board()
+    const found = await this.adapter.list()
     if ('error' in found) return
     this.board = found
     // The chip rows decide where the list starts, so the panel is laid out again.
@@ -363,12 +410,13 @@ export class FrontDeskScene extends Phaser.Scene {
     const text = this.draft.trim()
     if (text === '' || this.sending || this.keys.composing()) return
     const chat = this.detail?.chat
-    if (this.unreadable || !chat?.configured) {
+    const creating = this.conversationId === null && Boolean(this.adapter.create)
+    if (!creating && (this.unreadable || !chat?.configured)) {
       this.send = { kind: 'failed', text: this.unreadable ?? chat?.reason ?? 'the relay cannot post right now' }
       this.renderStatus()
       return
     }
-    if (chat.max_chars && text.length > chat.max_chars) {
+    if (chat?.max_chars && text.length > chat.max_chars) {
       this.send = { kind: 'failed', text: `${text.length} characters is over the ${chat.max_chars} the relay sends` }
       this.renderStatus()
       return
@@ -380,10 +428,20 @@ export class FrontDeskScene extends Phaser.Scene {
     this.send = { kind: 'sending', at: Date.now() / 1000 }
     this.renderStatus()
     this.renderPrompt()
-    const result = await this.source.send(this.conversationId, text, submitToken())
+    // With no conversation open the first post opens one (an argue); after
+    // that a post goes into the source conversation, whichever view is on.
+    const opening = this.conversationId === null
+    const result = opening
+      ? (this.adapter.create ? await this.adapter.create(text, submitToken()) : { sent: false, error: 'this room cannot open a conversation' })
+      : await this.adapter.send(this.conversationId as string, text, submitToken())
     this.sending = false
     this.keys.setDisabled(false)
-    if (result.sent) {
+    if (result.sent && opening && result.key) {
+      this.send = { kind: 'idle' }
+      this.keys.set('')
+      this.openConversation(result.key)
+      void this.refreshBoard()
+    } else if (result.sent) {
       this.send = result.resumed ? { kind: 'resumed' } : { kind: 'idle' }
       this.keys.set('')
       // The developer just spoke: the next reply is what they are waiting
@@ -407,17 +465,20 @@ export class FrontDeskScene extends Phaser.Scene {
   }
 
   private startConversation() {
-    this.openConversation(newConversationId())
+    this.openConversation(this.adapter.newKey())
+    this.keys.focus()
   }
 
-  private openConversation(id: string) {
+  private openConversation(id: string | null) {
     if (id === this.conversationId) return
     // A plan is one conversation's. Switching drops it rather than leaving
     // another conversation's targets on the screen.
-    this.closePanel.close()
+    this.closePanel?.close()
     this.conversationId = id
+    this.wanted = null
     const url = new URL(location.href)
-    url.searchParams.set('conv', id)
+    if (id === null) url.searchParams.delete(this.adapter.param)
+    else url.searchParams.set(this.adapter.param, id)
     history.replaceState(null, '', url)
     this.detail = undefined
     this.signature = ''
@@ -455,13 +516,21 @@ export class FrontDeskScene extends Phaser.Scene {
     return FrontDeskSettings.front(manifest)
   }
 
+  // Who a turn is drawn as. A rendered turn names its character; a post as
+  // written is drawn with its speaker's own character when the settings have
+  // one (`sage:arxiv` by its label, an agent by its roster name), and with
+  // the common icon under its label when they do not. Front — the account
+  // itself, never a logical speaker on it — stands in the lower left.
   private speakerOf(turn: PlayTurn | null, manifest: SettingsManifest | null): { character: SettingsCharacter | null; label: string; front: boolean } {
-    if (!turn || turn.character === null) {
-      const front = this.frontOf(manifest)
-      return { character: front, label: front?.name ?? 'Front', front: true }
+    const home = this.frontOf(manifest)
+    if (!turn) return { character: home, label: home?.name ?? 'Front', front: true }
+    if (turn.character === null) {
+      const character = FrontDeskSettings.forSpeaker(manifest, turn.agent, turn.speaker)
+      const front = turn.agent === 'front' && !turn.speaker.includes(':')
+      return { character: character ?? (front ? home : null), label: character?.name ?? turn.speaker, front }
     }
     const character = FrontDeskSettings.character(manifest, turn.character)
-    const front = character !== null && character === this.frontOf(manifest)
+    const front = character !== null && character === home
     return { character, label: character?.name ?? turn.character, front }
   }
 
@@ -558,12 +627,18 @@ export class FrontDeskScene extends Phaser.Scene {
     this.historyButton.setPosition(width - MARGIN, buttonsY).setOrigin(1, 0)
     this.newButton.setPosition(this.historyButton.x - this.historyButton.width - 8, buttonsY).setOrigin(1, 0)
     this.finishButton.setPosition(this.newButton.x - this.newButton.width - 8, buttonsY).setOrigin(1, 0)
-    this.settingsButton.setPosition(this.finishButton.x - this.finishButton.width - 8, buttonsY).setOrigin(1, 0)
-    this.closePanel.layout(width, barY)
+    const afterFinish = this.finishButton.visible ? this.finishButton.x - this.finishButton.width - 8 : this.newButton.x - this.newButton.width - 8
+    this.settingsButton.setPosition(afterFinish, buttonsY).setOrigin(1, 0)
+    // The view row sits under the room's buttons, right-aligned like them.
+    const viewY = buttonsY + 30
+    this.viewButton.setPosition(width - MARGIN, viewY).setOrigin(1, 0)
+    this.interpretationButton.setPosition(this.viewButton.x - this.viewButton.width - 8, viewY).setOrigin(1, 0)
+    this.reinterpretButton.setPosition(this.interpretationButton.x - this.interpretationButton.width - 8, viewY).setOrigin(1, 0)
+    this.closePanel?.layout(width, barY)
 
     // History panel: right side, above the bar; the whole frame when narrow.
     const panelX = width - MARGIN - historyWidth
-    const panelY = this.narrow ? 100 : 80
+    const panelY = this.narrow ? 130 : 110
     const panelHeight = barY - 8 - panelY
     this.historyPanel.setVisible(this.historyOpen)
     if (this.historyOpen) {
@@ -589,22 +664,26 @@ export class FrontDeskScene extends Phaser.Scene {
 
   private renderCaption() {
     const conversation = this.detail?.conversation
-    const topic = conversation?.live_topic ?? `front-desk-${this.conversationId}`
-    this.caption.setText(`FRONT DESK · #front › ${topic}`)
-    if (this.unreadable) {
+    const where = conversation ? `#${conversation.channel} › ${conversation.live_topic}`
+      : this.conversationId === null ? 'no conversation open' : `${this.adapter.param} ${this.conversationId}`
+    this.caption.setText(`${this.adapter.title} · ${where}`)
+    this.renderViewButtons()
+    if (this.conversationId === null) {
+      this.health.setText('nothing is open — pick a conversation in the history panel, or start one below').setColor(COLOR.dim)
+    } else if (this.unreadable) {
       this.health.setText(`⚠ UNKNOWN — ${this.unreadable}; last known history`).setColor(COLOR.warn)
     } else if (!this.detail) {
       this.health.setText('reading the conversation…').setColor(COLOR.dim)
     } else if (this.detail.health.state !== 'live') {
       this.health.setText(`⚠ UNKNOWN — ${this.detail.health.reason}; last known history`).setColor(COLOR.warn)
     } else {
-      const chat = this.detail.chat.configured ? 'chat posts as the Developer' : (this.detail.chat.reason ?? 'chat read-only')
+      const chat = this.detail.chat.configured ? 'you post as the Developer' : (this.detail.chat.reason ?? 'chat read-only')
       const known = conversation?.known === 'read' ? ' · read from Zulip' : conversation?.known === 'unknown' ? ' · history unknown' : ''
       this.health.setText(`relay live · ${chat}${known}${conversation?.resolved ? ' · ✔ resolved' : ''}`).setColor(COLOR.live)
     }
     const view = this.manifestInView()
     const parts = [this.settings.summary()]
-    if (this.current?.revision && !view.note) parts.push(`scene at ${this.current.revision.slice(0, 12)}`)
+    if (this.current?.revision && !view.note) parts.push(`dialogue at ${this.current.revision.slice(0, 12)}`)
     if (view.note) parts.push(view.note)
     const failed = this.failedTextures.size ? ` · ${this.failedTextures.size} image${this.failedTextures.size > 1 ? 's' : ''} unreadable, fallback shown` : ''
     const bad = Boolean(view.note) || this.failedTextures.size > 0 || !this.settings.activeManifest
@@ -639,7 +718,7 @@ export class FrontDeskScene extends Phaser.Scene {
     const front = this.frontOf(manifest)
     // Front's portrait and the background follow the revision in view.
     this.portrait.setTexture(this.texture(front?.face ?? null, FALLBACK_FACE))
-    const bgKey = this.texture(FrontDeskSettings.background(manifest), FALLBACK_BG)
+    const bgKey = this.texture(FrontDeskSettings.background(manifest, this.adapter.room), FALLBACK_BG)
     if (this.bg.texture.key !== bgKey) this.bg.setTexture(bgKey)
     const width = this.scale.width
     const height = this.scale.height
@@ -656,13 +735,15 @@ export class FrontDeskScene extends Phaser.Scene {
     const { x, y, width: boxWidth } = this.dialogueRect
 
     if (!reply || !turn) {
-      this.speaker.setText(front?.name ?? (this.detail?.conversation.posts.length ? 'Front' : 'Front Desk'))
-      const placeholder = this.detail === undefined
-        ? '…'
-        : this.detail.conversation.posts.length === 0
-          ? 'A new conversation. Say something in the bar below — Front answers here, and every post is kept in the history panel.'
-          : 'No reply from Front in this conversation yet.'
-      const box = this.boxFor({ character: null, text: placeholder, sources: [] }, null)
+      this.speaker.setText(front?.name ?? 'Front')
+      const placeholder = this.conversationId === null
+        ? this.adapter.words.empty
+        : this.detail === undefined
+          ? '…'
+          : this.detail.conversation.posts.length === 0
+            ? this.adapter.words.empty
+            : 'No agent has spoken in this conversation yet.'
+      const box = this.boxFor({ character: null, text: placeholder, sources: [], speaker: 'Front', agent: 'front' }, null)
       this.pages = paginate(wrapText(placeholder, box.innerWidth, this.measure), box.linesPerPage)
       this.body.setColor(COLOR.muted).setText(this.pages[0].join('\n')).setAlpha(1)
       this.portrait.setAlpha(1).clearTint()
@@ -742,7 +823,10 @@ export class FrontDeskScene extends Phaser.Scene {
     this.coFrame.fillRoundedRect(x, y, width, height, 14)
     this.coFrame.lineStyle(1, 0x5a4a80, alpha)
     this.coFrame.strokeRoundedRect(x, y, width, height, 14)
-    const label = who.character ? `${who.character.name}${who.character.nickname ? `（${who.character.nickname}）` : ''}` : `${who.label} · not in these settings`
+    // A logical speaker keeps its own label beside the face it borrows.
+    const named = who.character ? `${who.character.name}${who.character.nickname ? `（${who.character.nickname}）` : ''}` : null
+    const label = named ? (turn.speaker.includes(':') ? `${named} · ${turn.speaker}` : named)
+      : turn.character === null ? who.label : `${who.label} · not in these settings`
     this.coSpeaker.setText(label).setAlpha(alpha).setColor(who.character ? COLOR.other : COLOR.warn)
     const text = pageText ?? wrapText(turn.text, width - 32, this.measure).slice(0, 3).join('\n')
     this.coBody.setText(text).setAlpha(alpha).setColor(pageText ? COLOR.ink : COLOR.muted)
@@ -778,10 +862,14 @@ export class FrontDeskScene extends Phaser.Scene {
       chipX += chip.width + 6
       this.chips.push(chip)
     }
+    // A rendered line leads back to what was actually said: the chip opens
+    // the cited post as written.
     for (const source of sources) {
       const label = citation(source)
       const chip = this.text(0, 0, `📎 ${label.length > maxLabel ? `${label.slice(0, maxLabel - 1)}…` : label}`, MONO, 11, COLOR.other)
         .setBackgroundColor('#1b1830').setPadding(8, 4, 8, 4)
+        .setInteractive({ useHandCursor: true })
+        .on('pointerup', () => this.showSource(source))
       place(chip)
     }
     for (const link of links) {
@@ -804,7 +892,7 @@ export class FrontDeskScene extends Phaser.Scene {
     let text = ''
     let color = COLOR.muted
     if (this.send.kind === 'sending') {
-      text = `posting to #front… (${Math.round(now - this.send.at)}s)`
+      text = `posting… (${Math.round(now - this.send.at)}s)`
       color = COLOR.accent2
     } else if (this.send.kind === 'failed') {
       text = `✖ not sent — ${this.send.text}`
@@ -813,7 +901,7 @@ export class FrontDeskScene extends Phaser.Scene {
       text = `? uncertain — ${this.send.text}`
       color = COLOR.warn
     } else if (this.send.kind === 'resumed') {
-      text = '↩ reopened this conversation — the work it closed stays closed'
+      text = this.adapter.words.resumed
       color = COLOR.warn
     } else if (this.unreadable || (this.detail && this.detail.health.state !== 'live')) {
       text = '⚠ state unknown — the relay cannot be read; nothing here is current'
@@ -834,7 +922,7 @@ export class FrontDeskScene extends Phaser.Scene {
           color = COLOR.live
           break
         case 'done':
-          text = '✔ resolved — posting here reopens the conversation, not the work it closed'
+          text = this.adapter.words.done
           color = COLOR.dim
           break
         case 'quiet':
@@ -844,10 +932,17 @@ export class FrontDeskScene extends Phaser.Scene {
           text = `⚠ ${conversation.status.evidence}`
           color = COLOR.warn
       }
-      if (this.current?.error) {
-        text = `${text ? `${text} · ` : ''}scene unusable: ${this.current.error}`
-        color = COLOR.warn
+      // Why the reply on show is drawn the way it is: a rendering still to
+      // come, a failed one, a stale one. The words are already on screen.
+      const note = this.mode === 'dialogue' ? this.current?.note : null
+      if (note) {
+        text = `${text ? `${text} · ` : ''}${note}`
+        if (this.current?.state !== 'pending') color = COLOR.warn
       }
+    }
+    if (this.renderNote && this.renderNote.until > now && this.send.kind === 'idle') {
+      text = this.renderNote.text
+      color = this.renderNote.color
     }
     // The status shares the box header with the speaker's name: it is cut
     // to what fits rather than drawn over the name.
@@ -863,10 +958,14 @@ export class FrontDeskScene extends Phaser.Scene {
 
   private renderPrompt() {
     const chat = this.detail?.chat
-    const usable = !this.sending && !this.unreadable && Boolean(chat?.configured) && this.detail?.health.state === 'live'
+    // A room with nothing open can still open something: the composer is
+    // live as soon as the room has a way to create a conversation.
+    const opening = this.conversationId === null && Boolean(this.adapter.create)
+    const usable = !this.sending && (opening || (!this.unreadable && Boolean(chat?.configured) && this.detail?.health.state === 'live'))
     const maxWidth = Math.max(40, (this.counter.x - this.counter.width - 12) - (MARGIN + 16))
     if (this.draft === '') {
-      const hint = usable ? (maxWidth < 420 ? 'Say something to Front…' : 'Say something to Front… (Enter sends, Shift+Enter is a newline)') : 'chat is not available right now'
+      const words = opening ? 'State what you want, to open a new argue…' : this.adapter.words.prompt
+      const hint = usable ? (maxWidth < 420 ? words : `${words} (Enter sends, Shift+Enter is a newline)`) : 'chat is not available right now'
       this.promptText.setText(hint).setColor(COLOR.dim)
     } else {
       // The bar shows the tail of a long draft, on one line; the history
@@ -935,49 +1034,65 @@ export class FrontDeskScene extends Phaser.Scene {
       cursor += 8
     }
 
-    if (!this.detail) {
+    if (this.conversationId === null) {
+      add('No conversation is open. Pick one above, or state what you want in the bar below to open a new one.', COLOR.dim, FONT, HISTORY_PX, false)
+    } else if (!this.detail) {
       add(this.unreadable ? `History unknown — ${this.unreadable}` : 'reading…', this.unreadable ? COLOR.warn : COLOR.dim, FONT, HISTORY_PX, false)
     } else if (posts.length === 0) {
       add(this.detail.conversation.known === 'unknown' ? 'History unknown — the relay could not read this conversation.' : 'Nothing has been posted in this conversation yet.', COLOR.dim, FONT, HISTORY_PX, false)
     }
-    if (this.detail?.conversation.history.bounded) {
-      add(`Only the newest ${this.detail.conversation.history.posts} posts are held; older ones are in Zulip.`, COLOR.warn, MONO, 11, false)
+    if (this.detail?.conversation.bounded) {
+      add(`Only the newest ${posts.length} posts are held; older ones are in Zulip.`, COLOR.warn, MONO, 11, false)
     }
     const active = this.settings.activeManifest
+    const shown = this.detail?.conversation.presentation ?? null
+    let highlightAt: number | null = null
     for (const post of posts) {
       if (post.kind === 'ack') {
-        add(`· Front received it · ${clock(post.at)}`, COLOR.dim, MONO, 10.5, false)
+        add(`· ${post.speaker} received it · ${clock(post.at)}`, COLOR.dim, MONO, 10.5, false)
         cursor += 4
         continue
       }
-      if (post.kind === 'developer') {
-        row('user', null, '👤', post.by, COLOR.accent2, post.content, COLOR.muted, post.at)
+      const marked = post.message_id === this.highlighted
+      if (marked) highlightAt = cursor
+      if (post.kind === 'human') {
+        row('user', null, '👤', `${post.by}${marked ? '  ◀ cited' : ''}`, marked ? COLOR.warn : COLOR.accent2, post.content, COLOR.muted, post.at)
         continue
       }
-      if (post.kind === 'other') {
-        const known = FrontDeskSettings.bySender(active, post.by)
-        row(known ? 'character' : 'other', known?.face ?? null, '?', known ? known.name : post.by, known ? COLOR.other : COLOR.dim, post.content, COLOR.muted, post.at)
-        continue
-      }
-      // Front's reply: its turns when it has a scene (each with the face of
-      // the revision the scene names), the reply itself when not. Never both.
-      const scene = post.dialogue && post.dialogue.turns.length > 0 ? post.dialogue : null
-      const { manifest, note } = this.settings.resolve(scene?.settings_revision ?? null)
-      const front = this.frontOf(manifest)
-      if (!scene) {
-        const frontLabel = front ? `${front.name}${front.nickname ? `（${front.nickname}）` : ''}` : post.by
-        row('character', front?.face ?? null, 'F', frontLabel, COLOR.accent, post.content, COLOR.ink, post.at)
-        if (post.dialogue_error) add(`⚠ scene unusable: ${post.dialogue_error}`, COLOR.warn, MONO, 10.5)
-        continue
-      }
-      if (note) add(`⚠ ${note}`, COLOR.warn, MONO, 10.5, false)
-      for (const turn of scene.turns) {
-        const character = FrontDeskSettings.character(manifest, turn.character)
-        const isFront = character !== null && character === front
-        const label = character ? `${character.name}${character.nickname ? `（${character.nickname}）` : ''}` : `${turn.character} · not in these settings`
-        row('character', character?.face ?? null, '?', label, isFront ? COLOR.accent : character ? COLOR.other : COLOR.warn, turn.text, COLOR.ink, post.at)
-        cursor -= 4
-        if (turn.sources.length) add(turn.sources.map(citation).join('   '), COLOR.dim, MONO, 10)
+      // An agent's post: the turns of the interpretation on show when the
+      // view is the dialogue and one exists (each with the faces of its own
+      // revision and the posts it cites), the post as written otherwise —
+      // and always as written for the post a citation pointed at.
+      const found = this.mode === 'dialogue' && !marked
+        ? renderingOf(shown?.renderings[String(post.message_id)], this.wanted, shown?.active_revision ?? null) : null
+      const voiced = found?.turns.filter((turn) => !turn.plain && turn.character && turn.text) ?? []
+      if (!found || voiced.length === 0) {
+        const character = FrontDeskSettings.forSpeaker(active, post.agent, post.speaker)
+          ?? (post.agent === 'front' && !post.speaker.includes(':') ? this.frontOf(active) : null)
+        const isFront = post.agent === 'front' && !post.speaker.includes(':')
+        const named = character ? `${character.name}${character.nickname ? `（${character.nickname}）` : ''}` : null
+        const label = `${named ? (post.speaker.includes(':') ? `${named} · ${post.speaker}` : named) : post.speaker} · as written${marked ? '  ◀ cited' : ''}`
+        row(character ? 'character' : 'other', character?.face ?? null, '?', label,
+          marked ? COLOR.warn : isFront ? COLOR.accent : character ? COLOR.other : COLOR.dim, post.content, COLOR.ink, post.at)
+      } else {
+        const { manifest, note } = this.settings.resolve(found.settings_revision)
+        const front = this.frontOf(manifest)
+        if (note) add(`⚠ ${note}`, COLOR.warn, MONO, 10.5, false)
+        if (found.stale) add('⚠ the post changed after this was rendered', COLOR.warn, MONO, 10.5, false)
+        for (const turn of voiced) {
+          const character = FrontDeskSettings.character(manifest, turn.character)
+          const isFront = character !== null && character === front
+          const label = character ? `${character.name}${character.nickname ? `（${character.nickname}）` : ''}` : `${turn.character} · not in these settings`
+          row('character', character?.face ?? null, '?', label, isFront ? COLOR.accent : character ? COLOR.other : COLOR.warn, turn.text ?? '', COLOR.ink, post.at)
+          cursor -= 4
+          if (turn.sources.length) {
+            const chip = this.text(textX, y + cursor, `📎 ${turn.sources.map(citation).join('   ')}`, MONO, 10, COLOR.dim)
+              .setInteractive({ useHandCursor: true })
+              .on('pointerup', () => this.showSource(turn.sources[0]))
+            this.historyList.add(chip)
+            cursor += chip.height + 4
+          }
+        }
       }
       const links = linksIn(post.content)
       if (links.length) {
@@ -993,6 +1108,8 @@ export class FrontDeskScene extends Phaser.Scene {
       cursor += 6
     }
     this.historyHeight = cursor
+    // A cited post is brought into view; otherwise the scroll stays put.
+    if (highlightAt !== null) this.historyScroll = Math.max(0, highlightAt - 8)
     this.scrollHistory(0)
   }
 
@@ -1000,18 +1117,18 @@ export class FrontDeskScene extends Phaser.Scene {
     for (const chip of this.conversationChips) chip.destroy()
     this.conversationChips = []
     if (!this.historyOpen) return
-    const rows = this.board?.conversations ?? []
+    const rows = this.board ?? []
     const { x: panelX } = { x: this.historyViewport.x - 8 }
     let chipX = panelX + 14
     let chipY = this.historyViewport.y - 6 - this.conversationChipRows() * 24
     const width = this.historyViewport.width + 16
     for (const row of this.recentConversations(rows)) {
-      const active = row.id === this.conversationId
-      const label = `${row.resolved ? '✔ ' : ''}${row.id}`
+      const active = row.key === this.conversationId
+      const label = `${row.resolved ? '✔ ' : ''}${row.label}`
       const chip = this.text(0, 0, label, MONO, 10.5, active ? '#0d0f14' : COLOR.muted)
         .setBackgroundColor(active ? '#70c7ff' : '#1b2030').setPadding(7, 3, 7, 3)
         .setInteractive({ useHandCursor: true })
-        .on('pointerup', () => this.openConversation(row.id))
+        .on('pointerup', () => this.openConversation(row.key))
       if (chipX + chip.width > panelX + width - 14) {
         chipX = panelX + 14
         chipY += 24
@@ -1023,21 +1140,19 @@ export class FrontDeskScene extends Phaser.Scene {
     }
   }
 
-  private recentConversations(rows: DeskConversationRow[]): DeskConversationRow[] {
+  private recentConversations(rows: RoomRow[]): RoomRow[] {
     const sorted = [...rows].sort((a, b) => (b.last_post?.at ?? 0) - (a.last_post?.at ?? 0))
     const recent = sorted.slice(0, 8)
-    if (!recent.some((row) => row.id === this.conversationId)) {
-      recent.unshift({
-        id: this.conversationId, topic: `front-desk-${this.conversationId}`, live_topic: `front-desk-${this.conversationId}`,
-        resolved: false, posts: 0, last_post: null, status: { state: 'quiet', since: null, evidence: 'new' },
-      })
+    const open = this.conversationId
+    if (open !== null && !recent.some((row) => row.key === open)) {
+      recent.unshift({ key: open, label: open, resolved: false, last_post: null })
     }
     return recent
   }
 
   private conversationChipRows(): number {
     // A rough count for the layout: the chips are ~130px each.
-    const count = this.recentConversations(this.board?.conversations ?? []).length
+    const count = this.recentConversations(this.board ?? []).length
     const perRow = Math.max(1, Math.floor((this.historyViewport.width + 16 - 28) / 136))
     return Math.max(1, Math.ceil(count / perRow))
   }
@@ -1055,9 +1170,103 @@ export class FrontDeskScene extends Phaser.Scene {
   }
 
   private toggleClose() {
+    if (!this.closePanel || this.conversationId === null) return
     this.closePanel.toggle()
     this.closePanel.layout(this.scale.width, this.scale.height - BAR_HEIGHT - MARGIN)
     this.keys.focus()
+  }
+
+  // --- the view: dialogue or original, and which interpretation ----------------
+
+  private highlighted: number | null = null
+
+  // Rebuild the replies for the view on show, keeping the reader on the
+  // reply they were reading.
+  private replay() {
+    const conversation = this.detail?.conversation
+    this.replies = conversation ? repliesOf(conversation.posts, conversation.presentation, this.mode, this.wanted) : []
+    this.pageCache.clear()
+    this.cursor = settle({ ...this.cursor, turn: 0, page: 0 }, this.replies, this.shownId)
+    this.shownId = this.cursor.reply >= 0 ? this.replies[this.cursor.reply].message_id : null
+    this.renderDialogue()
+    this.renderHistory()
+    this.renderCaption()
+    this.renderStatus()
+  }
+
+  private toggleView() {
+    this.mode = this.mode === 'dialogue' ? 'original' : 'dialogue'
+    this.highlighted = null
+    this.replay()
+    this.keys.focus()
+  }
+
+  // Through the saved interpretations, newest first, and back to following
+  // the active settings.
+  private cycleInterpretation() {
+    const saved = (this.detail?.conversation.presentation?.interpretations ?? []).map((one) => one.settings_revision)
+    const choices: (string | null)[] = [null, ...saved.filter((revision, index) => saved.indexOf(revision) === index)]
+    const at = choices.indexOf(this.wanted)
+    this.wanted = choices[(at + 1) % choices.length]
+    this.mode = 'dialogue'
+    this.replay()
+    this.keys.focus()
+  }
+
+  // Ask Front for an interpretation with the settings that are current now.
+  // The earlier ones stay; this only adds one, and only because it was asked.
+  private async reinterpret() {
+    const key = this.conversationId
+    if (key === null || this.asking) return
+    this.asking = true
+    const revision = this.settings.activeRevision
+    const result = await this.adapter.render(key, revision, submitToken())
+    this.asking = false
+    const until = Date.now() / 1000 + 12
+    this.renderNote = result.sent
+      ? { text: `asked Front to re-voice this at settings ${(revision ?? 'current').slice(0, 12)} — earlier interpretations stay`, color: COLOR.other, until }
+      : { text: `✖ not asked — ${result.error ?? 'the relay refused'}`, color: COLOR.bad, until }
+    this.wanted = null
+    this.renderStatus()
+    this.keys.focus()
+    await this.refresh()
+  }
+
+  // From a rendered line to what was actually said: the posts as written,
+  // on the cited post, with the history open on it.
+  private showSource(source: Citation) {
+    const id = source.message_id
+    if (id === null || id === undefined) return
+    this.mode = 'original'
+    this.highlighted = id
+    const conversation = this.detail?.conversation
+    this.replies = conversation ? repliesOf(conversation.posts, conversation.presentation, this.mode, this.wanted) : []
+    const found = this.replies.findIndex((reply) => reply.message_id === id)
+    if (found >= 0) {
+      this.cursor = { reply: found, turn: 0, page: 0 }
+      this.shownId = id
+    }
+    this.pageCache.clear()
+    if (!this.historyOpen) this.toggleHistory()
+    else { this.renderDialogue(); this.renderHistory() }
+    this.renderCaption()
+    this.renderStatus()
+  }
+
+  private renderViewButtons() {
+    const shown = this.detail?.conversation.presentation ?? null
+    this.viewButton.setText(this.mode === 'dialogue' ? 'view: dialogue ⇄' : 'view: original ⇄')
+    const saved = shown?.interpretations.length ?? 0
+    const which = this.wanted ? this.wanted.slice(0, 8) : shown?.active_revision ? `active ${shown.active_revision.slice(0, 8)}` : 'active'
+    const state = shown?.renderer.state
+    const mark = state === 'rendering' ? ' …' : state === 'unavailable' ? ' ⚠' : shown && shown.failed.length ? ' ✖' : ''
+    this.interpretationButton.setText(`interpretation: ${which} (${saved} saved)${mark}`)
+      .setColor(state === 'unavailable' || (shown && shown.failed.length) ? COLOR.warn : COLOR.muted)
+      .setAlpha(this.mode === 'dialogue' ? 1 : 0.5)
+    this.reinterpretButton.setAlpha(this.conversationId !== null && !this.asking ? 1 : 0.45)
+    // Their widths follow their words.
+    this.interpretationButton.setX(this.viewButton.x - this.viewButton.width - 8)
+    this.reinterpretButton.setX(this.interpretationButton.x - this.interpretationButton.width - 8)
   }
 
   private toggleHistory() {
@@ -1066,7 +1275,7 @@ export class FrontDeskScene extends Phaser.Scene {
     // The draft is untouched: it lives in the textarea, not in this panel.
     this.layout(this.scale.width, this.scale.height)
     if (this.historyOpen) {
-      this.historyScroll = Number.MAX_SAFE_INTEGER
+      if (this.highlighted === null) this.historyScroll = Number.MAX_SAFE_INTEGER
       this.scrollHistory(0)
       void this.refreshBoard()
     }

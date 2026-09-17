@@ -4,7 +4,7 @@ if (params.get('parts') === 'gauge') {
   void import('./gaugePanel').then(module => module.initGaugePanel())
 } else if (params.get('parts') === 'graph') {
   void import('./operationParts').then(module => module.initOperationParts())
-} else if (params.get('view') === 'frontdesk') {
+} else if (params.get('view') === 'frontdesk' || params.get('view') === 'argue') {
   void import('./frontDesk')
 } else if (params.has('view') && params.get('parts') !== 'shell') {
   void import('./worldViews')

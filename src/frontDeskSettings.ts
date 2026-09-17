@@ -62,7 +62,7 @@ export class FrontDeskSettings {
   // active one with a note when the relay does not retain it.
   resolve(revision: string | null): Resolved {
     const active = this.activeManifest
-    if (!revision || revision === 'demo') return { manifest: active, substituted: false, note: null }
+    if (!revision || revision.startsWith('demo')) return { manifest: active, substituted: false, note: null }
     const known = this.manifests.get(revision)
     if (known) return { manifest: known, substituted: false, note: null }
     const gone = this.missing.get(revision)
@@ -98,10 +98,23 @@ export class FrontDeskSettings {
     return Object.values(manifest.characters).find((c) => c.senders.includes(sender)) ?? null
   }
 
-  static background(manifest: SettingsManifest | null): string | null {
+  // The speaker of a post as written: a logical participant (`sage:arxiv`)
+  // by its label, an agent by its roster name. None is a speaker without a
+  // character, drawn with the common icon under its own label.
+  static forSpeaker(manifest: SettingsManifest | null, agent: string | null, speaker: string): SettingsCharacter | null {
     if (!manifest) return null
-    const room = manifest.rooms['front'] ?? Object.values(manifest.rooms)[0]
-    return room?.background ?? null
+    const characters = Object.values(manifest.characters)
+    if (speaker.includes(':')) return characters.find((c) => c.senders.includes(speaker)) ?? null
+    return characters.find((c) => agent !== null && c.agents.includes(agent))
+      ?? characters.find((c) => c.senders.includes(speaker)) ?? null
+  }
+
+  // A room's own background; the Front Desk's when the revision predates
+  // the room (an old interpretation is still drawn somewhere).
+  static background(manifest: SettingsManifest | null, room = 'front'): string | null {
+    if (!manifest) return null
+    const found = manifest.rooms[room] ?? manifest.rooms['front'] ?? Object.values(manifest.rooms)[0]
+    return found?.background ?? null
   }
 
   summary(): string {

@@ -80,7 +80,13 @@ def locate(mirror: Mirror, anchor: int) -> Located | None:
     if message is None:
         return None
     bare = bare_topic(message.topic)
-    live = mirror.live_name(message.channel, bare) or message.topic
+    # Judged from the messages, not from the topic listing: a listing row can
+    # outlive the rename that emptied it (met live, `argue` p2 step 5 — a
+    # resolved argue read as open). The anchor's own topic is where the
+    # conversation is; an open twin counts only when it really holds posts.
+    live = message.topic
+    if live.startswith(RESOLVED_TOPIC_PREFIX) and mirror.messages(message.channel, bare, across_resolve=False):
+        live = bare
     return Located(int(anchor), message.channel, bare, live, live.startswith(RESOLVED_TOPIC_PREFIX))
 
 

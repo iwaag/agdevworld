@@ -333,3 +333,27 @@ def test_the_routes_answer_over_http():
     finally:
         server.shutdown()
         server.server_close()
+
+
+def test_the_reader_joins_new_public_channels_and_re_reads_what_it_missed():
+    """A resolve is a move, and moves reach only subscribers (met live)."""
+    from agentroom.subscriptions import ensure_subscribed
+
+    realm, mirror, _, room = world()
+
+    class Reader:
+        def __init__(self):
+            self.joined, self.asked = {"agents"}, []
+
+        def subscriptions(self):
+            return [{"name": name} for name in self.joined]
+
+        def subscribe_channels(self, names):
+            self.asked.append(list(names))
+            self.joined.update(names)
+
+    reader, lines, resyncs = Reader(), [], []
+    mirror.resync = lambda: resyncs.append(1)
+    assert ensure_subscribed(reader, mirror, lines.append) == ["argue", "memo"]
+    assert reader.asked == [["argue", "memo"]] and resyncs == [1] and "#argue" in lines[0]
+    assert ensure_subscribed(reader, mirror, lines.append) == [] and resyncs == [1]

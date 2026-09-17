@@ -77,6 +77,15 @@ def main(argv: list[str] | None = None) -> int:
     host = os.environ.get("AGENTROOM_HOST", DEFAULT_HOST)
     port = int(os.environ.get("AGENTROOM_PORT", DEFAULT_PORT))
     mirror = Mirror.open(mirror_path, store_dir)
+    if not (argv and argv[0] == "check"):
+        # Moves (a rename, a ✔) reach only subscribers: keep the reader in
+        # every public channel, as channels appear (`subscriptions.py`).
+        from agag.zulip import ZulipClient
+
+        from .subscriptions import keep_subscribed
+
+        keep_subscribed(lambda: ZulipClient.from_env(mirror_path), mirror,
+                        log=lambda line: print(line, flush=True))
     room = Room(mirror=mirror)
     # The cost gauge reads the same roots `/inflight` does and needs no
     # credential at all; without roots there is nothing to read and /cost

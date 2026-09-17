@@ -618,3 +618,24 @@ def test_the_inflight_signal_names_the_latest_run_by_its_channel_and_opening():
     found = ops.inflight("papers")
     assert found["session"]["channel"] == "routine-papers" and found["session"]["topic"] == "routinerun-1"
     assert found["session"]["opened"]["message_id"] == opened and found["session"]["nodes"] == 0
+
+
+# --- a memo is displayed, never owed (`argue` p2 step 1) ---------------------
+
+
+def test_a_memo_conversation_is_held_for_display_and_is_nobodys_row():
+    """Front's re-voicing quotes mentions, owned-looking names and notes. The
+    engine keeps the conversation — the rooms read it — and the board, the
+    served marks and the link index never see it."""
+    memo = topic(
+        "memo", "front-desk-x-s1",
+        message("```ag-memo\n{\"text\": \"@**Front** what next?\"}\n```", ident=90, sender_id=15, sender="Front"),
+        message("@**Front** a real mention, written into a memo", ident=91, ago=5000),
+        message("[selfnote][rootchat] front/front-desk-x", ident=92, sender_id=15, sender="Front"),
+        message("[selfnote][served] pj-mediagen/workrun-task2 999", ident=93, sender_id=15, sender="Front"),
+    )
+    assert memo.roots == [] and memo.served == {}
+    assert memo.last.id == 91  # held, and readable
+    control = topic("pj-mediagen", "workrun-task2", message("@**Front** what next?", ident=77, ago=5000))
+    found = snapshot_with({"front-agstudio1": FRONT}, [memo, control])
+    assert [(row["channel"], row["state"]) for row in found["rows"]] == [("pj-mediagen", "stalled")]

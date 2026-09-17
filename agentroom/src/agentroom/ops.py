@@ -43,6 +43,7 @@ import time
 from dataclasses import dataclass, field
 
 from agag.agent import is_ack
+from agag.memo import is_memo_channel
 from agag.intro import (
     AGENTS_CHANNEL,
     INTRO_TOPIC_PREFIX,
@@ -195,7 +196,10 @@ class Topic:
     resolved_at: float | None = None
 
     def add(self, message: dict) -> None:
-        self.link(message)
+        if not is_memo_channel(self.channel):
+            # A memo is held for display only (`agag.memo`): a note copied
+            # into one links nothing, closes nothing and marks nothing served.
+            self.link(message)
         if not is_real(message):
             return
         found = Message.of(message)
@@ -884,7 +888,9 @@ class Ops:
             rosters = dict(self._rosters)
             retired = set(self._retired)
             marks = {k: dict(v) for k, v in self._marks.items()}
-            topics = list(self._topics.values())
+            # Memo conversations are held for the rooms that display them and
+            # are never a row: nobody owes a memo anything (`agag.memo`).
+            topics = [t for t in self._topics.values() if not is_memo_channel(t.channel)]
             channels = set(self._channels)
             confirmed = dict(self._confirmed)
         health = self._health()

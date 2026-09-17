@@ -31,6 +31,7 @@ from .budget import Budget
 from .chat import Chat
 from .close import Closer, parse_key
 from .cost import Cost
+from .argueroom import ArguingRoom
 from .frontdesk import FrontDesk
 from .inflight import ROOTS_VARIABLE
 from .ops import Ops
@@ -39,18 +40,19 @@ from .settings import Settings
 
 ROUTES = ("/healthz", "/agents", "/work", "/work?resolved=1", "/ops", "/routines", "/routines/<name>",
           "/inflight/<name>", "/cost", "/budget", "/frontdesk", "/frontdesk/<id>",
-          "/frontdesk/<id>/close-plan",
+          "/frontdesk/<id>/close-plan", "/argues", "/argues/<anchor>",
           "/complete/plan?channel=<channel>&topic=<topic>",
           "/complete/history?channel=<channel>&topic=<topic>",
           "/settings", "/settings/<revision>", "/settings/<revision>/<path>")
 WRITE_ROUTES = ("/ops/confirm", "/chat", "/routines/<name>/start", "/frontdesk/<id>/post",
-                "/frontdesk/<id>/close", "/complete")
+                "/frontdesk/<id>/close", "/frontdesk/<id>/render", "/complete",
+                "/argues", "/argues/<anchor>/post", "/argues/<anchor>/render")
 
 
 def make_handler(room: Room, ops: Ops | None = None, chat: Chat | None = None,
                  cost: Cost | None = None, budget: Budget | None = None,
                  desk: FrontDesk | None = None, settings: Settings | None = None,
-                 closer: Closer | None = None):
+                 closer: Closer | None = None, argues: ArguingRoom | None = None):
     class Handler(BaseHTTPRequestHandler):
         server_version = "agentroom/0.1.0"
 
@@ -218,6 +220,18 @@ def make_handler(room: Room, ops: Ops | None = None, chat: Chat | None = None,
                         self._write_json(503, {"error": "the budget read is not configured"})
                     else:
                         self._write_json(200, budget.snapshot())
+                elif path == "/argues" or path.startswith("/argues/"):
+                    # The Arguing Room (`argue` p2): the list, or one argue
+                    # by its anchor message id — source posts, Front's saved
+                    # interpretations and the rendering status, all from the
+                    # mirror.
+                    if argues is None:
+                        self._write_json(503, {"error": "the Arguing Room is not configured"})
+                    elif path == "/argues":
+                        self._write_json(200, argues.board())
+                    else:
+                        found = argues.argue(unquote(path[len("/argues/"):]))
+                        self._write_json(404 if found.get("error") else 200, found)
                 elif path == "/frontdesk":
                     # The Front Desk's conversations (`front_desk` p1). The
                     # engine's memory when it has them, the realm when not;
@@ -411,6 +425,44 @@ def make_handler(room: Room, ops: Ops | None = None, chat: Chat | None = None,
             else:
                 self._write_json(403, found)
 
+        def _answer_write(self, found: dict) -> None:
+            if found.get("sent"):
+                self._write_json(200, found)
+            elif found.get("uncertain"):
+                self._write_json(502, found)
+            else:
+                self._write_json(403, found)
+
+        def _argue_write(self, rest: str) -> None:
+            """The Arguing Room's writes, as the Developer, once per token:
+            `POST /argues` opens one, `/argues/<anchor>/post` is the human's
+            next turn (a ✔'d argue is resumed in place), and
+            `/argues/<anchor>/render` asks Front for another interpretation."""
+            if argues is None:
+                self._write_json(503, {"sent": False, "error": "the Arguing Room is not configured"})
+                return
+            body = self._body()
+            if body is None:
+                return
+            token = str(body.get("token") or "")
+            if rest == "":
+                self._answer_write(argues.create(body.get("stem"), str(body.get("text") or ""), token))
+            elif rest.endswith("/post"):
+                self._answer_write(argues.post(unquote(rest[:-len("/post")]), str(body.get("text") or ""), token))
+            elif rest.endswith("/render"):
+                self._answer_write(argues.render(unquote(rest[:-len("/render")]), body.get("revision"), token))
+            else:
+                self._write_json(404, {"error": f"no POST route /argues/{rest}", "post": list(WRITE_ROUTES)})
+
+        def _desk_render(self, ident: str) -> None:
+            if desk is None:
+                self._write_json(503, {"sent": False, "error": "the Front Desk is not configured"})
+                return
+            body = self._body()
+            if body is None:
+                return
+            self._answer_write(desk.render(ident, body.get("revision"), str(body.get("token") or "")))
+
         def _complete(self, key) -> None:
             """Close the selected request and the work it opened.
 
@@ -453,6 +505,12 @@ def make_handler(room: Room, ops: Ops | None = None, chat: Chat | None = None,
                 return
             if path.startswith("/frontdesk/") and path.endswith("/post"):
                 self._desk_post(unquote(path[len("/frontdesk/"):-len("/post")]))
+                return
+            if path == "/argues" or path.startswith("/argues/"):
+                self._argue_write(path[len("/argues"):].lstrip("/"))
+                return
+            if path.startswith("/frontdesk/") and path.endswith("/render"):
+                self._desk_render(unquote(path[len("/frontdesk/"):-len("/render")]))
                 return
             if path.startswith("/frontdesk/") and path.endswith("/close"):
                 ident = unquote(path[len("/frontdesk/"):-len("/close")])
@@ -510,8 +568,8 @@ def make_handler(room: Room, ops: Ops | None = None, chat: Chat | None = None,
 def build_server(
     host: str, port: int, room: Room, ops: Ops | None = None, chat: Chat | None = None,
     cost: Cost | None = None, budget: Budget | None = None, desk: FrontDesk | None = None,
-    settings: Settings | None = None, closer: Closer | None = None,
+    settings: Settings | None = None, closer: Closer | None = None, argues: ArguingRoom | None = None,
 ) -> ThreadingHTTPServer:
     return ThreadingHTTPServer(
-        (host, port), make_handler(room, ops, chat, cost, budget, desk, settings, closer)
+        (host, port), make_handler(room, ops, chat, cost, budget, desk, settings, closer, argues)
     )

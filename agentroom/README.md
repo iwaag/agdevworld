@@ -127,6 +127,8 @@ writes only to this process's memory (see `POST /ops/confirm`).
   `GET /frontdesk/<id>/close-plan` and `POST /frontdesk/<id>/close` are the
   same operation with the Front Desk id naming the topic. See below.
 
+- `GET /argues`, `GET /argues/<anchor>`, `POST /argues`, `POST /argues/<anchor>/post`,
+  `POST /argues/<anchor>/render` → the Arguing Room (below).
 - `GET /frontdesk`, `GET /frontdesk/<id>`, `POST /frontdesk/<id>/post` → the
   Front Desk's conversations, one conversation's history, and a post into it
   as the Developer (`front_desk` p1). See below.
@@ -264,17 +266,65 @@ inside Front's own `front-` sweep. Three routes, in `frontdesk.py`:
   with `uncertain: true` when the post left and Zulip did not confirm it;
   never a retry, because a post here starts a paid run.
 
-Since `front_desk` p2 step 3 each post of Front's also carries **`dialogue`**
-and **`dialogue_error`**. agfront ends a reply that reports on another agent
-with a fenced `ag-dialogue` JSON block (`ag.frontdesk-dialogue.v1`: the
-settings revision it was written for and ordered `turns`, each a character
-id, a text and the source posts it was drawn from), validated and
-re-serialized there. The relay splits it off: `content` is the reply
-without the block, `dialogue` the parsed scene (`null` for a Front-only
-reply), and `dialogue_error` the reason recorded in an `ag-dialogue-error`
-fence when the run's block was unusable — the reply is shown on its own
-then. A machine block never reaches the rendered conversation. The
-Developer's posts are shown as typed, fences included.
+Since `argue` p2 a Front post carries **no dialogue**. The discussion is
+plain, and Front re-voices it afterwards into a memo topic nobody reacts to
+(`agag.memo`, `agfront.render`). The conversation payload carries that
+relation as **`presentation`** (below); `POST /frontdesk/<id>/render`
+`{revision?, token}` asks for another interpretation. The old `ag-dialogue`
+block inside a reply is not parsed any more.
+
+## `/argues` — the Arguing Room (`argue` p2)
+
+A human starts, reads and continues an argue (`#argue › argue-<stem>`,
+`agag.argue`) from a screen. In `argueroom.py`; every read is the mirror's.
+
+- `GET /argues` → `ag.argueroom.v1`: every argue, newest first — `anchor`
+  (the `[selfnote][argue]` note's message id, which **is** the argue),
+  `topic`, `live_topic`, `resolved`, `speakers`, `desire`, `outcome`,
+  `status` (`waiting` / `received` / `answered` / `done` / `quiet`, read off
+  the newest real post; `unknown` with `stale_state` while the mirror is not
+  live).
+- `GET /argues/<anchor>` → one argue, located by where that message is
+  **now**: a renamed or resolved topic is followed, and a topic that took a
+  freed display name is another argue. `posts` are every participant's real
+  posts — `kind` (`human` / `agent` / `ack`), `agent` (roster name),
+  `speaker` (a logical one such as `sage:arxiv` for a post under that
+  header) — plus `presentation`.
+- `POST /argues` `{stem?, text, token}` → opens one as the Developer: the
+  anchor note, then the text verbatim. A stem in use is refused; without a
+  stem a UTC stamp is minted.
+- `POST /argues/<anchor>/post` `{text, token}` → the human's next turn,
+  **into the source argue**. A ✔'d argue is un-resolved first and the
+  discussion resumes; what it ended in is not reopened and nothing
+  downstream runs.
+- `POST /argues/<anchor>/render` `{revision?, token}` → one
+  `[selfnote][render] <settings revision>` in the source (the active
+  revision by default). It reopens nothing and buys nobody a run.
+
+Every write is once per `token` (a repeat returns the first result with
+`duplicate: true`), `403` for a refusal, `502` with `uncertain: true` when
+Zulip did not confirm; never retried. Finishing an argue is Front's outcome
+or the shared `/complete` door.
+
+### `presentation` — speech and its character dialogue
+
+The same block in `/argues/<anchor>` and `/frontdesk/<id>`
+(`presentation.py`; a desk conversation's anchor is its first post):
+
+- `memo` — the memo topic whose `[selfnote][memosource]` names the anchor;
+- `interpretations` — one per `(settings_revision, renderer)` saved so far,
+  with `results`, `posts`, `stale` counts. Older ones stay, and their
+  portraits are served by `/settings/<revision>/…`;
+- `renderings` — `{source message id: [{settings_revision, renderer, job,
+  stale, turns, memo_message_ids}]}`; each turn keeps its `sources`, so a
+  rendered line leads back to the posts it re-voices. A `plain` turn
+  (`character: null`) is a speaker without a character: show the post;
+- `pending` — agent posts with no fresh result at `active_revision`
+  (`overdue` after 15 min), `failed` and `refused` — the renderer's own
+  records, `requests` — interpretation requests seen in the source;
+- `renderer` — `idle` / `rendering` / `unavailable` / `unknown`, with the
+  reason. A result whose fingerprint no longer matches the source, or whose
+  source post is gone, is `stale`.
 
 ## `/complete` — finishing a request (`front_desk` p3, p4)
 

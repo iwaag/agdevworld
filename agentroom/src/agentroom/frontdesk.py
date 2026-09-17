@@ -34,21 +34,19 @@ Nothing here decides what a post *is* beyond the two facts the realm gives:
 `agag.agent.is_ack` for Front's transport ack, and the Front roster's bot id
 for "Front said it". Selfnotes never enter the history (`ops.is_real`).
 
-**Since `front_desk` p2 step 3 a Front post may carry a dialogue.** agfront
-ends such a reply with a fenced `ag-dialogue` JSON block
-(`ag.frontdesk-dialogue.v1`: the settings revision and ordered turns, each
-a character id, a text and optional source posts), validated and
-re-serialized there. Here the block is split off again: `content` is the
-reply without it, `dialogue` the parsed turns, and `dialogue_error` what
-agfront recorded in an `ag-dialogue-error` fence when the run's block was
-unusable — so the screen shows the reply either way and never a machine
-block. Zulip remains the record; nothing about a dialogue is kept anywhere
-else.
+**Since `argue` p2 a Front post carries no dialogue.** The discussion is
+plain; Front re-voices it afterwards into a memo topic (`agag.memo`,
+`agfront.render`). The conversation payload carries that relation as
+`presentation` — the same block the Arguing Room returns
+(`agentroom.presentation`): the interpretations saved so far, each post's
+turns per interpretation with their sources, what is pending, failed or
+stale. A desk conversation's anchor is its first post. `render` asks for
+another interpretation. The old `ag-dialogue` block inside a reply is not
+parsed any more; a conversation recorded that way shows its text as it is.
 """
 
 from __future__ import annotations
 
-import json
 import re
 import threading
 import time
@@ -60,7 +58,9 @@ from urllib.parse import quote
 from agag.agent import is_ack
 from agag.zulip import RESOLVED_TOPIC_PREFIX, ZulipClient
 
+from .argueroom import SubmitTokens, request_rendering
 from .chat import Chat
+from .presentation import Located, agents_of, presentation, shown_content
 from .room import DESK_PREFIX, FRONT_CHANNEL, bare_topic
 
 if TYPE_CHECKING:  # pragma: no cover - typing only; ops imports this module
@@ -83,79 +83,10 @@ TOKEN_MEMORY = 200
 READ_TTL_SECONDS = 30.0
 #: How much of an unheld conversation a direct read fetches.
 READ_DEPTH = 200
-#: The turn-taking mention `serve_topic` puts in front of every reply
-#: (`@**Developer**`). Transport, like the ack: shown to nobody.
-HANDOFF = re.compile(r"^\s*@\*\*[^*\n]+\*\*\s*\n+")
-#: agfront's dialogue block and its error fence (`agfront.dialogue`).
-DIALOGUE_SCHEMA = "ag.frontdesk-dialogue.v1"
-DIALOGUE_FENCE = re.compile(r"```[ \t]*ag-dialogue[ \t]*\n(.*?)\n[ \t]*```[ \t]*", re.DOTALL)
-DIALOGUE_ERROR_FENCE = re.compile(r"```[ \t]*ag-dialogue-error[ \t]*\n(.*?)\n[ \t]*```[ \t]*", re.DOTALL)
-
 __all__ = [
     "DESK_DEEP", "DESK_PREFIX", "FrontDesk", "ID_PATTERN", "SCHEMA",
-    "is_desk_topic", "newest_desk_topics", "post_kind", "shown_content", "split_dialogue", "status_of",
+    "is_desk_topic", "newest_desk_topics", "post_kind", "shown_content", "status_of",
 ]
-
-
-def shown_content(content: str) -> str:
-    """The post as the developer should read it: without the leading
-    handoff mention the skeleton prefixes to a reply."""
-    return HANDOFF.sub("", content, count=1)
-
-
-def _dialogue(body: str) -> dict:
-    """The block's JSON as the screen gets it, checked for shape only: the
-    block was validated against the settings when agfront wrote it."""
-    data = json.loads(body)
-    if not isinstance(data, dict) or data.get("schema") != DIALOGUE_SCHEMA:
-        raise ValueError(f"not an {DIALOGUE_SCHEMA} block")
-    turns = data.get("turns")
-    if not isinstance(turns, list) or not turns:
-        raise ValueError("no turns")
-    shaped = []
-    for turn in turns:
-        if not isinstance(turn, dict) or not str(turn.get("character") or "").strip() or not str(turn.get("text") or "").strip():
-            raise ValueError("a turn without a character or a text")
-        sources = [
-            {"channel": str(s.get("channel") or ""), "topic": str(s.get("topic") or ""),
-             "message_id": (int(s["message_id"]) if s.get("message_id") is not None else None)}
-            for s in (turn.get("sources") or []) if isinstance(s, dict)
-        ]
-        shaped.append({"character": str(turn["character"]).strip(), "text": str(turn["text"]).strip(),
-                       "sources": sources})
-    return {"schema": DIALOGUE_SCHEMA, "settings_revision": str(data.get("settings_revision") or ""),
-            "turns": shaped}
-
-
-def split_dialogue(content: str) -> tuple[str, dict | None, str | None]:
-    """`(shown text, dialogue, error)` for one post's content.
-
-    The reply is what remains once the last `ag-dialogue` block (or the
-    `ag-dialogue-error` fence) is removed. A block that does not parse here
-    is reported as an error too, so a machine block never reaches the
-    rendered conversation whatever state it is in.
-    """
-    text = shown_content(content)
-    error: str | None = None
-    dialogue: dict | None = None
-    found = list(DIALOGUE_ERROR_FENCE.finditer(text))
-    if found:
-        last = found[-1]
-        try:
-            record = json.loads(last.group(1))
-            error = str(record.get("error") or "the run's dialogue block was unusable")
-        except (ValueError, AttributeError):
-            error = "the run's dialogue block was unusable"
-        text = (text[:last.start()] + text[last.end():]).strip()
-    found = list(DIALOGUE_FENCE.finditer(text))
-    if found:
-        last = found[-1]
-        try:
-            dialogue = _dialogue(last.group(1))
-        except (ValueError, TypeError) as failure:
-            error = f"the dialogue block could not be read: {failure}"
-        text = (text[:last.start()] + text[last.end():]).strip()
-    return text, dialogue, error
 
 
 def is_desk_topic(channel: str, topic: str) -> bool:
@@ -231,6 +162,8 @@ def status_of(topic, front_id: int | None, developer_id: int | None) -> dict:
 class FrontDesk:
     ops: "Ops | None"
     chat: Chat
+    settings: object | None = None
+    submits: SubmitTokens = field(default_factory=SubmitTokens, repr=False)
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
     _tokens: "OrderedDict[str, dict]" = field(default_factory=OrderedDict, repr=False)
     _developer_id: int | None = field(default=None, repr=False)
@@ -295,14 +228,9 @@ class FrontDesk:
 
     @staticmethod
     def _post(m, front_id, developer_id) -> dict:
-        kind = post_kind(m, front_id, developer_id)
-        if kind == "agent":
-            content, dialogue, error = split_dialogue(m.content)
-        else:
-            content, dialogue, error = shown_content(m.content), None, None
         return {
             "message_id": m.id, "at": m.timestamp, "by": m.sender, "sender_id": m.sender_id,
-            "content": content, "kind": kind, "dialogue": dialogue, "dialogue_error": error,
+            "content": shown_content(m.content), "kind": post_kind(m, front_id, developer_id),
         }
 
     def _row(self, ident: str, held, live: str | None, front_id, developer_id) -> dict:
@@ -406,9 +334,51 @@ class FrontDesk:
             "history": {"posts": len(posts), "bounded": bounded, "note": note},
             "posts": posts, "latest_reply": latest,
             "zulip_url": self.zulip_url(row["live_topic"]),
+            "presentation": self._presentation(ident, now),
         }
         return {"schema": SCHEMA, "generated_at": now, "health": health,
                 "chat": self.chat.status(), "conversation": conversation}
+
+    # -- the source and its memo ------------------------------------------------
+
+    def _located(self, ident: str) -> tuple[Located, list] | None:
+        """This conversation as a rendering source: its anchor is its first
+        post. None while the mirror holds nothing of it."""
+        mirror = self.mirror
+        if mirror is None:
+            return None
+        messages = mirror.messages(FRONT_CHANNEL, desk_topic(ident))
+        if not messages:
+            return None
+        live = mirror.live_name(FRONT_CHANNEL, desk_topic(ident)) or desk_topic(ident)
+        return Located(messages[0].id, FRONT_CHANNEL, desk_topic(ident), live,
+                       live.startswith(RESOLVED_TOPIC_PREFIX)), messages
+
+    def _active_revision(self) -> str | None:
+        if self.settings is None:
+            return None
+        try:
+            active = self.settings.active()
+        except Exception:  # noqa: BLE001 - no settings is an answer, not an error
+            return None
+        return str(active.get("revision")) if active else None
+
+    def _presentation(self, ident: str, now: float) -> dict | None:
+        found = self._located(ident)
+        if found is None:
+            return None
+        where, messages = found
+        return presentation(self.mirror, where, messages, agents_of(self.mirror),
+                            active_revision=self._active_revision(), now=now)
+
+    def render(self, ident: str, revision: str | None, token: str) -> dict:
+        """Ask Front for another interpretation of this conversation."""
+        if not ID_PATTERN.match(ident or ""):
+            return {"sent": False, "uncertain": False, "error": f"{ident!r} is not a Front Desk conversation id"}
+        found = self._located(ident)
+        if found is None:
+            return {"sent": False, "uncertain": False, "error": "nothing of this conversation is held, so there is nothing to render"}
+        return request_rendering(self.chat, self.submits, found[0], revision or self._active_revision(), token)
 
     # -- the write ----------------------------------------------------------
 

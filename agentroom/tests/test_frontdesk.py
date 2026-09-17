@@ -339,59 +339,50 @@ def test_the_three_routes_answer_over_http(tmp_path):
         server.server_close()
 
 
-# --- the dialogue block (front_desk p2 step 3) ------------------------------
+# --- the source and its memo (argue p2 step 3) --------------------------------
 
 
-import json as _json
-
-from agentroom.frontdesk import split_dialogue
-
-SCENE = {"schema": "ag.frontdesk-dialogue.v1", "settings_revision": "4f3b55f654c8",
-         "turns": [{"character": "front", "text": "親方、どう？"},
-                   {"character": "autolab", "text": "終わった。",
-                    "sources": [{"channel": "work-g-13", "topic": "workrun-task1-g-13", "message_id": 5203}]}]}
+from agag.memo import fingerprint, render_record, source_note
 
 
-def with_scene(reply, scene=SCENE):
-    return f"@**Developer**\n\n{reply}\n\n```ag-dialogue\n{_json.dumps(scene, ensure_ascii=False)}\n```"
+def test_a_desk_conversation_carries_its_presentation_and_no_block_is_parsed():
+    """The reply is shown as written — an old `ag-dialogue` block included —
+    and the scene comes from the memo topic that names this conversation's
+    first post."""
+    desk, _, ids = mirrored_desk((DEVELOPER, "Developer", "how did it go?"), (FRONT_BOT, "Front", ACK),
+                                 (FRONT_BOT, "Front", "@**Developer**\n\nDone: commit a99625f.\n\n```ag-dialogue\n{}\n```"))
+    realm = desk.mirror.realm
+    realm.add_channel(70, "memo")
+    from conftest import pump
 
-
-def test_the_block_is_split_off_and_the_reply_is_what_is_shown():
-    text, dialogue, error = split_dialogue(with_scene("できたよ🎉"))
-    assert text == "できたよ🎉" and error is None
-    assert dialogue["settings_revision"] == "4f3b55f654c8"
-    assert [t["character"] for t in dialogue["turns"]] == ["front", "autolab"]
-    assert dialogue["turns"][1]["sources"] == [{"channel": "work-g-13", "topic": "workrun-task1-g-13", "message_id": 5203}]
-    assert dialogue["turns"][0]["sources"] == []
-    assert split_dialogue("@**Developer**\n\nやっほー✨") == ("やっほー✨", None, None)
-
-
-def test_the_error_fence_becomes_dialogue_error_and_never_shows():
-    text, dialogue, error = split_dialogue(
-        '@**Developer**\n\nできたよ🎉\n\n```ag-dialogue-error\n{"schema": "ag.frontdesk-dialogue.v1-error", "error": "turn 2: character \'forge\' is not in settings revision"}\n```')
-    assert text == "できたよ🎉" and dialogue is None and "forge" in error
-
-
-def test_a_block_the_relay_cannot_read_is_an_error_not_a_rendered_block():
-    text, dialogue, error = split_dialogue("@**Developer**\n\nできたよ🎉\n\n```ag-dialogue\n{oops\n```")
-    assert text == "できたよ🎉" and dialogue is None and "could not be read" in error
-    text, dialogue, error = split_dialogue(with_scene("x", {"schema": "ag.frontdesk-dialogue.v1", "turns": []}))
-    assert dialogue is None and "no turns" in error and "ag-dialogue" not in text
-
-
-def test_posts_and_the_latest_reply_carry_the_dialogue():
-    held = topic(DESK, message("どうなった？", ident=1), by_front(ACK, ident=2), by_front(with_scene("できたよ🎉"), ident=3))
-    desk, _ = desk_with(held)
+    realm.create_channel(70, "memo")
+    realm.post("memo", f"{DESK}-s{ids[0]}", source_note(ids[0]), sender_id=FRONT_BOT, sender_name="Front")
+    reply = realm.messages[ids[2]]["content"]
+    realm.post("memo", f"{DESK}-s{ids[0]}", render_record({
+        "schema": "ag.memo-dialogue.v1", "kind": "result", "job": "j1", "part": 1, "parts": 1,
+        "source": {"anchor": ids[0], "channel": "front", "topic": DESK, "messages": [ids[2]],
+                   "fingerprint": fingerprint([(ids[2], reply)])},
+        "settings_revision": "aaaa1111", "renderer": "agfront.present/1",
+        "turns": [{"character": "front", "speaker": "Front", "text": "できたよ🎉 a99625f",
+                   "sources": [{"channel": "front", "topic": DESK, "message_id": ids[2]}]}]}),
+        sender_id=FRONT_BOT, sender_name="Front")
+    pump(desk.mirror)
     conversation = desk.conversation("20260908-1600", now=NOW)["conversation"]
-    reply = conversation["latest_reply"]
-    assert reply["content"] == "できたよ🎉" and "```" not in reply["content"]
-    assert reply["dialogue"]["turns"][1]["character"] == "autolab" and reply["dialogue_error"] is None
-    # The Developer's posts are never parsed for a block.
-    assert conversation["posts"][0]["dialogue"] is None and conversation["posts"][0]["dialogue_error"] is None
+    assert "```ag-dialogue" in conversation["latest_reply"]["content"]
+    assert "dialogue" not in conversation["latest_reply"]
+    shown = conversation["presentation"]
+    assert shown["anchor"] == ids[0] and shown["memo"] == {"channel": "memo", "topic": f"{DESK}-s{ids[0]}"}
+    (rendering,) = shown["renderings"][str(ids[2])]
+    assert rendering["settings_revision"] == "aaaa1111" and not rendering["stale"]
+    assert rendering["turns"][0]["text"] == "できたよ🎉 a99625f"
+    assert [i["settings_revision"] for i in shown["interpretations"]] == ["aaaa1111"]
 
 
-def test_a_developer_post_quoting_a_fence_is_shown_as_typed():
-    held = topic(DESK, message("これ？\n```ag-dialogue\n{}\n```", ident=1))
-    desk, _ = desk_with(held)
-    post = desk.conversation("20260908-1600", now=NOW)["conversation"]["posts"][0]
-    assert "```ag-dialogue" in post["content"] and post["dialogue"] is None
+def test_asking_for_another_interpretation_is_one_selfnote_in_the_source_once():
+    desk, client, ids = mirrored_desk((DEVELOPER, "Developer", "hello"), (FRONT_BOT, "Front", "hi"))
+    found = desk.render("20260908-1600", "bbbb2222", "tok-r")
+    assert found["sent"] and found["anchor"] == ids[0]
+    assert client.sent == [("front", DESK, "[selfnote][render] bbbb2222")]
+    assert desk.render("20260908-1600", "bbbb2222", "tok-r")["duplicate"] and len(client.sent) == 1
+    assert "no settings revision" in desk.render("20260908-1600", None, "tok-s")["error"]
+    assert "nothing of this conversation" in desk.render("20260101-0000", "bbbb2222", "tok-t")["error"]

@@ -25,6 +25,7 @@ from .budget import budget_from_env
 from .chat import CHAT_ENV_VARIABLE, DEFAULT_MAX_CHARS, Chat
 from .close import Closer
 from .cost import PRICES_VARIABLE, Cost, prices_path_from_env
+from .argueroom import ArguingRoom
 from .frontdesk import FrontDesk
 from .inflight import ROOTS_VARIABLE, parse_roots
 from .ops import DEFAULT_DONE_SECONDS, DEFAULT_STALLED_SECONDS, Ops
@@ -157,7 +158,11 @@ def main(argv: list[str] | None = None) -> int:
 
     # The Front Desk reads the mirror through the engine and writes with the
     # chat's credential. No third credential.
-    desk = FrontDesk(ops=ops, chat=chat)
+    settings = settings_from_env()
+    desk = FrontDesk(ops=ops, chat=chat, settings=settings)
+    # The Arguing Room (`argue` p2): the same mirror, the same write
+    # credential, and the settings only to know which revision is active.
+    argues = ArguingRoom(mirror=mirror, chat=chat, settings=settings)
 
     # The completion door (`front_desk` p3). It discovers from the mirror and
     # writes with the Developer's credential — the one that already posts
@@ -172,10 +177,9 @@ def main(argv: list[str] | None = None) -> int:
     # The settings repository (`front_desk` p2): read per request from the
     # active revision the sync command switched, so a content update needs
     # neither a restart nor a rebuild. Unconfigured is a payload, not a
-    # refusal to start.
-    settings = settings_from_env()
+    # refusal to start. (Made above: both rooms ask it which revision is active.)
 
-    server = build_server(host, port, room, ops, chat, cost, budget, desk, settings, closer)
+    server = build_server(host, port, room, ops, chat, cost, budget, desk, settings, closer, argues)
     print(
         f"agentroom listening on http://{host}:{port} (mirror on {mirror_path.name}, "
         f"store {store_dir}, stalled at {stalled:g}s, "

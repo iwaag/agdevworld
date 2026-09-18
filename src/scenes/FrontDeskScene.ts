@@ -9,9 +9,9 @@
 // the lower left with the dialogue beside it, another character speaks from
 // a portrait and text box in the upper left, a prompt bar runs along the
 // bottom, and the whole history is a panel that can be shown or hidden.
-// Everything visible is Phaser; the only DOM is the hidden textarea that
-// gives the prompt bar an IME (`frontDeskInput.ts`) and the link back to the
-// dashboard.
+// Everything visible is Phaser except the composer — a real, visible
+// textarea over the bar, because a canvas cannot host an IME
+// (`frontDeskInput.ts`) — and the links to the other room and the dashboard.
 //
 // Since `front_desk` p2 nothing drawn here is bundled: the faces, the names
 // and the background come from the settings revision the relay serves
@@ -64,7 +64,6 @@ const FONT = '"Hiragino Sans", "Hiragino Kaku Gothic ProN", "Helvetica Neue", Ar
 const MONO = 'ui-monospace, SFMono-Regular, Menlo, monospace'
 const BODY_PX = 18
 const HISTORY_PX = 14
-const PROMPT_PX = 16
 const REFRESH_MS = 4000
 const BOARD_MS = 30000
 const BAR_HEIGHT = 64
@@ -169,7 +168,6 @@ export class FrontDeskScene extends Phaser.Scene {
   private queueButton!: Phaser.GameObjects.Text
   private status!: Phaser.GameObjects.Text
   private chips: Phaser.GameObjects.Text[] = []
-  private promptText!: Phaser.GameObjects.Text
   private sendButton!: Phaser.GameObjects.Text
   private counter!: Phaser.GameObjects.Text
   private historyButton!: Phaser.GameObjects.Text
@@ -245,7 +243,6 @@ export class FrontDeskScene extends Phaser.Scene {
     this.queueButton = this.button('', () => this.turn(1), COLOR.accent2).setVisible(false)
     this.status = this.text(0, 0, '', MONO, 11.5, COLOR.muted)
 
-    this.promptText = this.text(0, 0, '', FONT, PROMPT_PX, COLOR.ink)
     this.sendButton = this.button('Send ⏎ · buys a run', () => void this.submit(), COLOR.accent2)
     this.counter = this.text(0, 0, '', MONO, 10.5, COLOR.dim)
     this.historyButton = this.button('history', () => this.toggleHistory())
@@ -289,6 +286,8 @@ export class FrontDeskScene extends Phaser.Scene {
     this.historyList = this.add.container(0, 0)
     this.historyPanel.add([this.historyBackdrop, this.historyTitle, this.historyList])
 
+    // The composer is the textarea itself; the scene keeps the draft only
+    // for the counter, the Send button and the submit.
     this.keys = createFrontDeskInput({
       onChange: (text) => {
         this.draft = text
@@ -439,7 +438,6 @@ export class FrontDeskScene extends Phaser.Scene {
     // One submit, one token: a double click, a second Enter or a retry after
     // a timeout all carry the same token and the relay refuses the repeat.
     this.sending = true
-    this.keys.setDisabled(true)
     this.send = { kind: 'sending', at: Date.now() / 1000 }
     this.renderStatus()
     this.renderPrompt()
@@ -450,7 +448,6 @@ export class FrontDeskScene extends Phaser.Scene {
       ? (this.adapter.create ? await this.adapter.create(text, submitToken()) : { sent: false, error: 'this room cannot open a conversation' })
       : await this.adapter.send(this.conversationId as string, text, submitToken())
     this.sending = false
-    this.keys.setDisabled(false)
     if (result.sent && opening && result.key) {
       this.send = { kind: 'idle' }
       this.keys.set('')
@@ -630,12 +627,14 @@ export class FrontDeskScene extends Phaser.Scene {
     this.pageLabel.setPosition(this.prevButton.x - this.prevButton.width - 10, this.nextButton.y - 6).setOrigin(1, 1)
     this.queueButton.setPosition(dialogueX + dialogueWidth - 14, dialogueY - 8).setOrigin(1, 1)
 
-    this.promptText.setPosition(MARGIN + 16, barY + BAR_HEIGHT / 2).setOrigin(0, 0.5)
     this.sendButton.setPosition(width - MARGIN - 12, barY + BAR_HEIGHT / 2).setOrigin(1, 0.5)
     this.counter.setPosition(this.sendButton.x - this.sendButton.width - 12, barY + BAR_HEIGHT / 2).setOrigin(1, 0.5)
+    // The composer takes the bar's left part and grows upward from its
+    // bottom edge; the counter and the Send button keep the right.
+    this.renderPrompt()
     this.keys.place({
-      x: MARGIN + 12, y: barY + 8,
-      width: Math.max(40, this.counter.x - this.counter.width - 8 - (MARGIN + 12)), height: BAR_HEIGHT - 16,
+      x: MARGIN + 10, y: barY + 10,
+      width: Math.max(40, this.counter.x - this.counter.width - 10 - (MARGIN + 10)), height: BAR_HEIGHT - 20,
     })
 
     const buttonsY = this.narrow ? 68 : 44
@@ -980,22 +979,16 @@ export class FrontDeskScene extends Phaser.Scene {
     // live as soon as the room has a way to create a conversation.
     const opening = this.conversationId === null && Boolean(this.adapter.create)
     const usable = !this.sending && (opening || (!this.unreadable && Boolean(chat?.configured) && this.detail?.health.state === 'live'))
-    const maxWidth = Math.max(40, (this.counter.x - this.counter.width - 12) - (MARGIN + 16))
-    if (this.draft === '') {
-      const words = opening ? 'State what you want, to open a new argue…' : this.adapter.words.prompt
-      const hint = usable ? (maxWidth < 420 ? words : `${words} (Enter sends, Shift+Enter is a newline)`) : 'chat is not available right now'
-      this.promptText.setText(hint).setColor(COLOR.dim)
-    } else {
-      // The bar shows the tail of a long draft, on one line; the history
-      // panel is where a long text is read back.
-      const oneLine = this.draft.replace(/\n/g, ' ⏎ ')
-      let shown = oneLine
-      while (shown !== '' && this.measure(shown) * (PROMPT_PX / BODY_PX) > maxWidth) shown = shown.slice(1)
-      this.promptText.setText(shown === oneLine ? shown : `…${shown.slice(1)}`).setColor(usable ? COLOR.ink : COLOR.dim)
-    }
+    // The hints live in the textarea's placeholder; the key note beside the
+    // counter, where there is room for it.
+    const words = opening ? 'State what you want, to open a new argue…' : this.adapter.words.prompt
+    this.keys.setPlaceholder(usable ? words : this.sending ? 'sending…' : 'chat is not available right now')
+    this.keys.setDisabled(!usable)
     const max = chat?.max_chars
     const length = Array.from(this.draft).length
-    this.counter.setText(max ? `${length}/${max}` : '').setColor(max && length > max ? COLOR.bad : COLOR.dim)
+    const count = max ? `${length}/${max}` : ''
+    const keysNote = this.narrow ? '' : '⏎ sends · ⇧⏎ newline'
+    this.counter.setText([count, keysNote].filter(Boolean).join(' · ')).setColor(max && length > max ? COLOR.bad : COLOR.dim)
     this.sendButton.setAlpha(usable && this.draft.trim() !== '' ? 1 : 0.45)
     this.sendButton.setText(this.sending ? 'sending…' : 'Send ⏎ · buys a run')
   }

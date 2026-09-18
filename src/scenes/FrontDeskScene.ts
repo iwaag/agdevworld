@@ -179,6 +179,9 @@ export class FrontDeskScene extends Phaser.Scene {
   private viewButton!: Phaser.GameObjects.Text
   private interpretationButton!: Phaser.GameObjects.Text
   private reinterpretButton!: Phaser.GameObjects.Text
+  // What the renderer is doing, from the detail payload the room already
+  // reads: the one place the paid button's consequences are shown.
+  private rendererLine!: Phaser.GameObjects.Text
   private closePanel: FrontDeskClosePanel | undefined
   private historyPanel!: Phaser.GameObjects.Container
   private historyBackdrop!: Phaser.GameObjects.Graphics
@@ -271,10 +274,14 @@ export class FrontDeskScene extends Phaser.Scene {
       // could not do anything.
       this.finishButton.setVisible(false)
     }
-    // The view, the interpretation on show, and asking for another one.
+    // Reading and writing, apart (`argue` p2 ex1). The two on the right only
+    // change what this screen shows; the one on the left, drawn as an
+    // action, asks Front for a run and confirms first.
     this.viewButton = this.button('', () => this.toggleView(), COLOR.accent)
     this.interpretationButton = this.button('', () => this.cycleInterpretation())
-    this.reinterpretButton = this.button('reinterpret ⟳', () => void this.reinterpret(), COLOR.other)
+    this.reinterpretButton = this.button('', () => void this.reinterpret(), '#0d0f14')
+      .setBackgroundColor(COLOR.warn)
+    this.rendererLine = this.text(0, 0, '', MONO, 10.5, COLOR.dim)
 
     this.historyPanel = this.add.container(0, 0).setVisible(false)
     this.historyBackdrop = this.add.graphics()
@@ -641,7 +648,10 @@ export class FrontDeskScene extends Phaser.Scene {
     const viewY = buttonsY + 30
     this.viewButton.setPosition(width - MARGIN, viewY).setOrigin(1, 0)
     this.interpretationButton.setPosition(this.viewButton.x - this.viewButton.width - 8, viewY).setOrigin(1, 0)
-    this.reinterpretButton.setPosition(this.interpretationButton.x - this.interpretationButton.width - 8, viewY).setOrigin(1, 0)
+    // The paid action stands apart from the two read-only controls, with
+    // the renderer's state under it.
+    this.reinterpretButton.setPosition(this.interpretationButton.x - this.interpretationButton.width - 36, viewY).setOrigin(1, 0)
+    this.rendererLine.setPosition(width - MARGIN, viewY + 28).setOrigin(1, 0)
     this.closePanel?.layout(width, barY)
 
     // History panel: right side, above the bar; the whole frame when narrow.
@@ -1212,8 +1222,7 @@ export class FrontDeskScene extends Phaser.Scene {
   // Through the saved interpretations, newest first, and back to following
   // the active settings.
   private cycleInterpretation() {
-    const saved = (this.detail?.conversation.presentation?.interpretations ?? []).map((one) => one.settings_revision)
-    const choices: (string | null)[] = [null, ...saved.filter((revision, index) => saved.indexOf(revision) === index)]
+    const choices = this.interpretationChoices()
     const at = choices.indexOf(this.wanted)
     this.wanted = choices[(at + 1) % choices.length]
     this.mode = 'dialogue'
@@ -1221,13 +1230,45 @@ export class FrontDeskScene extends Phaser.Scene {
     this.keys.focus()
   }
 
+  // Whether asking for another interpretation is possible right now. A
+  // second click during a render is the likeliest accidental double spend,
+  // so a busy renderer disables the button rather than warning after.
+  private canReinterpret(): { ok: boolean; why: string } {
+    const shown = this.detail?.conversation.presentation
+    if (this.conversationId === null) return { ok: false, why: 'nothing is open' }
+    if (this.asking) return { ok: false, why: 'asking…' }
+    if (this.sending) return { ok: false, why: 'a post is on its way' }
+    if (!this.settings.activeRevision) return { ok: false, why: 'no settings revision is active' }
+    if (!this.detail?.chat.configured || this.unreadable || this.detail.health.state !== 'live') return { ok: false, why: 'the relay cannot write right now' }
+    if (!this.detail.conversation.posts.some((post) => post.kind === 'agent')) return { ok: false, why: 'no agent has spoken yet' }
+    if (shown?.renderer.state === 'rendering') return { ok: false, why: 'the renderer is busy' }
+    return { ok: true, why: '' }
+  }
+
   // Ask Front for an interpretation with the settings that are current now.
-  // The earlier ones stay; this only adds one, and only because it was asked.
+  // The earlier ones stay; this only adds one, and only because it was asked
+  // — and confirmed, because it is the one paid write on this row.
   private async reinterpret() {
     const key = this.conversationId
-    if (key === null || this.asking) return
-    this.asking = true
+    const can = this.canReinterpret()
+    if (key === null || !can.ok) return
     const revision = this.settings.activeRevision
+    const shown = this.detail?.conversation.presentation
+    const agentPosts = this.detail?.conversation.posts.filter((post) => post.kind === 'agent').length ?? 0
+    const saved = shown?.interpretations.length ?? 0
+    const already = shown?.interpretations.some((one) => one.settings_revision === revision)
+    const words = [
+      `Ask Front to re-voice this ${this.adapter.room === 'argue' ? 'argue' : 'conversation'} with the current settings?`,
+      '',
+      `Settings revision: ${(revision ?? '').slice(0, 12)}${already ? ' (an interpretation at this revision already exists; a new one is still made)' : ''}`,
+      `Speech to re-voice: ${agentPosts} agent post${agentPosts === 1 ? '' : 's'} — the cost follows their length`,
+      `Saved interpretations: ${saved}, all kept; this adds one`,
+      '',
+      'This buys one presentation run. Nothing is posted into the discussion.',
+    ].join('\n')
+    if (!window.confirm(words)) { this.keys.focus(); return }
+    this.asking = true
+    this.renderViewButtons()
     const result = await this.adapter.render(key, revision, submitToken())
     this.asking = false
     const until = Date.now() / 1000 + 12
@@ -1236,6 +1277,7 @@ export class FrontDeskScene extends Phaser.Scene {
       : { text: `✖ not asked — ${result.error ?? 'the relay refused'}`, color: COLOR.bad, until }
     this.wanted = null
     this.renderStatus()
+    this.renderViewButtons()
     this.keys.focus()
     await this.refresh()
   }
@@ -1264,17 +1306,47 @@ export class FrontDeskScene extends Phaser.Scene {
   private renderViewButtons() {
     const shown = this.detail?.conversation.presentation ?? null
     this.viewButton.setText(this.mode === 'dialogue' ? 'view: dialogue ⇄' : 'view: original ⇄')
-    const saved = shown?.interpretations.length ?? 0
-    const which = this.wanted ? this.wanted.slice(0, 8) : shown?.active_revision ? `active ${shown.active_revision.slice(0, 8)}` : 'active'
-    const state = shown?.renderer.state
-    const mark = state === 'rendering' ? ' …' : state === 'unavailable' ? ' ⚠' : shown && shown.failed.length ? ' ✖' : ''
-    this.interpretationButton.setText(`interpretation: ${which} (${saved} saved)${mark}`)
-      .setColor(state === 'unavailable' || (shown && shown.failed.length) ? COLOR.warn : COLOR.muted)
+    // The cycler says that it cycles and where it is: `active` follows the
+    // current settings, a revision is one saved interpretation.
+    const choices = this.interpretationChoices()
+    const at = Math.max(0, choices.indexOf(this.wanted))
+    const which = this.wanted ? `rev ${this.wanted.slice(0, 8)}` : 'active = current settings'
+    this.interpretationButton.setText(choices.length > 1
+      ? `‹ interpretation ${at + 1}/${choices.length}: ${which} ›`
+      : `interpretation: ${which} · none saved yet`)
+      .setColor(COLOR.muted)
       .setAlpha(this.mode === 'dialogue' ? 1 : 0.5)
-    this.reinterpretButton.setAlpha(this.conversationId !== null && !this.asking ? 1 : 0.45)
+    // The paid action: what it will use, and whether it can be asked now.
+    const can = this.canReinterpret()
+    const revision = this.settings.activeRevision
+    this.reinterpretButton
+      .setText(this.asking ? 'asking Front…' : `re-voice with current settings ($)${revision ? ` · ${revision.slice(0, 8)}` : ''}`)
+      .setAlpha(can.ok ? 1 : 0.35)
+    if (can.ok) this.reinterpretButton.setInteractive({ useHandCursor: true })
+    else this.reinterpretButton.disableInteractive()
+    // The renderer, from the payload the room already reads: what is being
+    // rendered, what failed, when it is not answering.
+    const parts: string[] = []
+    let color = COLOR.dim
+    if (shown) {
+      const state = shown.renderer.state
+      if (state === 'rendering') { parts.push(`renderer: rendering ${shown.pending.length} post${shown.pending.length === 1 ? '' : 's'}…`); color = COLOR.accent2 }
+      else if (state === 'unavailable') { parts.push(`⚠ renderer unavailable — ${shown.renderer.reason}`); color = COLOR.warn }
+      else if (state === 'idle') parts.push('renderer: idle')
+      else parts.push(`renderer: ${state}`)
+      if (shown.failed.length) { parts.push(`✖ ${shown.failed.length} rendering${shown.failed.length === 1 ? '' : 's'} failed`); color = COLOR.warn }
+      if (shown.requests.length) parts.push(`${shown.requests.length} re-voicing${shown.requests.length === 1 ? '' : 's'} asked`)
+    }
+    if (!can.ok && this.conversationId !== null && can.why !== 'the renderer is busy') parts.push(`re-voice: ${can.why}`)
+    this.rendererLine.setText(parts.join(' · ')).setColor(color)
     // Their widths follow their words.
     this.interpretationButton.setX(this.viewButton.x - this.viewButton.width - 8)
-    this.reinterpretButton.setX(this.interpretationButton.x - this.interpretationButton.width - 8)
+    this.reinterpretButton.setX(this.interpretationButton.x - this.interpretationButton.width - 36)
+  }
+
+  private interpretationChoices(): (string | null)[] {
+    const saved = (this.detail?.conversation.presentation?.interpretations ?? []).map((one) => one.settings_revision)
+    return [null, ...saved.filter((revision, index) => saved.indexOf(revision) === index)]
   }
 
   private toggleHistory() {

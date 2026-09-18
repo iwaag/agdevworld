@@ -173,8 +173,12 @@ export function demoAdapter(room: RoomId, revision = 'demo'): RoomAdapter {
   const presentation = (): Presentation => {
     const agentPosts = posts.filter((post) => post.kind === 'agent')
     const failedIds = new Set(failed.filter((one) => one.settings_revision === revision).flatMap((one) => one.messages))
+    // Waiting: at the active revision, and at every revision a re-voicing
+    // asked for and has not got yet — so the paid button reads busy.
+    const wanted = new Set([revision, ...requests.map((one) => one.settings_revision)])
     const pending = agentPosts
-      .filter((post) => !(renderings[post.message_id] ?? []).some((one) => one.settings_revision === revision) && !failedIds.has(post.message_id))
+      .filter((post) => [...wanted].some((at) => !(renderings[post.message_id] ?? []).some((one) => one.settings_revision === at)
+        && !(at === revision && failedIds.has(post.message_id))))
       .map((post) => ({ message_id: post.message_id, age_seconds: now() - (born.get(post.message_id) ?? now()), overdue: false }))
     const seen = new Map<string, number>()
     for (const list of Object.values(renderings)) for (const one of list) seen.set(one.settings_revision, (seen.get(one.settings_revision) ?? 0) + 1)

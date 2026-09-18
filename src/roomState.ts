@@ -13,7 +13,7 @@
 // both rooms). A post always goes into the **source** conversation, whichever
 // view is showing.
 
-import { relayCompletion, type CompletionPlan } from './completionState'
+import { relayCompletion, relayCompletionAt, type CompletionPlan } from './completionState'
 
 const BASE = (import.meta.env.VITE_AGENTROOM_URL as string | undefined) ?? 'http://localhost:8094'
 
@@ -253,6 +253,15 @@ export const argueAdapter: RoomAdapter = {
   send: (key, text, token) => writeRelay(`/argues/${encodeURIComponent(key)}/post`, { text, token }),
   create: (text, token) => writeRelay('/argues', { text, token }),
   render: (key, revision, token) => writeRelay(`/argues/${encodeURIComponent(key)}/render`, { revision, token }),
+  // Finishing from the room (`argue` p2 ex1): the shared completion door,
+  // reached by anchor so the relay names the argue's current topic. The
+  // plan is the discussion only — what it ended in stays open — and a
+  // human close writes no outcome: a ✔ without an outcome note means
+  // "ended by the human".
+  completion: {
+    closePlan: (key) => relayCompletionAt.plan(`/argues/${encodeURIComponent(key)}/close-plan`),
+    close: (key, fingerprint) => relayCompletionAt.apply(`/argues/${encodeURIComponent(key)}/close`, fingerprint),
+  },
   words: {
     newButton: 'new argue',
     empty: 'A new argue. State what you want in the bar below — however vague — and Front opens the discussion with every agent. Every post is kept in the history panel.',

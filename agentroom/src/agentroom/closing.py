@@ -69,6 +69,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Callable, Iterable, Protocol
 
+from agag.argue import ARGUE_CHANNEL, ARGUE_TOPIC_PREFIX
 from agag.selfnote import Conversation, parse_note, parse_rootchat, parse_served
 from agag.zulip import RESOLVED_TOPIC_PREFIX
 
@@ -127,10 +128,15 @@ FRONT_PREFIX = "front-"
 #: ✔ that means something else entirely and are never a target.
 DESK, FRONT, ROUTINE_RUN, WORKPLAN, ASSETPLAN = (
     "desk", "front", "routine-run", "workplan", "assetplan")
+#: An argue (`argue` p2 ex1): `#argue › argue-<stem>`, a discussion a human
+#: leads. A request kind — another argue reached by a link is somebody
+#: else's — with a boundary of its own: closing one ends the *discussion*
+#: and nothing it opened (`_argue_boundary`).
+ARGUE = "argue"
 WORKRUN, ASSETRUN = "workrun", "assetrun"
 ROUTINE_GUIDE, INTRO = "routine-guide", "intro"
 TOPIC = "topic"
-REQUEST_KINDS = frozenset({DESK, FRONT, ROUTINE_RUN, WORKPLAN, ASSETPLAN})
+REQUEST_KINDS = frozenset({DESK, FRONT, ROUTINE_RUN, WORKPLAN, ASSETPLAN, ARGUE})
 EXECUTION_KINDS = frozenset({WORKRUN, ASSETRUN})
 RETIRING_KINDS = frozenset({ROUTINE_GUIDE, INTRO})
 #: How much of an unheld topic one read fetches. A `workrun-` topic is a
@@ -147,7 +153,7 @@ MAX_NODES = 120
 AUTO_MARKER = "[AUTO]"
 
 __all__ = [
-    "AUTOLAB_SOURCE", "Discovery", "EXECUTION_KINDS", "FORGE_SOURCE", "MAX_NODES",
+    "ARGUE", "AUTOLAB_SOURCE", "Discovery", "EXECUTION_KINDS", "FORGE_SOURCE", "MAX_NODES",
     "READ_DEPTH", "REQUEST_KINDS", "RETIRING_KINDS", "Related", "Scope", "WORK_CHANNEL_PREFIX",
     "WorkTarget", "classify", "describe_kind", "discover", "related_topics",
 ]
@@ -178,6 +184,8 @@ def classify(channel: str, topic: str) -> str:
         return TOPIC
     if channel == AGENTS_CHANNEL and topic.startswith(INTRO_PREFIX):
         return INTRO
+    if channel == ARGUE_CHANNEL and topic.startswith(ARGUE_TOPIC_PREFIX):
+        return ARGUE
     if topic.startswith(WORKPLAN_PREFIX):
         return WORKPLAN
     if topic.startswith(WORKRUN_PREFIX):
@@ -198,6 +206,7 @@ def describe_kind(kind: str, topic: str = "", channel: str = "") -> str:
                 else f"the guide of routine {name}")
     return {
         DESK: "a Front Desk conversation", FRONT: "a Front conversation",
+        ARGUE: "an argue",
         WORKPLAN: "an Autolab request", ASSETPLAN: "a Forge request",
         WORKRUN: "an Autolab task topic", ASSETRUN: "a Forge run topic",
         INTRO: "an agent's introduction",
@@ -899,6 +908,14 @@ def _scope(topics: dict, root: Key, node: Related, reader: Reader) -> Scope:
         description = f"Front Desk conversation {desk_id(root[1])} and the work it opened"
     elif kind == FRONT:
         description = f"{label}, a whole Front conversation, and the work it opened"
+    elif kind == ARGUE:
+        # The boundary p2 put into words: "posting here resumes the
+        # discussion, not what it ended in". The project, study or plan an
+        # argue opened is the next chapter and belongs to whoever the
+        # outcome names; the desk conversation it came from is somebody
+        # else's request. A ✔ here ends the discussion and nothing else.
+        description = (f"{label}, an argue: the discussion only. A project, study or plan it "
+                       "opened stays open, and so does the conversation it was opened from")
     elif kind == WORKPLAN:
         record = node.record if isinstance(node.record, Mission) else None
         named = f" (mission {record.label})" if record is not None else ""
@@ -1115,6 +1132,8 @@ def discover(
         gaps = {**gaps, "reads": reader.calls, "errors": _unique(reader.errors)}
         return Discovery(scope=scope, topics=[found[root]], excluded=excluded, works=[],
                          channels=[], gaps=gaps)
+    if scope.kind == ARGUE:
+        return _argue_boundary(scope, found, reader, gaps)
     lineage = [(p["channel"], p["topic"]) for p in scope.parents]
     kept, excluded = _ownership(root, found, lineage)
     _mark_archived(kept, root, reader)
@@ -1141,6 +1160,32 @@ def discover(
     gaps = {**gaps, "reads": reader.calls, "errors": _unique(reader.errors)}
     return Discovery(scope=scope, topics=kept, excluded=excluded, works=works,
                      channels=channels, gaps=gaps)
+
+
+ARGUE_DOWNSTREAM = ("what the argue ended in stays open: closing an argue ends the "
+                    "discussion and nothing it opened")
+
+
+def _argue_boundary(scope: Scope, found: dict[Key, Related], reader: Reader, gaps: dict) -> Discovery:
+    """An argue's closure is the argue topic and nothing else.
+
+    The walk was still made, so the preview can *show* what the argue led
+    to — autolab's `workplan-setup-<slug>` carries a root note naming the
+    argue, and from there a mission, its tasks and its channel — but every
+    one of those is the outcome's work, not the discussion's, and is listed
+    as an exclusion with that reason rather than as a target. No work
+    record, no channel. The memo is not in this graph at all (`[memosource]`
+    is deliberately not a root note) and is left as it is: presentation
+    only, a ✔ there changes nothing.
+    """
+    root = scope.root
+    kept = [found[root]]
+    _mark_archived(kept, root, reader)
+    excluded = [_exclude(node, ARGUE_DOWNSTREAM, node.links)
+                for key, node in sorted(found.items(), key=lambda i: (i[1].depth, i[0]))
+                if key != root]
+    gaps = {**gaps, "reads": reader.calls, "errors": _unique(reader.errors)}
+    return Discovery(scope=scope, topics=kept, excluded=excluded, works=[], channels=[], gaps=gaps)
 
 
 def _mark_archived(kept: list[Related], root: Key, reader: Reader) -> None:

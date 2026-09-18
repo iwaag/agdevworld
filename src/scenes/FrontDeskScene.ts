@@ -38,6 +38,7 @@
 // relay-backed view in this app follows.
 
 import Phaser from 'phaser'
+import { announceCompleted } from '../completionState'
 import { FrontDeskClosePanel } from '../frontDeskClosePanel'
 import { createFrontDeskInput, type FrontDeskInputHandle } from '../frontDeskInput'
 import {
@@ -256,11 +257,18 @@ export class FrontDeskScene extends Phaser.Scene {
         scene: this,
         source: completion,
         conversationId: () => this.conversationId ?? '',
-        onChanged: () => { void this.refresh(); void this.refreshBoard() },
+        onChanged: () => {
+          // Every relay-backed view on the page re-reads on this event; the
+          // room's own list shows the ✔ through the same door.
+          const conversation = this.detail?.conversation
+          if (conversation) announceCompleted({ channel: conversation.channel, topic: conversation.topic })
+          void this.refresh()
+          void this.refreshBoard()
+        },
       })
     } else {
-      // A room without a completion door of its own (an argue ends by its
-      // outcome) shows no button that could not do anything.
+      // A room without a completion door of its own shows no button that
+      // could not do anything.
       this.finishButton.setVisible(false)
     }
     // The view, the interpretation on show, and asking for another one.

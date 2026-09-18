@@ -39,10 +39,14 @@ if ((key ?? '') !== requested) {
 const app = document.getElementById('app')
 if (app) app.style.inset = '0'
 
+const scene = new FrontDeskScene({ adapter, conversationKey: key })
 new Phaser.Game({
   type: Phaser.AUTO,
   parent: 'app',
   backgroundColor: '#0d0f14',
   scale: { mode: Phaser.Scale.RESIZE, autoCenter: Phaser.Scale.CENTER_BOTH },
-  scene: [new FrontDeskScene({ adapter, conversationKey: key })],
+  scene: [scene],
 })
+// The demo is a fixture, and a fixture's driver needs to know where the
+// Phaser buttons are: the scene is reachable from the console only there.
+if (demo) (window as unknown as { __room: FrontDeskScene }).__room = scene

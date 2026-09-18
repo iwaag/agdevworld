@@ -20,7 +20,7 @@ import pytest
 from conftest import empty_room
 from agentroom.close import BLOCKED, DONE, READY, Closer, parse_key, plan_actions
 from agentroom.closing import (
-    ASSETPLAN, ASSETRUN, DESK, FRONT, INTRO, ROUTINE_GUIDE, ROUTINE_RUN, TOPIC, WORKPLAN,
+    ARGUE, ASSETPLAN, ASSETRUN, DESK, FRONT, INTRO, ROUTINE_GUIDE, ROUTINE_RUN, TOPIC, WORKPLAN,
     WORKRUN, classify, discover,
 )
 from agentroom.room import Room
@@ -745,3 +745,124 @@ def test_a_request_reads_whole_with_no_second_system_at_all():
     # Plane question to ask (`refactor` p2 step 4).
     assert "plane" not in found.gaps
     assert found.gaps["unread"] == [] and found.gaps["errors"] == []
+
+
+# --- an argue: the discussion only (`argue` p2 ex1) ---------------------------------
+
+
+ARGUE_TOPIC = "argue-failfarm"
+ARGUE_ROOT = ("argue", ARGUE_TOPIC)
+SETUP_TOPIC = "workplan-setup-failfarm"
+
+
+def argue_realm(*, resolved=False, **kwargs):
+    """An argue that ended in a project: Front's outcome note, autolab's
+    setup plan in the new `pj-` channel anchored to the argue by a root
+    note, its mission and task, and a memo of the rendering beside it —
+    the shape the realm actually has after `agproject open`."""
+    name = f"✔ {ARGUE_TOPIC}" if resolved else ARGUE_TOPIC
+    histories = {
+        ("argue", name): [
+            selfnote(300, "argue", f"from front/{DESK_TOPIC}", sender_id=DEVELOPER, sender="Developer"),
+            post(301, "I want machines that learn from failure.", sender_id=DEVELOPER, sender="Developer"),
+            post(302, "What would failure look like? @**autolab-agstudio1** could you say what a harness needs?"),
+            post(303, "A harness needs a failure record.", sender_id=AUTOLAB_BOT, sender=AUTOLAB),
+            selfnote(304, "served", f"argue/{ARGUE_TOPIC} 302", sender_id=AUTOLAB_BOT, sender=AUTOLAB),
+            selfnote(305, "desire", f"301 by {DEVELOPER}"),
+            selfnote(306, "served", f"pj-failfarm/{SETUP_TOPIC} 317"),
+            post(307, "This became a project: #pj-failfarm."),
+            selfnote(308, "outcome", "project pj-failfarm"),
+        ],
+        ("pj-failfarm", SETUP_TOPIC): [
+            selfnote(310, "rootchat", f"argue/{ARGUE_TOPIC}"),
+            post(311, "Please prepare the workspace for pj-failfarm.", sender_id=DEVELOPER, sender="Developer"),
+            selfnote(MISSION, "mission", "failfarm", sender_id=AUTOLAB_BOT, sender=AUTOLAB),
+            selfnote(313, "rootchat", f"argue/{ARGUE_TOPIC}", sender_id=AUTOLAB_BOT, sender=AUTOLAB),
+            post(314, "# Set up\n\nOne task.", sender_id=AUTOLAB_BOT, sender=AUTOLAB),
+            selfnote(315, "doc", "314", sender_id=AUTOLAB_BOT, sender=AUTOLAB),
+            selfnote(316, "state", "started", sender_id=AUTOLAB_BOT, sender=AUTOLAB),
+            post(317, "The workspace is ready.", sender_id=AUTOLAB_BOT, sender=AUTOLAB),
+        ],
+        (WORK_CHANNEL, f"✔ {WORKRUN_TOPIC}"): [
+            selfnote(TASK, "task", f"{MISSION}#1", sender_id=AUTOLAB_BOT, sender=AUTOLAB),
+            selfnote(321, "rootchat", f"pj-failfarm/{SETUP_TOPIC}", sender_id=AUTOLAB_BOT, sender=AUTOLAB),
+            post(322, "# Set up\n\nbody", sender_id=AUTOLAB_BOT, sender=AUTOLAB),
+            selfnote(323, "state", "completed", sender_id=AUTOLAB_BOT, sender=AUTOLAB),
+        ],
+        ("memo", f"{ARGUE_TOPIC}-s300"): [
+            selfnote(330, "memosource", "300"),
+            post(331, "```ag-memo-dialogue\n{}\n```"),
+        ],
+        ("front", DESK_TOPIC): [
+            post(1, "Let us argue about failure.", sender_id=DEVELOPER, sender="Developer"),
+            selfnote(2, "served", f"argue/{ARGUE_TOPIC} 307"),
+        ],
+    }
+    topics = {"argue": [name], "pj-failfarm": [SETUP_TOPIC], WORK_CHANNEL: [f"✔ {WORKRUN_TOPIC}"],
+              "memo": [f"{ARGUE_TOPIC}-s300"], "front": [DESK_TOPIC]}
+    streams = {"argue": 169, "pj-failfarm": 180, WORK_CHANNEL: 181, "memo": 171, "front": 5}
+    histories.update(kwargs.pop("histories", {}))
+    topics.update(kwargs.pop("topics", {}))
+    return Realm(histories, topics=topics, streams=streams, **kwargs)
+
+
+def test_an_argue_is_classified_by_its_channel_and_prefix():
+    assert classify("argue", ARGUE_TOPIC) == ARGUE
+    assert classify("argue", f"✔ {ARGUE_TOPIC}") == ARGUE
+    assert classify("argue", "something else") == TOPIC  # the channel alone is not an argue
+    assert classify("front", ARGUE_TOPIC) == TOPIC  # nor is the prefix outside #argue
+
+
+def test_closing_an_argue_is_the_discussion_only_and_says_what_stays_open():
+    found = discover({}, ARGUE_ROOT, realm=argue_realm())
+    assert found.scope.kind == ARGUE and found.scope.closable
+    assert "the discussion only" in found.scope.description
+    assert "stays open" in found.scope.description
+    # The argue itself, and nothing downstream: the setup plan is anchored to
+    # the argue by a root note and would be owned by the ordinary rule.
+    assert topic_keys(found) == [ARGUE_ROOT]
+    assert found.works == [] and found.channels == []
+    downstream = {row["topic"]: row["reason"] for row in found.excluded}
+    assert SETUP_TOPIC in downstream
+    assert all("ends the discussion" in reason for reason in downstream.values())
+    # The mission's own `work-` channel is read only for a mission this
+    # request owns, and an argue owns none: its tasks are never even looked at.
+    assert WORKRUN_TOPIC not in downstream
+    # The desk it was opened from and the memo are not in this graph at all.
+    assert DESK_TOPIC not in downstream and f"{ARGUE_TOPIC}-s300" not in downstream
+    assert found.scope.parents == []
+    [action] = plan_actions(found)
+    assert action.kind == "conversation" and action.state == READY
+    assert action.key == f"topic:argue/{ARGUE_TOPIC}" and action.detail["last_post_id"] == 308
+
+
+def test_a_human_close_of_an_argue_resolves_the_argue_and_writes_no_outcome():
+    realm = WritingRealm(argue_realm())
+    door, _, _ = closer(realm=realm)
+    found = door.close(ARGUE_ROOT)
+    assert found["applied"] is True and found["partial"] is False
+    assert [topic for _, topic in realm.resolved] == [ARGUE_TOPIC]
+    # No `[selfnote][outcome]`, no state note, no post of any kind: a ✔
+    # without an outcome note is what "ended by the human" looks like.
+    assert realm.posted == []
+    assert SETUP_TOPIC not in [topic for _, topic in realm.resolved]
+
+
+def test_a_resolved_argue_reports_already_done():
+    found = discover({}, ARGUE_ROOT, realm=argue_realm(resolved=True))
+    [action] = plan_actions(found)
+    assert action.state == DONE and action.reason == "already ✔"
+
+
+def test_another_argue_reached_from_a_desk_is_another_request():
+    realm = chain_realm(histories={
+        ("front", DESK_TOPIC): [
+            post(1, "hello", sender_id=DEVELOPER, sender="Developer"),
+            selfnote(2, "served", f"argue/{ARGUE_TOPIC} 1"),
+        ],
+        ("argue", ARGUE_TOPIC): [post(300, "somebody's argue", sender_id=DEVELOPER, sender="Developer")],
+    }, topics={"argue": [ARGUE_TOPIC]})
+    realm.streams["argue"] = 169
+    found = discover({}, ROOT, realm=realm)
+    assert topic_keys(found) == [ROOT]
+    assert excluded_of(found, ARGUE_TOPIC)["reason"] == "another request: an argue"

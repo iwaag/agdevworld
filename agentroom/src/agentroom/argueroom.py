@@ -36,8 +36,11 @@ Nothing is retried here.
   `[selfnote][render] <settings revision>` in the source. A selfnote buys
   nobody a run; Front's renderer reads it off its own mirror.
 
-Finishing an argue is the shared completion door (`/complete` with the
-argue's channel and topic) — no second completion engine.
+Finishing an argue is the shared completion door — no second completion
+engine. Since `argue` p2 ex1 the room reaches it by anchor
+(`/argues/<anchor>/close-plan`, `/argues/<anchor>/close`): `completion_key`
+resolves the anchor to the argue's current topic, so the closure names the
+topic the argue *is* now, never a stem copied from a URL.
 """
 
 from __future__ import annotations
@@ -206,6 +209,15 @@ class ArguingRoom:
         if where.channel != ARGUE_CHANNEL or not parse_argue(message.content)[0]:
             return {"error": f"message {ident} is not the anchor note of an argue"}
         return where
+
+    def completion_key(self, anchor) -> tuple[str, str] | dict:
+        """The `(channel, bare topic)` the completion engine closes for this
+        argue, or the refusal. Followed through a rename, and never a name
+        somebody else took after this argue was renamed away from it."""
+        where = self._where(anchor)
+        if isinstance(where, dict):
+            return where
+        return (where.channel, where.topic)
 
     def argue(self, anchor, now: float | None = None) -> dict:
         now = time.time() if now is None else now

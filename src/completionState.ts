@@ -158,6 +158,19 @@ export const relayCompletion: CompletionSource = {
   }),
 }
 
+// The same door reached through a route that names the request some other
+// way — the Arguing Room's `/argues/<anchor>/close-plan` and `/close`, where
+// the relay resolves the anchor to the argue's current topic itself.
+export const relayCompletionAt = {
+  plan: (path: string) => readJson<CompletionPlan>(`${BASE}${path}`, { signal: AbortSignal.timeout(20000) }),
+  apply: (path: string, fingerprint: string) => readJson<CompletionPlan>(`${BASE}${path}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ fingerprint }),
+    signal: AbortSignal.timeout(60000),
+  }),
+}
+
 export async function loadCompletionHistory(root?: CompletionRef): Promise<{ history: CompletionRecord[] } | { error: string }> {
   return readJson(`${BASE}/complete/history${root ? `?${query(root)}` : ''}`, { signal: AbortSignal.timeout(8000) })
 }
@@ -200,7 +213,7 @@ const ROOT_KIND: Record<string, string> = {
   desk: 'Front Desk conversation', front: 'Front conversation', 'routine-run': 'routine run',
   workplan: 'Autolab request', assetplan: 'Forge request', workrun: 'Autolab task topic',
   assetrun: 'Forge run topic', 'routine-guide': 'routine guide', intro: 'introduction',
-  topic: 'conversation',
+  argue: 'argue', topic: 'conversation',
 }
 
 export function rootKindLabel(kind: string): string {

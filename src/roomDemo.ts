@@ -46,6 +46,36 @@ const SCRIPT: Line[][] = [
 const DEMO_FLAKY = 'topic:agforge-agstudio1/assetrun-title'
 const demoClosed = new Set<string>()
 let demoFailedOnce = false
+// The demo argue: ✔ after a close from the room, open again after a post.
+let demoResolved = false
+
+// An argue's plan is the discussion only: the argue topic, and what it led
+// to listed as untouched (`closing._argue_boundary`).
+function demoArguePlan(_id: string, closed: Set<string>): ClosePlan {
+  const root = { channel: 'argue', topic: 'argue-demo' }
+  const key = 'topic:argue/argue-demo'
+  const done = closed.has(key)
+  const actions: CloseAction[] = [{
+    kind: 'conversation', key, label: '#argue › argue-demo',
+    state: done ? 'done' : 'ready', reason: done ? 'already ✔' : 'will be marked ✔ once everything above is done', detail: {},
+  }]
+  return {
+    schema: 'ag.completion.v1', generated_at: Date.now() / 1000,
+    topic: root.topic, channel: root.channel, root,
+    scope: {
+      root, kind: 'argue', closable: true, reason: '',
+      description: '#argue › argue-demo, an argue: the discussion only. A project, study or plan it opened stays open, and so does the conversation it was opened from',
+      parents: [], context: [], routine: null,
+    },
+    history: [],
+    fingerprint: actions.map((one) => `${one.key}=${one.state}`).join('|'),
+    status: { zulip_read: true, zulip_write: true, reason: '' },
+    actions, counts: { ready: done ? 0 : 1, blocked: 0, done: done ? 1 : 0, kept: 0 }, blocked: [],
+    excluded: [{ channel: 'pj-demo', topic: 'workplan-setup-demo', reason: 'what the argue ended in stays open: closing an argue ends the discussion and nothing it opened' }],
+    gaps: { truncated: false, unread: [], bounded: [], errors: [] },
+    results: [], note: 'this ends the discussion; a post here resumes it',
+  }
+}
 
 function resultRow(action: CloseAction): Omit<CloseResult, 'outcome' | 'note'> {
   return { key: action.key, kind: action.kind, label: action.label }
@@ -159,8 +189,9 @@ export function demoAdapter(room: RoomId, revision = 'demo'): RoomAdapter {
     health: { state: 'live', reason: 'demo source, nothing here reaches the realm' },
     chat: { configured: true, reason: null, max_chars: 4000 },
     conversation: {
-      key, channel, topic, live_topic: topic, resolved: false, known: 'held', bounded: false,
-      posts: [...posts], status: status(), zulip_url: null, presentation: presentation(),
+      key, channel, topic, live_topic: demoResolved ? `✔ ${topic}` : topic, resolved: demoResolved, known: 'held', bounded: false,
+      posts: [...posts], status: demoResolved ? { state: 'done', since: null, evidence: 'the topic carries ✔' } : status(),
+      zulip_url: null, presentation: presentation(),
     },
   })
   const answer = () => {
@@ -179,13 +210,16 @@ export function demoAdapter(room: RoomId, revision = 'demo'): RoomAdapter {
     other: room === 'argue' ? { label: 'Front Desk ↗', href: '/?view=frontdesk&demo=1' } : { label: 'Arguing Room ↗', href: '/?view=argue&demo=1' },
     newKey: () => (room === 'argue' ? null : 'demo'),
     async list() {
-      return posts.length || room === 'front' ? [{ key: 'demo', label: 'demo', resolved: false, last_post: posts.length ? { at: posts[posts.length - 1].at, by: posts[posts.length - 1].by } : null }] : []
+      return posts.length || room === 'front' ? [{ key: 'demo', label: 'demo', resolved: demoResolved, last_post: posts.length ? { at: posts[posts.length - 1].at, by: posts[posts.length - 1].by } : null }] : []
     },
     async detail(key) { return detail(key) },
     async send(_key, text) {
       posts.push({ message_id: next++, at: now(), by: 'Developer', sender_id: 8, content: text, kind: 'human', agent: null, speaker: 'Developer' })
+      const resumed = demoResolved
+      demoResolved = false
+      demoClosed.delete('topic:argue/argue-demo')
       answer()
-      return { sent: true, message_id: next - 1 }
+      return { sent: true, message_id: next - 1, resumed }
     },
     create: room === 'argue' ? async (text) => {
       posts.push({ message_id: next++, at: now(), by: 'Developer', sender_id: 8, content: text, kind: 'human', agent: null, speaker: 'Developer' })
@@ -205,7 +239,21 @@ export function demoAdapter(room: RoomId, revision = 'demo'): RoomAdapter {
       }, 3000)
       return { sent: true, note: 'asked; earlier interpretations stay' }
     },
-    completion: room === 'front' ? {
+    completion: room === 'argue' ? {
+      async closePlan(id) { return demoArguePlan(id, demoClosed) },
+      async close(id, fingerprint) {
+        const plan = demoArguePlan(id, demoClosed)
+        if (fingerprint !== plan.fingerprint) {
+          return { ...plan, refused: true, error: 'the targets have changed since this preview was made; nothing was closed' }
+        }
+        const results: CloseResult[] = plan.actions.map((action) => action.state === 'done'
+          ? { ...resultRow(action), outcome: 'already', note: action.reason }
+          : { ...resultRow(action), outcome: 'applied', note: 'is ✔' })
+        demoClosed.add(plan.actions[0].key)
+        demoResolved = true
+        return { ...demoArguePlan(id, demoClosed), results, applied: true, partial: false }
+      },
+    } : room === 'front' ? {
       async closePlan(id) {
       return demoPlan(id, demoClosed, demoFailedOnce)
     },

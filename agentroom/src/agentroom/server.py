@@ -41,12 +41,14 @@ from .settings import Settings
 ROUTES = ("/healthz", "/agents", "/work", "/work?resolved=1", "/ops", "/routines", "/routines/<name>",
           "/inflight/<name>", "/cost", "/budget", "/frontdesk", "/frontdesk/<id>",
           "/frontdesk/<id>/close-plan", "/argues", "/argues/<anchor>",
+          "/argues/<anchor>/close-plan",
           "/complete/plan?channel=<channel>&topic=<topic>",
           "/complete/history?channel=<channel>&topic=<topic>",
           "/settings", "/settings/<revision>", "/settings/<revision>/<path>")
 WRITE_ROUTES = ("/ops/confirm", "/chat", "/routines/<name>/start", "/frontdesk/<id>/post",
                 "/frontdesk/<id>/close", "/frontdesk/<id>/render", "/complete",
-                "/argues", "/argues/<anchor>/post", "/argues/<anchor>/render")
+                "/argues", "/argues/<anchor>/post", "/argues/<anchor>/render",
+                "/argues/<anchor>/close")
 
 
 def make_handler(room: Room, ops: Ops | None = None, chat: Chat | None = None,
@@ -229,6 +231,16 @@ def make_handler(room: Room, ops: Ops | None = None, chat: Chat | None = None,
                         self._write_json(503, {"error": "the Arguing Room is not configured"})
                     elif path == "/argues":
                         self._write_json(200, argues.board())
+                    elif path.endswith("/close-plan"):
+                        # What closing this argue would change (`argue` p2
+                        # ex1): the shared completion preview, keyed by the
+                        # topic the anchor is in now. A read; nothing moves.
+                        if closer is None:
+                            self._write_json(503, {"error": "conversation completion is not configured"})
+                        else:
+                            key = argues.completion_key(unquote(path[len("/argues/"):-len("/close-plan")]))
+                            found = closer.plan(key)
+                            self._write_json(400 if found.get("error") else 200, found)
                     else:
                         found = argues.argue(unquote(path[len("/argues/"):]))
                         self._write_json(404 if found.get("error") else 200, found)
@@ -505,6 +517,14 @@ def make_handler(room: Room, ops: Ops | None = None, chat: Chat | None = None,
                 return
             if path.startswith("/frontdesk/") and path.endswith("/post"):
                 self._desk_post(unquote(path[len("/frontdesk/"):-len("/post")]))
+                return
+            if path.startswith("/argues/") and path.endswith("/close"):
+                # Closing an argue from the room: the same door as the desk's,
+                # the argue named by its anchor (`argue` p2 ex1).
+                if argues is None:
+                    self._write_json(503, {"error": "the Arguing Room is not configured"})
+                else:
+                    self._complete(argues.completion_key(unquote(path[len("/argues/"):-len("/close")])))
                 return
             if path == "/argues" or path.startswith("/argues/"):
                 self._argue_write(path[len("/argues"):].lstrip("/"))

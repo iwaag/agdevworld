@@ -59,6 +59,12 @@ class Developer:
             raise self.fail
         return self.realm.post(channel, topic, content, sender_id=DEV, sender_name="Developer")
 
+    def resolve_topic(self, message_id, topic):
+        self.realm.resolve("argue", topic)
+
+    def stream_id(self, name):
+        return next(row["stream_id"] for row in self.realm.channels_by_id.values() if row["name"] == name)
+
     def call(self, method, path, params=None):
         self.patched.append((method, path, params))
         ident = int(path.split("/")[1])
@@ -333,6 +339,56 @@ def test_the_routes_answer_over_http():
     finally:
         server.shutdown()
         server.server_close()
+
+
+def test_closing_an_argue_from_the_room_is_the_shared_door_keyed_by_anchor():
+    """`argue` p2 ex1: the preview and the close are reached by anchor, the
+    plan names the argue's *current* topic and nothing else, the close is a
+    ✔ with no note written, and a post afterwards resumes it."""
+    from agentroom.close import Closer
+    from agentroom.realm import MirrorRealm
+
+    realm, mirror, client, room = world()
+    anchor, *_ = talk(realm)
+    pump(mirror)
+    realm.move(sorted(i for i, m in realm.messages.items() if m["subject"] == "argue-far"), "argue-renamed")
+    pump(mirror)
+    mirror.start()
+    door = Closer(topics=lambda: {}, reader_factory=lambda: MirrorRealm(mirror), writer_factory=lambda: client,
+                  mirror=mirror, confirm_seconds=2.0)
+    server = build_server("127.0.0.1", 0, empty_room(), closer=door, argues=room)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        def call(method, path, body=None):
+            connection = HTTPConnection("127.0.0.1", server.server_address[1], timeout=10)
+            connection.request(method, path, body=json.dumps(body) if body is not None else None,
+                               headers={"Content-Type": "application/json"})
+            response = connection.getresponse()
+            return response.status, json.loads(response.read())
+
+        status, plan = call("GET", f"/argues/{anchor}/close-plan")
+        assert status == 200 and plan["scope"]["kind"] == "argue" and plan["topic"] == "argue-renamed"
+        assert [a["key"] for a in plan["actions"]] == ["topic:argue/argue-renamed"]
+        assert plan["actions"][0]["state"] == "ready"
+        assert call("GET", "/argues/424242/close-plan")[0] == 400
+        before = len(realm.messages)
+        status, done = call("POST", f"/argues/{anchor}/close", {"fingerprint": plan["fingerprint"]})
+        assert status == 200 and done["applied"] and not done["partial"]
+        assert done["results"][0]["outcome"] == "applied"
+        assert len(realm.messages) == before, "a human close writes no note"
+        assert realm.messages[anchor]["subject"] == "✔ argue-renamed"
+        status, again = call("GET", f"/argues/{anchor}/close-plan")
+        assert again["actions"][0]["state"] == "done" and again["actions"][0]["reason"] == "already ✔"
+        assert call("POST", f"/argues/{anchor}/close", {"fingerprint": "stale"})[0] == 409
+        # And the room's own post resumes it, as before.
+        status, found = call("POST", f"/argues/{anchor}/post", {"text": "one more thought", "token": "c1"})
+        assert status == 200 and found["resumed"]
+        assert "/argues/<anchor>/close" in call("GET", "/")[1]["post"]
+    finally:
+        server.shutdown()
+        server.server_close()
+        mirror.stop()
 
 
 def test_the_reader_joins_new_public_channels_and_re_reads_what_it_missed():

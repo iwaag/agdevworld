@@ -106,6 +106,9 @@ def health_block(mirror: Mirror | None) -> dict:
         "revision": found["revision"],
         "last_event_at": found["last_event_at"],
         "resyncs": found["resyncs"],
+        # What the mirror has spent on Zulip since it started: a board that
+        # costs nothing to re-read shows the same number after every reload.
+        "calls": int(found.get("calls") or 0),
     }
 
 

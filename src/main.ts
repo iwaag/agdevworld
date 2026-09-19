@@ -6,6 +6,8 @@ if (params.get('parts') === 'gauge') {
   void import('./operationParts').then(module => module.initOperationParts())
 } else if (params.get('view') === 'frontdesk' || params.get('view') === 'argue') {
   void import('./frontDesk')
+} else if (params.get('view') === 'project') {
+  void import('./projectRoom').then(module => module.initProjectRoom())
 } else if (params.has('view') && params.get('parts') !== 'shell') {
   void import('./worldViews')
 } else {

@@ -17,7 +17,9 @@ import { relayCompletion, relayCompletionAt, type CompletionPlan } from './compl
 
 const BASE = (import.meta.env.VITE_AGENTROOM_URL as string | undefined) ?? 'http://localhost:8094'
 
-export type RoomId = 'front' | 'argue'
+// `project` is the Project Room (`project_room` p1): it stands in a room of
+// its own but is not one of the two adapter-driven dialogue rooms below.
+export type RoomId = 'front' | 'argue' | 'project'
 
 export interface Citation {
   channel: string

@@ -323,7 +323,8 @@ export class FrontDeskScene extends Phaser.Scene {
     // The ways out: the other room, and the dashboard.
     const nav = document.createElement('nav')
     nav.style.cssText = 'position:fixed;top:10px;right:16px;z-index:20;display:flex;gap:8px'
-    for (const [label, href] of [[this.adapter.other.label, this.adapter.other.href], ['Operation room ↗', '/']]) {
+    const demo = new URLSearchParams(location.search).get('demo') === '1'
+    for (const [label, href] of [[this.adapter.other.label, this.adapter.other.href], ['Project Room ↗', demo ? '/?view=project&demo=1' : '/?view=project'], ['Operation room ↗', '/']]) {
       const link = document.createElement('a')
       link.href = href
       link.textContent = label

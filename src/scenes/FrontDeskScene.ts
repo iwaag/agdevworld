@@ -59,6 +59,7 @@ import { FrontDeskSettings } from '../frontDeskSettings'
 import { ago, clock, submitToken, type Citation, type RoomAdapter, type RoomDetail, type RoomRow } from '../roomState'
 import { assetUrl, type SettingsCharacter, type SettingsManifest } from '../settingsState'
 import { linksIn, paginate, wrapText, type FoundLink, type Measure } from '../textLayout'
+import { ROOM_TINT_ALPHA, ROOM_TINT_COLOR } from './roomTint'
 
 const FONT = '"Hiragino Sans", "Hiragino Kaku Gothic ProN", "Helvetica Neue", Arial, "Apple Color Emoji", "Segoe UI Emoji", sans-serif'
 const MONO = 'ui-monospace, SFMono-Regular, Menlo, monospace'
@@ -151,6 +152,7 @@ export class FrontDeskScene extends Phaser.Scene {
 
   // Game objects
   private bg!: Phaser.GameObjects.Image
+  private bgTint!: Phaser.GameObjects.Rectangle
   private portrait!: Phaser.GameObjects.Image
   private coPortrait!: Phaser.GameObjects.Image
   private frame!: Phaser.GameObjects.Graphics
@@ -221,6 +223,10 @@ export class FrontDeskScene extends Phaser.Scene {
     unknown.destroy()
 
     this.bg = this.add.image(0, 0, FALLBACK_BG).setOrigin(0.5, 0.5)
+    // The shared room tint (`project_room` p1 step 4): the background at
+    // full strength competed with the portraits and the panels, so every
+    // image-backed room softens it the same way, at the same strength.
+    this.bgTint = this.add.rectangle(0, 0, 10, 10, ROOM_TINT_COLOR, ROOM_TINT_ALPHA).setOrigin(0, 0)
     this.frame = this.add.graphics()
     this.coFrame = this.add.graphics()
     this.portrait = this.add.image(0, 0, FALLBACK_FACE).setOrigin(0, 1)
@@ -742,6 +748,7 @@ export class FrontDeskScene extends Phaser.Scene {
     const height = this.scale.height
     const bgScale = Math.max(width / this.bg.width, height / this.bg.height)
     this.bg.setPosition(width / 2, height / 2).setScale(bgScale)
+    this.bgTint.setPosition(0, 0).setSize(width, height)
     const portraitHeight = this.narrow ? Math.max(140, Math.min(height * 0.42, width * 0.4)) : Math.max(140, Math.min(height * 0.42, width * 0.3))
     this.portrait.setScale(portraitHeight / Math.max(1, this.portrait.height))
 

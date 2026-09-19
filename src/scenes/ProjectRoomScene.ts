@@ -18,6 +18,7 @@
 import Phaser from 'phaser'
 import { FrontDeskSettings } from '../frontDeskSettings'
 import { assetUrl, type SettingsCharacter } from '../settingsState'
+import { ROOM_TINT_ALPHA, ROOM_TINT_COLOR } from './roomTint'
 
 const FALLBACK_BG = 'projectroom-fallback-bg'
 const FALLBACK_FACE = 'projectroom-fallback-face'
@@ -27,10 +28,10 @@ const MONO = 'ui-monospace, SFMono-Regular, Menlo, monospace'
 // The room's own background, by the settings' room id; the Front Desk's when
 // a revision predates the room (`FrontDeskSettings.background` falls back).
 export const ROOM_ID = 'project'
-// How much of the background the tint takes away. Step 4 chooses the final
-// value by looking; this is the starting point the plan names.
-export const TINT_COLOR = 0x0d0f14
-export const TINT_ALPHA = 0.25
+// How much of the background the tint takes away: the shared value every
+// image-backed room uses (`roomTint.ts`).
+export const TINT_COLOR = ROOM_TINT_COLOR
+export const TINT_ALPHA = ROOM_TINT_ALPHA
 
 export interface Speaker {
   character: SettingsCharacter | null

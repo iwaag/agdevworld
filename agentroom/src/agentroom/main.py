@@ -29,6 +29,7 @@ from .argueroom import ArguingRoom
 from .frontdesk import FrontDesk
 from .inflight import ROOTS_VARIABLE, parse_roots
 from .ops import DEFAULT_DONE_SECONDS, DEFAULT_STALLED_SECONDS, Ops
+from .projectroom import ProjectRoom
 from .realm import MirrorRealm
 from .room import Room
 from .server import build_server
@@ -140,6 +141,15 @@ def main(argv: list[str] | None = None) -> int:
             print(f"  {row['name']:<16} {row['state']:<10} runs {row['runs']} "
                   f"({row['open_runs']} open)"
                   + (f" · latest {latest['topic']} {latest['run']['state']}" if latest else ""))
+        board = ProjectRoom(mirror=mirror, ops=ops).board()
+        print(f"projects: {board['counts']['projects']} ({board['counts']['live']} live)")
+        for row in board["projects"]:
+            if row["archived"]:
+                continue
+            c = row["counts"]
+            print(f"  {row['channel']:<24} {row['kind']:<8} docs {c['documents']} setups {c['setups']} "
+                  f"missions {c['missions']} ({c['open_missions']} open) tasks {c['tasks_finished']}/{c['tasks']}"
+                  + (" · " + "; ".join(g["kind"] for g in row["gaps"]) if row["gaps"] else ""))
         print("chat: " + ("configured" if chat.configured else chat.status()["reason"]))
         if cost is None:
             print(f"cost: not configured ({ROOTS_VARIABLE} unset)")
@@ -172,6 +182,9 @@ def main(argv: list[str] | None = None) -> int:
     # The Arguing Room (`argue` p2): the same mirror, the same write
     # credential, and the settings only to know which revision is active.
     argues = ArguingRoom(mirror=mirror, chat=chat, settings=settings)
+    # The Project Room (`project_room` p1): the same mirror, the ops engine
+    # for the reply state.
+    projects = ProjectRoom(mirror=mirror, ops=ops)
 
     # The completion door (`front_desk` p3). It discovers from the mirror and
     # writes with the Developer's credential — the one that already posts
@@ -188,7 +201,7 @@ def main(argv: list[str] | None = None) -> int:
     # neither a restart nor a rebuild. Unconfigured is a payload, not a
     # refusal to start. (Made above: both rooms ask it which revision is active.)
 
-    server = build_server(host, port, room, ops, chat, cost, budget, desk, settings, closer, argues)
+    server = build_server(host, port, room, ops, chat, cost, budget, desk, settings, closer, argues, projects)
     print(
         f"agentroom listening on http://{host}:{port} (mirror on {mirror_path.name}, "
         f"store {store_dir}, stalled at {stalled:g}s, "

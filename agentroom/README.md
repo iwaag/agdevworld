@@ -132,6 +132,9 @@ writes only to this process's memory (see `POST /ops/confirm`).
 - `GET /frontdesk`, `GET /frontdesk/<id>`, `POST /frontdesk/<id>/post` → the
   Front Desk's conversations, one conversation's history, and a post into it
   as the Developer (`front_desk` p1). See below.
+- `GET /projects`, `GET /projects/<stream id | channel | slug>` → the Project
+  Room's read model: every project channel with its purpose documents,
+  setup, missions and tasks, or one project whole (`project_room` p1). See below.
 
 - `POST /routines/<name>/start` → the other write (`refine_routine` p1):
   ask Front to run one routine, by posting the request as the Developer at
@@ -272,6 +275,60 @@ plain, and Front re-voices it afterwards into a memo topic nobody reacts to
 relation as **`presentation`** (below); `POST /frontdesk/<id>/render`
 `{revision?, token}` asks for another interpretation. The old `ag-dialogue`
 block inside a reply is not parsed any more.
+
+## `/projects` — the Project Room's read model (`project_room` p1)
+
+What a project or study *is for* and how far its work has got, read from the
+mirror (`projectroom.py`) with the reply state lifted from the ops engine.
+The channel is the project: `pj-<slug>`, keyed by its **stream id** (a
+channel name or a slug is accepted too); `kind` is `project` / `study` when
+the description says so (`agproject` writes it; autolab's `(study pattern)`
+marker counts) and `unknown` for older channels — never guessed.
+
+- `GET /projects` → `ag.projectroom.v1`: every project channel, live first
+  by latest activity, archived after. Each row: `kind`, `origin` (the argue
+  the description names, with its anchor when the mirror holds it),
+  `counts` (documents, setups, missions, open missions, unrecorded plans,
+  tasks and finished tasks, missions by recorded state), `tasks_read`
+  (whether every mission's work channel is mirrored), `latest`, `reply`
+  (the most urgent reply state on the project), `gaps`, and short rows of
+  its `documents`, `setups`, `missions` and `plans`.
+- `GET /projects/<key>` → one project whole. Four shapes of conversation,
+  told apart by what they carry, never by name alone:
+  - `documents` — `goal` and `researchplan-…` topics; the newest visible
+    post is the current text (`current.content`). A document is not
+    executable work, and `missions` on it is always `[]`: no
+    research-plan-to-mission relation is inferred from similar names.
+  - `setups` — `workplan-setup-…` conversations without a `[mission]`
+    note: workspace preparation, which plans no mission.
+  - `missions` — every conversation carrying a `[mission]` note
+    (`autolab.read_record`): `anchor`, `label`, `setup` (a setup-shaped
+    topic that did record a mission), `work` (autolab's recorded state, with
+    the caveat that `started` proves no process), `reply` (the ops engine's
+    verdict for that conversation), `document` (the current plan), `tasks`
+    with their own `state`, `document`, `reply` and `origins`, `task_counts`
+    (`total`, `live`, `finished`, `completed`, `accepted`, `cancelled`,
+    `open` — counts, never a percentage), `tasks_read` (incomplete when the
+    `work-m<anchor>` channel is archived or absent), `replaces` /
+    `replaced_by` (the recorded relation, by anchor id), `links` (URLs in
+    the source posts, filed as repository / report / zulip / other),
+    `origins` (`[rootchat]` notes), `gaps`.
+  - `plans` — `workplan-…` conversations with no `[mission]` note: planned
+    before the conversation became the record, or not answered yet.
+  - `orphan_tasks` — `[task]` notes whose mission is not in any project
+    channel, filed under the project their `work-` channel's folder names.
+
+  A resolved conversation is `done` as a *reply* state and keeps its
+  recorded *work* state beside it; a ✔ over a `planned` mission is a
+  `resolved-unfinished` gap, not a success. `gaps` on the project say
+  `setup-only`, `no-mission` (a research plan alone is not work),
+  `no-document`, `archived`.
+- While the mirror is stale every `reply.state` is `unknown` with the last
+  known one in `stale_state`, and the payload carries `stale: true`; without
+  an ops engine the reply state is `unknown`, never `quiet`. An archived
+  channel is listed with its description and nothing invented for the rest.
+  Repeated reads cost no Zulip call: the model is derived once per mirror
+  revision.
 
 ## `/argues` — the Arguing Room (`argue` p2)
 

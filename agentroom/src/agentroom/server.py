@@ -35,6 +35,7 @@ from .argueroom import ArguingRoom
 from .frontdesk import FrontDesk
 from .inflight import ROOTS_VARIABLE
 from .ops import Ops
+from .projectroom import ProjectRoom
 from .room import Room, health_block
 from .settings import Settings
 
@@ -42,6 +43,7 @@ ROUTES = ("/healthz", "/agents", "/work", "/work?resolved=1", "/ops", "/routines
           "/inflight/<name>", "/cost", "/budget", "/frontdesk", "/frontdesk/<id>",
           "/frontdesk/<id>/close-plan", "/argues", "/argues/<anchor>",
           "/argues/<anchor>/close-plan",
+          "/projects", "/projects/<stream id | channel | slug>",
           "/complete/plan?channel=<channel>&topic=<topic>",
           "/complete/history?channel=<channel>&topic=<topic>",
           "/settings", "/settings/<revision>", "/settings/<revision>/<path>")
@@ -54,7 +56,8 @@ WRITE_ROUTES = ("/ops/confirm", "/chat", "/routines/<name>/start", "/frontdesk/<
 def make_handler(room: Room, ops: Ops | None = None, chat: Chat | None = None,
                  cost: Cost | None = None, budget: Budget | None = None,
                  desk: FrontDesk | None = None, settings: Settings | None = None,
-                 closer: Closer | None = None, argues: ArguingRoom | None = None):
+                 closer: Closer | None = None, argues: ArguingRoom | None = None,
+                 projects: ProjectRoom | None = None):
     class Handler(BaseHTTPRequestHandler):
         server_version = "agentroom/0.1.0"
 
@@ -243,6 +246,18 @@ def make_handler(room: Room, ops: Ops | None = None, chat: Chat | None = None,
                             self._write_json(400 if found.get("error") else 200, found)
                     else:
                         found = argues.argue(unquote(path[len("/argues/"):]))
+                        self._write_json(404 if found.get("error") else 200, found)
+                elif path == "/projects" or path.startswith("/projects/"):
+                    # The Project Room (`project_room` p1): every project
+                    # channel with its purpose documents, setup, missions and
+                    # tasks, or one project whole — all from the mirror, with
+                    # the reply state lifted from the ops engine.
+                    if projects is None:
+                        self._write_json(503, {"error": "the Project Room is not configured"})
+                    elif path == "/projects":
+                        self._write_json(200, projects.board())
+                    else:
+                        found = projects.project(unquote(path[len("/projects/"):]))
                         self._write_json(404 if found.get("error") else 200, found)
                 elif path == "/frontdesk":
                     # The Front Desk's conversations (`front_desk` p1). The
@@ -589,7 +604,8 @@ def build_server(
     host: str, port: int, room: Room, ops: Ops | None = None, chat: Chat | None = None,
     cost: Cost | None = None, budget: Budget | None = None, desk: FrontDesk | None = None,
     settings: Settings | None = None, closer: Closer | None = None, argues: ArguingRoom | None = None,
+    projects: ProjectRoom | None = None,
 ) -> ThreadingHTTPServer:
     return ThreadingHTTPServer(
-        (host, port), make_handler(room, ops, chat, cost, budget, desk, settings, closer, argues)
+        (host, port), make_handler(room, ops, chat, cost, budget, desk, settings, closer, argues, projects)
     )

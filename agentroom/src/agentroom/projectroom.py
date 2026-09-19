@@ -638,6 +638,18 @@ class ProjectRoom:
         return {"schema": SCHEMA, "generated_at": now, "health": health, "stale": health["state"] != "live",
                 "project": self._project(found, derived, replies, live, now, full=True)}
 
+    def work_row(self, anchor: int, now: float | None = None) -> dict | None:
+        """One mission or task row, whole, by its anchor (for the talk door)."""
+        now = time.time() if now is None else now
+        found = self.locate_work(anchor)
+        if found is None:
+            return None
+        derived = self.refresh()
+        replies, live = self._reply_rows(now)
+        if found["kind"] == MISSION:
+            return self._mission_row(found["read"], derived, replies, live, full=True)
+        return self._task_row(found["record"], replies, live, full=True)
+
     def locate_work(self, anchor) -> dict | None:
         """The mission or task a work anchor names, with the project it belongs
         to — for the conversation routes (step 2). None when no record wears

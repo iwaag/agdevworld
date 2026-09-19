@@ -30,6 +30,7 @@ from .frontdesk import FrontDesk
 from .inflight import ROOTS_VARIABLE, parse_roots
 from .ops import DEFAULT_DONE_SECONDS, DEFAULT_STALLED_SECONDS, Ops
 from .projectroom import ProjectRoom
+from .projecttalk import ProjectTalk
 from .realm import MirrorRealm
 from .room import Room
 from .server import build_server
@@ -185,6 +186,8 @@ def main(argv: list[str] | None = None) -> int:
     # The Project Room (`project_room` p1): the same mirror, the ops engine
     # for the reply state.
     projects = ProjectRoom(mirror=mirror, ops=ops)
+    # Comments into a project's conversations, on the same write credential.
+    talk = ProjectTalk(room=projects, chat=chat)
 
     # The completion door (`front_desk` p3). It discovers from the mirror and
     # writes with the Developer's credential — the one that already posts
@@ -201,7 +204,7 @@ def main(argv: list[str] | None = None) -> int:
     # neither a restart nor a rebuild. Unconfigured is a payload, not a
     # refusal to start. (Made above: both rooms ask it which revision is active.)
 
-    server = build_server(host, port, room, ops, chat, cost, budget, desk, settings, closer, argues, projects)
+    server = build_server(host, port, room, ops, chat, cost, budget, desk, settings, closer, argues, projects, talk)
     print(
         f"agentroom listening on http://{host}:{port} (mirror on {mirror_path.name}, "
         f"store {store_dir}, stalled at {stalled:g}s, "

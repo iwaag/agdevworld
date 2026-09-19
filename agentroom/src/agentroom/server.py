@@ -36,6 +36,7 @@ from .frontdesk import FrontDesk
 from .inflight import ROOTS_VARIABLE
 from .ops import Ops
 from .projectroom import ProjectRoom
+from .projecttalk import ProjectTalk
 from .room import Room, health_block
 from .settings import Settings
 
@@ -43,21 +44,22 @@ ROUTES = ("/healthz", "/agents", "/work", "/work?resolved=1", "/ops", "/routines
           "/inflight/<name>", "/cost", "/budget", "/frontdesk", "/frontdesk/<id>",
           "/frontdesk/<id>/close-plan", "/argues", "/argues/<anchor>",
           "/argues/<anchor>/close-plan",
-          "/projects", "/projects/<stream id | channel | slug>",
+          "/projects", "/projects/<stream id | channel | slug>", "/projects/<key>/topics/<topic>",
+          "/work/<anchor>",
           "/complete/plan?channel=<channel>&topic=<topic>",
           "/complete/history?channel=<channel>&topic=<topic>",
           "/settings", "/settings/<revision>", "/settings/<revision>/<path>")
 WRITE_ROUTES = ("/ops/confirm", "/chat", "/routines/<name>/start", "/frontdesk/<id>/post",
                 "/frontdesk/<id>/close", "/frontdesk/<id>/render", "/complete",
                 "/argues", "/argues/<anchor>/post", "/argues/<anchor>/render",
-                "/argues/<anchor>/close")
+                "/argues/<anchor>/close", "/work/<anchor>/post", "/projects/<key>/topics/<topic>/post")
 
 
 def make_handler(room: Room, ops: Ops | None = None, chat: Chat | None = None,
                  cost: Cost | None = None, budget: Budget | None = None,
                  desk: FrontDesk | None = None, settings: Settings | None = None,
                  closer: Closer | None = None, argues: ArguingRoom | None = None,
-                 projects: ProjectRoom | None = None):
+                 projects: ProjectRoom | None = None, talk: ProjectTalk | None = None):
     class Handler(BaseHTTPRequestHandler):
         server_version = "agentroom/0.1.0"
 
@@ -256,8 +258,26 @@ def make_handler(room: Room, ops: Ops | None = None, chat: Chat | None = None,
                         self._write_json(503, {"error": "the Project Room is not configured"})
                     elif path == "/projects":
                         self._write_json(200, projects.board())
+                    elif "/topics/" in path:
+                        # One unrecorded conversation of a project — a
+                        # document, a setup, a plan with no note — by name
+                        # (`project_room` p1 step 2).
+                        if talk is None:
+                            self._write_json(503, {"error": "project conversations are not configured"})
+                        else:
+                            key, _, topic = path[len("/projects/"):].partition("/topics/")
+                            found = talk.topic(unquote(key), unquote(topic))
+                            self._write_json(404 if found.get("error") else 200, found)
                     else:
                         found = projects.project(unquote(path[len("/projects/"):]))
+                        self._write_json(404 if found.get("error") else 200, found)
+                elif path.startswith("/work/"):
+                    # A mission or task by its anchor: history, destination,
+                    # record (`project_room` p1 step 2).
+                    if talk is None:
+                        self._write_json(503, {"error": "project conversations are not configured"})
+                    else:
+                        found = talk.work(unquote(path[len("/work/"):]))
                         self._write_json(404 if found.get("error") else 200, found)
                 elif path == "/frontdesk":
                     # The Front Desk's conversations (`front_desk` p1). The
@@ -525,8 +545,38 @@ def make_handler(room: Room, ops: Ops | None = None, chat: Chat | None = None,
                 # reload right after this reads the new state from the copy.
                 self._write_json(200, found)
 
+        def _project_write(self, path: str) -> None:
+            """The Project Room's comments (`project_room` p1 step 2): into
+            the mission or task the anchor is in now, or into an unrecorded
+            plan/setup by name. A document is refused with the path to Front;
+            a ✔'d target needs `resume: true`."""
+            if talk is None:
+                self._write_json(503, {"sent": False, "error": "project conversations are not configured"})
+                return
+            body = self._body()
+            if body is None:
+                return
+            text, token, resume = str(body.get("text") or ""), str(body.get("token") or ""), body.get("resume") is True
+            if path.startswith("/work/"):
+                found = talk.post_work(unquote(path[len("/work/"):-len("/post")]), text, token, resume=resume)
+            else:
+                key, _, topic = path[len("/projects/"):-len("/post")].partition("/topics/")
+                found = talk.post_topic(unquote(key), unquote(topic), text, token, resume=resume)
+            if found.get("sent"):
+                self._write_json(200, found)
+            elif found.get("uncertain"):
+                self._write_json(502, found)
+            elif found.get("needs_resume"):
+                self._write_json(409, found)
+            else:
+                self._write_json(403, found)
+
         def do_POST(self) -> None:  # noqa: N802
             path = urlparse(self.path).path.rstrip("/") or "/"
+            if (path.startswith("/work/") or (path.startswith("/projects/") and "/topics/" in path)) \
+                    and path.endswith("/post"):
+                self._project_write(path)
+                return
             if path == "/chat":
                 self._chat()
                 return
@@ -604,8 +654,8 @@ def build_server(
     host: str, port: int, room: Room, ops: Ops | None = None, chat: Chat | None = None,
     cost: Cost | None = None, budget: Budget | None = None, desk: FrontDesk | None = None,
     settings: Settings | None = None, closer: Closer | None = None, argues: ArguingRoom | None = None,
-    projects: ProjectRoom | None = None,
+    projects: ProjectRoom | None = None, talk: ProjectTalk | None = None,
 ) -> ThreadingHTTPServer:
     return ThreadingHTTPServer(
-        (host, port), make_handler(room, ops, chat, cost, budget, desk, settings, closer, argues, projects)
+        (host, port), make_handler(room, ops, chat, cost, budget, desk, settings, closer, argues, projects, talk)
     )

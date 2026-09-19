@@ -135,6 +135,9 @@ writes only to this process's memory (see `POST /ops/confirm`).
 - `GET /projects`, `GET /projects/<stream id | channel | slug>` → the Project
   Room's read model: every project channel with its purpose documents,
   setup, missions and tasks, or one project whole (`project_room` p1). See below.
+- `GET /work/<anchor>`, `POST /work/<anchor>/post`,
+  `GET|POST /projects/<key>/topics/<topic>[/post]` → a project conversation's
+  history and a comment into it (step 2). See below.
 
 - `POST /routines/<name>/start` → the other write (`refine_routine` p1):
   ask Front to run one routine, by posting the request as the Developer at
@@ -329,6 +332,41 @@ marker counts) and `unknown` for older channels — never guessed.
   channel is listed with its description and nothing invented for the rest.
   Repeated reads cost no Zulip call: the model is derived once per mirror
   revision.
+
+### `/work/<anchor>` and `/projects/<key>/topics/<topic>` — talking in a project (step 2)
+
+`projecttalk.py`. The selected conversation's visible history, and a comment
+into **the conversation it belongs to**, as the Developer:
+
+- `GET /work/<anchor>` → `ag.projecttalk.v1`: the mission or task wearing
+  that anchor, located where the message is **now** — `destination`
+  (`channel`, `topic`, `live_topic`, `resolved`, `role` = `planning` for a
+  mission / `execution` for a task, `responsible` = the live instances whose
+  roster owns it, a `label`), `posts` (every real post, `kind` human / agent
+  / ack, no selfnote), `status` judged against the serving agent (`waiting`
+  / `received` / `answered` / `done` / `quiet`; `unknown` + `stale_state`
+  while the mirror is stale), the `record` row from `/projects/<key>`, the
+  project stub with its argue anchor, `zulip_url`.
+- `GET /projects/<key>/topics/<topic>` → an unrecorded conversation by name:
+  a document (`role: none`, `postable: false`, plus `front` = the Front Desk
+  and the origin argue as the path for discussing how to proceed), a setup or
+  a plan without a note (`role: planning`). A topic carrying a work record
+  answers with its `anchor` and asks to be read by it, so a reused name never
+  shows another mission's history.
+- `POST /work/<anchor>/post` `{text, token, resume?}` → a plan comment into
+  the mission's planning conversation, a run comment into the task's
+  execution conversation. The destination is resolved from the anchor at
+  send time: a renamed topic is followed, a reused name is never posted into,
+  a deleted anchor sends nothing. A ✔'d target answers **409**
+  `needs_resume: true` unless `resume: true` is sent, and then it is
+  un-resolved first and the answer says `resumed: true`.
+- `POST /projects/<key>/topics/<topic>/post` → the same into a setup or an
+  unrecorded plan. A document is refused (**403**) with the `front` path: a
+  post there would dispatch nothing and must not look as if it had.
+
+Same rules as the rooms' writes: once per `token` (a repeat returns the first
+result with `duplicate: true`), `403` for a refusal, `502` `uncertain: true`
+when Zulip did not confirm, never retried. Every post buys autolab a run.
 
 ## `/argues` — the Arguing Room (`argue` p2)
 

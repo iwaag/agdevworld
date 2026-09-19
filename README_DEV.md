@@ -347,3 +347,28 @@ health and send tests intercept browser fetch; unit tests mock Zulip. Real chat
 verification is deliberate and at most one round trip, never automated posting.
 Rebuild the web image after frontend changes and kickstart the local relay job
 after relay code changes; verify event-queue health returns to live.
+
+## Project Room (`project_room` p1)
+
+`/?view=project` follows a project or a study from its purpose through its
+plans and runs, and talks in the selected one. It is a room of its own
+(`src/projectRoom.ts`, `src/scenes/ProjectRoomScene.ts`): the settings'
+`project` background under the shared tint (`src/scenes/roomTint.ts`, laid
+over the Front Desk and the Arguing Room too), the portrait of whoever
+answers in the selected conversation, and four DOM panels — projects and
+studies on the left, the selected project's purpose / setup / plans and runs
+in the centre, the selected document or plan on the right, the conversation
+and the composer below. The relay is the read model
+(`agentroom/README.md`, `/projects`, `/work/<anchor>`,
+`/projects/<key>/topics/<topic>`); `src/projectState.ts` carries its
+payloads and keeps two browser-local things: the read position per
+conversation (the pink "updated since you looked" dot) and the draft per
+conversation. `&demo=1` (`src/projectDemo.ts`) plays a fixture with no relay.
+
+Words the screen keeps apart: `work <state>` is autolab's recorded word
+(`started` proves no process); `reply <state>` is the ops engine's verdict
+for that conversation; task counts are counts, and `?` after one means the
+work channel is not mirrored. A document has no composer — it says where to
+take the discussion (Front) — and a ✔'d conversation is resumed only after a
+second press. URLs: `&project=<key>&plan=<anchor>` / `&run=<anchor>` /
+`&topic=<name>`.

@@ -112,6 +112,28 @@ def main(argv: list[str] | None = None) -> int:
         max_chars=int(os.environ.get("AGENTROOM_CHAT_MAX_CHARS", DEFAULT_MAX_CHARS)),
     )
 
+    watchdog = None
+    health_env = os.environ.get("AGENTROOM_MONITOR_HEALTH", "")
+    if health_env and not (argv and argv[0] == "check"):
+        # Observer's request monitor, watched from outside it (robust_workflow
+        # p2 step 4): its record is evaluated here, shown on /ops and
+        # /healthz, and a change into a failing state is sent to the realm's
+        # owners when AGENTROOM_MONITOR_ALERT=dm.
+        import threading
+
+        from agag.zulip import ZulipClient
+
+        from .watchdog import Watchdog, dm_owners
+
+        status_env = os.environ.get("AGENTROOM_MONITOR_STATUS", "")
+        alert = None
+        if os.environ.get("AGENTROOM_MONITOR_ALERT", "").strip() == "dm":
+            alert = dm_owners(lambda: ZulipClient.from_env(mirror_path))
+        watchdog = Watchdog(Path(health_env).expanduser(),
+                            Path(status_env).expanduser() if status_env else None,
+                            alert=alert, log=lambda line: print(line, flush=True))
+        threading.Thread(target=watchdog.run, name="monitor-watchdog", daemon=True).start()
+
     if argv and argv[0] == "check":
         # A one-shot read, so a credentials or connectivity problem is found
         # without a browser in the loop — and the honest measurement of what
@@ -204,7 +226,8 @@ def main(argv: list[str] | None = None) -> int:
     # neither a restart nor a rebuild. Unconfigured is a payload, not a
     # refusal to start. (Made above: both rooms ask it which revision is active.)
 
-    server = build_server(host, port, room, ops, chat, cost, budget, desk, settings, closer, argues, projects, talk)
+    server = build_server(host, port, room, ops, chat, cost, budget, desk, settings, closer, argues, projects, talk,
+                          watchdog=watchdog)
     print(
         f"agentroom listening on http://{host}:{port} (mirror on {mirror_path.name}, "
         f"store {store_dir}, stalled at {stalled:g}s, "

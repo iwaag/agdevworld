@@ -96,6 +96,28 @@ export interface OpsBoard {
   // not in `instances`, and this is how the screen can say so rather than
   // letting an agent disappear without an account of itself.
   retired: string[]
+  // What watches the requests (robust_workflow p2 step 4): the relay's own
+  // reading of Observer's monitor-health record. Absent on an older relay.
+  watchers?: { observer_monitor?: WatcherHealth }
+}
+
+export interface WatcherHealth {
+  state: 'ok' | 'idle' | 'disabled' | 'missing' | 'stopped' | 'stalled' | 'judgment_stalled' | 'unable_to_observe' | 'degraded'
+  reason: string
+  checked_at: number
+}
+
+const WATCHER_FAILING = ['missing', 'stopped', 'stalled', 'judgment_stalled', 'unable_to_observe', 'degraded']
+
+// The monitor that would flag a stalled row is named before the rows: a
+// quiet board means nothing if what watches it has stopped.
+export function watcherLine(board: OpsBoard): string | null {
+  const monitor = board.watchers?.observer_monitor
+  if (!monitor) return null
+  if (WATCHER_FAILING.includes(monitor.state)) {
+    return `⚠ Observer's request monitor is ${monitor.state.replace(/_/g, ' ').toUpperCase()} — ${monitor.reason}.`
+  }
+  return `request monitor ${monitor.state}`
 }
 
 // A board the view can render when the relay itself cannot be reached. The
@@ -205,12 +227,15 @@ export function at(timestamp: number | null | undefined): string {
 // because everything below it is only as true as the queue behind it.
 export function healthLine(board: OpsBoard): string {
   const health = board.health
+  const watcher = watcherLine(board)
   if (health.state !== 'live') {
-    return `⚠ UNKNOWN — ${health.reason}. Every row below is the last thing known, not the state now.`
+    const unknown = `⚠ UNKNOWN — ${health.reason}. Every row below is the last thing known, not the state now.`
+    return watcher?.startsWith('⚠') ? `${watcher} ${unknown}` : unknown
   }
   const seen = health.last_event_at ? `last event ${at(health.last_event_at)}` : 'no event yet'
-  return (
+  const line =
     `mirror live · ${seen} · ${health.topics} topics in ${health.channels} channels ` +
     `(revision ${health.revision}) · stalled at ${Math.round(board.settings.stalled_seconds / 60)} min`
-  )
+  if (!watcher) return line
+  return watcher.startsWith('⚠') ? `${watcher} ${line}` : `${line} · ${watcher}`
 }

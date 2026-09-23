@@ -59,7 +59,7 @@ def make_handler(room: Room, ops: Ops | None = None, chat: Chat | None = None,
                  cost: Cost | None = None, budget: Budget | None = None,
                  desk: FrontDesk | None = None, settings: Settings | None = None,
                  closer: Closer | None = None, argues: ArguingRoom | None = None,
-                 projects: ProjectRoom | None = None, talk: ProjectTalk | None = None):
+                 projects: ProjectRoom | None = None, talk: ProjectTalk | None = None, watchdog=None):
     class Handler(BaseHTTPRequestHandler):
         server_version = "agentroom/0.1.0"
 
@@ -133,7 +133,10 @@ def make_handler(room: Room, ops: Ops | None = None, chat: Chat | None = None,
             path = urlparse(self.path).path.rstrip("/") or "/"
             try:
                 if path == "/healthz":
-                    self._write_json(200, {"ok": True, "mirror": health_block(room.mirror)})
+                    payload = {"ok": True, "mirror": health_block(room.mirror)}
+                    if watchdog is not None:
+                        payload["observer_monitor"] = watchdog.latest()
+                    self._write_json(200, payload)
                 elif path == "/":
                     self._write_json(200, {
                         "service": "agentroom",
@@ -160,7 +163,12 @@ def make_handler(room: Room, ops: Ops | None = None, chat: Chat | None = None,
                                      "set OPSROOM_ZULIP_ENV to its own bot credential",
                         })
                     else:
-                        self._write_json(200, ops.snapshot())
+                        board = ops.snapshot()
+                        # What watches the requests is shown beside them: a
+                        # board of quiet rows means nothing if the monitor
+                        # that would have flagged them has stopped.
+                        board["watchers"] = {"observer_monitor": watchdog.latest()} if watchdog is not None else {}
+                        self._write_json(200, board)
                 elif path == "/routines":
                     # The routine board is the same engine's reading of the
                     # same realm, so it degrades the same way: no credential,
@@ -654,8 +662,9 @@ def build_server(
     host: str, port: int, room: Room, ops: Ops | None = None, chat: Chat | None = None,
     cost: Cost | None = None, budget: Budget | None = None, desk: FrontDesk | None = None,
     settings: Settings | None = None, closer: Closer | None = None, argues: ArguingRoom | None = None,
-    projects: ProjectRoom | None = None, talk: ProjectTalk | None = None,
+    projects: ProjectRoom | None = None, talk: ProjectTalk | None = None, watchdog=None,
 ) -> ThreadingHTTPServer:
     return ThreadingHTTPServer(
-        (host, port), make_handler(room, ops, chat, cost, budget, desk, settings, closer, argues, projects, talk)
+        (host, port), make_handler(room, ops, chat, cost, budget, desk, settings, closer, argues, projects, talk,
+                                   watchdog=watchdog)
     )

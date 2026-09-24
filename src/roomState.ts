@@ -272,12 +272,16 @@ interface ArgueRow {
   resolved: boolean
   last_post: { at: number; by: string } | null
   status: RoomStatus
+  asking?: number | null
 }
 
 interface ArgueDetail {
   health: { state: string; reason: string }
   chat: { configured: boolean; reason: string | null; max_chars?: number }
-  argue: ArgueRow & { posts: (RoomPost & { logical?: string | null })[]; zulip_url: string | null; presentation: Presentation }
+  argue: ArgueRow & {
+    posts: (RoomPost & { logical?: string | null })[]; zulip_url: string | null; presentation: Presentation
+    requests?: RoomRequests | null; viewer_id?: number | null
+  }
 }
 
 export const ANCHOR_PATTERN = /^[0-9]{1,12}$/
@@ -291,7 +295,7 @@ export const argueAdapter: RoomAdapter = {
   async list() {
     const found = await readRelay<{ argues: ArgueRow[] }>('/argues')
     if ('error' in found) return found
-    return found.argues.map((row) => ({ key: String(row.anchor), label: row.stem, resolved: row.resolved, last_post: row.last_post }))
+    return found.argues.map((row) => ({ key: String(row.anchor), label: row.stem, resolved: row.resolved, last_post: row.last_post, asking: row.asking ?? null }))
   },
   async detail(key) {
     const found = await readRelay<ArgueDetail>(`/argues/${encodeURIComponent(key)}`)
@@ -302,11 +306,11 @@ export const argueAdapter: RoomAdapter = {
       conversation: {
         key, channel: argue.channel, topic: argue.topic, live_topic: argue.live_topic, resolved: argue.resolved,
         known: 'held', bounded: false, posts: argue.posts, status: argue.status, zulip_url: argue.zulip_url,
-        presentation: argue.presentation,
+        presentation: argue.presentation, requests: argue.requests ?? null, viewer_id: argue.viewer_id ?? null,
       },
     }
   },
-  send: (key, text, token) => writeRelay(`/argues/${encodeURIComponent(key)}/post`, { text, token }),
+  send: (key, text, token, answers) => writeRelay(`/argues/${encodeURIComponent(key)}/post`, { text, token, ...(answers?.length ? { answers } : {}) }),
   create: (text, token) => writeRelay('/argues', { text, token }),
   render: (key, revision, token) => writeRelay(`/argues/${encodeURIComponent(key)}/render`, { revision, token }),
   // Finishing from the room (`argue` p2 ex1): the shared completion door,

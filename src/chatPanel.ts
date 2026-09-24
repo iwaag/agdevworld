@@ -28,6 +28,7 @@ import {
   type RoutinePost,
   type RoutineSession,
 } from './routineState'
+import { LABEL_STYLE, labelOf, pendingFor } from './postMeaning'
 
 const PANEL_CSS = `
 #chat-panel {
@@ -167,7 +168,8 @@ export function initChatPanel(options: { mount?: HTMLElement; managed?: boolean;
   let lastIds = ''
   const listeners: Array<(detail: RoutineDetail) => void> = []
 
-  function bubble(className: string, who: string | undefined, text: string): HTMLDivElement {
+  function bubble(className: string, who: string | undefined, text: string,
+    meaning?: { icon: string; text: string; tone: keyof typeof LABEL_STYLE } | null): HTMLDivElement {
     const node = document.createElement('div')
     node.className = `chat-msg ${className}`
     if (who) {
@@ -175,6 +177,17 @@ export function initChatPanel(options: { mount?: HTMLElement; managed?: boolean;
       label.className = 'chat-who'
       label.textContent = who
       node.append(label)
+    }
+    if (meaning) {
+      // What the post is for (`postMeaning.ts`): icon and words, never colour alone.
+      const style = LABEL_STYLE[meaning.tone]
+      const tag = document.createElement('span')
+      tag.className = `chat-intent ${meaning.tone}`
+      tag.textContent = `${meaning.icon} ${meaning.text}`
+      tag.style.cssText = `display:inline-block;margin:0 0 4px;padding:${style.background ? '1px 6px' : '0'};border-radius:4px;`
+        + `font:${style.bold ? 'bold ' : ''}10.5px ui-monospace,SFMono-Regular,Menlo,monospace;color:${style.color};`
+        + `background:${style.background ?? 'transparent'}`
+      node.append(tag, document.createElement('br'))
     }
     node.append(document.createTextNode(text))
     messagesEl.append(node)
@@ -224,7 +237,17 @@ export function initChatPanel(options: { mount?: HTMLElement; managed?: boolean;
     for (const post of posts) {
       const kind = classOf(post, session.opened?.message_id ?? null)
       const who = kind === 'ack' ? undefined : kind === 'fire' ? `opening post · ${post.by} · ${ago(detail.generated_at - post.at)} ago` : `${post.by} · ${ago(detail.generated_at - post.at)} ago`
-      bubble(kind, who, kind === 'ack' ? 'ack — a serving is under way' : post.content).dataset.messageId = String(post.message_id)
+      const meaning = kind === 'ack' ? null : labelOf(post.message_id, post.meaning, session.requests, detail.viewer_id)
+      bubble(kind, who, kind === 'ack' ? 'ack — a serving is under way' : post.content, meaning).dataset.messageId = String(post.message_id)
+    }
+    // What is still waiting for the viewer in this run, under the history.
+    const waiting = pendingFor(session.requests, detail.viewer_id)
+    if (waiting.length) {
+      const note = document.createElement('div')
+      note.className = 'chat-empty chat-asking'
+      note.style.cssText = 'color:#0d0f14;background:#ffc56d;font-weight:bold;border-radius:6px;padding:6px 8px'
+      note.textContent = `❓ ${waiting.length} waiting for your reply: ${waiting.map((row) => `#${row.id}`).join(', ')}`
+      messagesEl.append(note)
     }
     if (atBottom) messagesEl.scrollTop = messagesEl.scrollHeight
   }

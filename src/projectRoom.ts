@@ -26,6 +26,7 @@
 // button press and a ✔'d conversation asks once more before it is resumed.
 // A document has no composer: it says where to take the discussion (Front).
 
+import { LABEL_STYLE, labelOf } from './postMeaning'
 import Phaser from 'phaser'
 import { createFrontDeskInput, type FrontDeskInputHandle } from './frontDeskInput'
 import { FrontDeskSettings } from './frontDeskSettings'
@@ -604,7 +605,9 @@ export function initProjectRoom(): void {
           ['origins', (t.origins ?? []).map((o) => `#${o.channel} › ${o.topic} (${o.by})`).join('; ')]]))
         detailPanel.append(linksBlock(t.links ?? [], t.zulip_url))
         if (t.document?.content) { detailPanel.append(el('h3', '', `TASK · ${t.document.title}`)); detailPanel.append(el('div', 'pr-doc', t.document.content)) }
-        const result = [...conversation!.posts].reverse().find((p) => p.kind === 'agent' && /result|report|done|completed/i.test(p.content))
+        // The newest post that says it is a report (`ag.post.v1`) — read from
+        // the post's own label, never guessed from its words.
+        const result = [...conversation!.posts].reverse().find((p) => p.kind === 'agent' && p.meaning?.intent === 'report')
         if (result) { detailPanel.append(el('h3', '', `LATEST REPORT · ${clock(result.at)} by ${result.by}`)); detailPanel.append(el('div', 'pr-doc', result.content)) }
         return
       }
@@ -656,7 +659,16 @@ export function initProjectRoom(): void {
       if (post.kind === 'ack') { posts.append(el('p', 'pr-post ack', `· ${post.by} received it · ${clock(post.at)}`)); continue }
       const row = el('div', 'pr-post')
       const body = el('div')
-      body.append(el('div', `pr-who${post.kind === 'agent' ? ' agent' : ''}`, `${post.speaker} · ${clock(post.at)}${post.edited ? ' · edited' : ''}`), el('div', 'pr-body', post.content))
+      const label = labelOf(post.message_id, post.meaning, conversation.requests, conversation.viewer_id)
+      const who = el('div', `pr-who${post.kind === 'agent' ? ' agent' : ''}`, `${post.speaker} · ${clock(post.at)}${post.edited ? ' · edited' : ''}`)
+      if (label) {
+        const style = LABEL_STYLE[label.tone]
+        const tag = el('span', `pr-intent ${label.tone}`, ` ${label.icon} ${label.text}`)
+        tag.style.cssText = `margin-left:6px;color:${style.color};background:${style.background ?? 'transparent'};`
+          + `${style.bold ? 'font-weight:bold;' : ''}${style.background ? 'padding:0 5px;border-radius:4px;' : ''}`
+        who.append(tag)
+      }
+      body.append(who, el('div', 'pr-body', post.content))
       row.append(avatarFor(post), body)
       posts.append(row)
     }

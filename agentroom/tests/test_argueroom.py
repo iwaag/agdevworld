@@ -413,3 +413,30 @@ def test_the_reader_joins_new_public_channels_and_re_reads_what_it_missed():
     assert ensure_subscribed(reader, mirror, lines.append) == ["argue", "memo"]
     assert reader.asked == [["argue", "memo"]] and resyncs == [1] and "#argue" in lines[0]
     assert ensure_subscribed(reader, mirror, lines.append) == [] and resyncs == [1]
+
+
+# --- what a post is for, and what is still asked (clearer_chat_ui step 4) ---------------
+
+
+def test_an_argue_carries_meanings_and_two_speakers_questions_to_the_human():
+    realm, mirror, _, room = world()
+    anchor, *_ = talk(realm)
+    ask_front = realm.post("argue", "argue-far", "Which failure matters most?\n\n`ag-post intent=response_request to=8 ask=question`",
+                           sender_id=FRONT, sender_name="Front")
+    ask_lab = realm.post("argue", "argue-far", "May I prototype it?\n\n`ag-post intent=response_request to=8 ask=confirmation`",
+                         sender_id=AUTOLAB, sender_name="autolab-x1")
+    realm.post("argue", "argue-far", "**[sage:arxiv]**\nOne more paper.\n\n`ag-post intent=report`", sender_id=SAGE, sender_name="archsage")
+    pump(mirror)
+    argue = room.argue(anchor)["argue"]
+    assert argue["status"]["state"] == "asking" and argue["asking"] == 2
+    assert argue["requests"]["pending"] == [ask_front, ask_lab] and argue["viewer_id"] == DEV
+    meanings = {p["message_id"]: p["meaning"] for p in argue["posts"]}
+    assert meanings[ask_lab] == {"intent": "response_request", "to": DEV, "ask": "confirmation"}
+    assert all("ag-post" not in p["content"] for p in argue["posts"])
+    # The human answers autolab's by name: only that one settles.
+    sent = room.post(anchor, "Yes, prototype it.", "tok-ans", [ask_lab])
+    assert sent["sent"] and realm.messages[sent["message_id"]]["content"].endswith(f"`ag-post re={ask_lab}`")
+    pump(mirror)
+    after = room.argue(anchor)["argue"]["requests"]
+    assert after["pending"] == [ask_front]
+    assert "not a request" in room.post(anchor, "x", "tok-bad", [anchor])["error"]

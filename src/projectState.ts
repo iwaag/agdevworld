@@ -11,6 +11,7 @@
 // conversation (an "updated since you looked" mark), and the draft typed
 // into each conversation's composer. Both live in this browser only.
 
+import type { PostMeaning, RoomRequests } from './roomState'
 import { readRelay, writeRelay, type SendResult } from './roomState'
 
 export type ProjectKind = 'project' | 'study' | 'unknown'
@@ -173,6 +174,7 @@ export interface TalkPost {
   speaker: string
   content: string
   edited?: boolean
+  meaning?: PostMeaning | null
 }
 
 export interface Destination {
@@ -199,6 +201,8 @@ export interface TalkDetail {
     destination: Destination
     posts: TalkPost[]
     status: { state: string; since: number | null; evidence: string; stale_state?: string }
+    requests?: RoomRequests | null
+    viewer_id?: number | null
     zulip_url: string | null
     front: { desk: string; argue: string | null; note: string } | null
     note: string
@@ -323,7 +327,7 @@ export function replyLabel(reply: Reply | undefined | null): string {
 export function replyTone(state: string | undefined): string {
   switch (state) {
     case 'stalled': return 'bad'
-    case 'awaiting': case 'waiting': return 'warn'
+    case 'awaiting': case 'waiting': case 'asking': return 'warn'
     case 'acked': case 'received': return 'accent'
     case 'done': case 'answered': return 'live'
     case 'unknown': return 'warn'

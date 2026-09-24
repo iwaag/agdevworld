@@ -59,6 +59,7 @@ from agag.selfnote import parse_note
 
 from .chat import Chat
 from .presentation import Located, agents_of, locate, presentation, source_posts
+from .presentation import answer_body, requests_payload, with_requests
 
 SCHEMA = "ag.argueroom.v1"
 OUTCOME_TAG = "outcome"
@@ -163,14 +164,30 @@ class ArguingRoom:
                 origin = str(found) if found is not None else None
                 break
         shown = [p for p in posts if p["kind"] != "ack"]
+        requests = self._requests(where, messages)
         return {
             "anchor": where.anchor, "channel": where.channel, "topic": where.topic, "live_topic": where.live_topic,
             "stem": where.topic[len(ARGUE_TOPIC_PREFIX):], "resolved": where.resolved, "origin": origin,
             "posts": len(shown), "speakers": sorted({p["speaker"] for p in shown}),
             "last_post": ({"at": shown[-1]["at"], "by": shown[-1]["speaker"]} if shown else None),
             "desire": ({"message_id": desire.message_id, "user_id": desire.user_id} if desire else None),
-            "outcome": outcome, "status": status_of(posts, where.resolved),
+            "outcome": outcome, "status": with_requests(status_of(posts, where.resolved), requests),
+            "asking": len(requests["pending"]),
         }
+
+    @staticmethod
+    def _requests(where: Located, messages: list) -> dict:
+        """What is still being asked in this argue (`agag.outstanding`)."""
+        return requests_payload(messages, complete=True, closed=where.resolved, stale=False)
+
+    def viewer_id(self) -> int | None:
+        """Who this relay posts as, asked once."""
+        if getattr(self, "_viewer", None) is None and self.chat.configured:
+            try:
+                self._viewer = int(self.chat.client().whoami()["user_id"])
+            except Exception:  # noqa: BLE001 - unknown viewer: nothing reads "for you"
+                return None
+        return getattr(self, "_viewer", None)
 
     def board(self, now: float | None = None) -> dict:
         now = time.time() if now is None else now
@@ -239,6 +256,7 @@ class ArguingRoom:
         return {
             "schema": SCHEMA, "generated_at": now, "health": health, "chat": self.chat.status(),
             "argue": {**row, "posts": posts, "zulip_url": url,
+                      "requests": self._requests(where, messages), "viewer_id": self.viewer_id(),
                       "presentation": presentation(self.mirror, where, messages, agents,
                                                    active_revision=self._active_revision(), now=now)},
         }
@@ -291,14 +309,19 @@ class ArguingRoom:
             return False
         return True
 
-    def post(self, anchor, text: str, token: str) -> dict:
-        """The human's next turn, into the source argue, once per token."""
+    def post(self, anchor, text: str, token: str, answers=None) -> dict:
+        """The human's next turn, into the source argue, once per token.
+        `answers` names the request(s) it answers (`ag-post re=…`)."""
         refused = self._refusal(text, token)
         if refused is not None:
             return {"sent": False, "uncertain": False, "error": refused}
         where = self._where(anchor)
         if isinstance(where, dict):
             return {"sent": False, "uncertain": False, **where}
+        body, refused = answer_body(text, answers, self._requests(where, self.mirror.messages(where.channel, where.topic))
+                                    if answers else None)
+        if refused is not None:
+            return {"sent": False, "uncertain": False, "error": refused}
         earlier = self.tokens.earlier(token)
         if earlier is not None:
             return earlier
@@ -308,7 +331,7 @@ class ArguingRoom:
             resumed = self._unresolve(client, where, self.mirror.messages(where.channel, where.live_topic,
                                                                          across_resolve=False))
         try:
-            message_id = client.send_to_channel(where.channel, where.topic, text.strip())
+            message_id = client.send_to_channel(where.channel, where.topic, body)
         except Exception as error:  # noqa: BLE001 - reported, never retried
             return self.tokens.keep(token, {
                 "sent": False, "uncertain": True, "error": f"{type(error).__name__}: {error}",

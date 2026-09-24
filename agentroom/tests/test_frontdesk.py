@@ -445,7 +445,7 @@ def test_a_question_asked_before_the_newer_post_was_read_is_not_a_wait():
                  by_front(asking("Which provider?", seen=2), ident=4))
     desk, _ = desk_with(held)
     conversation = desk.conversation("20260908-1600", now=NOW)["conversation"]
-    assert conversation["status"]["state"] == "received" and "owes that post a run" in conversation["status"]["evidence"]
+    assert conversation["status"]["state"] == "received" and "owed a run first" in conversation["status"]["evidence"]
     assert conversation["requests"]["pending"] == []
 
 

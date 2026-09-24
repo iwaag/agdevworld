@@ -43,6 +43,9 @@ from typing import Iterable
 
 from agag.agent import is_ack
 
+from agag.post import strip as strip_post
+
+from .presentation import meaning_of, requests_payload
 from .room import bare_topic
 
 #: The channel folder every routine channel is filed in.
@@ -610,7 +613,11 @@ def session_of(
                      if bounded else "every post of this run the realm holds is here"),
         },
         # Real posts, oldest first. Selfnotes never enter `history`.
-        "chat": [{**_message(found), "content": found.content} for found in history],
+        # What each post is for, with its machine line out of the words
+        # (`agag.post`), and what is still being asked in this run.
+        "chat": [{**_message(found), "content": strip_post(found.content), "meaning": meaning_of(found.content)}
+                 for found in history],
+        "requests": requests_payload(history, complete=not bounded, closed=run.resolved, stale=False),
         **session_tree(topics, (channel, run.topic), rows_by_topic, since=0, until=None),
     }
 

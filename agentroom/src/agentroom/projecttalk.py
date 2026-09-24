@@ -49,7 +49,7 @@ from agag.zulip import RESOLVED_TOPIC_PREFIX
 from .argueroom import SubmitTokens
 from .chat import Chat
 from .ops import owns
-from .presentation import Located, agents_of, locate, source_posts
+from .presentation import Located, agents_of, locate, requests_payload, source_posts, with_requests
 from .projectroom import DOCUMENT, MISSION, PLAN, SETUP, TASK, ProjectRoom, classify
 from .room import health_block
 
@@ -156,10 +156,12 @@ class ProjectTalk:
 
     def _payload(self, kind: str, where: Located, role: str, project: dict | None, record: dict | None,
                  now: float) -> dict:
-        posts, _ = self._posts(where)
+        posts, messages = self._posts(where)
         health = self._health()
         destination = self._destination(where, role)
-        status = self.status_of(posts, where.resolved, destination["responsible"])
+        # What is still being asked here (`agag.outstanding`), and of whom.
+        requests = requests_payload(messages, complete=True, closed=where.resolved, stale=health["state"] != "live")
+        status = with_requests(self.status_of(posts, where.resolved, destination["responsible"]), requests)
         if health["state"] != "live":
             status = {**status, "stale_state": status["state"], "state": "unknown",
                       "evidence": f"{health['reason']}; last known: {status['evidence']}"}
@@ -169,7 +171,7 @@ class ProjectTalk:
                 "kind": kind, "anchor": where.anchor if kind in (MISSION, TASK) else None,
                 "project": project, "record": record,
                 "destination": destination,
-                "posts": posts, "status": status,
+                "posts": posts, "status": status, "requests": requests, "viewer_id": self.chat.viewer_id(),
                 "zulip_url": self._narrow(where.channel, where.live_topic),
                 "front": self._front_path(project) if role == NONE else None,
                 "note": ("posting here is a comment in the conversation autolab serves: it buys a run"

@@ -23,6 +23,7 @@ const BASE = (import.meta.env.VITE_AGENTROOM_URL as string | undefined) ?? 'http
 // A run's own vocabulary (relay `routines.run_state`), plus the ops board's
 // words for a run somebody else posted into, plus the row-only `idle` and
 // `retired`.
+import type { PostMeaning, RoomRequests } from './roomState'
 export type RunState = 'unstarted' | 'acked' | 'waiting' | 'awaiting' | 'stalled' | 'finished' | 'unknown'
 export type RoutineState = RunState | 'idle' | 'retired'
 
@@ -132,7 +133,10 @@ export interface RoutineSession {
   resolution: SessionResolution
   run: RunStatus
   history: { posts: number; post_limit: number; bounded: boolean; note: string }
-  chat: Array<RoutinePost & { content: string }>
+  // Each post with what it says it is for (`ag.post.v1`), and what is still
+  // being asked in this run (`ag.outstanding.v1`).
+  chat: Array<RoutinePost & { content: string; meaning?: PostMeaning | null }>
+  requests?: RoomRequests | null
   nodes: SessionNode[]
   truncation?: { truncated: boolean; reasons: string[]; max_nodes: number; max_depth: number }
 }
@@ -172,6 +176,8 @@ export interface RoutineBoard {
 }
 
 export interface RoutineDetail extends Omit<RoutineBoard, 'routines'> {
+  // Who this relay posts as, so a request to them reads "for you".
+  viewer_id?: number | null
   routine: RoutineRow
   sessions: RoutineSession[]
   latest_topic?: string | null

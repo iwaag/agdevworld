@@ -107,6 +107,18 @@ class Chat:
             ),
         }
 
+    def viewer_id(self) -> int | None:
+        """The user id this credential posts as — who a request "for you"
+        is for on screen. Asked once; None when unknown."""
+        if not self.configured:
+            return None
+        if getattr(self, "_viewer", None) is None:
+            try:
+                self._viewer = int(self.client().whoami()["user_id"])
+            except Exception:  # noqa: BLE001 - unknown viewer: nothing reads "for you"
+                return None
+        return self._viewer
+
     def client(self) -> ZulipClient:
         if self._client is None:
             factory = self.client_factory or ZulipClient.from_env

@@ -52,7 +52,7 @@ _SPEAKER_HEADER = re.compile(r"^\*\*\[[a-z][\w-]*:[\w.-]+\]\*\*[ \t]*\n")
 
 __all__ = [
     "OVERDUE_SECONDS", "Located", "agents_of", "answer_body", "locate", "meaning_of", "memo_topic_of",
-    "post_payload", "presentation", "requests_payload", "shown_content", "source_posts",
+    "post_payload", "presentation", "requests_payload", "shown_content", "source_posts", "with_requests",
 ]
 
 
@@ -109,6 +109,26 @@ def answer_body(text: str, answers, requests: dict | None) -> tuple[str | None, 
     if unknown:
         return None, f"#{', #'.join(map(str, unknown))} is not a request in this conversation"
     return compose(text.strip(), PostMeta(re=tuple(dict.fromkeys(ids)))), None
+
+
+def with_requests(status: dict, requests: dict | None) -> dict:
+    """The status once the conversation's explicit requests are read
+    (`agag.outstanding`): The agents having answered last is `asking` when a
+    request of its is still pending, and `answered` only when nothing is
+    asked. Anything else — the Developer spoke last, ✔, unknown — stands."""
+    if not requests or status.get("state") != "answered":
+        return status
+    rows = {int(r["id"]): r for r in requests.get("requests", [])}
+    pending = [rows[i] for i in requests.get("pending", []) if i in rows]
+    if pending:
+        newest = pending[-1]
+        return {"state": "asking", "since": newest.get("timestamp") or status.get("since"),
+                "evidence": f"{len(pending)} request(s) pending: " + ", ".join(f"#{r['id']}" for r in pending)}
+    overtaken = [r for r in rows.values() if r.get("state") == "overtaken"]
+    if overtaken:
+        return {"state": "received", "since": status.get("since"),
+                "evidence": f"#{overtaken[-1]['id']} was asked before your newer post was read; that post is owed a run first"}
+    return status
 
 
 @dataclass(frozen=True)

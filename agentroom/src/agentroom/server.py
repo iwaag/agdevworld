@@ -198,8 +198,10 @@ def make_handler(room: Room, ops: Ops | None = None, chat: Chat | None = None,
                         hide = (query.get("resolved") or ["show"])[0] == "hide"
                         found = ops.routine(unquote(path[len("/routines/"):]),
                                             include_resolved=not hide)
-                        self._write_json(404 if found.get("error") else 200,
-                                         self._with_chat(found))
+                        found = self._with_chat(found)
+                        if not found.get("error"):
+                            found["viewer_id"] = chat.viewer_id() if chat is not None else None
+                        self._write_json(404 if found.get("error") else 200, found)
                 elif path == "/cost":
                     # Host files only, like /inflight, so a view may poll it.
                     # The ops engine is asked for the roster and each
@@ -503,7 +505,8 @@ def make_handler(room: Room, ops: Ops | None = None, chat: Chat | None = None,
             if rest == "":
                 self._answer_write(argues.create(body.get("stem"), str(body.get("text") or ""), token))
             elif rest.endswith("/post"):
-                self._answer_write(argues.post(unquote(rest[:-len("/post")]), str(body.get("text") or ""), token))
+                self._answer_write(argues.post(unquote(rest[:-len("/post")]), str(body.get("text") or ""), token,
+                                               body.get("answers")))
             elif rest.endswith("/render"):
                 self._answer_write(argues.render(unquote(rest[:-len("/render")]), body.get("revision"), token))
             else:

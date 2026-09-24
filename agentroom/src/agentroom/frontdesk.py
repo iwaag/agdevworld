@@ -60,7 +60,9 @@ from agag.zulip import RESOLVED_TOPIC_PREFIX, ZulipClient
 
 from .argueroom import SubmitTokens, request_rendering
 from .chat import Chat
-from .presentation import Located, agents_of, answer_body, meaning_of, presentation, requests_payload, shown_content
+from .presentation import (
+    Located, agents_of, answer_body, meaning_of, presentation, requests_payload, shown_content, with_requests,
+)
 from .room import DESK_PREFIX, FRONT_CHANNEL, bare_topic
 
 if TYPE_CHECKING:  # pragma: no cover - typing only; ops imports this module
@@ -127,26 +129,6 @@ def post_kind(message, front_id: int | None, developer_id: int | None) -> str:
     if front_id is None and message.sender == "Front":
         return "agent"
     return "developer" if message.sender == "Developer" else "other"
-
-
-def with_requests(status: dict, requests: dict | None) -> dict:
-    """The status once the conversation's explicit requests are read
-    (`agag.outstanding`): Front having answered last is `asking` when a
-    request of its is still pending, and `answered` only when nothing is
-    asked. Anything else — the Developer spoke last, ✔, unknown — stands."""
-    if not requests or status.get("state") != "answered":
-        return status
-    rows = {int(r["id"]): r for r in requests.get("requests", [])}
-    pending = [rows[i] for i in requests.get("pending", []) if i in rows]
-    if pending:
-        newest = pending[-1]
-        return {"state": "asking", "since": newest.get("timestamp") or status.get("since"),
-                "evidence": f"{len(pending)} request(s) pending: " + ", ".join(f"#{r['id']}" for r in pending)}
-    overtaken = [r for r in rows.values() if r.get("state") == "overtaken"]
-    if overtaken:
-        return {"state": "received", "since": status.get("since"),
-                "evidence": f"#{overtaken[-1]['id']} was asked before your newer post was read; Front owes that post a run"}
-    return status
 
 
 def status_of(topic, front_id: int | None, developer_id: int | None) -> dict:

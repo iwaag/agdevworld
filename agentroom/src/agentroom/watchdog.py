@@ -24,7 +24,7 @@ file:
 | `stalled` | a cycle in progress for that long |
 | `judgment_stalled` | one judgment running for twice its timeout |
 | `unable_to_observe` | the monitor's source (its mirror) stale for 5 min |
-| `degraded` | some tracked request not looked at for `3 × interval` |
+| `degraded` | some tracked request not looked at for `3 × interval`; or a judgment waiting longer than `3 × timeout` behind others; or an incident whose evidence changed under its judgment `CHURN_LIMIT` times in a row (robust_workflow p3 step 2) |
 
 On a change into a failing state, and on the way back, the relay tells the
 realm's owners once by a direct message from its own bot — the one kind of
@@ -137,6 +137,17 @@ def evaluate(health: dict | None, status: dict | None = None, now: float | None 
     if unchecked > limit:
         return {**base, "state": "degraded",
                 "reason": f"a tracked request has not been looked at for {_minutes(unchecked)}"}
+    judgments = health.get("judgment") or {}
+    waiting = float(judgments.get("oldest_pending_seconds") or 0)
+    if waiting > 3 * timeout:
+        return {**base, "state": "degraded",
+                "reason": f"{judgments.get('pending')} judgment(s) waiting, the oldest for {_minutes(waiting)}: "
+                          "the judge is falling behind"}
+    churning = list(judgments.get("churning") or [])
+    if churning:
+        return {**base, "state": "degraded",
+                "reason": f"the evidence under {len(churning)} judgment(s) keeps changing before a verdict can be "
+                          f"used ({', '.join(churning[:3])}); nothing is concluded on them meanwhile"}
     tracked = int((health.get("requests") or {}).get("tracked") or 0)
     return {**base, "state": "ok" if tracked else "idle",
             "reason": f"cycle {cycle.get('count')} completed {_minutes(_age(now, cycle.get('completed_at')))} ago; "

@@ -74,6 +74,18 @@ def test_a_stale_source_is_unable_to_observe_and_unchecked_requests_are_degraded
     assert evaluate(record(requests={"oldest_unchecked_seconds": 900}), now=NOW)["state"] == "degraded"
 
 
+def test_a_judge_falling_behind_or_churning_evidence_is_degraded():
+    """robust_workflow p3 step 2: a verdict is used only for the evidence it
+    judged, so a backlog or evidence that keeps moving means nothing is being
+    concluded on those requests — said, not hidden behind `ok`."""
+    behind = evaluate(record(judgment={"pending": 3, "oldest_pending_seconds": 600}), now=NOW)
+    assert behind["state"] == "degraded" and "falling behind" in behind["reason"]
+    churn = evaluate(record(judgment={"churning": ["o100:n102"]}), now=NOW)
+    assert churn["state"] == "degraded" and "o100:n102" in churn["reason"]
+    assert evaluate(record(judgment={"pending": 1, "oldest_pending_seconds": 120, "churning": []}),
+                    now=NOW)["state"] == "ok"
+
+
 def test_one_alert_on_the_way_in_and_one_on_the_way_out(tmp_path):
     path = tmp_path / "monitor-health.json"
     sent = []

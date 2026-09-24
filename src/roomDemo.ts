@@ -194,7 +194,7 @@ export function demoAdapter(room: RoomId, revision = 'demo'): RoomAdapter {
     const unmatched: Record<string, number[]> = {}
     for (const post of posts) {
       const meaning = post.meaning
-      if (post.kind === 'human') {
+      if (post.kind === 'human' && meaning?.answer !== 'none') {
         const mine = rows.filter((row) => row.to === post.sender_id && row.state === 'pending')
         const named = mine.filter((row) => meaning?.re?.includes(row.id))
         if (named.length) for (const row of named) Object.assign(row, { state: 'answered', settled_by: post.message_id, how: 'reference' })
@@ -266,9 +266,9 @@ export function demoAdapter(room: RoomId, revision = 'demo'): RoomAdapter {
       return posts.length || room === 'front' ? [{ key: 'demo', label: 'demo', resolved: demoResolved, asking: requestsOf().pending.length, last_post: posts.length ? { at: posts[posts.length - 1].at, by: posts[posts.length - 1].by } : null }] : []
     },
     async detail(key) { return detail(key) },
-    async send(_key, text, _token, answers) {
+    async send(_key, text, _token, correlation) {
       posts.push({ message_id: next++, at: now(), by: 'Developer', sender_id: DEVELOPER, content: text, kind: 'human', agent: null, speaker: 'Developer',
-        meaning: answers?.length ? { re: answers } : null })
+        meaning: correlation?.kind === 'answer' ? { re: [correlation.id] } : correlation?.kind === 'none' ? { answer: 'none' } : null })
       const resumed = demoResolved
       demoResolved = false
       demoClosed.delete('topic:argue/argue-demo')

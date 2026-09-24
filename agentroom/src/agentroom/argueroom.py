@@ -309,9 +309,10 @@ class ArguingRoom:
             return False
         return True
 
-    def post(self, anchor, text: str, token: str, answers=None) -> dict:
+    def post(self, anchor, text: str, token: str, answers=None, not_answer=None) -> dict:
         """The human's next turn, into the source argue, once per token.
-        `answers` names the request(s) it answers (`ag-post re=…`)."""
+        `answers` names the request(s) it answers (`ag-post re=…`);
+        `not_answer` says it answers none (`ag-post answer=none`)."""
         refused = self._refusal(text, token)
         if refused is not None:
             return {"sent": False, "uncertain": False, "error": refused}
@@ -319,7 +320,7 @@ class ArguingRoom:
         if isinstance(where, dict):
             return {"sent": False, "uncertain": False, **where}
         body, refused = answer_body(text, answers, self._requests(where, self.mirror.messages(where.channel, where.topic))
-                                    if answers else None)
+                                    if answers else None, not_answer)
         if refused is not None:
             return {"sent": False, "uncertain": False, "error": refused}
         earlier = self.tokens.earlier(token)

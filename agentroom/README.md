@@ -260,7 +260,7 @@ inside Front's own `front-` sweep. Three routes, in `frontdesk.py`:
   mirror hydrated it once because its coverage was not complete), or
   `unknown` (no mirror, or the read failed; nothing is invented and the view
   keeps what it last knew).
-- `POST /frontdesk/<id>/post` `{text, token}` → a post as the Developer into
+- `POST /frontdesk/<id>/post` `{text, token, answers?, not_answer?}` → a post as the Developer into
   `front-desk-<id>`, on the chat credential and with `chat.py`'s guards
   (configured, length, no selfnote), plus two of its own: the id has one
   shape (`^[a-z0-9][a-z0-9-]{0,47}$`, so nothing else ever becomes part of a
@@ -271,6 +271,12 @@ inside Front's own `front-` sweep. Three routes, in `frontdesk.py`:
   Front's sweep never reads a resolved topic. `403` for a refusal, `502`
   with `uncertain: true` when the post left and Zulip did not confirm it;
   never a retry, because a post here starts a paid run.
+  The body may carry the composer's correlation choice (`clearer_chat_ui`
+  ex1): `answers: [request ids]` writes `ag-post re=…` (each must be a
+  request of this conversation), `not_answer: true` writes `ag-post
+  answer=none` (the post settles nothing, not even the one pending request
+  the next-post rule would give it); neither leaves the post plain. Both at
+  once are refused. The same body on `POST /argues/<anchor>/post`.
 
 Since `argue` p2 a Front post carries **no dialogue**. The discussion is
 plain, and Front re-voices it afterwards into a memo topic nobody reacts to
@@ -388,7 +394,7 @@ A human starts, reads and continues an argue (`#argue › argue-<stem>`,
 - `POST /argues` `{stem?, text, token}` → opens one as the Developer: the
   anchor note, then the text verbatim. A stem in use is refused; without a
   stem a UTC stamp is minted.
-- `POST /argues/<anchor>/post` `{text, token}` → the human's next turn,
+- `POST /argues/<anchor>/post` `{text, token, answers?, not_answer?}` → the human's next turn,
   **into the source argue**. A ✔'d argue is un-resolved first and the
   discussion resumes; what it ended in is not reopened and nothing
   downstream runs.

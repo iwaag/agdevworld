@@ -440,3 +440,24 @@ def test_an_argue_carries_meanings_and_two_speakers_questions_to_the_human():
     after = room.argue(anchor)["argue"]["requests"]
     assert after["pending"] == [ask_front]
     assert "not a request" in room.post(anchor, "x", "tok-bad", [anchor])["error"]
+
+
+def test_a_non_answer_in_an_argue_leaves_the_one_question_waiting_until_it_is_answered():
+    """clearer_chat_ui ex1 step 2, through the realm and the mirror: an aside
+    marked "not an answer" is stored with `answer=none` and settles nothing;
+    the explicit answer that follows settles the question."""
+    realm, mirror, _, room = world()
+    anchor, *_ = talk(realm)
+    question = realm.post("argue", "argue-far", "Which failure matters most?\n\n`ag-post intent=response_request to=8 ask=question`",
+                          sender_id=FRONT, sender_name="Front")
+    pump(mirror)
+    sent = room.post(anchor, "Unrelated: I am away for an hour.", "tok-aside", None, True)
+    assert sent["sent"] and realm.messages[sent["message_id"]]["content"].endswith("`ag-post answer=none`")
+    pump(mirror)
+    argue = room.argue(anchor)["argue"]
+    assert argue["requests"]["pending"] == [question] and argue["requests"]["unmatched"] == {}
+    assert room.post(anchor, "x", "tok-both", [question], True)["sent"] is False
+    answered = room.post(anchor, "The second one.", "tok-answer", [question])
+    pump(mirror)
+    rows = room.argue(anchor)["argue"]["requests"]["requests"]
+    assert [(r["id"], r["state"], r["settled_by"]) for r in rows] == [(question, "answered", answered["message_id"])]

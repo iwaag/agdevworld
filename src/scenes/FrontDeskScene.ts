@@ -64,7 +64,7 @@ import {
 } from '../frontDeskPlayback'
 import { FrontDeskSettings } from '../frontDeskSettings'
 import { LABEL_STYLE, labelOf, overtakenFor, pendingFor, requestOf, shortText, type PostLabel } from '../postMeaning'
-import { ago, clock, submitToken, type Citation, type PostMeaning, type RoomAdapter, type RoomDetail, type RoomRow } from '../roomState'
+import { AUTO, ago, clock, submitToken, type Citation, type Correlation, type PostMeaning, type RoomAdapter, type RoomDetail, type RoomRow } from '../roomState'
 import { assetUrl, type SettingsCharacter, type SettingsManifest } from '../settingsState'
 import { linksIn, paginate, wrapText, type FoundLink, type Measure } from '../textLayout'
 import { ROOM_TINT_ALPHA, ROOM_TINT_COLOR } from './roomTint'
@@ -131,9 +131,12 @@ export class FrontDeskScene extends Phaser.Scene {
   private send: SendPhase = { kind: 'idle' }
   private sending = false
   private settings!: FrontDeskSettings
-  // The request the next post answers, picked from the strip; null lets the
-  // relay's next-post rule decide (it settles only a single pending one).
-  private answering: number | null = null
+  // What the next post answers (`clearer_chat_ui` ex1): `auto` lets the
+  // relay's next-post rule decide (it settles only a single pending one),
+  // `answer` is a request picked from the strip, `none` an aside that must
+  // leave every question waiting. Kept through a failed or uncertain send,
+  // so the retry means the same; reset after a send and on a switch.
+  private correlation: Correlation = AUTO
 
   // Playback: the replies as turns, and where the reader is.
   private replies: PlayReply[] = []
@@ -418,8 +421,11 @@ export class FrontDeskScene extends Phaser.Scene {
         this.cursor = { reply: this.cursor.reply + 1, turn: 0, page: 0 }
       }
       this.shownId = this.cursor.reply >= 0 ? this.replies[this.cursor.reply].message_id : null
-      // A picked request that stopped waiting is no longer the target.
-      if (this.answering !== null && requestOf(conversation.requests, this.answering)?.state !== 'pending') this.answering = null
+      // A picked request that stopped waiting is no longer the target, and
+      // "not an answer" means nothing once nothing waits for the viewer.
+      const choice = this.correlation
+      if (choice.kind === 'answer' && requestOf(conversation.requests, choice.id)?.state !== 'pending') this.correlation = AUTO
+      if (choice.kind === 'none' && pendingFor(conversation.requests, this.viewer()).length === 0) this.correlation = AUTO
       this.renderDialogue()
       this.renderHistory()
     }
@@ -473,8 +479,7 @@ export class FrontDeskScene extends Phaser.Scene {
     const opening = this.conversationId === null
     const result = opening
       ? (this.adapter.create ? await this.adapter.create(text, submitToken()) : { sent: false, error: 'this room cannot open a conversation' })
-      : await this.adapter.send(this.conversationId as string, text, submitToken(),
-        this.answering !== null ? [this.answering] : undefined)
+      : await this.adapter.send(this.conversationId as string, text, submitToken(), this.correlation)
     this.sending = false
     if (result.sent && opening && result.key) {
       this.send = { kind: 'idle' }
@@ -484,7 +489,7 @@ export class FrontDeskScene extends Phaser.Scene {
     } else if (result.sent) {
       this.send = result.resumed ? { kind: 'resumed' } : { kind: 'idle' }
       this.keys.set('')
-      this.answering = null
+      this.correlation = AUTO
       // The developer just spoke: the next reply is what they are waiting
       // for, so the reader moves to the newest reply and the answer will
       // follow it rather than queue behind an old one.
@@ -528,7 +533,7 @@ export class FrontDeskScene extends Phaser.Scene {
     this.shownId = null
     this.pageCache.clear()
     this.send = { kind: 'idle' }
-    this.answering = null
+    this.correlation = AUTO
     this.historyScroll = 0
     this.renderAsks()
     this.renderDialogue()
@@ -887,7 +892,8 @@ export class FrontDeskScene extends Phaser.Scene {
     const viewer = this.viewer()
     const waiting = pendingFor(requests, viewer)
     const held = overtakenFor(requests, viewer)
-    if (this.conversationId === null || (waiting.length === 0 && held.length === 0 && this.answering === null)) return
+    const choice = this.correlation
+    if (this.conversationId === null || (waiting.length === 0 && held.length === 0 && choice.kind === 'auto')) return
     const { x, y, width } = this.dialogueRect
     const limit = x + width - (this.queueButton.visible ? this.queueButton.width + 24 : 14)
     let chipX = x
@@ -904,21 +910,27 @@ export class FrontDeskScene extends Phaser.Scene {
       place(this.text(0, 0, `❓ ${waiting.length} waiting for your reply`, MONO, 11.5, style.color)
         .setBackgroundColor(style.background ?? '').setFontStyle('bold').setPadding(8, 4, 8, 4)
         .setInteractive({ useHandCursor: true }).on('pointerup', () => this.goToRequest(waiting[0].id)))
+      // The choice comes before the chips, so it is never the one crowded out.
+      if (choice.kind === 'none') {
+        place(this.text(0, 0, `↷ NOT AN ANSWER — ${waiting.map((row) => `#${row.id}`).join(', ')} stay${waiting.length === 1 ? 's' : ''} waiting`,
+          MONO, 11, '#0d0f14').setBackgroundColor('#b9bdd6').setFontStyle('bold').setPadding(7, 4, 7, 4))
+      }
       for (const row of waiting) {
-        const picked = row.id === this.answering
+        const picked = choice.kind === 'answer' && row.id === choice.id
         const who = row.sender_name && row.sender_name !== asker ? `${row.sender_name}: ` : ''
         const chip = this.text(0, 0, `${picked ? '↩ answering ' : ''}#${row.id} ${who}${shortText(row.text, picked ? 34 : 26)}`, MONO, 11,
           picked ? '#0d0f14' : COLOR.warn)
           .setBackgroundColor(picked ? COLOR.accent2 : '#2a2210').setPadding(7, 4, 7, 4)
           .setInteractive({ useHandCursor: true })
-          .on('pointerup', () => (picked ? this.pickAnswer(null) : this.goToRequest(row.id)))
+          .on('pointerup', () => (picked ? this.choose(AUTO) : this.goToRequest(row.id)))
         if (!place(chip)) break
       }
-      if (waiting.length > 1 && this.answering === null) {
-        place(this.text(0, 0, 'pick the one your next post answers', MONO, 10.5, COLOR.muted).setPadding(4, 4, 4, 4))
-      } else if (this.answering !== null) {
-        place(this.button('✕ not an answer', () => this.pickAnswer(null)).setFontSize(10.5))
+      if (choice.kind === 'auto') {
+        place(this.text(0, 0, waiting.length > 1 ? 'pick the one your next post answers' : 'your next post answers it',
+          MONO, 10.5, COLOR.muted).setPadding(4, 4, 4, 4))
       }
+      if (choice.kind !== 'none') place(this.button('↷ not an answer', () => this.choose({ kind: 'none' })).setFontSize(10.5))
+      if (choice.kind !== 'auto') place(this.button('↺ automatic', () => this.choose(AUTO)).setFontSize(10.5))
     }
     if (held.length) {
       place(this.text(0, 0, `📩 ${held.map((row) => `#${row.id}`).join(', ')} was asked before your newer post was read — Front answers that first`,
@@ -935,15 +947,15 @@ export class FrontDeskScene extends Phaser.Scene {
       this.shownId = id
     }
     this.highlighted = this.historyOpen ? id : this.highlighted
-    this.pickAnswer(id)
+    this.choose({ kind: 'answer', id })
     this.renderDialogue()
     if (this.historyOpen) this.renderHistory()
     this.renderCaption()
     this.renderStatus()
   }
 
-  private pickAnswer(id: number | null) {
-    this.answering = id
+  private choose(choice: Correlation) {
+    this.correlation = choice
     this.renderAsks()
     this.renderPrompt()
     this.keys.focus()
@@ -1122,7 +1134,8 @@ export class FrontDeskScene extends Phaser.Scene {
     // The hints live in the textarea's placeholder; the key note beside the
     // counter, where there is room for it.
     const words = opening ? 'State what you want, to open a new argue…'
-      : this.answering !== null ? `Your answer to #${this.answering}…` : this.adapter.words.prompt
+      : this.correlation.kind === 'answer' ? `Your answer to #${this.correlation.id}…`
+        : this.correlation.kind === 'none' ? 'Not an answer — the questions above stay waiting…' : this.adapter.words.prompt
     this.keys.setPlaceholder(usable ? words : this.sending ? 'sending…' : 'chat is not available right now')
     this.keys.setDisabled(!usable)
     const max = chat?.max_chars

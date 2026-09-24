@@ -465,3 +465,33 @@ def test_an_answer_to_something_that_is_not_a_request_here_is_refused():
     assert found["sent"] is False and "is not a request in this conversation" in found["error"]
     assert client.sent == []
     assert desk.post("20260908-1600", "Yes.", "tok-c", ["x"])["error"] == "answers must be message ids"
+
+
+def test_a_non_answer_is_written_into_the_post_and_leaves_the_question_waiting():
+    """clearer_chat_ui ex1 step 2: "not an answer" used to send a plain post,
+    which the next-post rule read as the answer to the one pending question."""
+    # `seen` past everything: the question was written having read it all.
+    desk, client, ids = mirrored_desk((DEVELOPER, "Developer", "build it"),
+                                      (FRONT_BOT, "Front", asking("Which provider?", seen=10**6)))
+    found = desk.post("20260908-1600", "Unrelated: the staging box is back.", "tok-na", None, True)
+    assert found["sent"] is True
+    written = client.sent[-1][2]
+    assert written == "Unrelated: the staging box is back.\n\n`ag-post answer=none`"
+    # Read back through the relay's own path, as a reload would: the
+    # conversation now holds the aside, and the question still waits.
+    desk, _, ids = mirrored_desk((DEVELOPER, "Developer", "build it"),
+                                 (FRONT_BOT, "Front", asking("Which provider?", seen=10**6)),
+                                 (DEVELOPER, "Developer", written))
+    conversation = desk.conversation("20260908-1600", now=NOW)["conversation"]
+    assert conversation["requests"]["pending"] == [ids[1]] and conversation["requests"]["unmatched"] == {}
+    assert conversation["posts"][-1]["meaning"] == {"answer": "none"}
+    assert "ag-post" not in conversation["posts"][-1]["content"]
+
+
+def test_a_post_cannot_both_answer_and_not_answer():
+    desk, client, ids = mirrored_desk((DEVELOPER, "Developer", "build it"),
+                                      (FRONT_BOT, "Front", asking("Which provider?", seen=1)))
+    found = desk.post("20260908-1600", "Yes.", "tok-both", [ids[1]], True)
+    assert found["sent"] is False and "not both" in found["error"]
+    assert desk.post("20260908-1600", "Yes.", "tok-str", None, "yes")["error"] == "not_answer must be true or false"
+    assert client.sent == []

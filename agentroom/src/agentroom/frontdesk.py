@@ -422,15 +422,16 @@ class FrontDesk:
             return "a submit token is required, so a repeated submit is not a second run"
         return self.chat.text_check(text)
 
-    def post(self, ident: str, text: str, token: str, answers=None) -> dict:
+    def post(self, ident: str, text: str, token: str, answers=None, not_answer=None) -> dict:
         """Post as the Developer into `front-desk-<ident>`, once per token.
         `answers` names the request(s) the post answers; the reference is
         written into the post itself (`ag-post re=…`), which is what settles
-        exactly those and no other."""
+        exactly those and no other. `not_answer` writes `answer=none`: the
+        post settles nothing (`presentation.answer_body`)."""
         refused = self.check(ident, text, token)
         if refused is not None:
             return {"sent": False, "uncertain": False, "error": refused}
-        body, refused = answer_body(text, answers, self.requests(ident) if answers else None)
+        body, refused = answer_body(text, answers, self.requests(ident) if answers else None, not_answer)
         if refused is not None:
             return {"sent": False, "uncertain": False, "error": refused}
         with self._lock:

@@ -474,7 +474,7 @@ def make_handler(room: Room, ops: Ops | None = None, chat: Chat | None = None,
             if refused is not None:
                 self._write_json(403, {"sent": False, "uncertain": False, "error": refused})
                 return
-            found = desk.post(ident, text, token, body.get("answers"))
+            found = desk.post(ident, text, token, body.get("answers"), body.get("not_answer"))
             if found.get("sent"):
                 self._write_json(200, found)
             elif found.get("uncertain"):
@@ -506,7 +506,7 @@ def make_handler(room: Room, ops: Ops | None = None, chat: Chat | None = None,
                 self._answer_write(argues.create(body.get("stem"), str(body.get("text") or ""), token))
             elif rest.endswith("/post"):
                 self._answer_write(argues.post(unquote(rest[:-len("/post")]), str(body.get("text") or ""), token,
-                                               body.get("answers")))
+                                               body.get("answers"), body.get("not_answer")))
             elif rest.endswith("/render"):
                 self._answer_write(argues.render(unquote(rest[:-len("/render")]), body.get("revision"), token))
             else:

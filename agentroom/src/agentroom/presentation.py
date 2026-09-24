@@ -39,7 +39,7 @@ from dataclasses import dataclass
 from agag.agent import is_ack
 from agag.argue import speaker_of
 from agag.outstanding import read_requests
-from agag.post import PostMeta, compose, parse_post, strip as strip_post
+from agag.post import NONE, PostMeta, compose, parse_post, strip as strip_post
 from agag.memo import DIALOGUE_SCHEMA, MEMO_CHANNEL, RENDER_TAG, SOURCE_TAG, fingerprint, parse_record
 from agag.mirror import Mirror, bare_topic
 from agag.selfnote import is_selfnote, is_speech, parse_note
@@ -93,15 +93,25 @@ def requests_payload(messages, *, complete: bool, closed: bool, stale: bool, nam
     return found
 
 
-def answer_body(text: str, answers, requests: dict | None) -> tuple[str | None, str | None]:
-    """`(the post to write, why it is refused)` for a person's post that
-    answers `answers` (request ids). Each must be a request of this
-    conversation — the reference is what settles it, so a reference to
-    anything else would settle nothing and is refused rather than sent."""
+def answer_body(text: str, answers, requests: dict | None, not_answer=None) -> tuple[str | None, str | None]:
+    """`(the post to write, why it is refused)` for a person's post and the
+    composer's correlation choice (`clearer_chat_ui` ex1): `answers` (request
+    ids) — it answers exactly those, each of which must be a request of
+    this conversation, because the reference is what settles it and a
+    reference to anything else would settle nothing; `not_answer` — it
+    answers nothing, even the one request the next-post rule would give it
+    (`ag-post answer=none`); neither — the reader correlates. Both at once
+    contradict each other and are refused."""
+    if not_answer not in (None, False, True):
+        return None, "not_answer must be true or false"
     try:
         ids = [int(i) for i in (answers or [])]
     except (TypeError, ValueError):
         return None, "answers must be message ids"
+    if not_answer and ids:
+        return None, "a post either answers the named requests or is not an answer; not both"
+    if not_answer:
+        return compose(text.strip(), PostMeta(answer=NONE)), None
     if not ids:
         return text.strip(), None
     known = {int(r["id"]) for r in (requests or {}).get("requests", [])}

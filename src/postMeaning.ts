@@ -59,7 +59,8 @@ export function labelOf(
   viewer: number | null | undefined,
 ): PostLabel | null {
   if (!meaning || meaning.error) return null
-  const answers = meaning.re?.length ? `answers ${meaning.re.map((id) => `#${id}`).join(', ')}` : ''
+  const answers = meaning.re?.length ? `answers ${meaning.re.map((id) => `#${id}`).join(', ')}`
+    : meaning.answer === 'none' ? 'not an answer' : ''
   if (meaning.intent === 'progress') return { icon: '⏳', text: answers ? `progress · ${answers}` : 'progress', tone: 'progress' }
   if (meaning.intent === 'report') return { icon: '📄', text: answers ? `report · ${answers}` : 'report', tone: 'report' }
   if (meaning.intent === 'response_request') {
@@ -86,6 +87,7 @@ export function labelOf(
           : { icon: '❓', text: `${kind} for ${who}${row ? ' · waiting for their reply' : ''}`, tone: 'ask-other' }
     }
   }
+  if (meaning.answer === 'none') return { icon: '↷', text: 'not an answer', tone: 'settled' }
   if (answers) return { icon: '↩', text: answers, tone: 'answer' }
   return null
 }

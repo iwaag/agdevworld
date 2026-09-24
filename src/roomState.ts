@@ -83,8 +83,26 @@ export interface PostMeaning {
   to?: number
   ask?: 'question' | 'confirmation'
   re?: number[]
+  // `none`: the post says it answers no request (`ag-post answer=none`).
+  answer?: 'none'
   seen?: number
   error?: string
+}
+
+// The composer's choice of what the next post answers (`clearer_chat_ui`
+// ex1). Three choices, never one overloaded null: `auto` leaves it to the
+// relay's next-post rule (which settles a single pending request only);
+// `answer` names the request (`re=`); `none` says it answers nothing
+// (`answer=none`), so an aside never clears a question.
+export type Correlation = { kind: 'auto' } | { kind: 'answer'; id: number } | { kind: 'none' }
+
+export const AUTO: Correlation = { kind: 'auto' }
+
+// The relay's request body for a choice.
+export function correlationBody(choice: Correlation | undefined): Record<string, unknown> {
+  if (choice?.kind === 'answer') return { answers: [choice.id] }
+  if (choice?.kind === 'none') return { not_answer: true }
+  return {}
 }
 
 // One response request and where it stands now (`ag.outstanding.v1`,
@@ -203,9 +221,9 @@ export interface RoomAdapter {
   newKey: () => string | null
   list: () => Promise<RoomRow[] | { error: string }>
   detail: (key: string) => Promise<RoomDetail | { error: string }>
-  // `answers`: the request(s) this post answers, written into the post by
-  // the relay so exactly those are settled.
-  send: (key: string, text: string, token: string, answers?: number[]) => Promise<SendResult>
+  // `correlation`: what this post answers, written into the post by the
+  // relay — exactly the named request, or none at all.
+  send: (key: string, text: string, token: string, correlation?: Correlation) => Promise<SendResult>
   create?: (text: string, token: string) => Promise<SendResult>
   render: (key: string, revision: string | null, token: string) => Promise<SendResult>
   completion?: RoomCompletion
@@ -310,7 +328,7 @@ export const argueAdapter: RoomAdapter = {
       },
     }
   },
-  send: (key, text, token, answers) => writeRelay(`/argues/${encodeURIComponent(key)}/post`, { text, token, ...(answers?.length ? { answers } : {}) }),
+  send: (key, text, token, correlation) => writeRelay(`/argues/${encodeURIComponent(key)}/post`, { text, token, ...correlationBody(correlation) }),
   create: (text, token) => writeRelay('/argues', { text, token }),
   render: (key, revision, token) => writeRelay(`/argues/${encodeURIComponent(key)}/render`, { revision, token }),
   // Finishing from the room (`argue` p2 ex1): the shared completion door,
@@ -388,7 +406,7 @@ export const deskAdapter: RoomAdapter = {
       },
     }
   },
-  send: (key, text, token, answers) => writeRelay(`/frontdesk/${encodeURIComponent(key)}/post`, { text, token, ...(answers?.length ? { answers } : {}) }),
+  send: (key, text, token, correlation) => writeRelay(`/frontdesk/${encodeURIComponent(key)}/post`, { text, token, ...correlationBody(correlation) }),
   render: (key, revision, token) => writeRelay(`/frontdesk/${encodeURIComponent(key)}/render`, { revision, token }),
   completion: {
     closePlan: (key) => relayCompletion.plan({ channel: 'front', topic: `front-desk-${key}` }),

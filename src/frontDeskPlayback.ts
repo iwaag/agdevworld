@@ -17,7 +17,7 @@
 // Nothing here reads the relay or draws: it is arithmetic over what the relay
 // already said.
 
-import type { Citation, Presentation, Rendering, RoomPost } from './roomState'
+import type { Citation, PostMeaning, Presentation, Rendering, RoomPost } from './roomState'
 import { linksIn, type FoundLink } from './textLayout'
 
 export type ViewMode = 'dialogue' | 'original'
@@ -48,6 +48,9 @@ export interface PlayReply {
   note: string | null
   speaker: string
   agent: string | null
+  // What the source post says it is for. A rendering inherits it from the
+  // post it re-voices and never decides it from its own words.
+  meaning: PostMeaning | null
 }
 
 // Which interpretation of a post is shown: the one asked for; else the
@@ -67,7 +70,7 @@ function original(post: RoomPost): PlayTurn {
 export function replyOf(post: RoomPost, presentation: Presentation | null, mode: ViewMode, wanted: string | null): PlayReply {
   const base = {
     message_id: post.message_id, at: post.at, content: post.content, links: linksIn(post.content),
-    speaker: post.speaker, agent: post.agent,
+    speaker: post.speaker, agent: post.agent, meaning: post.meaning ?? null,
   }
   if (mode === 'original' || !presentation) {
     return { ...base, revision: null, turns: [original(post)], state: 'original', note: null }

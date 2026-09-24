@@ -73,6 +73,51 @@ export interface Presentation {
 
 export type RoomPostKind = 'human' | 'agent' | 'ack' | 'other'
 
+// What a post says it is for (`ag.post.v1`, pyagag `agag.post`), as the
+// relay read it from the post itself. Null is an unclassified post — never
+// "waiting for somebody". `error` is a line that was there and unusable.
+export type PostIntent = 'progress' | 'report' | 'response_request'
+
+export interface PostMeaning {
+  intent?: PostIntent
+  to?: number
+  ask?: 'question' | 'confirmation'
+  re?: number[]
+  seen?: number
+  error?: string
+}
+
+// One response request and where it stands now (`ag.outstanding.v1`,
+// pyagag `agag.outstanding`). The post keeps its intent forever; `state`
+// is derived from what came after it.
+export type RequestState = 'pending' | 'overtaken' | 'answered' | 'withdrawn' | 'superseded' | 'closed'
+
+export interface RequestRow {
+  id: number
+  sender_id: number
+  sender_name: string
+  to: number
+  to_name: string
+  ask: 'question' | 'confirmation' | null
+  text: string
+  timestamp: number
+  state: RequestState
+  settled_by: number | null
+  how: 'reference' | 'quote' | 'next_post' | null
+  certain: boolean
+  overtaken_by: number[]
+}
+
+export interface RoomRequests {
+  requests: RequestRow[]
+  pending: number[]
+  // A reply by a request's recipient that named nothing while several of
+  // theirs were pending: `{reply id: [request ids]}`.
+  unmatched: Record<string, number[]>
+  uncertain: string[]
+  closed: boolean
+}
+
 export interface RoomPost {
   message_id: number
   at: number
@@ -85,9 +130,10 @@ export interface RoomPost {
   // for a post under that header.
   agent: string | null
   speaker: string
+  meaning?: PostMeaning | null
 }
 
-export type RoomState = 'waiting' | 'received' | 'answered' | 'done' | 'quiet' | 'unknown'
+export type RoomState = 'waiting' | 'received' | 'answered' | 'asking' | 'done' | 'quiet' | 'unknown'
 
 export interface RoomStatus {
   state: RoomState
@@ -100,6 +146,8 @@ export interface RoomRow {
   label: string
   resolved: boolean
   last_post: { at: number; by: string } | null
+  // How many requests are pending in it; null when the relay holds only its name.
+  asking?: number | null
 }
 
 export interface RoomConversation {
@@ -114,6 +162,10 @@ export interface RoomConversation {
   status: RoomStatus
   zulip_url: string | null
   presentation: Presentation | null
+  // What is still being asked (null when the relay could not read the posts),
+  // and who this screen posts as, so a request to them reads "for you".
+  requests?: RoomRequests | null
+  viewer_id?: number | null
 }
 
 export interface RoomDetail {
@@ -151,7 +203,9 @@ export interface RoomAdapter {
   newKey: () => string | null
   list: () => Promise<RoomRow[] | { error: string }>
   detail: (key: string) => Promise<RoomDetail | { error: string }>
-  send: (key: string, text: string, token: string) => Promise<SendResult>
+  // `answers`: the request(s) this post answers, written into the post by
+  // the relay so exactly those are settled.
+  send: (key: string, text: string, token: string, answers?: number[]) => Promise<SendResult>
   create?: (text: string, token: string) => Promise<SendResult>
   render: (key: string, revision: string | null, token: string) => Promise<SendResult>
   completion?: RoomCompletion
@@ -279,6 +333,7 @@ interface DeskRow {
   id: string
   resolved: boolean
   last_post: { at: number; by: string } | null
+  asking?: number | null
 }
 
 interface DeskDetailPayload {
@@ -287,8 +342,9 @@ interface DeskDetailPayload {
   conversation: {
     id: string; topic: string; live_topic: string; resolved: boolean; known: 'held' | 'read' | 'unknown'
     history: { posts: number; bounded: boolean; note: string }
-    posts: { message_id: number; at: number; by: string; sender_id: number; content: string; kind: 'developer' | 'agent' | 'ack' | 'other' }[]
+    posts: { message_id: number; at: number; by: string; sender_id: number; content: string; kind: 'developer' | 'agent' | 'ack' | 'other'; meaning?: PostMeaning | null }[]
     status: RoomStatus; zulip_url: string | null; presentation: Presentation | null
+    requests?: RoomRequests | null; viewer_id?: number | null
   }
 }
 
@@ -308,7 +364,7 @@ export const deskAdapter: RoomAdapter = {
   async list() {
     const found = await readRelay<{ conversations: DeskRow[] }>('/frontdesk')
     if ('error' in found) return found
-    return found.conversations.map((row) => ({ key: row.id, label: row.id, resolved: row.resolved, last_post: row.last_post }))
+    return found.conversations.map((row) => ({ key: row.id, label: row.id, resolved: row.resolved, last_post: row.last_post, asking: row.asking ?? null }))
   },
   async detail(key) {
     const found = await readRelay<DeskDetailPayload>(`/frontdesk/${encodeURIComponent(key)}`)
@@ -319,6 +375,7 @@ export const deskAdapter: RoomAdapter = {
       conversation: {
         key, channel: 'front', topic: c.topic, live_topic: c.live_topic, resolved: c.resolved, known: c.known,
         bounded: c.history.bounded, status: c.status, zulip_url: c.zulip_url, presentation: c.presentation,
+        requests: c.requests ?? null, viewer_id: c.viewer_id ?? null,
         // The desk's relay words: the Developer is the human, Front is the agent.
         posts: c.posts.map((post) => ({
           ...post, kind: post.kind === 'developer' ? 'human' as const : post.kind,
@@ -327,7 +384,7 @@ export const deskAdapter: RoomAdapter = {
       },
     }
   },
-  send: (key, text, token) => writeRelay(`/frontdesk/${encodeURIComponent(key)}/post`, { text, token }),
+  send: (key, text, token, answers) => writeRelay(`/frontdesk/${encodeURIComponent(key)}/post`, { text, token, ...(answers?.length ? { answers } : {}) }),
   render: (key, revision, token) => writeRelay(`/frontdesk/${encodeURIComponent(key)}/render`, { revision, token }),
   completion: {
     closePlan: (key) => relayCompletion.plan({ channel: 'front', topic: `front-desk-${key}` }),

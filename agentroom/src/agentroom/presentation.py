@@ -38,6 +38,8 @@ from dataclasses import dataclass
 
 from agag.agent import is_ack
 from agag.argue import speaker_of
+from agag.outstanding import read_requests
+from agag.post import PostMeta, compose, parse_post, strip as strip_post
 from agag.memo import DIALOGUE_SCHEMA, MEMO_CHANNEL, RENDER_TAG, SOURCE_TAG, fingerprint, parse_record
 from agag.mirror import Mirror, bare_topic
 from agag.selfnote import is_selfnote, is_speech, parse_note
@@ -49,17 +51,64 @@ HANDOFF = re.compile(r"^\s*@\*\*[^*\n]+\*\*\s*\n+")
 _SPEAKER_HEADER = re.compile(r"^\*\*\[[a-z][\w-]*:[\w.-]+\]\*\*[ \t]*\n")
 
 __all__ = [
-    "OVERDUE_SECONDS", "Located", "agents_of", "locate", "memo_topic_of", "post_payload", "presentation",
-    "shown_content", "source_posts",
+    "OVERDUE_SECONDS", "Located", "agents_of", "answer_body", "locate", "meaning_of", "memo_topic_of",
+    "post_payload", "presentation", "requests_payload", "shown_content", "source_posts",
 ]
 
 
 def shown_content(content: str) -> str:
     """A post as a person should read it: without the leading hand-off
-    mention the skeleton prefixes to a reply, and without a logical
-    speaker's header (the speaker is a field of its own)."""
-    text = HANDOFF.sub("", str(content or ""), count=1)
+    mention the skeleton prefixes to a reply, without a logical speaker's
+    header (the speaker is a field of its own), and without the `ag-post`
+    line (what the post is for is `meaning_of`, a field of its own too)."""
+    text = HANDOFF.sub("", strip_post(content), count=1)
     return _SPEAKER_HEADER.sub("", text.lstrip(), count=1).strip()
+
+
+def meaning_of(content: str) -> dict | None:
+    """What a post says it is for (`agag.post`), for a room: `{intent, to,
+    ask, re, seen}` as present, or None for an unclassified post. A line
+    that is there but malformed is `{"error": …}` — shown as unclassified,
+    never guessed."""
+    parsed = parse_post(content)
+    if parsed.error:
+        return {"error": parsed.error}
+    return parsed.meta.as_dict() if parsed.meta is not None else None
+
+
+def requests_payload(messages, *, complete: bool, closed: bool, stale: bool, names: dict[int, str] | None = None) -> dict:
+    """Every response request of a conversation and where it stands
+    (`agag.outstanding`, `ag.outstanding.v1`), from the messages a room
+    already holds. The same function every consumer uses, so a room never
+    decides for itself what is still being asked."""
+    rows = [m if isinstance(m, dict) else m.as_zulip() if hasattr(m, "as_zulip") else {
+        "id": m.id, "sender_id": m.sender_id, "timestamp": m.timestamp, "content": m.content,
+        "sender_full_name": getattr(m, "sender_name", None) or getattr(m, "sender", ""),
+        "sender_realm_str": getattr(m, "sender_realm", "") or "",
+        "last_edit_timestamp": getattr(m, "edited_at", None),
+    } for m in messages]
+    found = read_requests(rows, complete=complete, closed=closed, stale=stale, is_ack=is_ack, names=names).as_dict()
+    for row in found["requests"]:
+        row["text"] = shown_content(row["text"])  # as a person reads it: no hand-off mention
+    return found
+
+
+def answer_body(text: str, answers, requests: dict | None) -> tuple[str | None, str | None]:
+    """`(the post to write, why it is refused)` for a person's post that
+    answers `answers` (request ids). Each must be a request of this
+    conversation — the reference is what settles it, so a reference to
+    anything else would settle nothing and is refused rather than sent."""
+    try:
+        ids = [int(i) for i in (answers or [])]
+    except (TypeError, ValueError):
+        return None, "answers must be message ids"
+    if not ids:
+        return text.strip(), None
+    known = {int(r["id"]) for r in (requests or {}).get("requests", [])}
+    unknown = [i for i in ids if i not in known]
+    if unknown:
+        return None, f"#{', #'.join(map(str, unknown))} is not a request in this conversation"
+    return compose(text.strip(), PostMeta(re=tuple(dict.fromkeys(ids)))), None
 
 
 @dataclass(frozen=True)
@@ -124,6 +173,7 @@ def post_payload(message, agents: dict[int, str]) -> dict:
         "sender_id": message.sender_id, "kind": kind, "agent": agent,
         "speaker": logical or message.sender_name, "logical": logical,
         "content": shown_content(content), "edited": message.edited_at is not None,
+        "meaning": meaning_of(content),
     }
 
 

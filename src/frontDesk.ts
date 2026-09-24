@@ -48,5 +48,6 @@ new Phaser.Game({
   scene: [scene],
 })
 // The demo is a fixture, and a fixture's driver needs to know where the
-// Phaser buttons are: the scene is reachable from the console only there.
-if (demo) (window as unknown as { __room: FrontDeskScene }).__room = scene
+// Phaser buttons are: the scene is reachable from the console only there —
+// and under `&probe=1`, for a driver pointed at a fixture relay.
+if (demo || params.get('probe') === '1') (window as unknown as { __room: FrontDeskScene }).__room = scene

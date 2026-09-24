@@ -386,3 +386,82 @@ def test_asking_for_another_interpretation_is_one_selfnote_in_the_source_once():
     assert desk.render("20260908-1600", "bbbb2222", "tok-r")["duplicate"] and len(client.sent) == 1
     assert "no settings revision" in desk.render("20260908-1600", None, "tok-s")["error"]
     assert "nothing of this conversation" in desk.render("20260101-0000", "bbbb2222", "tok-t")["error"]
+
+
+# --- what a post is for, and what is still asked (clearer_chat_ui step 3) ---------------
+
+PROGRESS = "Reading the project.\n\n`ag-post intent=progress`"
+REPORT = "@**Developer**\n\nThe workplan is open.\n\n`ag-post intent=report`"
+
+
+def asking(text, *, seen, ask="question"):
+    return f"@**Developer**\n\n{text}\n\n`ag-post intent=response_request to=8 ask={ask} seen={seen}`"
+
+
+def test_each_post_carries_its_meaning_and_the_line_is_never_shown():
+    held = topic(DESK, message("build it", ident=1), by_front(ACK, ident=2), by_front(PROGRESS, ident=3),
+                 by_front(asking("Which provider?", seen=2), ident=4))
+    desk, _ = desk_with(held)
+    posts = desk.conversation("20260908-1600", now=NOW)["conversation"]["posts"]
+    assert [p["meaning"] for p in posts] == [
+        None, None, {"intent": "progress"}, {"intent": "response_request", "to": 8, "ask": "question", "seen": 2}]
+    assert all("ag-post" not in p["content"] for p in posts)
+    assert posts[3]["content"] == "Which provider?"
+
+
+def test_a_pending_question_makes_the_conversation_asking_and_is_listed():
+    held = topic(DESK, message("build it", ident=1), by_front(ACK, ident=2),
+                 by_front(asking("Which provider?", seen=2), ident=3),
+                 by_front(asking("May I open a workplan?", seen=3, ask="confirmation"), ident=4))
+    desk, _ = desk_with(held)
+    conversation = desk.conversation("20260908-1600", now=NOW)["conversation"]
+    assert conversation["status"]["state"] == "asking" and "#3, #4" in conversation["status"]["evidence"]
+    assert conversation["requests"]["pending"] == [3, 4]
+    assert conversation["viewer_id"] == DEVELOPER
+    board = desk.board(now=NOW)["conversations"]
+    assert board[0]["asking"] == 2 and board[0]["status"]["state"] == "asking"
+
+
+def test_a_report_is_answered_and_asks_nothing():
+    held = topic(DESK, message("build it", ident=1), by_front(ACK, ident=2), by_front(REPORT, ident=3))
+    desk, _ = desk_with(held)
+    conversation = desk.conversation("20260908-1600", now=NOW)["conversation"]
+    assert conversation["status"]["state"] == "answered" and conversation["requests"]["pending"] == []
+
+
+def test_replying_updates_the_wait_and_the_question_keeps_its_label():
+    held = topic(DESK, message("build it", ident=1), by_front(ACK, ident=2),
+                 by_front(asking("Which provider?", seen=2), ident=3), message("GitHub", ident=4))
+    desk, _ = desk_with(held)
+    conversation = desk.conversation("20260908-1600", now=NOW)["conversation"]
+    assert conversation["requests"]["pending"] == []
+    assert conversation["requests"]["requests"][0]["state"] == "answered"
+    assert conversation["posts"][2]["meaning"]["intent"] == "response_request", "history keeps what it was"
+    assert conversation["status"]["state"] == "waiting", "the Developer spoke last; Front has it now"
+
+
+def test_a_question_asked_before_the_newer_post_was_read_is_not_a_wait():
+    held = topic(DESK, message("build it", ident=1), by_front(ACK, ident=2), message("and fast", ident=3),
+                 by_front(asking("Which provider?", seen=2), ident=4))
+    desk, _ = desk_with(held)
+    conversation = desk.conversation("20260908-1600", now=NOW)["conversation"]
+    assert conversation["status"]["state"] == "received" and "owes that post a run" in conversation["status"]["evidence"]
+    assert conversation["requests"]["pending"] == []
+
+
+def test_an_answer_names_the_request_inside_the_post():
+    desk, client, ids = mirrored_desk(
+        (DEVELOPER, "Developer", "build it"), (FRONT_BOT, "Front", asking("Which provider?", seen=1)),
+        (FRONT_BOT, "Front", asking("May I open it?", seen=2, ask="confirmation")))
+    found = desk.post("20260908-1600", "Yes.", "tok-a", [ids[2]])
+    assert found["sent"] is True
+    assert client.sent[-1] == ("front", DESK, f"Yes.\n\n`ag-post re={ids[2]}`")
+
+
+def test_an_answer_to_something_that_is_not_a_request_here_is_refused():
+    desk, client, ids = mirrored_desk((DEVELOPER, "Developer", "build it"),
+                                      (FRONT_BOT, "Front", asking("Which provider?", seen=1)))
+    found = desk.post("20260908-1600", "Yes.", "tok-b", [ids[0]])
+    assert found["sent"] is False and "is not a request in this conversation" in found["error"]
+    assert client.sent == []
+    assert desk.post("20260908-1600", "Yes.", "tok-c", ["x"])["error"] == "answers must be message ids"

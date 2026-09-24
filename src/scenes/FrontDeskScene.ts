@@ -33,6 +33,13 @@
 // Nothing here decides what a post *is*. The relay says which posts are the
 // human's, which are acks and which are agents' speech, who spoke and which
 // renderings exist; this scene renders those words.
+//
+// Since `clearer_chat_ui` step 3 the relay also says what each post is for —
+// progress, a report, or a request for somebody's answer — and which
+// requests are still waiting (`postMeaning.ts`). The reply on show carries
+// its label in either view (a rendering inherits its source post's), the
+// strip above the dialogue lists what is waiting for *you* and takes you to
+// each one, and picking one makes your next post name it as the answer.
 // When the relay cannot be read the last known history stays on screen
 // under an amber `unknown`, never a blank frame — the rule every
 // relay-backed view in this app follows.
@@ -56,7 +63,8 @@ import {
   type ViewMode,
 } from '../frontDeskPlayback'
 import { FrontDeskSettings } from '../frontDeskSettings'
-import { ago, clock, submitToken, type Citation, type RoomAdapter, type RoomDetail, type RoomRow } from '../roomState'
+import { LABEL_STYLE, labelOf, overtakenFor, pendingFor, requestOf, shortText, type PostLabel } from '../postMeaning'
+import { ago, clock, submitToken, type Citation, type PostMeaning, type RoomAdapter, type RoomDetail, type RoomRow } from '../roomState'
 import { assetUrl, type SettingsCharacter, type SettingsManifest } from '../settingsState'
 import { linksIn, paginate, wrapText, type FoundLink, type Measure } from '../textLayout'
 import { ROOM_TINT_ALPHA, ROOM_TINT_COLOR } from './roomTint'
@@ -123,6 +131,9 @@ export class FrontDeskScene extends Phaser.Scene {
   private send: SendPhase = { kind: 'idle' }
   private sending = false
   private settings!: FrontDeskSettings
+  // The request the next post answers, picked from the strip; null lets the
+  // relay's next-post rule decide (it settles only a single pending one).
+  private answering: number | null = null
 
   // Playback: the replies as turns, and where the reader is.
   private replies: PlayReply[] = []
@@ -188,6 +199,10 @@ export class FrontDeskScene extends Phaser.Scene {
   private historyTitle!: Phaser.GameObjects.Text
   private historyList!: Phaser.GameObjects.Container
   private conversationChips: Phaser.GameObjects.Text[] = []
+  // What the reply on show is for, beside its speaker's name.
+  private labelChip!: Phaser.GameObjects.Text
+  // What is waiting for the viewer, above the dialogue.
+  private askChips: Phaser.GameObjects.Text[] = []
 
   constructor(options: FrontDeskOptions) {
     super({ key: 'frontdesk' })
@@ -248,6 +263,7 @@ export class FrontDeskScene extends Phaser.Scene {
     this.nextButton = this.button('▶', () => this.turn(1))
     this.queueButton = this.button('', () => this.turn(1), COLOR.accent2).setVisible(false)
     this.status = this.text(0, 0, '', MONO, 11.5, COLOR.muted)
+    this.labelChip = this.text(0, 0, '', MONO, 11, COLOR.dim).setPadding(6, 2, 6, 2).setVisible(false)
 
     this.sendButton = this.button('Send ⏎ · buys a run', () => void this.submit(), COLOR.accent2)
     this.counter = this.text(0, 0, '', MONO, 10.5, COLOR.dim)
@@ -386,6 +402,7 @@ export class FrontDeskScene extends Phaser.Scene {
       shown && [shown.active_revision, shown.pending, shown.failed.map((one) => one.job), shown.renderer.state,
         Object.entries(shown.renderings).map(([id, list]) => [id, list.map((one) => [one.job, one.stale])])],
       found.chat.configured,
+      conversation.requests && conversation.requests.requests.map((row) => [row.id, row.state, row.settled_by]),
     ])
     if (signature !== this.signature) {
       this.signature = signature
@@ -401,9 +418,12 @@ export class FrontDeskScene extends Phaser.Scene {
         this.cursor = { reply: this.cursor.reply + 1, turn: 0, page: 0 }
       }
       this.shownId = this.cursor.reply >= 0 ? this.replies[this.cursor.reply].message_id : null
+      // A picked request that stopped waiting is no longer the target.
+      if (this.answering !== null && requestOf(conversation.requests, this.answering)?.state !== 'pending') this.answering = null
       this.renderDialogue()
       this.renderHistory()
     }
+    this.renderAsks()
     this.renderCaption()
     this.renderStatus()
     this.renderPrompt()
@@ -453,7 +473,8 @@ export class FrontDeskScene extends Phaser.Scene {
     const opening = this.conversationId === null
     const result = opening
       ? (this.adapter.create ? await this.adapter.create(text, submitToken()) : { sent: false, error: 'this room cannot open a conversation' })
-      : await this.adapter.send(this.conversationId as string, text, submitToken())
+      : await this.adapter.send(this.conversationId as string, text, submitToken(),
+        this.answering !== null ? [this.answering] : undefined)
     this.sending = false
     if (result.sent && opening && result.key) {
       this.send = { kind: 'idle' }
@@ -463,6 +484,7 @@ export class FrontDeskScene extends Phaser.Scene {
     } else if (result.sent) {
       this.send = result.resumed ? { kind: 'resumed' } : { kind: 'idle' }
       this.keys.set('')
+      this.answering = null
       // The developer just spoke: the next reply is what they are waiting
       // for, so the reader moves to the newest reply and the answer will
       // follow it rather than queue behind an old one.
@@ -506,7 +528,9 @@ export class FrontDeskScene extends Phaser.Scene {
     this.shownId = null
     this.pageCache.clear()
     this.send = { kind: 'idle' }
+    this.answering = null
     this.historyScroll = 0
+    this.renderAsks()
     this.renderDialogue()
     this.renderHistory()
     this.renderCaption()
@@ -679,6 +703,7 @@ export class FrontDeskScene extends Phaser.Scene {
     this.pageCache.clear()
     this.renderDialogue()
     this.renderHistory()
+    this.renderAsks()
     this.renderPrompt()
     this.renderCaption()
     this.renderStatus()
@@ -780,6 +805,7 @@ export class FrontDeskScene extends Phaser.Scene {
       this.prevButton.setVisible(false)
       this.nextButton.setVisible(false)
       this.queueButton.setVisible(false)
+      this.labelChip.setVisible(false)
       this.renderLinks(reply)
       return
     }
@@ -822,7 +848,105 @@ export class FrontDeskScene extends Phaser.Scene {
     this.nextButton.setVisible(paged).setAlpha(!ended || queued > 0 ? 1 : 0.35)
     this.queueButton.setVisible(queued > 0).setText(`▶ ${queued} new repl${queued > 1 ? 'ies' : 'y'} waiting`)
     this.queueButton.setPosition(x + boxWidth - 14, y - 8).setOrigin(1, 1)
+    this.placeLabel(reply.message_id, reply.meaning, who.front)
     this.renderLinks(reply)
+  }
+
+  // --- what a post is for ---------------------------------------------------------
+
+  private viewer(): number | null {
+    return this.detail?.conversation.viewer_id ?? null
+  }
+
+  private labelFor(messageId: number, meaning: PostMeaning | null | undefined): PostLabel | null {
+    return labelOf(messageId, meaning, this.detail?.conversation.requests, this.viewer())
+  }
+
+  // The reply's label beside the name of the box it is spoken in. The same
+  // label in the dialogue and the original view: it is the source post's.
+  private placeLabel(messageId: number, meaning: PostMeaning | null, front: boolean) {
+    const label = this.labelFor(messageId, meaning)
+    if (!label) { this.labelChip.setVisible(false); return }
+    const style = LABEL_STYLE[label.tone]
+    const name = front ? this.speaker : this.coSpeaker
+    this.labelChip.setText(`${label.icon} ${label.text}`).setColor(style.color)
+      .setBackgroundColor(style.background ?? 'rgba(0,0,0,0)').setFontStyle(style.bold ? 'bold' : 'normal')
+      .setPosition(name.x + name.width + 10, name.y).setOrigin(0, 0).setVisible(true)
+  }
+
+  // What is waiting for the viewer, above the dialogue: a count, one chip
+  // per request (it takes you to the question and makes your next post its
+  // answer), and a word when a question is held back because your newer
+  // post is being read first. History is never read from here — only the
+  // relay's current states.
+  private renderAsks() {
+    for (const chip of this.askChips) chip.destroy()
+    this.askChips = []
+    if (!this.labelChip) return
+    const requests = this.detail?.conversation.requests
+    const viewer = this.viewer()
+    const waiting = pendingFor(requests, viewer)
+    const held = overtakenFor(requests, viewer)
+    if (this.conversationId === null || (waiting.length === 0 && held.length === 0 && this.answering === null)) return
+    const { x, y, width } = this.dialogueRect
+    const limit = x + width - (this.queueButton.visible ? this.queueButton.width + 24 : 14)
+    let chipX = x
+    const place = (chip: Phaser.GameObjects.Text) => {
+      if (chipX + chip.width > limit && this.askChips.length > 0) { chip.destroy(); return false }
+      chip.setPosition(chipX, y - 8).setOrigin(0, 1)
+      chipX += chip.width + 6
+      this.askChips.push(chip)
+      return true
+    }
+    const style = LABEL_STYLE['ask-you']
+    if (waiting.length) {
+      const asker = waiting[0].sender_name || 'Front'
+      place(this.text(0, 0, `❓ ${waiting.length} waiting for your reply`, MONO, 11.5, style.color)
+        .setBackgroundColor(style.background ?? '').setFontStyle('bold').setPadding(8, 4, 8, 4)
+        .setInteractive({ useHandCursor: true }).on('pointerup', () => this.goToRequest(waiting[0].id)))
+      for (const row of waiting) {
+        const picked = row.id === this.answering
+        const who = row.sender_name && row.sender_name !== asker ? `${row.sender_name}: ` : ''
+        const chip = this.text(0, 0, `${picked ? '↩ answering ' : ''}#${row.id} ${who}${shortText(row.text, picked ? 34 : 26)}`, MONO, 11,
+          picked ? '#0d0f14' : COLOR.warn)
+          .setBackgroundColor(picked ? COLOR.accent2 : '#2a2210').setPadding(7, 4, 7, 4)
+          .setInteractive({ useHandCursor: true })
+          .on('pointerup', () => (picked ? this.pickAnswer(null) : this.goToRequest(row.id)))
+        if (!place(chip)) break
+      }
+      if (waiting.length > 1 && this.answering === null) {
+        place(this.text(0, 0, 'pick the one your next post answers', MONO, 10.5, COLOR.muted).setPadding(4, 4, 4, 4))
+      } else if (this.answering !== null) {
+        place(this.button('✕ not an answer', () => this.pickAnswer(null)).setFontSize(10.5))
+      }
+    }
+    if (held.length) {
+      place(this.text(0, 0, `📩 ${held.map((row) => `#${row.id}`).join(', ')} was asked before your newer post was read — Front answers that first`,
+        MONO, 10.5, COLOR.muted).setBackgroundColor('#1b2030').setPadding(7, 4, 7, 4))
+    }
+  }
+
+  // Show the question and make the next post its answer.
+  private goToRequest(id: number) {
+    if (this.mode === 'dialogue' && !this.replies.some((reply) => reply.message_id === id)) this.mode = 'original'
+    const found = this.replies.findIndex((reply) => reply.message_id === id)
+    if (found >= 0) {
+      this.cursor = { reply: found, turn: 0, page: 0 }
+      this.shownId = id
+    }
+    this.highlighted = this.historyOpen ? id : this.highlighted
+    this.pickAnswer(id)
+    this.renderDialogue()
+    if (this.historyOpen) this.renderHistory()
+    this.renderCaption()
+    this.renderStatus()
+  }
+
+  private pickAnswer(id: number | null) {
+    this.answering = id
+    this.renderAsks()
+    this.renderPrompt()
+    this.keys.focus()
   }
 
   private lastTurnBefore(front: boolean): PlayTurn | null {
@@ -943,9 +1067,16 @@ export class FrontDeskScene extends Phaser.Scene {
           color = COLOR.accent
           break
         case 'answered':
-          text = `answered ${ago(since)} ago`
+          text = `answered ${ago(since)} ago · nothing is asked of you`
           color = COLOR.live
           break
+        case 'asking': {
+          const waiting = pendingFor(conversation.requests, this.viewer()).length
+          text = waiting ? `❓ ${waiting} question${waiting > 1 ? 's' : ''} for you — reply below (${ago(since)})`
+            : `❓ waiting for somebody's reply (${ago(since)})`
+          color = COLOR.warn
+          break
+        }
         case 'done':
           text = this.adapter.words.done
           color = COLOR.dim
@@ -971,7 +1102,8 @@ export class FrontDeskScene extends Phaser.Scene {
     }
     // The status shares the box header with the speaker's name: it is cut
     // to what fits rather than drawn over the name.
-    const room = Math.max(60, this.dialogueRect.width - 36 - this.speaker.width - 16)
+    const labelled = this.labelChip.visible && Math.abs(this.labelChip.y - this.speaker.y) < 2
+    const room = Math.max(60, this.dialogueRect.width - 36 - this.speaker.width - 16 - (labelled ? this.labelChip.width + 10 : 0))
     const mono = (t: string) => this.measure(t) * (11.5 / BODY_PX) * 0.92
     if (mono(text) > room) {
       let shown = text
@@ -989,7 +1121,8 @@ export class FrontDeskScene extends Phaser.Scene {
     const usable = !this.sending && (opening || (!this.unreadable && Boolean(chat?.configured) && this.detail?.health.state === 'live'))
     // The hints live in the textarea's placeholder; the key note beside the
     // counter, where there is room for it.
-    const words = opening ? 'State what you want, to open a new argue…' : this.adapter.words.prompt
+    const words = opening ? 'State what you want, to open a new argue…'
+      : this.answering !== null ? `Your answer to #${this.answering}…` : this.adapter.words.prompt
     this.keys.setPlaceholder(usable ? words : this.sending ? 'sending…' : 'chat is not available right now')
     this.keys.setDisabled(!usable)
     const max = chat?.max_chars
@@ -1074,8 +1207,11 @@ export class FrontDeskScene extends Phaser.Scene {
       }
       const marked = post.message_id === this.highlighted
       if (marked) highlightAt = cursor
+      const meaning = this.labelFor(post.message_id, post.meaning)
+      const tag = meaning ? ` · ${meaning.icon} ${meaning.text}` : ''
+      const tagColor = meaning?.tone === 'ask-you' ? COLOR.warn : null
       if (post.kind === 'human') {
-        row('user', null, '👤', `${post.by}${marked ? '  ◀ cited' : ''}`, marked ? COLOR.warn : COLOR.accent2, post.content, COLOR.muted, post.at)
+        row('user', null, '👤', `${post.by}${tag}${marked ? '  ◀ cited' : ''}`, marked ? COLOR.warn : COLOR.accent2, post.content, COLOR.muted, post.at)
         continue
       }
       // An agent's post: the turns of the interpretation on show when the
@@ -1090,14 +1226,16 @@ export class FrontDeskScene extends Phaser.Scene {
           ?? (post.agent === 'front' && !post.speaker.includes(':') ? this.frontOf(active) : null)
         const isFront = post.agent === 'front' && !post.speaker.includes(':')
         const named = character ? `${character.name}${character.nickname ? `（${character.nickname}）` : ''}` : null
-        const label = `${named ? (post.speaker.includes(':') ? `${named} · ${post.speaker}` : named) : post.speaker} · as written${marked ? '  ◀ cited' : ''}`
+        const label = `${named ? (post.speaker.includes(':') ? `${named} · ${post.speaker}` : named) : post.speaker} · as written${tag}${marked ? '  ◀ cited' : ''}`
         row(character ? 'character' : 'other', character?.face ?? null, '?', label,
-          marked ? COLOR.warn : isFront ? COLOR.accent : character ? COLOR.other : COLOR.dim, post.content, COLOR.ink, post.at)
+          marked ? COLOR.warn : tagColor ?? (isFront ? COLOR.accent : character ? COLOR.other : COLOR.dim), post.content, COLOR.ink, post.at)
       } else {
         const { manifest, note } = this.settings.resolve(found.settings_revision)
         const front = this.frontOf(manifest)
         if (note) add(`⚠ ${note}`, COLOR.warn, MONO, 10.5, false)
         if (found.stale) add('⚠ the post changed after this was rendered', COLOR.warn, MONO, 10.5, false)
+        // The rendering inherits what its source post is for.
+        if (meaning) add(`${meaning.icon} ${meaning.text} · #${post.message_id}`, tagColor ?? LABEL_STYLE[meaning.tone].color, MONO, 10.5, false)
         for (const turn of voiced) {
           const character = FrontDeskSettings.character(manifest, turn.character)
           const isFront = character !== null && character === front
@@ -1143,7 +1281,7 @@ export class FrontDeskScene extends Phaser.Scene {
     const width = this.historyViewport.width + 16
     for (const row of this.recentConversations(rows)) {
       const active = row.key === this.conversationId
-      const label = `${row.resolved ? '✔ ' : ''}${row.label}`
+      const label = `${row.asking ? `❓${row.asking} ` : ''}${row.resolved ? '✔ ' : ''}${row.label}`
       const chip = this.text(0, 0, label, MONO, 10.5, active ? '#0d0f14' : COLOR.muted)
         .setBackgroundColor(active ? '#70c7ff' : '#1b2030').setPadding(7, 3, 7, 3)
         .setInteractive({ useHandCursor: true })

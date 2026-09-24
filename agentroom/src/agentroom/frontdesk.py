@@ -60,7 +60,7 @@ from agag.zulip import RESOLVED_TOPIC_PREFIX, ZulipClient
 
 from .argueroom import SubmitTokens, request_rendering
 from .chat import Chat
-from .presentation import Located, agents_of, presentation, shown_content
+from .presentation import Located, agents_of, answer_body, meaning_of, presentation, requests_payload, shown_content
 from .room import DESK_PREFIX, FRONT_CHANNEL, bare_topic
 
 if TYPE_CHECKING:  # pragma: no cover - typing only; ops imports this module
@@ -127,6 +127,26 @@ def post_kind(message, front_id: int | None, developer_id: int | None) -> str:
     if front_id is None and message.sender == "Front":
         return "agent"
     return "developer" if message.sender == "Developer" else "other"
+
+
+def with_requests(status: dict, requests: dict | None) -> dict:
+    """The status once the conversation's explicit requests are read
+    (`agag.outstanding`): Front having answered last is `asking` when a
+    request of its is still pending, and `answered` only when nothing is
+    asked. Anything else — the Developer spoke last, ✔, unknown — stands."""
+    if not requests or status.get("state") != "answered":
+        return status
+    rows = {int(r["id"]): r for r in requests.get("requests", [])}
+    pending = [rows[i] for i in requests.get("pending", []) if i in rows]
+    if pending:
+        newest = pending[-1]
+        return {"state": "asking", "since": newest.get("timestamp") or status.get("since"),
+                "evidence": f"{len(pending)} request(s) pending: " + ", ".join(f"#{r['id']}" for r in pending)}
+    overtaken = [r for r in rows.values() if r.get("state") == "overtaken"]
+    if overtaken:
+        return {"state": "received", "since": status.get("since"),
+                "evidence": f"#{overtaken[-1]['id']} was asked before your newer post was read; Front owes that post a run"}
+    return status
 
 
 def status_of(topic, front_id: int | None, developer_id: int | None) -> dict:
@@ -231,6 +251,7 @@ class FrontDesk:
         return {
             "message_id": m.id, "at": m.timestamp, "by": m.sender, "sender_id": m.sender_id,
             "content": shown_content(m.content), "kind": post_kind(m, front_id, developer_id),
+            "meaning": meaning_of(m.content),
         }
 
     def _row(self, ident: str, held, live: str | None, front_id, developer_id) -> dict:
@@ -242,15 +263,26 @@ class FrontDesk:
                 "posts": 0, "last_post": None,
                 "status": {"state": "done" if resolved else "quiet", "since": None,
                            "evidence": "the topic is known by name only; its posts are not held"},
+                "asking": None,
                 "held": False,
             }
+        requests = self._requests_of(held)
         return {
             "id": ident, "topic": topic, "live_topic": held.live_topic, "resolved": held.resolved,
             "posts": len(held.history),
             "last_post": ({"at": held.last.timestamp, "by": held.last.sender} if held.last else None),
-            "status": status_of(held, front_id, developer_id),
+            "status": with_requests(status_of(held, front_id, developer_id), requests),
+            "asking": len(requests["pending"]) if requests else 0,
             "held": True,
         }
+
+    @staticmethod
+    def _requests_of(held, *, stale: bool = False) -> dict | None:
+        """The conversation's requests, from the history the engine keeps;
+        None when it keeps none (a row known by name only)."""
+        if held is None or not held.keep_history:
+            return None
+        return requests_payload(held.history, complete=not held.history_bounded, closed=held.resolved, stale=stale)
 
     def board(self, now: float | None = None) -> dict:
         now = time.time() if now is None else now
@@ -322,6 +354,11 @@ class FrontDesk:
             posts = [self._post(m, front_id, developer_id) for m in sorted(held.history, key=lambda m: m.id)]
             note = ("the newest posts were read; older ones are in Zulip" if bounded
                     else "every real post of this conversation is here")
+        requests = None
+        if held is not None:
+            requests = requests_payload(held.history, complete=not bounded, closed=held.resolved,
+                                        stale=health["state"] != "live" and known == "held")
+            row["status"] = with_requests(row["status"], requests)
         latest = next((p for p in reversed(posts) if p["kind"] == "agent"), None)
         if health["state"] != "live" and known == "held":
             row["stale_state"] = row["status"]["state"]
@@ -335,6 +372,9 @@ class FrontDesk:
             "posts": posts, "latest_reply": latest,
             "zulip_url": self.zulip_url(row["live_topic"]),
             "presentation": self._presentation(ident, now),
+            # What is still being asked, and of whom (`agag.outstanding`);
+            # `viewer_id` is who this relay posts as, so a room can say "you".
+            "requests": requests, "viewer_id": developer_id,
         }
         return {"schema": SCHEMA, "generated_at": now, "health": health,
                 "chat": self.chat.status(), "conversation": conversation}
@@ -382,6 +422,15 @@ class FrontDesk:
 
     # -- the write ----------------------------------------------------------
 
+    def requests(self, ident: str) -> dict | None:
+        """This conversation's requests as the mirror holds it now."""
+        mirror = self.mirror
+        if mirror is None or not ID_PATTERN.match(ident or ""):
+            return None
+        messages = mirror.messages(FRONT_CHANNEL, desk_topic(ident))
+        live = mirror.live_name(FRONT_CHANNEL, desk_topic(ident)) or ""
+        return requests_payload(messages, complete=True, closed=live.startswith(RESOLVED_TOPIC_PREFIX), stale=False)
+
     def check(self, ident: str, text: str, token: str) -> str | None:
         if not self.chat.configured:
             return self.chat.status()["reason"]
@@ -391,9 +440,15 @@ class FrontDesk:
             return "a submit token is required, so a repeated submit is not a second run"
         return self.chat.text_check(text)
 
-    def post(self, ident: str, text: str, token: str) -> dict:
-        """Post as the Developer into `front-desk-<ident>`, once per token."""
+    def post(self, ident: str, text: str, token: str, answers=None) -> dict:
+        """Post as the Developer into `front-desk-<ident>`, once per token.
+        `answers` names the request(s) the post answers; the reference is
+        written into the post itself (`ag-post re=…`), which is what settles
+        exactly those and no other."""
         refused = self.check(ident, text, token)
+        if refused is not None:
+            return {"sent": False, "uncertain": False, "error": refused}
+        body, refused = answer_body(text, answers, self.requests(ident) if answers else None)
         if refused is not None:
             return {"sent": False, "uncertain": False, "error": refused}
         with self._lock:
@@ -402,7 +457,6 @@ class FrontDesk:
             return {**earlier, "duplicate": True,
                     "note": "this submit was already handled; the earlier result is repeated, nothing was posted again"}
         topic = desk_topic(ident)
-        body = text.strip()
         client = self.chat.client()
         resumed = False
         # A ✔'d conversation is resumed in place: un-resolve, then post. The

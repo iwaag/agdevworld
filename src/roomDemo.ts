@@ -6,6 +6,12 @@
 // fallback is visible first), one reply whose rendering fails, a second
 // interpretation on request, and — for the desk — the completion panel with
 // a target that fails once. Nothing here reaches the realm.
+//
+// Since `clearer_chat_ui` step 3 every scripted post says what it is for — a
+// progress note, a report, a question or a confirmation for the Developer —
+// and the demo keeps the requests' states the way the relay's read model
+// does (`agag.outstanding`: an answer naming a request settles it; an
+// unnamed answer settles the one pending request, never one of two).
 
 import type {
   CompletionAction as CloseAction,
@@ -14,29 +20,47 @@ import type {
   CompletionResult as CloseResult,
   CompletionState as CloseState,
 } from './completionState'
-import type { Presentation, Rendering, RoomAdapter, RoomDetail, RoomId, RoomPost, RoomStatus } from './roomState'
+import type { PostMeaning, Presentation, Rendering, RequestRow, RoomAdapter, RoomDetail, RoomId, RoomPost, RoomRequests, RoomStatus } from './roomState'
 
-interface Line { agent: string; speaker: string; by: string; sender_id: number; text: string; voiced: string[] | null }
+interface Line { agent: string; speaker: string; by: string; sender_id: number; text: string; voiced: string[] | null; meaning?: PostMeaning }
+
+const DEVELOPER = 8
+const progress: PostMeaning = { intent: 'progress' }
+const report: PostMeaning = { intent: 'report' }
+const question: PostMeaning = { intent: 'response_request', to: DEVELOPER, ask: 'question' }
+const confirmation: PostMeaning = { intent: 'response_request', to: DEVELOPER, ask: 'confirmation' }
 
 // What the agents "say" to each human post, plainly, and how Front re-voices
 // it. `voiced: null` is a speaker without a character (shown as written).
 const SCRIPT: Line[][] = [
-  [{ agent: 'front', speaker: 'Front', by: 'Front', sender_id: 15,
+  [{ agent: 'front', speaker: 'Front', by: 'Front', sender_id: 15, meaning: progress,
+     text: 'Reading the board and the introductions first.',
+     voiced: ['いま掲示板と自己紹介を読んでるとこ〜📖'] },
+   { agent: 'front', speaker: 'Front', by: 'Front', sender_id: 15, meaning: question,
      text: 'Welcome. This is a plain reply: the discussion itself carries no character. What would you like to do?',
      voiced: ['やっほー✨ ようこそ〜！💁‍♀️ ここの会話そのものはキャラなしで進むんだって。', '今日はなにする？🙆‍♀️💕'] }],
   [{ agent: 'front', speaker: 'Front', by: 'Front', sender_id: 15,
+     meaning: report,
      text: 'I asked autolab. Its plan is in #pj-ghtrends › workplan-trend9; see https://example.invalid/main/repos/example-awesome-tool.md',
      voiced: ['親方に聞いてきたよ〜！計画は #pj-ghtrends › workplan-trend9 にあるって📝 https://example.invalid/main/repos/example-awesome-tool.md'] },
    { agent: 'autolab', speaker: 'autolab-agstudio1', by: 'autolab-agstudio1', sender_id: 11,
+     meaning: report,
      text: 'Planned 2 tasks. Commit a99625f has the fetcher. I could not verify the GitHub token; if it is expired task 1 fails with HTTP 401.',
      voiced: ['2つ計画した。フェッチャーはコミット a99625f。', 'GitHub トークンは確認できてない。切れてたら task 1 は HTTP 401 で落ちる。'] },
    { agent: 'archsage', speaker: 'sage:arxiv', by: 'archsage', sender_id: 24,
      text: 'Three papers bear on this; none of them measures what you asked, which is itself worth a study.',
      voiced: null }],
-  [{ agent: 'front', speaker: 'Front', by: 'Front', sender_id: 15,
+  [{ agent: 'front', speaker: 'Front', by: 'Front', sender_id: 15, meaning: report,
      text: 'This reply is long on purpose, so that paging can be looked at. '.repeat(14).trim(),
-     voiced: ['これはページ送りのテスト用にわざと長くしてあるやつだよ〜📖 '.repeat(10).trim()] }],
+     voiced: ['これはページ送りのテスト用にわざと長くしてあるやつだよ〜📖 '.repeat(10).trim()] },
+   { agent: 'front', speaker: 'Front', by: 'Front', sender_id: 15, meaning: confirmation,
+     text: 'Shall I ask autolab to start task 1 now?',
+     voiced: ['親方に task 1 始めてもらっていい？🙏'] },
+   { agent: 'front', speaker: 'Front', by: 'Front', sender_id: 15, meaning: question,
+     text: 'And which palette should the title screen use, A or B?',
+     voiced: ['あとタイトル画面のパレット、A と B どっちにする？🎨'] }],
   [{ agent: 'front', speaker: 'Front', by: 'Front', sender_id: 15,
+     meaning: report,
      text: 'The rendering of this reply fails in the demo, so the original stays on show with the reason.',
      voiced: [] }],
 ]
@@ -156,18 +180,43 @@ export function demoAdapter(room: RoomId, revision = 'demo'): RoomAdapter {
   }
   const lines = new Map<number, Line>()
   const say = (line: Line) => {
-    const post: RoomPost = { message_id: next++, at: now(), by: line.by, sender_id: line.sender_id, content: line.text, kind: 'agent', agent: line.agent, speaker: line.speaker }
+    const post: RoomPost = { message_id: next++, at: now(), by: line.by, sender_id: line.sender_id, content: line.text, kind: 'agent', agent: line.agent, speaker: line.speaker, meaning: line.meaning ?? null }
     posts.push(post)
     lines.set(post.message_id, line)
     born.set(post.message_id, now())
     // The rendering lands a few seconds after the speech, as it really does.
     window.setTimeout(() => render(post, line, revision), 4000)
   }
+  // The relay's read model, in miniature: a reference settles what it
+  // names; an unnamed post by the recipient settles the one pending request.
+  const requestsOf = (): RoomRequests => {
+    const rows: RequestRow[] = []
+    const unmatched: Record<string, number[]> = {}
+    for (const post of posts) {
+      const meaning = post.meaning
+      if (post.kind === 'human') {
+        const mine = rows.filter((row) => row.to === post.sender_id && row.state === 'pending')
+        const named = mine.filter((row) => meaning?.re?.includes(row.id))
+        if (named.length) for (const row of named) Object.assign(row, { state: 'answered', settled_by: post.message_id, how: 'reference' })
+        else if (mine.length === 1) Object.assign(mine[0], { state: 'answered', settled_by: post.message_id, how: 'next_post' })
+        else if (mine.length > 1) unmatched[String(post.message_id)] = mine.map((row) => row.id)
+      }
+      if (meaning?.intent === 'response_request' && meaning.to !== undefined) {
+        rows.push({ id: post.message_id, sender_id: post.sender_id, sender_name: post.by, to: meaning.to, to_name: 'Developer',
+          ask: meaning.ask ?? null, text: post.content, timestamp: post.at, state: 'pending', settled_by: null, how: null,
+          certain: true, overtaken_by: [] })
+      }
+    }
+    if (demoResolved) for (const row of rows) if (row.state === 'pending') row.state = 'closed'
+    return { requests: rows, pending: rows.filter((row) => row.state === 'pending').map((row) => row.id), unmatched, uncertain: [], closed: demoResolved }
+  }
   const status = (): RoomStatus => {
     const last = posts[posts.length - 1]
     if (!last) return { state: 'quiet', since: null, evidence: 'no posts yet' }
     if (last.kind === 'human') return { state: 'waiting', since: last.at, evidence: 'the human spoke last' }
     if (last.kind === 'ack') return { state: 'received', since: last.at, evidence: 'Front acked and has not answered' }
+    const pending = requestsOf().pending
+    if (pending.length) return { state: 'asking', since: last.at, evidence: `${pending.length} request(s) pending` }
     return { state: 'answered', since: last.at, evidence: `${last.speaker} answered` }
   }
   const presentation = (): Presentation => {
@@ -195,7 +244,7 @@ export function demoAdapter(room: RoomId, revision = 'demo'): RoomAdapter {
     conversation: {
       key, channel, topic, live_topic: demoResolved ? `✔ ${topic}` : topic, resolved: demoResolved, known: 'held', bounded: false,
       posts: [...posts], status: demoResolved ? { state: 'done', since: null, evidence: 'the topic carries ✔' } : status(),
-      zulip_url: null, presentation: presentation(),
+      zulip_url: null, presentation: presentation(), requests: requestsOf(), viewer_id: DEVELOPER,
     },
   })
   const answer = () => {
@@ -214,11 +263,12 @@ export function demoAdapter(room: RoomId, revision = 'demo'): RoomAdapter {
     other: room === 'argue' ? { label: 'Front Desk ↗', href: '/?view=frontdesk&demo=1' } : { label: 'Arguing Room ↗', href: '/?view=argue&demo=1' },
     newKey: () => (room === 'argue' ? null : 'demo'),
     async list() {
-      return posts.length || room === 'front' ? [{ key: 'demo', label: 'demo', resolved: demoResolved, last_post: posts.length ? { at: posts[posts.length - 1].at, by: posts[posts.length - 1].by } : null }] : []
+      return posts.length || room === 'front' ? [{ key: 'demo', label: 'demo', resolved: demoResolved, asking: requestsOf().pending.length, last_post: posts.length ? { at: posts[posts.length - 1].at, by: posts[posts.length - 1].by } : null }] : []
     },
     async detail(key) { return detail(key) },
-    async send(_key, text) {
-      posts.push({ message_id: next++, at: now(), by: 'Developer', sender_id: 8, content: text, kind: 'human', agent: null, speaker: 'Developer' })
+    async send(_key, text, _token, answers) {
+      posts.push({ message_id: next++, at: now(), by: 'Developer', sender_id: DEVELOPER, content: text, kind: 'human', agent: null, speaker: 'Developer',
+        meaning: answers?.length ? { re: answers } : null })
       const resumed = demoResolved
       demoResolved = false
       demoClosed.delete('topic:argue/argue-demo')

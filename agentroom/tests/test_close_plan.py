@@ -143,7 +143,7 @@ def test_the_preview_is_walked_once_and_the_close_reuses_it():
     assert not closed["partial"] and closed["applied"]
     assert by_key(closed)[f"channel:{work}"] == DONE and by_key(closed)["topic:front/front-desk-1"] == DONE
     assert writer.resolved == [("pj-x", "workplan-a"), ("front", "front-desk-1")] and writer.archived == [work]
-    assert [c for _, _, c in writer.posted] == ["[selfnote][state] accepted", "[selfnote][state] done"]
+    assert [c for _, _, c in writer.posted] == ["[selfnote][state] accepted", "[selfnote][acceptance] #0 by 0", "[selfnote][state] done"]
     # A second preview reads the copy, which carries the writes: everything is done.
     after = door.plan(ROOT)
     assert set(by_key(after).values()) == {DONE} and after["gaps"]["zulip_calls"] == 0
@@ -416,7 +416,7 @@ def test_a_partial_failure_is_reported_per_target_and_the_retry_finishes_it():
     assert outcomes(again) == {f"work:m{mission}": ALREADY, "topic:pj-x/workplan-a": ALREADY,
                                f"topic:{work}/{task_topic}": ALREADY, f"channel:{work}": APPLIED,
                                "topic:front/front-desk-1": APPLIED}
-    assert [c for _, _, c in writer.posted] == ["[selfnote][state] accepted", "[selfnote][state] done"], \
+    assert [c for _, _, c in writer.posted] == ["[selfnote][state] accepted", "[selfnote][acceptance] #0 by 0", "[selfnote][state] done"], \
         "the acceptance was written once"
     assert not again["partial"] and writer.archived == [work]
     mirror.stop()

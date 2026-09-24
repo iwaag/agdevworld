@@ -316,6 +316,9 @@ def test_acceptance_is_written_into_the_conversations_it_is_about():
 
     assert realm.posted == [
         (WORK_CHANNEL, f"✔ {RUN_TOPIC}", "[selfnote][state] accepted"),
+        # Whose decision (robust_workflow p3 step 3): the person at the door,
+        # with no post to point at. This fake realm has no profile to read.
+        (PROJECT_CHANNEL, PLAN_TOPIC, "[selfnote][acceptance] #0 by 0"),
         (PROJECT_CHANNEL, PLAN_TOPIC, "[selfnote][state] done"),
         (FORGE_CHANNEL, ASSETPLAN_TOPIC, "[selfnote][state] accepted"),
     ]
@@ -379,13 +382,14 @@ def test_a_retry_finishes_what_is_left_and_repeats_nothing():
     realm = WritingRealm(open_chain(), fail=(ASSETRUN_TOPIC,))
     door, realm, _ = closer(realm=realm)
     door.close(ROOT)
-    # accepted the task, marked the mission done, accepted forge's request
-    assert len(realm.posted) == 3
+    # accepted the task, recorded whose acceptance, marked the mission done,
+    # accepted forge's request
+    assert len(realm.posted) == 4
     realm.fail.clear()
     again = door.close(ROOT)
     assert again["partial"] is False
     # Both records were finished already, so neither was written again.
-    assert len(realm.posted) == 3
+    assert len(realm.posted) == 4
     outcomes = {row["key"]: row["outcome"] for row in again["results"]}
     assert outcomes[f"work:{MISSION_LABEL}"] == ALREADY
     assert outcomes[f"topic:{PROJECT_CHANNEL}/{PLAN_TOPIC}"] == ALREADY
@@ -444,6 +448,9 @@ def test_the_approved_fingerprint_is_optional():
     assert door.close(ROOT, None)["applied"] is True
     assert realm.posted == [
         (WORK_CHANNEL, f"✔ {RUN_TOPIC}", "[selfnote][state] accepted"),
+        # Whose decision (robust_workflow p3 step 3): the person at the door,
+        # with no post to point at. This fake realm has no profile to read.
+        (PROJECT_CHANNEL, PLAN_TOPIC, "[selfnote][acceptance] #0 by 0"),
         (PROJECT_CHANNEL, PLAN_TOPIC, "[selfnote][state] done"),
         # Under the ✔ name it already wears: a post under the bare name of a
         # resolved topic opens a twin beside the conversation.
@@ -463,7 +470,7 @@ def test_two_clicks_do_not_both_close():
         thread.start()
     for thread in threads:
         thread.join()
-    assert len(realm.posted) == 3
+    assert len(realm.posted) == 4
     assert sum(1 for found in results
                for row in found["results"]
                if row["kind"] == "channel" and row["outcome"] == APPLIED) == 1
@@ -502,7 +509,7 @@ def test_the_plan_route_reads_and_the_close_route_writes(relay):
                               {"fingerprint": found["fingerprint"]})
     assert status == 200 and applied["applied"] is True
     assert [content for _, _, content in realm.posted] == [
-        "[selfnote][state] accepted", "[selfnote][state] done",
+        "[selfnote][state] accepted", "[selfnote][acceptance] #0 by 0", "[selfnote][state] done",
         "[selfnote][state] accepted"]
 
 

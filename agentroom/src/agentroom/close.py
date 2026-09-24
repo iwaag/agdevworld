@@ -67,6 +67,7 @@ from dataclasses import dataclass, field
 from hashlib import sha256
 from typing import Any, Callable, Protocol
 
+from agag.acceptance import acceptance_note
 from agag.selfnote import note as selfnote
 from agag.zulip import ZulipClient, live_topic_name
 
@@ -467,8 +468,17 @@ def _accept_mission(client: ZulipClient, detail: dict) -> str:
     channel, topic = str(detail.get("channel") or ""), str(detail.get("topic") or "")
     if not channel or not topic:
         raise RuntimeError("this mission's conversation is not known, so nothing can be written")
-    client.send_to_channel(channel, live_topic_name(client, channel, topic),
-                           selfnote(STATE_TAG, MISSION_DONE))
+    live = live_topic_name(client, channel, topic)
+    # Whose decision it is, in the one shape every path writes
+    # (`agag.acceptance`, robust_workflow p3 step 3): the person pressing
+    # this door, with no post to point at — the press is the decision.
+    try:
+        me = client.whoami()
+    except Exception:  # noqa: BLE001 - the record without a name is still the record
+        me = {}
+    client.send_to_channel(channel, live, acceptance_note(0, int(me.get("user_id") or 0),
+                                                          str(me.get("full_name") or "")))
+    client.send_to_channel(channel, live, selfnote(STATE_TAG, MISSION_DONE))
     accepted = f"; accepted {', '.join(moved)}" if moved else ""
     return f"{detail.get('label')} is done{accepted}"
 

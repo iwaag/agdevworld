@@ -295,7 +295,7 @@ def test_closing_the_selected_request_never_touches_its_parent(tmp_path):
         ASSETPLAN_TOPIC, ASSETRUN_TOPIC, "workplan-trend8"]
     assert DESK_TOPIC not in [topic for _, topic in realm.resolved]
     assert [content for _, _, content in realm.posted] == [
-        "[selfnote][state] accepted", "[selfnote][state] done",
+        "[selfnote][state] accepted", "[selfnote][acceptance] #0 by 0", "[selfnote][state] done",
         "[selfnote][state] accepted"]
 
 
@@ -475,7 +475,7 @@ def test_the_shared_routes_take_a_channel_and_a_topic(relay):
         "channel": "pj-ghtrends", "topic": "workplan-trend8", "fingerprint": found["fingerprint"]})
     assert status == 200 and applied["applied"] is True
     assert [content for _, _, content in realm.posted] == [
-        "[selfnote][state] accepted", "[selfnote][state] done",
+        "[selfnote][state] accepted", "[selfnote][acceptance] #0 by 0", "[selfnote][state] done",
         "[selfnote][state] accepted"]
     assert DESK_TOPIC not in [topic for _, topic in realm.resolved]
     status, history = request(port, "GET", "/complete/history?channel=pj-ghtrends&topic=workplan-trend8")

@@ -30,6 +30,7 @@ from urllib.parse import parse_qs, unquote, urlparse
 from .budget import Budget
 from .chat import Chat
 from .close import Closer, parse_key
+from .contexts import Contexts, ContextsError
 from .cost import Cost
 from .argueroom import ArguingRoom
 from .frontdesk import FrontDesk
@@ -48,18 +49,22 @@ ROUTES = ("/healthz", "/agents", "/work", "/work?resolved=1", "/ops", "/routines
           "/work/<anchor>",
           "/complete/plan?channel=<channel>&topic=<topic>",
           "/complete/history?channel=<channel>&topic=<topic>",
-          "/settings", "/settings/<revision>", "/settings/<revision>/<path>")
+          "/settings", "/settings/<revision>", "/settings/<revision>/<path>",
+          "/contexts", "/contexts/<id>/resolve?rev=<rev>", "/contexts/<id>/tree?rev=<rev>",
+          "/contexts/<id>/file?rev=<rev>&path=<path>")
 WRITE_ROUTES = ("/ops/confirm", "/chat", "/routines/<name>/start", "/frontdesk/<id>/post",
                 "/frontdesk/<id>/close", "/frontdesk/<id>/render", "/complete",
                 "/argues", "/argues/<anchor>/post", "/argues/<anchor>/render",
-                "/argues/<anchor>/close", "/work/<anchor>/post", "/projects/<key>/topics/<topic>/post")
+                "/argues/<anchor>/close", "/work/<anchor>/post", "/projects/<key>/topics/<topic>/post",
+                "/contexts", "/contexts/register", "/contexts/<id>", "/contexts/<id>/publish")
 
 
 def make_handler(room: Room, ops: Ops | None = None, chat: Chat | None = None,
                  cost: Cost | None = None, budget: Budget | None = None,
                  desk: FrontDesk | None = None, settings: Settings | None = None,
                  closer: Closer | None = None, argues: ArguingRoom | None = None,
-                 projects: ProjectRoom | None = None, talk: ProjectTalk | None = None, watchdog=None):
+                 projects: ProjectRoom | None = None, talk: ProjectTalk | None = None, watchdog=None,
+                 contexts: Contexts | None = None):
     class Handler(BaseHTTPRequestHandler):
         server_version = "agentroom/0.1.0"
 
@@ -109,6 +114,67 @@ def make_handler(room: Room, ops: Ops | None = None, chat: Chat | None = None,
                 return
             body, content_type = asset
             self._write_bytes(200, body, content_type, immutable=True)
+
+        def _contexts_error(self, error: ContextsError) -> None:
+            self._write_json(error.status, {"error": str(error), **error.extra})
+
+        def _contexts_get(self, path: str) -> None:
+            """Context repositories (`give_context_easier` p1): the catalog
+            with each source's newest publication, one source's tree and
+            README at a revision, one file's bytes, or a revision resolved to
+            its full commit for a reference."""
+            if contexts is None:
+                self._write_json(503, {"error": "context repositories are not configured"})
+                return
+            query = parse_qs(urlparse(self.path).query)
+            one = lambda key, default=None: (query.get(key) or [default])[0]  # noqa: E731
+            try:
+                if path == "/contexts":
+                    self._write_json(200, contexts.board(
+                        include_archived=one("all", "0") in ("1", "true", "yes"),
+                        refresh=one("refresh", "0") in ("1", "true", "yes")))
+                    return
+                ident, _, verb = path[len("/contexts/"):].partition("/")
+                ident = unquote(ident)
+                if verb == "resolve":
+                    self._write_json(200, contexts.resolve(ident, one("rev", "latest")))
+                elif verb == "tree":
+                    self._write_json(200, contexts.tree(ident, one("rev", "latest")))
+                elif verb == "file":
+                    revision = one("rev", "latest")
+                    body, kind, sha = contexts.file(ident, revision, one("path", ""))
+                    # A full commit in the URL names bytes that never change.
+                    self._write_bytes(200, body, kind, immutable=revision == sha)
+                else:
+                    self._write_json(404, {"error": f"no route {path}", "routes": list(ROUTES)})
+            except ContextsError as error:
+                self._contexts_error(error)
+
+        def _contexts_post(self, path: str) -> None:
+            """The Developer's context writes: create, register, edit the
+            catalog entry, publish files. No model run; each is one relay
+            operation on the Developer's Gitea token."""
+            if contexts is None:
+                self._write_json(503, {"error": "context repositories are not configured"})
+                return
+            body = self._body()
+            if body is None:
+                return
+            try:
+                if path == "/contexts":
+                    self._write_json(200, contexts.create(body))
+                elif path == "/contexts/register":
+                    self._write_json(200, contexts.register(body))
+                elif path.endswith("/publish"):
+                    self._write_json(200, contexts.publish(unquote(path[len("/contexts/"):-len("/publish")]), body))
+                else:
+                    ident = unquote(path[len("/contexts/"):])
+                    if "/" in ident:
+                        self._write_json(404, {"error": f"no POST route {path}", "post": list(WRITE_ROUTES)})
+                        return
+                    self._write_json(200, contexts.update(ident, body))
+            except ContextsError as error:
+                self._contexts_error(error)
 
         def do_OPTIONS(self) -> None:  # noqa: N802 (stdlib naming)
             self.send_response(204)
@@ -338,6 +404,8 @@ def make_handler(room: Room, ops: Ops | None = None, chat: Chat | None = None,
                     else:
                         found = desk.conversation(unquote(path[len("/frontdesk/"):]))
                         self._write_json(400 if found.get("error") else 200, found)
+                elif path == "/contexts" or path.startswith("/contexts/"):
+                    self._contexts_get(path)
                 elif path == "/settings" or path.startswith("/settings/"):
                     self._settings(unquote(path[len("/settings"):]).lstrip("/"))
                 elif path.startswith("/inflight/"):
@@ -584,6 +652,9 @@ def make_handler(room: Room, ops: Ops | None = None, chat: Chat | None = None,
 
         def do_POST(self) -> None:  # noqa: N802
             path = urlparse(self.path).path.rstrip("/") or "/"
+            if path == "/contexts" or path.startswith("/contexts/"):
+                self._contexts_post(path)
+                return
             if (path.startswith("/work/") or (path.startswith("/projects/") and "/topics/" in path)) \
                     and path.endswith("/post"):
                 self._project_write(path)
@@ -666,8 +737,9 @@ def build_server(
     cost: Cost | None = None, budget: Budget | None = None, desk: FrontDesk | None = None,
     settings: Settings | None = None, closer: Closer | None = None, argues: ArguingRoom | None = None,
     projects: ProjectRoom | None = None, talk: ProjectTalk | None = None, watchdog=None,
+    contexts: Contexts | None = None,
 ) -> ThreadingHTTPServer:
     return ThreadingHTTPServer(
         (host, port), make_handler(room, ops, chat, cost, budget, desk, settings, closer, argues, projects, talk,
-                                   watchdog=watchdog)
+                                   watchdog=watchdog, contexts=contexts)
     )

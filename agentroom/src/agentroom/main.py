@@ -24,6 +24,7 @@ from agag.mirror import Mirror
 from .budget import budget_from_env
 from .chat import CHAT_ENV_VARIABLE, DEFAULT_MAX_CHARS, Chat
 from .close import Closer
+from .contexts import contexts_from_env
 from .cost import PRICES_VARIABLE, Cost, prices_path_from_env
 from .argueroom import ArguingRoom
 from .frontdesk import FrontDesk
@@ -226,8 +227,13 @@ def main(argv: list[str] | None = None) -> int:
     # neither a restart nor a rebuild. Unconfigured is a payload, not a
     # refusal to start. (Made above: both rooms ask it which revision is active.)
 
+    # Context repositories (`give_context_easier` p1): the host's shared
+    # catalog through pyagag's agrefs, and the Developer's Gitea token for
+    # the panel's writes. Unconfigured is a payload, not a refusal to start.
+    contexts = contexts_from_env(log=lambda line: print(line, flush=True))
+
     server = build_server(host, port, room, ops, chat, cost, budget, desk, settings, closer, argues, projects, talk,
-                          watchdog=watchdog)
+                          watchdog=watchdog, contexts=contexts)
     print(
         f"agentroom listening on http://{host}:{port} (mirror on {mirror_path.name}, "
         f"store {store_dir}, stalled at {stalled:g}s, "

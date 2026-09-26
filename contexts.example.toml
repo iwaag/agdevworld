@@ -1,0 +1,20 @@
+# Context repositories: what the relay needs to *write* them from the
+# Front Room's context panel (give_context_easier p1).
+#
+# Copy to `.local/contexts.toml` (ignored). Reading needs nothing here: the
+# relay reads the host's shared catalog like every agent does, from
+# `[catalog] url` in ~/.config/agag/refs.toml (pyagag agrefs).
+
+[gitea]
+# The Gitea the catalog lives on; defaults to the catalog URL's scheme and host.
+# url = "http://<git host>:3000"
+# The Developer's Gitea access token (scopes write:repository, write:user),
+# in a 0600 file of its own. Relative paths are relative to this file.
+token_file = "../../.local/gitea/developer.token"
+# Whose account new repositories are created in; defaults to the catalog's owner.
+# owner = "developer"
+
+# Commit identity for publications; defaults to the token owner's Gitea profile.
+# [author]
+# name = "Developer"
+# email = "developer@example.invalid"

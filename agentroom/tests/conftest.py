@@ -50,3 +50,13 @@ def empty_room():
     from agentroom.room import Room
 
     return Room(mirror=mirror_over(FakeRealm()))
+
+
+import pytest as _pytest
+
+
+@_pytest.fixture(autouse=True)
+def _no_host_refs_config(tmp_path_factory, monkeypatch):
+    """The developer's own `~/.config/agag/refs.toml` never reaches a test."""
+    monkeypatch.setenv("AGREFS_HOST_CONFIG", str(tmp_path_factory.mktemp("hostcfg") / "refs.toml"))
+    monkeypatch.delenv("AGREFS_CATALOG", raising=False)

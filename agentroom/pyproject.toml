@@ -8,6 +8,7 @@ dependencies = ["pyagag"]
 [project.scripts]
 agentroom = "agentroom.main:main"
 agentroom-settings = "agentroom.settings:main"
+agentroom-contexts = "agentroom.contexts:main"
 
 [tool.uv.sources]
 pyagag = { git = "https://github.com/iwaag/pyagag.git", branch = "main" }

@@ -94,7 +94,9 @@ function ensureStyle() {
 #ctx-panel .ctx-line{display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin:6px 0}
 #ctx-panel pre{white-space:pre-wrap;word-break:break-word;font:12px/1.5 ${MONO};background:#10131c;border:1px solid #262b3d;border-radius:6px;padding:8px;margin:6px 0;max-height:40vh;overflow:auto;user-select:text}
 #ctx-panel .ctx-file{display:flex;align-items:center;gap:6px;padding:2px 0}
-#ctx-panel .ctx-file .ctx-row{flex:1;margin:0;padding:3px 6px;font:12px ${MONO}}
+#ctx-panel .ctx-file .ctx-row{flex:1;min-width:0;margin:0;padding:3px 6px;font:12px ${MONO};white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#ctx-panel .ctx-file .ctx-meta{white-space:nowrap}
+#ctx-panel .ctx-body{overflow-x:hidden}
 #ctx-panel .ctx-file button{padding:1px 6px}
 #ctx-panel .ctx-drafts{border:1px dashed #3a4060;border-radius:8px;padding:6px 8px;margin:0 0 8px}
 #ctx-panel .ctx-conflict{border:1px solid #ffc56d;border-radius:8px;padding:8px;margin:8px 0;color:#ffe2ad}

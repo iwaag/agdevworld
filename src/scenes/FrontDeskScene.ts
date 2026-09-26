@@ -46,6 +46,8 @@
 
 import Phaser from 'phaser'
 import { announceCompleted } from '../completionState'
+import { ContextPanel } from '../contextPanel'
+import { demoBump, demoContexts, relayContexts } from '../contextState'
 import { FrontDeskClosePanel } from '../frontDeskClosePanel'
 import { createFrontDeskInput, type FrontDeskInputHandle } from '../frontDeskInput'
 import {
@@ -197,6 +199,9 @@ export class FrontDeskScene extends Phaser.Scene {
   // reads: the one place the paid button's consequences are shown.
   private rendererLine!: Phaser.GameObjects.Text
   private closePanel: FrontDeskClosePanel | undefined
+  // The shared contexts beside the composer (`give_context_easier` p1): a
+  // DOM panel, so its search takes an IME and its text can be selected.
+  private contexts!: ContextPanel
   private historyPanel!: Phaser.GameObjects.Container
   private historyBackdrop!: Phaser.GameObjects.Graphics
   private historyTitle!: Phaser.GameObjects.Text
@@ -317,13 +322,21 @@ export class FrontDeskScene extends Phaser.Scene {
       onChange: (text) => {
         this.draft = text
         this.renderPrompt()
+        this.contexts?.draftChanged()
       },
       onSubmit: () => void this.submit(),
       onEscape: () => {
-        if (this.closePanel?.open) this.closePanel.close()
+        if (this.contexts?.open) this.contexts.setOpen(false, true)
+        else if (this.closePanel?.open) this.closePanel.close()
         else if (this.historyOpen) this.toggleHistory()
       },
     })
+    // The same panel in both rooms; what it inserts goes into this room's
+    // draft only. The demo gets an in-memory catalog.
+    const contextDemo = new URLSearchParams(location.search).get('demo') === '1'
+    const contextSource = contextDemo ? demoContexts() : relayContexts
+    this.contexts = new ContextPanel(contextSource, () => this.keys)
+    if (contextDemo) (window as unknown as { __ctxBump: (id: string) => void }).__ctxBump = (id) => demoBump(contextSource, id)
     // Clicking anywhere on the frame puts the keyboard back in the bar.
     this.keys.focus()
     this.input.on('pointerdown', (pointer: Phaser.Input.Pointer, over: unknown[]) => {
@@ -357,7 +370,7 @@ export class FrontDeskScene extends Phaser.Scene {
       nav.append(link)
     }
     document.body.append(nav)
-    this.events.once('shutdown', () => { nav.remove(); this.keys.destroy(); this.closePanel?.destroy() })
+    this.events.once('shutdown', () => { nav.remove(); this.keys.destroy(); this.closePanel?.destroy(); this.contexts.destroy() })
 
     this.layout(this.scale.width, this.scale.height)
     this.scale.on('resize', (size: Phaser.Structs.Size) => this.layout(size.width, size.height))
@@ -663,14 +676,19 @@ export class FrontDeskScene extends Phaser.Scene {
     this.pageLabel.setPosition(this.prevButton.x - this.prevButton.width - 10, this.nextButton.y - 6).setOrigin(1, 1)
     this.queueButton.setPosition(dialogueX + dialogueWidth - 14, dialogueY - 8).setOrigin(1, 1)
 
+    // The labels first: their width decides where the composer ends.
+    this.renderPrompt()
     this.sendButton.setPosition(width - MARGIN - 12, barY + BAR_HEIGHT / 2).setOrigin(1, 0.5)
     this.counter.setPosition(this.sendButton.x - this.sendButton.width - 12, barY + BAR_HEIGHT / 2).setOrigin(1, 0.5)
     // The composer takes the bar's left part and grows upward from its
     // bottom edge; the counter and the Send button keep the right.
     this.renderPrompt()
+    // The contexts toggle takes the bar's left end; the composer starts after it.
+    this.contexts?.place({ x: MARGIN, y: barY, width: width - 2 * MARGIN, height: BAR_HEIGHT }, this.narrow ? 130 : 110, this.narrow)
+    const composerX = MARGIN + 10 + (this.contexts ? this.contexts.toggleWidth() + 8 : 0)
     this.keys.place({
-      x: MARGIN + 10, y: barY + 10,
-      width: Math.max(40, this.counter.x - this.counter.width - 10 - (MARGIN + 10)), height: BAR_HEIGHT - 20,
+      x: composerX, y: barY + 10,
+      width: Math.max(40, this.counter.x - this.counter.width - 10 - composerX), height: BAR_HEIGHT - 20,
     })
 
     const buttonsY = this.narrow ? 68 : 44
@@ -1144,7 +1162,8 @@ export class FrontDeskScene extends Phaser.Scene {
     const keysNote = this.narrow ? '' : '⏎ sends · ⇧⏎ newline'
     this.counter.setText([count, keysNote].filter(Boolean).join(' · ')).setColor(max && length > max ? COLOR.bad : COLOR.dim)
     this.sendButton.setAlpha(usable && this.draft.trim() !== '' ? 1 : 0.45)
-    this.sendButton.setText(this.sending ? 'sending…' : 'Send ⏎ · buys a run')
+    // Narrow screens keep the cost word but not the sentence, so the composer keeps its room.
+    this.sendButton.setText(this.sending ? 'sending…' : this.narrow ? 'Send · run' : 'Send ⏎ · buys a run')
   }
 
   // --- history: portrait, name, text per turn --------------------------------

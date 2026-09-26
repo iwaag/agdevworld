@@ -22,6 +22,15 @@
 export interface FrontDeskInputHandle {
   value: () => string
   set: (text: string) => void
+  // Put `text` where the caret or selection was when the composer last had
+  // focus (`give_context_easier` p1: a context reference picked from the
+  // panel), keeping the rest of the draft, then give the composer the focus
+  // back with the caret after it. Spaces are added only where the text would
+  // otherwise run into a neighbouring word. Nothing is sent.
+  insert: (text: string) => void
+  // Replace every occurrence of `from` in the draft with `to` (a reference
+  // moved to a newer version on request); false when there was none.
+  replace: (from: string, to: string) => boolean
   focus: () => void
   // The bar's inner rect: the composer sits on its bottom edge and grows
   // upward from there.
@@ -77,6 +86,11 @@ export function createFrontDeskInput(options: {
   let composing = false
   let disabled = false
   let rect = { x: 0, y: 0, width: 10, height: 10 }
+  // Where the caret was: clicking a panel blurs the textarea, and the
+  // browser's own selection is not a reliable memory after that.
+  let saved = { start: 0, end: 0 }
+  const remember = () => { saved = { start: area.selectionStart, end: area.selectionEnd } }
+  for (const kind of ['select', 'keyup', 'mouseup', 'input', 'blur', 'compositionend']) area.addEventListener(kind, remember)
 
   // Grow upward from the bar's bottom edge: one row for an empty draft, up
   // to MAX_ROWS, then the draft scrolls inside the box.
@@ -119,6 +133,37 @@ export function createFrontDeskInput(options: {
       area.value = text
       options.onChange(text)
       grow()
+    },
+    insert(text) {
+      const value = area.value
+      const start = Math.min(saved.start, value.length)
+      const end = Math.min(Math.max(saved.end, start), value.length)
+      const before = value.slice(0, start)
+      const after = value.slice(end)
+      const piece = `${before && !/\s$/.test(before) ? ' ' : ''}${text}${after && !/^\s/.test(after) ? ' ' : ''}`
+      area.focus({ preventScroll: true })
+      area.setSelectionRange(start, end)
+      // execCommand keeps the browser's undo history; setRangeText is the
+      // fallback where it is not available (a disabled composer included).
+      const done = !disabled && document.execCommand?.('insertText', false, piece)
+      if (!done || area.value === value) area.setRangeText(piece, start, end, 'end')
+      const caret = start + piece.length
+      area.setSelectionRange(caret, caret)
+      saved = { start: caret, end: caret }
+      options.onChange(area.value)
+      grow()
+    },
+    replace(from, to) {
+      if (!from || !area.value.includes(from)) return false
+      const caret = area.selectionStart
+      const next = area.value.split(from).join(to)
+      area.value = next
+      const moved = Math.min(next.length, caret + (to.length - from.length))
+      area.setSelectionRange(moved, moved)
+      saved = { start: moved, end: moved }
+      options.onChange(next)
+      grow()
+      return true
     },
     focus() {
       if (!disabled) area.focus({ preventScroll: true })

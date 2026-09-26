@@ -206,10 +206,16 @@ export class ContextPanel {
     this.toggle.style.height = `${Math.round(size)}px`
     this.toggle.textContent = narrow ? '▤' : '▤ contexts'
     this.toggle.setAttribute('aria-label', 'contexts')
-    const width = narrow ? bar.width : Math.min(460, Math.max(320, bar.width * 0.4))
+    const width = ContextPanel.widthFor(bar.width, narrow)
     const bottom = bar.y - 8
     const height = Math.max(180, bottom - top)
     Object.assign(this.root.style, { left: `${Math.round(bar.x)}px`, top: `${Math.round(bottom - height)}px`, width: `${Math.round(width)}px`, height: `${Math.round(height)}px` })
+  }
+
+  // How wide the open panel is for a bar of this width: the scene keeps the
+  // dialogue and the reply-target strip to the right of it.
+  static widthFor(barWidth: number, narrow: boolean): number {
+    return narrow ? barWidth : Math.min(460, Math.max(320, barWidth * 0.4))
   }
 
   // The toggle's width, so the composer can start after it.

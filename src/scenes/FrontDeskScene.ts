@@ -335,7 +335,7 @@ export class FrontDeskScene extends Phaser.Scene {
     // draft only. The demo gets an in-memory catalog.
     const contextDemo = new URLSearchParams(location.search).get('demo') === '1'
     const contextSource = contextDemo ? demoContexts() : relayContexts
-    this.contexts = new ContextPanel(contextSource, () => this.keys)
+    this.contexts = new ContextPanel(contextSource, () => this.keys, () => { if (this.contexts) this.layout(this.scale.width, this.scale.height) })
     if (contextDemo) (window as unknown as { __ctxBump: (id: string) => void }).__ctxBump = (id) => demoBump(contextSource, id)
     // Clicking anywhere on the frame puts the keyboard back in the bar.
     this.keys.focus()
@@ -630,7 +630,11 @@ export class FrontDeskScene extends Phaser.Scene {
     const portraitWidth = this.portrait.width * portraitScale
 
     const historyWidth = this.historyOpen ? (this.narrow ? width - 2 * MARGIN : Math.min(440, Math.max(280, width * 0.36))) : 0
-    const dialogueX = this.narrow ? MARGIN : MARGIN + portraitWidth + 14
+    // An open context panel on a wide screen keeps the dialogue, and the
+    // reply-target strip above it, clear of the panel (a narrow screen
+    // overlays it, like the history panel).
+    const contextRight = !this.narrow && this.contexts?.open ? MARGIN + ContextPanel.widthFor(width - 2 * MARGIN, false) + 12 : 0
+    const dialogueX = Math.max(this.narrow ? MARGIN : MARGIN + portraitWidth + 14, contextRight)
     const dialogueWidth = Math.max(200, width - dialogueX - MARGIN - (historyWidth && !this.narrow ? historyWidth + MARGIN : 0))
     const dialogueHeight = this.narrow ? Math.max(140, height * 0.3) : Math.min(portraitHeight, Math.max(160, height * 0.4))
     const dialogueY = barY - 8 - dialogueHeight
@@ -646,7 +650,7 @@ export class FrontDeskScene extends Phaser.Scene {
     const coPortraitScale = coPortraitHeight / Math.max(1, this.coPortrait.height)
     this.coPortrait.setPosition(MARGIN, coTop).setScale(coPortraitScale)
     const coPortraitWidth = this.coPortrait.width * coPortraitScale
-    const coX = MARGIN + coPortraitWidth + 12
+    const coX = Math.max(MARGIN + coPortraitWidth + 12, contextRight)
     const coWidth = Math.max(180, Math.min(this.narrow ? width - coX - MARGIN : width * 0.5, width - coX - MARGIN - (historyWidth && !this.narrow ? historyWidth + MARGIN : 0)))
     const coHeight = Math.max(110, Math.min(coPortraitHeight, dialogueY - coTop - 24))
     this.coRect = { x: coX, y: coTop, width: coWidth, height: coHeight }

@@ -66,6 +66,8 @@ import {
 } from '../frontDeskPlayback'
 import { FrontDeskSettings } from '../frontDeskSettings'
 import { LABEL_STYLE, labelOf, overtakenFor, pendingFor, requestOf, shortText, type PostLabel } from '../postMeaning'
+import { ProgressPanel } from '../progressPanel'
+import { demoProgress, relayProgress } from '../progressState'
 import { AUTO, ago, clock, submitToken, type Citation, type Correlation, type PostMeaning, type RoomAdapter, type RoomDetail, type RoomRow } from '../roomState'
 import { assetUrl, type SettingsCharacter, type SettingsManifest } from '../settingsState'
 import { linksIn, paginate, wrapText, type FoundLink, type Measure } from '../textLayout'
@@ -202,6 +204,9 @@ export class FrontDeskScene extends Phaser.Scene {
   // The shared contexts beside the composer (`give_context_easier` p1): a
   // DOM panel, so its search takes an IME and its text can be selected.
   private contexts!: ContextPanel
+  // Every request in flight, in any Front conversation (`progress_panel`
+  // p1): a DOM panel in the right column, the Front Desk only.
+  private progress: ProgressPanel | undefined
   private historyPanel!: Phaser.GameObjects.Container
   private historyBackdrop!: Phaser.GameObjects.Graphics
   private historyTitle!: Phaser.GameObjects.Text
@@ -326,7 +331,8 @@ export class FrontDeskScene extends Phaser.Scene {
       },
       onSubmit: () => void this.submit(),
       onEscape: () => {
-        if (this.contexts?.open) this.contexts.setOpen(false, true)
+        if (this.progress?.open) this.progress.setOpen(false)
+        else if (this.contexts?.open) this.contexts.setOpen(false, true)
         else if (this.closePanel?.open) this.closePanel.close()
         else if (this.historyOpen) this.toggleHistory()
       },
@@ -337,6 +343,19 @@ export class FrontDeskScene extends Phaser.Scene {
     const contextSource = contextDemo ? demoContexts() : relayContexts
     this.contexts = new ContextPanel(contextSource, () => this.keys, () => { if (this.contexts) this.layout(this.scale.width, this.scale.height) })
     if (contextDemo) (window as unknown as { __ctxBump: (id: string) => void }).__ctxBump = (id) => demoBump(contextSource, id)
+    if (this.adapter.room === 'front') {
+      const progressSource = contextDemo ? demoProgress() : relayProgress
+      if (contextDemo) (window as unknown as { __progressDemo: unknown }).__progressDemo = progressSource
+      this.progress = new ProgressPanel(progressSource, {
+        current: () => this.conversationId,
+        onOpen: (desk) => this.openConversation(desk),
+        onVisibility: (open) => {
+          // One right column: the progress panel and the history take turns.
+          if (open && this.historyOpen) this.toggleHistory()
+          else this.layout(this.scale.width, this.scale.height)
+        },
+      })
+    }
     // Clicking anywhere on the frame puts the keyboard back in the bar.
     this.keys.focus()
     this.input.on('pointerdown', (pointer: Phaser.Input.Pointer, over: unknown[]) => {
@@ -370,7 +389,7 @@ export class FrontDeskScene extends Phaser.Scene {
       nav.append(link)
     }
     document.body.append(nav)
-    this.events.once('shutdown', () => { nav.remove(); this.keys.destroy(); this.closePanel?.destroy(); this.contexts.destroy() })
+    this.events.once('shutdown', () => { nav.remove(); this.keys.destroy(); this.closePanel?.destroy(); this.contexts.destroy(); this.progress?.destroy() })
 
     this.layout(this.scale.width, this.scale.height)
     this.scale.on('resize', (size: Phaser.Structs.Size) => this.layout(size.width, size.height))
@@ -548,6 +567,7 @@ export class FrontDeskScene extends Phaser.Scene {
     this.send = { kind: 'idle' }
     this.correlation = AUTO
     this.historyScroll = 0
+    this.progress?.currentChanged()
     this.renderAsks()
     this.renderDialogue()
     this.renderHistory()
@@ -630,12 +650,15 @@ export class FrontDeskScene extends Phaser.Scene {
     const portraitWidth = this.portrait.width * portraitScale
 
     const historyWidth = this.historyOpen ? (this.narrow ? width - 2 * MARGIN : Math.min(440, Math.max(280, width * 0.36))) : 0
+    const progressWidth = this.progress?.open ? ProgressPanel.widthFor(width - 2 * MARGIN, this.narrow) : 0
+    // The right column: the history or the progress panel, whichever is open.
+    const rightWidth = Math.max(historyWidth, progressWidth)
     // An open context panel on a wide screen keeps the dialogue, and the
     // reply-target strip above it, clear of the panel (a narrow screen
     // overlays it, like the history panel).
     const contextRight = !this.narrow && this.contexts?.open ? MARGIN + ContextPanel.widthFor(width - 2 * MARGIN, false) + 12 : 0
     const dialogueX = Math.max(this.narrow ? MARGIN : MARGIN + portraitWidth + 14, contextRight)
-    const dialogueWidth = Math.max(200, width - dialogueX - MARGIN - (historyWidth && !this.narrow ? historyWidth + MARGIN : 0))
+    const dialogueWidth = Math.max(200, width - dialogueX - MARGIN - (rightWidth && !this.narrow ? rightWidth + MARGIN : 0))
     const dialogueHeight = this.narrow ? Math.max(140, height * 0.3) : Math.min(portraitHeight, Math.max(160, height * 0.4))
     const dialogueY = barY - 8 - dialogueHeight
     this.dialogueRect = { x: dialogueX, y: dialogueY, width: dialogueWidth, height: dialogueHeight }
@@ -651,7 +674,7 @@ export class FrontDeskScene extends Phaser.Scene {
     this.coPortrait.setPosition(MARGIN, coTop).setScale(coPortraitScale)
     const coPortraitWidth = this.coPortrait.width * coPortraitScale
     const coX = Math.max(MARGIN + coPortraitWidth + 12, contextRight)
-    const coWidth = Math.max(180, Math.min(this.narrow ? width - coX - MARGIN : width * 0.5, width - coX - MARGIN - (historyWidth && !this.narrow ? historyWidth + MARGIN : 0)))
+    const coWidth = Math.max(180, Math.min(this.narrow ? width - coX - MARGIN : width * 0.5, width - coX - MARGIN - (rightWidth && !this.narrow ? rightWidth + MARGIN : 0)))
     const coHeight = Math.max(110, Math.min(coPortraitHeight, dialogueY - coTop - 24))
     this.coRect = { x: coX, y: coTop, width: coWidth, height: coHeight }
 
@@ -700,7 +723,22 @@ export class FrontDeskScene extends Phaser.Scene {
     this.newButton.setPosition(this.historyButton.x - this.historyButton.width - 8, buttonsY).setOrigin(1, 0)
     this.finishButton.setPosition(this.newButton.x - this.newButton.width - 8, buttonsY).setOrigin(1, 0)
     const afterFinish = this.finishButton.visible ? this.finishButton.x - this.finishButton.width - 8 : this.newButton.x - this.newButton.width - 8
-    this.settingsButton.setPosition(afterFinish, buttonsY).setOrigin(1, 0)
+    this.settingsButton.setPosition(afterFinish, buttonsY).setOrigin(1, 0).setVisible(true)
+    if (this.progress && this.narrow) {
+      // A narrow screen's button row overflows to the left: the toggle takes
+      // its left end, over the settings button that no longer fits there.
+      this.progress.place({ left: MARGIN, y: buttonsY, height: this.settingsButton.height },
+        { x: MARGIN, y: 130, width: width - 2 * MARGIN, height: barY - 8 - 130 })
+      if (this.settingsButton.x - this.settingsButton.width < MARGIN + this.progress.toggleWidth() + 8) this.settingsButton.setVisible(false)
+    }
+    if (this.progress && !this.narrow) {
+      const top = 110
+      this.progress.place(
+        { right: this.settingsButton.x - this.settingsButton.width - 8, y: buttonsY, height: this.settingsButton.height },
+        { x: width - MARGIN - (progressWidth || ProgressPanel.widthFor(width - 2 * MARGIN, this.narrow)), y: top,
+          width: progressWidth || ProgressPanel.widthFor(width - 2 * MARGIN, this.narrow), height: barY - 8 - top },
+      )
+    }
     // The view row sits under the room's buttons, right-aligned like them.
     const viewY = buttonsY + 30
     this.viewButton.setPosition(width - MARGIN, viewY).setOrigin(1, 0)
@@ -1526,6 +1564,9 @@ export class FrontDeskScene extends Phaser.Scene {
 
   private toggleHistory() {
     this.historyOpen = !this.historyOpen
+    if (this.historyOpen && this.progress?.open) {
+      this.progress.setOpen(false)
+    }
     this.historyButton.setText(this.historyOpen ? 'hide history' : 'history')
     // The draft is untouched: it lives in the textarea, not in this panel.
     this.layout(this.scale.width, this.scale.height)

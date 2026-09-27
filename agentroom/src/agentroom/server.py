@@ -37,6 +37,7 @@ from .frontdesk import FrontDesk
 from .inflight import ROOTS_VARIABLE
 from .ops import Ops
 from .projectroom import ProjectRoom
+from .progress import Progress
 from .projecttalk import ProjectTalk
 from .room import Room, health_block
 from .settings import Settings
@@ -46,7 +47,7 @@ ROUTES = ("/healthz", "/agents", "/work", "/work?resolved=1", "/ops", "/routines
           "/frontdesk/<id>/close-plan", "/argues", "/argues/<anchor>",
           "/argues/<anchor>/close-plan",
           "/projects", "/projects/<stream id | channel | slug>", "/projects/<key>/topics/<topic>",
-          "/work/<anchor>",
+          "/work/<anchor>", "/progress?current=<desk id>",
           "/complete/plan?channel=<channel>&topic=<topic>",
           "/complete/history?channel=<channel>&topic=<topic>",
           "/settings", "/settings/<revision>", "/settings/<revision>/<path>",
@@ -64,7 +65,7 @@ def make_handler(room: Room, ops: Ops | None = None, chat: Chat | None = None,
                  desk: FrontDesk | None = None, settings: Settings | None = None,
                  closer: Closer | None = None, argues: ArguingRoom | None = None,
                  projects: ProjectRoom | None = None, talk: ProjectTalk | None = None, watchdog=None,
-                 contexts: Contexts | None = None):
+                 contexts: Contexts | None = None, progress: Progress | None = None):
     class Handler(BaseHTTPRequestHandler):
         server_version = "agentroom/0.1.0"
 
@@ -355,6 +356,19 @@ def make_handler(room: Room, ops: Ops | None = None, chat: Chat | None = None,
                     else:
                         found = talk.work(unquote(path[len("/work/"):]))
                         self._write_json(404 if found.get("error") else 200, found)
+                elif path == "/progress":
+                    # The progress panel (`progress_panel` p1): every request
+                    # in flight as a card, off the mirror, Observer's records
+                    # and — for owners that expose it — a health check of each
+                    # open serving. A read: it writes nothing and starts
+                    # nothing, whether the panel is shown or not.
+                    if progress is None:
+                        self._write_json(503, {"error": "the progress read is not configured (no ops engine)"})
+                    else:
+                        query = parse_qs(urlparse(self.path).query)
+                        current = (query.get("current") or [None])[0]
+                        fresh = (query.get("fresh") or ["0"])[0] in ("1", "true", "yes")
+                        self._write_json(200, progress.board(current, fresh=fresh))
                 elif path == "/frontdesk":
                     # The Front Desk's conversations (`front_desk` p1). The
                     # engine's memory when it has them, the realm when not;
@@ -737,9 +751,9 @@ def build_server(
     cost: Cost | None = None, budget: Budget | None = None, desk: FrontDesk | None = None,
     settings: Settings | None = None, closer: Closer | None = None, argues: ArguingRoom | None = None,
     projects: ProjectRoom | None = None, talk: ProjectTalk | None = None, watchdog=None,
-    contexts: Contexts | None = None,
+    contexts: Contexts | None = None, progress: Progress | None = None,
 ) -> ThreadingHTTPServer:
     return ThreadingHTTPServer(
         (host, port), make_handler(room, ops, chat, cost, budget, desk, settings, closer, argues, projects, talk,
-                                   watchdog=watchdog, contexts=contexts)
+                                   watchdog=watchdog, contexts=contexts, progress=progress)
     )

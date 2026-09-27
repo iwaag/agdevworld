@@ -35,6 +35,7 @@ from .projecttalk import ProjectTalk
 from .realm import MirrorRealm
 from .room import Room
 from .server import build_server
+from .progress import progress_from_env
 from .settings import settings_from_env
 
 #: The mirror's credential: a `KEY=value` Zulip credentials file
@@ -232,8 +233,12 @@ def main(argv: list[str] | None = None) -> int:
     # the panel's writes. Unconfigured is a payload, not a refusal to start.
     contexts = contexts_from_env(log=lambda line: print(line, flush=True))
 
+    # The progress panel (`progress_panel` p1): the same mirror, Observer's
+    # records beside its monitor-health file, and its probe configuration.
+    progress = progress_from_env(ops, desk.developer_id)
+
     server = build_server(host, port, room, ops, chat, cost, budget, desk, settings, closer, argues, projects, talk,
-                          watchdog=watchdog, contexts=contexts)
+                          watchdog=watchdog, contexts=contexts, progress=progress)
     print(
         f"agentroom listening on http://{host}:{port} (mirror on {mirror_path.name}, "
         f"store {store_dir}, stalled at {stalled:g}s, "

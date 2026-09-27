@@ -234,3 +234,36 @@ def _units(card):
         unit = stack.pop()
         yield unit
         stack.extend(unit["children"])
+
+
+class QueueRunner(Runner):
+    """Answers a queued post's probe with where it waits (failsafe p5)."""
+
+    def __call__(self, command, **kwargs):
+        if "--queued" not in command:
+            return super().__call__(command, **kwargs)
+        self.calls.append(command)
+        return SimpleNamespace(stdout=json.dumps({
+            "schema": "agag.health.v1", "observed_at": time.time(), "verdict": "queued",
+            "why": "queued 40 s (position 1 of 1) behind work-m1/workrun-task1, whose serving is running",
+            "subject": {"ack": 0, "queued": True},
+            "queue": {"ahead": [{"channel": "work-m1", "topic": "workrun-task1", "ack": 1, "verdict": "running"}]}}),
+            returncode=0)
+
+
+def test_a_queued_post_of_a_probed_owner_shows_the_listeners_own_answer(tmp_path):
+    def second(realm, say, ids):
+        realm.add_channel(8, "pj-other")
+        say("front", "front-desk-c", "plan the other thing", DEV, "Developer", "c")
+        say("pj-other", "workplan-c", f"[selfnote][rootchat] front/front-desk-c #{ids['c']}", FRONT, "Front")
+        say("pj-other", "workplan-c", "@**autolab** please plan the other thing", FRONT, "Front", "queued")
+
+    runner = QueueRunner()
+    progress, realm, ids, _ = board_for(tmp_path, runner, setup=second)
+    card = card_of(progress.board(), "front-desk-c")
+    plan = next(u for u in _units(card) if u["topic"] == "workplan-c")
+    assert plan["display"]["state"] == "queued"
+    assert plan["queue"]["state"] == "behind" and plan["queue"]["evidence"] == "confirmed"
+    assert plan["queue"]["post"] == ids["queued"] and "behind work-m1/workrun-task1" in plan["display"]["reason"]
+    queued = [c for c in runner.calls if "--queued" in c]
+    assert len(queued) == 1 and queued[0][queued[0].index("--ack") + 1] == "0"

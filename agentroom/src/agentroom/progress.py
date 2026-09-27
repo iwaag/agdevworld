@@ -189,8 +189,12 @@ class HealthChecks:
     def covers(self, owner: str) -> bool:
         return owner in self.owners()
 
-    def _run(self, entry: dict, owner: str, ack: int, channel: str, topic: str) -> dict:
+    def _run(self, entry: dict, owner: str, ack: int, channel: str, topic: str, since: float | None = None) -> dict:
         command = [*map(str, entry["command"]), "--ack", str(ack), "--channel", channel, "--topic", topic]
+        if since is not None:
+            # A post nobody acknowledged yet: where it waits in the owner's
+            # queue (failsafe p5, `agag.health.probe_queue`).
+            command += ["--queued", "--since", str(float(since))]
         timeout = float(entry.get("timeout") or 10)
         try:
             done = self.runner(command, capture_output=True, text=True, timeout=timeout)
@@ -203,26 +207,28 @@ class HealthChecks:
                     "why": f"the health probe of {owner} failed: {type(error).__name__}", "subject": {"ack": ack},
                     "unknowns": [str(error)[:200]]}
 
-    def check(self, jobs: list[tuple[str, int, str, str]]) -> dict[tuple[str, int], dict]:
+    def check(self, jobs: list[tuple]) -> dict[tuple[str, int], dict]:
         """`{(owner, ack): report}` for these open servings: cached ones as
-        they are, the rest probed side by side within the budget."""
+        they are, the rest probed side by side within the budget. A job with
+        a fifth element (the post's time) and a negative `ack` (minus the
+        unit's anchor) asks where a queued post waits."""
         owners = self.owners()
         now = self.clock()
         answers: dict[tuple[str, int], dict] = {}
         due = []
         with self._lock:
-            for owner, ack, channel, topic in jobs:
+            for owner, ack, channel, topic, *since in jobs:
                 if owner not in owners or not ack:
                     continue
                 cached = self._cache.get((owner, ack))
                 if cached is not None and now - cached[0] < PROBE_TTL:
                     answers[(owner, ack)] = cached[1]
                 else:
-                    due.append((owner, ack, channel, topic))
+                    due.append((owner, ack, channel, topic, since[0] if since else None))
         if not due:
             return answers
         pool = ThreadPoolExecutor(max_workers=min(PROBE_WORKERS, len(due)), thread_name_prefix="progress-probe")
-        futures = {pool.submit(self._run, owners[o], o, a, c, t): (o, a) for o, a, c, t in due}
+        futures = {pool.submit(self._run, owners[o], o, max(a, 0), c, t, q): (o, a) for o, a, c, t, q in due}
         done, late = wait(futures, timeout=PROBE_BUDGET)
         pool.shutdown(wait=False, cancel_futures=True)
         with self._lock:
@@ -333,12 +339,17 @@ class Progress:
             for node in result.nodes():
                 if node.execution == "open" and node.owner in owners and node.ack:
                     jobs.append((node.owner, int(node.ack), node.channel, node.topic))
+                elif node.state == "queued" and node.owner in owners and node is not result.root and node.anchor:
+                    jobs.append((node.owner, -int(node.anchor), node.channel, node.topic,
+                                 float(node.last_activity or 0)))
         reports = self.health.check(jobs) if jobs else {}
         syncs = self._syncs()
         cards = []
         for entry, result in results:
             by_anchor = {int(n.anchor): reports[(n.owner, int(n.ack))] for n in result.nodes()
-                         if (n.owner, int(n.ack or 0)) in reports}
+                         if n.state != "queued" and (n.owner, int(n.ack or 0)) in reports}
+            by_anchor.update({int(n.anchor): reports[(n.owner, -int(n.anchor))] for n in result.nodes()
+                              if n.state == "queued" and n.anchor and (n.owner, -int(n.anchor)) in reports})
             pending = []
             if result.root is not None:
                 history = mirror.history(ORIGIN_CHANNEL, entry["topic"], num_before=400)
@@ -353,7 +364,7 @@ class Progress:
             cards.append(card)
         # Two requests at once are not two executions at once: say what a
         # queued post waits behind, across every request looked at.
-        queue_behind(cards)
+        queue_behind(cards, now=int(now))
         cards = self._scope(cards, now)
         for card in cards:
             self._last[card["origin"]] = card
@@ -426,7 +437,7 @@ class Progress:
         if not mine:
             found = self._one(topic, now)
             mine = [found] if found is not None else []
-            queue_behind(mine + cards)
+            queue_behind(mine + cards, now=int(now))
         rest = [c for c in cards if c["topic"] != topic]
         for card in mine:
             card["current"] = True

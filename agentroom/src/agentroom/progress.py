@@ -335,6 +335,7 @@ class Progress:
                 if node.execution == "open" and node.owner in owners and node.ack:
                     jobs.append((node.owner, int(node.ack), node.channel, node.topic))
         reports = self.health.check(jobs) if jobs else {}
+        syncs = self._syncs()
         cards = []
         for entry, result in results:
             by_anchor = {int(n.anchor): reports[(n.owner, int(n.ack))] for n in result.nodes()
@@ -348,7 +349,7 @@ class Progress:
                            for r in outstanding.pending]
             card = build_card(result, now=int(now), health=by_anchor,
                               recovery=recovery_for(records, entry["origin"]), viewer_id=viewer, pending=pending,
-                              source_live=live, source_note=health.get("reason") or "")
+                              source_live=live, source_note=health.get("reason") or "", syncs=syncs)
             card.update(self._placement(entry, card, now))
             cards.append(card)
         # Two requests at once are not two executions at once: say what a
@@ -371,6 +372,17 @@ class Progress:
                        "max_cards": MAX_CARDS, "refresh_seconds": REFRESH_SECONDS, "probe_ttl": PROBE_TTL},
             "cards": cards,
         }
+
+    def _syncs(self) -> list[dict]:
+        """Every sage refresh on record (`[selfnote][sagesync]`, archsage),
+        off the mirror's note index: a study's refresh counts wherever it
+        was recorded."""
+        try:
+            notes = self.mirror.notes(tag="sagesync")
+        except Exception:  # noqa: BLE001 - a missing index reads as nothing recorded
+            return []
+        return [{"tag": "sagesync", "value": n.value, "id": n.message_id, "at": n.timestamp, "by": n.sender_id}
+                for n in notes]
 
     def _placement(self, entry: dict, card: dict, now: float) -> dict:
         topic = entry["topic"]
@@ -434,7 +446,8 @@ class Progress:
         result = trace(MirrorReader(mirror), origin, now=int(now))
         health = mirror.health()
         card = build_card(result, now=int(now), recovery=recovery_for(records, origin), viewer_id=self.viewer(),
-                          source_live=health.get("state") == "live", source_note=health.get("reason") or "")
+                          source_live=health.get("state") == "live", source_note=health.get("reason") or "",
+                          syncs=self._syncs())
         index = [t for t in mirror.topic(ORIGIN_CHANNEL, topic)]
         entry = {"origin": origin, "topic": topic, "resolved": all(t.resolved for t in index) if index else False,
                  "first_at": int(messages[0].timestamp or 0), "last_at": int(messages[-1].timestamp or 0),

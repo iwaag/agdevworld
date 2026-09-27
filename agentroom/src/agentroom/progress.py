@@ -17,7 +17,7 @@ reader that shows progress says the same thing.
   seconds per serving, all due probes side by side within `PROBE_BUDGET`.
   A probe reads a directory, the process table and a journal; it starts
   nothing. Every other owner is conversation-only and the card says so.
-- **Recovery** — Observer's own files (`incidents/*.json`, `held.json`,
+- **Recovery** — Observer's own files (`incidents/*.json`,
   `retired.json`, `tracked.json`), read as they are: an incident, a hold
   by a person, a retirement. Nothing here writes them.
 
@@ -90,7 +90,7 @@ class ObserverRecords:
     directory: Path | None
 
     def read(self) -> dict[str, Any]:
-        found: dict[str, Any] = {"available": False, "incidents": [], "held": {}, "retired": {}, "tracked": {},
+        found: dict[str, Any] = {"available": False, "incidents": [], "retired": {}, "tracked": {},
                                  "problems": [], "monitor": None}
         if self.directory is None:
             found["problems"].append("Observer's directory is not configured")
@@ -100,7 +100,10 @@ class ObserverRecords:
             found["problems"].append(f"{incidents.name}/ is not there")
             return found
         found["available"] = True
-        for name in ("held", "retired", "tracked"):
+        # A person's holds are records in the request's conversation since
+        # failsafe p6 (`agag.holds`), read from the trace like everything
+        # else on the card; Observer's old `held.json` is not read.
+        for name in ("retired", "tracked"):
             path = incidents / f"{name}.json"
             try:
                 found[name] = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
@@ -150,14 +153,10 @@ def recovery_for(records: dict[str, Any], origin: int) -> dict[int, dict]:
         if current is None or (entry["open"] and not current.get("open")) \
                 or float(entry.get("detected_at") or 0) > float(current.get("detected_at") or 0):
             found[anchor] = entry
-    held = (records.get("held") or {}).get(okey)
     retired = (records.get("retired") or {}).get(okey)
-    if held or retired:
+    if retired:
         root = found.setdefault(int(origin), {})
-        if held:
-            root.update(held=True, held_why=(held or {}).get("why") if isinstance(held, dict) else str(held))
-        if retired:
-            root.update(retired=True, retired_why=(retired or {}).get("why") if isinstance(retired, dict) else "")
+        root.update(retired=True, retired_why=(retired or {}).get("why") if isinstance(retired, dict) else "")
     return found
 
 
@@ -291,7 +290,7 @@ class Progress:
         """Every `front-*` conversation with a reason to be looked at."""
         mirror = self.mirror
         tracked = {int(k[1:]) for k in (records.get("tracked") or {}) if str(k).startswith("o") and k[1:].isdigit()}
-        held = {int(k[1:]) for k in (records.get("held") or {}) if str(k).startswith("o") and k[1:].isdigit()}
+        held = self._hold_origins()
         seen: dict[int, dict] = {}
         for index in mirror.topics(ORIGIN_CHANNEL, include_resolved=True):
             if not index.name.startswith(ORIGIN_PREFIX):
@@ -317,6 +316,25 @@ class Progress:
             entry["held"] = origin in held
             entry["kept"] = keep
             found.append(entry)
+        return found
+
+    def _hold_origins(self) -> set[int]:
+        """Requests with a person's hold on record (`agag.holds`): kept on
+        the board whatever their age, and the card says whether it is still
+        in force."""
+        from agag.holds import HOLD_TAG
+
+        found = set()
+        try:
+            notes = self.mirror.notes(tag=HOLD_TAG)
+        except Exception:  # noqa: BLE001 - a missing index reads as nothing held
+            return found
+        for row in notes:
+            message = self.mirror.message(row.message_id)
+            if message is not None and message.channel == ORIGIN_CHANNEL:
+                first = self.mirror.messages(message.channel, message.topic)
+                if first:
+                    found.add(int(first[0].id))
         return found
 
     # -- one computation ------------------------------------------------------------
@@ -402,14 +420,15 @@ class Progress:
             self._keep.add(entry["origin"])
         else:
             self._keep.discard(entry["origin"])
-        if unfinished or entry["held"] or (entry["tracked"] and card["state"] != "completed"):
+        held = any(h.get("state") == "held" for h in card.get("holds") or [])
+        if unfinished or held or (entry["tracked"] and card["state"] != "completed"):
             group = "active"
         else:
             group = "recent"
         return {
             "topic": topic, "live_topic": entry["live"], "resolved": entry["resolved"],
             "desk": desk, "group": group, "last_at": entry["last_at"], "first_at": entry["first_at"],
-            "observer_tracked": entry["tracked"], "observer_held": entry["held"],
+            "observer_tracked": entry["tracked"], "observer_held": held,
             "links": self._links(card),
         }
 

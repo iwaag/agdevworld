@@ -21,7 +21,7 @@ from agentroom import progress as panel
 from agentroom.progress import HealthChecks, ObserverRecords, Progress, recovery_for
 
 ACK = "Message received. Please wait for the reply."
-DEV, FRONT, AUTOLAB = 8, 15, 11
+DEV, FRONT, AUTOLAB, OBSERVER = 8, 15, 11, 23
 BASE = 1_790_000_000
 
 
@@ -158,18 +158,24 @@ def test_a_failing_or_silent_probe_is_unknown_and_bounded(tmp_path, monkeypatch)
     assert task["display"]["state"] == "unknown" and "did not answer" in task["display"]["reason"]
 
 
-def test_observer_hold_and_incidents_reach_their_own_card(tmp_path):
+def test_a_hold_and_observer_s_incidents_reach_their_own_card(tmp_path):
+    """failsafe p6: a person's hold is a record in the request's own
+    conversation, read like everything else on the card."""
+    from agag.holds import hold_note
+
+    def setup(realm, say, ids):
+        say("front", "front-desk-a", hold_note("resume", ids["a"], DEV, "Developer", 0, "the Developer decides"),
+            OBSERVER, "agobserver-agstudio1")
+
     realm, ids, _ = build()
-    held = {f"o{ids['a']}": {"at": 1, "why": "the Developer decides"}}
     incident = {"key": f"o{ids['b']}:n{ids['b']}", "state": "detected", "kind": "unanswered",
                 "origin": {"key": f"o{ids['b']}"}, "node": {"anchor": ids["b"]}, "fact": "no answer"}
-    progress, *_ = board_for(tmp_path, held=held, incidents=[incident])
+    progress, *_ = board_for(tmp_path, incidents=[incident], setup=setup)
     board = progress.board()
     a, b = card_of(board, "front-desk-a"), card_of(board, "front-desk-b")
     assert a["state"] == "awaiting_you" and "the Developer decides" in a["reason"] and a["observer_held"]
+    assert [h["state"] for h in a["holds"]] == ["held"]
     assert b["state"] == "stopped" and "no answer" in b["reason"]
-    records = ObserverRecords(tmp_path / "observer").read()
-    assert recovery_for(records, ids["a"])[ids["a"]]["held"]
 
 
 def test_the_viewers_conversation_is_pinned_first_and_found_outside_the_bounds(tmp_path, monkeypatch):

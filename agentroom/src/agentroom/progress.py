@@ -53,6 +53,7 @@ from agag.agent import is_ack
 from agag.outstanding import read_requests
 from agag.progress import SCHEMA as CARD_SCHEMA
 from agag.progress import card as build_card
+from agag.progress import queue_behind
 from agag.trace import MirrorReader, trace
 from agag.zulip import RESOLVED_TOPIC_PREFIX
 
@@ -350,6 +351,9 @@ class Progress:
                               source_live=live, source_note=health.get("reason") or "")
             card.update(self._placement(entry, card, now))
             cards.append(card)
+        # Two requests at once are not two executions at once: say what a
+        # queued post waits behind, across every request looked at.
+        queue_behind(cards)
         cards = self._scope(cards, now)
         for card in cards:
             self._last[card["origin"]] = card
@@ -411,6 +415,7 @@ class Progress:
         if not mine:
             found = self._one(topic, now)
             mine = [found] if found is not None else []
+            queue_behind(mine + cards)
         rest = [c for c in cards if c["topic"] != topic]
         for card in mine:
             card["current"] = True

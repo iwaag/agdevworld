@@ -17,10 +17,11 @@ separations are in code rather than in the view:
   run is something Front opens after reading the guide, not a topic this
   relay opens for it. The GUI still cannot write into another agent's
   channel: routing work is Front's job, which is what Single Entrance means.
-- **A length guard.** This realm's `max_message_length` is 10000 and Zulip
-  **truncates silently** past it — measured in `comfynotify`. A refusal the
-  sender can read is the only acceptable behaviour at a boundary that
-  otherwise fails invisibly.
+- **A length guard.** A chat message is a message, not a document: this
+  door sends at most `max_chars` (4000 by default), and says so, rather than
+  forwarding a guide's worth of text into a paid Front run. The realm's own
+  ceiling is the server's `max_message_length`, which the client refuses
+  over rather than letting Zulip cut (failsafe p4).
 
 A post into a run topic or a Front Desk conversation is a message from the
 Developer in a topic Front sweeps, so it **starts a paid Front run**. That is
@@ -42,14 +43,11 @@ from .routines import GUIDE_TOPIC, RUN_PREFIX, is_run_topic, routine_channel, ro
 
 #: The credential the chat writes with. Deliberately its own variable.
 CHAT_ENV_VARIABLE = "AGENTROOM_CHAT_ZULIP_ENV"
-#: What this door will send. Far below the realm's own 10000, because a chat
-#: message longer than this is a document and belongs in the guide — and
-#: because the realm's limit is where the *silent* truncation begins.
+#: What this door will send: a chat message longer than this is a document
+#: and belongs in the guide.
 DEFAULT_MAX_CHARS = 4000
-#: The realm's own ceiling, past which Zulip drops the tail without an error.
-REALM_MAX_CHARS = 10000
 
-__all__ = ["CHAT_ENV_VARIABLE", "Chat", "DEFAULT_MAX_CHARS", "REALM_MAX_CHARS",
+__all__ = ["CHAT_ENV_VARIABLE", "Chat", "DEFAULT_MAX_CHARS",
            "allowed_topic", "request_text"]
 
 
@@ -99,7 +97,6 @@ class Chat:
         return {
             "configured": self.configured,
             "max_chars": self.max_chars,
-            "realm_max_chars": REALM_MAX_CHARS,
             "entrance": FRONT_CHANNEL,
             "reason": None if self.configured else (
                 f"{CHAT_ENV_VARIABLE} is unset, so this relay can read routines "
@@ -150,8 +147,7 @@ class Chat:
         if len(body) > self.max_chars:
             return (
                 f"{len(body)} characters is over the {self.max_chars} this door sends; "
-                f"Zulip itself truncates silently past {REALM_MAX_CHARS}, so a long "
-                f"instruction belongs in the guide instead"
+                f"a long instruction belongs in the guide instead"
             )
         return None
 

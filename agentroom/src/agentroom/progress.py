@@ -55,7 +55,6 @@ from agag.progress import SCHEMA as CARD_SCHEMA
 from agag.progress import card as build_card
 from agag.progress import queue_behind
 from agag.trace import MirrorReader, trace
-from agag.zulip import RESOLVED_TOPIC_PREFIX
 
 SCHEMA = "ag.progress-board.v1"
 ORIGIN_CHANNEL = "front"

@@ -298,6 +298,31 @@ Un-resolving a `#front` run topic more than 60 s after its ✔ makes Zulip post
 a notification line into an unresolved topic, which Front serves as a paid
 run. Resolve-only measurements, or undo inside Zulip's 60 s grace period.
 
+### Progress panel (`progress_panel` p1)
+
+The Front Desk's `▦ progress` toggle (`src/progressPanel.ts`, data and words
+in `src/progressState.ts`) shows every request in flight in any Front
+conversation: the open conversation pinned, then active requests, then
+results of the last 24 h. It reads `GET /progress?current=<desk id>` every
+8 s while open (60 s closed, for the toggle's `✋`/`■` badges); the board is
+pyagag's `agag.progress` read of the relay's mirror, Observer's records and
+autolab's health checks (`agentroom/src/agentroom/progress.py`). Its open
+state and expanded cards live in `localStorage`. It shares the right column
+with the history panel (one closes the other); on a narrow screen its toggle
+takes the button row's left end.
+
+Drawing rules: every state has an icon and words beside its colour; a band
+or segment moves only on a fresh health check (never on a conversation's
+claim, never while the board is stale or the relay unreadable, never under
+`prefers-reduced-motion`); a plan meter is one segment per task and shows no
+number while planning; stages stay as chips until their records exist. When
+the relay stops answering, the last board stays, marked with the time it was
+read.
+
+`?view=frontdesk&demo=1` scripts two requests over a minute
+(`window.__progressDemo.at(seconds)`, `.fail(true)`); `window.__progress
+.snapshot()` returns what the panel shows, for drivers.
+
 ## Cost gauge (`gauge_panel`)
 
 `/?parts=gauge` is a separate page meant for its own window beside the

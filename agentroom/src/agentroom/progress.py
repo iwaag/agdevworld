@@ -90,7 +90,7 @@ class ObserverRecords:
     directory: Path | None
 
     def read(self) -> dict[str, Any]:
-        found: dict[str, Any] = {"available": False, "incidents": [], "retired": {}, "tracked": {},
+        found: dict[str, Any] = {"available": False, "incidents": [], "tracked": {},
                                  "problems": [], "monitor": None}
         if self.directory is None:
             found["problems"].append("Observer's directory is not configured")
@@ -100,10 +100,12 @@ class ObserverRecords:
             found["problems"].append(f"{incidents.name}/ is not there")
             return found
         found["available"] = True
-        # A person's holds are records in the request's conversation since
-        # failsafe p6 (`agag.holds`), read from the trace like everything
-        # else on the card; Observer's old `held.json` is not read.
-        for name in ("retired", "tracked"):
+        # A person's holds (failsafe p6, `agag.holds`) and decisions about a
+        # request's standing (failsafe p6 ex1, `agag.dispositions`) are
+        # records in the request's conversation, read from the trace like
+        # everything else on the card; Observer's old `held.json` and
+        # `retired.json` are not read.
+        for name in ("tracked",):
             path = incidents / f"{name}.json"
             try:
                 found[name] = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
@@ -131,7 +133,7 @@ OPEN_INCIDENT_STATES = ("detected", "recovering")
 
 def recovery_for(records: dict[str, Any], origin: int) -> dict[int, dict]:
     """`{unit anchor: recovery}` for one request: its incidents by the
-    stalled node's anchor, a hold or retirement on its origin."""
+    stalled node's anchor."""
     okey = f"o{int(origin)}"
     found: dict[int, dict] = {}
     for record in records.get("incidents", []):
@@ -153,10 +155,6 @@ def recovery_for(records: dict[str, Any], origin: int) -> dict[int, dict]:
         if current is None or (entry["open"] and not current.get("open")) \
                 or float(entry.get("detected_at") or 0) > float(current.get("detected_at") or 0):
             found[anchor] = entry
-    retired = (records.get("retired") or {}).get(okey)
-    if retired:
-        root = found.setdefault(int(origin), {})
-        root.update(retired=True, retired_why=(retired or {}).get("why") if isinstance(retired, dict) else "")
     return found
 
 
@@ -291,6 +289,7 @@ class Progress:
         mirror = self.mirror
         tracked = {int(k[1:]) for k in (records.get("tracked") or {}) if str(k).startswith("o") and k[1:].isdigit()}
         held = self._hold_origins()
+        decided = self._hold_origins("disposition")
         seen: dict[int, dict] = {}
         for index in mirror.topics(ORIGIN_CHANNEL, include_resolved=True):
             if not index.name.startswith(ORIGIN_PREFIX):
@@ -309,7 +308,7 @@ class Progress:
         found = []
         for origin, entry in seen.items():
             age = now - entry["last_at"]
-            keep = origin in self._keep or origin in tracked or origin in held
+            keep = origin in self._keep or origin in tracked or origin in held or origin in decided
             if age > SCAN_HOURS * 3600 and not keep:
                 continue
             entry["tracked"] = origin in tracked
@@ -318,15 +317,16 @@ class Progress:
             found.append(entry)
         return found
 
-    def _hold_origins(self) -> set[int]:
-        """Requests with a person's hold on record (`agag.holds`): kept on
-        the board whatever their age, and the card says whether it is still
-        in force."""
+    def _hold_origins(self, tag: str | None = None) -> set[int]:
+        """Requests with a person's hold on record (`agag.holds`) — or, with
+        `tag="disposition"`, a decision about their standing
+        (`agag.dispositions`): looked at whatever their age, and the card
+        says whether it is still in force."""
         from agag.holds import HOLD_TAG
 
         found = set()
         try:
-            notes = self.mirror.notes(tag=HOLD_TAG)
+            notes = self.mirror.notes(tag=tag or HOLD_TAG)
         except Exception:  # noqa: BLE001 - a missing index reads as nothing held
             return found
         for row in notes:

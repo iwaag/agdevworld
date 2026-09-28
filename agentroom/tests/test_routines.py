@@ -66,7 +66,7 @@ def by_front(content, *, ident, ago=0.0):
 
 
 def origin_note(ident=9, home="front/front-desk-20260909-1459"):
-    return by_front(f"[selfnote][rootchat] {home}", ident=ident)
+    return by_front(f"[selfnote][rootchat] {home} rel=work", ident=ident)
 
 
 def history_of(*messages):
@@ -254,7 +254,7 @@ def test_a_first_line_heading_is_the_next_title_and_the_name_is_last():
 
 
 def rootnote(home, *, ident, sender_id=FRONT, sender="Front"):
-    return message(f"[selfnote][rootchat] {home}", ident=ident, sender_id=sender_id, sender=sender)
+    return message(f"[selfnote][rootchat] {home} rel=work", ident=ident, sender_id=sender_id, sender=sender)
 
 
 def servednote(remote, remote_id, *, ident, sender_id=FRONT, sender="Front"):
@@ -371,7 +371,7 @@ def test_a_sent_message_goes_into_the_routine_s_channel_and_reports_its_id(tmp_p
 def test_a_refused_message_is_never_posted(tmp_path):
     chat, client = started_chat(tmp_path)
     assert chat.send("front", "front-desk-1", "hi", {"papers"})["sent"] is False
-    assert chat.send(CHANNEL, RUN, "[selfnote][rootchat] x/y", {"papers"})["sent"] is False
+    assert chat.send(CHANNEL, RUN, "[selfnote][rootchat] x/y rel=work", {"papers"})["sent"] is False
     chat.max_chars = 10
     assert "over the 10" in chat.send(CHANNEL, RUN, "x" * 11, {"papers"})["error"]
     assert client.sent == []

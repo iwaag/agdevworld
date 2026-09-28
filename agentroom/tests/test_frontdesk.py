@@ -268,7 +268,7 @@ def test_the_refusals_are_the_relay_s():
     assert "conversation id" in desk.post("", "hi", "t")["error"]
     assert "token" in desk.post("20260908-1600", "hi", "")["error"]
     assert "nothing to send" in desk.post("20260908-1600", "   ", "t")["error"]
-    assert "machine-to-machine" in desk.post("20260908-1600", "[selfnote][rootchat] a/b", "t")["error"]
+    assert "machine-to-machine" in desk.post("20260908-1600", "[selfnote][rootchat] a/b rel=work", "t")["error"]
     desk.chat.max_chars = 10
     assert "over the 10" in desk.post("20260908-1600", "x" * 11, "t")["error"]
     assert client.sent == []

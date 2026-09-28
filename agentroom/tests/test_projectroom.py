@@ -71,7 +71,7 @@ def open_project(realm, stream_id, slug, kind, *, folder, argue="argue-x", at=NO
                       description=f"[AUTO] project: {slug}; {kind}; opened from argue argue/{argue}; its goal is the `{doc_topic}` topic")
     realm.post("argue", argue, "[selfnote][argue] from -", sender_id=DEV, sender_name="Developer", timestamp=int(at - 100))
     doc = front(realm, f"pj-{slug}", doc_topic, f"# {slug.title()} goal\n\nBuild the thing.\n\n---\nOpened from argue **#argue › {argue}**.", at=at)
-    front(realm, f"pj-{slug}", f"workplan-setup-{slug}", f"[selfnote][rootchat] argue/{argue}", at=at)
+    front(realm, f"pj-{slug}", f"workplan-setup-{slug}", f"[selfnote][rootchat] argue/{argue} rel=work", at=at)
     ask = front(realm, f"pj-{slug}", f"workplan-setup-{slug}", "Please prepare the workspace — setup only, no mission to plan.", at=at)
     return doc, ask
 
@@ -95,7 +95,7 @@ def mission(realm, channel, topic, slug, *, text="Plan it.", at=NOW - 3000, task
         for serial in range(1, tasks + 1):
             run = f"workrun-task{serial}-m{anchor}"
             task = bot(realm, work, run, f"[selfnote][task] {anchor}#{serial}", at=at + 10 * serial)
-            bot(realm, work, run, f"[selfnote][rootchat] {channel}/{topic}", at=at + 10 * serial)
+            bot(realm, work, run, f"[selfnote][rootchat] {channel}/{topic} rel=work", at=at + 10 * serial)
             tdoc = bot(realm, work, run, f"# Task {serial}\n\nDo step {serial}.", at=at + 10 * serial)
             bot(realm, work, run, f"[selfnote][doc] {tdoc}", at=at + 10 * serial)
             task_ids.append(task)

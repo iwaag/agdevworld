@@ -120,7 +120,7 @@ def test_a_selfnote_is_never_somebody_speaking():
         "agforge-agstudio1", "assetplan-poster",
         message("please", ident=1),
         message("done", ident=2, sender_id=13, sender="agforge-agstudio1"),
-        message("[selfnote][rootchat] front/front-9", ident=3, sender_id=15, sender="Front"),
+        message("[selfnote][rootchat] front/front-9 rel=work", ident=3, sender_id=15, sender="Front"),
     )
     assert state(found) is None
 
@@ -631,7 +631,7 @@ def test_a_memo_conversation_is_held_for_display_and_is_nobodys_row():
         "memo", "front-desk-x-s1",
         message("```ag-memo\n{\"text\": \"@**Front** what next?\"}\n```", ident=90, sender_id=15, sender="Front"),
         message("@**Front** a real mention, written into a memo", ident=91, ago=5000),
-        message("[selfnote][rootchat] front/front-desk-x", ident=92, sender_id=15, sender="Front"),
+        message("[selfnote][rootchat] front/front-desk-x rel=work", ident=92, sender_id=15, sender="Front"),
         message("[selfnote][served] pj-mediagen/workrun-task2 999", ident=93, sender_id=15, sender="Front"),
     )
     assert memo.roots == [] and memo.served == {}

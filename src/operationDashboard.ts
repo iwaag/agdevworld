@@ -35,9 +35,13 @@ function element<K extends keyof HTMLElementTagNameMap>(tag: K, text: string, cl
 }
 
 // One controller owns the selection and supplies every pane, including chat.
+// The agdev dashboard: the workflow editor through the loopback agdev origin
+// (nginx.conf, /wfe/). It is served on this host only.
+const AGDEV_URL = (import.meta.env.VITE_AGDEV_URL as string | undefined) ?? 'http://localhost:8093/wfe/'
+
 export async function initOperationDashboard(): Promise<void> {
   const host = element('main', '', 'operation-parts parts-shell dashboard')
-  host.innerHTML = `<header class="dashboard-header"><div><span class="eyebrow">AGDEVWORLD</span><h1>Operation room</h1></div><nav class="parts-toolbar"><a href="/?parts=gauge" target="_blank" rel="opener">Cost gauge ↗</a><a href="/?view=frontdesk">Front Desk</a><a href="/?view=argue">Arguing Room</a><a href="/?view=project">Project Room</a><a href="/?view=ops">Ops board</a><a href="/?view=nodes">World views</a><button class="refresh">Refresh</button></nav><p class="parts-health" role="status">Reading relay…</p></header>
+  host.innerHTML = `<header class="dashboard-header"><div><span class="eyebrow">AGDEVWORLD</span><h1>Operation room</h1></div><nav class="parts-toolbar"><a href="/?parts=gauge" target="_blank" rel="opener">Cost gauge ↗</a><a href="/?view=frontdesk">Front Desk</a><a href="/?view=argue">Arguing Room</a><a href="/?view=project">Project Room</a><a href="/?view=ops">Ops board</a><a href="/?view=nodes">World views</a><a href="${AGDEV_URL}" target="_blank" rel="noopener" title="Projects, shared repositories and runs (workflow editor, this host only)">agdev dashboard ↗</a><button class="refresh">Refresh</button></nav><p class="parts-health" role="status">Reading relay…</p></header>
     <div class="parts-grid"><aside class="routine-pane"><h2>Routines</h2><div class="routine-list"></div></aside>
     <section class="session-pane"><div class="pane-head"><h2>Recent runs <small>up to 3 visible · history, not capacity</small></h2><label class="show-resolved"><input type="checkbox"> Show resolved</label></div>
       <details class="new-session"><summary>Ask Front to run it</summary>

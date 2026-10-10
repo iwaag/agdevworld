@@ -5,6 +5,9 @@ services:
     restart: unless-stopped
     ports:
       - "8090:80"
+      # The agdev origin with the /wfe/ route to the workflow editor
+      # (nginx.conf): loopback only, like the service behind it.
+      - "127.0.0.1:8093:8093"
 
   # Dev with HMR: docker compose up dev
   dev:

@@ -1,0 +1,6 @@
+schema: ag.workflow.v1
+id: recursive-b
+name: Recursive B
+intent: Delegates back to A.
+nodes:
+  call-a: {type: delegate, description: run A, workflow: recursive-a}

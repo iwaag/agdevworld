@@ -1,0 +1,7 @@
+schema: ag.workflow.v1
+id: shape
+name: Wrong shape
+intent: nodes is a list, which the model cannot represent.
+nodes:
+  - a
+  - b

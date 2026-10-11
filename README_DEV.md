@@ -13,6 +13,8 @@ read static snapshots or their existing sample fallbacks.
 
 - `npm run dev` — vite with HMR on :5173.
 - `npm run build` — `tsc && vite build`. The frontend's only check; the Docker build runs it too, so a successful image build is a compile check.
+- `npm run editor:install` then `npm run check` — the frontend build plus the workflow editor package's own check (`workflow_editor/`: tsc, `node --test`, vite build). The package keeps its own lockfile; the Docker image does not include it.
+- `scripts/wfe-release.sh deploy <area>` — build, check and install the workflow editor service and its `wfe` launcher from an agdevworld commit (see "The workflow editor").
 - `docker compose up --build -d web` — production-style bundle behind nginx on :8090. Keep it current when a user may want to look.
 - `docker compose ps web` / `curl -I http://localhost:8090/` — confirm it came up.
 - `CAGENT_URL=https://localhost:8789 npm run cluster:fetch` — refresh the three cluster snapshots through cagent.
@@ -38,6 +40,8 @@ read static snapshots or their existing sample fallbacks.
 - `src/chatPanel.ts` — one routine fire topic and the existing `POST /chat` door; dashboard mode receives shared detail payloads, while world mode owns its selected-topic refresh.
 - `src/detailPopup.ts` — the detail overlay for a clicked card.
 - `src/clusterState.ts` — snapshot reads for the cluster panels.
+- `workflow_editor/` — the workflow editor (agdev dashboard, Project Editor, runs, `wfe`): a system component with its own package (see "The workflow editor").
+- `scripts/wfe-release.sh` — builds, installs and recovers the workflow editor's service and launcher.
 - `scripts/fetch-cluster-state.mjs` — snapshot refresh through cagent. The one piece of JavaScript outside `src/`; it is a developer command, not part of the service.
 - `public/cluster/*.json` — live snapshots, git-ignored; `public/*.sample.json` is the fallback. The Docker build copies whatever is in `public/` at build time, so move a live snapshot out first if a sample-only image is wanted.
 
@@ -397,3 +401,42 @@ work channel is not mirrored. A document has no composer — it says where to
 take the discussion (Front) — and a ✔'d conversation is resumed only after a
 second press. URLs: `&project=<key>&plan=<anchor>` / `&run=<anchor>` /
 `&topic=<name>`.
+
+## The workflow editor (`workflow_editor` p4/ex1)
+
+`workflow_editor/` is the agdev dashboard, the Project Editor, the run views
+and the `wfe` command line. It is agdevworld system code: developed here, built
+and installed by `scripts/wfe-release.sh`, never a project of the catalog it
+manages. Its own README (`workflow_editor/README.md`) covers the package; its
+history before p4/ex1 is the frozen `pj-agdev/experiments/workflow_editor` and
+the retired Gitea repository `developer/pj-workflow-editor` (`9c29117`, the
+imported commit).
+
+- **Separate process, shared ownership.** The editor service is a Node process
+  on the host (loopback `:8098`), because it works on host workspaces. nginx's
+  loopback-only `:8093` serves this site and routes `/wfe/` to it (`nginx.conf`);
+  the operation room links "agdev dashboard ↗" there and the dashboard links
+  "← agdevworld" back. The write API is never put on the LAN-facing `:8090`.
+- **Operating area** (`pj-agdev/.local/agdev/`, ignored): `registry.json` (the
+  catalog: projects, repositories, workspaces), `gitea.json`, `system.json`
+  (the boundary below), the workspaces `pj-<id>/`, `.local/exec/` (autolab's
+  queue and attempts), and the installed system code: `service/releases/<agdevworld
+  commit>/`, `service/current`, `service/previous`, `bin/wfe`.
+- **Releases.** `scripts/wfe-release.sh build <area> [<commit>]` archives
+  `workflow_editor/` at that agdevworld commit into `service/releases/<commit>/`,
+  runs `npm ci && npm run check` there and writes `RELEASE.json`. `activate`
+  refuses while an execution attempt is open, switches `service/current`
+  (which both the launchd service and `bin/wfe` run, so they move together),
+  rewrites `bin/wfe`, restarts `com.agdev.wfe-service` and requires the service
+  (`GET /wfe/api/version`) and the launcher (`wfe version`) to report the
+  commit; otherwise it restores the previous release. `deploy` = build +
+  activate; `rollback` returns to `service/previous`; `status` reads all of it.
+- **launchd.** `pj-agdev/devenv/launchd/com.agdev.wfe-service.plist.in` runs
+  `service/current/server/main.ts` with the area's registry; the executor
+  (`com.agdev.agautolab-wfexec`) uses `bin/wfe` through
+  `agautolab/.local/wfexec.toml`. A new release needs only `activate`; neither
+  plist changes.
+- **Tests outside the package.** `agautolab/tests/test_wfexec.py` runs the
+  executor against `WFE_PACKAGE` (default: this `workflow_editor/`; an
+  installed release works too).
+

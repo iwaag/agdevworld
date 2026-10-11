@@ -1,0 +1,13 @@
+# Project definition (ag.project.v2).
+# Repositories are not listed here: .gitmodules and Git are their authority.
+schema: ag.project.v2
+id: demo
+name: Demo Delivery Project
+devdocs: submodule
+intent: |
+  Deliver a small service from research to release while keeping what was
+  learned in shared study and wedo repositories.
+goals:
+  - Every workflow states its intent before its steps.
+  - Study results land in study repositories; implementation lessons in wedo repositories.
+  - A second workspace reproduces the same definitions from Git alone.

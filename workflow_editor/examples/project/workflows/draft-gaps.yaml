@@ -1,0 +1,21 @@
+# An incomplete draft with broken references, kept to show validation.
+schema: ag.workflow.v1
+id: draft-gaps
+name: Draft With Gaps
+intent: |
+  Explore an evaluation repository that has not been added to the project yet.
+repositories:
+  evals: {path: study/evals, access: readonly}
+  shared: {path: assets/shared, access: readonly}
+nodes:
+  explore:
+    type: study
+    description: Read the evaluation notes.
+    repositories: [evals, missing-binding]
+  hand-off:
+    type: delegate
+    description: Hand over to a workflow that does not exist.
+    workflow: no-such-workflow
+edges:
+  - {from: explore, to: hand-off}
+  - {from: hand-off, to: nowhere}

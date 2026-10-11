@@ -6,3 +6,6 @@ Dockerfile
 compose.yaml
 # The frontend image builds the frontend; the relay runs beside it.
 agentroom
+
+# The workflow editor package builds and ships through scripts/wfe-release.sh, not this image.
+workflow_editor

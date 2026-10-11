@@ -1,0 +1,4 @@
+schema: ag.workflow.v1
+id: broken
+nodes:
+  a: {type: do, description: "unterminated

@@ -1,0 +1,7 @@
+schema: ag.workflow.v1
+id: anchored
+name: Anchored
+intent: uses an anchor
+repositories:
+  tools: &tools {path: study/tools, access: readonly}
+  again: *tools

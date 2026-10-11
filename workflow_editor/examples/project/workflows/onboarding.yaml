@@ -1,0 +1,52 @@
+# Onboarding: all four node types, a parallel branch, a join, and a delegate.
+schema: ag.workflow.v1
+id: onboarding
+name: Service Onboarding
+intent: |
+  Prepare a new service for its first release: learn the existing patterns,
+  provision the runtime, agree on the plan with a human, then hand repository
+  setup to its own workflow while the release note is drafted in parallel.
+repositories:
+  patterns: {path: study/agentic-patterns, access: readonly}
+  tools: {path: study/tools, access: readonly}
+  runtime: {path: wedo/runtime, access: editable}
+  pipeline: {path: wedo/pipeline, access: editable}
+  docs: {path: devdocs, access: editable}
+nodes:
+  survey:
+    type: study
+    name: Survey patterns
+    description: Read the agentic pattern notes and existing tool studies; summarise what applies.
+    repositories: [patterns, tools]
+  provision:
+    type: do
+    name: Provision runtime
+    description: Create the runtime configuration and record the steps that worked.
+    repositories: [runtime]
+  review:
+    type: talk
+    name: Review plan
+    description: Agree on scope and permissions with the human owner before integration.
+    repositories: [docs]
+  integrate:
+    type: do
+    name: Integrate pipeline
+    description: Wire the runtime into the delivery pipeline. Waits for both provisioning and review.
+    repositories: [runtime, pipeline]
+  setup:
+    type: delegate
+    name: Repository setup
+    description: Run the repository setup workflow and wait for it to finish.
+    workflow: repo-setup
+  announce:
+    type: talk
+    name: Release note
+    description: Draft the release note with the owner while repository setup runs.
+    repositories: [docs]
+edges:
+  - {from: survey, to: provision}
+  - {from: survey, to: review}
+  - {from: provision, to: integrate}
+  - {from: review, to: integrate}
+  - {from: integrate, to: setup}
+  - {from: integrate, to: announce}

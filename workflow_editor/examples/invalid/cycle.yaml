@@ -1,0 +1,10 @@
+schema: ag.workflow.v1
+id: cycle
+name: Cycle
+intent: A loop, which p1 does not allow.
+nodes:
+  a: {type: do, description: first}
+  b: {type: talk, description: second}
+edges:
+  - {from: a, to: b}
+  - {from: b, to: a}

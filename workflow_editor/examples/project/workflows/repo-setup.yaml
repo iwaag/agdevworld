@@ -1,0 +1,27 @@
+# Delegated by onboarding. Positions are stored, so no automatic layout.
+schema: ag.workflow.v1
+id: repo-setup
+name: Repository Setup
+intent: |
+  Create the repository skeleton for a service and confirm the pipeline can
+  build it.
+repositories:
+  tools: {path: study/tools, access: readonly}
+  pipeline: {path: wedo/pipeline, access: editable}
+nodes:
+  check:
+    type: study
+    name: Check conventions
+    description: Look up repository conventions in the tool studies.
+    repositories: [tools]
+  scaffold:
+    type: do
+    name: Scaffold
+    description: Create the skeleton and a pipeline entry; record surprises.
+    repositories: [pipeline]
+edges:
+  - {from: check, to: scaffold}
+layout:
+  nodes:
+    check: {x: 40, y: 60}
+    scaffold: {x: 320, y: 60}

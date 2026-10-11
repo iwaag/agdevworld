@@ -35,7 +35,7 @@ class Refused extends Error { detail?: unknown; constructor(m: string, detail?: 
 // ---- arguments ---------------------------------------------------------------
 
 interface Parsed { positional: string[]; opts: Map<string, string[]>; flags: Set<string> }
-const FLAGS = new Set(['json', 'help', 'resume', 'h', 'new', 'history', 'no-gitea', 'reuse'])
+const FLAGS = new Set(['json', 'help', 'resume', 'h', 'new', 'history', 'no-gitea', 'reuse', 'lost', 'uncertain'])
 function parse(argv: string[]): Parsed {
   const p: Parsed = { positional: [], opts: new Map(), flags: new Set() }
   for (let i = 0; i < argv.length; i++) {
@@ -272,6 +272,28 @@ publish <checkpoint id>           retry a publication; finished steps are kept
 status [<run>]                    the executor, or one run's attempts, jobs and
                                   checkpoints
 State is <area>/.local/exec/exec.sqlite (this host only).`,
+  notify: `wfe notify <subcommand> …   (Zulip coordination; the transport's interface)
+
+status [<run>]                    targets (folders, channels), runs and their
+                                  delivery state, or one run's binding
+outbox [<project>/<workflow>/<run>]  the queued, failed and sent events
+due                               scan the records, then what to provision
+                                  and deliver now (JSON)
+target <key> --zulip-id <n> | --problem <text>
+sent --id <event id>… --message <n> --stream <n> --channel <name> --topic <name>
+failed --id <event id>… --error <text> [--uncertain]
+                                  --uncertain: the answer was lost after the
+                                  request; the next attempt looks for the
+                                  message's marker before posting again
+moved <project>/<workflow>/<run> --stream <n> --channel <name> --topic <name>
+run-problem <project>/<workflow>/<run> --problem <text>
+reset <key>                       the repair path: forget a binding (a deleted
+                                  channel, a taken name, a duplicate run) so it
+                                  is provisioned again
+Keys: folder:<project>, channel:<project>/<workflow>, <project>/<workflow>/<run>.
+Configuration: <area>/zulip.json {enabled, zulipUrl, viewBase, since[, person]};
+state: <area>/.local/notify/notify.sqlite. Nothing here posts: autolab's
+agautolab.wfnotify does, with its own credentials.`,
   project: `wfe project register <owner>/<name>
 wfe project obtain <project id>
 wfe project unregister <project id>
@@ -341,6 +363,7 @@ Projects and workspaces
   dashboard                 every project and shared repository, with where each fact was read
   request <workflow> …      a person's request to the executor (autolab): a run, queued
   exec <subcommand>         the executor's interface: claim, started, finished, stops, reconcile …
+  notify <subcommand>       Zulip coordination: status, outbox, due, reset … (autolab delivers)
 
 Workflows (by file name or id)
   workflow new <id>         create devdocs/workflows/<id>.yaml from the template
@@ -593,6 +616,67 @@ async function cmdExec(p: Parsed): Promise<number> {
   throw new UsageError('wfe exec claim|started|finished|stops|heartbeat|reconcile|publish|status')
 }
 
+// Zulip coordination: the outbox and bindings of this host, for the
+// transport (autolab) and for people. Rules are in server/notify.ts.
+async function cmdNotify(p: Parsed): Promise<number> {
+  const [sub, arg] = p.positional
+  const { NotifyStore } = await import('../server/notify.ts')
+  const x = await openExec(p)
+  const n = new NotifyStore({ area: areaDir(p), registryFile: registryFile(p), exec: x })
+  const num = (k: string) => { const v = opt(p, k); if (v === undefined || !/^\d+$/.test(v)) throw new UsageError(`--${k} <integer> is required`); return Number(v) }
+  const need = (k: string) => { const v = opt(p, k); if (!v?.trim()) throw new UsageError(`--${k} is required`); return v }
+  const ids = () => { const v = p.opts.get('id') ?? []; if (!v.length) throw new UsageError('--id <event id> is required (repeatable)'); return v }
+  try {
+    switch (sub) {
+      case 'due': json = true; out('', await n.due()); return 0
+      case 'target': {
+        if (!arg) throw new UsageError('target <key> --zulip-id <n> | --problem <text>')
+        n.recordTarget(arg, opt(p, 'zulip-id') !== undefined ? { zulipId: num('zulip-id') } : { problem: need('problem') })
+        out(`Recorded ${arg}.`, { ok: true }); return 0
+      }
+      case 'sent': n.recordSent(ids(), { messageId: num('message'), streamId: num('stream'), channel: need('channel'), topic: need('topic') }); out('Recorded as sent.', { ok: true }); return 0
+      case 'failed': n.recordFailed(ids(), need('error'), p.flags.has('uncertain')); out('Recorded the failure; it is retried later.', { ok: true }); return 0
+      case 'moved': if (!arg) throw new UsageError('moved <run key> …'); n.recordMoved(arg, { streamId: num('stream'), channel: need('channel'), topic: need('topic') }); out('Recorded where the topic is now.', { ok: true }); return 0
+      case 'run-problem': if (!arg) throw new UsageError('run-problem <run key> --problem <text>'); n.recordRunProblem(arg, need('problem')); out('Recorded.', { ok: true }); return 0
+      case 'reset': if (!arg) throw new UsageError('reset <key>'); { const notes = n.reset(arg); out(notes.join('\n'), { ok: true, notes }) } return 0
+      case 'outbox': {
+        const rows = n.outbox(arg)
+        out(rows.length ? rows.map(r => `${r.state.padEnd(7)} ${r.id}${r.message_id ? ` → message ${r.message_id}` : ''}${r.last_error ? `  (${r.attempts} attempt(s); ${r.last_error}${r.uncertain ? '; may have been posted' : ''})` : ''}`).join('\n') : 'The outbox is empty.', rows)
+        return 0
+      }
+      case 'status': {
+        const cfg = n.config()
+        if (arg) {
+          const ws = await workspace(p)
+          const ref = await import('../server/runs.ts').then(m => m.resolveRef(ws, arg))
+          const project = (await ws.readProject()).project?.id ?? ''
+          const st = n.runStatus(project, ref)
+          out(!st.configured ? `Zulip coordination is not configured${st.problem ? `: ${st.problem}` : ''}.` : [
+            `Topic: ${st.topic ? `${st.topic.channel} › ${st.topic.topic}${st.topic.url ? ` (${st.topic.url})` : ''}` : 'none yet'}`,
+            `Delivery: ${st.pending} pending, ${st.failed} failed${st.lastSent ? `; last sent ${st.lastSent}` : ''}${st.lastError ? `; last error: ${st.lastError}` : ''}`,
+            ...(st.provisioning ? [`Provisioning: ${st.provisioning}`] : []), ...(st.problem ? [`Problem: ${st.problem}`] : []), ...(st.skipped ? [`Not announced: ${st.skipped}`] : []),
+            `Answer link: ${st.viewBase ?? 'none configured — messages say to answer on the execution host'}`,
+          ].join('\n'), st)
+          return 0
+        }
+        await n.scan()
+        const o = n.overview()
+        out([
+          `Configuration: ${!cfg ? 'none (no zulip.json)' : 'problem' in cfg ? cfg.problem : `${cfg.enabled ? 'enabled' : 'disabled'}, ${cfg.zulipUrl}, answer link ${cfg.viewBase ?? 'none (remote readers are told to answer on the execution host)'}, announcing runs created since ${cfg.since}`}`,
+          'Targets:', ...o.targets.map(t => `  ${t.key.padEnd(44)} ${t.state.padEnd(11)} ${t.name}${t.zulip_id ? ` (#${t.zulip_id})` : ''}${t.problem ? ` — ${t.problem}` : ''}`),
+          'Runs:', ...o.runs.map(r => `  ${r.key.padEnd(44)} ${r.skipped ? 'not announced' : r.problem ? 'PROBLEM' : `${r.pending} pending, ${r.failed} failed`}${r.topic ? `  topic ${r.channel} › ${r.topic}` : ''}${r.problem ? ` — ${r.problem}` : ''}`),
+        ].join('\n'), { config: cfg, ...o })
+        return 0
+      }
+    }
+  } catch (e) {
+    if (e instanceof RequestError) throw new Refused(e.message, e.detail)
+    if (e instanceof UsageError) throw e
+    throw new Refused((e as Error).message)
+  } finally { n.close(); x.close(); execStore = undefined }
+  throw new UsageError('wfe notify status|outbox|due|target|sent|failed|moved|run-problem|reset')
+}
+
 // A person's request: their words become the run's braindump.md, and the
 // executor is queued.
 async function cmdRequest(p: Parsed): Promise<number> {
@@ -686,7 +770,7 @@ async function cmdDashboard(p: Parsed): Promise<number> {
 }
 
 const COMMANDS: Record<string, (p: Parsed) => Promise<number>> = {
-  run: cmdRun, project: cmdProject, repo: cmdRepo, dashboard: cmdDashboard, exec: cmdExec, request: cmdRequest,
+  run: cmdRun, project: cmdProject, repo: cmdRepo, dashboard: cmdDashboard, exec: cmdExec, request: cmdRequest, notify: cmdNotify,
   create: cmdCreate, register: cmdRegister, list: cmdList, status: cmdStatus, validate: cmdValidate,
   approve: cmdApprove, arrange: cmdArrange, 'add-repo': cmdAddRepo, workflow: cmdWorkflow, serve: cmdServe, setup: cmdSetup,
   version: cmdVersion,

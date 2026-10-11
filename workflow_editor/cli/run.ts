@@ -138,11 +138,12 @@ Closes a question without an answer; a node waiting on it resumes running.
 Writes run.json.`,
   events: `wfe run events <run> [--since <seq>]
 
-The notification boundary (p4: selection only, nothing is sent): the events
-a coordinator would announce, selected from committed history entries —
-acknowledged, question, answered, blocked, stopped, completed, decided,
-cancelled — each with a stable id (<project>/<workflow>/<run>#<seq>) and a
-pointer to the record. Reads only.`,
+The coordination events selected from committed history entries — started,
+question, answered, reported (a node's report), node-completed (manual
+policy), failed, held (stopped, interrupted, unknown), resumed, completed,
+decided, cancelled — each with a stable id
+(<project>/<workflow>/<run>#<seq>:<type>) and a pointer to the record. The
+same selection feeds Zulip delivery (wfe notify). Reads only.`,
   stop: `wfe run stop <run> --reason <text> --by <person>
 
 Stops execution; resumable. While an attempt executes, the stop is a request
@@ -471,7 +472,7 @@ export async function runCommand(c: RunCli): Promise<number> {
       if (!resp.record) throw c.refused(`run ${runKey(r)} cannot be used: ${resp.problem?.message}`)
       const since = Number(c.opt('since') ?? 0)
       const events = notableEvents(resp.record, since)
-      c.out(events.length ? events.map(e => `${e.id}  ${e.type.padEnd(12)} ${e.at}  ${e.detail.split('\n')[0].slice(0, 120)}`).join('\n') : `No notable events after seq ${since}.`, { ref: runKey(r), events })
+      c.out(events.length ? events.map(e => `${e.id}  ${e.type.padEnd(12)} ${e.at}  ${e.text.split('\n')[0].slice(0, 120)}`).join('\n') : `No notable events after seq ${since}.`, { ref: runKey(r), events })
       return 0
     }
     case 'access': {

@@ -72,8 +72,16 @@ export const api = {
   runOp: (id: string, workflow: string, run: string, op: Record<string, unknown> & { op: string; by: string; expectSeq?: number }) =>
     call<RunOpResponse>('POST', `${ws(id)}/runs/${encodeURIComponent(workflow)}/${encodeURIComponent(run)}/ops`, op),
   runExec: (id: string, workflow: string, run: string) => call<RunExecView>('GET', `${ws(id)}/runs/${encodeURIComponent(workflow)}/${encodeURIComponent(run)}/exec`),
+  runNotify: (id: string, workflow: string, run: string) => call<RunNotifyView>('GET', `${ws(id)}/runs/${encodeURIComponent(workflow)}/${encodeURIComponent(run)}/notify`),
   retryCheckpoint: (id: string, workflow: string, run: string, checkpoint: number) => call<unknown>('POST', `${ws(id)}/runs/${encodeURIComponent(workflow)}/${encodeURIComponent(run)}/checkpoints/${checkpoint}/publish`),
   requestRun: (id: string, input: { workflow: string; text: string; author: string; receipt: string }) =>
     call<{ ok: true; duplicate: boolean; ref: { workflow: string; run: string }; job: { id: number; state: string } }>('POST', `${ws(id)}/runs`, input),
   eventsUrl: (id?: string) => (id ? `${ws(id)}/events` : 'api/events'),
+}
+
+// Zulip coordination of one run (server/notify.ts runStatus).
+export interface RunNotifyView {
+  configured: boolean; problem?: string; skipped?: string
+  topic?: { url: string | null; channel: string; topic: string }
+  pending: number; failed: number; lastError?: string; lastSent?: string; provisioning?: string; viewBase: string | null
 }

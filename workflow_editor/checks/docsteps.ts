@@ -83,9 +83,11 @@ const allVisible = (p: Page) => p.evaluate(() => {
   return [...document.querySelectorAll<HTMLElement>('.canvas .node, .canvas .step-card, .canvas .report-icon, .canvas .final-step')].filter(e => !e.hidden)
     .every(e => { const r = e.getBoundingClientRect(); return r.left >= c.left - 1 && r.right <= c.right + 1 && r.top >= c.top - 1 && r.bottom <= c.bottom + 1 })
 })
+// The icon overlaps its card's lower-right corner: 18 px in, 12 px out.
 async function attached(p: Page, id: string): Promise<boolean> {
-  const card = await box(p, `.node[data-id="${id}"]`), icon = await box(p, `.report-icon[data-step="_report.${id}"]`)
-  return Math.abs(icon.x - (card.x + card.w - 18)) <= 1 && Math.abs(icon.y - (card.y + card.h - 18)) <= 1
+  const card = (await p.locator(`.node[data-id="${id}"]`).boundingBox())!, icon = (await p.locator(`.report-icon[data-step="_report.${id}"]`).boundingBox())!
+  const k = icon.width / 30
+  return Math.abs(icon.x - (card.x + card.width - 18 * k)) <= 1.5 && Math.abs(icon.y - (card.y + card.height - 18 * k)) <= 1.5
 }
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms))
 
@@ -160,6 +162,7 @@ try {
   const facts = await page.locator('.run-facts').innerText()
   check(/Work\s*2 completed · 2 pending/.test(facts) && /Documentation steps\s*1 running · 2 completed · 3 pending/.test(facts), `work and documentation are counted apart: ${facts.replace(/\n/g, ' | ')}`)
   check(/Writing report on\s*build/.test(await page.locator('.run-now').innerText()), 'summary: “Writing report on build”')
+  check(/Coordination \(Zulip\)\s*Not announced: Zulip coordination is not configured on this host/.test(await page.locator('.run-side').innerText()), 'the run view states its Zulip coordination (here: not configured)')
   await page.click('button[title="Fit graph"]')
   await sleep(150)
   check(await allVisible(page), 'run view: Fit includes the generated steps')

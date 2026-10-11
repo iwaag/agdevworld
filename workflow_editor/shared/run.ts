@@ -682,28 +682,74 @@ export function situation(s: Pick<RunState, 'control' | 'execution' | 'cancelled
   return 'idle'
 }
 
-// ---- notification boundary (p4: selection only, no delivery) ----------------------
+// ---- coordination events (p4 selection, p5 delivery) ----------------------------------
 
-// Events a coordinator would announce, selected from committed history
-// entries. Each carries a stable id (project/workflow/run#seq) and points at
-// the record for details. Nothing here sends anything.
-export type NotableType = 'acknowledged' | 'question' | 'answered' | 'blocked' | 'stopped' | 'completed' | 'decided' | 'cancelled'
-export interface NotableEvent { id: string; seq: number; type: NotableType; at: string; question?: string; node?: string; detail: string }
+// What a coordinator announces, selected from committed history entries:
+// the facts a person or another agent needs to know what happened, what is
+// uncertain and who acts next — not every record. Each event has a stable
+// id `<project>/<workflow>/<run>#<seq>:<type>` (one entry may give more than
+// one type) and points at the record for details. Delivery (server/notify.ts)
+// and its recovery use this one selection.
+//
+// `critical` events (questions, failures, holds, the completed execution, a
+// decision, a cancellation) are always sent on their own; routine ones may
+// be combined with adjacent routine ones.
+export type NotableType = 'started' | 'question' | 'answered' | 'reported' | 'node-completed' | 'failed' | 'held' | 'resumed' | 'completed' | 'decided' | 'cancelled'
+export interface NotableEvent {
+  id: string
+  seq: number
+  type: NotableType
+  at: string
+  by: string
+  critical: boolean
+  node?: string // the authored node concerned (a report's node, not the step)
+  step?: string // the documentation step, when it is one
+  question?: string
+  holder?: string // who holds the next move
+  text: string // the event's own words: a question, an outcome, a reason
+  document?: string // project-relative document the event refers to
+  hold?: HoldKind
+  decision?: 'accepted' | 'rejected'
+}
+// The hold an entry recorded, as the reducer worded it at that point (the
+// state keeps only the current hold): replayed from the frozen graph.
+function holdReason(r: RunRecord, seq: number): string {
+  const lastHold = [...r.history].reverse().find(h => h.change.hold?.[1])
+  if (lastHold?.seq === seq && r.control.hold) return r.control.hold.reason
+  const eff = r.definition.effective
+  if (!eff) return ''
+  try { return replay(r.history.slice(0, seq), { nodes: eff.nodes, edges: eff.edges }).state.control.hold?.reason ?? '' } catch { return '' }
+}
+
 export function notableEvents(r: RunRecord, sinceSeq = 0): NotableEvent[] {
   const out: NotableEvent[] = []
-  const id = (seq: number) => `${r.project}/${r.workflow}/${r.run}#${seq}`
+  const eff = r.definition.effective
+  const reporting = eff?.policy === 'default'
+  let started = false
   for (const e of r.history) {
-    if (e.seq <= sinceSeq) continue
     const d = e as unknown as Record<string, string>
-    const push = (type: NotableType, detail: string, extra: Partial<NotableEvent> = {}) => out.push({ id: id(e.seq), seq: e.seq, type, at: e.at, detail, ...extra })
-    if (e.op === 'attempt.begin' && d.reason === 'start') push('acknowledged', `${r.executor.name} began the run`)
-    else if (e.op === 'question.ask') push('question', d.text, { question: d.question, node: d.node })
-    else if (e.op === 'question.answer') push('answered', `answer to ${d.question} recorded`, { question: d.question })
-    else if (e.op === 'node.fail') push('blocked', `${d.node} failed: ${d.reason}`, { node: d.node })
-    else if (e.change.hold?.[1]) push(e.change.hold[1] === 'stopped' ? 'stopped' : 'blocked', `held: ${e.change.hold[1]}`)
-    if (e.change.execution?.[1] === 'completed') push('completed', 'every node completed')
-    if (e.op === 'run.decide') push('decided', `${d.decision} by ${e.by}`)
-    if (e.op === 'run.cancel') push('cancelled', d.reason)
+    if (e.op === 'attempt.begin' && !started) started = true
+    else if (e.op === 'attempt.begin') { /* a later launch is not news; holds and resumptions are */ }
+    if (e.seq <= sinceSeq) continue
+    const push = (type: NotableType, critical: boolean, text: string, extra: Partial<NotableEvent> = {}) =>
+      out.push({ id: `${r.project}/${r.workflow}/${r.run}#${e.seq}:${type}`, seq: e.seq, type, at: e.at, by: e.by, critical, text, ...extra })
+    const step = typeof d.node === 'string' ? eff?.nodes[d.node]?.step : undefined
+    if (e.op === 'attempt.begin' && r.history.find(h => h.op === 'attempt.begin')!.seq === e.seq) push('started', false, d.reason ?? '')
+    else if (e.op === 'question.ask') {
+      const q = r.questions[d.question]
+      push('question', true, d.text, { question: d.question, holder: d.to, node: step ? undefined : d.node, step: step ? d.node : undefined, document: q?.document?.path })
+    } else if (e.op === 'question.answer') push('answered', false, `answer to ${d.question} recorded`, { question: d.question, holder: r.executor.name })
+    else if (e.op === 'node.complete' && step?.kind === 'report') push('reported', false, d.outcome, { node: step.for ?? undefined, step: d.node, document: (e as unknown as { document?: DocumentEvidence }).document?.path })
+    else if (e.op === 'node.complete' && step?.kind === 'final-report') push('completed', true, d.outcome, { step: d.node, document: (e as unknown as { document?: DocumentEvidence }).document?.path })
+    else if (e.op === 'node.complete' && !step && !reporting) push('node-completed', false, d.outcome, { node: d.node })
+    else if (e.op === 'node.fail') push('failed', true, d.reason, { node: step ? step.for ?? undefined : d.node, step: step ? d.node : undefined })
+    // The hold's reason is derived by the reducer (an exit with work left
+    // running is an interruption); the latest hold carries it in the state.
+    if (e.change.hold?.[1]) push('held', true, holdReason(r, e.seq) || d.detail || d.reason || e.change.hold[1], { hold: e.change.hold[1] })
+    if (e.op === 'run.resume') push('resumed', false, d.reason)
+    if (e.change.execution?.[1] === 'completed' && !(step?.kind === 'final-report')) push('completed', true, d.outcome ?? 'every node completed')
+    if (e.op === 'run.decide') push('decided', true, d.evidence, { decision: d.decision as 'accepted' | 'rejected' })
+    if (e.op === 'run.cancel') push('cancelled', true, d.reason)
   }
   return out
 }

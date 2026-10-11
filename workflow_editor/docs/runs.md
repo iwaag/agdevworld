@@ -397,10 +397,71 @@ the run changed again needs a person. A failed push is retried without
 repeating the work (the journaled commits are pushed). Work completion and
 publication are shown separately.
 
-**Notification boundary.** `wfe run events` selects the events a future
-coordinator would announce (acknowledged, question, answered, blocked,
-stopped, completed, decided, cancelled), each with a stable id
-`<project>/<workflow>/<run>#<seq>`. Nothing is sent.
+**Coordination in Zulip (p5).** devdocs stays authoritative; Zulip carries
+short coordination messages that say what happened, what is uncertain and
+who acts next, and point at the records.
+
+| Zulip | Entity | Name (a label; identity is the recorded id) |
+| --- | --- | --- |
+| channel folder | project | `wf-<project>` |
+| channel | workflow | `wf-<project>.<workflow>` |
+| topic | run | `<run id>` |
+
+Names longer than 60 characters are cut with a hash of the whole. The `wf-`
+names and `run-…` topics match no legacy surface (`pj-`, `work-`, agent
+channels) and no listener's sweep prefix, and messages mention nobody, so
+no legacy listener is served by them; a reply in Zulip answers nothing —
+questions are answered in agdevworld, and the message says where.
+
+- **Selection** (`notableEvents`, `wfe run events`): started; a question
+  (who answers, the plan.md it asks about, where to answer); answered; a
+  node's report (its short outcome, the document); under manual policy a
+  node's completion; failed; held (stopped, interrupted, unknown — with the
+  reducer's reason); resumed; the completed execution ("not accepted yet");
+  a result decision; cancellation. Ids are `<project>/<workflow>/<run>#<seq>:<type>`.
+  Starts of nodes and steps, progress notes, attempts and other internal
+  transitions are not announced. Adjacent routine events go out as one
+  message; questions, failures, holds, completion, decisions and
+  cancellations alone. Messages have a budget (~900 characters) that
+  shortens free text, never the actionable lines.
+- **Publication** (from the checkpoints): a failed or attention checkpoint
+  and its recovery are announced; links are commit-addressed Gitea links
+  (`<origin>/src/commit/<sha>/<path in the owning repository>`, both devdocs
+  modes; credentials stripped), only when a published commit holds the
+  file. Otherwise the document is named as not yet published. A message
+  about a document waits for its publication while the attempt is open
+  (routine up to 20 min, questions and blockers 90 s); details that had to
+  be called unpublished get one "details published" update when a later
+  checkpoint publishes them.
+- **Durability** (`server/notify.ts`, `<area>/.local/notify/notify.sqlite`):
+  targets (folder, channels) with their Zulip ids and problems; each run's
+  topic binding and the identity it was bound with; an outbox keyed by event
+  id, rebuilt from history on every scan (a crash between the record and the
+  queue loses nothing). Delivery is ordered per run, retried with backoff
+  (15 s doubling to 15 min); a failure never changes the run's state. A send
+  whose answer was lost is marked uncertain and its marker line (`ref
+  <workflow>/<run> #<seq>:<type>`) is looked for in the topic before the
+  retry; exactly-once is not claimed. A run moved or renamed in Zulip is
+  followed by its last message id. A second run with the same
+  project/workflow/run identity (another workspace, another creation) is
+  refused as ambiguous, not merged. Runs created before `since` are not
+  announced (no backfill). Delayed messages say so; a question that is no
+  longer open says no action is needed.
+- **Provisioning**: a folder per project, then a channel per workflow known
+  from the registry's workspaces (external edits included), the realm owners
+  and the bot subscribed. An existing folder or channel of the same name is
+  adopted only when its description is this integration's (`[wfe] project
+  …`); otherwise it is a visible problem, and `wfe notify reset <key>` is the
+  repair path after a deletion or a rename.
+- **Configuration**: `<area>/zulip.json` `{enabled, zulipUrl, viewBase,
+  since, person}` — no credentials (autolab's transport holds them). A
+  `localhost` viewBase is refused; without one, messages say to answer on
+  the execution host and the run view says the remote address is missing.
+- **Transport**: autolab's `agautolab.wfnotify` asks `wfe notify due`, posts
+  with its bot and reports `sent` / `failed` / `moved` / `target`; it runs on
+  a thread of the executor process, independent of the agent and of the
+  slot. `wfe notify status|outbox|reset` are for people. The run view shows
+  the topic link, what is pending or failing, and provisioning problems.
 
 ## Operations
 
@@ -421,7 +482,8 @@ HTTP routes call them; neither needs the other running.
 | Stop (resumable), resume a held run | `stop`, `resume` | same (`run.stop`, `run.resume`) | run view → Execution |
 | Attempts, queue, publication of one run | `wfe exec status <run>` | `GET runs/<wf>/<run>/exec` | run view → Execution |
 | Retry a publication | `wfe exec publish <checkpoint>` | `POST runs/<wf>/<run>/checkpoints/<id>/publish` | run view → Retry publication |
-| Notable events | `events <run> [--since]` | — | — |
+| Coordination events (selection) | `events <run> [--since]` | — | — |
+| Zulip coordination of a run | `wfe notify status <run>` | `GET runs/<wf>/<run>/notify` | run view → Coordination (Zulip) |
 | Ask, take up, withdraw | `ask`, `take-up`, `withdraw` | same | — |
 | Answer | `answer <run> <q>` | same | run view → question → Answer |
 | Attach an artifact | `attach <run> <path>` | same | — (reports listed and readable) |

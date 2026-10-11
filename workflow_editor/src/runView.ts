@@ -6,7 +6,7 @@
 // edits a definition, and recording an answer does not wake any agent.
 import type { RunResponse } from '../shared/api.ts'
 import { holderOf, questionState, runKey, situation, type NodeRecord, type Question, type RunRecord } from '../shared/run.ts'
-import { api, ApiError, type RunExecView } from './api.ts'
+import { api, ApiError, type RunExecView, type RunNotifyView } from './api.ts'
 import { Canvas, STATE_GLYPH, TYPE_LABEL } from './canvas.ts'
 import { splitCounts, reportStep } from '../shared/compile.ts'
 import { stepFacts, stepLabel } from './inspector.ts'
@@ -71,6 +71,7 @@ export function renderRunView(root: HTMLElement, wsId: string, workflow: string,
   const drafts = new Map<string, string>() // answer and form drafts, kept across reloads
   let actor = stored(ACTOR_KEY, '')
   let execView: RunExecView | null = null
+  let notifyView: RunNotifyView | null = null
   let execError = ''
 
   const crumbs = h('div.crumbs')
@@ -99,6 +100,7 @@ export function renderRunView(root: HTMLElement, wsId: string, workflow: string,
       resp = r
       if (!rev) {
         try { execView = await api.runExec(wsId, workflow, run); execError = '' } catch (e) { execView = null; execError = (e as Error).message }
+        notifyView = await api.runNotify(wsId, workflow, run).catch(() => null)
       }
       loadError = ''
       if (r.record) shown = r
@@ -349,6 +351,7 @@ export function renderRunView(root: HTMLElement, wsId: string, workflow: string,
         viewing.error ? h('p.error', viewing.error) : viewing.text === undefined ? h('p.muted', 'Loading…') : h('pre', viewing.text)) : null))
 
     if (!rev) side.append(section('Execution', ...executionPanel(rec)))
+    if (!rev && notifyView) side.append(section('Coordination (Zulip)', ...coordinationPanel(notifyView)))
     if (!rev) side.append(section('Result', ...decisionForm(rec)))
 
     const history = rec.history.slice().reverse()
@@ -415,6 +418,21 @@ export function renderRunView(root: HTMLElement, wsId: string, workflow: string,
           c.state === 'failed' || c.state === 'attention' ? h('button', { onclick: async () => { try { await api.retryCheckpoint(wsId, workflow, run, c.id); opNotice = { kind: 'ok', text: 'Publication retried.' } } catch (e) { opNotice = { kind: 'error', text: `Retry failed: ${(e as Error).message}` } } await load({}) } }, 'Retry publication') : null))
       }
     }
+    return out
+  }
+
+  // Where this run's progress is announced, and what is still owed there.
+  // A delivery problem never changes the run's own state.
+  function coordinationPanel(v: RunNotifyView): (Node | null)[] {
+    if (!v.configured) return [h('p.small.muted', `Not announced: Zulip coordination is not configured on this host${v.problem ? ` (${v.problem})` : ''}.`)]
+    const out: (Node | null)[] = []
+    if (v.skipped) out.push(h('p.small.muted', `Not announced: ${v.skipped}.`))
+    out.push(v.topic ? h('p.small', 'Topic: ', v.topic.url ? h('a', { href: v.topic.url, target: '_blank', rel: 'noopener' }, `${v.topic.channel} › ${v.topic.topic}`) : `${v.topic.channel} › ${v.topic.topic}`) : h('p.small.muted', 'No message sent yet.'))
+    out.push(h(`p.small${v.failed ? '.error' : ''}`, `Delivery: ${v.pending} pending, ${v.failed} waiting for a retry${v.lastSent ? ` · last sent ${ago(v.lastSent)}` : ''}`))
+    if (v.lastError) out.push(h('p.small.error', `Last error: ${v.lastError}`))
+    if (v.provisioning) out.push(h('p.small.warn-text', `Channel: ${v.provisioning}`))
+    if (v.problem) out.push(h('div.banner.error.small', `${v.problem}`))
+    if (!v.viewBase) out.push(h('p.small.muted', 'No remote address of this view is configured: messages tell readers to answer on the execution host.'))
     return out
   }
 
@@ -496,7 +514,8 @@ export function renderRunView(root: HTMLElement, wsId: string, workflow: string,
     if (disposed || !shown?.record) return
     try {
       const v = await api.runExec(wsId, workflow, run)
-      if (JSON.stringify(v) !== JSON.stringify(execView)) { execView = v; execError = ''; renderSide() }
+      const nv = await api.runNotify(wsId, workflow, run).catch(() => null)
+      if (JSON.stringify(v) !== JSON.stringify(execView) || JSON.stringify(nv) !== JSON.stringify(notifyView)) { execView = v; notifyView = nv; execError = ''; renderSide() }
     } catch (e) { if (!execError) { execError = (e as Error).message; renderSide() } }
   }, 3000)
 

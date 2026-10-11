@@ -280,6 +280,12 @@ export function createHandler(config: ServiceConfig) {
         if (!ref.workflow || !ref.run || (parts.length > 7 && sub !== 'checkpoints')) throw new RequestError(404, 'not found')
         if (!sub && method === 'GET') return send(res, 200, await runResponse(ws, ref, { rev: url.searchParams.get('rev') || undefined }))
         if (sub === 'exec' && method === 'GET') return send(res, 200, needExec().runView(ws.reg.id, ref))
+        // Zulip coordination of this run: its topic, what is still owed, problems.
+        if (sub === 'notify' && method === 'GET') {
+          const { NotifyStore } = await import('./notify.ts')
+          const n = new NotifyStore({ area, registryFile: config.registryFile, exec: config.exec })
+          try { return send(res, 200, n.runStatus((await ws.readProject()).project?.id ?? '', ref)) } finally { n.close() }
+        }
         if (sub === 'checkpoints' && parts[7] && parts[8] === 'publish' && method === 'POST') return send(res, 200, await needExec().publishCheckpoint(Number(parts[7])))
         if (sub === 'file' && method === 'GET') return send(res, 200, await readRunFile(ws, ref, url.searchParams.get('path') ?? '', { rev: url.searchParams.get('rev') ?? undefined }))
         if (sub === 'ops' && method === 'POST') {

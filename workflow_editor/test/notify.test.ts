@@ -297,3 +297,73 @@ test('a hold carries the reducer\'s reason; resumption and cancellation are anno
   assert.equal(evs[1].hold, 'interrupted')
   assert.ok(evs.filter(e => e.type !== 'started' && e.type !== 'resumed').every(e => e.critical))
 })
+
+// ---- p5/ex1: migration of pre-p5/ex1 state -------------------------------------------
+
+// The schema the released p5 editor (32498e9) created, verbatim.
+const LEGACY_DDL = `
+  CREATE TABLE IF NOT EXISTS targets (key TEXT PRIMARY KEY, kind TEXT NOT NULL, project TEXT NOT NULL, workflow TEXT, name TEXT NOT NULL, description TEXT NOT NULL,
+    zulip_id INTEGER, state TEXT NOT NULL, problem TEXT, created TEXT NOT NULL, updated TEXT NOT NULL);
+  CREATE TABLE IF NOT EXISTS runs (key TEXT PRIMARY KEY, project TEXT NOT NULL, workflow TEXT NOT NULL, run TEXT NOT NULL, workspace TEXT NOT NULL, created TEXT NOT NULL,
+    scan_seq INTEGER NOT NULL DEFAULT 0, stream_id INTEGER, channel TEXT, topic TEXT, last_message_id INTEGER, problem TEXT, skipped TEXT, updated TEXT NOT NULL);
+  CREATE TABLE IF NOT EXISTS outbox (id TEXT PRIMARY KEY, run_key TEXT NOT NULL, ord REAL NOT NULL, type TEXT NOT NULL, critical INTEGER NOT NULL, event TEXT NOT NULL,
+    state TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, next_try TEXT, last_error TEXT, uncertain INTEGER NOT NULL DEFAULT 0, message_id INTEGER,
+    unpublished TEXT, sent_at TEXT, created TEXT NOT NULL);
+  CREATE INDEX IF NOT EXISTS outbox_run ON outbox (run_key, state, ord);`
+
+test('migration: sent evidence, bindings and pending work survive; legacy uncertainty becomes a reconciliation, with diagnostics', async () => {
+  const { DatabaseSync } = await import('node:sqlite')
+  const dir = join(root, 'legacy')
+  await rm(dir, { recursive: true, force: true })
+  const { mkdirSync } = await import('node:fs')
+  mkdirSync(join(dir, '.local', 'notify'), { recursive: true })
+  await writeFile(join(dir, 'zulip.json'), JSON.stringify({ enabled: true, zulipUrl: 'https://z.example', viewBase: null, since: '2026-01-01T00:00:00.000Z' }))
+  await writeFile(join(dir, 'registry.json'), JSON.stringify({ workspaces: [] }))
+  const file = join(dir, '.local', 'notify', 'notify.sqlite')
+  const db = new DatabaseSync(file)
+  db.exec('PRAGMA journal_mode = WAL;' + LEGACY_DDL)
+  const t = '2026-10-11T08:00:00.000Z'
+  db.prepare('INSERT INTO targets VALUES (\'channel:p/w\', \'channel\', \'p\', \'w\', \'wf-p.w\', \'[wfe] project p · workflow w: x\', 41, \'provisioned\', NULL, ?, ?)').run(t, t)
+  db.prepare('INSERT INTO runs (key, project, workflow, run, workspace, created, scan_seq, stream_id, channel, topic, last_message_id, updated) VALUES (?, \'p\', \'w\', ?, \'ws\', ?, 9, ?, ?, ?, ?, ?)').run('p/w/run-001', 'run-001', t, 41, 'wf-p.w', 'run-001', 501, t)
+  db.prepare('INSERT INTO runs (key, project, workflow, run, workspace, created, scan_seq, updated) VALUES (?, \'p\', \'x\', ?, \'ws\', ?, 3, ?)').run('p/x/run-001', 'run-001', t, t)
+  const row = (id: string, run: string, ord: number, state: string, o: { uncertain?: number; message?: number | null } = {}) =>
+    db.prepare('INSERT INTO outbox (id, run_key, ord, type, critical, event, state, uncertain, message_id, created) VALUES (?, ?, ?, \'reported\', 0, \'{}\', ?, ?, ?, ?)').run(id, run, ord, state, o.uncertain ?? 0, o.message ?? null, t)
+  row('p/w/run-001#2:started', 'p/w/run-001', 2, 'sent', { message: 500 })
+  row('p/w/run-001#3:reported', 'p/w/run-001', 3, 'sent', { message: 501 }) // a partial acknowledgment: #3 sent, #4 of its batch still uncertain
+  row('p/w/run-001#4:reported', 'p/w/run-001', 4, 'failed', { uncertain: 1 })
+  row('p/w/run-001#5:reported', 'p/w/run-001', 5, 'pending')
+  row('p/w/run-001#6:reported', 'p/w/run-001', 6, 'failed', { uncertain: 1 })
+  row('p/w/run-001#1:started', 'p/w/run-001', 1, 'sent') // sent without a message id
+  row('p/x/run-001#2:started', 'p/x/run-001', 2, 'pending') // no channel was ever provisioned for x
+  row('p/x/run-001#3:reported', 'p/x/run-001', 3, 'failed', { uncertain: 1 })
+  db.close()
+
+  const n = new NotifyStore({ area: dir, registryFile: join(dir, 'registry.json') })
+  assert.equal((n.db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, 2)
+  const out = Object.fromEntries(n.outbox().map(o => [o.id, o]))
+  assert.equal(out['p/w/run-001#2:started'].message_id, 500)
+  assert.equal(out['p/w/run-001#3:reported'].state, 'sent')
+  assert.equal(n.overview().runs.find(r => r.key === 'p/w/run-001')!.last_message_id, 501, 'the binding survives')
+  const [w, x] = n.deliveries()
+  assert.equal(w.kind, 'legacy')
+  assert.deepEqual(JSON.parse(w.events), ['p/w/run-001#4:reported', 'p/w/run-001#6:reported'], 'all uncertain events of the run, in order')
+  assert.equal(w.state, 'failed')
+  assert.equal(w.stream_id, 41)
+  assert.match(w.problem ?? '', /uncertain send of 2 event\(s\)/)
+  assert.match(w.problem ?? '', /inconsistent: 1 unattempted event\(s\) are ordered among or before the uncertain ones \(p\/w\/run-001#5:reported\)/)
+  assert.equal(out['p/w/run-001#5:reported'].delivery, null, 'unattempted work waits behind the reconciliation, unassigned')
+  assert.equal(x.state, 'unresolved', 'nowhere to search: a person decides')
+  assert.match(x.problem ?? '', /no destination is recorded/)
+  assert.ok(n.notes().some(o => /1 event\(s\) are recorded as sent without a message id/.test(o.note)))
+  // A second open applies nothing again.
+  n.close()
+  const again = new NotifyStore({ area: dir, registryFile: join(dir, 'registry.json') })
+  assert.equal(again.deliveries().length, 2)
+  // The person resolves the unsearchable one: its events go out again.
+  assert.match(again.resolve(x.id, { notPosted: true }, 'Test Person'), /go out in new deliveries/)
+  assert.equal(again.outbox().find(o => o.id === 'p/x/run-001#3:reported')!.delivery, null)
+  // A schema newer than this release is refused, not reinterpreted.
+  again.db.exec('PRAGMA user_version = 99')
+  again.close()
+  assert.throws(() => new NotifyStore({ area: dir, registryFile: join(dir, 'registry.json') }), /notify store: schema version failed.*newer than this release understands/)
+})

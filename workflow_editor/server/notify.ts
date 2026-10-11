@@ -174,8 +174,11 @@ function legacyUncertainty(db: DatabaseSync) {
     const rows = db.prepare('SELECT * FROM outbox WHERE run_key = ? AND state != \'sent\' ORDER BY ord, id').all(run_key) as unknown as OutboxRow[]
     const uncertain = rows.filter(r => r.uncertain)
     const notes = [`pre-p5/ex1 uncertain send of ${uncertain.length} event(s); the batch it was part of was not recorded, so the topic is searched for posts naming them before anything else of this run is sent`]
-    const firstUncertain = rows.indexOf(uncertain[0])
-    if (firstUncertain > 0) notes.push(`inconsistent: ${firstUncertain} unsent event(s) precede the uncertain ones (${rows.slice(0, firstUncertain).map(r => r.id).join(', ')}); they wait behind this reconciliation`)
+    // The old transport sent a contiguous prefix of a run's unsent events;
+    // an unattempted event among or before the uncertain ones is not that.
+    const lastUncertain = rows.lastIndexOf(uncertain.at(-1)!)
+    const among = rows.slice(0, lastUncertain).filter(r => !r.uncertain)
+    if (among.length) notes.push(`inconsistent: ${among.length} unattempted event(s) are ordered among or before the uncertain ones (${among.map(r => r.id).join(', ')}); they wait behind this reconciliation`)
     legacyDelivery(db, run_key, uncertain.map(r => r.id), uncertain[0].ord, notes.join('; '), at)
   }
   const odd = db.prepare('SELECT count(*) AS n FROM outbox WHERE state = \'sent\' AND message_id IS NULL').get() as { n: number }

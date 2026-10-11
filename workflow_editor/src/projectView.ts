@@ -415,6 +415,9 @@ export function renderProjectView(root: HTMLElement, wsId: string): ViewHandle {
 
   function render() {
     renderHeader()
+    // Project reads supply the workflow choices independently of run reads.
+    // Refresh the retained card too, even when the runs response arrived first.
+    renderRuns()
     main.replaceChildren(
       h('div.col', renderProjectCard(), renderRepos()),
       h('div.col', renderWorkspaces(), runsCard, renderWorkflows()),

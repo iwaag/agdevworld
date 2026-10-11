@@ -66,11 +66,28 @@ const result: Record<string, unknown> = {}
 
 try {
   console.log('request through the Project Editor')
+  // Force the runs response to arrive before the project/workflow data.
+  // The retained request card must refresh when the latter finally arrives.
+  await page.route('**/api/workspaces/chk/project*', async route => {
+    await new Promise(r => setTimeout(r, 1200))
+    await route.continue()
+  })
   await page.goto(`${B}/#/ws/chk`)
   await page.waitForSelector('.request-run', { timeout: 8000 }).catch(async () => { await shot(page, 'p4-debug-project', true); console.log(await page.locator('main').innerText()) })
+  await page.waitForSelector('.workflows .wf-row')
+  check(await page.getByLabel('Request workflow').locator('option[value="ship"]').count() === 1,
+    'workflow choices appear when project data arrives after the runs')
   await page.getByLabel('Request workflow').selectOption('ship')
   await page.getByLabel('Request author').fill('Check Person')
   await page.getByLabel('Request text').fill('Please build a small thing.')
+  await page.unrouteAll({ behavior: 'wait' })
+  const refreshed = page.waitForResponse(r => r.url().includes('/api/workspaces/chk/project?refresh=1'))
+  await page.getByRole('button', { name: 'Refresh', exact: true }).click()
+  await refreshed
+  await page.waitForFunction(() => document.querySelector<HTMLSelectElement>('[aria-label="Request workflow"]')?.value === 'ship')
+  check(await page.getByLabel('Request author').inputValue() === 'Check Person'
+    && await page.getByLabel('Request text').inputValue() === 'Please build a small thing.',
+    'refreshing workflow choices preserves the request author, text and selection')
   await page.getByRole('button', { name: 'Request run' }).click()
   check(await waitText('.request-run', /Requested: ship\/run-001/), 'the request creates the run and queues the executor')
   check((await readRun(ws, ref)).record?.input.author === 'Check Person', 'the person\'s words are the braindump, with them as author')

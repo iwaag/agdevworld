@@ -431,6 +431,15 @@ imported commit).
   (`GET /wfe/api/version`) and the launcher (`wfe version`) to report the
   commit; otherwise it restores the previous release. `deploy` = build +
   activate; `rollback` returns to `service/previous`; `status` reads all of it.
+- **Operating boundary.** The editor never registers, creates, requests,
+  claims or opens a workspace on system code, releases or control data, and
+  never takes up a retired repository (`workflow_editor/server/boundary.ts`,
+  its README). Implicit: the running package and the area's control data.
+  Configured in the area's `system.json`: agdevworld, agautolab, the frozen
+  experiment and the Gitea credentials folder are protected, and
+  `developer/pj-workflow-editor` (Gitea id 132) is retired. Edit that file,
+  not a project, to change the boundary. `wfe project unregister <id>` is the
+  supported way to take a project out of the catalog.
 - **launchd.** `pj-agdev/devenv/launchd/com.agdev.wfe-service.plist.in` runs
   `service/current/server/main.ts` with the area's registry; the executor
   (`com.agdev.agautolab-wfexec`) uses `bin/wfe` through

@@ -4,6 +4,7 @@
 // relations, reports and history — and offers the person's operations:
 // answering a question, deciding on the result, cancelling the run. It never
 // edits a definition, and recording an answer does not wake any agent.
+import { backendFact } from '../shared/backend.ts'
 import type { RunResponse } from '../shared/api.ts'
 import { holderOf, questionState, runKey, situation, type NodeRecord, type Question, type RunRecord } from '../shared/run.ts'
 import { api, ApiError, type RunExecView, type RunNotifyView } from './api.ts'
@@ -172,7 +173,7 @@ export function renderRunView(root: HTMLElement, wsId: string, workflow: string,
         srcText ? h(`span.src-state.${src!.status}`, srcText + (src?.renamed ? ` (now ${src.file})` : '')) : null),
       h('div.run-facts',
         fact('Input', input.kind === 'braindump' ? `braindump.md — the words of ${input.author}${input.recordedBy ? `, recorded by ${input.recordedBy}` : ''}` : `request.md — by ${input.requester}${input.onBehalfOf ? ` on behalf of ${input.onBehalfOf}` : ''}`),
-        fact('Executor', `${rec.executor.name} · backend ${rec.executor.backend ?? 'unknown'}`),
+        fact('Executor', `${rec.executor.name} · ${backendFact(rec.executor.backend, rev || !execView ? null : execView.attempts)}`, 'executor'),
         fact('Created', when(rec.created)), fact('Started', rec.started ? when(rec.started) : '—'), fact('Ended', rec.ended ? when(rec.ended) : '—'),
         fact('Last recorded update', `${when(rec.updated)} (${ago(rec.updated)})`, 'last-update'),
         ...countFacts(rec)),
@@ -516,7 +517,7 @@ export function renderRunView(root: HTMLElement, wsId: string, workflow: string,
     try {
       const v = await api.runExec(wsId, workflow, run)
       const nv = await api.runNotify(wsId, workflow, run).catch(() => null)
-      if (JSON.stringify(v) !== JSON.stringify(execView) || JSON.stringify(nv) !== JSON.stringify(notifyView)) { execView = v; notifyView = nv; execError = ''; renderSide() }
+      if (JSON.stringify(v) !== JSON.stringify(execView) || JSON.stringify(nv) !== JSON.stringify(notifyView)) { execView = v; notifyView = nv; execError = ''; renderSide(); renderSummary(shown) }
     } catch (e) { if (!execError) { execError = (e as Error).message; renderSide() } }
   }, 3000)
 

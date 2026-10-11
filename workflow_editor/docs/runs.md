@@ -581,7 +581,12 @@ questions are answered in agdevworld, and the message says where.
   …`); otherwise it is a visible problem, and `wfe notify reset <key>` is the
   repair path after a deletion or a rename.
 - **Configuration**: `<area>/zulip.json` `{enabled, zulipUrl, viewBase,
-  since, person}` — no credentials (autolab's transport holds them). A
+  since, person, intake?}` — no credentials (autolab's transport holds them).
+  `intake` (p6, [intake.md](intake.md)): `{enabled, since, projects: {<id>:
+  {workspace?}}, requesters: [{id: <Zulip user id>, name: <recorded as>}]}`;
+  the transport reads it through `wfe intake due` and runs on a thread of
+  `agautolab.wfexec` when its `.local/wfexec.toml` has `[intake] enabled =
+  true`. A
   `localhost` viewBase is refused; without one, messages say to answer on
   the execution host and the run view says the remote address is missing.
 - **Transport** (protocol 2; `wfe notify protocol`): autolab's

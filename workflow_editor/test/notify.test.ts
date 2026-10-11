@@ -11,7 +11,7 @@ import { notableEvents, type OpInput, type RunRef } from '../shared/run.ts'
 import { createProject } from '../server/create.ts'
 import { ExecStore } from '../server/exec.ts'
 import { gitOk } from '../server/git.ts'
-import { NotifyStore } from '../server/notify.ts'
+import { NotifyStore, type Delivery } from '../server/notify.ts'
 import { loadRegistry, registerWorkspace } from '../server/registry.ts'
 import { createRun, runOp } from '../server/runs.ts'
 import { Workspace } from '../server/workspace.ts'
@@ -103,6 +103,10 @@ async function area(name: string, o: { mode?: 'directory' | 'submodule'; config?
   return { dir, proj, ws, exec, store, registryFile }
 }
 const by = (ws: Workspace, ref: RunRef) => async (input: OpInput, who?: string) => (await runOp(ws, ref, input, { by: who, via: 'cli' })).record
+// The transport's side of the claim protocol, in process: one sender.
+const SENDER = { owner: 'test-sender', pid: process.pid }
+const claim = async (n: NotifyStore, at?: Date) => (await n.claim(SENDER, at)).deliveries
+const post = (n: NotifyStore, d: Delivery, messageId: number) => { n.begin(d.delivery, d.claim, { destination: d.destination }); n.acknowledge(d.delivery, d.claim, { messageId, destination: d.destination }) }
 async function provisionAll(n: NotifyStore) {
   for (let i = 0; i < 3; i++) {
     const d = await n.due()
@@ -119,15 +123,14 @@ test('without configuration nothing is owed; with it the folder comes before the
   let d = await n.due()
   assert.deepEqual(d.provision.map(t => t.kind), ['folder'])
   assert.equal(d.provision[0].name, 'wf-demo')
-  assert.deepEqual(d.deliveries, [])
+  assert.deepEqual(await claim(n), [])
   n.recordTarget('folder:demo', { zulipId: 7 })
   d = await n.due()
   assert.deepEqual(d.provision.map(t => [t.kind, t.name, 'folderId' in t ? t.folderId : null]), [['channel', 'wf-demo.ship', 7]])
   n.recordTarget('channel:demo/ship', { zulipId: 41 })
   const rec = by(a.ws, ref)
   await rec({ op: 'node.start', node: '_plan' })
-  d = await n.due()
-  assert.deepEqual(d.deliveries, [], 'node starts are not news')
+  assert.deepEqual((await claim(n)).filter(x => !x.events[0].endsWith(':started')), [], 'node starts are not news')
   void rec
 })
 
@@ -144,25 +147,32 @@ test('ordered, combined, critical alone; restart keeps state; a crash before que
   await rec({ op: 'attempt.end', attempt: 'a1', outcome: 'exited' } as OpInput, 'autolab')
   // A new store instance: what a restarted service or CLI sees.
   const n2 = a.store()
-  let d = await n2.due()
-  assert.equal(d.deliveries.length, 1)
-  assert.deepEqual(d.deliveries[0].ids, ['demo/ship/run-001#2:started'], 'the routine start goes first, alone before a critical question')
-  assert.match(d.deliveries[0].content, /\*\*Started\*\* — autolab took up the request: “Add a unit\.”/)
-  assert.equal(d.deliveries[0].topic, 'run-001')
-  assert.equal(d.deliveries[0].streamId, 41)
-  n2.recordSent(d.deliveries[0].ids, { messageId: 1001, streamId: 41, channel: 'wf-demo.ship', topic: 'run-001' })
-  d = await n2.due()
-  assert.deepEqual(d.deliveries[0].ids, ['demo/ship/run-001#4:question'])
-  assert.match(d.deliveries[0].content, /Question for Test Person/)
-  assert.equal(d.deliveries[0].lastMessageId, 1001)
+  let d = await claim(n2)
+  assert.equal(d.length, 1)
+  assert.deepEqual(d[0].events, ['demo/ship/run-001#2:started'], 'the routine start goes first, alone before a critical question')
+  assert.match(d[0].content, /\*\*Started\*\* — autolab took up the request: “Add a unit\.”/)
+  assert.equal(d[0].destination.topic, 'run-001')
+  assert.equal(d[0].destination.streamId, 41)
+  assert.equal(d[0].reconcile, null)
+  post(n2, d[0], 1001)
+  d = await claim(n2)
+  assert.deepEqual(d[0].events, ['demo/ship/run-001#4:question'])
+  assert.match(d[0].content, /Question for Test Person/)
+  assert.equal(d[0].lastMessageId, 1001)
   // The transport's answer was lost: the next attempt is told to look first.
-  n2.recordFailed(d.deliveries[0].ids, 'timed out after the request', true)
-  assert.deepEqual((await n2.due()).deliveries, [], 'a failed row waits for its retry time; nothing passes it')
-  n2.db.prepare('UPDATE outbox SET next_try = ? WHERE id = ?').run('2000-01-01T00:00:00.000Z', 'demo/ship/run-001#4:question')
-  d = await n2.due()
-  assert.equal(d.deliveries[0].uncertain, true)
-  assert.equal(d.deliveries[0].marker, 'ref ship/run-001 #4:question')
-  n2.recordSent(d.deliveries[0].ids, { messageId: 1002, streamId: 41, channel: 'wf-demo.ship', topic: 'run-001' })
+  n2.begin(d[0].delivery, d[0].claim, { destination: d[0].destination })
+  n2.fail(d[0].delivery, d[0].claim, 'timed out after the request', true)
+  assert.deepEqual(await claim(n2), [], 'a failed delivery waits for its retry time; nothing passes it')
+  n2.db.prepare('UPDATE deliveries SET next_try = ? WHERE id = ?').run('2000-01-01T00:00:00.000Z', d[0].delivery)
+  const again = (await claim(n2))[0]
+  assert.equal(again.delivery, d[0].delivery, 'the same delivery')
+  assert.equal(again.content, d[0].content)
+  assert.equal(again.marker, 'ref ship/run-001 #4:question')
+  assert.ok(again.reconcile, 'it may have been posted: look first')
+  assert.throws(() => n2.begin(again.delivery, again.claim, { destination: again.destination }), /search for its marker first/)
+  assert.throws(() => n2.acknowledge(again.delivery, d[0].claim, { messageId: 1002, destination: again.destination, found: true }), /stale/)
+  n2.acknowledge(again.delivery, again.claim, { messageId: 1002, destination: again.destination, found: true })
+  assert.equal(n2.acknowledge(again.delivery, again.claim, { messageId: 1002, destination: again.destination, found: true }), 'already recorded', 'repeating the acknowledgment is harmless')
   // Recorded in run.json, not yet scanned: the next due() finds it.
   await rec({ op: 'question.answer', question: 'q1', text: 'Agreed.' }, 'Test Person')
   await rec({ op: 'attempt.begin', attempt: 'a2', reason: 'resume' } as OpInput, 'autolab')
@@ -175,14 +185,14 @@ test('ordered, combined, critical alone; restart keeps state; a crash before que
   await rec({ op: 'node.complete', node: '_report.study', outcome: 'Read three sources. Next: build.', attempt: 'a2' } as OpInput)
   // The attempt is open in this host's records: the report waits for its publication.
   a.exec.db.prepare('INSERT INTO attempts (id, job, workspace, workflow, run, host, state, began) VALUES (?, 1, ?, ?, ?, \'h\', \'running\', ?)').run('a2', a.ws.reg.id, 'ship', 'run-001', new Date().toISOString())
-  d = await a.store().due()
-  assert.deepEqual(d.deliveries.map(x => x.ids.map(i => i.replace(/#\d+/, ''))), [['demo/ship/run-001:answered']], 'the answer notice goes; the report waits for publication while the attempt is open')
-  a.store().recordSent(d.deliveries[0].ids, { messageId: 1003, streamId: 41, channel: 'wf-demo.ship', topic: 'run-001' })
+  d = await claim(a.store())
+  assert.deepEqual(d.map(x => x.events.map(i => i.replace(/#\d+/, ''))), [['demo/ship/run-001:answered']], 'the answer notice goes; the report waits for publication while the attempt is open')
+  post(a.store(), d[0], 1003)
   a.exec.db.prepare('UPDATE attempts SET state = \'ended\' WHERE id = ?').run('a2')
-  d = await a.store().due()
-  assert.deepEqual(d.deliveries[0].ids.map(i => i.replace(/#\d+/, '')), ['demo/ship/run-001:reported'])
-  assert.match(d.deliveries[0].content, /\*\*Report — Study:\*\* Read three sources/)
-  assert.match(d.deliveries[0].content, /report-study\.md \(not yet published/)
+  d = await claim(a.store())
+  assert.deepEqual(d[0].events.map(i => i.replace(/#\d+/, '')), ['demo/ship/run-001:reported'])
+  assert.match(d[0].content, /\*\*Report — Study:\*\* Read three sources/)
+  assert.match(d[0].content, /report-study\.md \(not yet published/)
   assert.ok(n2.outbox('demo/ship/run-001').every(o => o.id.startsWith('demo/ship/run-001#')))
 })
 
@@ -195,27 +205,29 @@ test('a published checkpoint answers earlier unpublished details; failures and r
   await rec({ op: 'node.start', node: '_plan' })
   await writeFile(join(a.proj, dir, 'plan.md'), '# Plan\n')
   await rec({ op: 'question.ask', question: '', node: '_plan', text: 'Agree?', to: 'Test Person' })
-  let d = await n.due()
-  assert.match(d.deliveries[0].content, /plan\.md \(not yet published/)
-  n.recordSent(d.deliveries[0].ids, { messageId: 2001, streamId: 41, channel: 'wf-demo.ship', topic: 'run-001' })
+  let d = await claim(n)
+  assert.match(d[0].content, /plan\.md \(not yet published/)
+  post(n, d[0], 2001)
   // The publication fails first, then succeeds.
   const steps = JSON.stringify([{ repo: '.', include: [], excluded: [], conflicts: [], error: 'remote unreachable' }])
   a.exec.db.prepare('INSERT INTO checkpoints (id, workspace, workflow, run, kind, attempt, state, created, updated, steps, error) VALUES (1, ?, \'ship\', \'run-001\', \'after attempt\', NULL, \'failed\', ?, ?, ?, ?)').run(a.ws.reg.id, new Date().toISOString(), new Date().toISOString(), steps, 'git push failed: remote unreachable')
-  d = await n.due()
-  assert.deepEqual(d.deliveries[0].ids, ['demo/ship/run-001#cp1:failed'])
-  assert.match(d.deliveries[0].content, /Publication failed.*remote unreachable/)
-  n.recordSent(d.deliveries[0].ids, { messageId: 2002, streamId: 41, channel: 'wf-demo.ship', topic: 'run-001' })
+  d = await claim(n)
+  assert.deepEqual(d[0].events, ['demo/ship/run-001#cp1:failed'])
+  assert.match(d[0].content, /Publication failed.*remote unreachable/)
+  post(n, d[0], 2002)
   await gitOk(a.proj, ['add', '-A'])
   await gitOk(a.proj, ['commit', '-q', '-m', 'run'])
   const head = (await gitOk(a.proj, ['rev-parse', 'HEAD'])).trim()
   await gitOk(a.proj, ['remote', 'add', 'origin', 'http://gitea.example/developer/pj-demo.git']).catch(() => gitOk(a.proj, ['remote', 'set-url', 'origin', 'http://gitea.example/developer/pj-demo.git']))
   a.exec.db.prepare('UPDATE checkpoints SET state = \'published\', error = NULL, steps = ? WHERE id = 1').run(JSON.stringify([{ repo: '.', include: [dir], excluded: [], conflicts: [], commit: head, pushed: true, branch: 'main' }]))
-  d = await n.due()
-  assert.deepEqual(d.deliveries.map(x => x.ids).flat(), ['demo/ship/run-001#cp1:recovered'])
-  n.recordSent(d.deliveries[0].ids, { messageId: 2003, streamId: 41, channel: 'wf-demo.ship', topic: 'run-001' })
-  d = await n.due()
-  assert.deepEqual(d.deliveries[0].ids, ['demo/ship/run-001#cp1:published'])
-  assert.match(d.deliveries[0].content, new RegExp(`Details published.*\\[plan\\.md\\]\\(http://gitea\\.example/developer/pj-demo/src/commit/${head}/devdocs/runs/ship/run-001/plan\\.md\\)`))
+  d = await claim(n)
+  assert.deepEqual(d.map(x => x.events).flat(), ['demo/ship/run-001#cp1:recovered'])
+  post(n, d[0], 2003)
+  d = await claim(n)
+  assert.deepEqual(d[0].events, ['demo/ship/run-001#cp1:published'])
+  assert.match(d[0].content, new RegExp(`Details published.*\\[plan\\.md\\]\\(http://gitea\\.example/developer/pj-demo/src/commit/${head}/devdocs/runs/ship/run-001/plan\\.md\\)`))
+  assert.equal(d[0].marker, `ref ship/run-001 cp1:published ${head.slice(0, 7)}`, 'the follow-up\'s marker names its own event')
+  assert.match(n.deliveries('demo/ship/run-001')[0].unpublished ?? '', /plan\.md/, 'the frozen record keeps what the first message called unpublished')
 })
 
 test('submodule devdocs: links point into the devdocs repository at its commit', async () => {
@@ -237,7 +249,7 @@ test('runs before announcements began are not backfilled; a duplicate identity i
   await createRun(a.ws, { workflow: 'ship', input: { kind: 'braindump', text: 'x', author: 'P' }, executor: { name: 'autolab', backend: null }, by: 'P', via: 'cli' })
   const n = a.store()
   await provisionAll(n)
-  assert.deepEqual((await n.due()).deliveries, [])
+  assert.deepEqual(await claim(n), [])
   assert.match(n.overview().runs[0].skipped ?? '', /not backfilled/)
 
   const b = await area('dup')
@@ -254,7 +266,7 @@ test('runs before announcements began are not backfilled; a duplicate identity i
   const ws2 = new Workspace((await loadRegistry(b.registryFile)).workspaces.find(w => w.id === 'demo-2')!)
   await new Promise(r => setTimeout(r, 5))
   await createRun(ws2, { workflow: 'ship', input: { kind: 'braindump', text: 'other', author: 'P' }, executor: { name: 'autolab', backend: null }, by: 'P', via: 'cli' })
-  const d = await nb.due()
+  const d = await nb.claim(SENDER)
   assert.deepEqual(d.deliveries, [])
   assert.match(d.problems.join('\n'), /ambiguous identity: demo\/ship\/run-001 exists in workspace demo .* and in demo-2/)
   assert.match(nb.reset('demo/ship/run-001').join('\n'), /cleared/)

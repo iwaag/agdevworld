@@ -9,19 +9,34 @@
 // - runs: each run's topic binding (channel id, topic, last message id) and
 //   the identity it was bound with (workspace + creation time), so two
 //   different runs sharing project/workflow/run are refused, not merged;
+//   relocations: where a run's topic was followed to, kept as history;
 // - outbox: one row per coordination event, keyed by its stable id
 //   (<project>/<workflow>/<run>#<seq>:<type>, or a checkpoint's), rebuilt
 //   from history whenever it is scanned, so a crash between the record and
-//   the queue loses nothing.
+//   the queue loses nothing;
+// - deliveries (p5/ex1): one row per message. Its events, their order, the
+//   text, the marker line, the documents it called unpublished and where it
+//   was meant to go are frozen when it is first handed to a sender and never
+//   change afterwards; an event belongs to one delivery only, and a run has
+//   at most one delivery in progress. New events wait for the next one;
+// - senders: which transport may deliver. Only the recorded owner claims and
+//   sends; another takes over only when the owner's process is gone.
 //
 // The transport (autolab's agautolab.wfnotify, with the existing Zulip
-// client) asks `due()` what to do and reports each result; it never decides
-// what is notable. Delivery is ordered per run, retried with backoff, and a
-// send whose answer was lost is reconciled by its marker before retrying.
+// client) claims what is due, records `begin` before each POST and reports
+// the result with the delivery and claim it was given; it never decides what
+// is notable. A delivery that may have been posted — the answer was lost, or
+// a send was begun and not finished — is looked for by its marker before
+// anything is posted again, and only an established absence lets the same
+// payload go out again. Exactly-once is not claimed: a message deleted by
+// hand, or a search Zulip cannot answer, leaves the delivery uncertain, and
+// that is shown rather than guessed.
+import { randomBytes } from 'node:crypto'
 import { existsSync, mkdirSync, readFileSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
+import { hostname } from 'node:os'
 import { join } from 'node:path'
-import { DatabaseSync } from 'node:sqlite'
+import type { DatabaseSync } from 'node:sqlite'
 import {
   channelDescription, channelName, folderDescription, folderName, renderMessage, renderPublication, renderPublished, topicName, topicUrl,
   DELAYED_AFTER_MS, type DocLink, type RenderContext,
@@ -32,7 +47,8 @@ import type { CheckpointRow, ExecStore } from './exec.ts'
 import { git } from './git.ts'
 import { loadRegistry, observe } from './registry.ts'
 import { listRuns, readRun, runDir } from './runs.ts'
-import { Workspace } from './workspace.ts'
+import { openStore, transaction, type Migration } from './sqlite.ts'
+import { RequestError, Workspace } from './workspace.ts'
 
 // <area>/zulip.json — system configuration, outside every repository. No
 // credentials: the transport holds those.
@@ -59,18 +75,125 @@ export function loadNotifyConfig(area: string): NotifyConfig | { problem: string
   }
 }
 
+// The interface between this store and the transport. A transport that
+// speaks another version is refused rather than half understood (p5/ex1:
+// version 2 = frozen deliveries with claims; version 1 sent event ids).
+export const NOTIFY_PROTOCOL = 2
+
 export interface TargetRow { key: string; kind: 'folder' | 'channel'; project: string; workflow: string | null; name: string; description: string; zulip_id: number | null; state: 'pending' | 'provisioned' | 'problem'; problem: string | null; created: string; updated: string }
 export interface RunRow { key: string; project: string; workflow: string; run: string; workspace: string; created: string; scan_seq: number; stream_id: number | null; channel: string | null; topic: string | null; last_message_id: number | null; problem: string | null; skipped: string | null; updated: string }
+// state/attempts/next_try/last_error/uncertain are the pre-p5/ex1 per-event
+// delivery fields: kept for history and migration; deliveries carry them now.
 export interface OutboxRow { id: string; run_key: string; ord: number; type: string; critical: number; event: string; state: 'pending' | 'sent' | 'failed'; attempts: number; next_try: string | null; last_error: string | null; uncertain: number; message_id: number | null; unpublished: string | null; sent_at: string | null; created: string }
+export interface Destination { streamId: number; channel: string; topic: string }
+// ready: frozen, no send begun since it was (re)claimed; sending: a POST may
+// be under way or may have happened; failed: retried at next_try, `uncertain`
+// says whether it may have been posted; unresolved: needs a person (`wfe
+// notify resolve`); sent; resolved: a legacy delivery whose events were
+// accounted for.
+export type DeliveryState = 'ready' | 'sending' | 'failed' | 'unresolved' | 'sent' | 'resolved'
+export interface DeliveryRow {
+  id: number; run_key: string; kind: 'message' | 'legacy'; ord: number; events: string; content: string | null; marker: string | null; unpublished: string | null
+  stream_id: number | null; channel: string | null; topic: string | null; tried: string; state: DeliveryState; claim: string | null; owner: string | null
+  attempts: number; failures: number; next_try: string | null; last_error: string | null; uncertain: number; first_began: string | null; checked: string | null
+  message_id: number | null; sent_at: string | null; followed_up: number | null; problem: string | null; created: string; updated: string
+}
+export interface SenderRow { name: string; owner: string; pid: number | null; host: string; since: string; seen: string }
+export interface Sender { owner: string; pid: number }
 
 // What the transport is asked to do.
 export type ProvisionTask =
   | { kind: 'folder'; key: string; name: string; description: string; zulipId: number | null }
   | { kind: 'channel'; key: string; name: string; description: string; zulipId: number | null; folderId: number }
-export interface Delivery { ids: string[]; run: string; streamId: number; channel: string; topic: string; lastMessageId: number | null; content: string; marker: string; uncertain: boolean }
+// One claimed delivery. `destination` is where to post now (the run's
+// binding, which follows moves); `reconcile` is set when an earlier send may
+// have posted it: look in `searchIn` for the sender's messages since `since`
+// whose last line is `marker` (legacy: whose marker names any of `tokens`).
+export interface Delivery {
+  delivery: number; claim: string; run: string; kind: 'message' | 'legacy'; events: string[]; content: string; marker: string
+  destination: Destination; lastMessageId: number | null; attempts: number
+  reconcile: null | { since: string; searchIn: Destination[]; label: string; tokens?: { event: string; token: string }[] }
+}
 
 const now = () => new Date().toISOString()
-const BACKOFF = (attempts: number) => Math.min(15 * 60, 15 * 2 ** Math.max(0, attempts - 1)) * 1000
+const BACKOFF = (failures: number) => Math.min(15 * 60, 15 * 2 ** Math.max(0, failures - 1)) * 1000
+const ACTIVE = `('ready', 'sending', 'failed', 'unresolved')`
+const alive = (pid: number | null) => { if (!pid) return false; try { process.kill(pid, 0); return true } catch (e) { return (e as NodeJS.ErrnoException).code === 'EPERM' } }
+const sameDest = (a: Destination, b: Destination) => a.streamId === b.streamId && a.topic === b.topic
+
+// The marker token an event id stands for: `#<seq>:<type>` for a run entry,
+// `cp<n>:<state>` for a checkpoint's.
+export function markerToken(eventId: string): string {
+  const tail = eventId.slice(eventId.indexOf('#') + 1)
+  return tail.startsWith('cp') ? tail : `#${tail}`
+}
+
+const MIGRATIONS: Migration[] = [
+  {
+    version: 1, // p5: targets, runs, outbox (created before versions were kept)
+    up: db => db.exec(`
+      CREATE TABLE IF NOT EXISTS targets (key TEXT PRIMARY KEY, kind TEXT NOT NULL, project TEXT NOT NULL, workflow TEXT, name TEXT NOT NULL, description TEXT NOT NULL,
+        zulip_id INTEGER, state TEXT NOT NULL, problem TEXT, created TEXT NOT NULL, updated TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS runs (key TEXT PRIMARY KEY, project TEXT NOT NULL, workflow TEXT NOT NULL, run TEXT NOT NULL, workspace TEXT NOT NULL, created TEXT NOT NULL,
+        scan_seq INTEGER NOT NULL DEFAULT 0, stream_id INTEGER, channel TEXT, topic TEXT, last_message_id INTEGER, problem TEXT, skipped TEXT, updated TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS outbox (id TEXT PRIMARY KEY, run_key TEXT NOT NULL, ord REAL NOT NULL, type TEXT NOT NULL, critical INTEGER NOT NULL, event TEXT NOT NULL,
+        state TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, next_try TEXT, last_error TEXT, uncertain INTEGER NOT NULL DEFAULT 0, message_id INTEGER,
+        unpublished TEXT, sent_at TEXT, created TEXT NOT NULL);
+      CREATE INDEX IF NOT EXISTS outbox_run ON outbox (run_key, state, ord);
+    `),
+  },
+  {
+    version: 2, // p5/ex1: frozen deliveries, sender ownership, relocation history
+    up: db => {
+      db.exec(`
+        CREATE TABLE deliveries (id INTEGER PRIMARY KEY, run_key TEXT NOT NULL, kind TEXT NOT NULL, ord REAL NOT NULL, events TEXT NOT NULL, content TEXT, marker TEXT, unpublished TEXT,
+          stream_id INTEGER, channel TEXT, topic TEXT, tried TEXT NOT NULL DEFAULT '[]', state TEXT NOT NULL, claim TEXT, owner TEXT,
+          attempts INTEGER NOT NULL DEFAULT 0, failures INTEGER NOT NULL DEFAULT 0, next_try TEXT, last_error TEXT, uncertain INTEGER NOT NULL DEFAULT 0, first_began TEXT, checked TEXT,
+          message_id INTEGER, sent_at TEXT, followed_up INTEGER, problem TEXT, created TEXT NOT NULL, updated TEXT NOT NULL);
+        CREATE UNIQUE INDEX deliveries_active ON deliveries (run_key) WHERE state IN ${ACTIVE};
+        CREATE TABLE delivery_events (event TEXT PRIMARY KEY, delivery INTEGER NOT NULL REFERENCES deliveries (id), pos INTEGER NOT NULL);
+        CREATE INDEX delivery_events_delivery ON delivery_events (delivery, pos);
+        CREATE TABLE senders (name TEXT PRIMARY KEY, owner TEXT NOT NULL, pid INTEGER, host TEXT NOT NULL, since TEXT NOT NULL, seen TEXT NOT NULL);
+        CREATE TABLE relocations (id INTEGER PRIMARY KEY, run_key TEXT NOT NULL, stream_id INTEGER NOT NULL, channel TEXT NOT NULL, topic TEXT NOT NULL, reason TEXT NOT NULL, at TEXT NOT NULL);
+        CREATE TABLE notes (id INTEGER PRIMARY KEY, at TEXT NOT NULL, note TEXT NOT NULL);
+      `)
+      legacyUncertainty(db)
+    },
+  },
+]
+
+// Pre-p5/ex1 state: an event marked uncertain may have been posted in a
+// batch nobody recorded. Per run, those events become one legacy delivery
+// that is reconciled — the posts found name exactly which events they
+// carried — before anything new of that run is sent. Sent rows, bindings
+// and unattempted rows stay as they are; nothing already sent is rescanned.
+function legacyUncertainty(db: DatabaseSync) {
+  const at = now()
+  const runs = db.prepare('SELECT DISTINCT run_key FROM outbox WHERE state != \'sent\' AND uncertain = 1 ORDER BY run_key').all() as { run_key: string }[]
+  for (const { run_key } of runs) {
+    const rows = db.prepare('SELECT * FROM outbox WHERE run_key = ? AND state != \'sent\' ORDER BY ord, id').all(run_key) as unknown as OutboxRow[]
+    const uncertain = rows.filter(r => r.uncertain)
+    const notes = [`pre-p5/ex1 uncertain send of ${uncertain.length} event(s); the batch it was part of was not recorded, so the topic is searched for posts naming them before anything else of this run is sent`]
+    const firstUncertain = rows.indexOf(uncertain[0])
+    if (firstUncertain > 0) notes.push(`inconsistent: ${firstUncertain} unsent event(s) precede the uncertain ones (${rows.slice(0, firstUncertain).map(r => r.id).join(', ')}); they wait behind this reconciliation`)
+    legacyDelivery(db, run_key, uncertain.map(r => r.id), uncertain[0].ord, notes.join('; '), at)
+  }
+  const odd = db.prepare('SELECT count(*) AS n FROM outbox WHERE state = \'sent\' AND message_id IS NULL').get() as { n: number }
+  if (odd.n) db.prepare('INSERT INTO notes (at, note) VALUES (?, ?)').run(at, `migration: ${odd.n} event(s) are recorded as sent without a message id; left as they are`)
+  for (const r of runs) db.prepare('INSERT INTO notes (at, note) VALUES (?, ?)').run(at, `migration: ${r.run_key} had uncertain sends; a legacy reconciliation was created`)
+}
+
+function legacyDelivery(db: DatabaseSync, runKeyText: string, ids: string[], ord: number, problem: string, at: string): number {
+  const r = db.prepare('SELECT * FROM runs WHERE key = ?').get(runKeyText) as RunRow | undefined
+  const channel = r ? db.prepare('SELECT * FROM targets WHERE key = ?').get(`channel:${r.project}/${r.workflow}`) as TargetRow | undefined : undefined
+  const dest = r?.stream_id && r.channel && r.topic ? { streamId: r.stream_id, channel: r.channel, topic: r.topic }
+    : r && channel?.zulip_id ? { streamId: channel.zulip_id, channel: channel.name, topic: topicName(r.run) } : null
+  const id = Number(db.prepare(`INSERT INTO deliveries (run_key, kind, ord, events, stream_id, channel, topic, tried, state, uncertain, problem, created, updated)
+    VALUES (?, 'legacy', ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)`).run(runKeyText, ord, JSON.stringify(ids), dest?.streamId ?? null, dest?.channel ?? null, dest?.topic ?? null,
+    JSON.stringify(dest ? [dest] : []), dest ? 'failed' : 'unresolved', dest ? problem : `${problem}; no destination is recorded to search — resolve with \`wfe notify resolve\``, at, at).lastInsertRowid)
+  ids.forEach((e, i) => db.prepare('INSERT INTO delivery_events (event, delivery, pos) VALUES (?, ?, ?)').run(e, id, i))
+  return id
+}
 
 export class NotifyStore {
   readonly db: DatabaseSync
@@ -81,23 +204,13 @@ export class NotifyStore {
     this.area = o.area; this.registryFile = o.registryFile; this.exec = o.exec
     const dir = join(o.area, '.local', 'notify')
     mkdirSync(dir, { recursive: true })
-    this.db = new DatabaseSync(join(dir, 'notify.sqlite'))
-    this.db.exec('PRAGMA journal_mode = WAL; PRAGMA busy_timeout = 5000;')
-    this.db.exec(`
-      CREATE TABLE IF NOT EXISTS targets (key TEXT PRIMARY KEY, kind TEXT NOT NULL, project TEXT NOT NULL, workflow TEXT, name TEXT NOT NULL, description TEXT NOT NULL,
-        zulip_id INTEGER, state TEXT NOT NULL, problem TEXT, created TEXT NOT NULL, updated TEXT NOT NULL);
-      CREATE TABLE IF NOT EXISTS runs (key TEXT PRIMARY KEY, project TEXT NOT NULL, workflow TEXT NOT NULL, run TEXT NOT NULL, workspace TEXT NOT NULL, created TEXT NOT NULL,
-        scan_seq INTEGER NOT NULL DEFAULT 0, stream_id INTEGER, channel TEXT, topic TEXT, last_message_id INTEGER, problem TEXT, skipped TEXT, updated TEXT NOT NULL);
-      CREATE TABLE IF NOT EXISTS outbox (id TEXT PRIMARY KEY, run_key TEXT NOT NULL, ord REAL NOT NULL, type TEXT NOT NULL, critical INTEGER NOT NULL, event TEXT NOT NULL,
-        state TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, next_try TEXT, last_error TEXT, uncertain INTEGER NOT NULL DEFAULT 0, message_id INTEGER,
-        unpublished TEXT, sent_at TEXT, created TEXT NOT NULL);
-      CREATE INDEX IF NOT EXISTS outbox_run ON outbox (run_key, state, ord);
-    `)
+    this.db = openStore('notify store', join(dir, 'notify.sqlite'), MIGRATIONS)
   }
   close() { this.db.close() }
   private all<T>(sql: string, ...a: (string | number | null)[]): T[] { return this.db.prepare(sql).all(...a) as T[] }
   private one<T>(sql: string, ...a: (string | number | null)[]): T | undefined { return this.db.prepare(sql).get(...a) as T | undefined }
   private run(sql: string, ...a: (string | number | null)[]) { return this.db.prepare(sql).run(...a) }
+  private tx<T>(f: () => T): T { return transaction(this.db, f) }
 
   config(): NotifyConfig | { problem: string } | null { return loadNotifyConfig(this.area) }
 
@@ -123,7 +236,8 @@ export class NotifyStore {
 
   // The explicit repair path: forget a recorded binding (a deleted channel,
   // a name taken by hand) so the next pass provisions it again. Messages
-  // already sent stay where they are.
+  // already sent stay where they are; a delivery that may have been posted
+  // keeps the places it was sent to and is still looked for there.
   reset(key: string): string[] {
     const notes: string[] = []
     const t = this.target(key)
@@ -141,6 +255,8 @@ export class NotifyStore {
       notes.push(`${key}: topic binding and problem cleared`)
     }
     if (!notes.length) throw new Error(`nothing is recorded under ${key} (a target key is folder:<project> or channel:<project>/<workflow>; a run is <project>/<workflow>/<run>)`)
+    const open = this.all<DeliveryRow>(`SELECT * FROM deliveries WHERE state IN ${ACTIVE} AND (uncertain = 1 OR state = 'sending') AND (run_key = ? OR run_key LIKE ?)`, key, `${t?.kind === 'channel' ? `${t.project}/${t.workflow}` : '\u0000'}/%`)
+    for (const d of open) notes.push(`delivery ${d.id} of ${d.run_key} may have been posted; it is still looked for where it was sent (${(JSON.parse(d.tried) as Destination[]).map(x => `#${x.streamId} › ${x.topic}`).join(', ') || 'nowhere recorded'}) before anything is posted again`)
     return notes
   }
 
@@ -179,7 +295,7 @@ export class NotifyStore {
     let row = this.one<RunRow>('SELECT * FROM runs WHERE key = ?', key)
     if (!row) {
       const skipped = Date.parse(rec.created) < Date.parse(cfg.since) ? `created ${rec.created}, before announcements began (${cfg.since}); not backfilled` : null
-      this.run('INSERT INTO runs (key, project, workflow, run, workspace, created, skipped, updated) VALUES (?, ?, ?, ?, ?, ?, ?, ?)', key, rec.project, rec.workflow, rec.run, ws.reg.id, rec.created, skipped, now())
+      this.run('INSERT OR IGNORE INTO runs (key, project, workflow, run, workspace, created, skipped, updated) VALUES (?, ?, ?, ?, ?, ?, ?, ?)', key, rec.project, rec.workflow, rec.run, ws.reg.id, rec.created, skipped, now())
       row = this.one<RunRow>('SELECT * FROM runs WHERE key = ?', key)!
     }
     if (row.skipped) return []
@@ -201,12 +317,15 @@ export class NotifyStore {
     const insert = (id: string, ord: number, type: string, critical: boolean, event: unknown) => {
       const r = this.run('INSERT OR IGNORE INTO outbox (id, run_key, ord, type, critical, event, state, created) VALUES (?, ?, ?, ?, ?, ?, \'pending\', ?)', id, key, ord, type, critical ? 1 : 0, JSON.stringify(event), now())
       if (Number(r.changes)) added.push(id)
+      return Number(r.changes) > 0
     }
     if (rec.seq > row.scan_seq) {
       // Events of one entry keep the order the selection gives them.
-      let prev = -1, k = 0
-      for (const e of notableEvents(rec, row.scan_seq)) { k = e.seq === prev ? k + 1 : 0; prev = e.seq; insert(e.id, e.seq + k * 0.01, e.type, e.critical, e) }
-      this.run('UPDATE runs SET scan_seq = ?, updated = ? WHERE key = ?', rec.seq, now(), key)
+      this.tx(() => {
+        let prev = -1, k = 0
+        for (const e of notableEvents(rec, row!.scan_seq)) { k = e.seq === prev ? k + 1 : 0; prev = e.seq; insert(e.id, e.seq + k * 0.01, e.type, e.critical, e) }
+        this.run('UPDATE runs SET scan_seq = max(scan_seq, ?), updated = ? WHERE key = ?', rec.seq, now(), key)
+      })
     }
     // Publication: failures and their recovery, and details that became
     // readable after a message had to call them unpublished.
@@ -218,12 +337,20 @@ export class NotifyStore {
       if (cp.state === 'failed' || cp.state === 'attention') insert(`${cpKey}:${cp.state}`, ordOf + 0.5, 'publication', true, { checkpoint: cp.id, state: cp.state, detail: cp.error ?? stepProblems(cp), at })
       if (cp.state === 'published' && this.one('SELECT 1 FROM outbox WHERE id IN (?, ?)', `${cpKey}:failed`, `${cpKey}:attention`)) insert(`${cpKey}:recovered`, ordOf + 0.5, 'publication', false, { checkpoint: cp.id, state: 'recovered', at })
       if (cp.state === 'published') {
-        const waiting = this.all<OutboxRow>('SELECT * FROM outbox WHERE run_key = ? AND state = \'sent\' AND unpublished IS NOT NULL', key)
-        if (waiting.length) {
-          const docs = [...new Set(waiting.flatMap(o => JSON.parse(o.unpublished!) as string[]))]
-          insert(`${cpKey}:published`, ordOf + 0.6, 'published', false, { checkpoint: cp.id, docs, at })
-          this.run(`UPDATE outbox SET unpublished = NULL WHERE run_key = ? AND state = 'sent' AND unpublished IS NOT NULL`, key)
-        }
+        // Sent messages that called documents unpublished — deliveries (their
+        // frozen record stays as it was; the follow-up is noted beside it),
+        // and pre-p5/ex1 outbox rows.
+        this.tx(() => {
+          const deliveries = this.all<DeliveryRow>('SELECT * FROM deliveries WHERE run_key = ? AND state = \'sent\' AND unpublished IS NOT NULL AND followed_up IS NULL', key)
+          const legacy = this.all<OutboxRow>('SELECT * FROM outbox WHERE run_key = ? AND state = \'sent\' AND unpublished IS NOT NULL', key)
+          const docs = [...new Set([...deliveries, ...legacy].flatMap(o => JSON.parse(o.unpublished!) as string[]))]
+          if (!docs.length) return
+          let id = `${cpKey}:published`
+          for (let n = 2; this.one('SELECT 1 FROM outbox WHERE id = ?', id); n++) id = `${cpKey}:published.${n}`
+          insert(id, ordOf + 0.6, 'published', false, { checkpoint: cp.id, docs, at })
+          this.run('UPDATE deliveries SET followed_up = ?, updated = ? WHERE run_key = ? AND state = \'sent\' AND unpublished IS NOT NULL AND followed_up IS NULL', cp.id, now(), key)
+          this.run('UPDATE outbox SET unpublished = NULL WHERE run_key = ? AND state = \'sent\' AND unpublished IS NOT NULL', key)
+        })
       }
     }
     return added.map(id => `queued ${id}`)
@@ -244,50 +371,173 @@ export class NotifyStore {
 
   // ---- what is due -----------------------------------------------------------------------
 
-  async due(at = new Date()): Promise<{ disabled?: string; provision: ProvisionTask[]; deliveries: Delivery[]; problems: string[] }> {
+  private enabled(): { cfg: NotifyConfig } | { disabled: string; problems: string[] } {
     const cfg = this.config()
-    if (!cfg) return { disabled: `no ${join(this.area, 'zulip.json')}: Zulip coordination is not configured`, provision: [], deliveries: [], problems: [] }
-    if ('problem' in cfg) return { disabled: cfg.problem, provision: [], deliveries: [], problems: [cfg.problem] }
-    if (!cfg.enabled) return { disabled: 'zulip.json: enabled is false', provision: [], deliveries: [], problems: [] }
+    if (!cfg) return { disabled: `no ${join(this.area, 'zulip.json')}: Zulip coordination is not configured`, problems: [] }
+    if ('problem' in cfg) return { disabled: cfg.problem, problems: [cfg.problem] }
+    if (!cfg.enabled) return { disabled: 'zulip.json: enabled is false', problems: [] }
+    return { cfg }
+  }
+
+  // Scans, then says what to provision and which problems stand. Deliveries
+  // are handed out only by claim().
+  async due(): Promise<{ protocol: number; disabled?: string; provision: ProvisionTask[]; problems: string[] }> {
+    const e = this.enabled()
+    if ('disabled' in e) return { protocol: NOTIFY_PROTOCOL, disabled: e.disabled, provision: [], problems: e.problems }
     await this.scan()
-    const problems: string[] = []
     const provision: ProvisionTask[] = []
     for (const t of this.all<TargetRow>('SELECT * FROM targets ORDER BY kind DESC, key')) {
-      if (t.state === 'problem') { problems.push(`${t.key}: ${t.problem}`); continue }
-      if (t.state === 'provisioned') continue
+      if (t.state !== 'pending') continue
       if (t.kind === 'folder') provision.push({ kind: 'folder', key: t.key, name: t.name, description: t.description, zulipId: t.zulip_id })
       else {
         const folder = this.target(`folder:${t.project}`)
         if (folder?.state === 'provisioned') provision.push({ kind: 'channel', key: t.key, name: t.name, description: t.description, zulipId: t.zulip_id, folderId: folder.zulip_id! })
       }
     }
-    const deliveries: Delivery[] = []
-    for (const r of this.all<RunRow>('SELECT * FROM runs WHERE skipped IS NULL ORDER BY key')) {
-      if (r.problem) { problems.push(`${r.key}: ${r.problem}`); continue }
-      const rows = this.all<OutboxRow>('SELECT * FROM outbox WHERE run_key = ? AND state != \'sent\' ORDER BY ord, id', r.key)
-      if (!rows.length) continue
-      const head = rows[0]
-      if (head.next_try && Date.parse(head.next_try) > at.getTime()) continue // order: nothing passes a row that waits
-      const channel = this.target(`channel:${r.project}/${r.workflow}`)
-      if (channel?.state !== 'provisioned') continue // the channel comes first; the outbox waits
-      // A message about a document waits a little for its publication, so
-      // it can carry a working link: routine ones while the attempt is open
-      // (they then go out together), questions and blockers hardly at all.
-      const ev = JSON.parse(head.event) as { document?: string; at?: string }
-      const pending = this.publicationPending(r)
-      if (ev.document && pending && at.getTime() - Date.parse(ev.at ?? head.created) < (head.critical ? 90_000 : 20 * 60_000)) continue
-      // Adjacent routine rows go out as one message (up to one that waits
-      // for publication); a critical row alone.
-      const waits = (o: OutboxRow) => { const e = JSON.parse(o.event) as { document?: string; at?: string }; return !!e.document && pending && at.getTime() - Date.parse(e.at ?? o.created) < (o.critical ? 90_000 : 20 * 60_000) }
-      const batch: OutboxRow[] = [head]
-      const alone = (o: OutboxRow) => o.critical || o.type === 'publication' || o.type === 'published'
-      if (!alone(head)) for (const o of rows.slice(1, 6)) { if (alone(o) || waits(o) || (o.next_try && Date.parse(o.next_try) > at.getTime())) break; batch.push(o) }
-      try {
-        const d = await this.render(r, batch, cfg, at)
-        deliveries.push({ ...d, streamId: r.stream_id ?? channel.zulip_id!, channel: r.channel ?? channel.name, topic: r.topic ?? topicName(r.run), lastMessageId: r.last_message_id })
-      } catch (e) { problems.push(`${r.key}: cannot render ${head.id}: ${(e as Error).message}`) }
+    return { protocol: NOTIFY_PROTOCOL, provision, problems: this.problems() }
+  }
+
+  problems(): string[] {
+    const out: string[] = []
+    for (const t of this.all<TargetRow>('SELECT * FROM targets WHERE state = \'problem\' ORDER BY key')) out.push(`${t.key}: ${t.problem}`)
+    for (const r of this.all<RunRow>('SELECT * FROM runs WHERE skipped IS NULL AND problem IS NOT NULL ORDER BY key')) out.push(`${r.key}: ${r.problem}`)
+    for (const d of this.all<DeliveryRow>(`SELECT * FROM deliveries WHERE state IN ${ACTIVE} AND (state = 'unresolved' OR (uncertain = 1 AND last_error IS NOT NULL)) ORDER BY run_key`)) {
+      out.push(`${d.run_key}: delivery ${d.id} ${d.state === 'unresolved' ? 'needs a person' : 'may have been posted and is not reconciled'}: ${d.problem ?? d.last_error}`)
     }
-    return { provision, deliveries, problems }
+    return out
+  }
+
+  // Sender ownership: the recorded owner, or nobody, or an owner whose
+  // process on this host is gone. A lease that merely aged proves nothing
+  // (its request may still be in flight), so there is no expiry.
+  private takeSender(s: Sender): { ok: true; tookOver?: SenderRow } | { refused: string } {
+    const row = this.one<SenderRow>('SELECT * FROM senders WHERE name = \'zulip\'')
+    const host = hostname()
+    if (row && row.owner !== s.owner) {
+      if (row.host !== host) return { refused: `sender ${row.owner} on ${row.host} owns delivery (since ${row.since}, last seen ${row.seen}); its process cannot be checked from here. Stop it, then \`wfe notify sender --release ${row.owner}\`` }
+      if (alive(row.pid)) return { refused: `sender ${row.owner} (pid ${row.pid}, since ${row.since}, last seen ${row.seen}) is delivering; only one sender posts` }
+    }
+    const tookOver = row && row.owner !== s.owner ? row : undefined
+    this.run('INSERT INTO senders (name, owner, pid, host, since, seen) VALUES (\'zulip\', ?, ?, ?, ?, ?) ON CONFLICT (name) DO UPDATE SET owner = excluded.owner, pid = excluded.pid, host = excluded.host, since = CASE WHEN senders.owner = excluded.owner THEN senders.since ELSE excluded.since END, seen = excluded.seen',
+      s.owner, s.pid, host, now(), now())
+    return { ok: true, tookOver }
+  }
+
+  sender(): SenderRow | undefined { return this.one<SenderRow>('SELECT * FROM senders WHERE name = \'zulip\'') }
+
+  // A person's override for a sender on another host or a stuck record.
+  releaseSender(owner: string): string {
+    const row = this.sender()
+    if (!row || row.owner !== owner) throw new RequestError(409, `the sender is ${row ? row.owner : 'nobody'}, not ${owner}`)
+    if (row.host === hostname() && alive(row.pid)) throw new RequestError(409, `sender ${owner} (pid ${row.pid}) is still running on this host; stop it first`)
+    this.run('DELETE FROM senders WHERE name = \'zulip\' AND owner = ?', owner)
+    return `released ${owner}; deliveries it had begun are reconciled before they are sent again`
+  }
+
+  // Hands the sender at most one delivery per run: the run's delivery in
+  // progress, or a new one frozen from its next events. Rendering reads
+  // documents and Git outside any transaction; the delivery is then created
+  // in a short one that checks the selection still holds.
+  async claim(s: Sender, at = new Date()): Promise<{ protocol: number; disabled?: string; deliveries: Delivery[]; problems: string[]; refused?: string }> {
+    const e = this.enabled()
+    if ('disabled' in e) return { protocol: NOTIFY_PROTOCOL, disabled: e.disabled, deliveries: [], problems: e.problems }
+    const owner = this.tx(() => this.takeSender(s))
+    if ('refused' in owner) return { protocol: NOTIFY_PROTOCOL, deliveries: [], problems: [owner.refused], refused: owner.refused }
+    await this.scan()
+    const out: Delivery[] = []
+    const problems: string[] = []
+    for (const r of this.all<RunRow>('SELECT * FROM runs WHERE skipped IS NULL AND problem IS NULL ORDER BY key')) {
+      try {
+        const d = await this.claimRun(r, s, e.cfg, at)
+        if (d) out.push(d)
+      } catch (err) { problems.push(`${r.key}: ${(err as Error).message}`) }
+    }
+    return { protocol: NOTIFY_PROTOCOL, deliveries: out, problems: [...this.problems(), ...problems] }
+  }
+
+  private active(runKeyText: string): DeliveryRow | undefined {
+    return this.one<DeliveryRow>(`SELECT * FROM deliveries WHERE run_key = ? AND state IN ${ACTIVE}`, runKeyText)
+  }
+
+  private unassigned(runKeyText: string, limit = 7): OutboxRow[] {
+    return this.all<OutboxRow>('SELECT * FROM outbox WHERE run_key = ? AND state != \'sent\' AND id NOT IN (SELECT event FROM delivery_events) ORDER BY ord, id LIMIT ?', runKeyText, limit)
+  }
+
+  // Where the run's messages go now: its binding (which follows moves), or
+  // the workflow's channel and the run's topic.
+  private destination(r: RunRow): Destination | null {
+    if (r.stream_id && r.channel && r.topic) return { streamId: r.stream_id, channel: r.channel, topic: r.topic }
+    const channel = this.target(`channel:${r.project}/${r.workflow}`)
+    return channel?.state === 'provisioned' ? { streamId: channel.zulip_id!, channel: channel.name, topic: topicName(r.run) } : null
+  }
+
+  private async claimRun(r: RunRow, s: Sender, cfg: NotifyConfig, at: Date): Promise<Delivery | null> {
+    const current = this.active(r.key)
+    if (current) {
+      if (current.state === 'unresolved') return null // reported by problems()
+      if (current.state === 'failed' && current.next_try && Date.parse(current.next_try) > at.getTime()) return null
+      const dest = this.destination(r) ?? (current.stream_id ? { streamId: current.stream_id, channel: current.channel!, topic: current.topic! } : null)
+      if (!dest) return null
+      const claim = `c${randomBytes(6).toString('hex')}`
+      const n = this.run(`UPDATE deliveries SET claim = ?, owner = ?, state = CASE WHEN state = 'sending' THEN 'failed' ELSE state END,
+        uncertain = CASE WHEN state = 'sending' THEN 1 ELSE uncertain END, updated = ? WHERE id = ? AND state = ? AND coalesce(claim, '') = ?`,
+      claim, s.owner, now(), current.id, current.state, current.claim ?? '').changes
+      if (!Number(n)) return null // changed meanwhile; the next pass sees it
+      return this.handOut(this.one<DeliveryRow>('SELECT * FROM deliveries WHERE id = ?', current.id)!, r, dest)
+    }
+    // A new delivery from the run's next events, with the batching rules:
+    // adjacent routine events go together (up to six, and only up to one
+    // that waits for publication); a critical event, a publication notice
+    // or a published follow-up alone.
+    const rows = this.unassigned(r.key)
+    if (!rows.length) return null
+    const dest = this.destination(r)
+    if (!dest) return null // the channel comes first; the outbox waits
+    const pending = this.publicationPending(r)
+    const waits = (o: OutboxRow) => { const ev = JSON.parse(o.event) as { document?: string; at?: string }; return !!ev.document && pending && at.getTime() - Date.parse(ev.at ?? o.created) < (o.critical ? 90_000 : 20 * 60_000) }
+    // A message about a document waits a little for its publication, so it
+    // can carry a working link: routine ones while the attempt is open,
+    // questions and blockers hardly at all.
+    if (waits(rows[0])) return null
+    const batch: OutboxRow[] = [rows[0]]
+    const alone = (o: OutboxRow) => !!o.critical || o.type === 'publication' || o.type === 'published'
+    if (!alone(rows[0])) for (const o of rows.slice(1, 6)) { if (alone(o) || waits(o)) break; batch.push(o) }
+    const rendered = await this.render(r, batch, cfg, at)
+    const claim = `c${randomBytes(6).toString('hex')}`
+    const id = this.tx(() => {
+      // The selection still holds: nothing else became active, the same
+      // events are still the run's next, the binding has not changed.
+      if (this.active(r.key)) return null
+      const again = this.unassigned(r.key, batch.length).map(o => o.id)
+      if (again.join('\n') !== batch.map(o => o.id).join('\n')) return null
+      const r2 = this.one<RunRow>('SELECT * FROM runs WHERE key = ?', r.key)
+      const d2 = r2 && !r2.problem ? this.destination(r2) : null
+      if (!d2 || !sameDest(d2, dest)) return null
+      const t = now()
+      const did = Number(this.run(`INSERT INTO deliveries (run_key, kind, ord, events, content, marker, unpublished, stream_id, channel, topic, tried, state, claim, owner, created, updated)
+        VALUES (?, 'message', ?, ?, ?, ?, ?, ?, ?, ?, '[]', 'ready', ?, ?, ?, ?)`, r.key, batch[0].ord, JSON.stringify(batch.map(o => o.id)), rendered.content, rendered.marker,
+      rendered.unpublished.length ? JSON.stringify(rendered.unpublished) : null, dest.streamId, dest.channel, dest.topic, claim, s.owner, t, t).lastInsertRowid)
+      batch.forEach((o, i) => this.run('INSERT INTO delivery_events (event, delivery, pos) VALUES (?, ?, ?)', o.id, did, i))
+      return did
+    })
+    if (id === null) return null
+    return this.handOut(this.one<DeliveryRow>('SELECT * FROM deliveries WHERE id = ?', id)!, r, dest)
+  }
+
+  private handOut(d: DeliveryRow, r: RunRow, dest: Destination): Delivery {
+    const events = JSON.parse(d.events) as string[]
+    const label = runKey({ workflow: r.workflow, run: r.run })
+    let reconcile: Delivery['reconcile'] = null
+    if (d.uncertain || d.kind === 'legacy') {
+      const places: Destination[] = [dest, ...(d.stream_id ? [{ streamId: d.stream_id, channel: d.channel!, topic: d.topic! }] : []), ...(JSON.parse(d.tried) as Destination[]),
+        ...this.all<{ stream_id: number; channel: string; topic: string }>('SELECT * FROM relocations WHERE run_key = ? ORDER BY id', r.key).map(x => ({ streamId: x.stream_id, channel: x.channel, topic: x.topic }))]
+      const searchIn = places.filter((p, i) => places.findIndex(q => sameDest(p, q)) === i)
+      // Nothing of this delivery can have been posted before its events
+      // existed, nor (once begun) before its first send began.
+      const since = d.kind === 'legacy' ? (this.one<{ t: string }>(`SELECT min(created) AS t FROM outbox WHERE id IN (SELECT value FROM json_each(?))`, d.events)?.t ?? d.created) : (d.first_began ?? d.created)
+      reconcile = { since, searchIn, label, ...(d.kind === 'legacy' ? { tokens: events.map(ev => ({ event: ev, token: markerToken(ev) })) } : {}) }
+    }
+    return { delivery: d.id, claim: d.claim!, run: d.run_key, kind: d.kind, events, content: d.content ?? '', marker: d.marker ?? '', destination: dest, lastMessageId: r.last_message_id, attempts: d.attempts, reconcile }
   }
 
   private async workspaceOf(r: RunRow): Promise<Workspace | null> {
@@ -295,7 +545,7 @@ export class NotifyStore {
     return w ? new Workspace(w) : null
   }
 
-  private async render(r: RunRow, batch: OutboxRow[], cfg: NotifyConfig, at: Date): Promise<Omit<Delivery, 'streamId' | 'channel' | 'topic' | 'lastMessageId'>> {
+  private async render(r: RunRow, batch: OutboxRow[], cfg: NotifyConfig, at: Date): Promise<{ content: string; marker: string; unpublished: string[] }> {
     const ws = await this.workspaceOf(r)
     const ref = { workflow: r.workflow, run: r.run }
     const reading = ws ? await readRun(ws, ref) : undefined
@@ -333,7 +583,7 @@ export class NotifyStore {
       const e = events[0]
       const docs = (e.docs ?? []).map(p => links.get(p) ?? { path: p, name: p.split('/').pop()! })
       const commit = docs.find(d => d.commit)?.commit ?? ''
-      content = renderPublished(label, docs, commit)
+      content = renderPublished(label, docs, commit, markerToken(batch[0].id))
     } else {
       const oldest = events[0].at
       const delayed = at.getTime() - Date.parse(oldest) > DELAYED_AFTER_MS
@@ -341,8 +591,7 @@ export class NotifyStore {
     }
     // Which documents this message had to call unpublished: a later
     // published checkpoint answers them with one availability update.
-    this.db.prepare('UPDATE outbox SET unpublished = ? WHERE id = ?').run(unpublished.length ? JSON.stringify([...new Set(unpublished)]) : null, batch[0].id)
-    return { ids: batch.map(b => b.id), run: r.key, content, marker: content.split('\n').at(-1)!, uncertain: batch.some(b => b.uncertain) }
+    return { content, marker: content.split('\n').at(-1)!, unpublished: [...new Set(unpublished)] }
   }
 
   // Commit-addressed links for the run's documents: the newest published
@@ -371,29 +620,190 @@ export class NotifyStore {
 
   // ---- results from the transport --------------------------------------------------------
 
-  recordSent(ids: string[], o: { messageId: number; streamId: number; channel: string; topic: string }) {
-    const rows = ids.map(id => this.one<OutboxRow>('SELECT * FROM outbox WHERE id = ?', id)).filter((r): r is OutboxRow => !!r)
-    if (!rows.length) throw new Error(`no outbox rows ${ids.join(', ')}`)
-    const at = now()
-    for (const r of rows) this.run('UPDATE outbox SET state = \'sent\', message_id = ?, sent_at = ?, uncertain = 0, last_error = NULL, next_try = NULL WHERE id = ?', o.messageId, at, r.id)
-    this.run('UPDATE runs SET stream_id = ?, channel = ?, topic = ?, last_message_id = ?, updated = ? WHERE key = ?', o.streamId, o.channel, o.topic, o.messageId, at, rows[0].run_key)
+  // The delivery a result is about, checked: it exists, the claim is the
+  // one it holds now and the current sender's, and the events named are its
+  // events in its order. Anything else is a stale or unrelated update.
+  private held(id: number, claim: string, events: string[] | undefined): DeliveryRow {
+    const d = this.one<DeliveryRow>('SELECT * FROM deliveries WHERE id = ?', id)
+    if (!d) throw new RequestError(404, `no delivery ${id}`)
+    if (events && JSON.stringify(events) !== d.events) throw new RequestError(409, `delivery ${id} carries ${d.events}, not ${JSON.stringify(events)}`)
+    if (d.claim !== claim) throw new RequestError(409, `delivery ${id} is not held by claim ${claim} (${d.claim ? 'claimed again since' : d.state === 'sent' ? 'already sent' : 'not claimed'}); this result is stale`)
+    const owner = this.sender()
+    if (!owner || owner.owner !== d.owner) throw new RequestError(409, `delivery ${id} was claimed by ${d.owner}, which is no longer the sender`)
+    return d
   }
 
-  // A failure retries later; `uncertain` says the message may have been
-  // posted (the answer was lost), so the next attempt looks for its marker.
-  recordFailed(ids: string[], error: string, uncertain: boolean, at = new Date()) {
-    for (const id of ids) {
-      const r = this.one<OutboxRow>('SELECT * FROM outbox WHERE id = ?', id)
-      if (!r) continue
-      const attempts = r.attempts + 1
-      this.run('UPDATE outbox SET state = \'failed\', attempts = ?, last_error = ?, uncertain = ?, next_try = ? WHERE id = ?', attempts, error.slice(0, 500), uncertain || r.uncertain ? 1 : 0, new Date(at.getTime() + BACKOFF(attempts)).toISOString(), id)
-    }
+  // Recorded before the POST: from here until a result is recorded the
+  // delivery may have been posted. A delivery that may already have been
+  // posted is begun again only with the evidence that it was not.
+  begin(id: number, claim: string, o: { destination: Destination; checkedAbsent?: string; events?: string[] }) {
+    this.tx(() => {
+      const d = this.held(id, claim, o.events)
+      if (d.kind !== 'message') throw new RequestError(409, `delivery ${id} is a legacy reconciliation; it is never posted as such`)
+      if (!['ready', 'failed'].includes(d.state)) throw new RequestError(409, `delivery ${id} is ${d.state}; only a ready or failed delivery is begun`)
+      if (d.uncertain && !o.checkedAbsent?.trim()) throw new RequestError(409, `delivery ${id} may already have been posted; search for its marker first and pass what established its absence (--checked-absent)`)
+      const tried = JSON.parse(d.tried) as Destination[]
+      if (!tried.some(t => sameDest(t, o.destination))) tried.push(o.destination)
+      const t = now()
+      this.run('UPDATE deliveries SET state = \'sending\', attempts = attempts + 1, first_began = coalesce(first_began, ?), tried = ?, uncertain = 0, checked = coalesce(?, checked), updated = ? WHERE id = ?',
+        t, JSON.stringify(tried), o.checkedAbsent ?? null, t, id)
+    })
+  }
+
+  // The message is in Zulip: posted now, or found by its marker. The
+  // delivery and all its events are sent, and the run follows where it is.
+  // The same acknowledgment again is harmless; a different one is refused.
+  acknowledge(id: number, claim: string, o: { messageId: number; destination: Destination; found?: boolean; events?: string[] }): 'recorded' | 'already recorded' {
+    return this.tx(() => {
+      const prior = this.one<DeliveryRow>('SELECT * FROM deliveries WHERE id = ?', id)
+      if (prior?.state === 'sent') {
+        if (prior.message_id === o.messageId && (!o.events || JSON.stringify(o.events) === prior.events)) return 'already recorded'
+        throw new RequestError(409, `delivery ${id} is already recorded as message ${prior.message_id}, not ${o.messageId}`)
+      }
+      const d = this.held(id, claim, o.events)
+      if (d.kind !== 'message') throw new RequestError(409, `delivery ${id} is a legacy reconciliation; record what was found with \`wfe notify legacy\``)
+      if (d.state !== 'sending' && !o.found) throw new RequestError(409, `delivery ${id} was not begun; only a message found by its marker is recorded without a begin`)
+      const t = now()
+      this.run('UPDATE deliveries SET state = \'sent\', message_id = ?, sent_at = ?, claim = NULL, uncertain = 0, last_error = NULL, next_try = NULL, problem = NULL, checked = CASE WHEN ? THEN coalesce(checked, \'\') || \'found by its marker\' ELSE checked END, updated = ? WHERE id = ?',
+        o.messageId, t, o.found ? 1 : 0, t, id)
+      this.markSent(JSON.parse(d.events) as string[], o.messageId, t)
+      this.bind(d.run_key, o.destination, o.messageId, t)
+      return 'recorded'
+    })
+  }
+
+  private markSent(events: string[], messageId: number, t: string) {
+    for (const e of events) this.run('UPDATE outbox SET state = \'sent\', message_id = ?, sent_at = ?, uncertain = 0, last_error = NULL, next_try = NULL WHERE id = ?', messageId, t, e)
+  }
+
+  private bind(runKeyText: string, dest: Destination, messageId: number, t: string) {
+    this.run('UPDATE runs SET stream_id = ?, channel = ?, topic = ?, last_message_id = max(coalesce(last_message_id, 0), ?), updated = ? WHERE key = ?', dest.streamId, dest.channel, dest.topic, messageId, t, runKeyText)
+  }
+
+  // A failed attempt is retried later with the same delivery. `uncertain`:
+  // the request went out and its answer was lost, so the next attempt looks
+  // first. A failure that posted nothing keeps what was known before.
+  fail(id: number, claim: string, error: string, uncertain: boolean, o: { events?: string[]; at?: Date } = {}) {
+    const at = o.at ?? new Date()
+    this.tx(() => {
+      const d = this.held(id, claim, o.events)
+      if (!['ready', 'sending', 'failed'].includes(d.state)) throw new RequestError(409, `delivery ${id} is ${d.state}`)
+      const failures = d.failures + 1
+      const still = uncertain || (d.state !== 'sending' && !!d.uncertain)
+      this.run('UPDATE deliveries SET state = \'failed\', failures = ?, last_error = ?, uncertain = ?, next_try = ?, claim = NULL, updated = ? WHERE id = ?',
+        failures, error.slice(0, 500), still ? 1 : 0, new Date(at.getTime() + BACKOFF(failures)).toISOString(), now(), id)
+    })
+  }
+
+  // A legacy reconciliation's result: the posts found name the events they
+  // carried; those are sent. When the search covered everything the rest
+  // were never posted and go out with the new batching. An incomplete
+  // search keeps the rest uncertain.
+  legacy(id: number, claim: string, o: { found: { event: string; messageId: number; destination: Destination }[]; complete: boolean; error?: string }) {
+    this.tx(() => {
+      const d = this.held(id, claim, undefined)
+      if (d.kind !== 'legacy') throw new RequestError(409, `delivery ${id} is not a legacy reconciliation`)
+      const members = new Set(JSON.parse(d.events) as string[])
+      const t = now()
+      for (const f of o.found) {
+        if (!members.has(f.event)) throw new RequestError(409, `${f.event} is not part of delivery ${id}`)
+        this.markSent([f.event], f.messageId, t)
+        this.bind(d.run_key, f.destination, f.messageId, t)
+      }
+      if (o.complete) {
+        const unsent = [...members].filter(e => this.one<OutboxRow>('SELECT * FROM outbox WHERE id = ?', e)?.state !== 'sent')
+        for (const e of unsent) this.run('DELETE FROM delivery_events WHERE event = ? AND delivery = ?', e, id)
+        this.run('UPDATE deliveries SET state = \'resolved\', claim = NULL, uncertain = 0, checked = ?, problem = NULL, updated = ? WHERE id = ?',
+          `${o.found.length} event(s) found posted; ${unsent.length} not posted (searched completely), sent again in new deliveries: ${unsent.join(', ') || 'none'}`, t, id)
+      } else {
+        const failures = d.failures + 1
+        this.run('UPDATE deliveries SET state = \'failed\', failures = ?, last_error = ?, next_try = ?, claim = NULL, updated = ? WHERE id = ?',
+          failures, (o.error ?? 'the search could not establish which events were posted').slice(0, 500), new Date(Date.now() + BACKOFF(failures)).toISOString(), t, id)
+      }
+    })
+  }
+
+  // A person's reconciliation, for what the transport cannot establish: the
+  // message they found (it is recorded as sent), or that it is not in Zulip
+  // (the same payload goes out again).
+  resolve(id: number, o: { messageId: number } | { notPosted: true }, by: string): string {
+    return this.tx(() => {
+      const d = this.one<DeliveryRow>('SELECT * FROM deliveries WHERE id = ?', id)
+      if (!d) throw new RequestError(404, `no delivery ${id}`)
+      if (!['failed', 'unresolved', 'ready', 'sending'].includes(d.state)) throw new RequestError(409, `delivery ${id} is ${d.state}`)
+      const owner = this.sender()
+      if (d.state === 'sending' && owner && owner.host === hostname() && alive(owner.pid)) throw new RequestError(409, `delivery ${id} is being sent by ${owner.owner} (pid ${owner.pid}); wait for its result`)
+      const t = now()
+      if ('messageId' in o) {
+        if (d.kind === 'legacy') {
+          for (const e of JSON.parse(d.events) as string[]) this.markSent([e], o.messageId, t)
+          this.run('UPDATE deliveries SET state = \'resolved\', claim = NULL, uncertain = 0, checked = ?, problem = NULL, updated = ? WHERE id = ?', `resolved by ${by}: posted as message ${o.messageId}`, t, id)
+        } else {
+          this.run('UPDATE deliveries SET state = \'sent\', message_id = ?, sent_at = ?, claim = NULL, uncertain = 0, problem = NULL, checked = ?, updated = ? WHERE id = ?', o.messageId, t, `resolved by ${by}: posted as message ${o.messageId}`, t, id)
+          this.markSent(JSON.parse(d.events) as string[], o.messageId, t)
+        }
+        return `delivery ${id} recorded as message ${o.messageId}`
+      }
+      if (d.kind === 'legacy') {
+        this.run('DELETE FROM delivery_events WHERE delivery = ? AND event IN (SELECT id FROM outbox WHERE state != \'sent\')', id)
+        this.run('UPDATE deliveries SET state = \'resolved\', claim = NULL, uncertain = 0, checked = ?, problem = NULL, updated = ? WHERE id = ?', `resolved by ${by}: not posted; its events go out again`, t, id)
+        return `delivery ${id}: its unsent events go out in new deliveries`
+      }
+      this.run('UPDATE deliveries SET state = \'failed\', claim = NULL, uncertain = 0, next_try = NULL, problem = NULL, checked = ?, updated = ? WHERE id = ?', `resolved by ${by}: not posted`, t, id)
+      return `delivery ${id} goes out again as it was frozen`
+    })
+  }
+
+  // The pre-p5/ex1 transport's record of a send in flight (one per
+  // transport, so another run's could be lost): its events join their run's
+  // legacy reconciliation, before any new delivery could carry them.
+  importInflight(o: { ids: string[]; marker?: string }): string[] {
+    return this.tx(() => {
+      const notes: string[] = []
+      const byRun = new Map<string, OutboxRow[]>()
+      for (const id of o.ids) {
+        const row = this.one<OutboxRow>('SELECT * FROM outbox WHERE id = ?', id)
+        if (!row) { notes.push(`${id}: not in the outbox; ignored`); continue }
+        if (row.state === 'sent') { notes.push(`${id}: already recorded as sent`); continue }
+        const owner = this.one<{ delivery: number }>('SELECT delivery FROM delivery_events WHERE event = ?', id)
+        if (owner) {
+          const d = this.one<DeliveryRow>('SELECT * FROM deliveries WHERE id = ?', owner.delivery)!
+          if (d.kind !== 'legacy') throw new RequestError(409, `${id} is already part of delivery ${d.id}, frozen after the migration; the in-flight record cannot be reconciled automatically — check the topic, then \`wfe notify resolve ${d.id}\``)
+          notes.push(`${id}: already part of legacy reconciliation ${d.id}`); continue
+        }
+        byRun.set(row.run_key, [...(byRun.get(row.run_key) ?? []), row])
+      }
+      for (const [run, rows] of byRun) {
+        this.run('UPDATE outbox SET uncertain = 1 WHERE id IN (SELECT value FROM json_each(?))', JSON.stringify(rows.map(r => r.id)))
+        const current = this.active(run)
+        if (current && current.kind === 'legacy') {
+          const events = [...JSON.parse(current.events) as string[], ...rows.map(r => r.id)]
+          rows.forEach((r, i) => this.run('INSERT INTO delivery_events (event, delivery, pos) VALUES (?, ?, ?)', r.id, current.id, events.length - rows.length + i))
+          this.run('UPDATE deliveries SET events = ?, ord = min(ord, ?), marker = coalesce(marker, ?), updated = ? WHERE id = ?', JSON.stringify(events), Math.min(...rows.map(r => r.ord)), o.marker ?? null, now(), current.id)
+          notes.push(`${rows.map(r => r.id).join(', ')}: joined legacy reconciliation ${current.id}`)
+        } else if (current) {
+          throw new RequestError(409, `run ${run} already has delivery ${current.id} in progress; the in-flight events ${rows.map(r => r.id).join(', ')} need a person: check the topic, then \`wfe notify resolve ${current.id}\``)
+        } else {
+          const id = legacyDelivery(this.db, run, rows.map(r => r.id), Math.min(...rows.map(r => r.ord)), `pre-p5/ex1 send in flight (inflight.json${o.marker ? `, marker "${o.marker}"` : ''}); the topic is searched for it before anything else of this run is sent`, now())
+          if (o.marker) this.run('UPDATE deliveries SET marker = ? WHERE id = ?', o.marker, id)
+          notes.push(`${rows.map(r => r.id).join(', ')}: legacy reconciliation ${id}`)
+        }
+      }
+      return notes
+    })
   }
 
   // The topic a run's messages go to moved (renamed, or moved to another
-  // channel by a person): follow it, keeping the run's identity.
-  recordMoved(runKeyText: string, o: { streamId: number; channel: string; topic: string }) {
-    this.run('UPDATE runs SET stream_id = ?, channel = ?, topic = ?, updated = ? WHERE key = ?', o.streamId, o.channel, o.topic, now(), runKeyText)
+  // channel by a person): follow it, keeping the run's identity and where
+  // it was before.
+  recordMoved(runKeyText: string, o: Destination & { reason?: string }) {
+    this.tx(() => {
+      const r = this.one<RunRow>('SELECT * FROM runs WHERE key = ?', runKeyText)
+      if (!r) throw new RequestError(404, `no run ${runKeyText}`)
+      const t = now()
+      if (r.stream_id && r.channel && r.topic) this.run('INSERT INTO relocations (run_key, stream_id, channel, topic, reason, at) VALUES (?, ?, ?, ?, ?, ?)', runKeyText, r.stream_id, r.channel, r.topic, `left for #${o.streamId} › ${o.topic}${o.reason ? `: ${o.reason}` : ''}`, t)
+      this.run('UPDATE runs SET stream_id = ?, channel = ?, topic = ?, updated = ? WHERE key = ?', o.streamId, o.channel, o.topic, t, runKeyText)
+    })
   }
 
   recordRunProblem(runKeyText: string, problem: string) {
@@ -402,33 +812,47 @@ export class NotifyStore {
 
   // ---- views -----------------------------------------------------------------------------
 
-  runStatus(project: string, ref: RunRef): { configured: boolean; problem?: string; skipped?: string; topic?: { url: string | null; channel: string; topic: string }; pending: number; failed: number; lastError?: string; lastSent?: string; provisioning?: string; viewBase: string | null } {
+  runStatus(project: string, ref: RunRef): { configured: boolean; problem?: string; skipped?: string; topic?: { url: string | null; channel: string; topic: string }; pending: number; failed: number; uncertain: boolean; lastError?: string; lastSent?: string; provisioning?: string; viewBase: string | null } {
     const cfg = this.config()
-    if (!cfg || 'problem' in cfg || !cfg.enabled) return { configured: false, problem: cfg && 'problem' in cfg ? cfg.problem : undefined, pending: 0, failed: 0, viewBase: null }
+    if (!cfg || 'problem' in cfg || !cfg.enabled) return { configured: false, problem: cfg && 'problem' in cfg ? cfg.problem : undefined, pending: 0, failed: 0, uncertain: false, viewBase: null }
     const key = `${project}/${ref.workflow}/${ref.run}`
     const r = this.one<RunRow>('SELECT * FROM runs WHERE key = ?', key)
     const t = this.target(`channel:${project}/${ref.workflow}`), f = this.target(`folder:${project}`)
-    const counts = this.one<{ p: number; f: number }>('SELECT sum(state = \'pending\') AS p, sum(state = \'failed\') AS f FROM outbox WHERE run_key = ?', key)
+    const pending = this.one<{ n: number }>('SELECT count(*) AS n FROM outbox WHERE run_key = ? AND state != \'sent\'', key)?.n ?? 0
+    const d = this.active(key)
     const last = this.one<OutboxRow>('SELECT * FROM outbox WHERE run_key = ? AND state = \'sent\' ORDER BY sent_at DESC LIMIT 1', key)
-    const err = this.one<OutboxRow>('SELECT * FROM outbox WHERE run_key = ? AND state = \'failed\' ORDER BY ord LIMIT 1', key)
     const provisioning = [f, t].find(x => x?.state === 'problem')?.problem ?? ([f, t].some(x => !x || x.state === 'pending') ? 'the channel is not provisioned yet' : undefined)
     return {
-      configured: true, problem: r?.problem ?? undefined, skipped: r?.skipped ?? undefined,
+      configured: true, problem: r?.problem ?? (d?.state === 'unresolved' ? `delivery ${d.id} needs a person: ${d.problem}` : undefined), skipped: r?.skipped ?? undefined,
       topic: r?.stream_id && r.topic ? { url: topicUrl(cfg.zulipUrl, r.stream_id, r.channel ?? '', r.topic), channel: r.channel ?? '', topic: r.topic } : undefined,
-      pending: counts?.p ?? 0, failed: counts?.f ?? 0, lastError: err?.last_error ?? undefined, lastSent: last?.sent_at ?? undefined,
-      provisioning, viewBase: cfg.viewBase,
+      pending, failed: d && ['failed', 'unresolved'].includes(d.state) ? 1 : 0, uncertain: !!d && (!!d.uncertain || d.state === 'sending'),
+      lastError: d?.last_error ?? undefined, lastSent: last?.sent_at ?? undefined, provisioning, viewBase: cfg.viewBase,
     }
   }
 
-  overview(): { targets: TargetRow[]; runs: (RunRow & { pending: number; failed: number })[] } {
+  overview(): { targets: TargetRow[]; runs: (RunRow & { pending: number; failed: number; uncertain: number })[]; sender: SenderRow | null } {
     return {
       targets: this.all<TargetRow>('SELECT * FROM targets ORDER BY key'),
-      runs: this.all<RunRow & { pending: number; failed: number }>('SELECT r.*, (SELECT count(*) FROM outbox o WHERE o.run_key = r.key AND o.state = \'pending\') AS pending, (SELECT count(*) FROM outbox o WHERE o.run_key = r.key AND o.state = \'failed\') AS failed FROM runs r ORDER BY key'),
+      runs: this.all<RunRow & { pending: number; failed: number; uncertain: number }>(`SELECT r.*, (SELECT count(*) FROM outbox o WHERE o.run_key = r.key AND o.state != 'sent') AS pending,
+        (SELECT count(*) FROM deliveries d WHERE d.run_key = r.key AND d.state IN ('failed', 'unresolved')) AS failed,
+        (SELECT count(*) FROM deliveries d WHERE d.run_key = r.key AND d.state IN ${ACTIVE} AND (d.uncertain = 1 OR d.state = 'sending')) AS uncertain FROM runs r ORDER BY key`),
+      sender: this.sender() ?? null,
     }
   }
 
-  outbox(runKeyText?: string): OutboxRow[] {
-    return runKeyText ? this.all<OutboxRow>('SELECT * FROM outbox WHERE run_key = ? ORDER BY ord, id', runKeyText) : this.all<OutboxRow>('SELECT * FROM outbox ORDER BY run_key, ord, id')
+  outbox(runKeyText?: string): (OutboxRow & { delivery: number | null })[] {
+    const sql = 'SELECT o.*, e.delivery AS delivery FROM outbox o LEFT JOIN delivery_events e ON e.event = o.id'
+    return runKeyText ? this.all(`${sql} WHERE o.run_key = ? ORDER BY o.ord, o.id`, runKeyText) : this.all(`${sql} ORDER BY o.run_key, o.ord, o.id`)
+  }
+
+  deliveries(runKeyText?: string): DeliveryRow[] {
+    return runKeyText ? this.all<DeliveryRow>('SELECT * FROM deliveries WHERE run_key = ? ORDER BY id', runKeyText) : this.all<DeliveryRow>('SELECT * FROM deliveries ORDER BY id')
+  }
+
+  notes(): { at: string; note: string }[] { return this.all('SELECT at, note FROM notes ORDER BY id') }
+
+  relocations(runKeyText: string): { stream_id: number; channel: string; topic: string; reason: string; at: string }[] {
+    return this.all('SELECT * FROM relocations WHERE run_key = ? ORDER BY id', runKeyText)
   }
 }
 
@@ -438,4 +862,3 @@ function stepProblems(cp: CheckpointRow): string {
     return steps.map(s => [s.error, s.conflicts?.length ? `${s.repo}: ${s.conflicts.join(', ')} changed before the run and again by it` : ''].filter(Boolean).join('; ')).filter(Boolean).join('; ') || cp.state
   } catch { return cp.state }
 }
-

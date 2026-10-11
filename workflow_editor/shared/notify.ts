@@ -128,9 +128,10 @@ export function renderMessage(events: NotableEvent[], c: RenderContext, extra: {
 }
 
 // Publication updates: details that were not yet published when a message
-// referred to them, now readable at a commit.
-export function renderPublished(ref: string, docs: DocLink[], commit: string): string {
-  return [`**Details published** at ${commit.slice(0, 7)}: ${docs.map(docText).join(', ')}`, `ref ${ref} published ${commit.slice(0, 7)}`].join('\n')
+// referred to them, now readable at a commit. The marker names the
+// follow-up's own event (p5/ex1), so no two follow-ups share one.
+export function renderPublished(ref: string, docs: DocLink[], commit: string, token: string): string {
+  return [`**Details published** at ${commit.slice(0, 7)}: ${docs.map(docText).join(', ')}`, `ref ${ref} ${token} ${commit.slice(0, 7)}`].join('\n')
 }
 
 export function renderPublication(ref: string, state: 'failed' | 'attention' | 'recovered', detail: string, checkpoint: number): string {

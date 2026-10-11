@@ -433,20 +433,53 @@ questions are answered in agdevworld, and the message says where.
   (routine up to 20 min, questions and blockers 90 s); details that had to
   be called unpublished get one "details published" update when a later
   checkpoint publishes them.
-- **Durability** (`server/notify.ts`, `<area>/.local/notify/notify.sqlite`):
-  targets (folder, channels) with their Zulip ids and problems; each run's
-  topic binding and the identity it was bound with; an outbox keyed by event
-  id, rebuilt from history on every scan (a crash between the record and the
-  queue loses nothing). Delivery is ordered per run, retried with backoff
-  (15 s doubling to 15 min); a failure never changes the run's state. A send
-  whose answer was lost is marked uncertain and its marker line (`ref
-  <workflow>/<run> #<seq>:<type>`) is looked for in the topic before the
-  retry; exactly-once is not claimed. A run moved or renamed in Zulip is
-  followed by its last message id. A second run with the same
+- **Durability** (`server/notify.ts`, `<area>/.local/notify/notify.sqlite`,
+  schema versioned by `user_version`, migrations transactional): targets
+  (folder, channels) with their Zulip ids and problems; each run's topic
+  binding, the identity it was bound with and where it was followed to
+  (relocations); an outbox keyed by event id, rebuilt from history on every
+  scan (a crash between the record and the queue loses nothing). A failure
+  never changes the run's state. A second run with the same
   project/workflow/run identity (another workspace, another creation) is
   refused as ambiguous, not merged. Runs created before `since` are not
   announced (no backfill). Delayed messages say so; a question that is no
   longer open says no action is needed.
+- **Deliveries** (p5/ex1). One message is one delivery: its ordered events,
+  text, marker line (`ref <workflow>/<run> #<seq>:<type> …`, `cp<n>:<state>`
+  for publication notices), the documents it called unpublished and its
+  destination are frozen when it is first handed out and never change. An
+  event belongs to one delivery; a run has at most one delivery in
+  progress, and events recorded meanwhile wait for the next one (batching
+  as before: adjacent routine events up to six, critical ones and
+  publication notices alone, documents waiting briefly for publication).
+  Content is rendered outside any database transaction and committed in a
+  short one that checks the selection still holds.
+  States: `ready` → `sending` (recorded *before* the POST) → `sent`, or
+  `failed` (retried with backoff, 15 s doubling to 15 min, same payload).
+  A delivery that may have been posted — answer lost, begun and never
+  finished, or its acknowledgment could not be recorded — is looked for
+  before anything is posted again: the sender's own messages in each place
+  it was sent to, the run's current topic and its recorded relocations,
+  page by page back to before its first send. Found: acknowledged. Absent
+  across all of that: begun again with that evidence (`--checked-absent`),
+  same payload. Search or access failure: it stays uncertain and is shown
+  as a problem, never treated as absence; `wfe notify resolve` is the
+  person's path. A published follow-up announces documents that became
+  readable later; an attempted message is never rewritten. Exactly-once
+  is not claimed: a message deleted by hand, or Zulip losing history,
+  defeats the search.
+- **One sender**: `wfe notify claim --sender <owner> --pid <pid>` records
+  the sender; while that process lives on this host every other sender is
+  refused; when it is gone, the next one takes over and every begun
+  delivery is reconciled first. There is no lease expiry: an old claim
+  proves nothing about a request still in flight. Results (`begin`, `sent`,
+  `failed`, `legacy`) name the delivery, its claim and its events; stale or
+  unrelated ones are refused; the same acknowledgment twice is harmless.
+- **Before p5/ex1**: uncertain outbox rows become one legacy reconciliation
+  per run at migration; the transport's old `inflight.json` is imported
+  once (`import-inflight`) and retired. The posts found say exactly which
+  events they carried; a complete search releases the rest to new
+  deliveries; otherwise they stay uncertain.
 - **Provisioning**: a folder per project, then a channel per workflow known
   from the registry's workspaces (external edits included), the realm owners
   and the bot subscribed. An existing folder or channel of the same name is
@@ -457,11 +490,15 @@ questions are answered in agdevworld, and the message says where.
   since, person}` — no credentials (autolab's transport holds them). A
   `localhost` viewBase is refused; without one, messages say to answer on
   the execution host and the run view says the remote address is missing.
-- **Transport**: autolab's `agautolab.wfnotify` asks `wfe notify due`, posts
-  with its bot and reports `sent` / `failed` / `moved` / `target`; it runs on
-  a thread of the executor process, independent of the agent and of the
-  slot. `wfe notify status|outbox|reset` are for people. The run view shows
-  the topic link, what is pending or failing, and provisioning problems.
+- **Transport** (protocol 2; `wfe notify protocol`): autolab's
+  `agautolab.wfnotify` checks the protocol, asks `wfe notify due`
+  (provisioning), `claim`s, and for each delivery searches if asked,
+  `begin`s, posts with its bot and reports `sent` / `failed` / `moved` /
+  `target`; it runs on a thread of the executor process, independent of
+  the agent and of the slot. A transport of another protocol sends nothing
+  (an old `sent --id` is refused). `wfe notify status|outbox|deliveries|
+  sender|resolve|reset` are for people. The run view shows the topic link,
+  what is pending, failing or possibly posted, and provisioning problems.
 
 ## Operations
 

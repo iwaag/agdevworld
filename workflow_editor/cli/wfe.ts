@@ -35,7 +35,7 @@ class Refused extends Error { detail?: unknown; constructor(m: string, detail?: 
 // ---- arguments ---------------------------------------------------------------
 
 interface Parsed { positional: string[]; opts: Map<string, string[]>; flags: Set<string> }
-const FLAGS = new Set(['json', 'help', 'resume', 'h', 'new', 'history', 'no-gitea', 'reuse', 'lost', 'uncertain'])
+const FLAGS = new Set(['json', 'help', 'resume', 'h', 'new', 'history', 'no-gitea', 'reuse', 'lost', 'uncertain', 'found', 'complete', 'not-posted'])
 function parse(argv: string[]): Parsed {
   const p: Parsed = { positional: [], opts: new Map(), flags: new Set() }
   for (let i = 0; i < argv.length; i++) {
@@ -272,25 +272,49 @@ publish <checkpoint id>           retry a publication; finished steps are kept
 status [<run>]                    the executor, or one run's attempts, jobs and
                                   checkpoints
 State is <area>/.local/exec/exec.sqlite (this host only).`,
-  notify: `wfe notify <subcommand> …   (Zulip coordination; the transport's interface)
+  notify: `wfe notify <subcommand> …   (Zulip coordination; the transport's interface, protocol 2)
 
-status [<run>]                    targets (folders, channels), runs and their
-                                  delivery state, or one run's binding
-outbox [<project>/<workflow>/<run>]  the queued, failed and sent events
-due                               scan the records, then what to provision
-                                  and deliver now (JSON)
+status [<run>]                    targets (folders, channels), runs, the sender,
+                                  and delivery state, or one run's binding
+outbox [<project>/<workflow>/<run>]  events and the delivery each belongs to
+deliveries [<project>/<workflow>/<run>]  frozen messages: state, claim, attempts,
+                                  where they were sent, what established absence
+due                               scan the records, then what to provision (JSON)
+claim --sender <owner> --pid <n>  take the sender role (refused while another
+                                  sender's process lives) and hand out at most one
+                                  delivery per run (JSON). A delivery is frozen
+                                  when first handed out: its events, text, marker
+                                  and destination never change; new events wait
+begin <delivery> --claim <c> --stream <n> --channel <name> --topic <name>
+      [--checked-absent <evidence>]  recorded before the POST; a delivery that
+                                  may have been posted needs the evidence that it
+                                  was not
+sent <delivery> --claim <c> --message <n> --stream <n> --channel <name> --topic <name> [--found]
+                                  posted (or found by its marker): the delivery and
+                                  its events are sent; repeating it is harmless
+failed <delivery> --claim <c> --error <text> [--uncertain]
+                                  retried later with the same payload; --uncertain:
+                                  the answer was lost or the search was incomplete
+legacy <delivery> --claim <c> --found-json <[{event, message, stream, channel, topic}]>
+      [--complete] [--error <text>]  result of reconciling pre-p5/ex1 uncertain events
+resolve <delivery> --message <n> | --not-posted  --by <name>
+                                  a person's reconciliation when the transport
+                                  cannot establish whether it was posted
+import-inflight --id <event id>… [--marker <text>]
+                                  the old transport's inflight.json: its events
+                                  are reconciled before anything else of the run
+sender [--release <owner>]        who delivers; release a sender whose process is
+                                  gone or on another host
+protocol                          the transport protocol this release speaks
 target <key> --zulip-id <n> | --problem <text>
-sent --id <event id>… --message <n> --stream <n> --channel <name> --topic <name>
-failed --id <event id>… --error <text> [--uncertain]
-                                  --uncertain: the answer was lost after the
-                                  request; the next attempt looks for the
-                                  message's marker before posting again
 moved <project>/<workflow>/<run> --stream <n> --channel <name> --topic <name>
 run-problem <project>/<workflow>/<run> --problem <text>
 reset <key>                       the repair path: forget a binding (a deleted
                                   channel, a taken name, a duplicate run) so it
-                                  is provisioned again
+                                  is provisioned again; deliveries that may have
+                                  been posted are still looked for where they went
 Keys: folder:<project>, channel:<project>/<workflow>, <project>/<workflow>/<run>.
+Every --event <id> given to begin/sent/failed must equal the delivery's events.
 Configuration: <area>/zulip.json {enabled, zulipUrl, viewBase, since[, person]};
 state: <area>/.local/notify/notify.sqlite. Nothing here posts: autolab's
 agautolab.wfnotify does, with its own credentials.`,
@@ -363,7 +387,7 @@ Projects and workspaces
   dashboard                 every project and shared repository, with where each fact was read
   request <workflow> …      a person's request to the executor (autolab): a run, queued
   exec <subcommand>         the executor's interface: claim, started, finished, stops, reconcile …
-  notify <subcommand>       Zulip coordination: status, outbox, due, reset … (autolab delivers)
+  notify <subcommand>       Zulip coordination: status, deliveries, claim, resolve … (autolab delivers)
 
 Workflows (by file name or id)
   workflow new <id>         create devdocs/workflows/<id>.yaml from the template
@@ -620,28 +644,63 @@ async function cmdExec(p: Parsed): Promise<number> {
 // transport (autolab) and for people. Rules are in server/notify.ts.
 async function cmdNotify(p: Parsed): Promise<number> {
   const [sub, arg] = p.positional
-  const { NotifyStore } = await import('../server/notify.ts')
+  const { NotifyStore, NOTIFY_PROTOCOL } = await import('../server/notify.ts')
   const x = await openExec(p)
   const n = new NotifyStore({ area: areaDir(p), registryFile: registryFile(p), exec: x })
   const num = (k: string) => { const v = opt(p, k); if (v === undefined || !/^\d+$/.test(v)) throw new UsageError(`--${k} <integer> is required`); return Number(v) }
   const need = (k: string) => { const v = opt(p, k); if (!v?.trim()) throw new UsageError(`--${k} is required`); return v }
   const ids = () => { const v = p.opts.get('id') ?? []; if (!v.length) throw new UsageError('--id <event id> is required (repeatable)'); return v }
+  const delivery = () => { if (!arg || !/^\d+$/.test(arg)) throw new UsageError(`${sub} <delivery id> --claim <claim> …`); return Number(arg) }
+  const events = () => p.opts.get('event')
+  const dest = () => ({ streamId: num('stream'), channel: need('channel'), topic: need('topic') })
   try {
     switch (sub) {
+      case 'protocol': json = true; out('', { protocol: NOTIFY_PROTOCOL }); return 0
       case 'due': json = true; out('', await n.due()); return 0
+      case 'claim': json = true; out('', await n.claim({ owner: need('sender'), pid: num('pid') })); return 0
       case 'target': {
         if (!arg) throw new UsageError('target <key> --zulip-id <n> | --problem <text>')
         n.recordTarget(arg, opt(p, 'zulip-id') !== undefined ? { zulipId: num('zulip-id') } : { problem: need('problem') })
         out(`Recorded ${arg}.`, { ok: true }); return 0
       }
-      case 'sent': n.recordSent(ids(), { messageId: num('message'), streamId: num('stream'), channel: need('channel'), topic: need('topic') }); out('Recorded as sent.', { ok: true }); return 0
-      case 'failed': n.recordFailed(ids(), need('error'), p.flags.has('uncertain')); out('Recorded the failure; it is retried later.', { ok: true }); return 0
+      case 'begin': n.begin(delivery(), need('claim'), { destination: dest(), checkedAbsent: opt(p, 'checked-absent'), events: events() }); out('Begun: from now on it may have been posted.', { ok: true }); return 0
+      case 'sent': {
+        if (p.opts.has('id')) throw new UsageError('sent takes a delivery id and its claim (protocol 2); --id is the old protocol: update agautolab.wfnotify')
+        const r = n.acknowledge(delivery(), need('claim'), { messageId: num('message'), destination: dest(), found: p.flags.has('found'), events: events() })
+        out(r === 'recorded' ? 'Recorded as sent.' : 'Already recorded as this message.', { ok: true, result: r }); return 0
+      }
+      case 'failed': {
+        if (p.opts.has('id')) throw new UsageError('failed takes a delivery id and its claim (protocol 2); --id is the old protocol: update agautolab.wfnotify')
+        n.fail(delivery(), need('claim'), need('error'), p.flags.has('uncertain'), { events: events() }); out('Recorded the failure; the same delivery is retried later.', { ok: true }); return 0
+      }
+      case 'legacy': {
+        let found: { event: string; message: number; stream: number; channel: string; topic: string }[]
+        try { found = JSON.parse(opt(p, 'found-json') ?? '[]') } catch { throw new UsageError('--found-json must be a JSON list') }
+        n.legacy(delivery(), need('claim'), { found: found.map(f => ({ event: f.event, messageId: f.message, destination: { streamId: f.stream, channel: f.channel, topic: f.topic } })), complete: p.flags.has('complete'), error: opt(p, 'error') })
+        out('Recorded.', { ok: true }); return 0
+      }
+      case 'resolve': {
+        const how = p.flags.has('not-posted') ? { notPosted: true as const } : { messageId: num('message') }
+        const note = n.resolve(delivery(), how, need('by')); out(note, { ok: true, note }); return 0
+      }
+      case 'import-inflight': { const notes = n.importInflight({ ids: ids(), marker: opt(p, 'marker') }); out(notes.join('\n') || 'Nothing to import.', { ok: true, notes }); return 0 }
+      case 'sender': {
+        const release = opt(p, 'release')
+        if (release) { const note = n.releaseSender(release); out(note, { ok: true, note }); return 0 }
+        const s = n.sender() ?? null
+        out(s ? `Sender: ${s.owner} (pid ${s.pid} on ${s.host}, since ${s.since}, last claim ${s.seen})` : 'No sender has claimed yet.', s); return 0
+      }
+      case 'deliveries': {
+        const rows = n.deliveries(arg)
+        out(rows.length ? rows.map(d => `${String(d.id).padStart(4)} ${d.state.padEnd(10)} ${d.run_key} ${d.kind === 'legacy' ? '(legacy) ' : ''}${(JSON.parse(d.events) as string[]).map(e => e.slice(e.indexOf('#'))).join(' ')}${d.message_id ? ` → message ${d.message_id}` : ''}${d.attempts ? `  ${d.attempts} send(s)` : ''}${d.uncertain || d.state === 'sending' ? '  MAY HAVE BEEN POSTED' : ''}${d.last_error ? `  last error: ${d.last_error}` : ''}${d.problem ? `  ${d.problem}` : ''}`).join('\n') : 'No deliveries.', rows)
+        return 0
+      }
       case 'moved': if (!arg) throw new UsageError('moved <run key> …'); n.recordMoved(arg, { streamId: num('stream'), channel: need('channel'), topic: need('topic') }); out('Recorded where the topic is now.', { ok: true }); return 0
       case 'run-problem': if (!arg) throw new UsageError('run-problem <run key> --problem <text>'); n.recordRunProblem(arg, need('problem')); out('Recorded.', { ok: true }); return 0
       case 'reset': if (!arg) throw new UsageError('reset <key>'); { const notes = n.reset(arg); out(notes.join('\n'), { ok: true, notes }) } return 0
       case 'outbox': {
         const rows = n.outbox(arg)
-        out(rows.length ? rows.map(r => `${r.state.padEnd(7)} ${r.id}${r.message_id ? ` → message ${r.message_id}` : ''}${r.last_error ? `  (${r.attempts} attempt(s); ${r.last_error}${r.uncertain ? '; may have been posted' : ''})` : ''}`).join('\n') : 'The outbox is empty.', rows)
+        out(rows.length ? rows.map(r => `${r.state.padEnd(7)} ${r.id}${r.delivery ? `  (delivery ${r.delivery})` : ''}${r.message_id ? ` → message ${r.message_id}` : ''}${r.last_error ? `  (before p5/ex1: ${r.attempts} attempt(s); ${r.last_error}${r.uncertain ? '; may have been posted' : ''})` : ''}`).join('\n') : 'The outbox is empty.', rows)
         return 0
       }
       case 'status': {
@@ -653,19 +712,22 @@ async function cmdNotify(p: Parsed): Promise<number> {
           const st = n.runStatus(project, ref)
           out(!st.configured ? `Zulip coordination is not configured${st.problem ? `: ${st.problem}` : ''}.` : [
             `Topic: ${st.topic ? `${st.topic.channel} › ${st.topic.topic}${st.topic.url ? ` (${st.topic.url})` : ''}` : 'none yet'}`,
-            `Delivery: ${st.pending} pending, ${st.failed} failed${st.lastSent ? `; last sent ${st.lastSent}` : ''}${st.lastError ? `; last error: ${st.lastError}` : ''}`,
+            `Delivery: ${st.pending} pending, ${st.failed} failed${st.uncertain ? ' (may have been posted; looked for before any retry)' : ''}${st.lastSent ? `; last sent ${st.lastSent}` : ''}${st.lastError ? `; last error: ${st.lastError}` : ''}`,
             ...(st.provisioning ? [`Provisioning: ${st.provisioning}`] : []), ...(st.problem ? [`Problem: ${st.problem}`] : []), ...(st.skipped ? [`Not announced: ${st.skipped}`] : []),
             `Answer link: ${st.viewBase ?? 'none configured — messages say to answer on the execution host'}`,
           ].join('\n'), st)
           return 0
         }
         await n.scan()
-        const o = n.overview()
+        const o = n.overview(), problems = n.problems(), notes = n.notes()
         out([
           `Configuration: ${!cfg ? 'none (no zulip.json)' : 'problem' in cfg ? cfg.problem : `${cfg.enabled ? 'enabled' : 'disabled'}, ${cfg.zulipUrl}, answer link ${cfg.viewBase ?? 'none (remote readers are told to answer on the execution host)'}, announcing runs created since ${cfg.since}`}`,
           'Targets:', ...o.targets.map(t => `  ${t.key.padEnd(44)} ${t.state.padEnd(11)} ${t.name}${t.zulip_id ? ` (#${t.zulip_id})` : ''}${t.problem ? ` — ${t.problem}` : ''}`),
-          'Runs:', ...o.runs.map(r => `  ${r.key.padEnd(44)} ${r.skipped ? 'not announced' : r.problem ? 'PROBLEM' : `${r.pending} pending, ${r.failed} failed`}${r.topic ? `  topic ${r.channel} › ${r.topic}` : ''}${r.problem ? ` — ${r.problem}` : ''}`),
-        ].join('\n'), { config: cfg, ...o })
+          'Runs:', ...o.runs.map(r => `  ${r.key.padEnd(44)} ${r.skipped ? 'not announced' : r.problem ? 'PROBLEM' : `${r.pending} pending, ${r.failed} failed${r.uncertain ? ', 1 may have been posted' : ''}`}${r.topic ? `  topic ${r.channel} › ${r.topic}` : ''}${r.problem ? ` — ${r.problem}` : ''}`),
+          `Sender: ${o.sender ? `${o.sender.owner} (pid ${o.sender.pid} on ${o.sender.host}, last claim ${o.sender.seen})` : 'none yet'}`,
+          ...(problems.length ? ['Problems:', ...problems.map(x => `  ${x}`)] : []),
+          ...(notes.length ? ['Notes:', ...notes.map(x => `  ${x.at} ${x.note}`)] : []),
+        ].join('\n'), { config: cfg, ...o, problems, notes })
         return 0
       }
     }
@@ -674,7 +736,7 @@ async function cmdNotify(p: Parsed): Promise<number> {
     if (e instanceof UsageError) throw e
     throw new Refused((e as Error).message)
   } finally { n.close(); x.close(); execStore = undefined }
-  throw new UsageError('wfe notify status|outbox|due|target|sent|failed|moved|run-problem|reset')
+  throw new UsageError('wfe notify status|outbox|deliveries|due|claim|begin|sent|failed|legacy|resolve|import-inflight|sender|protocol|target|moved|run-problem|reset')
 }
 
 // A person's request: their words become the run's braindump.md, and the

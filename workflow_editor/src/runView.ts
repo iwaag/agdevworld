@@ -429,6 +429,7 @@ export function renderRunView(root: HTMLElement, wsId: string, workflow: string,
     if (v.skipped) out.push(h('p.small.muted', `Not announced: ${v.skipped}.`))
     out.push(v.topic ? h('p.small', 'Topic: ', v.topic.url ? h('a', { href: v.topic.url, target: '_blank', rel: 'noopener' }, `${v.topic.channel} › ${v.topic.topic}`) : `${v.topic.channel} › ${v.topic.topic}`) : h('p.small.muted', 'No message sent yet.'))
     out.push(h(`p.small${v.failed ? '.error' : ''}`, `Delivery: ${v.pending} pending, ${v.failed} waiting for a retry${v.lastSent ? ` · last sent ${ago(v.lastSent)}` : ''}`))
+    if (v.uncertain) out.push(h('p.small.warn', 'A message may already have been posted; it is looked for in Zulip before any retry (wfe notify deliveries).'))
     if (v.lastError) out.push(h('p.small.error', `Last error: ${v.lastError}`))
     if (v.provisioning) out.push(h('p.small.warn-text', `Channel: ${v.provisioning}`))
     if (v.problem) out.push(h('div.banner.error.small', `${v.problem}`))

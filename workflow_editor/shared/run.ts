@@ -117,9 +117,16 @@ export interface Question {
   takenUp: { by: string; at: string; answer: number } | null
   withdrawn: { by: string; at: string; reason: string } | null
   document?: DocumentEvidence // asked from the plan step: the plan.md it asked about (p5)
+  subject?: DocumentEvidence[] // asked from the result-confirmation node: the deliverables it presents (p6)
 }
 export interface Artifact { path: string; node: string | null; title: string; by: string; at: string }
-export interface Decision { decision: 'accepted' | 'rejected'; by: string; at: string; evidence: string; note: string }
+export interface Decision {
+  decision: 'accepted' | 'rejected'; by: string; at: string; evidence: string; note: string
+  // A decision the person gave by answering the result-confirmation
+  // question (p6): which question and answer, whose words, and the
+  // deliverables (by hash) it confirmed.
+  confirmation?: { question: string; answer: number; from: string; source?: SourceRef; subject: DocumentEvidence[] }
+}
 export interface Execution {
   state: ExecutionState
   counts: Record<NodeState, number>
@@ -180,7 +187,7 @@ export type OpInput =
   | { op: 'node.complete'; node: string; outcome: string; artifacts?: string[]; document?: DocumentEvidence; agreement?: string }
   | { op: 'node.fail'; node: string; reason: string }
   | { op: 'node.cancel'; node: string; reason: string }
-  | { op: 'question.ask'; question: string; node?: string; text: string; to: string; document?: DocumentEvidence; plan?: boolean }
+  | { op: 'question.ask'; question: string; node?: string; text: string; to: string; document?: DocumentEvidence; plan?: boolean; subjects?: string[]; subject?: DocumentEvidence[] }
   | { op: 'question.answer'; question: string; text: string; from?: string; source?: SourceRef }
   | { op: 'instruction.receive'; instruction?: string; text: string; from: string; source?: SourceRef }
   | { op: 'instruction.ack'; instructions: string[]; response: string; note: string }
@@ -188,7 +195,7 @@ export type OpInput =
   | { op: 'question.withdraw'; question: string; reason: string }
   | { op: 'artifact.attach'; path: string; node?: string; title?: string }
   | { op: 'run.cancel'; reason: string }
-  | { op: 'run.decide'; decision: 'accepted' | 'rejected'; evidence: string; note?: string }
+  | { op: 'run.decide'; decision: 'accepted' | 'rejected'; evidence?: string; note?: string; question?: string; answer?: number; subject?: DocumentEvidence[] }
   | { op: 'attempt.begin'; attempt: string; reason: string; backend?: string; settings?: AttemptSettings }
   | { op: 'attempt.end'; attempt: string; outcome: AttemptOutcome; detail?: string }
   | { op: 'run.stop'; reason: string }
@@ -329,6 +336,17 @@ export function sourceOf(v: unknown): SourceRef {
   const int = (x: unknown, what: string) => (typeof x === 'number' && Number.isInteger(x) && x > 0 ? x : fail('shape', `source.${what} must be a positive integer`))
   if (o.kind !== 'zulip') fail('shape', 'source.kind must be zulip')
   return { kind: 'zulip', realm: text(o.realm, 'source.realm'), message: int(o.message, 'message'), stream: int(o.stream, 'stream'), topic: text(o.topic, 'source.topic'), sender: int(o.sender, 'sender'), senderName: text(o.senderName, 'source.senderName'), at: text(o.at, 'source.at') }
+}
+
+// A deliverable's evidence: a project-relative file, its hash and size.
+function subjectOf(v: unknown, what: string): DocumentEvidence {
+  if (!isObj(v)) return fail('shape', `${what} must be {path, sha256, bytes}`)
+  const d = v as Record<string, unknown>
+  const path = typeof d.path === 'string' ? normalizeRepoPath(d.path) : null
+  if (!path || path === '.') fail('shape', `${what}: path must be project-relative`)
+  if (typeof d.sha256 !== 'string' || !/^[0-9a-f]{64}$/.test(d.sha256)) fail('shape', `${what}: sha256 must be 64 hex digits`)
+  if (typeof d.bytes !== 'number' || !Number.isInteger(d.bytes) || d.bytes <= 0) fail('document-empty', `${what}: ${path} is empty`)
+  return { path: path!, sha256: d.sha256 as string, bytes: d.bytes as number }
 }
 
 function attemptSettings(v: unknown): AttemptSettings {
@@ -508,6 +526,13 @@ export function apply(prev: RunState | null, e: HistoryEntry | (OpInput & EntryM
         if (!plan) fail('shape', 'this run has no plan step; there is no plan.md to ask about')
         q.document = evidence(e.document, 'asking about the revised plan', documentPath(s, plan!))
       } else if (e.document !== undefined) fail('shape', 'only a question about the plan records a document')
+      // The result confirmation presents deliverables; the question records
+      // them by hash (the file layer checks them), so a confirmation is of
+      // exactly those files.
+      if (e.node && graph.nodes[e.node]?.confirms === 'result') {
+        if (!Array.isArray(e.subject) || !e.subject.length) fail('subject-missing', `${e.node} confirms the result: name the deliverables it presents (--subject <path>, written first)`)
+        q.subject = e.subject!.map((d, i) => subjectOf(d, `subject ${i + 1}`))
+      } else if (e.subject !== undefined) fail('shape', 'only a question from the result-confirmation node presents deliverables')
       if (e.node !== undefined && e.node !== null) {
         const n = node(e.node)
         if (n.state !== 'running') fail('state', `node "${e.node}" is ${n.state}; a question waits from a running node${n.state === 'waiting' ? ' (it already waits on something)' : ''}`)
@@ -652,8 +677,38 @@ export function apply(prev: RunState | null, e: HistoryEntry | (OpInput & EntryM
     }
     case 'run.decide': {
       if (e.decision !== 'accepted' && e.decision !== 'rejected') fail('shape', 'decision must be accepted or rejected')
-      if (e.decision === 'accepted' && prev.execution.state !== 'completed') fail('not-completed', `the execution is ${prev.execution.state}; only a completed execution can be accepted`)
-      s.decisions.push({ decision: e.decision, by, at, evidence: text(e.evidence, 'the evidence'), note: optText(e.note, 'note') })
+      if (e.question === undefined || e.question === null) {
+        // The person's own decision (browser, CLI).
+        if (e.decision === 'accepted' && prev.execution.state !== 'completed') fail('not-completed', `the execution is ${prev.execution.state}; only a completed execution can be accepted`)
+        s.decisions.push({ decision: e.decision, by, at, evidence: text(e.evidence, 'the evidence'), note: optText(e.note, 'note') })
+        break
+      }
+      // The decision the person's answer to the result-confirmation question
+      // is (p6), recorded by the executor that took it up. It may precede the
+      // execution's completion; the two stay separate facts.
+      live()
+      if (ctl.attempt && e.attempt !== ctl.attempt.id) fail(e.attempt ? 'attempt-stale' : 'attempt-required', `attempt ${ctl.attempt.id} is executing this run; the decision it records from a confirmation carries its id`)
+      if (!ctl.attempt && e.attempt) fail('attempt-stale', `attempt ${e.attempt} is not open`)
+      const q = question(e.question)
+      const confirming = q.node ? graph.nodes[q.node]?.confirms === 'result' : false
+      if (!confirming) fail('not-result-confirmation', `question ${q.id} was ${q.node ? `asked from ${q.node}` : 'asked from no node'}, which does not confirm the result${q.node && stepOf(graph, q.node)?.kind === 'plan' ? ' (plan agreement is not acceptance of the result)' : ''}; only the result-confirmation question's answer becomes a decision`)
+      const latest = Object.values(s.questions).filter(x => x.node === q.node).at(-1)!
+      if (latest.id !== q.id) fail('not-result-confirmation', `question ${latest.id} was asked after ${q.id}; the decision is the answer to the latest confirmation question`)
+      const taken = q.takenUp
+      if (!taken) return fail('no-answer', `question ${q.id} is ${questionState(q)}; a decision is an answer that was taken up`)
+      const index = e.answer ?? taken.answer
+      if (index !== taken.answer) fail('shape', `answer ${index} of ${q.id} was not the one taken up (${taken.answer})`)
+      if (s.decisions.some(d => d.confirmation?.question === q.id)) fail('decision-exists', `a decision from ${q.id} is already recorded`)
+      const now = (e.subject ?? []).map((d, i) => subjectOf(d, `subject ${i + 1}`))
+      const asked = q.subject ?? []
+      const changed = asked.filter(a => !now.some(n => n.path === a.path && n.sha256 === a.sha256))
+      if (changed.length) fail('subject-changed', `${changed.map(c => c.path).join(', ')} changed since ${q.id} presented ${changed.length === 1 ? 'it' : 'them'}; present the current deliverables again`)
+      const a = q.answers[index]
+      s.decisions.push({
+        decision: e.decision, by, at, note: optText(e.note, 'note'),
+        evidence: optText(e.evidence, 'evidence') || `${q.id} answer ${index} from ${a.from}${a.source ? ` (Zulip message ${a.source.message})` : ''}, confirming ${asked.map(x => `${x.path} (${x.sha256.slice(0, 12)})`).join(', ')}`,
+        confirmation: { question: q.id, answer: index, from: a.from, ...(a.source ? { source: a.source } : {}), subject: asked },
+      })
       break
     }
     default:
@@ -808,6 +863,8 @@ export function situation(s: Pick<RunState, 'control' | 'execution' | 'cancelled
 // decision, a cancellation) are always sent on their own; routine ones may
 // be combined with adjacent routine ones.
 export type NotableType = 'started' | 'question' | 'answered' | 'reported' | 'node-completed' | 'failed' | 'held' | 'resumed' | 'completed' | 'decided' | 'cancelled'
+  | 'instructed' | 'acknowledged' // p6: an additional instruction received, and taken up
+  | 'accepted' | 'notice' // p6, request topic only: the request became a run; a reply about a post (server/notify.ts)
 export interface NotableEvent {
   id: string
   seq: number
@@ -823,6 +880,11 @@ export interface NotableEvent {
   document?: string // project-relative document the event refers to
   hold?: HoldKind
   decision?: 'accepted' | 'rejected'
+  subject?: string[] // the deliverables a result-confirmation question presents (p6)
+  confirmation?: { question: string; from: string } // a decision from the person's confirmation (p6)
+  instructions?: string[] // instructed / acknowledged (p6)
+  response?: string // acknowledged: incorporate | clarify | new-run
+  confirms?: boolean // a question from the result-confirmation node
 }
 // The hold an entry recorded, as the reducer worded it at that point (the
 // state keeps only the current hold): replayed from the frozen graph.
@@ -850,7 +912,7 @@ export function notableEvents(r: RunRecord, sinceSeq = 0): NotableEvent[] {
     if (e.op === 'attempt.begin' && r.history.find(h => h.op === 'attempt.begin')!.seq === e.seq) push('started', false, d.reason ?? '')
     else if (e.op === 'question.ask') {
       const q = r.questions[d.question]
-      push('question', true, d.text, { question: d.question, holder: d.to, node: step ? undefined : d.node, step: step ? d.node : undefined, document: q?.document?.path })
+      push('question', true, d.text, { question: d.question, holder: d.to, node: step ? undefined : d.node, step: step ? d.node : undefined, document: q?.document?.path, ...(q?.subject ? { subject: q.subject.map(x => x.path), confirms: true } : {}) })
     } else if (e.op === 'question.answer') push('answered', false, `answer to ${d.question} recorded`, { question: d.question, holder: r.executor.name })
     else if (e.op === 'node.complete' && step?.kind === 'report') push('reported', false, d.outcome, { node: step.for ?? undefined, step: d.node, document: (e as unknown as { document?: DocumentEvidence }).document?.path })
     else if (e.op === 'node.complete' && step?.kind === 'final-report') push('completed', true, d.outcome, { step: d.node, document: (e as unknown as { document?: DocumentEvidence }).document?.path })
@@ -863,7 +925,12 @@ export function notableEvents(r: RunRecord, sinceSeq = 0): NotableEvent[] {
     if (e.change.hold?.[1]) push('held', true, holdReason(r, e.seq) || d.detail || d.reason || e.change.hold[1], { hold: e.change.hold[1] })
     if (e.op === 'run.resume') push('resumed', false, d.reason)
     if (e.change.execution?.[1] === 'completed' && !(step?.kind === 'final-report')) push('completed', true, d.outcome ?? 'every node completed', e.op === 'node.complete' && !step ? { node: d.node } : {})
-    if (e.op === 'run.decide') push('decided', true, d.evidence, { decision: d.decision as 'accepted' | 'rejected' })
+    if (e.op === 'run.decide') {
+      const dec = r.decisions.find(x => x.at === e.at && x.by === e.by && x.decision === d.decision)
+      push('decided', true, dec?.evidence ?? d.evidence ?? '', { decision: d.decision as 'accepted' | 'rejected', ...(dec?.confirmation ? { confirmation: { question: dec.confirmation.question, from: dec.confirmation.from }, subject: dec.confirmation.subject.map(x => x.path) } : {}) })
+    }
+    if (e.op === 'instruction.receive') push('instructed', false, d.text, { instructions: [e.change.instruction?.[1] ?? ''], holder: r.executor.name })
+    if (e.op === 'instruction.ack') push('acknowledged', false, d.note, { instructions: (e as unknown as { instructions: string[] }).instructions, response: d.response })
     if (e.op === 'run.cancel') push('cancelled', true, d.reason)
   }
   return out

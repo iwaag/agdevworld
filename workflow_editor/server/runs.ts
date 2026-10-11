@@ -592,6 +592,18 @@ async function runOpLocked(ws: Workspace, ref: RunRef, input: OpInput & EntryMet
     if ('problem' in checked) docProblem = checked.problem
     else (op as { document?: DocumentEvidence }).document = checked
   }
+  // Deliverables a result-confirmation question presents, and their state
+  // when a decision is recorded from it: checked here, on disk (p6).
+  if (op.op === 'question.ask') {
+    delete op.subject
+    if (op.subjects?.length) op.subject = await Promise.all(op.subjects.map(p => checkSubject(ws, p)))
+    delete op.subjects
+  }
+  if (op.op === 'run.decide') {
+    delete op.subject
+    const q = op.question ? record.questions[op.question] : undefined
+    if (q?.subject) op.subject = (await Promise.all(q.subject.map(d => checkSubject(ws, d.path).catch(() => null)))).filter((d): d is DocumentEvidence => !!d)
+  }
   let next: RunRecord
   try {
     next = operate(record, op, { at: (ctx.now ?? new Date()).toISOString(), by: ctx.by?.trim() || record.executor.name, via: ctx.via, graph, expectSeq: ctx.expectSeq })
@@ -624,6 +636,24 @@ export async function checkDocument(ws: Workspace, ref: RunRef, step: StepSpec):
   const bytes = await readFile(abs)
   if (!bytes.toString('utf8').trim()) return { problem: `${path} is empty` }
   return { path, sha256: sha256(bytes), bytes: bytes.length }
+}
+
+// A deliverable: a regular, nonempty file inside the project (not a link
+// out of it), by hash and size. Large files are fine (a PPTX); its content
+// is not read as text.
+const MAX_SUBJECT = 200 * 1024 * 1024
+export async function checkSubject(ws: Workspace, path: string): Promise<DocumentEvidence> {
+  const rel = normalizeRepoPath(path)
+  if (!rel || rel === '.') throw new RequestError(400, `subject "${path}" must be a project-relative file path`)
+  const abs = await inside(ws.root, rel)
+  const l = await lstat(abs).catch(() => null)
+  if (!l) throw new RequestError(422, `${rel} does not exist; write the deliverable before presenting it`, { code: 'subject-missing' })
+  if (l.isSymbolicLink() || !l.isFile()) throw new RequestError(422, `${rel} is not a regular file`, { code: 'subject-missing' })
+  if (!(await realpath(abs)).startsWith((await realpath(ws.root)) + sep)) throw new RequestError(422, `${rel} resolves outside the project`, { code: 'subject-missing' })
+  if (l.size === 0) throw new RequestError(422, `${rel} is empty`, { code: 'document-empty' })
+  if (l.size > MAX_SUBJECT) throw new RequestError(422, `${rel} is larger than ${MAX_SUBJECT} bytes`, { code: 'subject-missing' })
+  const bytes = await readFile(abs)
+  return { path: rel, sha256: sha256(bytes), bytes: bytes.length }
 }
 
 // ---- checking --------------------------------------------------------------------

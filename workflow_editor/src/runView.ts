@@ -440,13 +440,14 @@ export function renderRunView(root: HTMLElement, wsId: string, workflow: string,
     if (!v.configured) return [h('p.small.muted', `Not announced: Zulip coordination is not configured on this host${v.problem ? ` (${v.problem})` : ''}.`)]
     const out: (Node | null)[] = []
     if (v.skipped) out.push(h('p.small.muted', `Not announced: ${v.skipped}.`))
-    out.push(v.topic ? h('p.small', 'Topic: ', v.topic.url ? h('a', { href: v.topic.url, target: '_blank', rel: 'noopener' }, `${v.topic.channel} › ${v.topic.topic}`) : `${v.topic.channel} › ${v.topic.topic}`) : h('p.small.muted', 'No message sent yet.'))
+    if (v.request) out.push(h('p.small', 'Request and conversation: ', v.request.url ? h('a', { href: v.request.url, target: '_blank', rel: 'noopener' }, `${v.request.channel} › ${v.request.topic}`) : `${v.request.channel} › ${v.request.topic}`, h('span.muted', ' — questions are answered there')))
+    out.push(v.topic ? h('p.small', v.request ? 'Progress: ' : 'Topic: ', v.topic.url ? h('a', { href: v.topic.url, target: '_blank', rel: 'noopener' }, `${v.topic.channel} › ${v.topic.topic}`) : `${v.topic.channel} › ${v.topic.topic}`) : h('p.small.muted', 'No message sent yet.'))
     out.push(h(`p.small${v.failed ? '.error' : ''}`, `Delivery: ${v.pending} pending, ${v.failed} waiting for a retry${v.lastSent ? ` · last sent ${ago(v.lastSent)}` : ''}`))
     if (v.uncertain) out.push(h('p.small.warn', 'A message may already have been posted; it is looked for in Zulip before any retry (wfe notify deliveries).'))
     if (v.lastError) out.push(h('p.small.error', `Last error: ${v.lastError}`))
     if (v.provisioning) out.push(h('p.small.warn-text', `Channel: ${v.provisioning}`))
     if (v.problem) out.push(h('div.banner.error.small', `${v.problem}`))
-    if (!v.viewBase) out.push(h('p.small.muted', 'No remote address of this view is configured: messages tell readers to answer on the execution host.'))
+    if (!v.viewBase && !v.request) out.push(h('p.small.muted', 'No remote address of this view is configured: messages tell readers to answer on the execution host.'))
     return out
   }
 

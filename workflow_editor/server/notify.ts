@@ -38,9 +38,10 @@ import { hostname } from 'node:os'
 import { join } from 'node:path'
 import type { DatabaseSync } from 'node:sqlite'
 import {
-  channelDescription, channelName, folderDescription, folderName, renderMessage, renderPublication, renderPublished, topicName, topicUrl,
-  DELAYED_AFTER_MS, type DocLink, type RenderContext,
+  channelDescription, channelName, folderDescription, folderName, messageUrl, renderMessage, renderNotice, renderPublication, renderPublished, topicName, topicUrl,
+  DELAYED_AFTER_MS, type DocLink, type NoticeKind, type RenderContext,
 } from '../shared/notify.ts'
+import type { IntakeStore, RequestRow } from './intake.ts'
 import { notableEvents, questionState, runKey, type NotableEvent, type RunRecord, type RunRef } from '../shared/run.ts'
 import { assertWorkspaceAllowed, loadBoundary } from './boundary.ts'
 import type { CheckpointRow, ExecStore } from './exec.ts'
@@ -82,7 +83,11 @@ export function loadNotifyConfig(area: string): NotifyConfig | { problem: string
 export const NOTIFY_PROTOCOL = 2
 
 export interface TargetRow { key: string; kind: 'folder' | 'channel'; project: string; workflow: string | null; name: string; description: string; zulip_id: number | null; state: 'pending' | 'provisioned' | 'problem'; problem: string | null; created: string; updated: string }
-export interface RunRow { key: string; project: string; workflow: string; run: string; workspace: string; created: string; scan_seq: number; stream_id: number | null; channel: string | null; topic: string | null; last_message_id: number | null; problem: string | null; skipped: string | null; updated: string }
+// A conversation messages go to (p6: `kind`). `run`: a run's progress topic,
+// keyed <project>/<workflow>/<run>. `request`: the request topic a run was
+// asked for in, keyed <project>/<workflow>/<request key>, bound to its run
+// once it exists (`bound`); its place is the intake's recorded topic.
+export interface RunRow { key: string; project: string; workflow: string; run: string; workspace: string; created: string; scan_seq: number; stream_id: number | null; channel: string | null; topic: string | null; last_message_id: number | null; problem: string | null; skipped: string | null; updated: string; kind: 'run' | 'request'; request: string | null; bound: string | null }
 // state/attempts/next_try/last_error/uncertain are the pre-p5/ex1 per-event
 // delivery fields: kept for history and migration; deliveries carry them now.
 export interface OutboxRow { id: string; run_key: string; ord: number; type: string; critical: number; event: string; state: 'pending' | 'sent' | 'failed'; attempts: number; next_try: string | null; last_error: string | null; uncertain: number; message_id: number | null; unpublished: string | null; sent_at: string | null; created: string }
@@ -161,7 +166,30 @@ const MIGRATIONS: Migration[] = [
       legacyUncertainty(db)
     },
   },
+  {
+    version: 3, // p6: request-topic conversations beside run topics
+    up: db => db.exec(`
+      ALTER TABLE runs ADD COLUMN kind TEXT NOT NULL DEFAULT 'run';
+      ALTER TABLE runs ADD COLUMN request TEXT;
+      ALTER TABLE runs ADD COLUMN bound TEXT;
+    `),
+  },
 ]
+
+// Where a run's coordination event goes (p6). A run requested in a Zulip
+// request topic talks with the person there — questions, receipts of their
+// answers and instructions, the result, its decision — and reports progress
+// in its run topic. Events that need the person go to both. A run requested
+// elsewhere keeps one topic.
+const REQUEST_ONLY = new Set(['question', 'answered', 'instructed', 'acknowledged', 'accepted', 'notice'])
+const RUN_ONLY = new Set(['started', 'reported', 'node-completed'])
+export function destinationsOf(type: string, requested: boolean): ('run' | 'request')[] {
+  if (!requested) return ['run']
+  if (REQUEST_ONLY.has(type)) return ['request']
+  if (RUN_ONLY.has(type)) return ['run']
+  return ['run', 'request']
+}
+export const REQUEST_SUFFIX = '@request'
 
 // Pre-p5/ex1 state: an event marked uncertain may have been posted in a
 // batch nobody recorded. Per run, those events become one legacy delivery
@@ -204,8 +232,9 @@ export class NotifyStore {
   readonly area: string
   readonly registryFile: string
   private exec?: ExecStore
-  constructor(o: { area: string; registryFile: string; exec?: ExecStore }) {
-    this.area = o.area; this.registryFile = o.registryFile; this.exec = o.exec
+  intake?: IntakeStore // the request topics (p6); without it every run has one topic
+  constructor(o: { area: string; registryFile: string; exec?: ExecStore; intake?: IntakeStore }) {
+    this.area = o.area; this.registryFile = o.registryFile; this.exec = o.exec; this.intake = o.intake
     const dir = join(o.area, '.local', 'notify')
     mkdirSync(dir, { recursive: true })
     this.db = openStore('notify store', join(dir, 'notify.sqlite'), MIGRATIONS)
@@ -290,12 +319,47 @@ export class NotifyStore {
         if (rec) notes.push(...await this.scanRun(ws, rec, cfg))
       }
     }
+    notes.push(...this.scanNotices(cfg))
     return notes
+  }
+
+  // The request topic's conversation row, created when first needed and
+  // bound to its run once that exists.
+  private requestThread(req: RequestRow): string {
+    const key = `${req.project}/${req.workflow}/${req.key}`
+    const channel = this.target(`channel:${req.project}/${req.workflow}`)?.name ?? channelName(req.project, req.workflow)
+    this.run(`INSERT OR IGNORE INTO runs (key, project, workflow, run, workspace, created, stream_id, channel, topic, kind, request, bound, updated)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'request', ?, ?, ?)`, key, req.project, req.workflow, req.key, req.workspace, req.created, req.stream_id, channel, req.topic, req.key, req.run, now())
+    if (req.run) this.run('UPDATE runs SET bound = ?, updated = ? WHERE key = ? AND bound IS NULL', req.run, now(), key)
+    return key
+  }
+
+  // Replies the intake owes the person about posts that changed nothing or
+  // need them (docs/intake.md): one message each, in their request topic.
+  private scanNotices(cfg: NotifyConfig): string[] {
+    if (!this.intake) return []
+    const added: string[] = []
+    for (const m of this.intake.notices()) {
+      const req = m.request_key ? this.intake.request(m.request_key) : undefined
+      if (!req || Date.parse(req.created) < Date.parse(cfg.since)) continue
+      const key = this.requestThread(req)
+      const id = `${key}#z${m.id}:${m.notice}`
+      if (this.one('SELECT 1 FROM outbox WHERE id = ?', id)) continue
+      const ord = (this.one<{ o: number | null }>('SELECT max(ord) AS o FROM outbox WHERE run_key = ?', key)?.o ?? 0) + 0.5
+      const event = { id, seq: 0, type: 'notice', at: m.updated, by: 'intake', critical: true, text: m.detail ?? '', kind: m.notice, post: m.id, stream: m.stream_id, topic: m.topic, classification: m.classification ? JSON.parse(m.classification) : null }
+      const r = this.run('INSERT OR IGNORE INTO outbox (id, run_key, ord, type, critical, event, state, created) VALUES (?, ?, ?, \'notice\', 1, ?, \'pending\', ?)', id, key, ord, JSON.stringify(event), now())
+      if (Number(r.changes)) added.push(`queued ${id}`)
+    }
+    return added
   }
 
   private async scanRun(ws: Workspace, rec: RunRecord, cfg: NotifyConfig): Promise<string[]> {
     const key = `${rec.project}/${rec.workflow}/${rec.run}`
     this.ensureTarget('channel', rec.project, rec.workflow, rec.workflow)
+    // A run requested in a Zulip request topic is announced once the intake
+    // has bound the request to it, so its first events reach both topics.
+    const req = this.intake?.requestOfRun(rec.project, rec)
+    if (rec.input.source?.kind === 'zulip' && !req) return []
     let row = this.one<RunRow>('SELECT * FROM runs WHERE key = ?', key)
     if (!row) {
       const skipped = Date.parse(rec.created) < Date.parse(cfg.since) ? `created ${rec.created}, before announcements began (${cfg.since}); not backfilled` : null
@@ -318,16 +382,29 @@ export class NotifyStore {
       return [`${key}: recreated run`]
     }
     const added: string[] = []
-    const insert = (id: string, ord: number, type: string, critical: boolean, event: unknown) => {
-      const r = this.run('INSERT OR IGNORE INTO outbox (id, run_key, ord, type, critical, event, state, created) VALUES (?, ?, ?, ?, ?, ?, \'pending\', ?)', id, key, ord, type, critical ? 1 : 0, JSON.stringify(event), now())
+    const reqKey = req ? this.requestThread(req) : null
+    const insert = (id: string, ord: number, type: string, critical: boolean, event: unknown, thread = key) => {
+      const r = this.run('INSERT OR IGNORE INTO outbox (id, run_key, ord, type, critical, event, state, created) VALUES (?, ?, ?, ?, ?, ?, \'pending\', ?)', id, thread, ord, type, critical ? 1 : 0, JSON.stringify(event), now())
       if (Number(r.changes)) added.push(id)
       return Number(r.changes) > 0
     }
+    // The request became this run: said once, first, in the request topic.
+    if (reqKey) {
+      const first = rec.history[0]
+      insert(`${key}#1:accepted${REQUEST_SUFFIX}`, 1, 'accepted', false, { id: `${key}#1:accepted`, seq: 1, type: 'accepted', at: first.at, by: first.by, critical: false, text: '' }, reqKey)
+    }
     if (rec.seq > row.scan_seq) {
-      // Events of one entry keep the order the selection gives them.
+      // Events of one entry keep the order the selection gives them; each
+      // goes to the conversations it belongs to, under an id per destination.
       this.tx(() => {
         let prev = -1, k = 0
-        for (const e of notableEvents(rec, row!.scan_seq)) { k = e.seq === prev ? k + 1 : 0; prev = e.seq; insert(e.id, e.seq + k * 0.01, e.type, e.critical, e) }
+        for (const e of notableEvents(rec, row!.scan_seq)) {
+          k = e.seq === prev ? k + 1 : 0; prev = e.seq
+          for (const d of destinationsOf(e.type, !!reqKey)) {
+            if (d === 'run') insert(e.id, e.seq + k * 0.01, e.type, e.critical, e)
+            else insert(`${e.id}${REQUEST_SUFFIX}`, e.seq + k * 0.01, e.type, e.critical, e, reqKey!)
+          }
+        }
         this.run('UPDATE runs SET scan_seq = max(scan_seq, ?), updated = ? WHERE key = ?', rec.seq, now(), key)
       })
     }
@@ -343,17 +420,18 @@ export class NotifyStore {
       if (cp.state === 'published') {
         // Sent messages that called documents unpublished — deliveries (their
         // frozen record stays as it was; the follow-up is noted beside it),
-        // and pre-p5/ex1 outbox rows.
-        this.tx(() => {
-          const deliveries = this.all<DeliveryRow>('SELECT * FROM deliveries WHERE run_key = ? AND state = \'sent\' AND unpublished IS NOT NULL AND followed_up IS NULL', key)
-          const legacy = this.all<OutboxRow>('SELECT * FROM outbox WHERE run_key = ? AND state = \'sent\' AND unpublished IS NOT NULL', key)
+        // and pre-p5/ex1 outbox rows — in each conversation that sent them.
+        for (const thread of [key, ...(reqKey ? [reqKey] : [])]) this.tx(() => {
+          const deliveries = this.all<DeliveryRow>('SELECT * FROM deliveries WHERE run_key = ? AND state = \'sent\' AND unpublished IS NOT NULL AND followed_up IS NULL', thread)
+          const legacy = this.all<OutboxRow>('SELECT * FROM outbox WHERE run_key = ? AND state = \'sent\' AND unpublished IS NOT NULL', thread)
           const docs = [...new Set([...deliveries, ...legacy].flatMap(o => JSON.parse(o.unpublished!) as string[]))]
           if (!docs.length) return
-          let id = `${cpKey}:published`
-          for (let n = 2; this.one('SELECT 1 FROM outbox WHERE id = ?', id); n++) id = `${cpKey}:published.${n}`
-          insert(id, ordOf + 0.6, 'published', false, { checkpoint: cp.id, docs, at })
-          this.run('UPDATE deliveries SET followed_up = ?, updated = ? WHERE run_key = ? AND state = \'sent\' AND unpublished IS NOT NULL AND followed_up IS NULL', cp.id, now(), key)
-          this.run('UPDATE outbox SET unpublished = NULL WHERE run_key = ? AND state = \'sent\' AND unpublished IS NOT NULL', key)
+          const base = `${cpKey}:published${thread === key ? '' : REQUEST_SUFFIX}`
+          let id = base
+          for (let n = 2; this.one('SELECT 1 FROM outbox WHERE id = ?', id); n++) id = `${base}.${n}`
+          insert(id, ordOf + 0.6, 'published', false, { checkpoint: cp.id, docs, at }, thread)
+          this.run('UPDATE deliveries SET followed_up = ?, updated = ? WHERE run_key = ? AND state = \'sent\' AND unpublished IS NOT NULL AND followed_up IS NULL', cp.id, now(), thread)
+          this.run('UPDATE outbox SET unpublished = NULL WHERE run_key = ? AND state = \'sent\' AND unpublished IS NOT NULL', thread)
         })
       }
     }
@@ -362,9 +440,10 @@ export class NotifyStore {
 
   // An attempt of the run is open, or its last checkpoint is not settled.
   private publicationPending(r: RunRow): boolean {
-    if (!this.exec) return false
-    const open = this.exec.db.prepare('SELECT 1 FROM attempts WHERE workspace = ? AND workflow = ? AND run = ? AND state != \'ended\'').get(r.workspace, r.workflow, r.run)
-    const last = this.exec.db.prepare('SELECT state FROM checkpoints WHERE workspace = ? AND workflow = ? AND run = ? ORDER BY id DESC LIMIT 1').get(r.workspace, r.workflow, r.run) as { state?: string } | undefined
+    const run = r.kind === 'request' ? r.bound : r.run
+    if (!this.exec || !run) return false
+    const open = this.exec.db.prepare('SELECT 1 FROM attempts WHERE workspace = ? AND workflow = ? AND run = ? AND state != \'ended\'').get(r.workspace, r.workflow, run)
+    const last = this.exec.db.prepare('SELECT state FROM checkpoints WHERE workspace = ? AND workflow = ? AND run = ? ORDER BY id DESC LIMIT 1').get(r.workspace, r.workflow, run) as { state?: string } | undefined
     return !!open || last?.state === 'pending'
   }
 
@@ -545,7 +624,7 @@ export class NotifyStore {
 
   private handOut(d: DeliveryRow, r: RunRow, dest: Destination): Delivery {
     const events = JSON.parse(d.events) as string[]
-    const label = runKey({ workflow: r.workflow, run: r.run })
+    const label = runKey({ workflow: r.workflow, run: r.kind === 'request' ? r.bound ?? r.run : r.run })
     let reconcile: Delivery['reconcile'] = null
     if (d.uncertain || d.kind === 'legacy') {
       const places: Destination[] = [dest, ...(d.stream_id ? [{ streamId: d.stream_id, channel: d.channel!, topic: d.topic! }] : []), ...(JSON.parse(d.tried) as Destination[]),
@@ -566,12 +645,28 @@ export class NotifyStore {
 
   private async render(r: RunRow, batch: OutboxRow[], cfg: NotifyConfig, at: Date): Promise<{ content: string; marker: string; unpublished: string[] }> {
     const ws = await this.workspaceOf(r)
-    const ref = { workflow: r.workflow, run: r.run }
-    const reading = ws ? await readRun(ws, ref) : undefined
+    const inRequest = r.kind === 'request'
+    const runId = inRequest ? r.bound : r.run
+    const ref = { workflow: r.workflow, run: runId ?? r.run }
+    const reading = ws && runId ? await readRun(ws, ref) : undefined
     const rec = reading?.record
     const authored = rec ? reading!.bundle.entries[rec.definition.root]?.workflow : undefined
     const label = runKey(ref)
-    const links = ws ? await this.links(ws, ref) : new Map<string, DocLink>()
+    const links = ws && runId ? await this.links(ws, ref) : new Map<string, DocLink>()
+    const marker = `ref ${label} ${batch.map(o => markerToken(o.id)).join(' ')}`
+    if (batch[0].type === 'notice') {
+      const e = JSON.parse(batch[0].event) as { kind: NoticeKind; post: number; stream: number; topic: string; classification: null; text: string }
+      const content = renderNotice({ kind: e.kind, post: messageUrl(cfg.zulipUrl, e.stream, r.channel ?? '', e.topic, e.post), classification: e.classification, detail: e.text, ref: label, executor: rec?.executor.name ?? 'the agent', marker })
+      return { content, marker, unpublished: [] }
+    }
+    // The two conversations link to each other (p6).
+    const req = rec ? this.intake?.requestOfRun(rec.project, rec) : undefined
+    const runRow = rec ? this.one<RunRow>('SELECT * FROM runs WHERE key = ?', `${rec.project}/${rec.workflow}/${rec.run}`) : undefined
+    const channelTarget = this.target(`channel:${r.project}/${r.workflow}`)
+    const runTopic = runRow?.stream_id && runRow.topic ? topicUrl(cfg.zulipUrl, runRow.stream_id, runRow.channel ?? '', runRow.topic)
+      : channelTarget?.zulip_id && runId ? topicUrl(cfg.zulipUrl, channelTarget.zulip_id, channelTarget.name, topicName(runId)) : undefined
+    const reqRow = req ? this.one<RunRow>('SELECT * FROM runs WHERE key = ?', `${req.project}/${req.workflow}/${req.key}`) : undefined
+    const requestTopic = reqRow?.stream_id && reqRow.topic ? topicUrl(cfg.zulipUrl, reqRow.stream_id, reqRow.channel ?? '', reqRow.topic) : undefined
     const unpublished: string[] = []
     const link = (path: string): DocLink => {
       const l = links.get(path) ?? { path, name: path.split('/').pop()! }
@@ -579,7 +674,10 @@ export class NotifyStore {
       return l
     }
     const runView = cfg.viewBase ? `${cfg.viewBase.replace(/\/?$/, '/')}#/ws/${encodeURIComponent(r.workspace)}/run/${encodeURIComponent(r.workflow)}/${encodeURIComponent(r.run)}` : undefined
-    const answerRoute = (q: string) => (runView ? `[agdevworld run view](${runView})` : `in agdevworld's run view on the execution host (no remote address is configured), or \`wfe run answer ${label} ${q || '<question>'} --answer … --by <name>\` there`)
+    const answerRoute = (q: string) => inRequest
+      ? `reply in this topic — quote this message, or start your reply with \`${q || 'q<n>'}:\`.`
+      : req && requestTopic ? `in the request topic: ${requestTopic}`
+        : runView ? `[agdevworld run view](${runView})` : `in agdevworld's run view on the execution host (no remote address is configured), or \`wfe run answer ${label} ${q || '<question>'} --answer … --by <name>\` there`
     const request = rec && ws ? await readFile(join(ws.root, runDir(ref), rec.input.file), 'utf8').then(t => t.split('\n').map(l => l.replace(/^#+\s*/, '').trim()).find(Boolean) ?? '', () => '') : ''
     const nextOf = (): string | undefined => {
       if (!rec) return undefined
@@ -592,6 +690,8 @@ export class NotifyStore {
       ref: label, executor: rec?.executor.name ?? 'the executor', request, answerRoute, runLink: runView, link,
       label: id => authored?.nodes[id]?.name || id, openQuestion: id => !!rec?.questions[id] && ['open', 'answered'].includes(questionState(rec.questions[id])),
       now: at, next: nextOf(), person: cfg.person,
+      conversation: inRequest ? 'request' : 'run', runTopic: inRequest ? runTopic : undefined, requestTopic: inRequest ? undefined : requestTopic,
+      decision: rec?.decisions.length ? (d => ({ decision: d.decision, by: d.by, question: d.confirmation?.question, from: d.confirmation?.from }))(rec.decisions.at(-1)!) : undefined,
     }
     const events = batch.map(o => JSON.parse(o.event) as NotableEvent & { checkpoint?: number; state?: string; detail?: string; docs?: string[] })
     let content: string
@@ -606,7 +706,7 @@ export class NotifyStore {
     } else {
       const oldest = events[0].at
       const delayed = at.getTime() - Date.parse(oldest) > DELAYED_AFTER_MS
-      content = renderMessage(events, ctx, delayed ? { delayedFrom: oldest } : {})
+      content = renderMessage(events, ctx, { marker, ...(delayed ? { delayedFrom: oldest } : {}) })
     }
     // Which documents this message had to call unpublished: a later
     // published checkpoint answers them with one availability update.
@@ -630,7 +730,7 @@ export class NotifyStore {
       const path = `devdocs/${inRepo.slice(info.prefix.length)}`
       for (const c of commits) {
         if ((await git(info.ownerDir, ['cat-file', '-e', `${c}:${inRepo}`])).code !== 0) continue
-        out.set(path, { path, name: path.split('/').pop()!, commit: c, url: web ? `${web}/src/commit/${c}/${inRepo}` : undefined })
+        out.set(path, { path, name: path.split('/').pop()!, commit: c, url: web ? `${web}/src/commit/${c}/${inRepo}` : undefined, raw: web ? `${web}/raw/commit/${c}/${inRepo}` : undefined })
         break
       }
     }
@@ -832,12 +932,14 @@ export class NotifyStore {
   // Which request-topic message carried a question (p6 step 6 delivers
   // questions to the request topic); until then, none.
   postedLookup(): (requestKey: string, ref: RunRef, question: string) => number | null {
-    return () => null
+    return (requestKey, ref, question) => this.one<{ message_id: number }>(
+      `SELECT message_id FROM outbox WHERE run_key LIKE ? AND type = 'question' AND state = 'sent' AND id LIKE ? AND json_extract(event, '$.question') = ? ORDER BY message_id LIMIT 1`,
+      `%/${ref.workflow}/${requestKey}`, `%/${ref.workflow}/${ref.run}#%${REQUEST_SUFFIX}`, question)?.message_id ?? null
   }
 
   // ---- views -----------------------------------------------------------------------------
 
-  runStatus(project: string, ref: RunRef): { configured: boolean; problem?: string; skipped?: string; topic?: { url: string | null; channel: string; topic: string }; pending: number; failed: number; uncertain: boolean; lastError?: string; lastSent?: string; provisioning?: string; viewBase: string | null } {
+  runStatus(project: string, ref: RunRef): { configured: boolean; problem?: string; skipped?: string; topic?: { url: string | null; channel: string; topic: string }; request?: { url: string | null; channel: string; topic: string }; pending: number; failed: number; uncertain: boolean; lastError?: string; lastSent?: string; provisioning?: string; viewBase: string | null } {
     const cfg = this.config()
     if (!cfg || 'problem' in cfg || !cfg.enabled) return { configured: false, problem: cfg && 'problem' in cfg ? cfg.problem : undefined, pending: 0, failed: 0, uncertain: false, viewBase: null }
     const key = `${project}/${ref.workflow}/${ref.run}`
@@ -847,7 +949,9 @@ export class NotifyStore {
     const d = this.active(key)
     const last = this.one<OutboxRow>('SELECT * FROM outbox WHERE run_key = ? AND state = \'sent\' ORDER BY sent_at DESC LIMIT 1', key)
     const provisioning = [f, t].find(x => x?.state === 'problem')?.problem ?? ([f, t].some(x => !x || x.state === 'pending') ? 'the channel is not provisioned yet' : undefined)
+    const rq = this.one<RunRow>('SELECT * FROM runs WHERE kind = \'request\' AND project = ? AND workflow = ? AND bound = ?', project, ref.workflow, ref.run)
     return {
+      ...(rq?.stream_id && rq.topic ? { request: { url: topicUrl(cfg.zulipUrl, rq.stream_id, rq.channel ?? '', rq.topic), channel: rq.channel ?? '', topic: rq.topic } } : {}),
       configured: true, problem: r?.problem ?? (d?.state === 'unresolved' ? `delivery ${d.id} needs a person: ${d.problem}` : undefined), skipped: r?.skipped ?? undefined,
       topic: r?.stream_id && r.topic ? { url: topicUrl(cfg.zulipUrl, r.stream_id, r.channel ?? '', r.topic), channel: r.channel ?? '', topic: r.topic } : undefined,
       pending, failed: d && ['failed', 'unresolved'].includes(d.state) ? 1 : 0, uncertain: !!d && (!!d.uncertain || d.state === 'sending'),

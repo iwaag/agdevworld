@@ -47,7 +47,7 @@ export function ownsDescription(kind: 'folder' | 'channel', description: string,
 
 // ---- messages ----------------------------------------------------------------------------
 
-export interface DocLink { path: string; name: string; url?: string; commit?: string } // url only when published
+export interface DocLink { path: string; name: string; url?: string; raw?: string; commit?: string } // url (view) and raw (download) only when published
 export interface RenderContext {
   ref: string // <workflow>/<run>
   executor: string
@@ -60,28 +60,43 @@ export interface RenderContext {
   now: Date
   next?: string // the next action as the record states it now (ready / waiting)
   person?: string // who decides the result
+  // p6: which conversation the message is for. The request topic is where
+  // the person talks with the agent; the run topic carries progress.
+  conversation?: 'request' | 'run'
+  requestTopic?: string // a link to the run's request topic, when it has one
+  runTopic?: string // a link to the run's progress topic
+  decision?: { decision: 'accepted' | 'rejected'; by: string; question?: string; from?: string } // the latest result decision now
 }
 
 const cut = (text: string, n: number) => { const t = text.replace(/\s+/g, ' ').trim(); return t.length > n ? `${t.slice(0, Math.max(0, n - 1))}…` : t }
 const firstLine = (text: string) => text.split('\n').map(l => l.trim()).find(Boolean) ?? ''
-const docText = (d: DocLink) => (d.url ? `[${d.name}](${d.url})` : d.commit ? `${d.name} (published at ${d.commit.slice(0, 7)}; no web link for its repository)` : `${d.name} (not yet published: only on the execution host)`)
+const TEXT_LIKE = /\.(md|txt|json|ya?ml|csv|html?|py|js|ts|svg)$/i
+const docText = (d: DocLink) => (d.url ? (d.raw && !TEXT_LIKE.test(d.name) ? `[${d.name}](${d.raw}) ([view](${d.url}))` : `[${d.name}](${d.url})`) : d.commit ? `${d.name} (published at ${d.commit.slice(0, 7)}; no web link for its repository)` : `${d.name} (not yet published: only on the execution host)`)
 const when = (iso: string) => iso.replace('T', ' ').slice(0, 16) + ' UTC'
 
 // One event: its lines, the free text kept apart so the budget can shorten it.
 function lines(e: NotableEvent, c: RenderContext): { head: string; free: string; tail: string[] } {
   const node = e.node ? c.label(e.node) : ''
   const doc = e.document ? docText(c.link(e.document)) : ''
+  const subject = e.subject?.length ? e.subject.map(p => docText(c.link(p))).join(', ') : ''
+  const inRequest = c.conversation === 'request'
   switch (e.type) {
-    case 'started': return { head: `**Started** — ${c.executor} took up the request${c.request ? ':' : '.'}`, free: c.request ? `“${c.request}”` : '', tail: c.next ? [`Next: ${c.next}`] : [] }
+    case 'accepted': return { head: `**Request received** — ${c.executor} performs it as run ${c.ref}.`, free: '', tail: [...(c.runTopic ? [`Progress: ${c.runTopic}`] : []), ...(c.next ? [`Next: ${c.next}`] : []), 'Reply here: answers to questions, further instructions.'] }
+    case 'started': return { head: `**Started** — ${c.executor} took up the request${c.request ? ':' : '.'}`, free: c.request ? `“${c.request}”` : '', tail: [...(c.requestTopic ? [`Request and conversation: ${c.requestTopic}`] : []), ...(c.next ? [`Next: ${c.next}`] : [])] }
     case 'question': {
       const stale = e.question && !c.openQuestion(e.question)
       return {
-        head: `**Question for ${e.holder}**${e.step === '_plan' ? ' — agree to the plan' : node ? ` — ${node}` : ''} (${e.question})${stale ? ' — already answered or closed; no action needed' : ''}`,
+        head: `**Question for ${e.holder}**${e.step === '_plan' ? ' — agree to the plan' : e.confirms ? ' — confirm the result' : node ? ` — ${node}` : ''} (${e.question})${stale ? ' — already answered or closed; no action needed' : ''}`,
         free: firstLine(e.text) === e.text.trim() ? e.text.trim() : e.text.trim().replace(/\n+/g, ' / '),
-        tail: [...(doc ? [`${e.step === '_plan' ? 'Plan' : 'Document'}: ${doc}`] : []), ...(stale ? [] : [`Answer: ${c.answerRoute(e.question ?? '')}`])],
+        tail: [...(doc ? [`${e.step === '_plan' ? 'Plan' : 'Document'}: ${doc}`] : []), ...(subject ? [`Deliverables: ${subject}`] : []), ...(stale ? [] : [`Answer: ${c.answerRoute(e.question ?? '')}`])],
       }
     }
-    case 'answered': return { head: `**Answered** — ${e.question} by ${e.by}; ${c.executor} resumes with it.`, free: '', tail: [] }
+    case 'answered': return inRequest
+      ? { head: `**Recorded** as your answer to ${e.question}. ${c.executor} reads it when it resumes (recorded, not yet read).`, free: '', tail: [] }
+      : { head: `**Answered** — ${e.question} by ${e.by}; ${c.executor} resumes with it.`, free: '', tail: [] }
+    case 'instructed': return { head: `**Instruction recorded** (${e.instructions?.join(', ')}) — ${c.executor} reads it at its next step; nothing running is interrupted.`, free: inRequest ? '' : e.text, tail: [] }
+    case 'acknowledged': return { head: `**Instruction taken up** (${e.instructions?.join(', ')}: ${e.response === 'incorporate' ? 'it will be followed' : e.response === 'clarify' ? 'a question follows' : 'it needs a new request'}) —`, free: e.text, tail: [] }
+    case 'notice': return { head: e.text, free: '', tail: [] }
     case 'reported': return { head: `**Report — ${node}:**`, free: e.text, tail: [...(doc ? [`Details: ${doc}`] : []), ...(c.next ? [`Next: ${c.next}`] : [])] }
     case 'node-completed': return { head: `**Done — ${node}:**`, free: e.text, tail: c.next ? [`Next: ${c.next}`] : [] }
     case 'failed': return { head: `**Failed — ${node || e.step}:**`, free: e.text, tail: [`Next: ${c.person ?? 'the person'} looks at the run, then resumes or cancels it.`] }
@@ -93,9 +108,14 @@ function lines(e: NotableEvent, c: RenderContext): { head: string; free: string;
     case 'completed': return {
       head: '**Execution completed**' + (e.step ? ' — final report written.' : '.'),
       free: e.text,
-      tail: [...(doc ? [`Report: ${doc}`] : []), `Not accepted yet: ${c.person ?? 'the person'} reviews the result and decides.`],
+      tail: [...(doc ? [`Report: ${doc}`] : []),
+        c.decision ? `Result ${c.decision.decision}${c.decision.question ? ` by ${c.decision.from ?? c.person ?? 'the person'}'s answer to ${c.decision.question}` : ` by ${c.decision.by}`} (a separate record from this completion).`
+          : `Not accepted yet: ${c.person ?? 'the person'} reviews the result and decides.`,
+        ...(inRequest ? ['This request is complete; a new request needs a new request topic.'] : [])],
     }
-    case 'decided': return { head: `**Result ${e.decision}** by ${e.by}.`, free: e.text ? `Evidence: ${e.text}` : '', tail: [] }
+    case 'decided': return e.confirmation
+      ? { head: `**Result ${e.decision}** — ${e.confirmation.from}'s answer to ${e.confirmation.question}, recorded by ${e.by}.`, free: '', tail: subject ? [`Confirmed: ${subject}`] : [] }
+      : { head: `**Result ${e.decision}** by ${e.by}.`, free: e.text ? `Evidence: ${e.text}` : '', tail: [] }
     case 'cancelled': return { head: `**Run cancelled** by ${e.by}:`, free: e.text, tail: [] }
   }
 }
@@ -107,9 +127,9 @@ export const messageMarker = (ref: string, events: Pick<NotableEvent, 'seq' | 't
 // Renders one message for one event or several adjacent routine events of
 // one run. The marker line names the run and the entries, so a message
 // whose sending was uncertain can be found again before retrying.
-export function renderMessage(events: NotableEvent[], c: RenderContext, extra: { delayedFrom?: string } = {}): string {
+export function renderMessage(events: NotableEvent[], c: RenderContext, extra: { delayedFrom?: string; marker?: string } = {}): string {
   const parts = events.map(e => lines(e, c))
-  const marker = messageMarker(c.ref, events)
+  const marker = extra.marker ?? messageMarker(c.ref, events)
   const fixed = [
     ...(extra.delayedFrom ? ['_Delayed: recorded YYYY-MM-DD HH:MM UTC; the run may have moved on._'] : []),
     ...parts.flatMap(p => [p.head, ...p.tail]),
@@ -143,8 +163,29 @@ export function renderPublication(ref: string, state: 'failed' | 'attention' | '
   ].join('\n')
 }
 
+// A reply about one of the person's posts that changed nothing, or needs
+// them (p6, docs/intake.md): which post, what happened to it, what to do.
+export type NoticeKind = 'clarify' | 'late' | 'closed' | 'refused' | 'problem'
+export function renderNotice(o: { kind: NoticeKind; post: string; classification: { kind: string; reason?: string; question?: string; questions?: string[]; state?: string } | null; detail: string | null; ref: string; executor: string; marker: string }): string {
+  const c = o.classification
+  let body: string
+  if (o.kind === 'clarify') {
+    body = c?.reason === 'ambiguous' ? `**Which question?** Your [post](${o.post}) could answer ${c.questions?.join(' or ')}; nothing was recorded. Reply again quoting the question, or start with \`${c.questions?.[0]}:\`.`
+      : c?.reason === 'not-yet-asked' ? `**Not recorded as an answer** — ${c.questions?.[0]} had not been asked here yet when you wrote this [post](${o.post}). Reply to the question once it appears.`
+        : `**No such question** — this run has no ${c?.questions?.[0]}; your [post](${o.post}) was not recorded as an answer.`
+  } else if (o.kind === 'late') {
+    body = `**Too late for ${c?.question}** — it was already ${c?.state === 'withdrawn' ? 'withdrawn' : 'taken up'}, so your [post](${o.post}) is kept but not applied. If it changes anything, say so in a new message (it is recorded as an instruction).`
+  } else if (o.kind === 'closed') {
+    body = `**This request is ${c?.reason === 'cancelled' ? 'cancelled' : 'complete'}** (run ${o.ref}). Your [post](${o.post}) is kept but not applied; it does not reopen the run. A new request needs a new \`request-…\` topic.`
+  } else if (o.kind === 'refused') {
+    body = `**This request could not start**: ${cut(o.detail ?? '', 300)} Your [post](${o.post}) is kept. Open a new \`request-…\` topic when it can.`
+  } else body = `**Routing problem** with your [post](${o.post}): ${cut(o.detail ?? '', 400)}`
+  return [body, o.marker].join('\n')
+}
+
 // Hash-encoded Zulip narrow for a topic.
 export function topicUrl(base: string, streamId: number, channel: string, topic: string): string {
   const enc = (t: string) => encodeURIComponent(t).replace(/\./g, '%2E').replace(/%/g, '.')
   return `${base.replace(/\/$/, '')}/#narrow/channel/${streamId}-${enc(channel)}/topic/${enc(topic)}`
 }
+export const messageUrl = (base: string, streamId: number, channel: string, topic: string, id: number) => `${topicUrl(base, streamId, channel, topic)}/near/${id}`

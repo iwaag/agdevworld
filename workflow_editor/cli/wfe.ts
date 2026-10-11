@@ -680,6 +680,8 @@ async function cmdNotify(p: Parsed): Promise<number> {
   const { NotifyStore, NOTIFY_PROTOCOL } = await import('../server/notify.ts')
   const x = await openExec(p)
   const n = new NotifyStore({ area: areaDir(p), registryFile: registryFile(p), exec: x })
+  const { IntakeStore } = await import('../server/intake.ts')
+  n.intake = new IntakeStore({ area: areaDir(p), registryFile: registryFile(p), exec: x, notify: n, posted: n.postedLookup() })
   const num = (k: string) => { const v = opt(p, k); if (v === undefined || !/^\d+$/.test(v)) throw new UsageError(`--${k} <integer> is required`); return Number(v) }
   const need = (k: string) => { const v = opt(p, k); if (!v?.trim()) throw new UsageError(`--${k} is required`); return v }
   const ids = () => { const v = p.opts.get('id') ?? []; if (!v.length) throw new UsageError('--id <event id> is required (repeatable)'); return v }
@@ -768,7 +770,7 @@ async function cmdNotify(p: Parsed): Promise<number> {
     if (e instanceof RequestError) throw new Refused(e.message, e.detail)
     if (e instanceof UsageError) throw e
     throw new Refused((e as Error).message)
-  } finally { n.close(); x.close(); execStore = undefined }
+  } finally { n.intake?.close(); n.close(); x.close(); execStore = undefined }
   throw new UsageError('wfe notify status|outbox|deliveries|due|claim|begin|sent|failed|legacy|resolve|import-inflight|sender|protocol|target|moved|run-problem|reset')
 }
 
@@ -781,6 +783,7 @@ async function cmdIntake(p: Parsed): Promise<number> {
   const x = await openExec(p)
   const n = new NotifyStore({ area: areaDir(p), registryFile: registryFile(p), exec: x })
   const i = new IntakeStore({ area: areaDir(p), registryFile: registryFile(p), exec: x, notify: n, posted: n.postedLookup() })
+  n.intake = i
   const num = (k: string) => { const v = opt(p, k); if (v === undefined || !/^\d+$/.test(v)) throw new UsageError(`--${k} <integer> is required`); return Number(v) }
   try {
     switch (sub) {

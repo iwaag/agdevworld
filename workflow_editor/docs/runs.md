@@ -385,6 +385,24 @@ records a decision on the result, with actor and evidence. `accepted` is only
 recorded on a `completed` execution; `rejected` at any time. A completion
 record, an answer, or a definition approval never creates a decision.
 
+### Result confirmation (p6)
+
+A workflow may designate one talk node `confirms: result`. Its question
+presents the deliverables (`ask … --subject <path>`, required there): the
+file layer records each by path, hash and size (`question.subject`). When the
+person's answer, taken up by the executor, confirms them, the executor
+records the decision that answer is: `decide <run> --decision accepted
+--question <q>` (fenced by its attempt). The reducer requires the latest
+question of the confirming node, its answer taken up, no earlier decision
+from it, and the deliverables unchanged since they were presented
+(`subject-changed` otherwise: present them again). The decision records
+`confirmation: {question, answer, from, source, subject}` and an evidence
+text naming them. It may precede the execution's completion; the two stay
+separate facts and are shown separately. A question from `_plan` or any
+other node is refused (`not-result-confirmation`): plan agreement never
+becomes acceptance, and the person does not approve twice. An ambiguous
+answer is the executor's to follow up with another question.
+
 ### Artifacts
 
 `attach` records a project-relative path (usually a report in the run
@@ -454,6 +472,24 @@ Changes present before the attempt began are left out; a pre-existing change
 the run changed again needs a person. A failed push is retried without
 repeating the work (the journaled commits are pushed). Work completion and
 publication are shown separately.
+
+**Two conversations (p6).** A run requested in a Zulip request topic
+([intake.md](intake.md)) talks with the person in that topic and reports
+progress in its run topic:
+
+| Destination | Events |
+| --- | --- |
+| request topic | the request accepted (with the run topic's link), questions (with their id and how to reply), receipts of answers and instructions (recorded, not yet read), instructions taken up, holds and failures, the completed execution with the result's state, the decision, cancellation, and replies about posts that changed nothing (late, unclear, after completion, refused, routing problems) |
+| run topic | started (with the request topic's link), node reports, holds and failures, resumption, publication failures and recovery, the completed execution, the decision |
+
+Each destination is a conversation of its own in the notifier (`runs.kind`
+`request`, keyed `<project>/<workflow>/r<origin post>`, its place the
+intake's recorded topic, bound to the run): the same event sent to both is
+two outbox rows (`…#<seq>:<type>` and `…#<seq>:<type>@request`), two
+frozen deliveries with their own markers, searched for only where each was
+sent. Questions in the request topic say to reply there; their posted
+message ids are how replies bind (`postedLookup`). Runs requested elsewhere
+keep one topic and the previous wording.
 
 **Coordination in Zulip (p5).** devdocs stays authoritative; Zulip carries
 short coordination messages that say what happened, what is uncertain and

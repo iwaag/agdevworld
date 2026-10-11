@@ -118,13 +118,15 @@ Dependent nodes stay blocked. Writes run.json.`,
 
 Discontinues one node, or (without <node>) the whole run: every pending,
 running or waiting node is cancelled in the same entry. Final. Writes run.json.`,
-  ask: `wfe run ask <run> [<node>] --question <text> --to <who> [--id q<n>] [--about-plan]
+  ask: `wfe run ask <run> [<node>] --question <text> --to <who> [--id q<n>] [--about-plan] [--subject <path>]...
 
 Records a question (ids q1, q2, … unless --id). With <node>, the running node
 then waits on it and <who> holds the next move. A question from _plan needs
 plan.md written first and records which plan.md it asks about. --about-plan asks
 about a revised plan.md later in the run (the same evidence: its hash), when
-the person's input changed the agreed work. Writes run.json.`,
+the person's input changed the agreed work. From the result-confirmation node
+(confirms: result) the question presents the deliverables with --subject
+(project-relative files, written first; recorded by hash). Writes run.json.`,
   answer: `wfe run answer <run> <question> --answer <text> [--from <person>]
 
 Records an answer to that question. The waiting node stays waiting until the
@@ -193,10 +195,21 @@ Records an artifact reference (a report, a result file). <path> is
 project-relative, relative to the current directory, or a file name in the
 run folder. A missing file is recorded and shown as missing. Writes run.json.`,
   decide: `wfe run decide <run> --decision accepted|rejected --evidence <ref> --by <person> [--note <text>]
+wfe run decide <run> --decision accepted|rejected --question <q> [--note <text>]
 
-Records a decision on the run's result, with who decided and on what evidence.
-accepted needs a completed execution. Completion records and answers never
-create a decision. Writes run.json.`,
+Records a decision on the run's result.
+
+The person's own decision (--by, --evidence): accepted needs a completed
+execution.
+
+From a confirmation (--question): the executor records the decision the
+person's answer to the result-confirmation question is — the latest question
+from the confirms: result node, its answer taken up, its deliverables
+unchanged since it presented them. It may precede the execution's completion
+(they stay separate facts). The record names the question, the answer, whose
+words they were and the deliverables by hash. A plan agreement, an answer to
+any other question, or a completion record never becomes a decision.
+Writes run.json.`,
 }
 
 export function runIndex(): string {
@@ -486,7 +499,7 @@ export async function runCommand(c: RunCli): Promise<number> {
       const res = await wrap(() => c.exec().resume(ws, r, by ?? 'person', need(c, 'reason', 'the resume instruction: what the executor should do now'), 'cli', receipt))
       return report(r, res.record, `Recorded: resumed.${res.job ? ` Queued job ${res.job.id} (${res.job.state}).` : ''}`)
     }
-    case 'ask': return op({ op: 'question.ask', question: c.opt('id') ?? '', node: args[1], text: need(c, 'question', 'the question'), to: need(c, 'to', 'to whom it is addressed'), ...(c.flag('about-plan') ? { plan: true } : {}) },
+    case 'ask': return op({ op: 'question.ask', question: c.opt('id') ?? '', node: args[1], text: need(c, 'question', 'the question'), to: need(c, 'to', 'to whom it is addressed'), ...(c.flag('about-plan') ? { plan: true } : {}), ...(c.opts('subject').length ? { subjects: c.opts('subject').map(p => projectPath(ws, p)) } : {}) },
       rec => { const q = Object.values(rec.questions).at(-1)!; return `Recorded question ${q.id} to ${q.to}${q.node ? `; ${q.node} waits on it` : ''}.` })
     case 'answer': {
       if (!args[1]) throw c.usage('<question> is required')
@@ -552,6 +565,16 @@ export async function runCommand(c: RunCli): Promise<number> {
     case 'decide': {
       const decision = need(c, 'decision', 'accepted or rejected')
       if (decision !== 'accepted' && decision !== 'rejected') throw c.usage('--decision is accepted or rejected')
+      const question = c.opt('question')
+      if (question) {
+        // Recorded by the executing attempt; its end publishes it.
+        const index = c.opt('index') !== undefined ? Number(c.opt('index')) : undefined
+        const target = await ref()
+        const meta = { ...(attempt ? { attempt } : {}), ...(receipt ? { receipt } : {}) }
+        const res = await wrap(() => runOp(ws, target, { op: 'run.decide', decision, question, answer: index, note: c.opt('note'), ...meta }, { by, via: 'cli', expectSeq }))
+        const d = res.record.decisions.at(-1)!
+        return report(target, res.record, res.duplicate ? 'Already recorded (same receipt); nothing changed.' : `Recorded: result ${decision}, from ${d.confirmation?.from}'s answer to ${question} (${d.evidence}). Execution is ${res.record.execution.state}; the two are separate records.`)
+      }
       if (!by?.trim()) throw c.usage('--by is required: the person who decides')
       return op({ op: 'run.decide', decision, evidence: need(c, 'evidence', 'what the decision rests on'), note: c.opt('note') }, () => `Recorded: ${decision} by ${by}.`, undefined,
         async (t, rec) => { if (hostOf(rec.executor) !== c.exec().executor) return null; const cp = await c.exec().afterDecision(ws, t, decision); return `Publication checkpoint ${cp.id}: ${cp.state}${cp.error ? ` — ${cp.error}` : ''}` })

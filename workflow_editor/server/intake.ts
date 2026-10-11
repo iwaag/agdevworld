@@ -441,6 +441,9 @@ export class IntakeStore {
       : this.all<MessageRow>('SELECT * FROM messages ORDER BY id DESC LIMIT ?', o.limit ?? 50)
   }
 
+  // Posts whose reply to the person is owed (the notifier queues each once).
+  notices(): MessageRow[] { return this.all<MessageRow>('SELECT * FROM messages WHERE notice IS NOT NULL AND state = \'done\' ORDER BY id') }
+
   relocations(key: string) { return this.all<{ from_topic: string; to_topic: string; message: number; at: string }>('SELECT * FROM relocations WHERE request_key = ? ORDER BY id', key) }
 }
 

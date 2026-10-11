@@ -83,5 +83,6 @@ export const api = {
 export interface RunNotifyView {
   configured: boolean; problem?: string; skipped?: string
   topic?: { url: string | null; channel: string; topic: string }
+  request?: { url: string | null; channel: string; topic: string } // p6: the request topic the run was asked for in
   pending: number; failed: number; uncertain?: boolean; lastError?: string; lastSent?: string; provisioning?: string; viewBase: string | null
 }

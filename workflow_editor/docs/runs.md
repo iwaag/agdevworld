@@ -1,4 +1,4 @@
-# Workflow run contract (`ag.workflow-run.v2`, p3/pre1, p4)
+# Workflow run contract (`ag.workflow-run.v2`, p3/pre1, p4, p5)
 
 A **run** is one execution of a workflow: the input it was given, the fixed
 definition it follows, and a record of what the executor reported. It lives in
@@ -26,11 +26,13 @@ writers taking turns per file).
 ```text
 devdocs/runs/<workflow-id>/<run-id>/
   braindump.md          the person's own input (or request.md, see Input)
-  plan.md               the executor's plan (optional, free form)
+  plan.md               the agreed plan (default policy: the _plan step's document)
+  report-<node>.md      a report per authored node (default policy)
+  report.md             the final report (default policy)
   run.json              the record: current state and its history
   definition/
     <workflow-id>.yaml  the run's workflow, copied byte for byte
-  report*.md, …         whatever the executor reports; names are its choice
+  …                     anything else the executor writes (manual policy: names are its choice)
 ```
 
 The p3 layout (`devdocs/<workflow-id>/runs/<run-id>/`) and
@@ -129,6 +131,21 @@ compares it with the current source (same definition, changed, renamed,
 deleted). A run on a changed definition is a new run (`--predecessor
 <run-ref>` records the link).
 
+**The effective graph is frozen (p5).** At creation the root workflow is
+compiled with its documentation policy (`shared/compile.ts`) and the result
+is recorded as `definition.effective` — compiler version, policy, nodes
+(generated steps with their purpose, document and instructions) and edges —
+in `run.create` and the state. Readiness, replay and every operation follow
+that graph. Reading checks it against the bundle: same policy, same authored
+nodes, edges between known nodes, and — when the recorded compiler is the
+current one — exactly what it compiles to; a disagreement makes the record
+unusable (`bundle`), never silently recompiled. A graph frozen by another
+compiler version is followed as recorded. A record without
+`definition.effective` was created before p5 and follows its authored graph
+(no generated steps); nothing converts it. A workflow the compiler refuses
+(no nodes, broken edges, an unknown policy) is refused at creation (422)
+before anything is written.
+
 Definition approval stays a statement about a definition. Its state is
 recorded and shown; it is not a gate, not permission to execute and not
 acceptance of a result.
@@ -219,6 +236,54 @@ are declarations, as approvers are.
 
 Independent branches may be performed one after another; nothing runs nodes
 by itself, and no timer changes a state.
+
+### Documentation steps (p5)
+
+Under the `default` policy the run has generated steps beside the authored
+nodes ([contract.md](contract.md), *Documentation policy*): `_plan`,
+`_report.<node>` and `_final-report`. They are nodes of the run: the same
+states, operations, attempt fencing, receipts, stops and resumption. An
+authored node's `completed` and its report's `running` are separate facts,
+and the run is `completed` only when `_final-report` is.
+
+| Step | Document | Completes when |
+| --- | --- | --- |
+| `_plan` (type talk) | `plan.md` | its document is checked **and** the latest question asked from `_plan` was asked about that same content and its answer was taken up (`agreement`) |
+| `_report.<node>` | `report-<node>.md` | its document is checked |
+| `_final-report` | `report.md` | its document is checked |
+
+- **Document evidence.** Before `complete` of a step (and `ask` from
+  `_plan`), the file layer (`server/runs.ts` `checkDocument`) requires the
+  document to be a regular, nonempty file of the run folder — not a
+  symbolic link, not resolving elsewhere — and passes `{path, sha256,
+  bytes}` to the reducer, which checks its shape and path and records it on
+  the node (`document`) and among the outcome's artifacts. Evidence offered
+  by a caller is discarded. File presence is not a claim that the prose is
+  right.
+- **Plan agreement.** A question from `_plan` records the plan.md it asked
+  about (`question.document`); the plan is therefore written before it is
+  consulted on. A revision is asked about again, and a later question
+  supersedes earlier answers. Completing `_plan` records which question
+  agreed (`agreement`, `--agreement` to name it). A withdrawal is not
+  agreement, and plan agreement is neither definition approval nor
+  acceptance of the result. Whether an answer *is* agreement is the
+  executor's reading of the person's words: taking it up and completing the
+  step is the executor's claim.
+- **Failure.** A failed or cancelled authored node blocks its report, its
+  successors and the final report, so the run cannot complete. A partial
+  report may be attached to the failed node (`attach --node`); it does not
+  complete a step. Nothing writes a report or a final report for the
+  executor.
+- **Interruption.** An attempt that ends while a report step is running is
+  interrupted like any other; after `run.resume` the next attempt continues
+  the report, and the completed work is not repeated.
+- The execution brief (`server/exec.ts` `documentationBrief`) names the
+  policy and, for each running, ready or waiting step, its purpose,
+  document and frozen instructions. Under `manual` (and in runs created
+  before p5) it says that no plan or report is asked unless a node or the
+  person asks.
+- Error codes: `document-missing`, `document-path`, `document-empty`,
+  `plan-not-agreed`.
 
 ### Waiting
 

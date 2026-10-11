@@ -26,6 +26,24 @@ import { createRun, listRuns, readRun, runDir, runOp } from './runs.ts'
 import { RequestError, Workspace } from './workspace.ts'
 
 export const EXECUTOR = 'autolab'
+
+// What the run's frozen documentation policy asks of this attempt (p5): the
+// policy, and for every documentation step that is running or ready, its
+// purpose, its document and the instructions frozen with the run.
+export function documentationBrief(r: RunRecord): string[] {
+  const eff = r.definition.effective
+  if (!eff) return ['Documentation policy: none (this run was created before p5); write plans and reports only where a node or the person asks.']
+  if (eff.policy === 'manual') return ['Documentation policy: manual. No plan or report is a step of this run; write documents only where a node description or the person asks for them.']
+  const out = ['Documentation policy: default. _plan, _report.<node> and _final-report are steps of this run, recorded like any node (start, complete); each completes only when its document is a nonempty file of the run folder.']
+  const now = [...r.execution.active, ...r.execution.ready, ...r.execution.waiting.map(w => w.node)]
+  for (const id of [...new Set(now)]) {
+    const step = eff.nodes[id]?.step
+    if (!step) continue
+    const state = r.nodes[id]?.state
+    out.push('', `Step ${id} (${state === 'pending' ? 'ready' : state}): ${step.purpose}. Document: ${runDir(r)}/${step.output}.${step.for && r.nodes[step.for]?.state === 'completed' ? ` Node ${step.for} is completed; only its report remains.` : ''}`, step.instructions)
+  }
+  return out
+}
 const now = () => new Date().toISOString()
 const alive = (pid: number | null) => { if (!pid) return false; try { process.kill(pid, 0); return true } catch (e) { return (e as NodeJS.ErrnoException).code === 'EPERM' } }
 
@@ -198,6 +216,7 @@ export class ExecStore {
       for (const w of r.execution.waiting) lines.push(`Node ${w.node} waits; next move: ${holderOf(r, w.node)}.`)
     }
     lines.push(`Ready: ${r.execution.ready.join(', ') || '(none)'}; running: ${r.execution.active.join(', ') || '(none)'}.`)
+    lines.push(...documentationBrief(r))
     return lines.join('\n')
   }
 

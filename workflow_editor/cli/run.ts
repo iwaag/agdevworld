@@ -6,6 +6,7 @@ import { isAbsolute, relative, resolve, sep } from 'node:path'
 import type { RunResponse } from '../shared/api.ts'
 import { accessAt } from '../shared/access.ts'
 import { normalizeRepoPath } from '../shared/model.ts'
+import { splitCounts } from '../shared/compile.ts'
 import { EXECUTOR_OPS, holderOf, notableEvents, questionState, runKey, type EntrustRef, type HistoryEntry, type OpInput, type RunRecord, type RunRef } from '../shared/run.ts'
 import {
   checkRun, createRun, listRuns, resolveRef, runDir, runOp, runResponse, type CreateRunOptions,
@@ -96,11 +97,19 @@ Adds a progress note to a running or waiting node; its state stays. Writes run.j
 Records that a running node waits for an external result: why, who or what
 holds the next move, and a reference to what is awaited. For a question use
 ask. Writes run.json.`,
-  complete: `wfe run complete <run> <node> --outcome <text> [--artifact <path>]...
+  complete: `wfe run complete <run> <node> --outcome <text> [--artifact <path>]... [--agreement <question>]
 
 Records the completion of a running node with its outcome and optional
 artifacts (project-relative, relative to the current directory, or a file name
-in the run folder). Writes run.json.`,
+in the run folder). Writes run.json.
+Documentation steps (default policy: _plan, _report.<node>, _final-report)
+complete only when their document (plan.md, report-<node>.md, report.md) is
+a nonempty file of the run folder; its hash and size are recorded as
+evidence, and the document is listed with the outcome. _plan completes only
+on agreement: a question asked from _plan about this same plan.md whose
+answer was taken up (--agreement names it; default the latest taken up).
+Keep the outcome short (result, main verification fact, next action): it is
+what coordination messages quote.`,
   fail: `wfe run fail <run> <node> --reason <text>
 
 Records that a problem prevents the running or waiting node from continuing.
@@ -112,7 +121,8 @@ running or waiting node is cancelled in the same entry. Final. Writes run.json.`
   ask: `wfe run ask <run> [<node>] --question <text> --to <who> [--id q<n>]
 
 Records a question (ids q1, q2, … unless --id). With <node>, the running node
-then waits on it and <who> holds the next move. Writes run.json.`,
+then waits on it and <who> holds the next move. A question from _plan needs
+plan.md written first and records which plan.md it asks about. Writes run.json.`,
   answer: `wfe run answer <run> <question> --answer <text> [--from <person>]
 
 Records an answer to that question. The waiting node stays waiting until the
@@ -279,7 +289,13 @@ export function describeRun(r: RunResponse, opts: { history?: boolean; url?: str
   if (rec.predecessor) lines.push(`Predecessor: ${runKey(rec.predecessor)}${r.predecessor?.problem ? ` — ${r.predecessor.problem}` : r.predecessor?.execution ? ` (${r.predecessor.execution})` : ''}`)
   lines.push(`Created ${rec.created}; started ${rec.started ?? '—'}; ended ${rec.ended ?? '—'}; last update ${ago(rec.updated)}; seq ${rec.seq}`)
   if (rec.cancelled) lines.push(`Cancelled by ${rec.cancelled.by}: ${rec.cancelled.reason}`)
-  lines.push(`Nodes (${Object.entries(ex.counts).filter(([, n]) => n).map(([k, n]) => `${n} ${k}`).join(', ')}):`)
+  const eff = rec.definition.effective
+  const count = (c: Record<string, number>) => Object.entries(c).filter(([, n]) => n).map(([k, n]) => `${n} ${k}`).join(', ') || 'none'
+  if (eff) {
+    const split = splitCounts(eff, rec.nodes)
+    lines.push(`Documentation policy: ${eff.policy} (frozen at creation, ${eff.compiler})${eff.policy === 'default' ? ` — work: ${count(split.work)}; documentation steps: ${count(split.docs)}` : ''}`)
+  } else lines.push('Documentation policy: none (created before p5; the authored graph)')
+  lines.push(`Nodes (${count(ex.counts)}):`)
   for (const [id, n] of Object.entries(rec.nodes)) {
     let what = ''
     if (n.state === 'pending') what = ex.ready.includes(id) ? 'READY to start' : ex.blocked.includes(id) ? 'blocked: a predecessor failed or was cancelled' : 'waits for predecessors'
@@ -289,7 +305,9 @@ export function describeRun(r: RunResponse, opts: { history?: boolean; url?: str
     else if (n.state === 'failed') what = `failure: ${n.failure?.reason}`
     else if (n.state === 'cancelled') what = `cancelled: ${n.cancellation?.reason}`
     const last = n.notes.at(-1)
-    lines.push(`  ${id.padEnd(20)} ${n.state.padEnd(9)} ${what}${last && n.state !== 'completed' ? `\n${' '.repeat(33)}note: ${first(last.text, 120)}` : ''}`)
+    const step = eff?.nodes[id]?.step
+    const doc = step ? `\n${' '.repeat(33)}${step.purpose}: ${r.dir}/${step.output}${n.document ? ` (checked: ${n.document.bytes} bytes, sha256 ${n.document.sha256.slice(0, 12)}…)` : r.files.some(f => f.name === step.output) ? ' (written, not yet recorded)' : ' (not written yet)'}${n.agreement ? `; agreed in ${n.agreement.question}` : ''}` : ''
+    lines.push(`  ${id.padEnd(20)} ${n.state.padEnd(9)} ${what}${doc}${last && n.state !== 'completed' ? `\n${' '.repeat(33)}note: ${first(last.text, 120)}` : ''}`)
   }
   if (ex.ready.length) lines.push(`Ready: ${ex.ready.join(', ')}`)
   const qs = Object.values(rec.questions)
@@ -406,7 +424,11 @@ export async function runCommand(c: RunCli): Promise<number> {
       const r = await ref()
       const ws2 = ws
       const artifacts = c.opts('artifact').map(p => artifactPath(ws2, r, p))
-      return op({ op: 'node.complete', node: node(), outcome: need(c, 'outcome', 'what the node produced or concluded'), artifacts }, () => `Recorded: ${args[1]} completed.`, r)
+      const agreement = c.opt('agreement')
+      return op({ op: 'node.complete', node: node(), outcome: need(c, 'outcome', 'what the node produced or concluded'), artifacts, ...(agreement ? { agreement } : {}) }, rec => {
+        const d = rec.nodes[args[1]]?.document
+        return `Recorded: ${args[1]} completed.${d ? ` Document ${d.path} checked (${d.bytes} bytes, sha256 ${d.sha256.slice(0, 12)}…).` : ''}${rec.nodes[args[1]]?.agreement ? ` Plan agreed in ${rec.nodes[args[1]].agreement!.question}.` : ''}`
+      }, r)
     }
     case 'fail': return op({ op: 'node.fail', node: node(), reason: need(c, 'reason', 'what prevents continuation') }, () => `Recorded: ${args[1]} failed.`)
     case 'cancel':

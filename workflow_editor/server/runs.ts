@@ -4,14 +4,15 @@
 // shared/run.ts; this module only reads and writes files. The CLI and the
 // service both call it.
 import { createHash } from 'node:crypto'
-import { mkdir, readdir, readFile, stat, writeFile } from 'node:fs/promises'
-import { join } from 'node:path'
+import { lstat, mkdir, readdir, readFile, realpath, stat, writeFile } from 'node:fs/promises'
+import { join, sep } from 'node:path'
 import type { FileProblem, RelatedRun, RunFile, RunResponse, RunSummary, SourceComparison } from '../shared/api.ts'
-import { approvalStates, semanticDigest } from '../shared/canonical.ts'
+import { approvalStates, canonicalJson, semanticDigest } from '../shared/canonical.ts'
+import { COMPILER_VERSION, compile, isGenerated, type EffectiveGraph, type StepSpec } from '../shared/compile.ts'
 import { ID_PATTERN, normalizeRepoPath, type Workflow } from '../shared/model.ts'
 import {
-  checkRecord, delegateNodes, operate, RUN_ID, RunError, runKey, validRunRef,
-  type BundleEntry, type DefinitionRef, type EntrustRef, type Executor, type OpInput, type RepoContext, type RunGraph,
+  checkRecord, delegateNodes, documentPath, operate, RUN_ID, RunError, runFolder, RUNS_ROOT, runKey, validRunRef,
+  type BundleEntry, type DefinitionRef, type DocumentEvidence, type EntrustRef, type Executor, type OpInput, type RepoContext, type RunGraph,
   type EntryMeta, type RunInput, type RunRecord, type RunRef,
 } from '../shared/run.ts'
 import { atomicWrite, inside, readTextOrNull } from './files.ts'
@@ -28,8 +29,8 @@ const MAX_READ = 1024 * 1024
 
 // devdocs/runs/<workflow-id>/<run-id>/ (p4). The p3 layout
 // (devdocs/<workflow-id>/runs/<run-id>/) is neither read nor converted.
-export const RUNS_DIR = 'devdocs/runs'
-export const runDir = (r: RunRef) => `${RUNS_DIR}/${r.workflow}/${r.run}`
+export const RUNS_DIR = RUNS_ROOT
+export const runDir = runFolder
 const devdocsRel = (projectRel: string) => projectRel.slice('devdocs/'.length)
 const sha256 = (text: string | Buffer) => createHash('sha256').update(text).digest('hex')
 const sigOf = async (path: string) => { const s = await stat(path).catch(() => null); return s ? `${s.size}:${s.mtimeMs}:${s.ino}` : null }
@@ -127,6 +128,9 @@ async function readFrom(src: Source, expect: RunRef & { project?: string }, cach
     const r = raw as Record<string, unknown>
     const bundle = await loadBundle(src, r?.definition)
     if (bundle.problem || !bundle.graph) return { text, problem: { kind: 'shape', message: bundle.problem ?? 'no graph', code: 'bundle' }, bundle }
+    const frozen = followedGraph(r?.definition as DefinitionRef, bundle)
+    if (typeof frozen === 'string') return { text, problem: { kind: 'shape', message: frozen, code: 'bundle' }, bundle }
+    bundle.graph = frozen
     const checked = checkRecord(raw, bundle.graph)
     if (!checked.ok) return { text, problem: { kind: 'shape', message: checked.message, code: checked.code }, bundle }
     if (expect.project !== undefined && checked.record.project !== expect.project) {
@@ -142,6 +146,28 @@ async function readFrom(src: Source, expect: RunRef & { project?: string }, cach
     cache.set(cacheKey.split('\0')[0], { key: cacheKey, reading: { ...reading, record: reading.record && structuredClone(reading.record) } })
   }
   return reading
+}
+
+// The graph a run follows (p5): its frozen effective graph, checked against
+// the bundled authored definition; a run without one (created before p5)
+// follows the authored graph. Returns a problem text when they disagree.
+function followedGraph(def: DefinitionRef, bundle: Bundle): RunGraph | string {
+  const eff = def?.effective as EffectiveGraph | undefined
+  if (eff === undefined) return bundle.graph!
+  if (!eff || typeof eff !== 'object' || typeof eff.compiler !== 'string' || typeof eff.nodes !== 'object' || eff.nodes === null || !Array.isArray(eff.edges)) return 'run.json definition.effective is malformed'
+  const root = bundle.entries[def.root].workflow!
+  if (eff.policy !== root.documentation.policy) return `the frozen graph says policy "${String(eff.policy)}", the bundled definition "${root.documentation.policy}"`
+  const authored = (g: RunGraph) => canonicalJson(Object.fromEntries(Object.entries(g.nodes).filter(([id]) => !isGenerated(id))))
+  if (authored(eff) !== authored(bundle.graph!)) return 'the frozen graph\'s authored nodes differ from the bundled definition'
+  for (const e of eff.edges) if (!(e?.from in eff.nodes) || !(e?.to in eff.nodes)) return `the frozen graph has an edge to an unknown node (${String(e?.from)} → ${String(e?.to)})`
+  for (const [id, n] of Object.entries(eff.nodes)) if (isGenerated(id) !== !!n?.step) return `the frozen graph's node "${id}" ${isGenerated(id) ? 'has no step' : 'is authored but carries a step'}`
+  // Same compiler: it must still produce exactly this graph. Another
+  // version's graph is followed as frozen.
+  if (eff.compiler === COMPILER_VERSION) {
+    const again = compile(root)
+    if (!again.ok || canonicalJson(again.graph) !== canonicalJson(eff)) return `the frozen graph differs from what ${COMPILER_VERSION} produces for the bundled definition`
+  }
+  return { nodes: eff.nodes, edges: eff.edges }
 }
 
 async function bundleSigs(dir: string): Promise<string> {
@@ -467,7 +493,10 @@ export async function createRun(ws: Workspace, o: CreateRunOptions): Promise<Cre
   if (o.predecessor) validRunRef(o.predecessor, 'predecessor')
   const definition = await definitionRef(src.root, src.files, src.warnings)
   const context = await repoContext(ws, src.files)
-  const graph = graphOf(src.files[src.root].workflow)
+  const compiled = compile(src.files[src.root].workflow)
+  if (!compiled.ok) throw new RequestError(422, `${src.root} cannot be executed: ${compiled.message}. Nothing was written.`, { code: compiled.code })
+  definition.effective = compiled.graph
+  const graph: RunGraph = { nodes: compiled.graph.nodes, edges: compiled.graph.edges }
   const record = createRecord(project, ref, input, o, definition, context, graph)
   for (const [id, f] of Object.entries(src.files)) files[`${DEFINITION_DIR}/${id}.yaml`] = f.text
   if (o.plan !== undefined) files['plan.md'] = o.plan
@@ -526,16 +555,48 @@ async function runOpLocked(ws: Workspace, ref: RunRef, input: OpInput & EntryMet
       if (n && n !== '.') await inside(ws.root, n) // bounds, before anything is written
     }
   }
+  // A documentation step's document is checked here, on disk, and recorded
+  // as evidence; the reducer checks the evidence, never the file.
+  let docProblem: string | undefined
+  const step = (op.op === 'node.complete' || op.op === 'question.ask') && op.node ? graph.nodes[op.node]?.step : undefined
+  if (op.op === 'node.complete' || op.op === 'question.ask') delete op.document // never taken from the caller
+  if (step && (op.op === 'node.complete' || step.kind === 'plan')) {
+    const checked = await checkDocument(ws, ref, step)
+    if ('problem' in checked) docProblem = checked.problem
+    else (op as { document?: DocumentEvidence }).document = checked
+  }
   let next: RunRecord
   try {
     next = operate(record, op, { at: (ctx.now ?? new Date()).toISOString(), by: ctx.by?.trim() || record.executor.name, via: ctx.via, graph, expectSeq: ctx.expectSeq })
   } catch (e) {
-    if (e instanceof RunError) throw new RequestError(e.code === 'outdated' ? 409 : 422, e.message, { code: e.code })
+    if (e instanceof RunError) {
+      const message = e.code === 'document-missing' && docProblem ? `${op.op === 'question.ask' ? 'asking from' : 'completing'} ${(op as { node: string }).node}: ${docProblem}` : e.message
+      throw new RequestError(e.code === 'outdated' ? 409 : 422, message, { code: e.code })
+    }
     throw e
   }
   if (next === record) return { record, ref, duplicate: true }
   await writeRecord(dir, next)
   return { record: next, ref }
+}
+
+// The document a step writes: a regular, nonempty file inside the run
+// folder (no symbolic link out of it). Its hash and size are the evidence.
+export async function checkDocument(ws: Workspace, ref: RunRef, step: StepSpec): Promise<DocumentEvidence | { problem: string }> {
+  const path = documentPath(ref, step)
+  if (step.output.includes('/') || step.output.startsWith('.')) return { problem: `${step.output} is not a file name of the run folder` }
+  let folder: string
+  try { folder = await realpath(await inside(ws.root, runDir(ref))) } catch (e) { return { problem: `the run folder cannot be resolved inside the workspace: ${(e as Error).message}` } }
+  const abs = join(folder, step.output)
+  const l = await lstat(abs).catch(() => null)
+  if (!l) return { problem: `${path} does not exist; write it before recording the step` }
+  if (l.isSymbolicLink()) return { problem: `${path} is a symbolic link; the document must be a file of the run folder` }
+  if (!l.isFile()) return { problem: `${path} is not a file` }
+  if (!(await realpath(abs)).startsWith(folder + sep)) return { problem: `${path} resolves outside the run folder` }
+  if (l.size > MAX_READ) return { problem: `${path} is larger than ${MAX_READ} bytes` }
+  const bytes = await readFile(abs)
+  if (!bytes.toString('utf8').trim()) return { problem: `${path} is empty` }
+  return { path, sha256: sha256(bytes), bytes: bytes.length }
 }
 
 // ---- checking --------------------------------------------------------------------

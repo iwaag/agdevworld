@@ -93,8 +93,14 @@ What you have:
   `fail` — a problem prevents continuing. The person reads them as they
   happen, so a record made when the thing happens is what they see. Records
   are never edited: a correction goes into a report or a later note.
-- Plans and reports are yours: what you write in them and which reports you
-  make. The tools never parse them.
+- Plans and reports are yours to write; the tools never parse their prose.
+  A run's documentation policy (`wfe run show` names it) says when they are
+  steps of the run. Under `default` the run has `_plan` (write `plan.md`,
+  ask the person to agree to it, complete after taking up their agreement
+  to that same file), `_report.<node>` after each node (`report-<node>.md`)
+  and `_final-report` (`report.md`); each completes only when its document
+  is a nonempty file of the run folder, and successors wait for them.
+  Under `manual`, which reports you make is your choice or the person's.
 - The person can answer a question in the browser or here. An answer recorded
   in the browser does not reach you by itself; the person tells you here, and
   `wfe run show` shows it. Their answer given here is recorded with

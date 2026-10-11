@@ -3,9 +3,13 @@
 // Shared by the service, the CLI and the browser; it touches no files.
 // See docs/runs.md for the contract.
 import { canonicalJson } from './canonical.ts'
+import type { EffectiveGraph, StepSpec } from './compile.ts'
 import { ID_PATTERN, normalizeRepoPath, type Edge } from './model.ts'
 
 export const RUN_SCHEMA = 'ag.workflow-run.v2'
+// Where run folders live in a project (docs/runs.md).
+export const RUNS_ROOT = 'devdocs/runs'
+export const runFolder = (r: RunRef) => `${RUNS_ROOT}/${r.workflow}/${r.run}`
 export const RUN_ID = /^run-[a-z0-9][a-z0-9_.-]{0,59}$/
 export const QUESTION_ID = /^q[0-9]{1,6}$/
 export const NODE_STATES = ['pending', 'running', 'waiting', 'completed', 'failed', 'cancelled'] as const
@@ -47,12 +51,19 @@ export interface BundleEntry {
   definitionDigest: string
   approvals: { intent: string; definition: string }
 }
-export interface DefinitionRef { root: string; workflows: Record<string, BundleEntry>; warnings: string[] }
+// `effective` (p5): the graph the run follows, compiled from the root
+// workflow and its documentation policy at creation and frozen here. A run
+// created before p5 has none and follows its authored graph.
+export interface DefinitionRef { root: string; workflows: Record<string, BundleEntry>; warnings: string[]; effective?: EffectiveGraph }
 export interface RepoContext { path: string; head: string | null; branch: string | null; dirty: number | null }
 
 export type WaitOn = { question: string } | { external: string }
 export interface Wait { reason: string; holder: string; on: WaitOn }
 export interface Note { at: string; by: string; text: string }
+// A document a step was checked to have written (p5): project-relative path,
+// content hash and size at the moment of the check. File presence, not a
+// claim that the prose is right.
+export interface DocumentEvidence { path: string; sha256: string; bytes: number }
 export interface NodeRecord {
   state: NodeState
   updated: string | null
@@ -63,6 +74,8 @@ export interface NodeRecord {
   failure: { reason: string; at: string; by: string } | null
   cancellation: { reason: string; at: string; by: string } | null
   notes: Note[]
+  document?: DocumentEvidence // a documentation step's checked document (p5)
+  agreement?: { question: string } // the plan step: the question whose taken-up answer agreed to that document
 }
 // `from` gave the answer; `by` recorded it (the same unless someone relays it).
 export interface Answer { text: string; from: string; by: string; at: string; via: string }
@@ -76,6 +89,7 @@ export interface Question {
   answers: Answer[]
   takenUp: { by: string; at: string; answer: number } | null
   withdrawn: { by: string; at: string; reason: string } | null
+  document?: DocumentEvidence // asked from the plan step: the plan.md it asked about (p5)
 }
 export interface Artifact { path: string; node: string | null; title: string; by: string; at: string }
 export interface Decision { decision: 'accepted' | 'rejected'; by: string; at: string; evidence: string; note: string }
@@ -135,10 +149,10 @@ export type OpInput =
   | { op: 'node.start'; node: string; reason?: string }
   | { op: 'node.progress'; node: string; text: string }
   | { op: 'node.wait'; node: string; reason: string; holder: string; external: string }
-  | { op: 'node.complete'; node: string; outcome: string; artifacts?: string[] }
+  | { op: 'node.complete'; node: string; outcome: string; artifacts?: string[]; document?: DocumentEvidence; agreement?: string }
   | { op: 'node.fail'; node: string; reason: string }
   | { op: 'node.cancel'; node: string; reason: string }
-  | { op: 'question.ask'; question: string; node?: string; text: string; to: string }
+  | { op: 'question.ask'; question: string; node?: string; text: string; to: string; document?: DocumentEvidence }
   | { op: 'question.answer'; question: string; text: string; from?: string }
   | { op: 'question.take-up'; question: string; answer?: number }
   | { op: 'question.withdraw'; question: string; reason: string }
@@ -172,8 +186,13 @@ export interface Change {
 export type HistoryEntry = OpInput & EntryMeta & { seq: number; at: string; by: string; via: string; change: Change }
 export interface RunRecord extends RunState { history: HistoryEntry[] }
 
-// The graph the run follows: the root workflow of its bundle.
-export interface RunGraph { nodes: Record<string, { type: string; workflow?: string }>; edges: Edge[] }
+// The graph the run follows: its frozen effective graph (p5), or, for a run
+// created before p5, the root workflow of its bundle. A node with `step` is a
+// generated documentation step.
+export interface RunGraph { nodes: Record<string, { type: string; workflow?: string; step?: StepSpec }>; edges: Edge[] }
+export const stepOf = (graph: RunGraph, node: string): StepSpec | undefined => graph.nodes[node]?.step
+// The document a step writes, project-relative.
+export const documentPath = (r: RunRef, step: StepSpec) => `${runFolder(r)}/${step.output}`
 
 // Delegate nodes are definition and display only (p4): a workflow that has
 // one is refused at run creation, by every entrance, through this reducer.
@@ -261,6 +280,15 @@ export function validArtifactPath(p: unknown): string {
   return n!
 }
 
+function evidence(v: unknown, what: string, expected: string): DocumentEvidence {
+  if (!isObj(v)) return fail('document-missing', `${what} needs the checked document ${expected} (the file layer records it; write the file first)`)
+  const d = v as Record<string, unknown>
+  if (d.path !== expected) fail('document-path', `${what}: the document is ${expected}, not ${String(d.path)}`)
+  if (typeof d.sha256 !== 'string' || !/^[0-9a-f]{64}$/.test(d.sha256)) fail('shape', `${what}: document sha256 must be 64 hex digits`)
+  if (typeof d.bytes !== 'number' || !Number.isInteger(d.bytes) || d.bytes <= 0) fail('document-empty', `${what}: ${expected} is empty`)
+  return { path: expected, sha256: d.sha256 as string, bytes: d.bytes as number }
+}
+
 function emptyNode(): NodeRecord {
   return { state: 'pending', updated: null, started: null, ended: null, wait: null, outcome: null, failure: null, cancellation: null, notes: [] }
 }
@@ -282,6 +310,8 @@ export function apply(prev: RunState | null, e: HistoryEntry | (OpInput & EntryM
     if (!RUN_ID.test(e.run)) fail('run-id', `run id "${e.run}" must match ${RUN_ID.source}`)
     const ids = [...(e.nodes ?? [])].sort()
     if (canonicalJson(ids) !== canonicalJson(Object.keys(graph.nodes).sort())) fail('graph', 'the nodes in run.create differ from the bundled definition')
+    const eff = e.definition?.effective
+    if (eff && canonicalJson({ nodes: eff.nodes, edges: eff.edges }) !== canonicalJson({ nodes: graph.nodes, edges: graph.edges })) fail('graph', 'the graph followed differs from the frozen effective graph')
     const delegates = delegateNodes(graph)
     if (delegates.length) fail('delegate-unsupported', `the workflow has delegate node${delegates.length === 1 ? '' : 's'} ${delegates.join(', ')}; delegate execution is not supported, so no run of it is created`)
     const nodes = Object.fromEntries(ids.map(id => [id, emptyNode()]))
@@ -367,6 +397,14 @@ export function apply(prev: RunState | null, e: HistoryEntry | (OpInput & EntryM
       const n = node(e.node)
       if (n.state !== 'running') fail('state', `node "${e.node}" is ${n.state}; only a running node completes${n.state === 'waiting' ? ' (resume it with start first)' : ''}`)
       const artifacts = (e.artifacts ?? []).map(validArtifactPath)
+      const step = stepOf(graph, e.node)
+      let doc: DocumentEvidence | undefined
+      if (step) {
+        doc = evidence(e.document, `completing ${e.node}`, documentPath(s, step))
+        if (step.kind === 'plan') n.agreement = { question: agreedPlan(e.node, doc, e.agreement) }
+        n.document = doc
+        if (!artifacts.includes(doc.path)) artifacts.unshift(doc.path)
+      } else if (e.document !== undefined || e.agreement !== undefined) fail('shape', `node "${e.node}" is authored work; documents and plan agreement belong to documentation steps`)
       n.outcome = { text: text(e.outcome, 'the outcome'), artifacts }
       n.ended = at
       for (const path of artifacts) s.artifacts.push({ path, node: e.node, title: '', by, at })
@@ -396,6 +434,11 @@ export function apply(prev: RunState | null, e: HistoryEntry | (OpInput & EntryM
       if (!QUESTION_ID.test(e.question)) fail('shape', `question id "${e.question}" must match ${QUESTION_ID.source}`)
       if (e.question in s.questions) fail('question-exists', `question ${e.question} already exists`)
       const q: Question = { id: e.question, node: e.node ?? null, text: text(e.text, 'the question'), to: text(e.to, 'to whom the question is addressed'), askedBy: by, asked: at, answers: [], takenUp: null, withdrawn: null }
+      const step = e.node ? stepOf(graph, e.node) : undefined
+      // The plan is written before it is consulted on, and the question
+      // records which plan.md it asked about.
+      if (step?.kind === 'plan') q.document = evidence(e.document, `asking from ${e.node}`, documentPath(s, step))
+      else if (e.document !== undefined) fail('shape', 'only a question from the plan step records a document')
       if (e.node !== undefined && e.node !== null) {
         const n = node(e.node)
         if (n.state !== 'running') fail('state', `node "${e.node}" is ${n.state}; a question waits from a running node${n.state === 'waiting' ? ' (it already waits on something)' : ''}`)
@@ -511,6 +554,23 @@ export function apply(prev: RunState | null, e: HistoryEntry | (OpInput & EntryM
     }
     default:
       fail('op-unknown', `unknown operation "${(e as { op: string }).op}"`)
+  }
+
+  // The plan step completes on agreement to the plan.md it completes with: a
+  // question from the step, asked about that same content, whose answer was
+  // taken up. A withdrawal, or agreement to an earlier revision, is not it.
+  function agreedPlan(step: string, doc: DocumentEvidence, named: unknown): string {
+    if (named !== undefined && (typeof named !== 'string' || !(named in s.questions))) fail('question-unknown', `question "${String(named)}" does not exist in this run`)
+    // Questions keep their asking order; a later question supersedes the
+    // answers to earlier ones.
+    const latest = Object.values(s.questions).filter(q => q.node === step).at(-1)
+    const q = named ? s.questions[named as string] : latest
+    if (!q) return fail('plan-not-agreed', `${step} has asked nothing; ask the person to agree to plan.md first`)
+    if (q.node !== step) fail('plan-not-agreed', `question ${q.id} was not asked from ${step}`)
+    if (q !== latest) fail('plan-not-agreed', `question ${latest!.id} was asked after ${q.id}; agreement is the answer to the latest question about the plan`)
+    if (!q.takenUp) fail('plan-not-agreed', `question ${q.id} is ${questionState(q)}; agreement is an answer that was taken up`)
+    if (!q.document || q.document.sha256 !== doc.sha256) fail('plan-not-agreed', `plan.md changed since question ${q.id} asked about it; ask about the current plan`)
+    return q.id
   }
 
   function resumeFrom(q: Question) {

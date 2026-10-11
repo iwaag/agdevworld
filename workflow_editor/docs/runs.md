@@ -321,6 +321,41 @@ answer: `instructions.<id>` (`i1`, `i2`, … in order) with its text, `from`,
 `ack: null`. It changes no node and is refused only on a cancelled run.
 Acknowledgment and the node-boundary rules are below (*Node boundaries*).
 
+### Node boundaries (p6)
+
+The executor acknowledges instructions with `instruction.ack` (executor
+operation, fenced by the open attempt): the ids, a `response` —
+`incorporate` (into upcoming work), `clarify` (it asks the person) or
+`new-run` (it explains why the request needs a new run) — and a note saying
+what it will do. Each instruction is acknowledged once.
+
+Two transitions are **node boundaries** and are refused (code
+`instructions-pending`, listing each instruction and the `wfe run ack`
+command) while a received instruction is unacknowledged:
+
+- `node.start` of a pending node — authored nodes and documentation steps
+  alike;
+- the completion that would complete the execution (the last node, under
+  `default` the `_final-report`).
+
+Resuming a waiting node, progress notes, questions and the completion of a
+node that is not the last are not boundaries: a running node is never
+interrupted, and nothing asks an agent to stop finished work to look at its
+input. Receipt (`instruction.receive`), acknowledgment and the boundary
+transitions all hold the run's lock, so the order is the history's: an
+instruction applied before a start blocks it; one applied after belongs to
+the next boundary (or, after completion, to nothing — `instruction.receive`
+is refused on a completed execution, code `run-completed`, and the intake
+explains that a new request topic is needed). A post still in transit is not
+claimed to have reached the run.
+
+An instruction that would change completed work or the graph is asked about
+(`clarify`); completed nodes are not reopened. A revised plan is asked about
+again with `wfe run ask … --about-plan`, which records the revised plan.md's
+hash like the plan step's own question. The execution brief lists the
+unacknowledged instructions in full; `wfe run instructions` and the run view
+show them all.
+
 An answer to another question leaves a node waiting. Recording an answer is
 not taking it up, taking it up is not completing the node, and none of these
 is accepting a result.

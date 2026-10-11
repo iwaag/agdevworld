@@ -7,7 +7,7 @@ import type { RunResponse } from '../shared/api.ts'
 import { accessAt } from '../shared/access.ts'
 import { normalizeRepoPath } from '../shared/model.ts'
 import { splitCounts } from '../shared/compile.ts'
-import { EXECUTOR_OPS, holderOf, notableEvents, questionState, runKey, type EntrustRef, type HistoryEntry, type OpInput, type RunRecord, type RunRef } from '../shared/run.ts'
+import { EXECUTOR_OPS, holderOf, hostOf, notableEvents, questionState, runKey, type EntrustRef, type HistoryEntry, type Instruction, type OpInput, type RunRecord, type RunRef } from '../shared/run.ts'
 import {
   checkRun, createRun, listRuns, resolveRef, runDir, runOp, runResponse, type CreateRunOptions,
 } from '../server/runs.ts'
@@ -118,11 +118,13 @@ Dependent nodes stay blocked. Writes run.json.`,
 
 Discontinues one node, or (without <node>) the whole run: every pending,
 running or waiting node is cancelled in the same entry. Final. Writes run.json.`,
-  ask: `wfe run ask <run> [<node>] --question <text> --to <who> [--id q<n>]
+  ask: `wfe run ask <run> [<node>] --question <text> --to <who> [--id q<n>] [--about-plan]
 
 Records a question (ids q1, q2, … unless --id). With <node>, the running node
 then waits on it and <who> holds the next move. A question from _plan needs
-plan.md written first and records which plan.md it asks about. Writes run.json.`,
+plan.md written first and records which plan.md it asks about. --about-plan asks
+about a revised plan.md later in the run (the same evidence: its hash), when
+the person's input changed the agreed work. Writes run.json.`,
   answer: `wfe run answer <run> <question> --answer <text> [--from <person>]
 
 Records an answer to that question. The waiting node stays waiting until the
@@ -136,6 +138,25 @@ Records that the executor took up the latest answer (or answer --index, from
 
 Closes a question without an answer; a node waiting on it resumes running.
 Writes run.json.`,
+  instructions: `wfe run instructions <run>
+
+The person's additional instructions to this run (p6): each one's text, who
+gave it and where, the nodes running when it arrived, and whether it was
+acknowledged and how. Received is not read: the executor acknowledges each
+(wfe run ack) at a node boundary. Reads only.`,
+  instruct: `wfe run instruct <run> --instruction <text> [--from <person>]
+
+Records a person's additional instruction to the run (the same record a post
+in its Zulip request topic becomes): it changes no node and interrupts
+nothing; the executor reads it at the next node boundary. --from names whose
+words they are (default --by). Writes run.json.`,
+  ack: `wfe run ack <run> <instruction>... --response incorporate|clarify|new-run --note <text>
+
+Records that the executor took up these instructions and what it will do:
+incorporate them into upcoming work, clarify them with a question to the
+person, or explain why they need a new run. Starting a node, and the run's
+last completion, are refused while a received instruction is
+unacknowledged. Writes run.json.`,
   events: `wfe run events <run> [--since <seq>]
 
 The coordination events selected from committed history entries — started,
@@ -194,6 +215,7 @@ export function runIndex(): string {
   stop / resume <run>      stop execution (resumable), resume a held run
   events <run>             notification-worthy events (selection only)
   ask / answer / take-up / withdraw    questions
+  instructions / instruct / ack       additional instructions: list, give, acknowledge
   access <run> [<path>]... what the run's definition declares for a path
   attach <run> <path>      record an artifact
   decide <run>             record acceptance or rejection of the result
@@ -255,10 +277,11 @@ const ago = (at: string | null | undefined) => {
 
 function entryLine(e: HistoryEntry): string {
   const d = e as unknown as Record<string, unknown>
-  const subject = [d.node && `node ${d.node}`, d.question && `question ${d.question}`, d.path && `${d.path}`].filter(Boolean).join(', ')
+  const subject = [d.node && `node ${d.node}`, d.question && `question ${d.question}`, d.path && `${d.path}`,
+    e.op === 'instruction.receive' && `instruction ${e.change.instruction?.[1] ?? ''}`, Array.isArray(d.instructions) && `instructions ${(d.instructions as string[]).join(', ')} (${String(d.response)})`].filter(Boolean).join(', ')
   const moves = Object.entries(e.change.nodes ?? {}).map(([n, [a, b]]) => `${n} ${a}→${b}`)
   if (e.change.execution) moves.push(`run ${e.change.execution[0] ?? '—'}→${e.change.execution[1]}`)
-  const detail = (d.reason ?? d.outcome ?? d.text ?? d.evidence ?? d.external ?? '') as string
+  const detail = (d.reason ?? d.outcome ?? d.text ?? d.evidence ?? d.external ?? d.note ?? '') as string
   return `  ${String(e.seq).padStart(3)} ${e.at}  ${e.op.padEnd(17)} ${e.by} (${e.via})${subject ? `  ${subject}` : ''}${moves.length ? `  [${moves.join(', ')}]` : ''}${detail ? `\n${' '.repeat(30)}${first(detail, 140)}` : ''}`
 }
 
@@ -320,12 +343,25 @@ export function describeRun(r: RunResponse, opts: { history?: boolean; url?: str
       if (q.withdrawn) lines.push(`     withdrawn by ${q.withdrawn.by}: ${q.withdrawn.reason}`)
     }
   }
+  const ins = Object.values(rec.instructions ?? {})
+  if (ins.length) {
+    const pending = ins.filter(i => !i.ack)
+    lines.push(`Instructions (${pending.length ? `${pending.length} NOT ACKNOWLEDGED — the next node start and the last completion wait for wfe run ack` : 'all acknowledged'}):`)
+    for (const i of ins) lines.push(...instructionLines(i))
+  }
   if (r.artifacts.length) lines.push('Artifacts:', ...r.artifacts.map(a => `  ${a.path}${a.exists ? '' : ' (missing)'}`))
   if (rec.decisions.length) lines.push('Decisions:', ...rec.decisions.map(d => `  ${d.decision} by ${d.by} at ${d.at}; evidence: ${d.evidence}${d.note ? `; ${d.note}` : ''}`))
   if (r.files.length) lines.push(`Files in ${r.dir}/: ${r.files.map(f => f.name).join(', ')}; the fixed definition in definition/`)
   const hist = opts.history ? rec.history : rec.history.slice(-5)
   lines.push(opts.history ? 'History:' : `History (last ${hist.length} of ${rec.history.length}; --history for all):`, ...hist.map(entryLine))
   return lines.join('\n')
+}
+
+function instructionLines(i: Instruction): string[] {
+  return [
+    `  ${i.id} ${i.ack ? `acknowledged (${i.ack.response})` : 'received'} from ${i.from}${i.by !== i.from ? `, recorded by ${i.by}` : ''} via ${i.via} at ${i.at}${i.source ? ` (Zulip message ${i.source.message} in "${i.source.topic}")` : ''}${i.during.length ? `; arrived while ${i.during.join(', ')} ran` : ''}: ${first(i.text, 400)}`,
+    ...(i.ack ? [`     ${i.ack.by}${i.ack.attempt ? ` (attempt ${i.ack.attempt})` : ''} at ${i.ack.at}: ${first(i.ack.note, 300)}`] : []),
+  ]
 }
 
 // ---- the command -----------------------------------------------------------------
@@ -450,12 +486,12 @@ export async function runCommand(c: RunCli): Promise<number> {
       const res = await wrap(() => c.exec().resume(ws, r, by ?? 'person', need(c, 'reason', 'the resume instruction: what the executor should do now'), 'cli', receipt))
       return report(r, res.record, `Recorded: resumed.${res.job ? ` Queued job ${res.job.id} (${res.job.state}).` : ''}`)
     }
-    case 'ask': return op({ op: 'question.ask', question: c.opt('id') ?? '', node: args[1], text: need(c, 'question', 'the question'), to: need(c, 'to', 'to whom it is addressed') },
+    case 'ask': return op({ op: 'question.ask', question: c.opt('id') ?? '', node: args[1], text: need(c, 'question', 'the question'), to: need(c, 'to', 'to whom it is addressed'), ...(c.flag('about-plan') ? { plan: true } : {}) },
       rec => { const q = Object.values(rec.questions).at(-1)!; return `Recorded question ${q.id} to ${q.to}${q.node ? `; ${q.node} waits on it` : ''}.` })
     case 'answer': {
       if (!args[1]) throw c.usage('<question> is required')
       return op({ op: 'question.answer', question: args[1], text: need(c, 'answer', 'the answer text'), from: c.opt('from') }, () => `Recorded an answer to ${args[1]}. A node waiting on it keeps waiting until the answer is taken up.`, undefined,
-        async (t, rec) => { if (rec.executor.name !== c.exec().executor) return null; const j = await c.exec().afterAnswer(ws, t, args[1]); return j ? `The executor resumes the run (job ${j.id}, ${j.state}).` : 'The run is not resumed automatically now (held, executing, or not waiting on this question).' })
+        async (t, rec) => { if (hostOf(rec.executor) !== c.exec().executor) return null; const j = await c.exec().afterAnswer(ws, t, args[1]); return j ? `The executor resumes the run (job ${j.id}, ${j.state}).` : 'The run is not resumed automatically now (held, executing, or not waiting on this question).' })
     }
     case 'take-up': {
       if (!args[1]) throw c.usage('<question> is required')
@@ -465,6 +501,24 @@ export async function runCommand(c: RunCli): Promise<number> {
     case 'withdraw': {
       if (!args[1]) throw c.usage('<question> is required')
       return op({ op: 'question.withdraw', question: args[1], reason: need(c, 'reason', 'why the question is withdrawn') }, () => `Recorded: ${args[1]} withdrawn.`)
+    }
+    case 'instructions': {
+      const r = await ref()
+      const resp = await wrap(() => runResponse(ws, r))
+      if (!resp.record) throw c.refused(`run ${runKey(r)} cannot be used: ${resp.problem?.message}`)
+      const ins = Object.values(resp.record.instructions ?? {})
+      c.out(ins.length ? ins.flatMap(instructionLines).join('\n') : 'No instructions were received.', { ref: runKey(r), instructions: ins, pending: ins.filter(i => !i.ack).map(i => i.id) })
+      return 0
+    }
+    case 'instruct': {
+      const from = c.opt('from') ?? by
+      if (!from?.trim()) throw c.usage('--from <person> (or --by) is required: whose instruction it is')
+      return op({ op: 'instruction.receive', text: need(c, 'instruction', 'the instruction'), from }, rec => `Recorded instruction ${Object.keys(rec.instructions ?? {}).at(-1)}; ${rec.executor.name} reads it at the next node boundary.`)
+    }
+    case 'ack': {
+      const ids = args.slice(1)
+      if (!ids.length) throw c.usage('<instruction>... is required (i1 i2 …)')
+      return op({ op: 'instruction.ack', instructions: ids, response: need(c, 'response', 'incorporate, clarify or new-run'), note: need(c, 'note', 'what you will do about it') }, () => `Recorded: ${ids.join(', ')} acknowledged.`)
     }
     case 'events': {
       const r = await ref()
@@ -500,7 +554,7 @@ export async function runCommand(c: RunCli): Promise<number> {
       if (decision !== 'accepted' && decision !== 'rejected') throw c.usage('--decision is accepted or rejected')
       if (!by?.trim()) throw c.usage('--by is required: the person who decides')
       return op({ op: 'run.decide', decision, evidence: need(c, 'evidence', 'what the decision rests on'), note: c.opt('note') }, () => `Recorded: ${decision} by ${by}.`, undefined,
-        async (t, rec) => { if (rec.executor.name !== c.exec().executor) return null; const cp = await c.exec().afterDecision(ws, t, decision); return `Publication checkpoint ${cp.id}: ${cp.state}${cp.error ? ` — ${cp.error}` : ''}` })
+        async (t, rec) => { if (hostOf(rec.executor) !== c.exec().executor) return null; const cp = await c.exec().afterDecision(ws, t, decision); return `Publication checkpoint ${cp.id}: ${cp.state}${cp.error ? ` — ${cp.error}` : ''}` })
     }
   }
   return 2

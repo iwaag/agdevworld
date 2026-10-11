@@ -218,6 +218,7 @@ test('instructions do not touch nodes; ambiguity, late replies and completed run
   assert.equal(rec.questions.q1.answers.length, 1, 'a late reply is applied nowhere')
   assert.equal(s.i.message(REALM, late.id)!.notice, 'late')
   // Completion: a further post is kept and explained; no new run, nothing reopened.
+  await runOp(s.ws, ref, { op: 'instruction.ack', instructions: ['i1'], response: 'incorporate', note: 'bigger' }, { by: 'maker', via: 'cli' })
   await runOp(s.ws, ref, { op: 'node.complete', node: 'build', outcome: 'built' }, { by: 'maker', via: 'cli' })
   const after = post({ id: 3020, topicFirst, content: 'one more thing' })
   receive(s.i, [after])

@@ -19,7 +19,7 @@ import { hostname } from 'node:os'
 import { join } from 'node:path'
 import type { DatabaseSync } from 'node:sqlite'
 import { normalizeRepoPath } from '../shared/model.ts'
-import { holderOf, hostOf, runKey, situation, type AttemptSettings, type RunRecord, type RunRef } from '../shared/run.ts'
+import { holderOf, hostOf, pendingInstructions, runKey, situation, type AttemptSettings, type RunRecord, type RunRef } from '../shared/run.ts'
 import { assertWorkspaceAllowed, loadBoundary } from './boundary.ts'
 import type { Gitea } from './gitea.ts'
 import { baseline, publish, type Baseline, type RepoStep } from './publish.ts'
@@ -58,6 +58,20 @@ export function documentationBrief(r: RunRecord): string[] {
     out.push('', `Step ${id} (${state === 'pending' ? 'ready' : state}): ${step.purpose}. Document: ${runDir(r)}/${step.output}.${step.for && r.nodes[step.for]?.state === 'completed' ? ` Node ${step.for} is completed; only its report remains.` : ''}`, step.instructions)
   }
   return out
+}
+// The person's additional instructions as the attempt starts (p6): the
+// unacknowledged ones in full, in arrival order. More may arrive while it
+// works; each node boundary shows them (wfe run start refuses until they are
+// acknowledged).
+export function instructionBrief(r: RunRecord): string[] {
+  const all = Object.values(r.instructions ?? {})
+  if (!all.length) return []
+  const pending = pendingInstructions(r)
+  if (!pending.length) return [`Additional instructions: ${all.length}, all acknowledged (wfe run instructions <run>).`]
+  return [
+    '', `Additional instructions received and not yet acknowledged (${pending.length}); acknowledge each with what you will do before starting a node (wfe run ack <run> <id>… --response incorporate|clarify|new-run --note …):`,
+    ...pending.flatMap(i => [`- ${i.id}, from ${i.from} at ${i.at}${i.during.length ? ` (while ${i.during.join(', ')} ran)` : ''}:`, ...i.text.split('\n').map(l => `    ${l}`)]),
+  ]
 }
 const now = () => new Date().toISOString()
 const alive = (pid: number | null) => { if (!pid) return false; try { process.kill(pid, 0); return true } catch (e) { return (e as NodeJS.ErrnoException).code === 'EPERM' } }
@@ -263,6 +277,7 @@ export class ExecStore {
       for (const w of r.execution.waiting) lines.push(`Node ${w.node} waits; next move: ${holderOf(r, w.node)}.`)
     }
     lines.push(`Ready: ${r.execution.ready.join(', ') || '(none)'}; running: ${r.execution.active.join(', ') || '(none)'}.`)
+    lines.push(...instructionBrief(r))
     lines.push(...documentationBrief(r))
     return lines.join('\n')
   }

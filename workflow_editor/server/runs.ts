@@ -222,7 +222,7 @@ export function summaryOf(ref: RunRef, reading: Pick<Reading, 'record' | 'proble
   return {
     ...base, created: r.created, updated: r.updated, seq: r.seq, execution: r.execution.state, counts: r.execution.counts,
     waiting: r.execution.waiting.map(w => ({ node: w.node, holder: holderText(r, w.node) })), ready: r.execution.ready, failed: r.execution.failed,
-    input: r.input.kind, executor: r.executor.name, executorHost: hostOf(r.executor),
+    input: r.input.kind, executor: r.executor.name, executorHost: hostOf(r.executor), pendingInstructions: Object.values(r.instructions ?? {}).filter(i => !i.ack).length,
     decision: r.decisions.at(-1)?.decision,
   }
 }
@@ -584,7 +584,8 @@ async function runOpLocked(ws: Workspace, ref: RunRef, input: OpInput & EntryMet
   // A documentation step's document is checked here, on disk, and recorded
   // as evidence; the reducer checks the evidence, never the file.
   let docProblem: string | undefined
-  const step = (op.op === 'node.complete' || op.op === 'question.ask') && op.node ? graph.nodes[op.node]?.step : undefined
+  const planAsked = op.op === 'question.ask' && op.plan ? Object.values(graph.nodes).find(n => n.step?.kind === 'plan')?.step : undefined
+  const step = planAsked ?? ((op.op === 'node.complete' || op.op === 'question.ask') && op.node ? graph.nodes[op.node]?.step : undefined)
   if (op.op === 'node.complete' || op.op === 'question.ask') delete op.document // never taken from the caller
   if (step && (op.op === 'node.complete' || step.kind === 'plan')) {
     const checked = await checkDocument(ws, ref, step)

@@ -4,7 +4,7 @@
 // See docs/runs.md for the contract.
 import { canonicalJson } from './canonical.ts'
 import type { EffectiveGraph, StepSpec } from './compile.ts'
-import type { SourceRef } from './intake.ts'
+import { INSTRUCTION_RESPONSES, type SourceRef } from './intake.ts'
 import { ID_PATTERN, normalizeRepoPath, type Edge } from './model.ts'
 
 export const RUN_SCHEMA = 'ag.workflow-run.v2'
@@ -180,9 +180,10 @@ export type OpInput =
   | { op: 'node.complete'; node: string; outcome: string; artifacts?: string[]; document?: DocumentEvidence; agreement?: string }
   | { op: 'node.fail'; node: string; reason: string }
   | { op: 'node.cancel'; node: string; reason: string }
-  | { op: 'question.ask'; question: string; node?: string; text: string; to: string; document?: DocumentEvidence }
+  | { op: 'question.ask'; question: string; node?: string; text: string; to: string; document?: DocumentEvidence; plan?: boolean }
   | { op: 'question.answer'; question: string; text: string; from?: string; source?: SourceRef }
   | { op: 'instruction.receive'; instruction?: string; text: string; from: string; source?: SourceRef }
+  | { op: 'instruction.ack'; instructions: string[]; response: string; note: string }
   | { op: 'question.take-up'; question: string; answer?: number }
   | { op: 'question.withdraw'; question: string; reason: string }
   | { op: 'artifact.attach'; path: string; node?: string; title?: string }
@@ -194,12 +195,15 @@ export type OpInput =
   | { op: 'run.resume'; reason: string }
 
 export const OPS = ['run.create', 'node.start', 'node.progress', 'node.wait', 'node.complete', 'node.fail', 'node.cancel',
-  'question.ask', 'question.answer', 'question.take-up', 'question.withdraw', 'instruction.receive', 'artifact.attach', 'run.cancel', 'run.decide',
+  'question.ask', 'question.answer', 'question.take-up', 'question.withdraw', 'instruction.receive', 'instruction.ack', 'artifact.attach', 'run.cancel', 'run.decide',
   'attempt.begin', 'attempt.end', 'run.stop', 'run.resume'] as const
 // The executor's own reports. While an attempt is open they must carry its
 // id (`attempt`), so a stopped or superseded attempt cannot write into the
 // record of the one that replaced it.
-export const EXECUTOR_OPS: readonly string[] = ['node.start', 'node.progress', 'node.wait', 'node.complete', 'node.fail', 'question.ask', 'question.take-up', 'question.withdraw', 'artifact.attach']
+export const EXECUTOR_OPS: readonly string[] = ['node.start', 'node.progress', 'node.wait', 'node.complete', 'node.fail', 'question.ask', 'question.take-up', 'question.withdraw', 'instruction.ack', 'artifact.attach']
+
+// Received instructions the executor has not acknowledged, in arrival order.
+export const pendingInstructions = (s: Pick<RunState, 'instructions'>): Instruction[] => Object.values(s.instructions ?? {}).filter(i => !i.ack)
 // Every entry may carry `attempt` (the executor's launch) and `receipt` (an
 // idempotency key: a retransmitted request with the same receipt is not
 // recorded twice).
@@ -418,6 +422,7 @@ export function apply(prev: RunState | null, e: HistoryEntry | (OpInput & EntryM
           const preds = predecessors(graph).get(e.node)!.filter(p => s.nodes[p].state !== 'completed')
           fail('not-ready', `node "${e.node}" is not ready: ${preds.map(p => `${p} is ${s.nodes[p].state}`).join(', ')}`)
         }
+        boundary(`starting ${e.node}`)
         n.started = at
         if (!s.started) s.started = at
       } else if (n.state === 'waiting') {
@@ -459,6 +464,9 @@ export function apply(prev: RunState | null, e: HistoryEntry | (OpInput & EntryM
         n.document = doc
         if (!artifacts.includes(doc.path)) artifacts.unshift(doc.path)
       } else if (e.document !== undefined || e.agreement !== undefined) fail('shape', `node "${e.node}" is authored work; documents and plan agreement belong to documentation steps`)
+      // The last completion of the run is a boundary too: input received
+      // before it is considered, whichever node it is.
+      if (Object.entries(s.nodes).every(([id, x]) => id === e.node || x.state === 'completed')) boundary(`completing ${e.node}, the last node of the run`)
       n.outcome = { text: text(e.outcome, 'the outcome'), artifacts }
       n.ended = at
       for (const path of artifacts) s.artifacts.push({ path, node: e.node, title: '', by, at })
@@ -492,7 +500,14 @@ export function apply(prev: RunState | null, e: HistoryEntry | (OpInput & EntryM
       // The plan is written before it is consulted on, and the question
       // records which plan.md it asked about.
       if (step?.kind === 'plan') q.document = evidence(e.document, `asking from ${e.node}`, documentPath(s, step))
-      else if (e.document !== undefined) fail('shape', 'only a question from the plan step records a document')
+      else if (e.plan) {
+        // A revised plan after the plan step (p6: an instruction changed the
+        // agreed work): asked about with the same document evidence, so the
+        // renewed agreement names the plan.md it agreed to.
+        const plan = Object.values(graph.nodes).find(n => n.step?.kind === 'plan')?.step
+        if (!plan) fail('shape', 'this run has no plan step; there is no plan.md to ask about')
+        q.document = evidence(e.document, 'asking about the revised plan', documentPath(s, plan!))
+      } else if (e.document !== undefined) fail('shape', 'only a question about the plan records a document')
       if (e.node !== undefined && e.node !== null) {
         const n = node(e.node)
         if (n.state !== 'running') fail('state', `node "${e.node}" is ${n.state}; a question waits from a running node${n.state === 'waiting' ? ' (it already waits on something)' : ''}`)
@@ -536,8 +551,10 @@ export function apply(prev: RunState | null, e: HistoryEntry | (OpInput & EntryM
       break
     }
     case 'instruction.receive': {
-      // Received, not read: no node changes, nothing is interrupted.
+      // Received, not read: no node changes, nothing is interrupted. A
+      // completed run is over: input for it needs a new request.
       live()
+      if (s.execution.state === 'completed') fail('run-completed', 'the run\'s execution is completed; further input needs a new request, it does not reopen this run')
       const all = s.instructions ?? {}
       const id = e.instruction || `i${Object.keys(all).length + 1}`
       if (!INSTRUCTION_ID.test(id)) fail('shape', `instruction id "${id}" must match ${INSTRUCTION_ID.source}`)
@@ -546,6 +563,23 @@ export function apply(prev: RunState | null, e: HistoryEntry | (OpInput & EntryM
       if (e.source !== undefined) ins.source = sourceOf(e.source)
       s.instructions = { ...all, [id]: ins }
       change.instruction = [null, id]
+      break
+    }
+    case 'instruction.ack': {
+      live()
+      if (!(INSTRUCTION_RESPONSES as readonly string[]).includes(e.response)) fail('shape', `response must be one of ${INSTRUCTION_RESPONSES.join(', ')}`)
+      const ids = Array.isArray(e.instructions) ? [...new Set(e.instructions)] : []
+      if (!ids.length) fail('missing', 'name the instructions acknowledged')
+      const note = text(e.note, 'what you will do about it (the note)')
+      const all = { ...(s.instructions ?? {}) }
+      for (const id of ids) {
+        const ins = all[id]
+        if (!ins) fail('instruction-unknown', `instruction "${id}" does not exist in this run`)
+        if (ins.ack) fail('instruction-acknowledged', `instruction ${id} was already acknowledged (${ins.ack.response}) by ${ins.ack.by} at ${ins.ack.at}`)
+        all[id] = { ...ins, ack: { by, at, attempt: e.attempt ?? null, response: e.response, note } }
+      }
+      s.instructions = all
+      change.instruction = [ids.join(','), 'acknowledged']
       break
     }
     case 'artifact.attach': {
@@ -641,6 +675,15 @@ export function apply(prev: RunState | null, e: HistoryEntry | (OpInput & EntryM
     if (!q.takenUp) fail('plan-not-agreed', `question ${q.id} is ${questionState(q)}; agreement is an answer that was taken up`)
     if (!q.document || q.document.sha256 !== doc.sha256) fail('plan-not-agreed', `plan.md changed since question ${q.id} asked about it; ask about the current plan`)
     return q.id
+  }
+
+  // A node boundary: refused while a received instruction is unacknowledged.
+  // Input applied before this entry (the run's lock orders them) is seen
+  // here; input applied after it belongs to the next boundary.
+  function boundary(what: string) {
+    const pending = pendingInstructions(s)
+    if (!pending.length) return
+    fail('instructions-pending', `${what} is a node boundary, and ${pending.length === 1 ? 'an instruction was' : `${pending.length} instructions were`} received and not acknowledged: ${pending.map(i => `${i.id} from ${i.from} (${i.at}): "${i.text.replace(/\s+/g, ' ').slice(0, 200)}"`).join('; ')}. Read ${pending.length === 1 ? 'it' : 'them'} (wfe run instructions <run>) and record what you will do: wfe run ack <run> ${pending.map(i => i.id).join(' ')} --response incorporate|clarify|new-run --note "…"; then retry.`)
   }
 
   function resumeFrom(q: Question) {

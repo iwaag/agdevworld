@@ -334,6 +334,18 @@ export function renderRunView(root: HTMLElement, wsId: string, workflow: string,
     side.append(section(`Questions (${qs.filter(q => ['open', 'answered'].includes(questionState(q))).length} open)`,
       qs.length ? h('div.questions', ...qs.slice().reverse().map(q => questionCard(rec, q))) : h('p.muted.small', 'No questions recorded.')))
 
+    // Additional instructions (p6): received from the person, acknowledged by
+    // the executor at a node boundary. Received is not read.
+    const ins = Object.values(rec.instructions ?? {})
+    if (ins.length) {
+      const pending = ins.filter(i => !i.ack).length
+      side.append(section(`Instructions (${pending ? `${pending} not acknowledged` : 'all acknowledged'})`,
+        h('div.questions', ...ins.slice().reverse().map(i => h(`div.question.q-${i.ack ? 'taken-up' : 'answered'}`, { dataset: { instruction: i.id } },
+          h('div.q-head', h('strong', i.id), chip(i.ack ? 'completed' : 'waiting', i.ack ? `acknowledged: ${i.ack.response}` : 'received'), h('span.muted.small', ` from ${i.from} via ${i.via} · ${when(i.at)}${i.during.length ? ` · while ${i.during.join(', ')} ran` : ''}`)),
+          h('p.q-text', i.text),
+          i.ack ? h('p.small.ok-text', `${i.ack.by}: ${i.ack.note}`) : h('p.small.muted', `${rec.executor.name} reads it at the next node boundary; no node starts before it is acknowledged.`))))))
+    }
+
     const rel: (Node | null)[] = []
     if (r!.predecessor) rel.push(h('div', 'Predecessor: ', h('a', { href: runHash(wsId, r!.predecessor.ref) }, r!.predecessor.ref)))
     const input = rec.input

@@ -373,6 +373,7 @@ export class IntakeStore {
         this.move(row, 'done', { notice: 'late', classification: JSON.stringify({ kind: 'late', question: c.question, state: q && q.withdrawn ? 'withdrawn' : 'taken-up' }), detail: (e as Error).message })
         return 'ok'
       }
+      if (code === 'run-completed') { this.move(row, 'done', { notice: 'closed', classification: JSON.stringify({ kind: 'closed', reason: 'completed' }), detail: (e as Error).message }); return 'ok' }
       if (code === 'run-cancelled') { this.move(row, 'done', { notice: 'closed', classification: JSON.stringify({ kind: 'closed', reason: 'cancelled' }), detail: (e as Error).message }); return 'ok' }
       // Any other refusal by the record is deterministic: retrying repeats
       // it. Shown and told, not applied.

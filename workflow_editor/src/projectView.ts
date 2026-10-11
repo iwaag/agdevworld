@@ -321,21 +321,29 @@ export function renderProjectView(root: HTMLElement, wsId: string): ViewHandle {
             w.warnings ? h('span.chip.warn', `${w.warnings} warning${w.warnings > 1 ? 's' : ''}`) : null)),
         h('a.button', { href: `#/ws/${encodeURIComponent(wsId)}/wf/${encodeURIComponent(w.file)}` }, 'Open Editor')))
     }
-    const id = h('input', { placeholder: 'release-check', 'aria-label': 'New workflow id' })
-    const name = h('input', { placeholder: 'Release Check', 'aria-label': 'New workflow name' })
+    const { id, name, policy } = newWorkflow
     card.append(h('div.create-wf', h('h3', 'New workflow'),
-      h('div.row', h('label.field', h('span', 'Id'), id), h('label.field', h('span', 'Name'), name),
+      h('div.row', h('label.field', h('span', 'Id'), id), h('label.field', h('span', 'Name'), name), h('label.field', h('span', 'Documentation'), policy),
         h('button', {
           disabled: !data.workflowsDir.exists,
           onclick: async () => {
             try {
-              const r = await api.createWorkflow(wsId, id.value.trim(), name.value.trim())
+              const r = await api.createWorkflow(wsId, id.value.trim(), name.value.trim(), policy.value)
               location.hash = `#/ws/${encodeURIComponent(wsId)}/wf/${encodeURIComponent(r.file)}`
             } catch (e) { createError = (e as Error).message; render() }
           },
         }, 'Create')),
       createError ? h('p.error', createError) : null))
     return card
+  }
+
+  // The new-workflow form outlives renders, so text typed while the view
+  // reloads is kept (a render follows every load).
+  const newWorkflow = {
+    id: h('input', { placeholder: 'release-check', 'aria-label': 'New workflow id' }),
+    name: h('input', { placeholder: 'Release Check', 'aria-label': 'New workflow name' }),
+    policy: h('select', { 'aria-label': 'Documentation policy of the new workflow', title: 'default: each run plans with the person, reports every node and writes a final report. manual: documents only when asked.' },
+      h('option', { value: 'default', selected: true }, 'default — plan and reports'), h('option', { value: 'manual' }, 'manual — only when asked')),
   }
 
   // Runs (docs/runs.md): every run of every workflow, newest first.

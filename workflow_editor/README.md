@@ -266,6 +266,22 @@ enforce readiness (a join waits for every predecessor; failures never satisfy
 a dependency). Files are saved, never committed. See
 [docs/runs.md](docs/runs.md).
 
+**Documentation policy (p5).** A workflow declares `documentation.policy`
+(`default` or `manual`; chosen at creation, changed with nothing selected
+in the editor). Under `default` the editor previews what a run adds, from
+the same compiler run creation uses (`shared/compile.ts`): a normal-sized
+plan talk card before the entry cards, a small report icon on each card's
+lower-right corner (it moves with its card; it has no position of its own)
+and a compact final-report endpoint. Selecting one shows its document, what
+it waits for and the instructions the agent gets. The run view draws the
+run's frozen graph the same way: work and reporting are separate states, a
+report being written is highlighted and labelled "Writing report", states
+carry a glyph and an accessible label besides their color, and the detail
+view says whether the document is missing, being written or checked (and
+opens it). Work and documentation steps are counted apart. Under `manual`
+nothing is added. Changing the policy changes the preview and makes the
+definition approval stale; it never changes a saved run.
+
 ## Checks
 
 ```sh
@@ -285,6 +301,14 @@ npm run seed -- --reset && node checks/step3.ts
 npm run seed -- --reset && node checks/step4.ts
 node checks/e2e.ts   # the p1 acceptance scenario; reseeds by itself
 ```
+
+`checks/docsteps.ts` (p5) checks the documentation steps in both views on its
+own temporary project and private service (port 8197): the preview's plan
+card, report icons and final report, their attachment while a card is
+dragged, Fit and zoom, step selection, the policy switch and its approval
+effect, an unsaved draft during run events, "Writing report", document
+states (missing, unfinished, checked, opened), split counts and a manual
+run. `npm run build && node checks/docsteps.ts [--keep]`.
 
 `checks/runs.ts` (p3/pre1) checks the run views on its own temporary project
 and private service (port 8196): node states as text, branches and joins,

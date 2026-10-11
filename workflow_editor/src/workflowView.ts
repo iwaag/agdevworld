@@ -3,6 +3,7 @@
 // draft until an explicit Save, and guards the draft against external changes.
 import type { FileProblem, WorkflowResponse } from '../shared/api.ts'
 import { approvalStates, canonicalJson, type ApprovalState } from '../shared/canonical.ts'
+import { compile } from '../shared/compile.ts'
 import { NODE_TYPES, cloneWorkflow, type ApprovalKind, type NodeType, type Workflow } from '../shared/model.ts'
 import { hasErrors, validateWorkflow, type ValidationContext } from '../shared/validate.ts'
 import { api } from './api.ts'
@@ -306,19 +307,28 @@ export function renderWorkflowView(root: HTMLElement, wsId: string, file: string
     for (const b of toolbar.querySelectorAll('button')) (b as HTMLButtonElement).disabled = readonly()
     const issues = validateWorkflow(draft, context())
     const errors = issues.filter(i => i.severity === 'error'), warnings = issues.filter(i => i.severity === 'warning')
+    // The same compiler run creation uses: what a run of this draft adds.
+    const compiled = compile(draft)
+    const effective = compiled.ok && compiled.graph.policy === 'default' ? compiled.graph : null
+    const reports = effective ? Object.values(effective.nodes).filter(n => n.step?.kind === 'report').length : 0
     statusLine.replaceChildren(
       h(`span.v-summary${errors.length ? '.error' : warnings.length ? '.warn' : '.ok'}`, icon(errors.length ? 'alert' : 'check', 'icon small'),
         errors.length || warnings.length ? `${errors.length} error${errors.length === 1 ? '' : 's'}, ${warnings.length} warning${warnings.length === 1 ? '' : 's'}` : 'Structure and references valid'),
       ...(errors.length ? [h('span.muted.small', 'Drafts with errors can be saved but not approved. Select nothing to see the full list.')] : []),
+      h('span.policy-state.small', { dataset: { policy: draft.documentation.policy || 'none' } }, icon('doc', 'icon tiny'),
+        draft.documentation.policy === 'default'
+          ? (effective ? `Documentation: default — a run adds the plan talk, ${reports} report${reports === 1 ? '' : 's'} and the final report (shown on the canvas)` : `Documentation: default — preview unavailable: ${!compiled.ok ? compiled.message : ''}`)
+          : draft.documentation.policy === 'manual' ? 'Documentation: manual — a run adds no plan or reports' : `Documentation policy ${draft.documentation.policy ? `"${draft.documentation.policy}" is not supported` : 'is not declared'} — choose one with nothing selected`),
     )
     saveButton.disabled = readonly() || !dirty()
     saveStateEl.textContent = saveError ? 'Save failed' : problem ? 'Read-only' : dirty() ? 'Unsaved changes' : (saveState || 'Saved')
     saveStateEl.className = `save-state${saveError ? ' error' : dirty() ? ' dirty' : ''}`
     if (selection?.kind === 'node' && !draft.nodes[selection.id]) selection = null
     if (selection?.kind === 'edge' && !draft.edges[selection.index]) selection = null
-    canvas.render(draft, { repositories: resp?.repositories ?? [], workflows: resp?.workflows ?? [], errorNodes: new Set(errors.map(i => i.node).filter((n): n is string => !!n)), readonly: readonly() }, selection)
+    if (selection?.kind === 'step' && !effective?.nodes[selection.id]) selection = null
+    canvas.render(draft, { repositories: resp?.repositories ?? [], workflows: resp?.workflows ?? [], errorNodes: new Set(errors.map(i => i.node).filter((n): n is string => !!n)), readonly: readonly(), effective }, selection)
     if (rebuildInspector) renderInspector(inspector, {
-      draft, selection, repositories: resp?.repositories ?? [], workflows: resp?.workflows ?? [], issues, readonly: readonly(), file,
+      draft, selection, repositories: resp?.repositories ?? [], workflows: resp?.workflows ?? [], issues, readonly: readonly(), file, effective,
     }, { changed: rebuild => update(rebuild), select: sel => { selection = sel; update(true) }, deleteNode, deleteEdge, connect })
     renderBanners()
     const snapshot = draft
@@ -348,7 +358,7 @@ export function renderWorkflowView(root: HTMLElement, wsId: string, file: string
     if (t.closest('input, textarea, select')) return
     if ((e.key === 'Delete' || e.key === 'Backspace') && selection) {
       e.preventDefault()
-      if (selection.kind === 'node') deleteNode(selection.id); else deleteEdge(selection.index)
+      if (selection.kind === 'node') deleteNode(selection.id); else if (selection.kind === 'edge') deleteEdge(selection.index)
     }
     if ((e.metaKey || e.ctrlKey) && e.key === 's') { e.preventDefault(); void save() }
   }

@@ -89,7 +89,8 @@ async function waitFor(fn: () => Promise<boolean>, ms = 6000): Promise<number | 
   return null
 }
 const waitSeq = (n: number, ms = 6000) => waitFor(async () => (await seqShown(page)) >= n, ms)
-const cardText = (id: string) => page.locator(`.node[data-id="${id}"] .run-status`).innerText().catch(() => '')
+// The card's state label without its state glyph (p5: shown before the label).
+const cardText = (id: string) => page.locator(`.node[data-id="${id}"] .run-status`).innerText().then(t => t.replace(/^[○◇⊘✎⏸✓✕–]\s*/, ''), () => '')
 const stats = () => service.stats()
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms))
 const pct = (xs: number[], p: number) => { const s = [...xs].sort((a, b) => a - b); return Math.round(s[Math.min(s.length - 1, Math.floor(p * s.length))]) }

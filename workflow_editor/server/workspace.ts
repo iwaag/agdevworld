@@ -4,7 +4,7 @@ import { readdir, realpath, stat } from 'node:fs/promises'
 import { join } from 'node:path'
 import { approvalStates, type ApprovalState } from '../shared/canonical.ts'
 import {
-  ID_PATTERN, emptyWorkflow, normalizeRepoPath, PROJECT_SCHEMA,
+  DOC_POLICIES, ID_PATTERN, emptyWorkflow, normalizeRepoPath, PROJECT_SCHEMA,
   type ApprovalKind, type Project, type Workflow,
 } from '../shared/model.ts'
 import { delegateTargets, hasErrors, validateProject, validateWorkflow, type ValidationContext } from '../shared/validate.ts'
@@ -316,8 +316,9 @@ export class Workspace {
     }
   }
 
-  async createWorkflow(id: string, name: string): Promise<{ file: string }> {
+  async createWorkflow(id: string, name: string, policy: string = 'default'): Promise<{ file: string }> {
     if (!ID_PATTERN.test(id)) throw new RequestError(400, `workflow id must match ${ID_PATTERN.source}`)
+    if (!(DOC_POLICIES as readonly string[]).includes(policy)) throw new RequestError(400, `documentation policy must be ${DOC_POLICIES.join(' or ')}`)
     const dir = await this.workflowsDir()
     if (!dir.exists) throw new RequestError(409, `cannot create a workflow: ${dir.reason}`)
     const { list } = await this.workflowSummaries()
@@ -326,7 +327,9 @@ export class Workspace {
     const file = `${id}.yaml`
     const target = await inside(this.root, `${WORKFLOWS_DIR}/${file}`)
     try {
-      await createExclusive(target, newWorkflowText(emptyWorkflow(id, name)))
+      const w = emptyWorkflow(id, name)
+      w.documentation.policy = policy
+      await createExclusive(target, newWorkflowText(w))
     } catch (e) {
       if ((e as NodeJS.ErrnoException).code === 'EEXIST') throw new RequestError(409, `${file} already exists`)
       throw e

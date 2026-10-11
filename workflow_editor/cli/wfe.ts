@@ -238,10 +238,13 @@ same operation as the project view's "Add submodule": git submodule add.
 Local file transport is enabled for this command only. The submodule is
 staged in the project root, not committed.
 Exit 0 added; 1 failed (what Git left behind is reported; nothing is reset).`,
-  workflow: `wfe workflow new <id> [--name <name>] [--workspace <id>]
+  workflow: `wfe workflow new <id> [--name <name>] [--policy default|manual] [--workspace <id>]
 
 Creates devdocs/workflows/<id>.yaml with the editor's template (schema, id,
-name, empty intent, no nodes), as the project view's "New workflow" does.
+name, empty intent, no nodes, documentation policy --policy, default
+"default"), as the project view's "New workflow" does. Under the default
+policy a run plans, reports each node and reports the whole (docs/contract.md,
+"Documentation policy"); manual leaves documents to explicit instructions.
 Refuses an id already used by another workflow file. Writing the file by hand
 is equally valid; see docs/contract.md.`,
   request: `wfe request <workflow> --braindump <file|-> --author <person> [--receipt <id>] [--workspace <id>]
@@ -503,10 +506,10 @@ async function cmdAddRepo(p: Parsed): Promise<number> {
 
 async function cmdWorkflow(p: Parsed): Promise<number> {
   const [sub, id] = p.positional
-  if (sub !== 'new' || !id) throw new UsageError('usage: wfe workflow new <id> [--name <name>]')
+  if (sub !== 'new' || !id) throw new UsageError('usage: wfe workflow new <id> [--name <name>] [--policy default|manual]')
   const ws = await workspace(p)
   try {
-    const r = await ws.createWorkflow(id, opt(p, 'name') ?? '')
+    const r = await ws.createWorkflow(id, opt(p, 'name') ?? '', opt(p, 'policy') ?? 'default')
     const path = join(ws.root, 'devdocs', 'workflows', r.file)
     out(`Created ${path}. Fill in intent, repositories, nodes and edges (docs/contract.md).`, { ok: true, file: r.file, path })
     return 0

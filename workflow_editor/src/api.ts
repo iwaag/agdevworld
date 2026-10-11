@@ -58,7 +58,7 @@ export const api = {
   saveProject: (id: string, project: Project) => call<SaveResponse>('PUT', `${ws(id)}/project`, { project }),
   addSubmodule: (id: string, path: string, url: string) => call<AddSubmoduleResponse>('POST', `${ws(id)}/submodules`, { path, url }, [422]),
   addNewRepository: (id: string, path: string) => call<AddSubmoduleResponse>('POST', `${ws(id)}/submodules`, { path, create: true }, [422]),
-  createWorkflow: (id: string, wid: string, name: string) => call<{ file: string }>('POST', `${ws(id)}/workflows`, { id: wid, name }),
+  createWorkflow: (id: string, wid: string, name: string, policy = 'default') => call<{ file: string }>('POST', `${ws(id)}/workflows`, { id: wid, name, policy }),
   workflow: (id: string, file: string, refresh = false) => call<WorkflowResponse>('GET', `${wf(id, file)}${refresh ? '?refresh=1' : ''}`),
   saveWorkflow: (id: string, file: string, workflow: Workflow) => call<SaveResponse>('PUT', wf(id, file), { workflow }),
   approve: (id: string, file: string, kind: ApprovalKind, approver: string) =>

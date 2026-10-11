@@ -7,7 +7,9 @@
 import type { RunResponse } from '../shared/api.ts'
 import { holderOf, questionState, runKey, situation, type NodeRecord, type Question, type RunRecord } from '../shared/run.ts'
 import { api, ApiError, type RunExecView } from './api.ts'
-import { Canvas, TYPE_LABEL } from './canvas.ts'
+import { Canvas, STATE_GLYPH, TYPE_LABEL } from './canvas.ts'
+import { splitCounts, reportStep } from '../shared/compile.ts'
+import { stepFacts, stepLabel } from './inspector.ts'
 import { h, when } from './dom.ts'
 import { icon } from './icons.ts'
 import { live, serial } from './live.ts'
@@ -76,7 +78,7 @@ export function renderRunView(root: HTMLElement, wsId: string, workflow: string,
   const liveState = h('span.live-state')
   const banners = h('div.banners')
   const summary = h('div.run-summary')
-  const canvas = new Canvas({ select: sel => { selection = sel?.kind === 'node' ? sel.id : null; render() }, move: () => {}, connect: () => {} })
+  const canvas = new Canvas({ select: sel => { selection = sel?.kind === 'node' || sel?.kind === 'step' ? sel.id : null; render() }, move: () => {}, connect: () => {} })
   canvas.setMode('compact')
   const legend = h('div.run-legend')
   const side = h('aside.run-side', { 'aria-label': 'Run details' })
@@ -171,9 +173,9 @@ export function renderRunView(root: HTMLElement, wsId: string, workflow: string,
         fact('Executor', `${rec.executor.name} · backend ${rec.executor.backend ?? 'unknown'}`),
         fact('Created', when(rec.created)), fact('Started', rec.started ? when(rec.started) : '—'), fact('Ended', rec.ended ? when(rec.ended) : '—'),
         fact('Last recorded update', `${when(rec.updated)} (${ago(rec.updated)})`, 'last-update'),
-        fact('Nodes', Object.entries(ex.counts).filter(([, n]) => n).map(([k, n]) => `${n} ${k}`).join(' · '))),
+        ...countFacts(rec)),
       h('div.run-now',
-        line('Active', ex.active.length ? ex.active.map(n => nodeLink(n)) : ['—']),
+        line('Active', ex.active.length ? ex.active.map(n => rec.definition.effective?.nodes[n]?.step?.kind === 'report' ? h('span', 'Writing report on ', nodeLink(n, rec.definition.effective.nodes[n].step!.for ?? n)) : nodeLink(n)) : ['—']),
         line('Waiting', ex.waiting.length ? ex.waiting.map(w => h('span', nodeLink(w.node), ` → next move: ${holderOf(rec, w.node)}`)) : ['—']),
         line('Ready', ex.ready.length ? ex.ready.map(n => nodeLink(n)) : ['—']),
         ex.failed.length ? line('Failed', ex.failed.map(n => nodeLink(n)), 'error') : null,
@@ -191,7 +193,19 @@ export function renderRunView(root: HTMLElement, wsId: string, workflow: string,
   }
   const fact = (k: string, v: string, cls = '') => h(`div.fact${cls ? `.${cls}` : ''}`, h('span.k', k), h('span.v', v))
   const line = (k: string, items: (Node | string | null)[], cls = '') => h(`div.now-line${cls ? `.${cls}` : ''}`, h('span.k', k), h('span.v', ...items.filter((x): x is Node | string => x !== null).flatMap((x, i) => (i ? [', ', x] : [x]))))
-  const nodeLink = (id: string) => h('a.node-link', { href: '#', onclick: (e: Event) => { e.preventDefault(); selection = id; render(); canvas.reveal(id) } }, id)
+  const nodeLink = (id: string, text = id) => h('a.node-link', { href: '#', onclick: (e: Event) => { e.preventDefault(); selection = id; render(); canvas.reveal(id) } }, text)
+
+  // Authored work and documentation steps are counted apart (p5): "5 of 7"
+  // would hide that the work is finished and only reports remain.
+  function countFacts(rec: RunRecord): HTMLElement[] {
+    const order = ['running', 'waiting', 'completed', 'failed', 'cancelled', 'pending']
+    const count = (c: Record<string, number>) => order.filter(k => c[k]).map(k => `${c[k]} ${k}`).join(' · ') || '—'
+    const eff = rec.definition.effective
+    if (!eff) return [fact('Nodes', count(rec.execution.counts)), fact('Documentation', 'none (created before p5)')]
+    if (eff.policy !== 'default') return [fact('Nodes', count(rec.execution.counts)), fact('Documentation', 'manual — no generated plan or reports')]
+    const split = splitCounts(eff, rec.nodes)
+    return [fact('Work', count(split.work)), fact('Documentation steps', count(split.docs), 'doc-counts'), fact('Policy', 'default (frozen at creation)')]
+  }
 
   function renderBanners() {
     banners.replaceChildren()
@@ -208,8 +222,9 @@ export function renderRunView(root: HTMLElement, wsId: string, workflow: string,
 
   function renderLegend() {
     legend.replaceChildren(h('span.muted.small', 'Node states:'),
-      ...['pending', 'ready', 'running', 'waiting', 'completed', 'failed', 'cancelled', 'blocked'].map(s => chip(s)),
-      h('span.muted.small', ' · the graph is this run’s fixed copy; click a node for details'))
+      ...['pending', 'ready', 'running', 'waiting', 'completed', 'failed', 'cancelled', 'blocked'].map(s => chip(s, `${STATE_GLYPH[s]} ${STATE_LABEL[s]}`)),
+      h('span.muted.small', ' · the graph is this run’s fixed copy; click a node for details'),
+      ...(shown?.record?.definition.effective?.policy === 'default' ? [h('span.muted.small.legend-doc', ' · the small icon on a card is its report; “Writing report” marks the one being written')] : []))
   }
 
   // ---- side panel -------------------------------------------------------------
@@ -220,12 +235,28 @@ export function renderRunView(root: HTMLElement, wsId: string, workflow: string,
 
   function nodeDetail(rec: RunRecord, id: string): HTMLElement {
     const n: NodeRecord = rec.nodes[id]
-    const def = shown?.bundle[rec.definition.root]?.workflow?.nodes[id]
+    const wf = shown?.bundle[rec.definition.root]?.workflow
+    const def = wf?.nodes[id]
+    const eff = rec.definition.effective
+    const step = eff?.nodes[id]?.step
     const { state, label } = nodeLabel(rec, id)
-    const box = h('div.node-detail')
-    box.append(h('div.insp-head', icon(def?.type ?? 'unknown', 'icon'), h('h3', def?.name || id), h('code', id), h('button.icon-btn', { title: 'Close', onclick: () => { selection = null; render() } }, '×')))
-    box.append(h('div.chips', chip(state, label), h('span.chip', TYPE_LABEL[def?.type ?? ''] ?? def?.type ?? '?')))
+    const box = h('div.node-detail', { dataset: { node: id } })
+    const label2 = (x: string) => (wf && eff ? stepLabel(wf, eff, x) : x)
+    box.append(h('div.insp-head', icon(step ? 'doc' : def?.type ?? 'unknown', 'icon'), h('h3', step ? label2(id) : def?.name || id), h('code', id), h('button.icon-btn', { title: 'Close', onclick: () => { selection = null; render() } }, '×')))
+    box.append(h('div.chips', chip(state, `${STATE_GLYPH[state] ?? ''} ${label}`), h('span.chip', step ? 'Documentation step' : TYPE_LABEL[def?.type ?? ''] ?? def?.type ?? '?')))
     if (def?.description) box.append(h('p.small', def.description))
+    if (step && eff) {
+      // The document: missing, written but unrecorded, or checked.
+      const file = shown?.files.find(f => f.name === step.output)
+      const path = `${shown!.dir}/${step.output}`
+      const docState = n.document ? `checked when recorded: ${n.document.bytes} bytes, sha256 ${n.document.sha256.slice(0, 12)}…${file ? '' : ' — the file is gone now'}` : file ? (state === 'running' ? 'being written — not yet recorded' : 'written, not recorded as complete') : 'not written yet'
+      box.append(h(`div.doc-state${n.document ? '.ok' : file ? '.unfinished' : '.missing'}`, h('strong', step.output), ': ', docState, ' ', file ? fileButton(path, 'Open') : null))
+      if (n.agreement) box.append(h('p.small.ok-text', `Agreed: the answer to ${n.agreement.question} was taken up for this plan.md.`))
+      box.append(...stepFacts(eff, id, label2))
+    } else if (eff?.nodes[reportStep(id)]) {
+      const r = reportStep(id)
+      box.append(h('p.small', 'Its report: ', nodeLink(r, `report-${id}.md`), ` — ${nodeLabel(rec, r).label}. Successors wait for the report, not only for this work.`))
+    }
     const rows: [string, string][] = [['Started', n.started ? when(n.started) : '—'], ['Ended', n.ended ? when(n.ended) : '—'], ['Last update', n.updated ? `${when(n.updated)} (${ago(n.updated)})` : '—']]
     box.append(h('dl.kv', ...rows.flatMap(([k, v]) => [h('dt', k), h('dd', v)])))
     if (n.wait) {
@@ -429,10 +460,12 @@ export function renderRunView(root: HTMLElement, wsId: string, workflow: string,
       const sel = selection && rec.nodes[selection] ? { kind: 'node' as const, id: selection } : null
       // Bindings resolve against the repositories recorded at creation.
       const repositories = rec.context.repositories.map(c => ({ path: c.path, name: c.path, kind: c.path === '.' ? 'root' as const : 'submodule' as const, category: 'other' as const, initialized: true, dirty: c.dirty ?? 0 }))
+      const eff = rec.definition.effective
+      const sel2 = selection && eff?.nodes[selection]?.step ? { kind: 'step' as const, id: selection } : sel
       canvas.render(wf, {
-        repositories, readonly: true, errorNodes: new Set(), run: status,
+        repositories, readonly: true, errorNodes: new Set(), run: status, effective: eff?.policy === 'default' ? eff : null,
         workflows: Object.entries(r!.bundle).filter(([, b]) => b.workflow).map(([id, b]) => ({ file: b.file, id, name: b.workflow!.name, errors: 0, warnings: 0, delegates: [] })),
-      }, sel)
+      }, sel2)
     }
     renderLegend()
     renderSide()

@@ -330,7 +330,7 @@ export function createHandler(config: ServiceConfig) {
         if (method === 'POST') {
           const input = await body(req) as Record<string, unknown>
           if (typeof input.id !== 'string') throw new RequestError(400, 'id is required')
-          return send(res, 201, await ws.createWorkflow(input.id, typeof input.name === 'string' ? input.name : ''))
+          return send(res, 201, await ws.createWorkflow(input.id, typeof input.name === 'string' ? input.name : '', typeof input.policy === 'string' ? input.policy : 'default'))
         }
       }
       if (b === 'workflows' && file && !action) {

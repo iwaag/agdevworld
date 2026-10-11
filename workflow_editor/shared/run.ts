@@ -741,13 +741,15 @@ export function notableEvents(r: RunRecord, sinceSeq = 0): NotableEvent[] {
     } else if (e.op === 'question.answer') push('answered', false, `answer to ${d.question} recorded`, { question: d.question, holder: r.executor.name })
     else if (e.op === 'node.complete' && step?.kind === 'report') push('reported', false, d.outcome, { node: step.for ?? undefined, step: d.node, document: (e as unknown as { document?: DocumentEvidence }).document?.path })
     else if (e.op === 'node.complete' && step?.kind === 'final-report') push('completed', true, d.outcome, { step: d.node, document: (e as unknown as { document?: DocumentEvidence }).document?.path })
-    else if (e.op === 'node.complete' && !step && !reporting) push('node-completed', false, d.outcome, { node: d.node })
+    // The node whose completion completes the execution is told once, as
+    // the completion.
+    else if (e.op === 'node.complete' && !step && !reporting && e.change.execution?.[1] !== 'completed') push('node-completed', false, d.outcome, { node: d.node })
     else if (e.op === 'node.fail') push('failed', true, d.reason, { node: step ? step.for ?? undefined : d.node, step: step ? d.node : undefined })
     // The hold's reason is derived by the reducer (an exit with work left
     // running is an interruption); the latest hold carries it in the state.
     if (e.change.hold?.[1]) push('held', true, holdReason(r, e.seq) || d.detail || d.reason || e.change.hold[1], { hold: e.change.hold[1] })
     if (e.op === 'run.resume') push('resumed', false, d.reason)
-    if (e.change.execution?.[1] === 'completed' && !(step?.kind === 'final-report')) push('completed', true, d.outcome ?? 'every node completed')
+    if (e.change.execution?.[1] === 'completed' && !(step?.kind === 'final-report')) push('completed', true, d.outcome ?? 'every node completed', e.op === 'node.complete' && !step ? { node: d.node } : {})
     if (e.op === 'run.decide') push('decided', true, d.evidence, { decision: d.decision as 'accepted' | 'rejected' })
     if (e.op === 'run.cancel') push('cancelled', true, d.reason)
   }

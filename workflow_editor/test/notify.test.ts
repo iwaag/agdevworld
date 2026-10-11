@@ -266,7 +266,8 @@ test('manual policy: authored completions and the completed execution are announ
   const rec = by(a.ws, ref)
   for (const id of ['study', 'build']) { await rec({ op: 'node.start', node: id }); await rec({ op: 'node.complete', node: id, outcome: `${id} done` }) }
   const r = (await rec({ op: 'run.decide', decision: 'accepted', evidence: 'demo checked' }, 'P'))
-  assert.deepEqual(notableEvents(r).map(e => e.type), ['node-completed', 'node-completed', 'completed', 'decided'])
+  assert.deepEqual(notableEvents(r).map(e => e.type), ['node-completed', 'completed', 'decided'], 'the last node is told once, as the completion')
+  assert.equal(notableEvents(r).find(e => e.type === 'completed')!.text, 'build done')
 })
 
 test('a hold carries the reducer\'s reason; resumption and cancellation are announced', async () => {

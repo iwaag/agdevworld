@@ -203,7 +203,9 @@ export class NotifyStore {
       if (Number(r.changes)) added.push(id)
     }
     if (rec.seq > row.scan_seq) {
-      for (const e of notableEvents(rec, row.scan_seq)) insert(e.id, e.seq, e.type, e.critical, e)
+      // Events of one entry keep the order the selection gives them.
+      let prev = -1, k = 0
+      for (const e of notableEvents(rec, row.scan_seq)) { k = e.seq === prev ? k + 1 : 0; prev = e.seq; insert(e.id, e.seq + k * 0.01, e.type, e.critical, e) }
       this.run('UPDATE runs SET scan_seq = ?, updated = ? WHERE key = ?', rec.seq, now(), key)
     }
     // Publication: failures and their recovery, and details that became

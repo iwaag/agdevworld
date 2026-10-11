@@ -3,7 +3,8 @@
 //
 //   node scripts/seed.ts [--root <dir>] [--reset]
 //
-// The default root is .local/fixture in this package (ignored by Git). The
+// The default root is agdevworld/.local/wfe-fixture (ignored by Git; outside
+// the package, whose own directory the editor never registers). The
 // generated repositories, workspaces and registry stay there. Commits use a
 // fixed identity and dates so that a reseed produces the same hashes.
 import { cp, mkdir, readdir, rm, stat, writeFile } from 'node:fs/promises'
@@ -19,7 +20,7 @@ const MARKER = '.workflow-editor-fixture'
 const args = process.argv.slice(2)
 const flag = (name: string) => args.includes(name)
 const option = (name: string) => { const i = args.indexOf(name); return i >= 0 ? args[i + 1] : undefined }
-export const DEFAULT_ROOT = resolve(pkg, '.local', 'fixture')
+export const DEFAULT_ROOT = resolve(pkg, '..', '.local', 'wfe-fixture')
 
 const FIXED_DATE = '2026-10-01T09:00:00+09:00'
 const env = {

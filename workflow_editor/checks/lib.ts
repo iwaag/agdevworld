@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url'
 
 const here = dirname(fileURLToPath(import.meta.url))
 // WFE_FIXTURE and WFE_URL point the checks at a private seed and service.
-export const FIXTURE = resolve(process.env.WFE_FIXTURE ?? join(here, '..', '.local', 'fixture'))
+export const FIXTURE = resolve(process.env.WFE_FIXTURE ?? join(here, '..', '..', '.local', 'wfe-fixture'))
 export const SHOTS = join(FIXTURE, 'screenshots')
 export const BASE = process.env.WFE_URL ?? 'http://127.0.0.1:5175'
 export const wsDir = (id: string) => join(FIXTURE, 'workspaces', id)

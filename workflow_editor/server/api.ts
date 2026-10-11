@@ -15,6 +15,7 @@ import { listRuns, readRunFile, runOp, runResponse } from './runs.ts'
 import { OPS, type OpInput, type RunRef } from '../shared/run.ts'
 import type { Watcher } from './watch.ts'
 import { codeVersion } from './version.ts'
+import { assertNotRetired, assertWorkspaceAllowed, loadBoundary, retiredByUrl } from './boundary.ts'
 import { RequestError, Workspace } from './workspace.ts'
 
 export interface ServiceConfig {
@@ -107,6 +108,7 @@ export function createHandler(config: ServiceConfig) {
   async function workspace(id: string): Promise<Workspace> {
     const reg = (await registry()).workspaces.find(w => w.id === id)
     if (!reg) throw new RequestError(404, `workspace "${id}" is not registered`)
+    await assertWorkspaceAllowed(await loadBoundary(config.registryFile, area), reg, 'Opening')
     const obs = await observe(reg)
     if (!obs.available) throw new RequestError(409, `workspace "${id}" is registered but not available: ${obs.reason}`)
     return new Workspace(reg)
@@ -224,7 +226,7 @@ export function createHandler(config: ServiceConfig) {
         if (typeof input.path !== 'string' || !input.path.trim()) throw new RequestError(400, 'path is required')
         const id = typeof input.id === 'string' && input.id.trim() ? input.id.trim() : undefined
         const path = input.path.trim()
-        const result = await registerWorkspace(config.registryFile, isAbsolute(path) ? path : join(area, path), { id })
+        const result = await registerWorkspace(config.registryFile, isAbsolute(path) ? path : join(area, path), { id, area })
         return send(res, result.ok ? 200 : 422, result)
       }
       // Creation writes only beneath the authoring area (the CLI takes any destination).
@@ -319,6 +321,7 @@ export function createHandler(config: ServiceConfig) {
           return send(res, result.ok ? 200 : 422, result)
         }
         if (typeof input.url !== 'string') throw new RequestError(400, 'url is required (or create: true for a new local repository)')
+        assertNotRetired(retiredByUrl(await loadBoundary(config.registryFile, area), input.url), `Adding ${input.url} as a submodule`)
         const result = await ws.addSubmodule(input.path, input.url)
         return send(res, result.ok ? 200 : 422, result)
       }

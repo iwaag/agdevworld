@@ -7,6 +7,7 @@ import { readFile, stat } from 'node:fs/promises'
 import { join } from 'node:path'
 import type { AgdevResult, AgdevStep, DashboardProject, DashboardRepository, DashboardResponse, DashboardWorkspace, Observation, RepositoryUse } from '../shared/api.ts'
 import { ID_PATTERN, normalizeRepoPath, PROJECT_SCHEMA } from '../shared/model.ts'
+import { assertNotProtected, assertNotRetired, assertWorkspaceAllowed, loadBoundary, retiredById, type Boundary } from './boundary.ts'
 import { inside } from './files.ts'
 import { git, gitOk } from './git.ts'
 import { Gitea, GiteaError, relativeRepoUrl, repoOfUrl, type GiteaRepo } from './gitea.ts'
@@ -141,6 +142,8 @@ export async function obtainWorkspace(ctx: AgdevContext, projectId: string, env:
   const project = reg.projects.find(p => p.id === projectId)
   if (!project) throw new RequestError(404, `project "${projectId}" is not registered`)
   const entry = reg.repositories.find(r => r.key === project.root)!
+  const boundary = await loadBoundary(ctx.registryFile, ctx.area)
+  assertNotRetired(retiredById(boundary, entry.gitea.id), `Obtaining a workspace of "${projectId}"`)
   const repo = await wrapGitea(() => g.repoById(entry.gitea.id))
   if (!repo) throw new RequestError(409, `the root repository of ${projectId} (Gitea id ${entry.gitea.id}, registered as ${entry.gitea.owner}/${entry.gitea.name}) no longer exists on Gitea`)
   let n = 1, dir = '', id = ''
@@ -149,10 +152,11 @@ export async function obtainWorkspace(ctx: AgdevContext, projectId: string, env:
     dir = join(ctx.area, n === 1 ? `pj-${projectId}` : `pj-${projectId}-${n}`)
     if (!(await exists(dir)) && !reg.workspaces.some(w => w.id === id)) break
   }
+  await assertNotProtected(boundary, dir, `Obtaining a workspace of "${projectId}"`)
   const gEnv = { ...env, ...(await g.gitEnv()) }
   const r = await git(ctx.area, ['clone', '--recurse-submodules', '--', g.cloneUrl(repo.owner, repo.name), dir], { env: gEnv, timeoutMs: 300_000 })
   if (r.code !== 0) throw new RequestError(502, `cloning ${repo.fullName} failed: ${r.stderr.trim()}${await exists(dir) ? ` (the partial clone is left at ${dir})` : ''}`)
-  const registered = await registerWorkspace(ctx.registryFile, dir, { id })
+  const registered = await registerWorkspace(ctx.registryFile, dir, { id, area: ctx.area })
   if (!registered.ok) throw new RequestError(409, `cloned into ${dir}, but registration was refused: ${registered.message}`)
   return { ok: true, message: `Cloned ${repo.fullName} into ${dir} and registered it as workspace "${id}".`, workspace: id, path: dir, diagnostics: registered.diagnostics }
 }
@@ -167,6 +171,7 @@ export async function addSharedRepository(ctx: AgdevContext, ws: Workspace, key:
   const entry = reg.repositories.find(r => r.key === key)
   if (!entry) throw new RequestError(404, `${key} is not a registered repository`)
   if (entry.category === 'root') throw new RequestError(400, 'a project root cannot be added as a submodule')
+  assertNotRetired(retiredById(await loadBoundary(ctx.registryFile, ctx.area), entry.gitea.id), `Adding ${entry.gitea.owner}/${entry.gitea.name} to ${ws.reg.id}`)
   const path = normalizeRepoPath(rawPath)
   if (!path || path === '.') throw new RequestError(400, `"${rawPath}" is not a project-relative path`)
   const repo = await wrapGitea(() => g.repoById(entry.gitea.id))
@@ -181,7 +186,10 @@ export async function addSharedRepository(ctx: AgdevContext, ws: Workspace, key:
 
 // ---- the dashboard --------------------------------------------------------------------
 
-async function workspaceView(w: Registration): Promise<DashboardWorkspace> {
+async function workspaceView(w: Registration, boundary: Boundary): Promise<DashboardWorkspace> {
+  try { await assertWorkspaceAllowed(boundary, w, 'Listing') } catch (e) {
+    return { id: w.id, label: w.label, host: w.host, available: false, reason: `refused: ${(e as Error).message}` }
+  }
   const o = await observe(w)
   const view: DashboardWorkspace = { id: w.id, label: w.label, host: w.host, available: o.available, reason: o.reason }
   if (!o.available) return view
@@ -201,6 +209,8 @@ async function workspaceView(w: Registration): Promise<DashboardWorkspace> {
 export async function dashboard(ctx: AgdevContext): Promise<DashboardResponse> {
   const at = new Date().toISOString()
   const reg: Registry = await loadRegistry(ctx.registryFile) // a broken registry is an error, never an empty list
+  const boundary = await loadBoundary(ctx.registryFile, ctx.area)
+  const wsView = (w: Registration) => workspaceView(w, boundary)
   const g = ctx.gitea
   const out: DashboardResponse = {
     at, registry: { path: ctx.registryFile, exists: reg.exists },
@@ -229,7 +239,7 @@ export async function dashboard(ctx: AgdevContext): Promise<DashboardResponse> {
       id: p.id,
       root: { key: p.root, ...(rootObs && !(rootObs instanceof Error) ? { fullName: rootObs.fullName, htmlUrl: rootObs.htmlUrl } : { fullName: `${rootEntry.gitea.owner}/${rootEntry.gitea.name}`, error: rootObs instanceof Error ? rootObs.message : rootObs === null ? 'missing on Gitea' : out.gitea.state !== 'ok' ? 'Gitea not read' : undefined }) },
       definition: { source: '', at },
-      workspaces: await Promise.all(reg.workspaces.filter(w => w.project === p.id).map(workspaceView)),
+      workspaces: await Promise.all(reg.workspaces.filter(w => w.project === p.id).map(wsView)),
     }
     // Definition and submodules: from an available workspace, else from Gitea.
     let modules: string | null = null
@@ -274,6 +284,6 @@ export async function dashboard(ctx: AgdevContext): Promise<DashboardResponse> {
           : { state: 'unknown', error: out.gitea.error ?? out.gitea.state, at }
     out.repositories.push({ key: r.key, category: r.category, description: r.description || gitea.description || '', registered: { owner: r.gitea.owner, name: r.gitea.name }, gitea, usedBy: uses.get(r.key) ?? [], usageUnknown: unknown.get(r.key) ?? [] })
   }
-  out.unlinkedWorkspaces = await Promise.all(reg.workspaces.filter(w => !w.project || !reg.projects.some(p => p.id === w.project)).map(workspaceView))
+  out.unlinkedWorkspaces = await Promise.all(reg.workspaces.filter(w => !w.project || !reg.projects.some(p => p.id === w.project)).map(wsView))
   return out
 }

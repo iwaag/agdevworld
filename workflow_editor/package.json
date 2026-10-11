@@ -7,10 +7,10 @@
   "bin": { "wfe": "cli/wfe.ts" },
   "scripts": {
     "seed": "node scripts/seed.ts",
-    "service": "node server/main.ts --registry .local/fixture/registry.json",
+    "service": "node server/main.ts --registry ../.local/wfe-fixture/registry.json",
     "dev": "vite",
     "build": "tsc && vite build",
-    "start": "npm run build && node server/main.ts --serve-dist --registry .local/fixture/registry.json",
+    "start": "npm run build && node server/main.ts --serve-dist --registry ../.local/wfe-fixture/registry.json",
     "test": "node --test 'test/**/*.test.ts'",
     "check": "tsc && node --test 'test/**/*.test.ts' && vite build",
     "wfe": "node cli/wfe.ts"

@@ -5,14 +5,14 @@
 //
 //   npm run build && node checks/agdev.ts [--port 8197] [--keep]
 //
-// Screenshots go to workflow_editor/.local/p4/screenshots/ (ignored).
+// Screenshots go to agdevworld/.local/wfe-checks/screenshots/ (ignored).
 import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const here = dirname(fileURLToPath(import.meta.url))
-process.env.WFE_FIXTURE = resolve(here, '..', '.local', 'p4')
+process.env.WFE_FIXTURE = resolve(here, '..', '..', '.local', 'wfe-checks')
 const args = process.argv.slice(2)
 const PORT = Number(args.includes('--port') ? args[args.indexOf('--port') + 1] : 8197)
 

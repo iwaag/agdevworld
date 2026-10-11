@@ -15,12 +15,13 @@ import { Gitea, GiteaError, loadGiteaSetting } from '../server/gitea.ts'
 import { REPO_CATEGORIES, type RepoCategory } from '../server/registry.ts'
 import { existsSync, readFileSync } from 'node:fs'
 import { ExecStore } from '../server/exec.ts'
-import { loadRegistry, observe, registerWorkspace, RegistryError, workspaceAt, type Registration } from '../server/registry.ts'
+import { loadRegistry, observe, registerWorkspace, RegistryError, unregisterProject, workspaceAt, type Registration } from '../server/registry.ts'
 import { RequestError, Workspace } from '../server/workspace.ts'
 import { listRuns } from '../server/runs.ts'
 import { setupArea } from './setup.ts'
 import { runCommand, runIndex } from './run.ts'
 import { codeVersion } from '../server/version.ts'
+import { assertNotRetired, assertWorkspaceAllowed, loadBoundary, retiredByUrl } from '../server/boundary.ts'
 
 const here = dirname(fileURLToPath(import.meta.url))
 // The editor package (agdevworld/workflow_editor, or an installed release of it).
@@ -98,6 +99,7 @@ async function workspace(p: Parsed): Promise<Workspace> {
     w = await workspaceAt(reg, process.cwd())
     if (!w) throw new Refused(`the current directory is not inside a registered workspace; pass --workspace <id> (see: wfe list), or register it (wfe register)`)
   }
+  await assertWorkspaceAllowed(await loadBoundary(registryFile(p), areaDir(p)), w, 'Opening')
   const o = await observe(w)
   if (!o.available) throw new Refused(`workspace "${w.id}" is registered but not available: ${o.reason}`)
   return new Workspace(w)
@@ -265,6 +267,7 @@ status [<run>]                    the executor, or one run's attempts, jobs and
 State is <area>/.local/exec/exec.sqlite (this host only).`,
   project: `wfe project register <owner>/<name>
 wfe project obtain <project id>
+wfe project unregister <project id>
 
 register  records a project root that exists on Gitea (its project.yaml must be
           ag.project.v2), its devdocs repository in submodule mode, and the
@@ -272,6 +275,9 @@ register  records a project root that exists on Gitea (its project.yaml must be
 obtain    clones a registered project with its submodules from Gitea into the
           area (pj-<id>, or pj-<id>-2 … when taken) and registers that
           workspace. An existing folder is never reused or overwritten.
+unregister removes the project, its workspaces and its root repository entry
+          from the registry, and nothing else: folders and Gitea stay. Refused
+          while a workspace of it has a queued job or an open attempt.
 Needs the Gitea setting (gitea.json beside the registry, --gitea or WFE_GITEA).`,
   repo: `wfe repo register <owner>/<name> --category study|wedo|other|devdocs
 wfe repo create <name> --category study|wedo|other [--description <text>]
@@ -379,7 +385,7 @@ async function cmdCreate(p: Parsed): Promise<number> {
 }
 
 async function cmdRegister(p: Parsed): Promise<number> {
-  const r = await registerWorkspace(registryFile(p), resolve(p.positional[0] ?? '.'), { id: opt(p, 'id'), label: opt(p, 'label') })
+  const r = await registerWorkspace(registryFile(p), resolve(p.positional[0] ?? '.'), { id: opt(p, 'id'), label: opt(p, 'label'), area: areaDir(p) })
   out([r.message, ...(r.diagnostics.length ? ['Structure:', ...r.diagnostics.map(diag)] : [])].join('\n'), r)
   return r.ok ? 0 : 1
 }
@@ -479,6 +485,7 @@ async function cmdAddRepo(p: Parsed): Promise<number> {
   if (!path || (!location && !fresh) || (location && fresh)) throw new UsageError('add-repo needs <path> and either <location> or --new')
   const ws = await workspace(p)
   try {
+    if (location) assertNotRetired(retiredByUrl(await loadBoundary(registryFile(p), areaDir(p)), location), `Adding ${location} as a submodule`)
     const r = fresh ? await addNewRepository(ws, path, join(areaDir(p), 'sources')) : await ws.addSubmodule(path, location)
     const lines = [r.message, ...(r.stderr ? [r.stderr] : [])]
     if (r.partial) lines.push(`Left behind — .gitmodules entry: ${r.partial.gitmodulesEntry}; path exists: ${r.partial.pathExists}; staged: ${r.partial.staged}; module git dir: ${r.partial.gitDirExists}`)
@@ -617,7 +624,20 @@ async function cmdProject(p: Parsed): Promise<number> {
   const ctx = await agdevCtx(p)
   if (sub === 'register') return agdevRun(() => { const o = ownerName(arg, '<repository>'); return registerGiteaProject(ctx, o.owner, o.name) })
   if (sub === 'obtain') { if (!arg) throw new UsageError('obtain needs a project id'); return agdevRun(() => obtainWorkspace(ctx, arg)) }
-  throw new UsageError('wfe project register <owner>/<name> | obtain <project id>')
+  if (sub === 'unregister') {
+    if (!arg) throw new UsageError('unregister needs a project id')
+    const reg = await loadRegistry(registryFile(p))
+    const ids = reg.workspaces.filter(w => w.project === arg).map(w => w.id)
+    const x = await openExec(p)
+    try {
+      const pending = x.pendingFor(ids)
+      if (pending.jobs.length || pending.attempts.length) throw new Refused(`project "${arg}" has unfinished execution here (${pending.attempts.map(a => `attempt ${a.id} ${a.state}`).concat(pending.jobs.map(j => `job ${j.id} ${j.state}`)).join(', ')}); stop or cancel it first (wfe run stop/cancel), then unregister`, pending)
+    } finally { x.close(); execStore = undefined }
+    const r = await unregisterProject(registryFile(p), arg)
+    out([`Unregistered project ${r.project.id}.`, ...r.workspaces.map(w => `  workspace ${w.id} (${w.path}; the folder is kept)`), ...r.repositories.map(e => `  repository ${e.key} ${e.gitea.owner}/${e.gitea.name} (on Gitea it is kept)`)].join('\n'), { ok: true, ...r })
+    return 0
+  }
+  throw new UsageError('wfe project register <owner>/<name> | obtain <project id> | unregister <project id>')
 }
 
 async function cmdRepo(p: Parsed): Promise<number> {
@@ -691,6 +711,7 @@ export async function main(argv: string[]): Promise<number> {
     return await COMMANDS[cmd](p)
   } catch (e) {
     if (e instanceof UsageError) { console.error(`wfe ${cmd}: ${e.message}\n\n${cmd === 'run' ? 'See: wfe run help <subcommand>' : HELP[cmd]}`); return 2 }
+    if (e instanceof RequestError && !(e instanceof Refused)) e = new Refused(e.message, e.detail)
     if (e instanceof Refused || e instanceof RegistryError) {
       const detail = (e as Refused).detail
       if (json) console.log(JSON.stringify({ ok: false, error: e.message, detail }, null, 2))

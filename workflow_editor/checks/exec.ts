@@ -12,7 +12,7 @@ import { fileURLToPath } from 'node:url'
 import { performance } from 'node:perf_hooks'
 
 const here = dirname(fileURLToPath(import.meta.url))
-process.env.WFE_FIXTURE = resolve(here, '..', '.local', 'p4')
+process.env.WFE_FIXTURE = resolve(here, '..', '..', '.local', 'wfe-checks')
 const args = process.argv.slice(2)
 const PORT = Number(args.includes('--port') ? args[args.indexOf('--port') + 1] : 8198)
 const root = await mkdtemp(join(tmpdir(), 'wfe-exec-check-'))

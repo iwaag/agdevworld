@@ -18,6 +18,7 @@ import { hostname } from 'node:os'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { holderOf, runKey, situation, type RunRecord, type RunRef } from '../shared/run.ts'
+import { assertWorkspaceAllowed, loadBoundary } from './boundary.ts'
 import type { Gitea } from './gitea.ts'
 import { baseline, publish, type Baseline, type RepoStep } from './publish.ts'
 import { loadRegistry, observe, type Registration } from './registry.ts'
@@ -68,6 +69,7 @@ export class ExecStore {
   async workspace(id: string): Promise<Workspace> {
     const reg = (await loadRegistry(this.ctx.registryFile)).workspaces.find(w => w.id === id)
     if (!reg) throw new RequestError(404, `workspace "${id}" is not registered`)
+    await assertWorkspaceAllowed(await loadBoundary(this.ctx.registryFile, this.ctx.area), reg, 'Execution')
     const o = await observe(reg)
     if (!o.available) throw new RequestError(409, `workspace "${id}" is not available: ${o.reason}`)
     return new Workspace(reg)
@@ -166,6 +168,14 @@ export class ExecStore {
       this.run('UPDATE attempts SET baseline = ?, log = ? WHERE id = ?', JSON.stringify(base), join(this.logsDir, `${id}.jsonl`), id)
       return { job: this.one<JobRow>('SELECT * FROM jobs WHERE id = ?', job.id)!, attempt: this.attemptRow(id)!, workspace: ws.reg, ref, brief: await this.brief(ws, ref, job) }
     }
+  }
+
+  // Work of these workspaces that is not finished here: queued or claimed
+  // jobs and attempts that have not ended. A catalog removal waits for none.
+  pendingFor(workspaces: string[]): { jobs: JobRow[]; attempts: AttemptRow[] } {
+    const jobs = this.all<JobRow>('SELECT * FROM jobs WHERE state IN (\'queued\', \'claimed\')').filter(j => workspaces.includes(j.workspace))
+    const attempts = this.all<AttemptRow>('SELECT * FROM attempts WHERE state != \'ended\'').filter(a => workspaces.includes(a.workspace))
+    return { jobs, attempts }
   }
 
   attemptRow(id: string): AttemptRow | undefined { return this.one<AttemptRow>('SELECT * FROM attempts WHERE id = ?', id) }

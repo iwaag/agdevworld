@@ -16,6 +16,7 @@ import { mkdir, readFile, realpath, stat } from 'node:fs/promises'
 import { basename, dirname, join, resolve } from 'node:path'
 import type { Diagnostic } from '../shared/api.ts'
 import { ID_PATTERN } from '../shared/model.ts'
+import { assertNotProtected, assertNotRetired, loadBoundary, retiredById, retiredByName, retiredByUrl } from './boundary.ts'
 import { atomicWrite, readTextOrNull } from './files.ts'
 import { git } from './git.ts'
 import { withLock } from './lock.ts'
@@ -107,6 +108,8 @@ export async function updateRegistry<T>(file: string, change: (raw: Record<strin
 // Records a Gitea repository by its id. Registering the same id again keeps
 // the entry (and reports it); a different category is refused, not changed.
 export async function registerRepository(file: string, repo: { id: number; owner: string; name: string; description?: string }, category: RepoCategory, now = new Date()): Promise<{ status: 'registered' | 'already-registered'; entry: RepoEntry }> {
+  const boundary = await loadBoundary(file)
+  assertNotRetired(retiredById(boundary, repo.id) ?? retiredByName(boundary, repo.owner, repo.name), `Registering ${repo.owner}/${repo.name}`)
   return updateRegistry(file, (raw, current) => {
     const key = repoKey(repo.id)
     const found = current.repositories.find(r => r.key === key)
@@ -122,6 +125,9 @@ export async function registerRepository(file: string, repo: { id: number; owner
 }
 
 export async function registerProject(file: string, id: string, root: string, now = new Date()): Promise<{ status: 'registered' | 'already-registered'; entry: ProjectEntry }> {
+  const boundary = await loadBoundary(file)
+  const rootId = /^gitea:(\d+)$/.exec(root)
+  if (rootId) assertNotRetired(retiredById(boundary, Number(rootId[1])), `Registering project "${id}"`)
   return updateRegistry(file, (raw, current) => {
     const found = current.projects.find(p => p.id === id)
     if (found) {
@@ -132,6 +138,25 @@ export async function registerProject(file: string, id: string, root: string, no
     const entry: ProjectEntry = { id, root, registered: now.toISOString() }
     raw.projects = [...((raw.projects as unknown[] | undefined) ?? []), entry]
     return { status: 'registered' as const, entry }
+  })
+}
+
+// Removes a project from the catalog: the project, every workspace
+// registered for it, and its root repository entry when no other project
+// uses it as root. Only the registry changes: workspace folders, Gitea
+// repositories and their history stay as they are. Shared repositories are
+// independent of any one project and stay registered.
+export async function unregisterProject(file: string, id: string): Promise<{ project: ProjectEntry; workspaces: Registration[]; repositories: RepoEntry[] }> {
+  return updateRegistry(file, (raw, current) => {
+    const project = current.projects.find(p => p.id === id)
+    if (!project) throw new RegistryError(`project "${id}" is not registered`)
+    const workspaces = current.workspaces.filter(w => w.project === id)
+    const keepRoot = current.projects.some(p => p.id !== id && p.root === project.root)
+    const repositories = keepRoot ? [] : current.repositories.filter(r => r.key === project.root)
+    raw.projects = ((raw.projects as Record<string, unknown>[] | undefined) ?? []).filter(p => p.id !== id)
+    raw.workspaces = ((raw.workspaces as Record<string, unknown>[] | undefined) ?? []).filter(w => w.project !== id)
+    if (!keepRoot) raw.repositories = ((raw.repositories as Record<string, unknown>[] | undefined) ?? []).filter(r => repoKey((r.gitea as { id: number }).id) !== project.root)
+    return { project, workspaces, repositories }
   })
 }
 
@@ -175,7 +200,7 @@ async function same(a: string, b: string) {
 
 // Records the Git root that contains `dir`. Repeating it for the same root
 // changes nothing; other entries and fields of the registry are kept.
-export async function registerWorkspace(file: string, dir: string, opts: { id?: string; label?: string } = {}): Promise<RegisterResult> {
+export async function registerWorkspace(file: string, dir: string, opts: { id?: string; label?: string; area?: string } = {}): Promise<RegisterResult> {
   const abs = resolve(dir)
   if (!(await stat(abs).then(s => s.isDirectory(), () => false))) {
     return { ok: false, status: 'refused', message: `${abs} is not a directory`, diagnostics: [] }
@@ -183,6 +208,12 @@ export async function registerWorkspace(file: string, dir: string, opts: { id?: 
   const top = await git(abs, ['rev-parse', '--show-toplevel'])
   if (top.code !== 0) return { ok: false, status: 'refused', message: `${abs} is not inside a Git repository; a workspace is a project's Git root`, diagnostics: [] }
   const root = await realpath(top.stdout.trim())
+  // The operating boundary (server/boundary.ts): never system code, releases
+  // or control data, and never a clone of a retired repository.
+  const boundary = await loadBoundary(file, opts.area)
+  await assertNotProtected(boundary, root, `Registering ${root} as a workspace`)
+  const origin = await git(root, ['remote', 'get-url', 'origin'])
+  if (origin.code === 0) assertNotRetired(retiredByUrl(boundary, origin.stdout.trim()), `Registering ${root} as a workspace`)
   const structure = await new Workspace({ id: '', label: '', host: '', path: root }).structure()
   return updateRegistry(file, async (raw, current): Promise<RegisterResult> => {
     for (const w of current.workspaces) {

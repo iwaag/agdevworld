@@ -27,6 +27,7 @@ import { readTextOrNull } from './files.ts'
 import { git, gitOk, LOCAL_TRANSPORT } from './git.ts'
 import { Gitea, type GiteaRepo } from './gitea.ts'
 import { registerProject, registerRepository, registerWorkspace, repoKey } from './registry.ts'
+import { assertNotProtected, loadBoundary } from './boundary.ts'
 import { Workspace } from './workspace.ts'
 import { newProjectText, parseProject } from './yamlDoc.ts'
 
@@ -150,6 +151,7 @@ export async function createProject(o: CreateProjectOptions): Promise<CreateProj
   if (!ID_PATTERN.test(o.id)) return result(false, `project id "${o.id}" must match ${ID_PATTERN.source}`)
   if (!o.name.trim()) return result(false, 'a project name is required')
   if (!isAbsolute(o.dir)) return result(false, 'the destination must be an absolute path')
+  await assertNotProtected(await loadBoundary(o.registryFile), dir, `Creating a project at ${dir}`)
   const mode: DevdocsMode = o.devdocs ?? 'directory'
   if (!(DEVDOCS_MODES as readonly string[]).includes(mode)) return result(false, `devdocs mode "${mode}" must be directory or submodule`)
   if (mode === 'directory' && o.devdocsSource) return result(false, 'a devdocs source repository applies to the submodule mode only')

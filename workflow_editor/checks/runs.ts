@@ -7,7 +7,7 @@
 //
 //   npm run build && node checks/runs.ts [--port 8196] [--repeat 20] [--out <file.json>] [--keep]
 //
-// Screenshots and the JSON record go to workflow_editor/.local/p4/ (ignored).
+// Screenshots and the JSON record go to agdevworld/.local/wfe-checks/ (ignored).
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
@@ -17,7 +17,7 @@ import type { Page } from 'playwright-core'
 import type { OpInput, RunRecord, RunRef } from '../shared/run.ts'
 
 const here = dirname(fileURLToPath(import.meta.url))
-const OUT_DIR = resolve(here, '..', '.local', 'p4')
+const OUT_DIR = resolve(here, '..', '..', '.local', 'wfe-checks')
 process.env.WFE_FIXTURE = OUT_DIR // lib.ts puts screenshots beneath it
 const args = process.argv.slice(2)
 const option = (n: string, d: string) => { const i = args.indexOf(n); return i >= 0 ? args[i + 1] : d }

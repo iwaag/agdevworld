@@ -52,6 +52,46 @@ The registry is always given explicitly (`--registry` / `WFE_REGISTRY`; the
 area's `bin/wfe` sets it). There is no default: moved code must never open a
 different, empty catalog.
 
+### The operating boundary (p4/ex1, `server/boundary.ts`)
+
+The supported management and execution operations never register, create,
+request, claim or open a workspace whose real path overlaps a protected path
+(the path itself, inside it, or containing it — after resolving symbolic
+links), and never take up a retired repository:
+
+| Protected | Source |
+| --- | --- |
+| The package directory this process runs (a source checkout or an installed release) | implicit |
+| `registry.json`, `gitea.json`, `system.json`, `service/`, `bin/`, `.local/` of the area | implicit |
+| Further paths (agdevworld's source, autolab, the frozen experiment) | `system.json` → `protectedPaths` |
+| Retired repositories, by Gitea id and owner/name | `system.json` → `retiredRepositories` |
+
+`system.json` sits beside the registry, outside every managed project, so no
+project file or workflow declaration can change it; a malformed one refuses
+these operations rather than reading as empty. The checks are in the shared
+operations, so the browser, the API and the CLI meet the same refusal (403,
+or exit 1):
+
+- registration (`wfe register`, the dashboard's register by path, a
+  workspace obtained from Gitea, project creation's destination, checked
+  before anything is written);
+- every workspace resolution (API, CLI), a request, and the executor's claim
+  — a job for a protected or retired workspace is dropped with the reason,
+  so a hand-edited registry gains nothing;
+- a retired repository as a registered repository, a project root, a
+  workspace's `origin`, a shared repository added to a project, or a
+  submodule location.
+
+The dashboard shows a registration that is refused as unavailable, with the
+refusal. These checks protect the supported operations; they are not an OS
+sandbox (an agent with shell access under the same account can still reach
+the files).
+
+`wfe project unregister <id>` removes a project, its workspaces and its root
+repository entry from the registry, and nothing else (folders and Gitea
+stay); it is refused while a workspace of the project has a queued job or an
+open attempt.
+
 agdevworld reaches it same-origin at `http://localhost:8093/wfe/`: its nginx
 listens on 8093, published on 127.0.0.1 only, and proxies `/wfe/` to the
 service on the host's loopback with an `x-wfe-route` header. Through that
@@ -105,8 +145,8 @@ npm run seed -- --reset
 
 The seed creates bare source repositories, a project `pj-demo` with `devdocs`,
 `study/*`, `wedo/*` and `assets/shared` submodules (relative URLs), and two
-workspaces `a` and `b` cloned from it, under `.local/fixture/` in this package
-(ignored). Workspace A leaves `assets/shared` uninitialized. The registry of
+workspaces `a` and `b` cloned from it, under agdevworld's `.local/wfe-fixture/`
+(ignored; outside this package, whose own directory the editor never registers). Workspace A leaves `assets/shared` uninitialized. The registry of
 workspaces is `registry.json` there; it is machine-specific and never tracked.
 Local file transport for submodules is enabled per command
 (`-c protocol.file.allow=always`), not in any Git config file.
@@ -128,7 +168,7 @@ npm start         # builds, then serves UI and API on http://127.0.0.1:8095
 
 The page opens on the projects list (`#/`). The service reads the registry it
 is given (`--registry <file>` or `WFE_REGISTRY`, required; the npm scripts give
-the fixture's `.local/fixture/registry.json`; `--area`, `--port`,
+the fixture's `../.local/wfe-fixture/registry.json`; `--area`, `--port`,
 `--poll-ms` (definitions, default 1000), `--git-poll-ms` (Git state, default 3000)). `wfe serve` builds the UI and starts the service for the
 registry it is given.
 
@@ -235,7 +275,7 @@ npm run check   # type check, tests and production build
 
 Browser checks drive the real UI with `playwright-core` and its cached
 Chromium. The p1 checks need a fresh seed, the service and the dev server,
-and write screenshots to `.local/fixture/screenshots/`.
+and write screenshots to `../.local/wfe-fixture/screenshots/`.
 `WFE_FIXTURE=<dir>` and `WFE_URL=<url>` point them at a private seed
 (`npm run seed -- --root <dir>`) and service instead:
 
@@ -251,7 +291,7 @@ and private service (port 8196): node states as text, branches and joins,
 answers and the stale-view guard, delegation links, source edits, malformed
 records, outages, run switching, an open definition draft, history at a
 commit, and the update latency. It writes its record and screenshots to
-`.local/p4/`:
+`../.local/wfe-checks/`:
 
 ```sh
 npm run build && node checks/runs.ts [--repeat 20] [--keep]

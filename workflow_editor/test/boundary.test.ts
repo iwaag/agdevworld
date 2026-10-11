@@ -94,7 +94,7 @@ test('registration refuses protected paths: the path itself, a symlink, a path i
   await refused(registerWorkspace(c.registry, join(c.sys, 'nested', 'pkg')), /is inside .*system-code/)
   await refused(registerWorkspace(c.registry, c.outer), /contains .*frozen/)
   // Implicit, without any system.json: the running package and the area's control data.
-  await refused(registerWorkspace(c.registry, PACKAGE_DIR), /contains .*workflow_editor|is .*workflow_editor/)
+  await refused(registerWorkspace(c.registry, PACKAGE_DIR), /the workflow editor code this process runs/)
   await repo(join(c.a, 'service', 'releases', 'r1'))
   await refused(registerWorkspace(c.registry, join(c.a, 'service', 'releases', 'r1')), /control data/)
   // Nothing was registered by any of these.

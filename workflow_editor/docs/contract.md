@@ -132,6 +132,35 @@ to an unknown node or to itself, a cycle, a malformed node id, or a missing
 or unsupported policy. A delegate node compiles for the preview; runs of it
 are still refused at creation.
 
+### Execution, intake and result confirmation (p6)
+
+Optional fields of a workflow, read by the execution host and the Zulip
+intake. Credentials never appear here: they are host configuration.
+
+```yaml
+execution:
+  agent: ppt-agent            # the identity runs are performed as (default: the execution host's name)
+  profile: sonnet             # one of the execution host's profiles (default: the host's)
+  guides: [agent/guide.md, agent/create.md]   # project-relative; added after the common contract
+intake:
+  zulip: requests             # the workflow's Zulip channel accepts request topics (docs/intake.md)
+nodes:
+  present:
+    type: talk
+    confirms: result          # the run's result-confirmation talk (docs/runs.md)
+```
+
+- A run records `executor: {name: <agent>, host: <execution host>}` at
+  creation; the host owns its queue, attempts and publication.
+- Each attempt reads `execution` from the run's **frozen** definition. The
+  guides are read from the workspace at claim and recorded by hash with
+  `attempt.begin` (`settings`), with the profile, the backend it resolved to
+  and the host's common contract. A profile the host does not offer, or a
+  guide that cannot be read, drops the job with the reason; nothing else is
+  launched instead.
+- `confirms: result` is valid on one talk node per workflow. The compiler
+  (`ag.wfe-compile.v2`) keeps it in the frozen graph.
+
 ### devdocs storage modes (p4)
 
 | Mode | What devdocs is | Owning repository and path |
@@ -233,6 +262,10 @@ fulfils its intent.
 | `workflow-on-non-delegate` | warning | `workflow` on a non-delegate node |
 | `edge-from-missing`, `edge-to-missing`, `edge-self`, `graph-cycle` | error | broken or cyclic edges |
 | `edge-duplicate`, `layout-orphan` | warning | redundant entries |
+| `execution-agent`, `execution-profile`, `execution-guide-path` | error | malformed agent id, profile name or guide path (p6) |
+| `execution-guide-duplicate` | warning | a guide listed twice |
+| `intake-mode` | error | `intake.zulip` is not `requests` |
+| `confirms-kind`, `confirms-type`, `confirms-duplicate` | error | `confirms` other than `result`, on a non-talk node, or on more than one node |
 
 Drafts with errors can be saved. They cannot be approved.
 
@@ -270,7 +303,8 @@ declared approver and the time:
 1. **Intent approval** covers `intent`.
 2. **Definition approval** covers intent, the documentation policy,
    repository bindings (key, path, access), node IDs, types, names,
-   descriptions, node repository bindings, delegate targets, and edges.
+   descriptions, node repository bindings, delegate targets, and edges;
+   and, when declared (p6), `execution`, `intake` and a node's `confirms`.
 
 Excluded from both digests: workflow `id` and `name`, approvals, layout,
 fields outside the contract, comments, key order and YAML formatting.
@@ -282,7 +316,10 @@ Digest = `sha256:` + hex SHA-256 of the UTF-8 canonical JSON of a projection:
   "intent": T(intent), "kind": "ag.workflow.v2/definition", "nodes": {id: {"description": T, "name": T,
   "repositories": [sorted, unique], "type": …, "workflow": id or null}},
   "repositories": {key: {"access": …, "path": normalized path}}}`; edges are
-  de-duplicated and sorted by `from`, then `to`.
+  de-duplicated and sorted by `from`, then `to`. When declared (p6), the
+  projection also has `"execution": {"agent", "profile", "guides": [normalized
+  paths]}`, `"intake": {"zulip"}` and a node's `"confirms"`; a workflow
+  without them keeps the digest it had.
 - Canonical JSON: keys sorted by UTF-16 code unit, no insignificant
   whitespace, standard JSON string escaping.
 - `T(text)`: CRLF/CR become LF, trailing spaces/tabs on each line are removed,

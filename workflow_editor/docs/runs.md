@@ -354,6 +354,14 @@ autolab, `agautolab.wfexec` — is queued. Two kinds of fact are kept apart:
 | `run.json` (durable work record) | `control`: the open attempt (id, reason, backend), how the last one ended, a hold, a requested stop; the history of `attempt.begin`, `attempt.end`, `run.stop`, `run.resume` |
 | `<area>/.local/exec/exec.sqlite` (this host) | the queue, the one execution slot, each attempt's process id, times and log, publication checkpoints, the executor's heartbeat (`server/exec.ts`) |
 
+**Settings (p6).** The run's workflow names the agent identity, the host
+profile and project guides (contract.md, *Execution, intake and result
+confirmation*). `wfe exec claim` takes what the host offers (`--profiles-json`,
+`--contract <name>=<sha256>`), resolves the run's settings from its frozen
+definition and records them with `attempt.begin` (`settings`: agent, profile,
+backend, contract and guides by hash); the host composes the prompt from the
+common contract, the guides it was handed and the brief.
+
 **Attempts.** One run can take several launches of the agent. `attempt.begin`
 (by the execution host when it claims a job) opens one; while it is open the
 executor's own reports (`start`, `progress`, `wait`, `complete`, `fail`,

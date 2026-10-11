@@ -224,7 +224,7 @@ test('a new workflow file reads back as the same model', async () => {
     schema: 'ag.workflow.v2', documentation: { policy: 'default' }, id: 'fresh', name: 'Fresh', intent: 'Line one.\nLine two.\n',
     repositories: { tools: { path: 'study/tools', access: 'readonly' } },
     nodes: { s: { type: 'study', name: 'S', description: 'look', repositories: ['tools'] } },
-    edges: [], approvals: {}, layout: { nodes: {} },
+    edges: [], execution: { agent: '', profile: '', guides: [] }, intake: { zulip: '' }, approvals: {}, layout: { nodes: {} },
   }
   const text = newWorkflowText(w)
   const r = parseWorkflow(text)

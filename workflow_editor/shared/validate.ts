@@ -2,7 +2,7 @@
 // well-formed and that its references resolve; it never judges whether the
 // graph fulfils the intent. Errors block approval; drafts may still be saved.
 import {
-  ACCESS_LEVELS, DEVDOCS_MODES, DOC_POLICIES, ID_PATTERN, NODE_TYPES, PROJECT_SCHEMA, WORKFLOW_SCHEMA, normalizeRepoPath,
+  ACCESS_LEVELS, CONFIRMS, DEVDOCS_MODES, DOC_POLICIES, ID_PATTERN, INTAKE_MODES, NODE_TYPES, PROFILE_PATTERN, PROJECT_SCHEMA, WORKFLOW_SCHEMA, normalizeRepoPath,
   type Issue, type Project, type Workflow,
 } from './model.ts'
 
@@ -65,6 +65,16 @@ export function validateWorkflow(w: Workflow, ctx: ValidationContext = {}): Issu
     if (others.length) issues.push(err('id-duplicate', `Workflow id "${w.id}" is also used by ${others.map(o => o.file).join(', ')}.`, { field: 'id' }))
   }
 
+  // Execution and intake (p6)
+  if (w.execution.agent && !ID_PATTERN.test(w.execution.agent)) issues.push(err('execution-agent', `execution.agent "${w.execution.agent}" must match ${ID_PATTERN.source}.`, { field: 'execution' }))
+  if (w.execution.profile && !PROFILE_PATTERN.test(w.execution.profile)) issues.push(err('execution-profile', `execution.profile "${w.execution.profile}" must be a profile name (${PROFILE_PATTERN.source}).`, { field: 'execution' }))
+  w.execution.guides.forEach((g, i) => {
+    const p = normalizeRepoPath(g)
+    if (p === null || p === '.') issues.push(err('execution-guide-path', `execution.guides[${i}] "${g}" must be a project-relative file path without "..".`, { field: 'execution' }))
+  })
+  if (new Set(w.execution.guides.map(g => normalizeRepoPath(g))).size !== w.execution.guides.length) issues.push(warn('execution-guide-duplicate', 'execution.guides lists a guide twice.', { field: 'execution' }))
+  if (w.intake.zulip && !(INTAKE_MODES as readonly string[]).includes(w.intake.zulip)) issues.push(err('intake-mode', `intake.zulip "${w.intake.zulip}" is not supported; expected ${INTAKE_MODES.join(' or ')} (or leave it out).`, { field: 'intake' }))
+
   // Repository bindings
   const byPath = new Map((ctx.repositories ?? []).map(r => [r.path, r]))
   for (const [key, b] of Object.entries(w.repositories)) {
@@ -97,7 +107,13 @@ export function validateWorkflow(w: Workflow, ctx: ValidationContext = {}): Issu
     } else if (n.workflow) {
       issues.push(warn('workflow-on-non-delegate', `Node "${id}" is "${n.type}" but names a target workflow; only delegate nodes use it.`, { node: id }))
     }
+    if (n.confirms) {
+      if (!(CONFIRMS as readonly string[]).includes(n.confirms)) issues.push(err('confirms-kind', `Node "${id}" confirms "${n.confirms}"; expected ${CONFIRMS.join(' or ')}.`, { node: id }))
+      else if (n.type !== 'talk') issues.push(err('confirms-type', `Node "${id}" confirms the result but is "${n.type}"; only a talk node asks the person.`, { node: id }))
+    }
   }
+  const confirming = Object.entries(w.nodes).filter(([, n]) => n.confirms === 'result').map(([id]) => id)
+  if (confirming.length > 1) issues.push(err('confirms-duplicate', `Nodes ${confirming.join(', ')} all confirm the result; a run has one result confirmation.`))
 
   // Edges
   const seen = new Set<string>()

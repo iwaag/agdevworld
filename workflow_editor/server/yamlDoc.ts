@@ -99,8 +99,10 @@ const approval = record({ digest: scalar, approver: scalar, at: scalar })
 export const WORKFLOW_SHAPE = record({
   schema: scalar, id: scalar, name: scalar, intent: scalar,
   documentation: record({ policy: scalar }),
+  execution: record({ agent: scalar, profile: scalar, guides: list(scalar) }),
+  intake: record({ zulip: scalar }),
   repositories: dict(record({ path: scalar, access: scalar }, true)),
-  nodes: dict(record({ type: scalar, name: scalar, description: scalar, repositories: list(scalar), workflow: scalar })),
+  nodes: dict(record({ type: scalar, name: scalar, confirms: scalar, description: scalar, repositories: list(scalar), workflow: scalar })),
   edges: list(record({ from: scalar, to: scalar }, true)),
   approvals: record({ intent: approval, definition: approval }),
   layout: record({ nodes: dict(record({ x: scalar, y: scalar }, true)) }),
@@ -249,7 +251,7 @@ export function workflowForWrite(w: Workflow): Record<string, unknown> {
   const nodes: Record<string, unknown> = {}
   for (const [id, n] of Object.entries(w.nodes)) {
     nodes[id] = {
-      type: n.type, name: n.name || undefined, description: n.description,
+      type: n.type, name: n.name || undefined, confirms: n.confirms || undefined, description: n.description,
       repositories: n.repositories, workflow: n.workflow || undefined,
     }
   }
@@ -257,7 +259,7 @@ export function workflowForWrite(w: Workflow): Record<string, unknown> {
   for (const [k, a] of Object.entries(w.approvals)) if (a) approvals[k] = a
   return {
     schema: w.schema, id: w.id, name: w.name, intent: w.intent,
-    documentation: w.documentation, repositories: w.repositories, nodes, edges: w.edges,
+    documentation: w.documentation, execution: w.execution, intake: w.intake, repositories: w.repositories, nodes, edges: w.edges,
     approvals, layout: w.layout,
   }
 }

@@ -43,7 +43,17 @@ export interface RunInput {
   entrustedBy?: EntrustRef
   original?: string // run-relative file keeping the input a request was derived from
 }
-export interface Executor { name: string; backend: string | null }
+// `name` is the agent identity the run is performed as (p6: the workflow's
+// execution.agent); `host` the execution host that launches it, when that is
+// not the agent itself (autolab executing for ppt-agent).
+export interface Executor { name: string; backend: string | null; host?: string }
+export const hostOf = (e: Executor) => e.host ?? e.name
+// What one attempt was launched with (p6), recorded with attempt.begin so its
+// behaviour can be explained later: the agent identity, the host's profile
+// and the backend it resolved to, and the guides composed into its
+// instructions — the host's common contract and the project's guides — by
+// content hash.
+export interface AttemptSettings { agent: string; profile: string | null; backend: string | null; contract: { name: string; sha256: string } | null; guides: { path: string; sha256: string }[] }
 export interface BundleEntry {
   file: string // run-relative, definition/<id>.yaml
   source: string // project-relative file it was copied from
@@ -111,7 +121,7 @@ export const ATTEMPT_OUTCOMES = ['exited', 'stopped', 'interrupted', 'unknown'] 
 export type AttemptOutcome = typeof ATTEMPT_OUTCOMES[number]
 export type HoldKind = 'stopped' | 'interrupted' | 'unknown'
 export interface Control {
-  attempt: { id: string; reason: string; began: string; backend: string | null } | null // the open attempt; backend: what served it (Agent ≠ Model)
+  attempt: { id: string; reason: string; began: string; backend: string | null; settings?: AttemptSettings } | null // the open attempt; backend: what served it (Agent ≠ Model)
   attempts: number
   last: { id: string; outcome: AttemptOutcome; ended: string; detail: string; backend: string | null } | null
   hold: { kind: HoldKind; since: string; by: string; reason: string } | null // nothing resumes it but run.resume
@@ -159,7 +169,7 @@ export type OpInput =
   | { op: 'artifact.attach'; path: string; node?: string; title?: string }
   | { op: 'run.cancel'; reason: string }
   | { op: 'run.decide'; decision: 'accepted' | 'rejected'; evidence: string; note?: string }
-  | { op: 'attempt.begin'; attempt: string; reason: string; backend?: string }
+  | { op: 'attempt.begin'; attempt: string; reason: string; backend?: string; settings?: AttemptSettings }
   | { op: 'attempt.end'; attempt: string; outcome: AttemptOutcome; detail?: string }
   | { op: 'run.stop'; reason: string }
   | { op: 'run.resume'; reason: string }
@@ -189,7 +199,7 @@ export interface RunRecord extends RunState { history: HistoryEntry[] }
 // The graph the run follows: its frozen effective graph (p5), or, for a run
 // created before p5, the root workflow of its bundle. A node with `step` is a
 // generated documentation step.
-export interface RunGraph { nodes: Record<string, { type: string; workflow?: string; step?: StepSpec }>; edges: Edge[] }
+export interface RunGraph { nodes: Record<string, { type: string; workflow?: string; confirms?: string; step?: StepSpec }>; edges: Edge[] }
 export const stepOf = (graph: RunGraph, node: string): StepSpec | undefined => graph.nodes[node]?.step
 // The document a step writes, project-relative.
 export const documentPath = (r: RunRef, step: StepSpec) => `${runFolder(r)}/${step.output}`
@@ -287,6 +297,21 @@ function evidence(v: unknown, what: string, expected: string): DocumentEvidence 
   if (typeof d.sha256 !== 'string' || !/^[0-9a-f]{64}$/.test(d.sha256)) fail('shape', `${what}: document sha256 must be 64 hex digits`)
   if (typeof d.bytes !== 'number' || !Number.isInteger(d.bytes) || d.bytes <= 0) fail('document-empty', `${what}: ${expected} is empty`)
   return { path: expected, sha256: d.sha256 as string, bytes: d.bytes as number }
+}
+
+function attemptSettings(v: unknown): AttemptSettings {
+  if (!isObj(v)) return fail('shape', 'attempt settings must be an object')
+  const o = v as Record<string, unknown>
+  const hash = (h: unknown, what: string) => (typeof h === 'string' && /^[0-9a-f]{64}$/.test(h) ? h : fail('shape', `${what}: sha256 must be 64 hex digits`))
+  const contract = o.contract === null || o.contract === undefined ? null : isObj(o.contract) ? { name: text((o.contract as Record<string, unknown>).name, 'the contract name'), sha256: hash((o.contract as Record<string, unknown>).sha256, 'the contract') } : fail('shape', 'settings.contract must be {name, sha256}')
+  if (!Array.isArray(o.guides)) fail('shape', 'settings.guides must be a list')
+  const guides = (o.guides as unknown[]).map((g, i) => {
+    if (!isObj(g)) return fail('shape', `settings.guides[${i}] must be {path, sha256}`)
+    const path = normalizeRepoPath(String((g as Record<string, unknown>).path ?? ''))
+    if (!path || path === '.') fail('shape', `settings.guides[${i}] path must be project-relative`)
+    return { path: path!, sha256: hash((g as Record<string, unknown>).sha256, `settings.guides[${i}]`) }
+  })
+  return { agent: text(o.agent, 'settings.agent'), profile: optText(o.profile, 'settings.profile') || null, backend: optText(o.backend, 'settings.backend') || null, contract, guides }
 }
 
 function emptyNode(): NodeRecord {
@@ -505,6 +530,7 @@ export function apply(prev: RunState | null, e: HistoryEntry | (OpInput & EntryM
       if (ctl.hold) fail('held', `the run is held (${ctl.hold.kind}: ${ctl.hold.reason}); a person resumes it first (run.resume)`)
       if (ctl.stop) fail('held', 'a stop was requested; nothing begins until it is confirmed and the run is resumed')
       ctl.attempt = { id: e.attempt, reason: text(e.reason, 'the reason'), began: at, backend: optText(e.backend, 'backend') || null }
+      if (e.settings !== undefined) ctl.attempt.settings = attemptSettings(e.settings)
       ctl.attempts++
       break
     }

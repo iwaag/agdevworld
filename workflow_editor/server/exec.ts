@@ -12,21 +12,35 @@
 // recorded end becomes `unknown`, a non-zero exit `interrupted`; both hold the
 // run until a person resumes it. A request or answer sent twice (same
 // receipt) is queued once.
-import { randomBytes } from 'node:crypto'
+import { createHash, randomBytes } from 'node:crypto'
 import { mkdirSync } from 'node:fs'
+import { lstat, readFile, realpath } from 'node:fs/promises'
 import { hostname } from 'node:os'
 import { join } from 'node:path'
 import type { DatabaseSync } from 'node:sqlite'
-import { holderOf, runKey, situation, type RunRecord, type RunRef } from '../shared/run.ts'
+import { normalizeRepoPath } from '../shared/model.ts'
+import { holderOf, hostOf, runKey, situation, type AttemptSettings, type RunRecord, type RunRef } from '../shared/run.ts'
 import { assertWorkspaceAllowed, loadBoundary } from './boundary.ts'
 import type { Gitea } from './gitea.ts'
 import { baseline, publish, type Baseline, type RepoStep } from './publish.ts'
 import { loadRegistry, observe, type Registration } from './registry.ts'
 import { createRun, listRuns, readRun, runDir, runOp } from './runs.ts'
 import { named, openStore, transaction } from './sqlite.ts'
+import { inside } from './files.ts'
 import { RequestError, Workspace } from './workspace.ts'
 
 export const EXECUTOR = 'autolab'
+
+// What the execution host says about itself when it claims (p6): the
+// profiles it can launch (name → backend label) and the common workflow
+// contract it composes every prompt from. A run's workflow chooses among the
+// profiles; the host never launches one it does not have.
+export interface HostOffer { profiles?: Record<string, string>; contract?: { name: string; sha256: string } }
+// What one attempt is launched with: the recorded settings plus the guide
+// texts the host composes into the prompt (the texts are not recorded; their
+// hashes are).
+export interface AttemptExecution { agent: string; profile: string | null; backend: string | null; guides: { path: string; sha256: string; text: string }[] }
+const sha256 = (b: string | Buffer) => createHash('sha256').update(b).digest('hex')
 
 // What the run's frozen documentation policy asks of this attempt (p5): the
 // policy, and for every documentation step that is running or ready, its
@@ -99,7 +113,7 @@ export class ExecStore {
   // there meanwhile (one workspace, one run's working tree).
   async holder(ws: Workspace, except?: RunRef): Promise<string | null> {
     for (const r of await listRuns(ws)) {
-      if (r.problem || r.executor !== this.executor || (except && r.workflow === except.workflow && r.run === except.run)) continue
+      if (r.problem || r.executorHost !== this.executor || (except && r.workflow === except.workflow && r.run === except.run)) continue
       if (r.execution === 'completed' || r.execution === 'cancelled') continue
       const begun = this.one<{ n: number }>('SELECT count(*) AS n FROM attempts WHERE workspace = ? AND workflow = ? AND run = ?', ws.reg.id, r.workflow, r.run)!.n > 0
       if (begun || this.one('SELECT 1 FROM jobs WHERE workspace = ? AND workflow = ? AND run = ? AND state IN (\'queued\', \'claimed\')', ws.reg.id, r.workflow, r.run)) return r.ref
@@ -116,7 +130,7 @@ export class ExecStore {
     const ws = await this.workspace(o.workspace)
     const held = await this.holder(ws)
     if (held) throw new RequestError(409, `workspace ${ws.reg.id} is held by run ${held}, which has not completed (it may be awaiting a person). Finish or cancel it, or request the run in another workspace of the project.`)
-    const created = await createRun(ws, { workflow: o.workflow, input: { kind: 'braindump', text: o.text, author: o.author, recordedBy: o.by }, executor: { name: this.executor, backend: null }, by: o.by ?? o.author, via: o.via })
+    const created = await createRun(ws, { workflow: o.workflow, input: { kind: 'braindump', text: o.text, author: o.author, recordedBy: o.by }, executor: { host: this.executor }, by: o.by ?? o.author, via: o.via })
     const job = this.enqueue(ws.reg.id, created.ref, 'start', `request:${o.receipt}`, 'start: the person\'s request')
     return { job, ref: created.ref, duplicate: false }
   }
@@ -138,7 +152,7 @@ export class ExecStore {
   // answered question is what its node waits on and nothing holds it.
   async afterAnswer(ws: Workspace, ref: RunRef, question: string): Promise<JobRow | null> {
     const r = (await readRun(ws, ref)).record
-    if (!r || r.executor.name !== this.executor || r.cancelled || r.control.hold || r.control.attempt) return null
+    if (!r || hostOf(r.executor) !== this.executor || r.cancelled || r.control.hold || r.control.attempt) return null
     const q = r.questions[question]
     if (!q || !q.answers.length || q.takenUp || q.withdrawn) return null
     if (!r.execution.waiting.some(w => 'question' in w.on && w.on.question === question)) return null
@@ -150,7 +164,7 @@ export class ExecStore {
   // Takes the oldest queued job when the slot is free and records the
   // attempt's beginning in run.json. Jobs whose run is cancelled, held or
   // already open are dropped with the reason.
-  async claim(backend: string | null): Promise<{ job: JobRow; attempt: AttemptRow; workspace: Registration; ref: RunRef; brief: string } | { idle: string }> {
+  async claim(backend: string | null, offer: HostOffer = {}): Promise<{ job: JobRow; attempt: AttemptRow; workspace: Registration; ref: RunRef; brief: string; execution: AttemptExecution } | { idle: string }> {
     const busy = this.one<AttemptRow>('SELECT * FROM attempts WHERE state != \'ended\'')
     if (busy) return { idle: `the slot is held by attempt ${busy.id} (${busy.workspace} ${busy.workflow}/${busy.run})` }
     for (;;) {
@@ -160,31 +174,65 @@ export class ExecStore {
       const drop = (note: string) => this.run('UPDATE jobs SET state = \'dropped\', note = ? WHERE id = ?', note, job.id)
       let ws: Workspace
       try { ws = await this.workspace(job.workspace) } catch (e) { drop((e as Error).message); continue }
-      const rec = (await readRun(ws, ref)).record
+      const reading = await readRun(ws, ref)
+      const rec = reading.record
       if (!rec) { drop('the run cannot be read'); continue }
       if (rec.cancelled) { drop('the run is cancelled'); continue }
       if (rec.control.hold) { drop(`the run is held (${rec.control.hold.kind}); a person resumes it`); continue }
       if (rec.control.attempt) { drop(`attempt ${rec.control.attempt.id} is still open in run.json`); continue }
+      const execution = await this.execution(ws, rec, reading.bundle.entries[rec.definition.root]?.workflow?.execution, backend, offer)
+      if ('refused' in execution) { drop(execution.refused); continue }
       const id = `a${Date.now().toString(36)}-${randomBytes(3).toString('hex')}`
       const claimed = this.tx(() => {
         if (this.one('SELECT 1 FROM attempts WHERE state != \'ended\'')) return false
         const r = this.run('UPDATE jobs SET state = \'claimed\', claimed = ?, attempt = ? WHERE id = ? AND state = \'queued\'', now(), id, job.id)
         if (Number(r.changes) !== 1) return false
-        this.run('INSERT INTO attempts (id, job, workspace, workflow, run, host, state, began, backend) VALUES (?, ?, ?, ?, ?, ?, \'launching\', ?, ?)', id, job.id, job.workspace, job.workflow, job.run, hostname(), now(), backend)
+        this.run('INSERT INTO attempts (id, job, workspace, workflow, run, host, state, began, backend) VALUES (?, ?, ?, ?, ?, ?, \'launching\', ?, ?)', id, job.id, job.workspace, job.workflow, job.run, hostname(), now(), execution.backend)
         return true
       })
       if (!claimed) return { idle: 'another executor claimed it first' }
       const base: Baseline = await baseline(ws)
       try {
-        await runOp(ws, ref, { op: 'attempt.begin', attempt: id, reason: job.kind, ...(backend ? { backend } : {}) }, { by: this.executor, via: 'exec' })
+        const settings: AttemptSettings = { agent: execution.agent, profile: execution.profile, backend: execution.backend, contract: offer.contract ?? null, guides: execution.guides.map(g => ({ path: g.path, sha256: g.sha256 })) }
+        await runOp(ws, ref, { op: 'attempt.begin', attempt: id, reason: job.kind, ...(execution.backend ? { backend: execution.backend } : {}), settings }, { by: this.executor, via: 'exec' })
       } catch (e) {
         this.run('UPDATE attempts SET state = \'ended\', ended = ?, outcome = \'refused\' WHERE id = ?', now(), id)
         this.run('UPDATE jobs SET state = \'dropped\', note = ? WHERE id = ?', `attempt refused: ${(e as Error).message}`, job.id)
         continue
       }
       this.run('UPDATE attempts SET baseline = ?, log = ? WHERE id = ?', JSON.stringify(base), join(this.logsDir, `${id}.jsonl`), id)
-      return { job: this.one<JobRow>('SELECT * FROM jobs WHERE id = ?', job.id)!, attempt: this.attemptRow(id)!, workspace: ws.reg, ref, brief: await this.brief(ws, ref, job) }
+      return { job: this.one<JobRow>('SELECT * FROM jobs WHERE id = ?', job.id)!, attempt: this.attemptRow(id)!, workspace: ws.reg, ref, brief: await this.brief(ws, ref, job), execution }
     }
+  }
+
+  // The settings an attempt of this run is launched with (p6), from the
+  // run's frozen definition: the agent it is performed as, the host profile
+  // the workflow asks for, and its guides as they are in the workspace now
+  // (by content hash). A profile the host does not offer, or a guide that is
+  // missing, refuses the job with the reason instead of launching something
+  // else.
+  async execution(ws: Workspace, rec: RunRecord, ex: { agent: string; profile: string; guides: string[] } | undefined, backend: string | null, offer: HostOffer): Promise<AttemptExecution | { refused: string }> {
+    const profile = ex?.profile || null
+    let chosen = backend
+    if (profile && offer.profiles) {
+      if (!(profile in offer.profiles)) return { refused: `the workflow asks for execution profile "${profile}", which this execution host does not offer (${Object.keys(offer.profiles).sort().join(', ')})` }
+      chosen = offer.profiles[profile]
+    }
+    const guides: AttemptExecution['guides'] = []
+    for (const g of ex?.guides ?? []) {
+      const path = normalizeRepoPath(g)
+      if (!path || path === '.') return { refused: `guide "${g}" is not a project-relative path` }
+      try {
+        const abs = await inside(ws.root, path)
+        const l = await lstat(abs)
+        if (!l.isFile() || l.isSymbolicLink() || !(await realpath(abs)).startsWith(await realpath(ws.root))) return { refused: `guide ${path} is not a regular file of the workspace` }
+        const bytes = await readFile(abs)
+        guides.push({ path, sha256: sha256(bytes), text: bytes.toString('utf8') })
+      } catch (e) {
+        return { refused: `guide ${path} cannot be read in workspace ${ws.reg.id}: ${(e as Error).message}` }
+      }
+    }
+    return { agent: rec.executor.name, profile, backend: chosen, guides }
   }
 
   // Work of these workspaces that is not finished here: queued or claimed
@@ -206,7 +254,7 @@ export class ExecStore {
   // where the record is. The guide (autolab's) says how.
   async brief(ws: Workspace, ref: RunRef, job: JobRow): Promise<string> {
     const r = (await readRun(ws, ref)).record!
-    const lines = [`Run: ${r.project} / ${runKey(ref)} (record ${runDir(ref)}/run.json)`, `Workspace: ${ws.root}`, `Why this attempt: ${job.reason}`]
+    const lines = [`Run: ${r.project} / ${runKey(ref)} (record ${runDir(ref)}/run.json)`, `Agent: you perform this run as ${r.executor.name}${hostOf(r.executor) !== r.executor.name ? `; the execution host ${hostOf(r.executor)} launched you and publishes your work` : ''}.`, `Workspace: ${ws.root}`, `Why this attempt: ${job.reason}`]
     if (job.kind === 'start') lines.push(`The person's request is ${runDir(ref)}/${r.input.file} (author ${r.input.author ?? r.input.requester}).`)
     const resume = [...r.history].reverse().find(e => e.op === 'run.resume') as (RunRecord['history'][number] & { reason?: string }) | undefined
     if (job.kind === 'resume') {
@@ -262,7 +310,7 @@ export class ExecStore {
 
   async resume(ws: Workspace, ref: RunRef, by: string, reason: string, via: string, receipt?: string) {
     const r = await runOp(ws, ref, { op: 'run.resume', reason, ...(receipt ? { receipt: `resume:${receipt}` } : {}) }, { by, via })
-    const job = r.record.executor.name === this.executor ? this.enqueue(ws.reg.id, ref, 'resume', `resume:${ws.reg.id}/${runKey(ref)}/${r.record.seq}`, `resume: ${reason}`) : null
+    const job = hostOf(r.record.executor) === this.executor ? this.enqueue(ws.reg.id, ref, 'resume', `resume:${ws.reg.id}/${runKey(ref)}/${r.record.seq}`, `resume: ${reason}`) : null
     return { record: r.record, job }
   }
 
@@ -332,7 +380,7 @@ export class ExecStore {
       if (!(await observe(w)).available) continue
       const ws = new Workspace(w)
       for (const s of await listRuns(ws)) {
-        if (s.problem || s.executor !== this.executor) continue
+        if (s.problem || s.executorHost !== this.executor) continue
         const ref = { workflow: s.workflow, run: s.run }
         const rec = (await readRun(ws, ref)).record
         if (!rec || rec.cancelled || rec.control.hold || rec.control.attempt) continue

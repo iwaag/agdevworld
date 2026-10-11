@@ -22,7 +22,8 @@ import { findCycle } from './validate.ts'
 
 // Changes whenever the expansion, the identities or the step instructions
 // change. A run records the version it was compiled with.
-export const COMPILER_VERSION = 'ag.wfe-compile.v1'
+// v2 (p6): authored nodes keep `confirms` (the result-confirmation talk).
+export const COMPILER_VERSION = 'ag.wfe-compile.v2'
 
 // Generated identities start with "_", which an authored id never does
 // (ID_PATTERN), so the two can never collide.
@@ -48,7 +49,7 @@ export interface StepSpec {
   purpose: string // one line, for views and notifications
   instructions: string // what the executing agent is asked to write
 }
-export interface EffectiveNode { type: string; workflow?: string; step?: StepSpec }
+export interface EffectiveNode { type: string; workflow?: string; confirms?: string; step?: StepSpec }
 export interface EffectiveGraph { compiler: string; policy: DocPolicy; nodes: Record<string, EffectiveNode>; edges: Edge[] }
 
 export type CompileResult = { ok: true; graph: EffectiveGraph } | { ok: false; code: string; message: string }
@@ -84,6 +85,12 @@ function step(kind: StepKind, node: string | null): StepSpec {
 
 const byEdge = (a: Edge, b: Edge) => (a.from < b.from ? -1 : a.from > b.from ? 1 : a.to < b.to ? -1 : a.to > b.to ? 1 : 0)
 
+// An authored node as runs follow it: its type, a delegate's target, and
+// whether it is the result confirmation.
+export function authoredNode(n: Pick<Workflow['nodes'][string], 'type' | 'workflow' | 'confirms'>): EffectiveNode {
+  return { type: n.type, ...(n.workflow ? { workflow: n.workflow } : {}), ...(n.confirms ? { confirms: n.confirms } : {}) }
+}
+
 // Compiles an authored definition. Refuses what is not an executable graph
 // (no nodes, broken or cyclic edges, malformed ids, an unknown policy)
 // instead of letting generated steps make it look executable.
@@ -107,10 +114,7 @@ export function compile(w: Pick<Workflow, 'nodes' | 'edges' | 'documentation'>):
   const cycle = findCycle(ids, id => out.get(id) ?? [])
   if (cycle) return { ok: false, code: 'graph-cycle', message: `the graph has a cycle: ${cycle.join(' → ')}` }
 
-  const authored: Record<string, EffectiveNode> = Object.fromEntries(ids.map(id => {
-    const n = w.nodes[id]
-    return [id, n.workflow ? { type: n.type, workflow: n.workflow } : { type: n.type }]
-  }))
+  const authored: Record<string, EffectiveNode> = Object.fromEntries(ids.map(id => [id, authoredNode(w.nodes[id])]))
   if (policy === 'manual') return { ok: true, graph: { compiler: COMPILER_VERSION, policy, nodes: authored, edges: edges.sort(byEdge) } }
 
   const nodes: Record<string, EffectiveNode> = { [PLAN_STEP]: { type: 'talk', step: step('plan', null) }, ...authored }

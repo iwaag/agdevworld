@@ -256,9 +256,15 @@ once. Refused while another run of the executor holds the workspace (it has
 begun and has not completed or been cancelled); use another workspace.`,
   exec: `wfe exec <subcommand> …   (the executor's interface; JSON output)
 
-claim [--backend <text>]          take the next queued job if the slot is free:
-                                  records attempt.begin; prints the attempt,
-                                  workspace, run and a brief for its prompt
+claim [--backend <text>] [--profiles-json <{name: backend}>] [--contract <name>=<sha256>]
+                                  take the next queued job if the slot is free:
+                                  records attempt.begin with the settings it is
+                                  launched with (agent, profile → backend, the
+                                  contract and the project guides by hash);
+                                  prints the attempt, workspace, run, a brief
+                                  and the guides for its prompt. A profile the
+                                  host does not offer, or a missing guide,
+                                  drops the job with the reason
 started <attempt> --pid <pid>     the attempt's process is running
 finished <attempt> --exit-code <n> [--signal <name>] [--lost]
                                   how it ended; records attempt.end, publishes
@@ -615,7 +621,13 @@ async function cmdExec(p: Parsed): Promise<number> {
   const num = (k: string) => { const v = opt(p, k); if (v === undefined || !/^-?\d+$/.test(v)) throw new UsageError(`--${k} <integer> is required`); return Number(v) }
   try {
     switch (sub) {
-      case 'claim': out('', await x.claim(opt(p, 'backend') ?? null)); return 0
+      case 'claim': {
+        const profiles = opt(p, 'profiles-json')
+        const contract = opt(p, 'contract')
+        const m = contract ? /^([^=]+)=([0-9a-f]{64})$/.exec(contract) : null
+        if (contract && !m) throw new UsageError('--contract <name>=<sha256 of the contract text>')
+        out('', await x.claim(opt(p, 'backend') ?? null, { ...(profiles ? { profiles: JSON.parse(profiles) as Record<string, string> } : {}), ...(m ? { contract: { name: m[1], sha256: m[2] } } : {}) })); return 0
+      }
       case 'started': if (!arg) throw new UsageError('started <attempt> --pid <pid>'); x.started(arg, num('pid')); out('', { ok: true }); return 0
       case 'finished': {
         if (!arg) throw new UsageError('finished <attempt> --exit-code <n> [--signal <name>]')

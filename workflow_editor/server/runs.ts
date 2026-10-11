@@ -8,10 +8,10 @@ import { lstat, mkdir, readdir, readFile, realpath, stat, writeFile } from 'node
 import { join, sep } from 'node:path'
 import type { FileProblem, RelatedRun, RunFile, RunResponse, RunSummary, SourceComparison } from '../shared/api.ts'
 import { approvalStates, canonicalJson, semanticDigest } from '../shared/canonical.ts'
-import { COMPILER_VERSION, compile, isGenerated, type EffectiveGraph, type StepSpec } from '../shared/compile.ts'
+import { authoredNode, COMPILER_VERSION, compile, isGenerated, type EffectiveGraph, type StepSpec } from '../shared/compile.ts'
 import { ID_PATTERN, normalizeRepoPath, type Workflow } from '../shared/model.ts'
 import {
-  checkRecord, delegateNodes, documentPath, operate, RUN_ID, RunError, runFolder, RUNS_ROOT, runKey, validRunRef,
+  checkRecord, delegateNodes, documentPath, hostOf, operate, RUN_ID, RunError, runFolder, RUNS_ROOT, runKey, validRunRef,
   type BundleEntry, type DefinitionRef, type DocumentEvidence, type EntrustRef, type Executor, type OpInput, type RepoContext, type RunGraph,
   type EntryMeta, type RunInput, type RunRecord, type RunRef,
 } from '../shared/run.ts'
@@ -37,7 +37,7 @@ const sigOf = async (path: string) => { const s = await stat(path).catch(() => n
 
 export function graphOf(w: Workflow): RunGraph {
   return {
-    nodes: Object.fromEntries(Object.entries(w.nodes).map(([id, n]) => [id, n.workflow ? { type: n.type, workflow: n.workflow } : { type: n.type }])),
+    nodes: Object.fromEntries(Object.entries(w.nodes).map(([id, n]) => [id, authoredNode(n)])),
     edges: w.edges.map(e => ({ from: e.from, to: e.to })),
   }
 }
@@ -221,7 +221,7 @@ export function summaryOf(ref: RunRef, reading: Pick<Reading, 'record' | 'proble
   return {
     ...base, created: r.created, updated: r.updated, seq: r.seq, execution: r.execution.state, counts: r.execution.counts,
     waiting: r.execution.waiting.map(w => ({ node: w.node, holder: holderText(r, w.node) })), ready: r.execution.ready, failed: r.execution.failed,
-    input: r.input.kind, executor: r.executor.name,
+    input: r.input.kind, executor: r.executor.name, executorHost: hostOf(r.executor),
     decision: r.decisions.at(-1)?.decision,
   }
 }
@@ -371,7 +371,10 @@ export interface CreateRunOptions {
   input:
     | { kind: 'braindump'; text: string; author: string; recordedBy?: string }
     | { kind: 'request'; text: string; requester: string; entrustedBy: EntrustRef; onBehalfOf?: string; original?: string }
-  executor: Executor
+  // The agent identity. With `host`, the run is performed as the
+  // definition's execution.agent (or as the host itself when none is
+  // declared) and the host is recorded beside it (p6).
+  executor: Executor | { host: string }
   plan?: string
   predecessor?: RunRef
   by: string
@@ -478,7 +481,8 @@ function inputOf(o: CreateRunOptions['input']): { input: RunInput; files: Record
 }
 
 export async function createRun(ws: Workspace, o: CreateRunOptions): Promise<CreatedRun> {
-  if (!o.executor.name?.trim()) throw new RequestError(400, 'the executor is required (--executor <name>): who performs the run')
+  const host = 'host' in o.executor ? o.executor.host : undefined
+  if (!host && !(o.executor as Executor).name?.trim()) throw new RequestError(400, 'the executor is required (--executor <name>): who performs the run')
   const { input, files } = inputOf(o.input)
   // A named run that exists is refused first, whatever the definition's state.
   if (o.name && ID_PATTERN.test(o.workflow) && await stat(await inside(ws.root, runDir({ workflow: o.workflow, run: o.name }))).then(() => true, () => false)) {
@@ -497,14 +501,16 @@ export async function createRun(ws: Workspace, o: CreateRunOptions): Promise<Cre
   if (!compiled.ok) throw new RequestError(422, `${src.root} cannot be executed: ${compiled.message}. Nothing was written.`, { code: compiled.code })
   definition.effective = compiled.graph
   const graph: RunGraph = { nodes: compiled.graph.nodes, edges: compiled.graph.edges }
-  const record = createRecord(project, ref, input, o, definition, context, graph)
+  const agent = src.files[src.root].workflow.execution.agent
+  const executor: Executor = host ? { name: agent || host, backend: null, host } : o.executor as Executor
+  const record = createRecord(project, ref, input, { ...o, executor }, definition, context, graph)
   for (const [id, f] of Object.entries(src.files)) files[`${DEFINITION_DIR}/${id}.yaml`] = f.text
   if (o.plan !== undefined) files['plan.md'] = o.plan
   return writeRun(ws, ref, files, record)
 }
 
-function createRecord(project: string, ref: RunRef, input: RunInput, o: Pick<CreateRunOptions, 'executor' | 'predecessor' | 'by' | 'via' | 'now'>, definition: DefinitionRef, context: { repositories: RepoContext[] }, graph: RunGraph): RunRecord {
-  const executor: Executor = { name: o.executor.name.trim(), backend: o.executor.backend?.trim() || null }
+function createRecord(project: string, ref: RunRef, input: RunInput, o: Pick<CreateRunOptions, 'predecessor' | 'by' | 'via' | 'now'> & { executor: Executor }, definition: DefinitionRef, context: { repositories: RepoContext[] }, graph: RunGraph): RunRecord {
+  const executor: Executor = { name: o.executor.name.trim(), backend: o.executor.backend?.trim() || null, ...(o.executor.host ? { host: o.executor.host } : {}) }
   try {
     return operate(null, {
       op: 'run.create', project, workflow: ref.workflow, run: ref.run, input, executor, predecessor: o.predecessor ?? null,

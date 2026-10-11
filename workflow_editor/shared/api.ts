@@ -155,7 +155,8 @@ export interface RunSummary {
   ready?: string[]
   failed?: string[]
   input?: 'braindump' | 'request'
-  executor?: string
+  executor?: string // the agent identity
+  executorHost?: string // the execution host that launches it (p6)
   decision?: 'accepted' | 'rejected'
 }
 

@@ -18,6 +18,17 @@ export type DevdocsMode = typeof DEVDOCS_MODES[number]
 // `manual` leaves documents to explicit instructions.
 export const DOC_POLICIES = ['default', 'manual'] as const
 export type DocPolicy = typeof DOC_POLICIES[number]
+// How runs of a workflow are executed and requested (p6). `execution` names
+// the agent identity, the host's execution profile and project-relative
+// guides added to the common workflow contract; credentials stay in host
+// configuration. `intake.zulip: requests` lets the workflow's Zulip channel
+// accept request topics (docs/intake.md). Empty values: the host's defaults,
+// no intake.
+export const INTAKE_MODES = ['requests'] as const
+// A talk node may be the run's designated result confirmation (p6): the
+// person's confirmation there maps to the result decision (docs/runs.md).
+export const CONFIRMS = ['result'] as const
+export const PROFILE_PATTERN = /^[a-z0-9][a-z0-9_.-]{0,63}$/
 export type ApprovalKind = typeof APPROVAL_KINDS[number]
 
 // Stable identifiers: workflow IDs, node IDs and repository binding keys.
@@ -32,6 +43,7 @@ export interface WorkflowNode {
   description: string
   repositories: string[]
   workflow?: string
+  confirms?: string // 'result' on the result-confirmation talk (p6)
 }
 export interface Edge { from: string; to: string }
 export interface ApprovalRecord { digest: string; approver: string; at: string }
@@ -48,6 +60,8 @@ export interface Workflow {
   // Plain text so that an unsupported or missing value is representable and
   // reported by validation ('' = the file declares none).
   documentation: { policy: string }
+  execution: { agent: string; profile: string; guides: string[] }
+  intake: { zulip: string }
   approvals: Partial<Record<ApprovalKind, ApprovalRecord>>
   layout: { nodes: Record<string, Point> }
 }
@@ -81,7 +95,8 @@ export interface ShapeIssue { path: string; message: string }
 export function emptyWorkflow(id: string, name: string): Workflow {
   return {
     schema: WORKFLOW_SCHEMA, id, name, intent: '',
-    repositories: {}, nodes: {}, edges: [], documentation: { policy: 'default' }, approvals: {}, layout: { nodes: {} },
+    repositories: {}, nodes: {}, edges: [], documentation: { policy: 'default' },
+    execution: { agent: '', profile: '', guides: [] }, intake: { zulip: '' }, approvals: {}, layout: { nodes: {} },
   }
 }
 
@@ -157,6 +172,7 @@ export function workflowFromData(raw: unknown): { workflow: Workflow; issues: Sh
       repositories: stringList(value, 'repositories', path, issues),
     }
     if (value.workflow !== undefined && value.workflow !== null) node.workflow = text(value, 'workflow', path, issues)
+    if (value.confirms !== undefined && value.confirms !== null) node.confirms = text(value, 'confirms', path, issues)
     w.nodes[key] = node
   }
   list(raw, 'edges', '$', issues).forEach((value, i) => {
@@ -166,6 +182,9 @@ export function workflowFromData(raw: unknown): { workflow: Workflow; issues: Sh
   })
   const documentation = map(raw, 'documentation', '$', issues)
   w.documentation.policy = text(documentation, 'policy', '$.documentation', issues)
+  const execution = map(raw, 'execution', '$', issues)
+  w.execution = { agent: text(execution, 'agent', '$.execution', issues), profile: text(execution, 'profile', '$.execution', issues), guides: stringList(execution, 'guides', '$.execution', issues) }
+  w.intake = { zulip: text(map(raw, 'intake', '$', issues), 'zulip', '$.intake', issues) }
   const approvals = map(raw, 'approvals', '$', issues)
   for (const [key, value] of Object.entries(approvals)) {
     const path = `$.approvals.${key}`

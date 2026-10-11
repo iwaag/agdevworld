@@ -79,7 +79,11 @@ async function giteaOf(p: Parsed): Promise<Gitea | undefined> {
 }
 async function agdevCtx(p: Parsed): Promise<AgdevContext> {
   const gitea = await giteaOf(p)
-  return { registryFile: registryFile(p), area: areaDir(p), gitea, giteaProblem: gitea ? undefined : `no Gitea setting at ${giteaFile(p)}` }
+  // The execution host's state from this area's store, as the service reads
+  // it, so `wfe dashboard` and the browser say the same; no store, no executor.
+  const store = join(areaDir(p), '.local', 'exec', 'exec.sqlite')
+  const executor = existsSync(store) ? async () => { const x = new ExecStore({ registryFile: registryFile(p), area: areaDir(p) }); try { return x.executorState() } finally { x.close() } } : undefined
+  return { registryFile: registryFile(p), area: areaDir(p), gitea, giteaProblem: gitea ? undefined : `no Gitea setting at ${giteaFile(p)}`, executor }
 }
 const ownerName = (text: string | undefined, what: string) => {
   const m = /^([^/\s]+)\/([^/\s]+)$/.exec(text ?? '')

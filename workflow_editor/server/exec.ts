@@ -16,13 +16,14 @@ import { randomBytes } from 'node:crypto'
 import { mkdirSync } from 'node:fs'
 import { hostname } from 'node:os'
 import { join } from 'node:path'
-import { DatabaseSync } from 'node:sqlite'
+import type { DatabaseSync } from 'node:sqlite'
 import { holderOf, runKey, situation, type RunRecord, type RunRef } from '../shared/run.ts'
 import { assertWorkspaceAllowed, loadBoundary } from './boundary.ts'
 import type { Gitea } from './gitea.ts'
 import { baseline, publish, type Baseline, type RepoStep } from './publish.ts'
 import { loadRegistry, observe, type Registration } from './registry.ts'
 import { createRun, listRuns, readRun, runDir, runOp } from './runs.ts'
+import { named, openStore, transaction } from './sqlite.ts'
 import { RequestError, Workspace } from './workspace.ts'
 
 export const EXECUTOR = 'autolab'
@@ -60,29 +61,27 @@ export class ExecStore {
     this.ctx = ctx
     const dir = join(ctx.area, '.local', 'exec')
     mkdirSync(join(dir, 'logs'), { recursive: true })
-    this.db = new DatabaseSync(join(dir, 'exec.sqlite'))
-    this.db.exec('PRAGMA journal_mode = WAL; PRAGMA busy_timeout = 5000;')
-    this.db.exec(`
-      CREATE TABLE IF NOT EXISTS jobs (id INTEGER PRIMARY KEY, receipt TEXT UNIQUE NOT NULL, kind TEXT NOT NULL, workspace TEXT NOT NULL, workflow TEXT NOT NULL, run TEXT NOT NULL,
-        reason TEXT NOT NULL, state TEXT NOT NULL, created TEXT NOT NULL, claimed TEXT, attempt TEXT, note TEXT);
-      CREATE TABLE IF NOT EXISTS attempts (id TEXT PRIMARY KEY, job INTEGER NOT NULL, workspace TEXT NOT NULL, workflow TEXT NOT NULL, run TEXT NOT NULL, host TEXT NOT NULL,
-        pid INTEGER, state TEXT NOT NULL, began TEXT NOT NULL, ended TEXT, exit_code INTEGER, signal TEXT, outcome TEXT, log TEXT, stop_requested TEXT, backend TEXT, baseline TEXT);
-      CREATE TABLE IF NOT EXISTS checkpoints (id INTEGER PRIMARY KEY, workspace TEXT NOT NULL, workflow TEXT NOT NULL, run TEXT NOT NULL, kind TEXT NOT NULL, attempt TEXT,
-        state TEXT NOT NULL, created TEXT NOT NULL, updated TEXT NOT NULL, steps TEXT NOT NULL, error TEXT, baseline TEXT);
-      CREATE TABLE IF NOT EXISTS heartbeat (name TEXT PRIMARY KEY, at TEXT NOT NULL, pid INTEGER, detail TEXT);
-    `)
+    this.db = openStore('exec store', join(dir, 'exec.sqlite'), [{
+      version: 1, // p4/p5 tables (created before versions were kept; adopted as they are)
+      up: db => db.exec(`
+        CREATE TABLE IF NOT EXISTS jobs (id INTEGER PRIMARY KEY, receipt TEXT UNIQUE NOT NULL, kind TEXT NOT NULL, workspace TEXT NOT NULL, workflow TEXT NOT NULL, run TEXT NOT NULL,
+          reason TEXT NOT NULL, state TEXT NOT NULL, created TEXT NOT NULL, claimed TEXT, attempt TEXT, note TEXT);
+        CREATE TABLE IF NOT EXISTS attempts (id TEXT PRIMARY KEY, job INTEGER NOT NULL, workspace TEXT NOT NULL, workflow TEXT NOT NULL, run TEXT NOT NULL, host TEXT NOT NULL,
+          pid INTEGER, state TEXT NOT NULL, began TEXT NOT NULL, ended TEXT, exit_code INTEGER, signal TEXT, outcome TEXT, log TEXT, stop_requested TEXT, backend TEXT, baseline TEXT);
+        CREATE TABLE IF NOT EXISTS checkpoints (id INTEGER PRIMARY KEY, workspace TEXT NOT NULL, workflow TEXT NOT NULL, run TEXT NOT NULL, kind TEXT NOT NULL, attempt TEXT,
+          state TEXT NOT NULL, created TEXT NOT NULL, updated TEXT NOT NULL, steps TEXT NOT NULL, error TEXT, baseline TEXT);
+        CREATE TABLE IF NOT EXISTS heartbeat (name TEXT PRIMARY KEY, at TEXT NOT NULL, pid INTEGER, detail TEXT);
+      `),
+    }])
   }
   close() { this.db.close() }
   get logsDir() { return join(this.ctx.area, '.local', 'exec', 'logs') }
   get executor() { return this.ctx.executor ?? EXECUTOR }
 
-  private tx<T>(f: () => T): T {
-    this.db.exec('BEGIN IMMEDIATE')
-    try { const r = f(); this.db.exec('COMMIT'); return r } catch (e) { this.db.exec('ROLLBACK'); throw e }
-  }
-  private all<T>(sql: string, ...a: (string | number | null)[]): T[] { return this.db.prepare(sql).all(...a) as T[] }
-  private one<T>(sql: string, ...a: (string | number | null)[]): T | undefined { return this.db.prepare(sql).get(...a) as T | undefined }
-  private run(sql: string, ...a: (string | number | null)[]) { return this.db.prepare(sql).run(...a) }
+  private tx<T>(f: () => T): T { return transaction(this.db, f, 'exec store') }
+  private all<T>(sql: string, ...a: (string | number | null)[]): T[] { return named('exec store', 'a read', () => this.db.prepare(sql).all(...a) as T[]) }
+  private one<T>(sql: string, ...a: (string | number | null)[]): T | undefined { return named('exec store', 'a read', () => this.db.prepare(sql).get(...a) as T | undefined) }
+  private run(sql: string, ...a: (string | number | null)[]) { return named('exec store', 'a write', () => this.db.prepare(sql).run(...a)) }
 
   async workspace(id: string): Promise<Workspace> {
     const reg = (await loadRegistry(this.ctx.registryFile)).workspaces.find(w => w.id === id)

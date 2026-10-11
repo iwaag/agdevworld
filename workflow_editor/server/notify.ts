@@ -47,7 +47,7 @@ import type { CheckpointRow, ExecStore } from './exec.ts'
 import { git } from './git.ts'
 import { loadRegistry, observe } from './registry.ts'
 import { listRuns, readRun, runDir } from './runs.ts'
-import { openStore, transaction, type Migration } from './sqlite.ts'
+import { named, openStore, transaction, type Migration } from './sqlite.ts'
 import { RequestError, Workspace } from './workspace.ts'
 
 // <area>/zulip.json — system configuration, outside every repository. No
@@ -210,10 +210,10 @@ export class NotifyStore {
     this.db = openStore('notify store', join(dir, 'notify.sqlite'), MIGRATIONS)
   }
   close() { this.db.close() }
-  private all<T>(sql: string, ...a: (string | number | null)[]): T[] { return this.db.prepare(sql).all(...a) as T[] }
-  private one<T>(sql: string, ...a: (string | number | null)[]): T | undefined { return this.db.prepare(sql).get(...a) as T | undefined }
-  private run(sql: string, ...a: (string | number | null)[]) { return this.db.prepare(sql).run(...a) }
-  private tx<T>(f: () => T): T { return transaction(this.db, f) }
+  private all<T>(sql: string, ...a: (string | number | null)[]): T[] { return named('notify store', 'a read', () => this.db.prepare(sql).all(...a) as T[]) }
+  private one<T>(sql: string, ...a: (string | number | null)[]): T | undefined { return named('notify store', 'a read', () => this.db.prepare(sql).get(...a) as T | undefined) }
+  private run(sql: string, ...a: (string | number | null)[]) { return named('notify store', 'a write', () => this.db.prepare(sql).run(...a)) }
+  private tx<T>(f: () => T): T { return transaction(this.db, f, 'notify store') }
 
   config(): NotifyConfig | { problem: string } | null { return loadNotifyConfig(this.area) }
 

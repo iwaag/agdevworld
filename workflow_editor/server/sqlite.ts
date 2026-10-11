@@ -44,11 +44,29 @@ export function retryBusy<T>(f: () => T, deadline = Date.now() + OPEN_DEADLINE_M
 
 // One short write transaction. BEGIN IMMEDIATE takes the write lock at once
 // (waiting up to the busy timeout), so a transaction never fails half-way
-// for lack of the lock; it rolls back on any error.
-export function transaction<T>(db: DatabaseSync, f: () => T): T {
-  db.exec('BEGIN IMMEDIATE')
-  try { const r = f(); db.exec('COMMIT'); return r } catch (e) {
-    try { db.exec('ROLLBACK') } catch { /* already rolled back */ }
+// for lack of the lock; it rolls back on any error. It is not retried here:
+// whether repeating it is safe is the caller's to know. A SQLite failure is
+// reported with the store's name and its code.
+export function transaction<T>(db: DatabaseSync, f: () => T, store?: string): T {
+  let began = false
+  try {
+    db.exec('BEGIN IMMEDIATE')
+    began = true
+    const r = f()
+    db.exec('COMMIT')
+    return r
+  } catch (e) {
+    if (began) try { db.exec('ROLLBACK') } catch { /* already rolled back */ }
+    if (store && typeof (e as { errcode?: unknown }).errcode === 'number' && !(e instanceof StoreError)) throw new StoreError(store, began ? 'a write transaction' : 'taking the write lock', e)
+    throw e
+  }
+}
+
+// A statement outside a transaction (an autocommit write or a read): its
+// SQLite failure is reported with the store's name, what it was and its code.
+export function named<T>(store: string, operation: string, f: () => T): T {
+  try { return f() } catch (e) {
+    if (typeof (e as { errcode?: unknown }).errcode === 'number' && !(e instanceof StoreError)) throw new StoreError(store, operation, e)
     throw e
   }
 }

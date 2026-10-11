@@ -15,6 +15,7 @@ import { Gitea, GiteaError, loadGiteaSetting } from '../server/gitea.ts'
 import { REPO_CATEGORIES, type RepoCategory } from '../server/registry.ts'
 import { existsSync, readFileSync } from 'node:fs'
 import { ExecStore } from '../server/exec.ts'
+import { StoreError } from '../server/sqlite.ts'
 import { loadRegistry, observe, registerWorkspace, RegistryError, unregisterProject, workspaceAt, type Registration } from '../server/registry.ts'
 import { RequestError, Workspace } from '../server/workspace.ts'
 import { listRuns } from '../server/runs.ts'
@@ -865,6 +866,8 @@ export async function main(argv: string[]): Promise<number> {
   } catch (e) {
     if (e instanceof UsageError) { console.error(`wfe ${cmd}: ${e.message}\n\n${cmd === 'run' ? 'See: wfe run help <subcommand>' : HELP[cmd]}`); return 2 }
     if (e instanceof RequestError && !(e instanceof Refused)) e = new Refused(e.message, e.detail)
+    // A store that could not be opened or written: store, operation, SQLite code.
+    if (e instanceof StoreError) e = new Refused(e.message)
     if (e instanceof Refused || e instanceof RegistryError) {
       const detail = (e as Refused).detail
       if (json) console.log(JSON.stringify({ ok: false, error: e.message, detail }, null, 2))

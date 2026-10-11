@@ -70,7 +70,7 @@ write_launcher() {
   cat > "$AREA/bin/wfe.new" <<SH
 #!/bin/sh
 # wfe of the installed release (service/current), pinned to this area's registry
-# and to the port its service listens on (so `wfe status` finds it).
+# and to the port its service listens on (so wfe status finds it).
 # Written by agdevworld scripts/wfe-release.sh; the service runs the same release.
 WFE_REGISTRY="$AREA/registry.json" WFE_PORT="${URL##*:}" exec node "$SERVICE/current/cli/wfe.ts" "\$@"
 SH

@@ -39,7 +39,7 @@ const { Workspace } = await import('../server/workspace.ts')
 
 // ---- data ----------------------------------------------------------------------------
 
-const wf = (id: string, nodes: string, edges: string) => `schema: ag.workflow.v1\nid: ${id}\nname: ${id}\nintent: |\n  Check workflow ${id}.\nrepositories:\n  docs: {path: devdocs, access: editable}\nnodes:\n${nodes}edges:\n${edges}\n`
+const wf = (id: string, nodes: string, edges: string) => `schema: ag.workflow.v2\ndocumentation: {policy: manual}\nid: ${id}\nname: ${id}\nintent: |\n  Check workflow ${id}.\nrepositories:\n  docs: {path: devdocs, access: editable}\nnodes:\n${nodes}edges:\n${edges}\n`
 const node = (id: string, type: string, extra = '') => `  ${id}:\n    type: ${type}\n    name: ${id}\n    description: ${id} step as captured\n    repositories: [docs]\n${extra}`
 const SHIP = wf('ship', [node('survey', 'study'), node('build', 'do'), node('ask', 'talk'), node('handoff', 'do'), node('join', 'do')].join(''),
   '  - {from: survey, to: build}\n  - {from: survey, to: ask}\n  - {from: survey, to: handoff}\n  - {from: build, to: join}\n  - {from: ask, to: join}\n  - {from: handoff, to: join}')

@@ -31,7 +31,8 @@ before(async () => {
 })
 after(async () => { await rm(root, { recursive: true, force: true }) })
 
-const WF = `schema: ag.workflow.v1
+const WF = `schema: ag.workflow.v2
+documentation: {policy: manual}
 id: ship
 name: Ship
 intent: |

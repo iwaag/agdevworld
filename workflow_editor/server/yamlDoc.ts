@@ -98,6 +98,7 @@ const list = (item: Shape, block = false): Shape => ({ kind: 'list', item, block
 const approval = record({ digest: scalar, approver: scalar, at: scalar })
 export const WORKFLOW_SHAPE = record({
   schema: scalar, id: scalar, name: scalar, intent: scalar,
+  documentation: record({ policy: scalar }),
   repositories: dict(record({ path: scalar, access: scalar }, true)),
   nodes: dict(record({ type: scalar, name: scalar, description: scalar, repositories: list(scalar), workflow: scalar })),
   edges: list(record({ from: scalar, to: scalar }, true)),
@@ -256,7 +257,7 @@ export function workflowForWrite(w: Workflow): Record<string, unknown> {
   for (const [k, a] of Object.entries(w.approvals)) if (a) approvals[k] = a
   return {
     schema: w.schema, id: w.id, name: w.name, intent: w.intent,
-    repositories: w.repositories, nodes, edges: w.edges,
+    documentation: w.documentation, repositories: w.repositories, nodes, edges: w.edges,
     approvals, layout: w.layout,
   }
 }
@@ -277,7 +278,7 @@ export function renderProject(doc: Document, p: Project): string {
 
 export function newWorkflowText(w: Workflow): string {
   const doc = new Document({})
-  doc.commentBefore = ' Workflow definition (ag.workflow.v1). Edit here or in the workflow editor.'
+  doc.commentBefore = ' Workflow definition (ag.workflow.v2). Edit here or in the workflow editor.'
   return renderWorkflow(doc, w)
 }
 

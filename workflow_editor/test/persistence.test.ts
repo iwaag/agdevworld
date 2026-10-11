@@ -96,7 +96,7 @@ test('saves are atomic: no temporary files remain, and a failed rename leaves th
 
 test('malformed or unsupported content on disk is never overwritten by a save', async () => {
   const draft = await model('repo-setup.yaml')
-  for (const bad of ['schema: ag.workflow.v1\nnodes: {a: [unclosed\n', 'schema: ag.workflow.v1\nid: &x repo-setup\nname: *x\n']) {
+  for (const bad of ['schema: ag.workflow.v2\ndocumentation: {policy: manual}\nnodes: {a: [unclosed\n', 'schema: ag.workflow.v2\ndocumentation: {policy: manual}\nid: &x repo-setup\nname: *x\n']) {
     await writeFile(path('repo-setup.yaml'), bad)
     await assert.rejects(ws.saveWorkflow('repo-setup.yaml', draft), /cannot be read/)
     assert.equal(await readFile(path('repo-setup.yaml'), 'utf8'), bad)

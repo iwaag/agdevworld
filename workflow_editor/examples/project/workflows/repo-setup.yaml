@@ -1,5 +1,6 @@
 # Delegated by onboarding. Positions are stored, so no automatic layout.
-schema: ag.workflow.v1
+schema: ag.workflow.v2
+documentation: {policy: manual}
 id: repo-setup
 name: Repository Setup
 intent: |

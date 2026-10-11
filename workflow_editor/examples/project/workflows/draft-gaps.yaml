@@ -1,5 +1,6 @@
 # An incomplete draft with broken references, kept to show validation.
-schema: ag.workflow.v1
+schema: ag.workflow.v2
+documentation: {policy: manual}
 id: draft-gaps
 name: Draft With Gaps
 intent: |

@@ -26,7 +26,7 @@ runs (execution records) are in [docs/runs.md](docs/runs.md).
 
 | Path | Purpose |
 | --- | --- |
-| `shared/` | Models, validation, canonicalization and digests; `run.ts`, the run reducer (service, CLI and browser) |
+| `shared/` | Models, validation, canonicalization and digests; `compile.ts`, the effective execution graph of a documentation policy (p5); `run.ts`, the run reducer (service, CLI and browser) |
 | `server/` | Local service: YAML round-trip, Git inspection, file persistence, watching, project creation and registration; `runs.ts`, run folders and operations |
 | `cli/wfe.ts`, `cli/run.ts` | `wfe`, the command-line surface over the same modules (`wfe help`, `wfe run help`) |
 | `src/` | Browser UI (TypeScript, Vite, DOM cards and SVG edges) |

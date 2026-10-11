@@ -68,10 +68,10 @@ test('hello comes after the first snapshot; definition files created, changed an
   assert.ok(await s.until(() => s.events.some(e => e.event === 'hello')))
   assert.equal(watcher.gitKey('w') !== null, true, 'the Git fingerprint is taken before hello')
   const wf = join(dir, 'devdocs', 'workflows', 'a.yaml')
-  await writeFile(wf, 'schema: ag.workflow.v1\nid: a\nname: A\nintent: x\n')
+  await writeFile(wf, 'schema: ag.workflow.v2\ndocumentation: {policy: manual}\nid: a\nname: A\nintent: x\n')
   assert.ok(await s.until(() => has(s.events, d => d.kind === 'workflow' && d.file === 'a.yaml' && d.rev !== null) && has(s.events, d => d.kind === 'workflows')), 'creation: file and list events')
   s.events.length = 0
-  await writeFile(wf, 'schema: ag.workflow.v1\nid: a\nname: A2\nintent: x\n')
+  await writeFile(wf, 'schema: ag.workflow.v2\ndocumentation: {policy: manual}\nid: a\nname: A2\nintent: x\n')
   assert.ok(await s.until(() => has(s.events, d => d.kind === 'workflow' && d.file === 'a.yaml')), 'change')
   s.events.length = 0
   await unlink(wf)

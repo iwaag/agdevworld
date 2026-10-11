@@ -34,7 +34,8 @@ const registry = join(area, 'registry.json')
 const dir = join(area, 'pj-chk')
 const made = await createProject({ dir, id: 'chk', name: 'Exec check', intent: 'Checks.', goals: [], devdocs: 'directory', registryFile: registry })
 if (!made.ok) throw new Error(made.message)
-await writeFile(join(dir, 'devdocs', 'workflows', 'ship.yaml'), `schema: ag.workflow.v1
+await writeFile(join(dir, 'devdocs', 'workflows', 'ship.yaml'), `schema: ag.workflow.v2
+documentation: {policy: manual}
 id: ship
 name: Ship
 intent: |

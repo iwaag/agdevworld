@@ -2,7 +2,7 @@
 // well-formed and that its references resolve; it never judges whether the
 // graph fulfils the intent. Errors block approval; drafts may still be saved.
 import {
-  ACCESS_LEVELS, DEVDOCS_MODES, ID_PATTERN, NODE_TYPES, PROJECT_SCHEMA, WORKFLOW_SCHEMA, normalizeRepoPath,
+  ACCESS_LEVELS, DEVDOCS_MODES, DOC_POLICIES, ID_PATTERN, NODE_TYPES, PROJECT_SCHEMA, WORKFLOW_SCHEMA, normalizeRepoPath,
   type Issue, type Project, type Workflow,
 } from './model.ts'
 
@@ -51,7 +51,10 @@ export function findCycle(nodes: string[], next: (id: string) => string[]): stri
 
 export function validateWorkflow(w: Workflow, ctx: ValidationContext = {}): Issue[] {
   const issues: Issue[] = []
-  if (w.schema !== WORKFLOW_SCHEMA) issues.push(err('schema', w.schema ? `Unsupported schema "${w.schema}"; expected ${WORKFLOW_SCHEMA}.` : `Missing schema; expected ${WORKFLOW_SCHEMA}.`, { field: 'schema' }))
+  if (w.schema === 'ag.workflow.v1') issues.push(err('schema', `Schema ag.workflow.v1 is not read since p5: set schema to ${WORKFLOW_SCHEMA} and declare documentation: {policy: default | manual}.`, { field: 'schema' }))
+  else if (w.schema !== WORKFLOW_SCHEMA) issues.push(err('schema', w.schema ? `Unsupported schema "${w.schema}"; expected ${WORKFLOW_SCHEMA}.` : `Missing schema; expected ${WORKFLOW_SCHEMA}.`, { field: 'schema' }))
+  if (!w.documentation.policy) issues.push(err('documentation-policy', `documentation.policy is not declared; expected ${DOC_POLICIES.join(' or ')}.`, { field: 'documentation' }))
+  else if (!(DOC_POLICIES as readonly string[]).includes(w.documentation.policy)) issues.push(err('documentation-policy', `documentation.policy "${w.documentation.policy}" is not supported; expected ${DOC_POLICIES.join(' or ')}.`, { field: 'documentation' }))
   if (!w.id) issues.push(err('id-missing', 'Workflow id is missing.', { field: 'id' }))
   else if (!ID_PATTERN.test(w.id)) issues.push(err('id-invalid', `Workflow id "${w.id}" must match ${ID_PATTERN.source}.`, { field: 'id' }))
   if (!w.name.trim()) issues.push(warn('name-missing', 'Workflow name is empty.', { field: 'name' }))

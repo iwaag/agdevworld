@@ -1,4 +1,5 @@
-schema: ag.workflow.v1
+schema: ag.workflow.v2
+documentation: {policy: manual}
 id: anchored
 name: Anchored
 intent: uses an anchor

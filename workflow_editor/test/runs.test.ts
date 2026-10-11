@@ -170,7 +170,8 @@ test('a graph with a delegate node is refused by the reducer itself', () => {
 
 // ---- files -------------------------------------------------------------------------
 
-const wf = (id: string, nodes: string, edges: string) => `schema: ag.workflow.v1
+const wf = (id: string, nodes: string, edges: string) => `schema: ag.workflow.v2
+documentation: {policy: manual}
 id: ${id}
 name: ${id}
 intent: |

@@ -39,7 +39,7 @@ const run = (cwd: string, a: string[]) => gitOk(cwd, a, { env, config })
 function workflowText(id: string, intent: string, nodes = 4): string {
   const ids = Array.from({ length: nodes }, (_, i) => `step-${i + 1}`)
   return [
-    'schema: ag.workflow.v1', `id: ${id}`, `name: Workflow ${id}`, 'intent: |', `  ${intent}`,
+    'schema: ag.workflow.v2', 'documentation: {policy: manual}', `id: ${id}`, `name: Workflow ${id}`, 'intent: |', `  ${intent}`,
     'repositories:', '  docs: {path: devdocs, access: editable}', 'nodes:',
     ...ids.flatMap((n, i) => [`  ${n}:`, `    type: ${i % 2 ? 'do' : 'study'}`, `    name: Step ${i + 1}`, `    description: Bench step ${i + 1}.`, '    repositories: [docs]']),
     'edges:', ...ids.slice(1).map((n, i) => `  - {from: ${ids[i]}, to: ${n}}`), '',

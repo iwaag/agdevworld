@@ -32,8 +32,9 @@ export function intentProjection(w: Workflow) {
 }
 
 // Definition approval covers intent, repository bindings, node types, names,
-// descriptions, node repository bindings, delegate targets and edges.
-// Workflow id/name, approvals and layout are outside it.
+// descriptions, node repository bindings, delegate targets, edges and the
+// documentation policy (p5: it changes the executed graph). Workflow id/name,
+// approvals and layout are outside it.
 export function definitionProjection(w: Workflow) {
   const repositories: Record<string, unknown> = {}
   for (const [key, b] of Object.entries(w.repositories)) {
@@ -54,7 +55,7 @@ export function definitionProjection(w: Workflow) {
     .map(e => [e.from, e.to] as const)
     .filter(([from, to]) => { const k = canonicalJson([from, to]); if (seen.has(k)) return false; seen.add(k); return true })
     .sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : a[1] < b[1] ? -1 : a[1] > b[1] ? 1 : 0))
-  return { kind: 'ag.workflow.v1/definition', intent: normalizeText(w.intent), repositories, nodes, edges }
+  return { kind: 'ag.workflow.v2/definition', intent: normalizeText(w.intent), documentation: { policy: w.documentation.policy }, repositories, nodes, edges }
 }
 
 export function projection(kind: ApprovalKind, w: Workflow) {

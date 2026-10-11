@@ -205,7 +205,8 @@ function wfe(args: string[], cwd = area): Promise<{ code: number; stdout: string
   }, (e, stdout, stderr) => r({ code: e ? (e.code as number) : 0, stdout, stderr })))
 }
 
-const WORKFLOW = `schema: ag.workflow.v1
+const WORKFLOW = `schema: ag.workflow.v2
+documentation: {policy: manual}
 id: review
 name: Review
 intent: |

@@ -1,4 +1,5 @@
-schema: ag.workflow.v1
+schema: ag.workflow.v2
+documentation: {policy: manual}
 id: shape
 name: Wrong shape
 intent: nodes is a list, which the model cannot represent.

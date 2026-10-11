@@ -2,7 +2,7 @@
 // the authority; these are the editable projections of their supported fields.
 // See docs/contract.md for the file contract.
 
-export const WORKFLOW_SCHEMA = 'ag.workflow.v1'
+export const WORKFLOW_SCHEMA = 'ag.workflow.v2'
 export const PROJECT_SCHEMA = 'ag.project.v2'
 export const NODE_TYPES = ['study', 'do', 'delegate', 'talk'] as const
 export type NodeType = typeof NODE_TYPES[number]
@@ -13,6 +13,11 @@ export const APPROVAL_KINDS = ['intent', 'definition'] as const
 // (the default for new projects) or a repository of its own, as a submodule.
 export const DEVDOCS_MODES = ['directory', 'submodule'] as const
 export type DevdocsMode = typeof DEVDOCS_MODES[number]
+// Who decides when plans and reports are written (p5): `default` makes the
+// run itself plan, report each node and report the whole (shared/compile.ts);
+// `manual` leaves documents to explicit instructions.
+export const DOC_POLICIES = ['default', 'manual'] as const
+export type DocPolicy = typeof DOC_POLICIES[number]
 export type ApprovalKind = typeof APPROVAL_KINDS[number]
 
 // Stable identifiers: workflow IDs, node IDs and repository binding keys.
@@ -40,6 +45,9 @@ export interface Workflow {
   repositories: Record<string, RepositoryBinding>
   nodes: Record<string, WorkflowNode>
   edges: Edge[]
+  // Plain text so that an unsupported or missing value is representable and
+  // reported by validation ('' = the file declares none).
+  documentation: { policy: string }
   approvals: Partial<Record<ApprovalKind, ApprovalRecord>>
   layout: { nodes: Record<string, Point> }
 }
@@ -73,7 +81,7 @@ export interface ShapeIssue { path: string; message: string }
 export function emptyWorkflow(id: string, name: string): Workflow {
   return {
     schema: WORKFLOW_SCHEMA, id, name, intent: '',
-    repositories: {}, nodes: {}, edges: [], approvals: {}, layout: { nodes: {} },
+    repositories: {}, nodes: {}, edges: [], documentation: { policy: 'default' }, approvals: {}, layout: { nodes: {} },
   }
 }
 
@@ -125,6 +133,7 @@ function stringList(raw: Record<string, unknown>, key: string, path: string, iss
 export function workflowFromData(raw: unknown): { workflow: Workflow; issues: ShapeIssue[] } {
   const issues: ShapeIssue[] = []
   const w = emptyWorkflow('', '')
+  w.documentation.policy = '' // absent from the file: validation says so
   if (!isRecord(raw)) {
     issues.push({ path: '$', message: raw === null || raw === undefined ? 'empty document' : 'top level must be a mapping' })
     return { workflow: w, issues }
@@ -155,6 +164,8 @@ export function workflowFromData(raw: unknown): { workflow: Workflow; issues: Sh
     if (!isRecord(value)) { issues.push({ path, message: 'expected a mapping with from and to' }); return }
     w.edges.push({ from: text(value, 'from', path, issues), to: text(value, 'to', path, issues) })
   })
+  const documentation = map(raw, 'documentation', '$', issues)
+  w.documentation.policy = text(documentation, 'policy', '$.documentation', issues)
   const approvals = map(raw, 'approvals', '$', issues)
   for (const [key, value] of Object.entries(approvals)) {
     const path = `$.approvals.${key}`

@@ -1,5 +1,7 @@
 # Onboarding: all four node types, a parallel branch, a join, and a delegate.
-schema: ag.workflow.v1
+schema: ag.workflow.v2
+documentation:
+  policy: default # default | manual
 id: onboarding
 name: Service Onboarding
 intent: |

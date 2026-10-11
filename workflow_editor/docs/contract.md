@@ -1,4 +1,4 @@
-# Workflow editor file contract (p1, p2/pre1, p4)
+# Workflow editor file contract (p1, p2/pre1, p4, p5)
 
 The definition files are the authority. The editor reads and writes them; it
 keeps no database. A person or an agent can edit the same files with any text
@@ -44,14 +44,16 @@ goals:
   - One goal per item.
 ```
 
-## `ag.workflow.v1`
+## `ag.workflow.v2`
 
 ```yaml
-schema: ag.workflow.v1
+schema: ag.workflow.v2
 id: onboarding           # stable; delegates refer to it
 name: Service Onboarding # display only
 intent: |
   The author's intent. Everything else is reviewed against it.
+documentation:
+  policy: default        # default | manual (p5); see "Documentation policy"
 repositories:            # binding key -> project-relative path and access
   tools: {path: study/tools, access: readonly}
   runtime: {path: wedo/runtime, access: editable}
@@ -79,6 +81,56 @@ layout:                  # optional; absent positions are laid out automatically
 
 `ag.project.v1` (no storage mode) is not read: it is reported as an
 unsupported schema, and such a project is registered again under v2.
+
+`ag.workflow.v1` (no documentation policy) is not read as a valid
+definition since p5: it is reported as a `schema` error that says what to
+change (set `schema: ag.workflow.v2` and declare `documentation.policy`).
+It still loads in the editor, so the change can be made there. Runs created
+before p5 keep their v1 snapshot and their meaning ([runs.md](runs.md)).
+
+### Documentation policy (p5)
+
+`documentation.policy` says who decides when plans and reports are written.
+It is required: a missing or unknown value is the error
+`documentation-policy`, never a silent default. New workflows are created
+with `default`.
+
+| Policy | The run's effective graph |
+| --- | --- |
+| `default` | The authored graph plus generated documentation steps (below) |
+| `manual` | Exactly the authored graph. No plan or report is generated, required or prompted for; an explicit node description or the person can still ask for documents |
+
+The file keeps only what the author wrote: generated steps are never
+inserted into the YAML. One compiler (`shared/compile.ts`, version
+`ag.wfe-compile.v1`) produces the effective graph for both the editor's
+preview and run creation. For `study → implement → check`:
+
+```text
+_plan → study → _report.study → implement → _report.implement
+      → check → _report.check → _final-report
+```
+
+1. One plan talk (`_plan`) before every authored entry node.
+2. One report step (`_report.<node>`) after every authored node.
+3. Every authored dependency `A → B` becomes `A → _report.A → B`: a branch's
+   report gates its own successors, and a join waits for every predecessor's
+   report.
+4. One final report (`_final-report`) after the reports of all authored
+   terminal nodes.
+5. Generated steps get no reports of their own.
+
+Generated ids start with `_`, which no authored id can (see Identifiers), so
+they never collide. Each generated step records its purpose, the authored
+node it reports on (`for`), its document (`plan.md`, `report-<node>.md`,
+`report.md`, run-relative) and the instructions the executing agent is
+given. These step kinds are internal: they are not in the node palette and
+cannot be authored.
+
+The compiler refuses what is not an executable graph instead of letting
+generated steps make it look executable: no nodes (`nodes-empty`), an edge
+to an unknown node or to itself, a cycle, a malformed node id, or a missing
+or unsupported policy. A delegate node compiles for the preview; runs of it
+are still refused at creation.
 
 ### devdocs storage modes (p4)
 
@@ -165,7 +217,8 @@ fulfils its intent.
 
 | Code | Severity | Meaning |
 | --- | --- | --- |
-| `schema` | error | `schema` is not `ag.workflow.v1` |
+| `schema` | error | `schema` is not `ag.workflow.v2` (a v1 file is told what to add) |
+| `documentation-policy` | error | `documentation.policy` missing or not `default` / `manual` |
 | `id-missing`, `id-invalid`, `id-duplicate` | error | workflow ID absent, malformed, or used by another file |
 | `intent-missing` | error | empty intent |
 | `name-missing` | warning | empty display name |
@@ -215,9 +268,9 @@ Two independent approval records, each storing the approved digest, the
 declared approver and the time:
 
 1. **Intent approval** covers `intent`.
-2. **Definition approval** covers intent, repository bindings (key, path,
-   access), node IDs, types, names, descriptions, node repository bindings,
-   delegate targets, and edges.
+2. **Definition approval** covers intent, the documentation policy,
+   repository bindings (key, path, access), node IDs, types, names,
+   descriptions, node repository bindings, delegate targets, and edges.
 
 Excluded from both digests: workflow `id` and `name`, approvals, layout,
 fields outside the contract, comments, key order and YAML formatting.
@@ -225,8 +278,8 @@ fields outside the contract, comments, key order and YAML formatting.
 Digest = `sha256:` + hex SHA-256 of the UTF-8 canonical JSON of a projection:
 
 - Intent: `{"intent": T(intent), "kind": "ag.workflow.v1/intent"}`.
-- Definition: `{"edges": [[from, to], …], "intent": T(intent), "kind":
-  "ag.workflow.v1/definition", "nodes": {id: {"description": T, "name": T,
+- Definition: `{"documentation": {"policy": …}, "edges": [[from, to], …],
+  "intent": T(intent), "kind": "ag.workflow.v2/definition", "nodes": {id: {"description": T, "name": T,
   "repositories": [sorted, unique], "type": …, "workflow": id or null}},
   "repositories": {key: {"access": …, "path": normalized path}}}`; edges are
   de-duplicated and sorted by `from`, then `to`.
@@ -240,8 +293,11 @@ Digest = `sha256:` + hex SHA-256 of the UTF-8 canonical JSON of a projection:
 A record is **approved** when its digest equals the current content's digest,
 **stale** when it differs (the record is kept, not erased), and the kind is
 **unapproved** when there is no record. Changing intent makes both stale; a
-node description or edge change makes definition stale; a layout change makes
-neither stale.
+node description, edge or documentation policy change makes definition
+stale; a layout change makes neither stale. The definition projection's kind
+changed from `ag.workflow.v1/definition` to `ag.workflow.v2/definition` in
+p5, so every definition approval recorded before p5 reads as stale; the
+intent projection is unchanged.
 
 Approvals are about the definition. They are not permission to execute,
 acceptance of results, or an attestation of repository contents, and they do

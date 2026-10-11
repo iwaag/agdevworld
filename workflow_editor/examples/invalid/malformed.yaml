@@ -1,4 +1,5 @@
-schema: ag.workflow.v1
+schema: ag.workflow.v2
+documentation: {policy: manual}
 id: broken
 nodes:
   a: {type: do, description: "unterminated

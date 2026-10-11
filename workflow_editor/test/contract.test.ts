@@ -172,7 +172,8 @@ test('an unchanged document round-trips byte for byte', async () => {
 
 test('edits keep comments, unrelated fields and flow style', async () => {
   const text = `# heading comment
-schema: ag.workflow.v1
+schema: ag.workflow.v2
+documentation: {policy: manual}
 id: keep
 name: Keep  # trailing comment
 owner: someone-else   # not in the model
@@ -220,7 +221,7 @@ edges:
 
 test('a new workflow file reads back as the same model', async () => {
   const w: Workflow = {
-    schema: 'ag.workflow.v1', id: 'fresh', name: 'Fresh', intent: 'Line one.\nLine two.\n',
+    schema: 'ag.workflow.v2', documentation: { policy: 'default' }, id: 'fresh', name: 'Fresh', intent: 'Line one.\nLine two.\n',
     repositories: { tools: { path: 'study/tools', access: 'readonly' } },
     nodes: { s: { type: 'study', name: 'S', description: 'look', repositories: ['tools'] } },
     edges: [], approvals: {}, layout: { nodes: {} },

@@ -207,10 +207,18 @@ test('a published checkpoint answers earlier unpublished details; failures and r
   await rec({ op: 'question.ask', question: '', node: '_plan', text: 'Agree?', to: 'Test Person' })
   let d = await claim(n)
   assert.match(d[0].content, /plan\.md \(not yet published/)
-  post(n, d[0], 2001)
+  // Its send is uncertain; the publication happens before the retry.
+  n.begin(d[0].delivery, d[0].claim, { destination: d[0].destination })
+  n.fail(d[0].delivery, d[0].claim, 'timed out', true)
+  const frozen = d[0]
   // The publication fails first, then succeeds.
   const steps = JSON.stringify([{ repo: '.', include: [], excluded: [], conflicts: [], error: 'remote unreachable' }])
   a.exec.db.prepare('INSERT INTO checkpoints (id, workspace, workflow, run, kind, attempt, state, created, updated, steps, error) VALUES (1, ?, \'ship\', \'run-001\', \'after attempt\', NULL, \'failed\', ?, ?, ?, ?)').run(a.ws.reg.id, new Date().toISOString(), new Date().toISOString(), steps, 'git push failed: remote unreachable')
+  n.db.prepare('UPDATE deliveries SET next_try = NULL WHERE id = ?').run(frozen.delivery)
+  d = await claim(n)
+  assert.equal(d[0].delivery, frozen.delivery, 'the uncertain question goes first; the publication notice waits behind it')
+  assert.equal(d[0].content, frozen.content, 'its text is as frozen')
+  n.acknowledge(d[0].delivery, d[0].claim, { messageId: 2001, destination: d[0].destination, found: true })
   d = await claim(n)
   assert.deepEqual(d[0].events, ['demo/ship/run-001#cp1:failed'])
   assert.match(d[0].content, /Publication failed.*remote unreachable/)
@@ -224,7 +232,7 @@ test('a published checkpoint answers earlier unpublished details; failures and r
   assert.deepEqual(d.map(x => x.events).flat(), ['demo/ship/run-001#cp1:recovered'])
   post(n, d[0], 2003)
   d = await claim(n)
-  assert.deepEqual(d[0].events, ['demo/ship/run-001#cp1:published'])
+  assert.deepEqual(d[0].events, ['demo/ship/run-001#cp1:published'], 'the newly readable plan is announced after, not written into the earlier message')
   assert.match(d[0].content, new RegExp(`Details published.*\\[plan\\.md\\]\\(http://gitea\\.example/developer/pj-demo/src/commit/${head}/devdocs/runs/ship/run-001/plan\\.md\\)`))
   assert.equal(d[0].marker, `ref ship/run-001 cp1:published ${head.slice(0, 7)}`, 'the follow-up\'s marker names its own event')
   assert.match(n.deliveries('demo/ship/run-001')[0].unpublished ?? '', /plan\.md/, 'the frozen record keeps what the first message called unpublished')

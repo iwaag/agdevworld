@@ -478,6 +478,21 @@ export class NotifyStore {
     const current = this.active(r.key)
     if (current) {
       if (current.state === 'unresolved') return null // reported by problems()
+      // Its events were sent by something else meanwhile (a release rolled
+      // back to and forward again): recorded, never sent a second time.
+      const members = JSON.parse(current.events) as string[]
+      const elsewhere = this.all<OutboxRow>(`SELECT * FROM outbox WHERE id IN (SELECT value FROM json_each(?)) AND state = 'sent'`, current.events)
+      if (current.kind === 'message' && elsewhere.length) {
+        const ids = [...new Set(elsewhere.map(o => o.message_id))]
+        const t = now()
+        if (elsewhere.length === members.length && ids.length === 1 && ids[0] !== null) {
+          this.run(`UPDATE deliveries SET state = 'sent', message_id = ?, sent_at = ?, claim = NULL, checked = 'its events were recorded as sent outside this delivery', updated = ? WHERE id = ? AND state = ?`, ids[0], t, t, current.id, current.state)
+          return null
+        }
+        this.run(`UPDATE deliveries SET state = 'unresolved', claim = NULL, problem = ?, updated = ? WHERE id = ? AND state = ?`,
+          `${elsewhere.length} of its ${members.length} event(s) were recorded as sent outside this delivery (messages ${ids.join(', ')}); check the topic, then \`wfe notify resolve ${current.id}\``, t, current.id, current.state)
+        return null
+      }
       if (current.state === 'failed' && current.next_try && Date.parse(current.next_try) > at.getTime()) return null
       const dest = this.destination(r) ?? (current.stream_id ? { streamId: current.stream_id, channel: current.channel!, topic: current.topic! } : null)
       if (!dest) return null

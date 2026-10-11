@@ -50,7 +50,11 @@ function holder(file: string, release: string): Promise<() => Promise<void>> {
     for (const end = Date.now() + 60000; !existsSync(process.argv[2]) && Date.now() < end; ) await new Promise(r => setTimeout(r, 5))
     db.exec('ROLLBACK'); db.close()`
   const p = spawn(process.execPath, ['--input-type=module', '-e', code, file, release], { stdio: ['ignore', 'pipe', 'inherit'] })
-  return new Promise(resolve => p.stdout.once('data', () => resolve(async () => { await writeFile(release, ''); await new Promise(r => p.on('exit', r)) })))
+  const exited = new Promise(r => p.once('exit', r)) // listened to from the start: an early exit is not missed
+  return new Promise((resolve, reject) => {
+    p.stdout.once('data', () => resolve(async () => { await writeFile(release, ''); await exited }))
+    void exited.then(() => reject(new Error('the lock holder exited before holding the lock')))
+  })
 }
 
 async function area(): Promise<string> {

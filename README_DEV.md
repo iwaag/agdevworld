@@ -449,3 +449,17 @@ imported commit).
   executor against `WFE_PACKAGE` (default: this `workflow_editor/`; an
   installed release works too).
 
+### Plans, reports and Zulip coordination (`workflow_editor` p5)
+
+- Workflows are `ag.workflow.v2` and declare `documentation.policy`
+  (`default` | `manual`). Under `default` a run gets a plan talk
+  (`plan.md`, agreed with the person before any work), a report step per
+  node (`report-<node>.md`) and a final report (`report.md`), compiled by
+  `workflow_editor/shared/compile.ts` and frozen into the run; steps
+  complete only on a checked, nonempty document. `manual` adds nothing.
+- Zulip coordination: folder `wf-<project>`, channel
+  `wf-<project>.<workflow>`, topic per run. The editor decides what is owed
+  (`server/notify.ts`, `wfe notify`); autolab's `agautolab.wfnotify` posts,
+  on a thread of the executor. Configuration is `<area>/zulip.json`
+  (no credentials). Answers are recorded in agdevworld, never from Zulip.
+  Contract: `workflow_editor/docs/runs.md`.

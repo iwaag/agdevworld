@@ -100,6 +100,10 @@ that writes its own request — rewording a person's input, or delegating — us
 (`{kind: "run", workflow, run, node}`), a project file (`{kind: "file",
 path}`), or a free reference such as a conversation (`{kind: "note", text}`).
 An entrance for requests from external agents is not part of p4.
+A braindump posted in a Zulip request topic (p6, [intake.md](intake.md))
+records where it came from as `input.source` (realm, message, channel,
+topic, sender, time), and `run.create` carries the post's receipt
+`zulip:<realm>:<message id>`: the same post never creates a second run.
 When a derived request was built from a person's input, `--original <file>`
 keeps that input beside it as `original-input.md`. No tool writes a human
 author it was not given.
@@ -305,6 +309,17 @@ thing at a time; asking from an already waiting node is refused.
 | `answer` (text; `from` who gave it, `by` who recorded it) | none — the node keeps waiting. Several answers may be recorded; each names its question. An agent relaying the person's reply from the IDE records `from` = the person, `by` = itself |
 | `take-up` (who took it up, which answer) | the node waiting on that question resumes `running` |
 | `withdraw` (reason) | the question is closed without an answer; a node waiting on it resumes `running` |
+
+An answer from Zulip (p6) records the person as `from`, the post as
+`source` and the post's receipt; `via` is `zulip`.
+
+### Additional instructions (p6)
+
+`instruction.receive` records a person's further input that is not an
+answer: `instructions.<id>` (`i1`, `i2`, … in order) with its text, `from`,
+`source`, the nodes recorded as running when it arrived (`during`) and
+`ack: null`. It changes no node and is refused only on a cancelled run.
+Acknowledgment and the node-boundary rules are below (*Node boundaries*).
 
 An answer to another question leaves a node waiting. Recording an answer is
 not taking it up, taking it up is not completing the node, and none of these

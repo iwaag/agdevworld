@@ -58,6 +58,7 @@ export interface NotifyConfig {
   viewBase: string | null // agdevworld's editor as remote readers reach it (…/wfe/); null: none is reachable
   since: string // runs created before this are not announced (no backfill)
   person?: string // who decides results, as messages name them
+  intake?: unknown // requests from Zulip (p6): read by server/intake.ts loadIntakeConfig
 }
 
 export function loadNotifyConfig(area: string): NotifyConfig | { problem: string } | null {
@@ -69,7 +70,7 @@ export function loadNotifyConfig(area: string): NotifyConfig | { problem: string
       return { problem: `${file} needs {"enabled": bool, "zulipUrl": text, "since": ISO time, "viewBase": URL or null}` }
     }
     if (raw.viewBase && /^https?:\/\/(localhost|127\.|\[::1\])/.test(raw.viewBase)) return { problem: `${file}: viewBase ${raw.viewBase} is reachable only on this host; set null or a URL remote readers reach` }
-    return { enabled: raw.enabled, zulipUrl: raw.zulipUrl, viewBase: raw.viewBase ?? null, since: raw.since, person: raw.person }
+    return { enabled: raw.enabled, zulipUrl: raw.zulipUrl, viewBase: raw.viewBase ?? null, since: raw.since, person: raw.person, ...(raw.intake !== undefined ? { intake: raw.intake } : {}) }
   } catch (e) {
     return { problem: `${file} cannot be read: ${(e as Error).message}` }
   }
@@ -826,6 +827,12 @@ export class NotifyStore {
 
   recordRunProblem(runKeyText: string, problem: string) {
     this.run('UPDATE runs SET problem = ?, updated = ? WHERE key = ?', problem, now(), runKeyText)
+  }
+
+  // Which request-topic message carried a question (p6 step 6 delivers
+  // questions to the request topic); until then, none.
+  postedLookup(): (requestKey: string, ref: RunRef, question: string) => number | null {
+    return () => null
   }
 
   // ---- views -----------------------------------------------------------------------------

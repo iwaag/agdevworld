@@ -4,6 +4,7 @@
 // See docs/runs.md for the contract.
 import { canonicalJson } from './canonical.ts'
 import type { EffectiveGraph, StepSpec } from './compile.ts'
+import type { SourceRef } from './intake.ts'
 import { ID_PATTERN, normalizeRepoPath, type Edge } from './model.ts'
 
 export const RUN_SCHEMA = 'ag.workflow-run.v2'
@@ -42,6 +43,7 @@ export interface RunInput {
   onBehalfOf?: string
   entrustedBy?: EntrustRef
   original?: string // run-relative file keeping the input a request was derived from
+  source?: SourceRef // where the person's words were posted (p6: the Zulip post that became the braindump)
 }
 // `name` is the agent identity the run is performed as (p6: the workflow's
 // execution.agent); `host` the execution host that launches it, when that is
@@ -88,7 +90,22 @@ export interface NodeRecord {
   agreement?: { question: string } // the plan step: the question whose taken-up answer agreed to that document
 }
 // `from` gave the answer; `by` recorded it (the same unless someone relays it).
-export interface Answer { text: string; from: string; by: string; at: string; via: string }
+export interface Answer { text: string; from: string; by: string; at: string; via: string; source?: SourceRef }
+// An additional instruction (p6): the person's further input to a run that
+// is not an answer. Receiving it changes no node; the executing attempt
+// acknowledges it at a node boundary with what it will do.
+export interface Instruction {
+  id: string
+  text: string
+  from: string // the person whose words these are
+  by: string // who recorded them
+  at: string
+  via: string
+  source?: SourceRef
+  during: string[] // nodes recorded as running when it arrived
+  ack: { by: string; at: string; attempt: string | null; response: string; note: string } | null
+}
+export const INSTRUCTION_ID = /^i[0-9]{1,6}$/
 export interface Question {
   id: string
   node: string | null
@@ -141,6 +158,7 @@ export interface RunState {
   context: { repositories: RepoContext[] }
   nodes: Record<string, NodeRecord>
   questions: Record<string, Question>
+  instructions?: Record<string, Instruction> // present once the first one arrives (p6)
   artifacts: Artifact[]
   decisions: Decision[]
   cancelled: { reason: string; at: string; by: string } | null
@@ -163,7 +181,8 @@ export type OpInput =
   | { op: 'node.fail'; node: string; reason: string }
   | { op: 'node.cancel'; node: string; reason: string }
   | { op: 'question.ask'; question: string; node?: string; text: string; to: string; document?: DocumentEvidence }
-  | { op: 'question.answer'; question: string; text: string; from?: string }
+  | { op: 'question.answer'; question: string; text: string; from?: string; source?: SourceRef }
+  | { op: 'instruction.receive'; instruction?: string; text: string; from: string; source?: SourceRef }
   | { op: 'question.take-up'; question: string; answer?: number }
   | { op: 'question.withdraw'; question: string; reason: string }
   | { op: 'artifact.attach'; path: string; node?: string; title?: string }
@@ -175,7 +194,7 @@ export type OpInput =
   | { op: 'run.resume'; reason: string }
 
 export const OPS = ['run.create', 'node.start', 'node.progress', 'node.wait', 'node.complete', 'node.fail', 'node.cancel',
-  'question.ask', 'question.answer', 'question.take-up', 'question.withdraw', 'artifact.attach', 'run.cancel', 'run.decide',
+  'question.ask', 'question.answer', 'question.take-up', 'question.withdraw', 'instruction.receive', 'artifact.attach', 'run.cancel', 'run.decide',
   'attempt.begin', 'attempt.end', 'run.stop', 'run.resume'] as const
 // The executor's own reports. While an attempt is open they must carry its
 // id (`attempt`), so a stopped or superseded attempt cannot write into the
@@ -190,6 +209,7 @@ export interface EntryMeta { attempt?: string; receipt?: string }
 export interface Change {
   nodes?: Record<string, [NodeState | null, NodeState]>
   question?: [string | null, string]
+  instruction?: [string | null, string]
   execution?: [ExecutionState | null, ExecutionState]
   hold?: [HoldKind | null, HoldKind | null]
 }
@@ -299,6 +319,14 @@ function evidence(v: unknown, what: string, expected: string): DocumentEvidence 
   return { path: expected, sha256: d.sha256 as string, bytes: d.bytes as number }
 }
 
+export function sourceOf(v: unknown): SourceRef {
+  if (!isObj(v)) return fail('shape', 'a source must be an object')
+  const o = v as Record<string, unknown>
+  const int = (x: unknown, what: string) => (typeof x === 'number' && Number.isInteger(x) && x > 0 ? x : fail('shape', `source.${what} must be a positive integer`))
+  if (o.kind !== 'zulip') fail('shape', 'source.kind must be zulip')
+  return { kind: 'zulip', realm: text(o.realm, 'source.realm'), message: int(o.message, 'message'), stream: int(o.stream, 'stream'), topic: text(o.topic, 'source.topic'), sender: int(o.sender, 'sender'), senderName: text(o.senderName, 'source.senderName'), at: text(o.at, 'source.at') }
+}
+
 function attemptSettings(v: unknown): AttemptSettings {
   if (!isObj(v)) return fail('shape', 'attempt settings must be an object')
   const o = v as Record<string, unknown>
@@ -339,6 +367,7 @@ export function apply(prev: RunState | null, e: HistoryEntry | (OpInput & EntryM
     if (eff && canonicalJson({ nodes: eff.nodes, edges: eff.edges }) !== canonicalJson({ nodes: graph.nodes, edges: graph.edges })) fail('graph', 'the graph followed differs from the frozen effective graph')
     const delegates = delegateNodes(graph)
     if (delegates.length) fail('delegate-unsupported', `the workflow has delegate node${delegates.length === 1 ? '' : 's'} ${delegates.join(', ')}; delegate execution is not supported, so no run of it is created`)
+    if (e.input?.source !== undefined) sourceOf(e.input.source) // checked, recorded as given
     const nodes = Object.fromEntries(ids.map(id => [id, emptyNode()]))
     const state: RunState = {
       schema: RUN_SCHEMA, project: e.project, workflow: e.workflow, run: e.run, created: at,
@@ -478,7 +507,9 @@ export function apply(prev: RunState | null, e: HistoryEntry | (OpInput & EntryM
       const q = question(e.question)
       if (q.withdrawn) fail('question-closed', `question ${q.id} was withdrawn`)
       if (q.takenUp) fail('question-closed', `the answer to ${q.id} was already taken up; ask a new question`)
-      q.answers.push({ text: text(e.text, 'the answer'), from: optText(e.from, 'from').trim() || by, by, at, via: e.via })
+      const answer: Answer = { text: text(e.text, 'the answer'), from: optText(e.from, 'from').trim() || by, by, at, via: e.via }
+      if (e.source !== undefined) answer.source = sourceOf(e.source)
+      q.answers.push(answer)
       change.question = [q.id, 'answered']
       if (q.node) s.nodes[q.node].updated = at
       break
@@ -502,6 +533,19 @@ export function apply(prev: RunState | null, e: HistoryEntry | (OpInput & EntryM
       q.withdrawn = { by, at, reason: text(e.reason, 'the reason') }
       change.question = [q.id, 'withdrawn']
       resumeFrom(q)
+      break
+    }
+    case 'instruction.receive': {
+      // Received, not read: no node changes, nothing is interrupted.
+      live()
+      const all = s.instructions ?? {}
+      const id = e.instruction || `i${Object.keys(all).length + 1}`
+      if (!INSTRUCTION_ID.test(id)) fail('shape', `instruction id "${id}" must match ${INSTRUCTION_ID.source}`)
+      if (id in all) fail('instruction-exists', `instruction ${id} already exists`)
+      const ins: Instruction = { id, text: text(e.text, 'the instruction'), from: text(e.from, 'whose instruction it is (from)'), by, at, via: e.via, during: Object.keys(s.nodes).filter(n => s.nodes[n].state === 'running').sort(), ack: null }
+      if (e.source !== undefined) ins.source = sourceOf(e.source)
+      s.instructions = { ...all, [id]: ins }
+      change.instruction = [null, id]
       break
     }
     case 'artifact.attach': {

@@ -36,7 +36,7 @@ class Refused extends Error { detail?: unknown; constructor(m: string, detail?: 
 // ---- arguments ---------------------------------------------------------------
 
 interface Parsed { positional: string[]; opts: Map<string, string[]>; flags: Set<string> }
-const FLAGS = new Set(['json', 'help', 'resume', 'h', 'new', 'history', 'no-gitea', 'reuse', 'lost', 'uncertain', 'found', 'complete', 'not-posted'])
+const FLAGS = new Set(['json', 'help', 'resume', 'h', 'new', 'history', 'no-gitea', 'reuse', 'lost', 'uncertain', 'found', 'complete', 'not-posted', 'ok'])
 function parse(argv: string[]): Parsed {
   const p: Parsed = { positional: [], opts: new Map(), flags: new Set() }
   for (let i = 0; i < argv.length; i++) {
@@ -279,6 +279,25 @@ publish <checkpoint id>           retry a publication; finished steps are kept
 status [<run>]                    the executor, or one run's attempts, jobs and
                                   checkpoints
 State is <area>/.local/exec/exec.sqlite (this host only).`,
+  intake: `wfe intake <subcommand> …   (requests from Zulip; the transport's interface, protocol 1)
+
+status                            configuration, channel cursors, the transport's
+                                  last pass, posts by stage, requests, problems
+messages [--request <key>] [--limit <n>]
+                                  posts as received and what became of each
+due                               the routed workflow channels and their cursors (JSON)
+receive --stream <id> --through <id> --messages-json <file|->
+                                  store posts of one channel and move its cursor
+                                  past --through in one transaction; a post
+                                  already stored is not stored again
+process                           settle what can be settled, in message order:
+                                  classify, apply through the run operations
+                                  (by the post's receipt), queue what follows
+transport --ok | --error <text> [--detail <text>]
+                                  the transport's last pass, shown to people
+retry [<message id>]              try failed posts again now, from the stage
+                                  that failed
+State is <area>/.local/intake/intake.sqlite; the rules are docs/intake.md.`,
   notify: `wfe notify <subcommand> …   (Zulip coordination; the transport's interface, protocol 2)
 
 status [<run>]                    targets (folders, channels), runs, the sender,
@@ -393,6 +412,7 @@ Projects and workspaces
   repo register|create|add  shared repositories on Gitea, and adding one to this project
   dashboard                 every project and shared repository, with where each fact was read
   request <workflow> …      a person's request to the executor (autolab): a run, queued
+  intake <subcommand>       requests from Zulip: status, messages, receive, process … (autolab fetches)
   exec <subcommand>         the executor's interface: claim, started, finished, stops, reconcile …
   notify <subcommand>       Zulip coordination: status, deliveries, claim, resolve … (autolab delivers)
 
@@ -752,6 +772,68 @@ async function cmdNotify(p: Parsed): Promise<number> {
   throw new UsageError('wfe notify status|outbox|deliveries|due|claim|begin|sent|failed|legacy|resolve|import-inflight|sender|protocol|target|moved|run-problem|reset')
 }
 
+// Requests from Zulip: the inbox of this host, for the transport (autolab)
+// and for people. Rules are in shared/intake.ts and server/intake.ts.
+async function cmdIntake(p: Parsed): Promise<number> {
+  const [sub, arg] = p.positional
+  const { IntakeStore, INTAKE_PROTOCOL, loadIntakeConfig } = await import('../server/intake.ts')
+  const { NotifyStore } = await import('../server/notify.ts')
+  const x = await openExec(p)
+  const n = new NotifyStore({ area: areaDir(p), registryFile: registryFile(p), exec: x })
+  const i = new IntakeStore({ area: areaDir(p), registryFile: registryFile(p), exec: x, notify: n, posted: n.postedLookup() })
+  const num = (k: string) => { const v = opt(p, k); if (v === undefined || !/^\d+$/.test(v)) throw new UsageError(`--${k} <integer> is required`); return Number(v) }
+  try {
+    switch (sub) {
+      case 'protocol': json = true; out('', { protocol: INTAKE_PROTOCOL }); return 0
+      case 'due': json = true; out('', await i.due()); return 0
+      case 'receive': {
+        json = true
+        const cfg = loadIntakeConfig(areaDir(p))
+        if ('disabled' in cfg) throw new Refused(cfg.disabled)
+        const file = opt(p, 'messages-json'); if (!file) throw new UsageError('--messages-json <file|-> is required')
+        let messages: unknown
+        try { messages = JSON.parse(readFileSync(file === '-' ? 0 : resolve(file), 'utf8')) } catch (e) { throw new UsageError(`--messages-json: ${(e as Error).message}`) }
+        if (!Array.isArray(messages)) throw new UsageError('--messages-json must hold a JSON list')
+        out('', { ok: true, ...i.receive({ realm: cfg.realm, streamId: num('stream'), through: num('through'), messages }) }); return 0
+      }
+      case 'process': { const notes = await i.process(); out(notes.join('\n') || 'Nothing to settle.', { ok: true, notes }); return 0 }
+      case 'transport': {
+        const error = opt(p, 'error')
+        if (!p.flags.has('ok') && !error) throw new UsageError('transport --ok | --error <text>')
+        i.transportResult({ ok: !error, error, detail: opt(p, 'detail') }); out('Recorded.', { ok: true }); return 0
+      }
+      case 'retry': {
+        const cfg = loadIntakeConfig(areaDir(p))
+        if ('disabled' in cfg) throw new Refused(cfg.disabled)
+        const k = i.retry(cfg.realm, arg ? Number(arg) : undefined); out(`${k} failed post(s) will be tried at the next pass.`, { ok: true, count: k }); return 0
+      }
+      case 'messages': {
+        const rows = i.messages({ request: opt(p, 'request'), limit: opt(p, 'limit') ? num('limit') : undefined })
+        out(rows.length ? rows.map(m => `${String(m.id).padStart(7)} ${m.state.padEnd(10)} ${m.topic} — ${m.sender_name}${m.sender_bot ? ' (bot)' : ''}: ${m.content.replace(/\s+/g, ' ').slice(0, 60)}${m.classification ? `\n          ${m.classification}` : m.route ? `\n          ${m.route}` : ''}${m.applied ? ` → ${m.applied}` : ''}${m.notice ? ` reply: ${m.notice}` : ''}${m.error ? `\n          error: ${m.error}` : ''}`).join('\n') : 'No posts.', rows)
+        return 0
+      }
+      case 'status': {
+        const cfg = loadIntakeConfig(areaDir(p))
+        const due = await i.due(), st = i.status()
+        out([
+          `Configuration: ${'disabled' in cfg ? `off — ${cfg.disabled}` : `on, realm ${cfg.realm}, posts since ${cfg.intake.since}, projects ${Object.keys(cfg.intake.projects).join(', ') || 'none'}, requesters ${cfg.intake.requesters.map(r => `${r.name} (${r.id})`).join(', ')}`}`,
+          'Channels:', ...due.channels.map(c => `  #${c.streamId} ${c.project}/${c.workflow}  cursor ${c.cursor}`),
+          `Transport: ${st.transport ? `${st.transport.ok ? 'ok' : 'FAILED'} at ${st.transport.at}${st.transport.error ? ` — ${st.transport.error}` : ''}` : 'no pass recorded yet'}`,
+          `Posts: ${Object.entries(st.counts).map(([k, v]) => `${v} ${k}`).join(', ') || 'none'}`,
+          'Requests:', ...st.requests.map(r => `  ${r.key.padEnd(10)} ${r.state.padEnd(8)} ${r.project}/${r.workflow} "${r.topic}"${r.run ? ` → ${r.run_workflow}/${r.run}` : ''}${r.refused ? ` — ${r.refused}` : ''}`),
+          ...(due.problems.length ? ['Problems:', ...due.problems.map(x => `  ${x}`)] : []),
+        ].join('\n'), { config: cfg, ...due, ...st })
+        return 0
+      }
+    }
+  } catch (e) {
+    if (e instanceof RequestError) throw new Refused(e.message, e.detail)
+    if (e instanceof UsageError || e instanceof Refused) throw e
+    throw new Refused((e as Error).message)
+  } finally { i.close(); n.close(); x.close(); execStore = undefined }
+  throw new UsageError('wfe intake status|messages|due|receive|process|transport|retry|protocol')
+}
+
 // A person's request: their words become the run's braindump.md, and the
 // executor is queued.
 async function cmdRequest(p: Parsed): Promise<number> {
@@ -845,7 +927,7 @@ async function cmdDashboard(p: Parsed): Promise<number> {
 }
 
 const COMMANDS: Record<string, (p: Parsed) => Promise<number>> = {
-  run: cmdRun, project: cmdProject, repo: cmdRepo, dashboard: cmdDashboard, exec: cmdExec, request: cmdRequest, notify: cmdNotify,
+  run: cmdRun, project: cmdProject, repo: cmdRepo, dashboard: cmdDashboard, exec: cmdExec, request: cmdRequest, notify: cmdNotify, intake: cmdIntake,
   create: cmdCreate, register: cmdRegister, list: cmdList, status: cmdStatus, validate: cmdValidate,
   approve: cmdApprove, arrange: cmdArrange, 'add-repo': cmdAddRepo, workflow: cmdWorkflow, serve: cmdServe, setup: cmdSetup,
   version: cmdVersion,

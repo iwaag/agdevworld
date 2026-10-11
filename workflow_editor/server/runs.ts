@@ -15,6 +15,7 @@ import {
   type BundleEntry, type DefinitionRef, type DocumentEvidence, type EntrustRef, type Executor, type OpInput, type RepoContext, type RunGraph,
   type EntryMeta, type RunInput, type RunRecord, type RunRef,
 } from '../shared/run.ts'
+import type { SourceRef } from '../shared/intake.ts'
 import { atomicWrite, inside, readTextOrNull } from './files.ts'
 import { withLock } from './lock.ts'
 import { blobSizeAt, listAt, resolveRev, RevError, showAt, type DevdocsInfo, type DevdocsRev } from './devdocs.ts'
@@ -369,7 +370,7 @@ export interface CreateRunOptions {
   workflow: string // id or file name in devdocs/workflows
   name?: string // run id; default the next run-NNN
   input:
-    | { kind: 'braindump'; text: string; author: string; recordedBy?: string }
+    | { kind: 'braindump'; text: string; author: string; recordedBy?: string; source?: SourceRef }
     | { kind: 'request'; text: string; requester: string; entrustedBy: EntrustRef; onBehalfOf?: string; original?: string }
   // The agent identity. With `host`, the run is performed as the
   // definition's execution.agent (or as the host itself when none is
@@ -377,6 +378,9 @@ export interface CreateRunOptions {
   executor: Executor | { host: string }
   plan?: string
   predecessor?: RunRef
+  // The idempotency key of the input (p6: the Zulip post), carried by
+  // run.create; findRunByReceipt finds the run again after a crash.
+  receipt?: string
   by: string
   via: string
   now?: Date
@@ -470,6 +474,7 @@ function inputOf(o: CreateRunOptions['input']): { input: RunInput; files: Record
     if (!o.author?.trim()) throw new RequestError(400, 'a braindump needs its author: the person whose words it holds (--author)')
     const input: RunInput = { kind: 'braindump', file: 'braindump.md', author: o.author.trim() }
     if (o.recordedBy?.trim() && o.recordedBy.trim() !== input.author) input.recordedBy = o.recordedBy.trim()
+    if (o.source) input.source = o.source
     return { input, files: { 'braindump.md': o.text } }
   }
   if (!o.requester?.trim()) throw new RequestError(400, 'a request needs its requester: the agent that wrote it (--requester)')
@@ -503,23 +508,38 @@ export async function createRun(ws: Workspace, o: CreateRunOptions): Promise<Cre
   const graph: RunGraph = { nodes: compiled.graph.nodes, edges: compiled.graph.edges }
   const agent = src.files[src.root].workflow.execution.agent
   const executor: Executor = host ? { name: agent || host, backend: null, host } : o.executor as Executor
-  const record = createRecord(project, ref, input, { ...o, executor }, definition, context, graph)
+  const record = createRecord(project, ref, input, { ...o, executor }, definition, context, graph, o.receipt)
   for (const [id, f] of Object.entries(src.files)) files[`${DEFINITION_DIR}/${id}.yaml`] = f.text
   if (o.plan !== undefined) files['plan.md'] = o.plan
   return writeRun(ws, ref, files, record)
 }
 
-function createRecord(project: string, ref: RunRef, input: RunInput, o: Pick<CreateRunOptions, 'predecessor' | 'by' | 'via' | 'now'> & { executor: Executor }, definition: DefinitionRef, context: { repositories: RepoContext[] }, graph: RunGraph): RunRecord {
+function createRecord(project: string, ref: RunRef, input: RunInput, o: Pick<CreateRunOptions, 'predecessor' | 'by' | 'via' | 'now'> & { executor: Executor }, definition: DefinitionRef, context: { repositories: RepoContext[] }, graph: RunGraph, receipt?: string): RunRecord {
   const executor: Executor = { name: o.executor.name.trim(), backend: o.executor.backend?.trim() || null, ...(o.executor.host ? { host: o.executor.host } : {}) }
   try {
     return operate(null, {
       op: 'run.create', project, workflow: ref.workflow, run: ref.run, input, executor, predecessor: o.predecessor ?? null,
-      definition, context, nodes: Object.keys(graph.nodes).sort(),
+      definition, context, nodes: Object.keys(graph.nodes).sort(), ...(receipt ? { receipt } : {}),
     }, { at: (o.now ?? new Date()).toISOString(), by: o.by, via: o.via, graph })
   } catch (e) {
     if (e instanceof RunError) throw new RequestError(e.code === 'delegate-unsupported' ? 422 : 400, e.message, { code: e.code })
     throw e
   }
+}
+
+// The run a creation with this receipt made, if any (p6). A request applied
+// twice — after a crash between creating the run and recording that it was
+// created — finds its run instead of making a second one.
+export async function findRunByReceipt(ws: Workspace, workflow: string, receipt: string): Promise<RunRef | null> {
+  for (const ref of await runRefs(ws, workflow)) {
+    const text = await readTextOrNull(join(await inside(ws.root, runDir(ref)), RUN_FILE))
+    if (!text?.includes(receipt)) continue
+    try {
+      const first = (JSON.parse(text) as { history?: { op?: string; receipt?: string }[] }).history?.[0]
+      if (first?.op === 'run.create' && first.receipt === receipt) return ref
+    } catch { /* an unreadable record is not this one */ }
+  }
+  return null
 }
 
 // ---- operations ------------------------------------------------------------------

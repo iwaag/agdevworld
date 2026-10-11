@@ -280,6 +280,48 @@ test('a confirmation is of the presented files: changed deliverables need presen
   assert.equal((await readRun(ws, ref)).record!.decisions.length, 0)
 })
 
+test('an answer arriving before the asking attempt exits resumes through the existing lifecycle', async () => {
+  const { x, n, i, ws, dir } = await setup()
+  const posted: Posted[] = []
+  const origin = post(null, 'Make a deck.')
+  receive(i, origin)
+  await i.process()
+  const ref = { workflow: 'make', run: 'run-001' }
+  const c = await x.claim('test', {})
+  assert.ok('attempt' in c)
+  const A = c.attempt.id
+  await agent(ws, ref, { op: 'node.start', node: '_plan' }, A)
+  await writeFile(join(dir, 'devdocs/runs/make/run-001/plan.md'), '# Plan\n')
+  await agent(ws, ref, { op: 'question.ask', question: 'q1', node: '_plan', text: 'Agree?', to: 'Pat' }, A)
+  // Delivered while the attempt is still open (the plan link waits at most
+  // briefly; make it due now), and answered before the process ends.
+  n.db.prepare('UPDATE outbox SET created = \'2000-01-01T00:00:00.000Z\'').run()
+  await deliver(n, posted, {})
+  const q1 = posted.find(p => /\(q1\)/.test(p.content))
+  if (!q1) {
+    // The question waits for publication while the attempt is open: answer
+    // after it is posted, whenever that is — here, after the 90 s bound.
+    const outbox = n.outbox().find(o => o.type === 'question')!
+    const ev = JSON.parse(outbox.event); ev.at = '2000-01-01T00:00:00.000Z'
+    n.db.prepare('UPDATE outbox SET event = ? WHERE id = ?').run(JSON.stringify(ev), outbox.id)
+    await deliver(n, posted, {})
+  }
+  assert.ok(posted.some(p => /\(q1\)/.test(p.content)), 'the question is posted while the attempt is open')
+  assert.ok(x.attemptRow(A)!.state !== 'ended')
+  const yes = post(origin.id, 'Yes.')
+  receive(i, yes)
+  await i.process()
+  assert.equal((await readRun(ws, ref)).record!.questions.q1.answers.length, 1, 'recorded at once')
+  assert.equal(x.runView(ws.reg.id, ref).jobs.filter(j => j.kind === 'resume').length, 0, 'no resume while the asking attempt is open')
+  const f = await x.finished(A, { code: 0, signal: null })
+  assert.equal(f.outcome, 'exited')
+  assert.ok(f.resumeJob, 'its end queues the resumption')
+  assert.equal(x.runView(ws.reg.id, ref).jobs.filter(j => j.kind === 'resume').length, 1)
+  const c2 = await x.claim('test', {})
+  assert.ok('attempt' in c2)
+  assert.match(c2.brief, /resume: answer 0 to q1 recorded/)
+})
+
 test('an uncertain send is reconciled where it was sent: request and run topics are searched separately', async () => {
   const { n, i } = await setup()
   const posted: Posted[] = []

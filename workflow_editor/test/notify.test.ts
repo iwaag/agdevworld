@@ -250,6 +250,7 @@ test('submodule devdocs: links point into the devdocs repository at its commit',
   const links = await a.store().links(a.ws, ref)
   const l = links.get(`${dir}/braindump.md`)!
   assert.equal(l.url, `https://gitea.example/developer/demo-devdocs/src/commit/${head}/runs/ship/run-001/braindump.md`, 'path inside the devdocs repository, no credentials')
+  assert.equal(l.raw, `https://gitea.example/developer/demo-devdocs/raw/commit/${head}/runs/ship/run-001/braindump.md`, 'a download link at the same commit (p6: deliverables)')
 })
 
 test('runs before announcements began are not backfilled; a duplicate identity is refused, not merged', async () => {

@@ -6,7 +6,7 @@ import { api, ApiError } from './api.ts'
 import { live, serial } from './live.ts'
 import { h, short } from './dom.ts'
 import { diagnosticList } from './homeView.ts'
-import { displayToggle, showDetail } from './displayMode.ts'
+import { displayToggle, onDisplay, showDetail } from './displayMode.ts'
 import { icon } from './icons.ts'
 import type { ViewHandle } from './main.ts'
 import { ago, runHash, STATE_LABEL } from './runCommon.ts'
@@ -466,13 +466,18 @@ export function renderProjectView(root: HTMLElement, wsId: string): ViewHandle {
       h('div.hero-actions', h('button', { onclick: openSettings }, icon('settings', 'icon small'), 'Project settings')))
   }
 
+  // The hero follows the settings draft when Simple is shown again; nothing
+  // else is rebuilt by a switch.
+  let hero: HTMLElement | null = null
+  const offDisplay = onDisplay(d => { if (d === 'simple' && hero?.isConnected) { const next = renderHero(); hero.replaceWith(next); hero = next } })
+
   function render() {
     renderHeader()
     // Project reads supply the workflow choices independently of run reads.
     // Refresh the retained card too, even when the runs response arrived first.
     renderRuns()
     main.replaceChildren(
-      renderHero(),
+      hero = renderHero(),
       h('div.col.d-only', renderProjectCard(), renderRepos()),
       h('div.col.project-work', renderWorkspaces(), runsCard, renderWorkflows()),
     )
@@ -501,7 +506,7 @@ export function renderProjectView(root: HTMLElement, wsId: string): ViewHandle {
   void loadRuns({})
   renderRuns()
   return {
-    dispose: () => { disposed = true; stream.close() },
+    dispose: () => { disposed = true; offDisplay(); stream.close() },
     isDirty: dirty,
   }
 }

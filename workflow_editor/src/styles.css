@@ -754,3 +754,7 @@ html[data-display="simple"] .active-list .muted.small { font-size: 14px; }
 html[data-display="simple"] .question { padding: 12px 14px; border-radius: 12px; }
 html[data-display="simple"] .q-text { font-size: 15px; line-height: 1.5; }
 .banner > .icon.small { width: 16px; height: 16px; }
+/* The top bar stays in view, so the Simple/Detail toggle is one click away
+   wherever the page is scrolled (p8/ex1). */
+.topbar, .app-header { position: sticky; top: 0; z-index: 30; }
+.inspector, .run-side { top: 52px; max-height: calc(100vh - 52px); }

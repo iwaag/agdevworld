@@ -105,3 +105,6 @@ document.addEventListener('compositionend', () => {
   if (pending) { const p = pending; queueMicrotask(() => setDisplay(p)) }
 }, true)
 apply()
+// For checks: how many views listen now (one per mounted view; navigation
+// must not accumulate them).
+;(window as unknown as { __wfeDisplay?: object }).__wfeDisplay = { listeners: () => listeners.size }

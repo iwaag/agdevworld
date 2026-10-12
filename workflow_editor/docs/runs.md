@@ -637,17 +637,17 @@ HTTP routes call them; neither needs the other running.
 | What the definition declares for a path | `access <run> [<path>]…` | — | — |
 | Start / resume, progress note | `start`, `progress` | `POST runs/<wf>/<run>/ops` | — |
 | Wait, complete, fail | `wait`, `complete`, `fail` | same | — |
-| Cancel a node or the run | `cancel [<node>]` | same | run view → Cancel run |
+| Cancel a node or the run | `cancel [<node>]` | same | run view → Result and decision → Cancel run (a failed run: its focus card) |
 | Request a run (the person's words; queues autolab) | `wfe request <workflow> …` | `POST runs` | Project Editor → Request a run |
-| Stop (resumable), resume a held run | `stop`, `resume` | same (`run.stop`, `run.resume`) | run view → Execution |
-| Attempts, queue, publication of one run | `wfe exec status <run>` | `GET runs/<wf>/<run>/exec` | run view → Execution |
-| Retry a publication | `wfe exec publish <checkpoint>` | `POST runs/<wf>/<run>/checkpoints/<id>/publish` | run view → Retry publication |
+| Stop (resumable), resume a held run | `stop`, `resume` | same (`run.stop`, `run.resume`) | run view → focus card (Stop while work runs; the resume form while held) or Execution and publication → Stop |
+| Attempts, queue, publication of one run | `wfe exec status <run>` | `GET runs/<wf>/<run>/exec` | run view → Execution and publication; the title band's executor chip |
+| Retry a publication | `wfe exec publish <checkpoint>` | `POST runs/<wf>/<run>/checkpoints/<id>/publish` | run view → Execution and publication → Retry publication (named under Needs attention) |
 | Coordination events (selection) | `events <run> [--since]` | — | — |
 | Zulip coordination of a run | `wfe notify status <run>` | `GET runs/<wf>/<run>/notify` | run view → Coordination (Zulip) |
 | Ask, take up, withdraw | `ask`, `take-up`, `withdraw` | same | — |
-| Answer | `answer <run> <q>` | same | run view → question → Answer |
+| Answer | `answer <run> <q>` | same | run view → focus card → the question's form |
 | Attach an artifact | `attach <run> <path>` | same | — (reports listed and readable) |
-| Decide on the result | `decide <run> --decision …` | same | run view → Accept / Reject |
+| Decide on the result | `decide <run> --decision …` | same | run view → Result and decision → Accept / Reject (a completed run without a decision: its focus card) |
 | The node catalog the run was given (p7/ex1) | `nodes <run> [--show <template>]` | `GET runs/<wf>/<run>` (`catalog`) | run view → Node catalog |
 
 The browser offers the person's operations: answering, deciding on the
@@ -657,7 +657,9 @@ not make them, so a click cannot claim work. The person can still record
 anything with `wfe run … --by <name>`. Creating a run starts from the person's
 words given in the IDE, where the conversation with the executor happens.
 Submitting an answer in the browser stores it; it does not launch or wake the
-IDE agent. The person continues the conversation in VS Code.
+IDE agent. The person continues the conversation in VS Code. An answer is not
+a decision on the result and does not resume a held run; those stay separate
+operations with their own preconditions (p8 keeps them apart in the view).
 
 `test/runs.test.ts` ("operation parity") runs every operation once through the CLI module and once over HTTP, and requires the
 same record apart from route and times.

@@ -268,12 +268,12 @@ a dependency). Files are saved, never committed. See
 [docs/runs.md](docs/runs.md).
 
 **Documentation policy (p5).** A workflow declares `documentation.policy`
-(`default` or `manual`; chosen at creation, changed with nothing selected
+(`default` or `manual`; chosen at creation, changed in Workflow settings
 in the editor). Under `default` the editor previews what a run adds, from
 the same compiler run creation uses (`shared/compile.ts`): a normal-sized
-plan talk card before the entry cards, a small report icon on each card's
-lower-right corner (it moves with its card; it has no position of its own)
-and a compact final-report endpoint. Selecting one shows its document, what
+plan talk card before the entry cards, a small report icon inside each
+card's lower-right corner (it moves with its card; it has no position of its
+own) and a dashed final-report endpoint. Selecting one shows its document, what
 it waits for and the instructions the agent gets. The run view draws the
 run's frozen graph the same way: work and reporting are separate states, a
 report being written is highlighted and labelled "Writing report", states
@@ -282,6 +282,24 @@ view says whether the document is missing, being written or checked (and
 opens it). Work and documentation steps are counted apart. Under `manual`
 nothing is added. Changing the policy changes the preview and makes the
 definition approval stale; it never changes a saved run.
+
+**The two screens (p8).** The workflow editor has a slim header (crumbs,
+Refresh, save state, Save), a title band (the editable name, the intent's
+first line, both approval states, a validation chip and two explicit entries:
+**Intent & approvals** — the authoritative intent, the declared approver and
+the two approvals — and **Workflow settings** — policy, bindings, the full
+validation list), an **Add node** menu (base types and the person's
+templates), and an inspector that opens only for a selection or settings and
+closes with × or Escape. The run view has a header with the connection, a
+title band that keeps recorded progress, the decision and executor activity
+apart (**Run details** holds timestamps, backend, attempts and provenance), a
+**focus card** chosen from the run's state — the person's current task, with
+the canonical answer forms, the resume form while held and the decision when
+a completed run has none — above the graph, and a side pane of labelled,
+expandable record sections. The canvas opens whole at up to 100 % when the
+graph fits at a readable scale (72 %); otherwise at that scale from the
+graph's start (a run: its current position) with an in-view count and Fit.
+A size change never resets the person's zoom or pan.
 
 **How the run view stays live (p7/ex2).** The view is built once and kept up
 to date in place, so whatever arrives never interrupts typing or reading:
@@ -295,12 +313,22 @@ to date in place, so whatever arrives never interrupts typing or reading:
   shows its result. Leaving the view aborts reads and ignores anything that
   still completes. File reads carry their own identity, so a late response
   never replaces another file.
-- **Persistent right pane** (`src/runSide.ts`). Each section has one root.
-  Display is patched (`src/patch.ts`): unchanged nodes are not written, and
-  keyed items (questions, history entries, attempts, …) keep their elements.
-  Controls are created once, attached when their operation applies, and
-  never rebuilt. Built display carries no listeners: links and buttons name a
-  `data-action` that the view handles with the state of that moment.
+- **Persistent focus card and side pane** (`src/runSide.ts`). Each section
+  has one root. Display is patched (`src/patch.ts`): unchanged nodes are not
+  written, and keyed items (questions, history entries, attempts, …) keep
+  their elements. Controls are created once, attached when their operation
+  applies, and never rebuilt. A control's home may change with the state
+  (an open question is answered in the focus card, a resolved one is a
+  record at the side), but only while it holds no draft and has no focus.
+  Built display carries no listeners: links and buttons name a `data-action`
+  that the view handles with the state of that moment; the listener on the
+  shared app root is removed with the view (p8).
+- **Disclosure (p8).** Side sections are closed until the person opens them
+  (kept per browser); background updates never open or close one, and
+  explicit navigation (a file link, "Adjust future work", a resolved
+  question) opens the one it leads to. A closed section's label carries its
+  counts and marks a problem or an action; the focus card lists what needs
+  the person. A closed section keeps its controls attached.
 - **Input ownership.** The text in a control is the draft, and no background
   update writes it. A submission clears only the exact text it sent. Typing
   while it is in flight is kept, and a second submission waits for the first.
@@ -311,7 +339,7 @@ to date in place, so whatever arrives never interrupts typing or reading:
   text, reason, revision and sequence it inspected.
 - **Reading position.** The pane holds its own anchor
   (`overflow-anchor: none`): the first visible item keeps its place when
-  content changes above it. At the top of the history, new entries show
+  content changes above it; a closed section is held by its label. At the top of the history, new entries show
   beneath the heading. The open file keeps its scroll offsets when its
   content changes, and starts at the top when another file is opened. The
   person's own navigation is not anchored.
@@ -370,6 +398,24 @@ are held; that submissions, withdrawals, cancellations, conflicts and
 adjustment previews are handled safely; and that slow reads never overlap or
 roll back. Synthetic composition is not the macOS Japanese IME, which is
 checked by hand. `npm run build && node checks/runInteraction.ts [--keep]`.
+
+`checks/states.ts` (p8) builds a private project with representative
+states — default and manual policies, appearance and provenance, branch and
+join, a large graph, long Japanese and English text, a YAML error — and 14
+runs (plan question, working attempt, live review, answered, held, failed,
+cancelled, accepted while cleaning up, completed on an adjusted definition,
+completed without a decision, two open questions, not started, malformed,
+and a historical commit), recorded through the server modules. `node
+checks/states.ts --serve` keeps it running for a look (port 8210);
+`--shots <dir>` captures every state at 1440 × 1000 and 1280 × 800
+(`checks/statesShots.ts`).
+
+`checks/simplerUi.ts` (p8) checks the redesigned screens on those states
+(port 8212): the next action per run state, the separation of progress,
+decision, executor activity and connection, controls behind panels and
+disclosures, drafts across closing and background updates, focus returns,
+framing, and that connections stay attached to their cards.
+`npm run build && node checks/simplerUi.ts [--keep]`.
 
 `checks/appearance.ts` (p7) checks node appearance on its own temporary
 project and private service (port 8198): presets, the inspector's icon and

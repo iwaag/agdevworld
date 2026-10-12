@@ -376,7 +376,8 @@ export function renderProjectView(root: HTMLElement, wsId: string): ViewHandle {
     const workflows = data?.workflows.filter(w => w.id && !w.problem) ?? []
     const current = reqWorkflow.value
     reqWorkflow.replaceChildren(...workflows.map(w => h('option', { value: w.id!, disabled: w.delegates.length > 0, selected: w.id === current }, `${w.name || w.id}${w.delegates.length ? ' — has a delegate node: not executable' : w.errors ? ' — has validation errors' : ''}`)))
-    if (!reqAuthor.value) reqAuthor.value = localStorage.getItem('workflow-editor.actor') ?? ''
+    // A per-viewer convenience: storage that is unavailable leaves it empty.
+    if (!reqAuthor.value) { try { reqAuthor.value = localStorage.getItem('workflow-editor.actor') ?? '' } catch { /* not remembered */ } }
     const go = h('button.primary', {
       onclick: async () => {
         if (!reqText.value.trim() || !reqAuthor.value.trim() || !reqWorkflow.value) { reqResult = h('div.banner.error', 'Choose a workflow, and give your name and your words.'); renderRuns(); return }
@@ -384,7 +385,7 @@ export function renderProjectView(root: HTMLElement, wsId: string): ViewHandle {
         go.disabled = true
         try {
           const r = await api.requestRun(wsId, { workflow: reqWorkflow.value, text: reqText.value, author: reqAuthor.value.trim(), receipt: reqReceipt })
-          localStorage.setItem('workflow-editor.actor', reqAuthor.value.trim())
+          try { localStorage.setItem('workflow-editor.actor', reqAuthor.value.trim()) } catch { /* not remembered */ }
           reqResult = h('div.banner.ok', `${r.duplicate ? 'Already requested' : 'Requested'}: `, h('a', { href: runHash(wsId, `${r.ref.workflow}/${r.ref.run}`) }, `${r.ref.workflow}/${r.ref.run}`), ` — the executor is queued (job ${r.job.id}, ${r.job.state}).`)
           reqText.value = ''; reqReceipt = ''
         } catch (e) { reqResult = h('div.banner.error', `Not requested: ${(e as Error).message}`) }

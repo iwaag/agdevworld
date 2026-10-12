@@ -202,7 +202,7 @@ try {
   check(await page.locator('.side-sec[data-section="definition"] .sec-content').isVisible() && await page.getByLabel('Adjusted definition').evaluate(e => document.activeElement === e), '"Adjust future work" opens the Definition section at the adjustment form')
   check(/Reports and files \(3, 0 missing\)|Reports and files \(3\)/.test(await text('.side-sec[data-section="files"] .sec-toggle')), 'the files section counts what is there')
   await page.locator('.node[data-id="_report.implement"], [data-step="_report.implement"]').first().click()
-  check(/the file is gone now/.test(await text('.side-card')), 'a recorded report whose file was deleted says so')
+  check(/the file is gone now/.test(await text('.side-card[data-section="selected"]')), 'a recorded report whose file was deleted says so')
 
   await gotoRun('accepted')
   check(await kind() === 'accepted' && /Accepted · cleanup pending/.test(await text('.run-facts-row')) && await page.locator('.run-facts-row .state-chip').innerText() !== '✓ Completed', 'accepted while cleaning up: the decision is shown, the run is not called completed')
@@ -211,10 +211,10 @@ try {
   const outcomes = await page.locator('.focus .outcome-list:not(.after) li strong').allInnerTexts()
   const after = await page.locator('.focus .outcome-list.after li strong').allInnerTexts()
   check(await kind() === 'completed' && outcomes.join('|') === 'Research contrast|Implement|Verify|Present|Human check' && after.join('|') === 'Clean up', `completed: outcomes in dependency order, each named; cleanup apart after the review: ${outcomes.join(', ')} / ${after.join(', ')}`)
-  check(/Accepted by Sample Agent from q2 \(Sample Person's answer\)/.test(await text('.focus')) && /stopped/.test(await text('.focus .review-link')), 'the actual decision and the stopped presentation')
+  check(/Accepted from Sample Person's answer \(q2, recorded by Sample Agent\)/.test(await text('.focus')) && /stopped/.test(await text('.focus .review-link')), 'the actual decision and the stopped presentation')
   await page.locator('.focus .file-link', { hasText: 'Read final report' }).click()
   await page.waitForSelector('.file-view pre')
-  check(await page.locator('.side-sec[data-section="files"] .sec-content').isVisible() && /Added a night mode toggle/.test(await text('.file-view pre')), '"Read final report" opens the report in the Files section')
+  check(await page.locator('.side-card.file-card').isVisible() && /Added a night mode toggle/.test(await text('.file-view pre')), '"Read final report" opens the report in the side pane\'s file card (p8/ex1)')
   check(/Fixed snapshot · r2 in force/.test(await text('.graph-head')) && await page.locator('.node[data-id="research"]').count() === 1, 'the graph is the definition in force (r2, with its added study)')
   await shot(page, 'p8-run-completed', false)
 

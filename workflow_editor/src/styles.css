@@ -748,3 +748,9 @@ html[data-display="simple"] .node.preview .type-label { display: none; }
 html[data-display="simple"] .node.preview .type-icon { width: 38px; height: 38px; padding: 6px; border-radius: 10px; background: rgba(255,255,255,.8); }
 html[data-display="simple"] .node.preview .node-title { font-size: 18px; }
 html[data-display="simple"] .node.preview { width: 100%; max-width: 340px; padding: 14px 16px; }
+html[data-display="simple"] .active-list, html[data-display="simple"] .failures { font-size: 15px; padding-left: 0; list-style: none; gap: 6px; }
+html[data-display="simple"] .active-list .node-link, html[data-display="simple"] .failures .node-link { font-weight: 650; }
+html[data-display="simple"] .active-list .muted.small { font-size: 14px; }
+html[data-display="simple"] .question { padding: 12px 14px; border-radius: 12px; }
+html[data-display="simple"] .q-text { font-size: 15px; line-height: 1.5; }
+.banner > .icon.small { width: 16px; height: 16px; }

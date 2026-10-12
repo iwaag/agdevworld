@@ -381,6 +381,7 @@ export class RunSide {
       show(this.actorRow, false)
       show(this.sideHint, false)
       for (const s of sections) show(s.root, false)
+      this.el.classList.add('quiet')
       patchContent(this.focusDisplay, h('h2.focus-head', d.resp?.problem ? 'No usable record' : 'Loading…'), d.resp?.problem ? h('p.focus-lead', 'run.json cannot be read; the banner above says why. Nothing can be recorded until the files are fixed.') : null)
       return
     }
@@ -424,25 +425,26 @@ export class RunSide {
     const hold = rec.control.hold
     const isReview = (q: Question) => !!q.presentation || (!!q.node && wf?.nodes[q.node]?.confirms === 'result')
     let kind: string, head: string, lead: string | Node
-    if (d.rev) { kind = 'history'; head = 'A recorded state'; lead = `As committed at ${d.rev.slice(0, 10)}: what was recorded then, read-only. This host's live facts and the operations are not shown.` }
+    if (d.rev) { kind = 'history'; head = 'A recorded state'; lead = h('span', h('span.d-only', `As committed at ${d.rev.slice(0, 10)}: what`), h('span.s-only', 'What'), ' was recorded then, read-only. This host\'s live facts and the operations are not shown.') }
     else if (rec.cancelled) { kind = 'cancelled'; head = 'Cancelled'; lead = h('span', `${rec.cancelled.by}`, h('span.d-only', `, ${when(rec.cancelled.at)}`), `: ${rec.cancelled.reason}`) }
     else if (asking.length) {
       const review = asking.some(isReview)
       kind = review ? 'review' : 'question'
       head = review ? 'Ready for your review' : asking.length > 1 ? `${asking.length} questions wait for your answer` : 'A question waits for your answer'
-      lead = review ? 'Open the review, then answer the question below. Your answer is recorded; the executor records the decision when it takes the answer up.' : `${rec.executor.name} asked; your answer is recorded in run.json and does not wake the executor — tell it where you work with it.`
+      lead = review ? h('span', 'Open the review, then answer below.', h('span.d-only', ' Your answer is recorded; the executor records the decision when it takes the answer up.'))
+        : h('span', `${rec.executor.name} asked.`, h('span.s-only', ' Recording your answer does not wake it.'), h('span.d-only', ' Your answer is recorded in run.json and does not wake the executor — tell it where you work with it.'))
     } else if (answerable.length) {
       kind = 'answered'; head = 'Your answer is recorded'
-      lead = `${rec.executor.name} has not taken it up yet: the next move is theirs. Recording an answer does not wake the executor.`
+      lead = h('span', `${rec.executor.name} has not taken it up yet: the next move is theirs.`, h('span.d-only', ' Recording an answer does not wake the executor.'))
     } else if (hold) { kind = 'held'; head = `Held (${hold.kind})`; lead = h('span', `${hold.by}`, h('span.d-only', `, ${when(hold.since)}`), `: ${sentence(hold.reason)} Nothing runs until it is resumed with an instruction.`) }
     else if (ex.failed.length) {
       kind = 'failed'; head = `${ex.failed.map(name).join(', ')} failed`
       const work = ex.blocked.filter(n => !effectiveOf(rec)?.nodes[n]?.step), docs = ex.blocked.length - work.length
       lead = ex.blocked.length ? `Blocked by it: ${work.map(name).join(', ') || 'no work'}${docs ? ` (and ${docs} documentation step${docs === 1 ? '' : 's'})` : ''}.` : 'Nothing depends on it.'
     }
-    else if (accepted && ex.state !== 'completed') { kind = 'accepted'; head = 'Accepted — cleanup is still running'; lead = `The result was accepted${last!.confirmation ? ` from ${last!.confirmation.question}` : ''}; the run completes after its remaining steps.` }
+    else if (accepted && ex.state !== 'completed') { kind = 'accepted'; head = 'Accepted — cleanup is still running'; lead = h('span', 'The result was accepted', last!.confirmation ? h('span.d-only', ` from ${last!.confirmation.question}`) : null, '; the run completes after its remaining steps.') }
     else if (ex.state === 'completed') { kind = 'completed'; head = !last ? 'Completed — no decision recorded' : accepted ? 'Completed and accepted' : 'Completed — result rejected'; lead = !last ? 'Every node recorded completion. Accepting the result is your separate decision.' : h('span', `${last.decision === 'accepted' ? 'Accepted' : 'Rejected'}${last.confirmation ? ` from ${last.confirmation.from}'s answer` : ` by ${last.by}`}`, h('span.d-only', `${last.confirmation ? ` (${last.confirmation.question}, recorded by ${last.by})` : ''}, ${when(last.at)}`), '.') }
-    else if (ex.active.length || rec.control.attempt) { kind = 'working'; head = 'Work in progress'; lead = 'Nothing is needed from you now.' }
+    else if (ex.active.length || rec.control.attempt) { kind = 'working'; head = 'Work in progress'; lead = this.observation(rec)[0] === 'warn' ? 'Recorded as in progress, but this host does not see the work running: look below.' : 'Nothing is needed from you now.' }
     else if (ex.state === 'not-started') { kind = 'not-started'; head = 'Not started'; lead = `Waiting for ${rec.executor.name} to start.` }
     else { kind = 'idle'; head = 'Waiting for the executor'; lead = ex.ready.length ? `Ready to start: ${ex.ready.map(name).join(', ')}.` : 'Nothing is running and nothing is ready.' }
     if (this.focus.dataset.kind !== kind) this.focus.dataset.kind = kind
@@ -541,16 +543,27 @@ export class RunSide {
         : rec.control.attempt ? `attempt ${rec.control.attempt.id} is open in the record; this host shows no process for it` : 'no attempt is open'
     const steps = ex.active.map(n => { const st = effectiveOf(rec)?.nodes[n]?.step; return h('li', { dataset: { key: `act:${n}` } }, st?.kind === 'report' ? h('span', 'Writing ', nodeLink(n, name(n))) : nodeLink(n, name(n)), rec.nodes[n].notes.at(-1) ? h('span.muted.small', ` — ${rec.nodes[n].notes.at(-1)!.text.split('\n')[0].slice(0, 140)}`) : null) })
     const sit = situation(rec)
-    // Simple (p8/ex1): what this host observes, in a few words with an icon.
-    // A missing or failed observation never reads as healthy progress.
-    const [tone, seen] = rev(d) ? ['muted', ''] : d.execError ? ['warn', 'This host\'s execution facts cannot be read'] : open ? (open.alive === true ? ['ok', 'The executor is working on this host'] : open.alive === false ? (open.pid ? ['warn', 'No executor process is seen'] : ['muted', 'The executor is starting']) : ['muted', 'The executor runs on another host'])
-      : rec.control.attempt ? ['warn', 'No executor process is seen for the open attempt'] : ex.active.length ? ['warn', 'Recorded as running, but no attempt is open'] : ['muted', 'No attempt is open']
+    const [tone, seen] = this.observation(rec)
     return h('div.active-block',
       steps.length ? h('ul.active-list', ...steps) : h('p.small.muted', 'No node is recorded as running.'),
       seen ? h(`p.s-only.observation.${tone}`, icon(tone === 'ok' ? 'play' : tone === 'warn' ? 'alert' : 'history', 'icon small'), seen) : null,
       h('p.small.executor-line.d-only', `Executor: ${host}${d.execView ? ` · executor ${d.execView.executor.state}` : ''}`),
       h('div.row.tight.focus-actions', h('button', { title: 'Stop execution; the run stays resumable', dataset: { action: 'stop-run' }, disabled: this.frozen || !!rec.control.hold || !!rec.control.stop || sit === 'completed' }, icon('stop', 'icon tiny'), 'Stop'),
         rec.control.stop ? h('span.small.warn-text', `Stop requested by ${rec.control.stop.by}; waiting for the process to end.`) : null))
+  }
+
+  // Simple (p8/ex1): what this host observes of the executor, in a few words
+  // with a tone. A missing or failed observation never reads as healthy.
+  private observation(rec: RunRecord): ['ok' | 'warn' | 'muted', string] {
+    const d = this.data
+    const open = d.execView?.attempts.find(a => a.state !== 'ended')
+    if (d.rev) return ['muted', '']
+    if (d.connected === false) return ['warn', 'Not connected: what runs now is not known']
+    if (d.execError) return ['warn', 'This host\'s execution facts cannot be read']
+    if (!d.execView) return ['muted', 'Checking the executor…']
+    if (open) return open.alive === true ? ['ok', 'The executor is working on this host'] : open.alive === false ? (open.pid ? ['warn', 'No executor process is seen'] : ['muted', 'The executor is starting']) : ['muted', 'The executor runs on another host']
+    if (rec.control.attempt) return ['warn', 'No executor process is seen for the open attempt']
+    return rec.execution.active.length ? ['warn', 'Recorded as running, but no attempt is open'] : ['muted', 'No attempt is open']
   }
 
   // The recorded outcomes, each with the step it came from, in dependency
@@ -690,7 +703,7 @@ export class RunSide {
     patchContent(item.display,
       h('div.q-head', h('strong', q.id), chip(questionChip(st), st), h('span.muted.small.d-only', ` to ${q.to}${q.node ? ` · node ${q.node}` : ''} · asked by ${q.askedBy}, ${ago(q.asked)}`)),
       h('p.q-text', q.text),
-      q.presentation ? h('p.small', 'About presentation ', h('strong', q.presentation.id), h('span.d-only', ` (revision ${q.presentation.revision.slice(7, 19)})`), ' — ', v?.live ? h('a', { href: v.url!, target: '_blank', rel: 'noopener' }, 'open the review ↗') : h('span.muted', 'not served now')) : null,
+      q.presentation ? h('p.small.d-only', 'About presentation ', h('strong', q.presentation.id), h('span.d-only', ` (revision ${q.presentation.revision.slice(7, 19)})`), ' — ', v?.live ? h('a', { href: v.url!, target: '_blank', rel: 'noopener' }, 'open the review ↗') : h('span.muted', 'not served now')) : null,
       q.document ? h('p.small', 'About ', doc ? fileLink(`${this.data.shown!.dir}/${doc.name}`, q.document.path.split('/').pop()!) : h('code', q.document.path), doc ? '' : ' (not in the run folder now)') : null,
       ...q.answers.map((a, i) => h('div.answer', { dataset: { key: `a:${i}` } }, h('span.muted.small.d-only', `Answer ${i}${q.takenUp?.answer === i ? ' — taken up' : ''} · from ${a.from}${a.by !== a.from ? `, recorded by ${a.by}` : ''} via ${a.via} · ${when(a.at)}`), h('div', a.text))),
       q.takenUp ? h('p.small.ok-text', `Taken up by ${q.takenUp.by} ${ago(q.takenUp.at)}.`) : null,
@@ -1022,6 +1035,5 @@ export class RunSide {
   }
 }
 
-const rev = (d: RunData) => !!d.rev
 const docLink = (path: string, label: string) => { const a = fileLink(path, label); a.classList.add('focus-link'); a.prepend(icon('doc', 'icon small')); return a }
 const questionChip = (st: string) => (st === 'open' ? 'waiting' : st === 'answered' ? 'running' : st === 'taken-up' ? 'completed' : 'cancelled')

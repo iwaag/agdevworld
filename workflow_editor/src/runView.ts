@@ -288,7 +288,7 @@ export function renderRunView(root: HTMLElement, wsId: string, workflow: string,
       h('a', { href: '#/' }, 'Projects'), h('span.sep', '/'),
       h('a', { href: `#/ws/${encodeURIComponent(wsId)}` }, projectName), h('span.sep', '/'),
       h('span', 'Run'), h('span.sep.d-only', '/'), h('strong.run-ref.here.d-only', ref),
-      rev ? h('span.pill.warn', `as committed at ${rev.slice(0, 10)}`) : null)
+      rev ? h('span.pill.warn.d-only', `as committed at ${rev.slice(0, 10)}`) : null)
   }
 
   function renderLive() {
@@ -409,11 +409,12 @@ export function renderRunView(root: HTMLElement, wsId: string, workflow: string,
   function renderBanners() {
     const missing = resp?.problem?.code === 'missing'
     patchContent(banners,
-      !connected && !rev ? h('div.banner.warn', h('strong', 'Not connected to the editor service.'), ' Recorded changes are not shown until it reconnects; this view re-reads the run when it does.') : null,
-      loadError ? h('div.banner.error', `Could not read the run: ${loadError}`) : null,
+      !connected && !rev ? h('div.banner.warn', icon('alert', 'icon small'), h('strong', 'Not connected to the editor service.'), h('span', ' Recorded changes are not shown until it reconnects', h('span.d-only', '; this view re-reads the run when it does'), '.')) : null,
+      loadError ? h('div.banner.error', icon('alert', 'icon small'), `Could not read the run: ${loadError}`) : null,
       resp && !resp.record ? h('div.banner.error', h('strong', missing ? `${ref} has no readable run.json` : `run.json cannot be used (${resp.problem?.code ?? resp.problem?.kind})`), ` — ${resp.problem?.message}. `,
         shown ? `Showing the last valid reading (seq ${shown.record!.seq}) read-only; nothing is recorded until the files are fixed. wfe run check names the difference.` : 'Nothing is shown until the files are fixed.') : null,
-      rev && resp?.revInfo ? h('div.banner.warn', `As committed in the ${resp.revInfo.owner === 'root' ? 'project root' : 'devdocs repository'} at ${resp.revInfo.commit.slice(0, 10)}${resp.revInfo.root ? ` (the devdocs gitlink of root commit ${resp.revInfo.root.slice(0, 10)})` : ''} (${when(resp.revInfo.date)}): “${resp.revInfo.subject}”. Read-only. `, h('a.button', { href: runHash(wsId, ref) }, 'Open the current run')) : null,
+      rev && resp?.revInfo ? h('div.banner.warn.s-only', icon('history', 'icon small'), h('span', h('strong', 'A past state of this run'), ` — as committed on ${new Date(resp.revInfo.date).toLocaleDateString()}: “${resp.revInfo.subject}”. Read-only.`), h('a.button', { href: runHash(wsId, ref) }, 'Open the current run')) : null,
+      rev && resp?.revInfo ? h('div.banner.warn.d-only', `As committed in the ${resp.revInfo.owner === 'root' ? 'project root' : 'devdocs repository'} at ${resp.revInfo.commit.slice(0, 10)}${resp.revInfo.root ? ` (the devdocs gitlink of root commit ${resp.revInfo.root.slice(0, 10)})` : ''} (${when(resp.revInfo.date)}): “${resp.revInfo.subject}”. Read-only. `, h('a.button', { href: runHash(wsId, ref) }, 'Open the current run')) : null,
       opNotice ? h(`div.banner.${opNotice.kind}`, opNotice.text, h('button.icon-btn', { 'aria-label': 'Dismiss', dataset: { action: 'dismiss' } }, '×')) : null)
   }
 
@@ -503,7 +504,8 @@ export function renderRunView(root: HTMLElement, wsId: string, workflow: string,
       return null
     },
     flush: () => refresh.request('full'),
-    state: c => { connected = c; if (!disposed) { renderLive(); renderBanners() } },
+    // The side's executor observation says when the connection is lost (p8/ex1).
+    state: c => { connected = c; if (!disposed) { renderLive(); renderBanners(); if (shown?.record) side.updateHost(data()) } },
   })
   // Relative times ("5 min ago") age while nothing is recorded.
   const clock = setInterval(() => { if (shown?.record && !disposed) { renderSummary(); renderSide() } }, 30_000)

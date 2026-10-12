@@ -228,7 +228,20 @@ export function renderHomeView(root: HTMLElement): ViewHandle {
     return box
   }
 
+  // A render re-attaches the forms' inputs (they outlive renders); the one
+  // being typed in gets the keyboard back with its selection, so the 20 s
+  // refresh never takes it away (found in p8/ex1).
   function render() {
+    const active = document.activeElement
+    const typing = Object.values(f).find(el => el === active) as HTMLInputElement | HTMLTextAreaElement | undefined
+    const sel = typing && 'selectionStart' in typing ? [typing.selectionStart, typing.selectionEnd] as const : null
+    renderInto()
+    if (typing && document.activeElement !== typing) {
+      typing.focus({ preventScroll: true })
+      if (sel && sel[0] !== null) try { typing.setSelectionRange(sel[0], sel[1]) } catch { /* not a text control */ }
+    }
+  }
+  function renderInto() {
     main.replaceChildren(renderSimple(), h('div.dash-detail.d-only', renderStatus(), h('div.dash-grid', h('div.col', renderProjects(), renderRepositories()), renderEntrances())))
   }
 

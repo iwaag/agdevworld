@@ -202,14 +202,23 @@ run folder. A missing file is recorded and shown as missing. Writes run.json.`,
   adjust: `wfe run adjust <run> --definition <file|-> --reason <text> --source <source> [--dry-run] [--propose <name>] [--expect-revision r<n>]
 
 Changes the run's future work (docs/adjustments.md): <file> is the whole
-definition in force (wfe run revisions <run> --show), edited. Only pending
+definition in force (wfe run revisions <run> --show > <draft>), edited by
+hand or with wfe nodes instantiate <template> --run <run> --file <draft>. Only pending
 work may change: nodes added, removed or rewired, a pending cleanup moved
 after a new confirmation. Started, waiting and finished work keeps its
 identity, meaning and dependencies; bindings, execution settings, intake
 and documentation policy never change. Applied at a node boundary (nothing
 running, no unacknowledged instruction), as a new immutable revision
 (definition/r<n>/<workflow>.yaml) recorded in run.json; the original stays.
-  --source answer:<q>[:<n>]   the person's answer asked for it (taken up)
+  --source request            the run's original request (braindump.md or
+                              request.md, as recorded at creation) already
+                              asks for this work, e.g. research before
+                              implementing: no separate permission question.
+                              It says why, not that the person approved this
+                              graph; plan.md says which nodes the run adds and
+                              the plan is agreed as usual. Not for scope the
+                              request does not contain (use agreement)
+           answer:<q>[:<n>]   the person's answer asked for it (taken up)
            instruction:<i>    an acknowledged instruction asked for it
            agreement:<q>      the person agreed to this exact proposal
            person             a person applies it (no attempt open)
@@ -625,10 +634,10 @@ export async function runCommand(c: RunCli): Promise<number> {
     case 'adjust': {
       const r = await ref()
       const text = readInput(c, need(c, 'definition', 'the adjusted definition file (- for standard input)'))
-      const src = need(c, 'source', 'answer:<q>[:<n>] | instruction:<i> | agreement:<q> | person')
+      const src = need(c, 'source', 'request | answer:<q>[:<n>] | instruction:<i> | agreement:<q> | person')
       const m = /^(answer|instruction|agreement):([a-z0-9]+)(?::(\d+))?$/.exec(src)
-      const source = src === 'person' ? { kind: 'person' as const, ...(by ? { by } : {}) } : m?.[1] === 'answer' ? { kind: 'answer' as const, question: m[2], ...(m[3] ? { answer: Number(m[3]) } : {}) } : m?.[1] === 'instruction' ? { kind: 'instruction' as const, instruction: m[2] } : m?.[1] === 'agreement' ? { kind: 'agreement' as const, question: m[2] } : null
-      if (!source) throw c.usage(`--source "${src}" must be answer:<q>[:<n>], instruction:<i>, agreement:<q> or person`)
+      const source = src === 'request' ? { kind: 'request' as const } : src === 'person' ? { kind: 'person' as const, ...(by ? { by } : {}) } : m?.[1] === 'answer' ? { kind: 'answer' as const, question: m[2], ...(m[3] ? { answer: Number(m[3]) } : {}) } : m?.[1] === 'instruction' ? { kind: 'instruction' as const, instruction: m[2] } : m?.[1] === 'agreement' ? { kind: 'agreement' as const, question: m[2] } : null
+      if (!source) throw c.usage(`--source "${src}" must be request, answer:<q>[:<n>], instruction:<i>, agreement:<q> or person`)
       const res = await wrap(() => adjustRun(ws, r, { text, reason: need(c, 'reason', 'why the run changes'), source, dryRun: c.flag('dry-run'), propose: c.opt('propose'), expectRevision: c.opt('expect-revision') }, { by, via: 'cli', expectSeq, attempt, receipt }))
       c.out(adjustText(res, runKey(r)), res)
       return res.ok ? 0 : 1
@@ -678,7 +687,7 @@ export async function runCommand(c: RunCli): Promise<number> {
         return 0
       }
       const lines = [`Run ${runKey(r)}: revision ${rec.definition.active ?? 'r1'} in force.`, `  r1  the original snapshot (definition/${rec.definition.root}.yaml, created ${rec.created})`]
-      for (const v of rec.definition.revisions ?? []) lines.push(`  ${v.revision}  from ${v.parent} by ${v.by} at ${v.at} (${v.source.kind}${'question' in v.source ? ` ${v.source.question}` : 'instruction' in v.source ? ` ${v.source.instruction}` : ''}): ${first(v.reason, 120)}`, `      added ${v.diff.added.join(', ') || '—'}; removed ${v.diff.removed.join(', ') || '—'}; ${v.file}`)
+      for (const v of rec.definition.revisions ?? []) lines.push(`  ${v.revision}  from ${v.parent} by ${v.by} at ${v.at} (${v.source.kind}${'question' in v.source ? ` ${v.source.question}` : 'instruction' in v.source ? ` ${v.source.instruction}` : 'input' in v.source ? ` ${v.source.input} ${v.source.sha256.slice(0, 12)}…` : ''}): ${first(v.reason, 120)}`, `      added ${v.diff.added.join(', ') || '—'}; removed ${v.diff.removed.join(', ') || '—'}; ${v.file}`)
       c.out(lines.join('\n'), { active: rec.definition.active ?? 'r1', revisions: rec.definition.revisions ?? [] })
       return 0
     }

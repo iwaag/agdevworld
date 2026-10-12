@@ -471,7 +471,7 @@ export function renderRunView(root: HTMLElement, wsId: string, workflow: string,
     const list = (xs: string[]) => xs.filter(x => !x.startsWith('_')).join(', ') || '—'
     out.push(h('p.small', h('strong', 'r1'), ` original snapshot — definition/${rec.definition.root}.yaml, ${when(rec.created)}`))
     for (const v of revs) out.push(h('div.revision', { dataset: { revision: v.revision } },
-      h('p.small', h('strong', v.revision), ` from ${v.parent} · ${v.by} · ${when(v.at)} · source: ${v.source.kind}${'question' in v.source ? ` ${v.source.question}` : 'instruction' in v.source ? ` ${v.source.instruction}` : ''}`),
+      h('p.small', h('strong', v.revision), ` from ${v.parent} · ${v.by} · ${when(v.at)} · source: ${v.source.kind === 'request' ? `the original request (${v.source.input})` : v.source.kind}${'question' in v.source ? ` ${v.source.question}` : 'instruction' in v.source ? ` ${v.source.instruction}` : ''}`),
       h('p.small', v.reason),
       h('p.small.muted', `added ${list(v.diff.added)}; removed ${list(v.diff.removed)}; ${v.file}`)))
     if (!revs.length) out.push(h('p.small.muted', 'Not adjusted: the run follows its original snapshot.'))

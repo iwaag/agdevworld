@@ -66,7 +66,7 @@ export function catalogBrief(c: RunCatalog, run: string): string[] {
   if (!t.length) return ['', 'The person\'s node catalog was empty when this run was created: they have named no activity they expect as a workflow node of its own.']
   return ['', `The person's node catalog, as it was when this run was created (wfe run nodes ${run} shows each template in full):`, CATALOG_MEANING,
     ...t.map(x => `- ${x.id} "${x.name}" (${x.type}, revision ${x.revision}): ${x.expectation.trim().split('\n').join(' ')}`),
-    `A node from one of them goes into a draft of this run's definition with wfe nodes instantiate <template> --run ${run} --file <draft> (wfe nodes help); the draft becomes future work with wfe run adjust (wfe run help adjust).`]
+    `A node from one of them goes into a draft of this run's definition with wfe nodes instantiate <template> --run ${run} --file <draft> (wfe nodes help); the draft becomes future work with wfe run adjust, with --source request when the request already asks for that work (wfe run help adjust).`]
 }
 
 // A node's provenance (docs/contract.md, "Template provenance"): outside

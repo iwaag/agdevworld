@@ -716,7 +716,9 @@ async function runOpLocked(ws: Workspace, ref: RunRef, input: OpInput & EntryMet
 export interface AdjustOptions {
   text: string // the whole adjusted definition (the active revision, edited)
   reason: string
-  source: AdjustSource
+  // A request source may leave out input and hash: the file layer names the
+  // run's input file and hashes it as it is on disk (p7/ex1).
+  source: AdjustSource | { kind: 'request'; input?: string; sha256?: string }
   dryRun?: boolean // inspect only: the difference and every refusal, nothing written
   propose?: string // write it as definition/proposals/<name>.yaml to ask about (agreement)
   expectRevision?: string // refuse unless this revision is in force
@@ -767,6 +769,16 @@ export async function adjustRun(ws: Workspace, ref: RunRef, o: AdjustOptions, ct
     const problems: AdjustResult['problems'] = []
     const problem = (code: string, message: string) => problems.push({ code, message })
     const empty: AuthoredDiff = { added: [], removed: [], changed: [], restyled: [] }
+    // The original request (p7/ex1): the run's input file, by its hash on
+    // disk now; the reducer compares it with the hash recorded at creation.
+    let source = o.source as AdjustSource
+    if (o.source.kind === 'request') {
+      const input = o.source.input ?? record.input.file
+      const onDisk = await checkRunFile(ws, ref, input)
+      if ('problem' in onDisk) problem('adjust-unauthorized', `the run's input ${input} cannot be read: ${onDisk.problem}`)
+      else if (o.source.sha256 && o.source.sha256 !== onDisk.sha256) problem('adjust-unauthorized', `${input} on disk is not the content named (hash ${o.source.sha256.slice(0, 12)}…)`)
+      source = { kind: 'request', input, sha256: 'problem' in onDisk ? '0'.repeat(64) : onDisk.sha256 }
+    }
     const parsed = parseWorkflow(o.text)
     if (!parsed.ok) return { ok: false, dryRun: !!o.dryRun, parent, authored: empty, graph: graphDiff(graph, graph), problems: [{ code: 'adjust-graph', message: `the adjusted definition cannot be read: ${parsed.problem.message}` }] }
     const next = parsed.model
@@ -802,7 +814,7 @@ export async function adjustRun(ws: Workspace, ref: RunRef, o: AdjustOptions, ct
     const revFile = `${DEFINITION_DIR}/${revision}/${record.definition.root}.yaml`
     const input = compiled.ok ? {
       op: 'run.adjust' as const, revision, parent, file: revFile, sha256: sha256(o.text), definitionDigest: await semanticDigest('definition', next), effective: compiled.graph,
-      reason: o.reason, source: o.source, ...(ctx.attempt ? { attempt: ctx.attempt } : {}), ...(ctx.receipt ? { receipt: ctx.receipt } : {}),
+      reason: o.reason, source, ...(ctx.attempt ? { attempt: ctx.attempt } : {}), ...(ctx.receipt ? { receipt: ctx.receipt } : {}),
     } : null
     // The record's own rules, tried on a copy, so an inspection lists them too.
     if (input && !o.propose) {

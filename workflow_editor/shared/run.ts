@@ -79,6 +79,7 @@ export type AdjustSource =
   | { kind: 'instruction'; instruction: string } // an acknowledged additional instruction asked for it
   | { kind: 'agreement'; question: string } // the person agreed to this exact proposal (the question's document)
   | { kind: 'person'; by?: string } // a person applies it themselves
+  | { kind: 'request'; input: string; sha256: string } // the run's original braindump or entrusted request asks for this work (p7/ex1); by file and hash
 export interface AdjustDiff { added: string[]; removed: string[]; changed: string[]; edgesAdded: [string, string][]; edgesRemoved: [string, string][] }
 export interface Revision {
   revision: string // r2, r3, …
@@ -425,13 +426,17 @@ function subjectOf(v: unknown, what: string): DocumentEvidence {
 }
 
 function adjustSource(v: unknown): AdjustSource {
-  if (!isObj(v)) return fail('shape', 'an adjustment names its source: an answer, an instruction, an agreement or a person')
+  if (!isObj(v)) return fail('shape', 'an adjustment names its source: an answer, an instruction, an agreement, a person or the original request')
   const o = v as Record<string, unknown>
   if (o.kind === 'answer') return { kind: 'answer', question: text(o.question, 'source.question'), ...(o.answer !== undefined ? { answer: Number(o.answer) } : {}) }
   if (o.kind === 'instruction') return { kind: 'instruction', instruction: text(o.instruction, 'source.instruction') }
   if (o.kind === 'agreement') return { kind: 'agreement', question: text(o.question, 'source.question') }
   if (o.kind === 'person') return { kind: 'person', ...(typeof o.by === 'string' && o.by.trim() ? { by: o.by.trim() } : {}) }
-  return fail('shape', 'source.kind is answer, instruction, agreement or person')
+  if (o.kind === 'request') {
+    if (typeof o.sha256 !== 'string' || !/^[0-9a-f]{64}$/.test(o.sha256)) fail('shape', 'a request source names the input by hash (source.sha256)')
+    return { kind: 'request', input: text(o.input, 'source.input'), sha256: o.sha256 as string }
+  }
+  return fail('shape', 'source.kind is answer, instruction, agreement, person or request')
 }
 
 const hasCycle = (ids: string[], next: (id: string) => string[]): boolean => {
@@ -937,6 +942,12 @@ export function apply(prev: RunState | null, e: HistoryEntry | (OpInput & EntryM
         const q = question(source.question)
         if (!q.takenUp) fail('adjust-unauthorized', `${q.id} has no answer taken up; agreement is an answer that was taken up`)
         if (!q.document || q.document.sha256 !== e.sha256) fail('adjust-unauthorized', `${q.id} did not ask about this exact definition (the proposal's hash differs); ask about the proposal you apply`)
+      } else if (source.kind === 'request') {
+        // The run's own input, as recorded at creation (p7/ex1): why the
+        // change is made, not the person's approval of a graph.
+        if (source.input !== s.input.file) fail('adjust-unauthorized', `the request source must be this run's input ${s.input.file}, not ${source.input}`)
+        if (!s.input.sha256) fail('adjust-unauthorized', `this run recorded no hash of ${s.input.file} at creation (it predates request-sourced adjustments); use the person's answer, instruction or agreement`)
+        if (source.sha256 !== s.input.sha256) fail('adjust-unauthorized', `${s.input.file} is not the input this run was created with (its hash differs from the one recorded at creation)`)
       }
       const diff = graphDiff(graph, { nodes, edges })
       const rev: Revision = { revision: id, parent: active, file: e.file, sha256: e.sha256, definitionDigest: e.definitionDigest, effective: next as EffectiveGraph, reason: text(e.reason, 'the reason'), source, diff, at, by }

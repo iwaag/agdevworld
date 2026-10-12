@@ -13,7 +13,8 @@ import { splitCounts, reportStep } from '../shared/compile.ts'
 import { stepFacts, stepLabel } from './inspector.ts'
 import { h, when } from './dom.ts'
 import { icon } from './icons.ts'
-import { live, serial } from './live.ts'
+import { live } from './live.ts'
+import { outcome, RefreshCoordinator, type Outcome, type RefreshKind } from './runRefresh.ts'
 import type { ViewHandle } from './main.ts'
 
 const ACTOR_KEY = 'workflow-editor.actor'
@@ -75,6 +76,7 @@ export function renderRunView(root: HTMLElement, wsId: string, workflow: string,
   let disposed = false
   let projectName = 'Project'
   let viewing: { path: string; text?: string; error?: string } | null = null
+  let fileRequest = 0 // the identity of the latest file read; older responses are dropped
   const drafts = new Map<string, string>() // answer and form drafts, kept across reloads
   let actor = stored(ACTOR_KEY, '')
   let execView: RunExecView | null = null
@@ -84,7 +86,7 @@ export function renderRunView(root: HTMLElement, wsId: string, workflow: string,
   let adjustPreview: AdjustView | null = null // the last inspection of a proposed adjustment (p7)
 
   const crumbs = h('div.crumbs')
-  const refreshButton = h('button', { title: 'Re-read the run now', onclick: () => void load({}) }, 'Refresh')
+  const refreshButton = h('button', { title: 'Re-read the run now', onclick: () => void refresh.request('full') }, 'Refresh')
   const liveState = h('span.live-state')
   const banners = h('div.banners')
   const summary = h('div.run-summary')
@@ -102,25 +104,30 @@ export function renderRunView(root: HTMLElement, wsId: string, workflow: string,
 
   // ---- loading ----------------------------------------------------------------
 
-  const load = serial<object>(async () => {
-    try {
-      const r = await api.run(wsId, workflow, run, rev)
-      if (disposed) return
-      resp = r
-      if (!rev) {
-        try { execView = await api.runExec(wsId, workflow, run); execError = '' } catch (e) { execView = null; execError = (e as Error).message }
-        notifyView = await api.runNotify(wsId, workflow, run).catch(() => null)
-        presentViews = r.record?.presentations ? (await api.runPresentations(wsId, workflow, run).catch(() => ({ presentations: [] }))).presentations : []
-      }
-      loadError = ''
-      if (r.record) shown = r
-      render()
-    } catch (e) {
-      if (disposed) return
-      loadError = (e as Error).message
-      render()
-    }
-  }, a => a)
+  // One batch of reads (runRefresh.ts). A full batch reads the run with this
+  // host's facts; presentation facts follow the run just read, or the last
+  // usable one when the new reading is malformed. A host batch re-reads only
+  // the facts that change without a run.json change.
+  interface Batch { run?: Outcome<RunResponse>; exec?: Outcome<RunExecView>; notify?: Outcome<RunNotifyView>; presentations?: Outcome<PresentationView[]> }
+  async function readBatch(kind: RefreshKind, signal: AbortSignal): Promise<Batch> {
+    const [runOut, exec, notify] = await Promise.all([
+      kind === 'full' ? outcome(api.run(wsId, workflow, run, rev, signal)) : undefined,
+      rev ? undefined : outcome(api.runExec(wsId, workflow, run, signal)),
+      rev ? undefined : outcome(api.runNotify(wsId, workflow, run, signal)),
+    ])
+    const rec = runOut?.ok && runOut.value.record ? runOut.value.record : shown?.record
+    const presentations = rev ? undefined : rec?.presentations ? await outcome(api.runPresentations(wsId, workflow, run, signal).then(x => x.presentations)) : { ok: true as const, value: [] }
+    return { run: runOut, exec, notify, presentations }
+  }
+  function applyBatch(b: Batch) {
+    if (b.run?.ok) { resp = b.run.value; loadError = ''; if (b.run.value.record) shown = b.run.value } else if (b.run) loadError = b.run.error
+    // A failed host read keeps the last facts beside its error; nothing else is cleared.
+    if (b.exec?.ok) { execView = b.exec.value; execError = '' } else if (b.exec) execError = b.exec.error
+    if (b.notify?.ok) notifyView = b.notify.value
+    if (b.presentations?.ok) presentViews = b.presentations.value
+    render()
+  }
+  const refresh = new RefreshCoordinator<Batch>(readBatch, applyBatch)
 
   async function loadProjectName() {
     const p = await api.project(wsId).catch(() => null)
@@ -148,7 +155,7 @@ export function renderRunView(root: HTMLElement, wsId: string, workflow: string,
         ? { kind: 'warn', text: 'The run changed since this view was read, so nothing was recorded. The view is reloaded; check it and submit again (your text is kept).' }
         : { kind: 'error', text: `Not recorded: ${err.message}` }
     }
-    await load({})
+    await refresh.request('full')
   }
 
   // ---- rendering --------------------------------------------------------------
@@ -349,15 +356,20 @@ export function renderRunView(root: HTMLElement, wsId: string, workflow: string,
     return h('a.file-link', { href: '#', title: 'Show this file here (read-only)', onclick: (e: Event) => { e.preventDefault(); void openFile(path) } }, label)
   }
 
+  // Each read has its own identity: a late response for one file never
+  // replaces another file, a newer read of the same file or a disposed view.
   async function openFile(path: string) {
+    const id = ++fileRequest
     viewing = { path }
     render()
+    let next: typeof viewing
     try {
-      const r = await api.runFile(wsId, workflow, run, path, rev ? shown?.rev ?? rev : undefined)
-      if (viewing?.path === path) viewing = { path, text: r.text }
+      next = { path, text: (await api.runFile(wsId, workflow, run, path, rev ? shown?.rev ?? rev : undefined)).text }
     } catch (e) {
-      if (viewing?.path === path) viewing = { path, error: (e as Error).message }
+      next = { path, error: (e as Error).message }
     }
+    if (disposed || id !== fileRequest) return
+    viewing = next
     render()
   }
 
@@ -442,7 +454,7 @@ export function renderRunView(root: HTMLElement, wsId: string, workflow: string,
       const name = actor.trim()
       if (!name) { opNotice = { kind: 'error', text: 'Enter your name first (who asks for it).' }; render(); return }
       try { await api.presentation(wsId, workflow, run, p, action, name); opNotice = { kind: 'ok', text: action === 'start' ? `Presentation ${p} is served.` : `Presentation ${p}: stop verified.` } } catch (e) { opNotice = { kind: 'error', text: `${action === 'start' ? 'Start' : 'Stop'} of ${p} failed: ${(e as Error).message}` } }
-      await load({})
+      await refresh.request('full')
     }
     const finished = !!rec.cancelled || rec.execution.state === 'completed'
     for (const p of Object.values(rec.presentations ?? {}).slice().reverse()) {
@@ -491,7 +503,7 @@ export function renderRunView(root: HTMLElement, wsId: string, workflow: string,
         adjustPreview = r
         if (!dryRun && r.ok) { drafts.delete(key); drafts.delete('adjust-reason'); adjustPreview = null; opNotice = { kind: 'ok', text: `Adjusted: ${r.revision} is in force.` } }
       } catch (e) { opNotice = { kind: 'error', text: `Not adjusted: ${(e as Error).message}` } }
-      await load({})
+      await refresh.request('full')
     }
     const p = adjustPreview
     out.push(h('details.adjust', { open: drafts.has(key) || !!p },
@@ -552,7 +564,7 @@ export function renderRunView(root: HTMLElement, wsId: string, workflow: string,
           h(`span.chip.${c.state === 'published' || c.state === 'nothing' ? 'ok' : c.state === 'pending' ? 'muted' : 'warn'}`, c.state === 'nothing' ? 'nothing to publish' : c.state), ` ${c.kind}`,
           ...c.steps.map(st => h('div.muted', `${st.repo === '.' ? 'root' : st.repo}: ${st.commit ? `${st.commit.slice(0, 7)} ${st.pushed ? `pushed to ${st.branch}` : 'not pushed'}` : 'no commit'}${st.excluded.length ? `; left out (already changed before): ${st.excluded.join(', ')}` : ''}${st.conflicts.length ? `; needs you: ${st.conflicts.join(', ')} changed before the run and again by it` : ''}${st.error ? `; ${st.error}` : ''}`)),
           c.error ? h('div.error', c.error) : null,
-          c.state === 'failed' || c.state === 'attention' ? h('button', { onclick: async () => { try { await api.retryCheckpoint(wsId, workflow, run, c.id); opNotice = { kind: 'ok', text: 'Publication retried.' } } catch (e) { opNotice = { kind: 'error', text: `Retry failed: ${(e as Error).message}` } } await load({}) } }, 'Retry publication') : null))
+          c.state === 'failed' || c.state === 'attention' ? h('button', { onclick: async () => { try { await api.retryCheckpoint(wsId, workflow, run, c.id); opNotice = { kind: 'ok', text: 'Publication retried.' } } catch (e) { opNotice = { kind: 'error', text: `Retry failed: ${(e as Error).message}` } } await refresh.request('full') } }, 'Retry publication') : null))
       }
     }
     return out
@@ -642,29 +654,21 @@ export function renderRunView(root: HTMLElement, wsId: string, workflow: string,
       if (ev.kind === 'runs' || ev.kind === 'workflow' || ev.kind === 'workflows') return ['content']
       return null
     },
-    flush: () => load({}),
+    flush: () => refresh.request('full'),
     state: c => { connected = c; render() },
   })
   // Relative times ("5 min ago") age while nothing is recorded.
   const clock = setInterval(() => { if (shown?.record) renderSummary(shown) }, 30_000)
   // This host's execution facts (process, queue, publication) change without
-  // a run.json change; they are re-read every 3 s.
-  const execTimer = rev ? undefined : setInterval(async () => {
-    if (disposed || !shown?.record) return
-    try {
-      const v = await api.runExec(wsId, workflow, run)
-      const nv = await api.runNotify(wsId, workflow, run).catch(() => null)
-      const pv = shown.record.presentations ? (await api.runPresentations(wsId, workflow, run).catch(() => ({ presentations: presentViews }))).presentations : []
-      if (JSON.stringify(v) !== JSON.stringify(execView) || JSON.stringify(nv) !== JSON.stringify(notifyView) || JSON.stringify(pv) !== JSON.stringify(presentViews)) { execView = v; notifyView = nv; presentViews = pv; execError = ''; renderSide(); renderSummary(shown) }
-    } catch (e) { if (!execError) { execError = (e as Error).message; renderSide() } }
-  }, 3000)
+  // a run.json change; they are re-read every 3 s, never beside another batch.
+  const execTimer = rev ? undefined : setInterval(() => { if (shown?.record && !refresh.busy) void refresh.request('host') }, 3000)
 
   renderCrumbs()
   render()
-  void load({}).then(() => canvas.fit())
+  void refresh.request('full').then(() => { if (!disposed) canvas.fit() })
   void loadProjectName()
   return {
-    dispose: () => { disposed = true; stream?.close(); clearInterval(clock); clearInterval(execTimer) },
+    dispose: () => { disposed = true; fileRequest++; refresh.dispose(); stream?.close(); clearInterval(clock); clearInterval(execTimer) },
     isDirty: () => [...drafts.values()].some(v => v.trim() !== ''),
   }
 }

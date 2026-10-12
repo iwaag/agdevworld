@@ -41,13 +41,14 @@ export class ApiError extends Error {
   constructor(status: number, message: string, detail?: unknown) { super(message); this.status = status; this.detail = detail }
 }
 
-async function call<T>(method: string, path: string, body?: unknown, okStatuses: number[] = []): Promise<T> {
+async function call<T>(method: string, path: string, body?: unknown, okStatuses: number[] = [], signal?: AbortSignal): Promise<T> {
   let res: Response
   try {
     res = await fetch(path, {
       method,
       headers: body === undefined ? {} : { 'content-type': 'application/json' },
       body: body === undefined ? undefined : JSON.stringify(body),
+      signal,
     })
   } catch (e) {
     throw new ApiError(0, `The editor service is not reachable (${(e as Error).message}).`)
@@ -85,16 +86,16 @@ export const api = {
   approve: (id: string, file: string, kind: ApprovalKind, approver: string) =>
     call<SaveResponse & { state: ApprovalState }>('POST', `${wf(id, file)}/approve`, { kind, approver }),
   runs: (id: string) => call<RunSummary[]>('GET', `${ws(id)}/runs`),
-  run: (id: string, workflow: string, run: string, rev?: string) =>
-    call<RunResponse>('GET', `${ws(id)}/runs/${encodeURIComponent(workflow)}/${encodeURIComponent(run)}${rev ? `?rev=${encodeURIComponent(rev)}` : ''}`),
-  runFile: (id: string, workflow: string, run: string, path: string, rev?: string) =>
-    call<{ path: string; text: string }>('GET', `${ws(id)}/runs/${encodeURIComponent(workflow)}/${encodeURIComponent(run)}/file?path=${encodeURIComponent(path)}${rev ? `&rev=${encodeURIComponent(rev)}` : ''}`),
+  run: (id: string, workflow: string, run: string, rev?: string, signal?: AbortSignal) =>
+    call<RunResponse>('GET', `${ws(id)}/runs/${encodeURIComponent(workflow)}/${encodeURIComponent(run)}${rev ? `?rev=${encodeURIComponent(rev)}` : ''}`, undefined, [], signal),
+  runFile: (id: string, workflow: string, run: string, path: string, rev?: string, signal?: AbortSignal) =>
+    call<{ path: string; text: string }>('GET', `${ws(id)}/runs/${encodeURIComponent(workflow)}/${encodeURIComponent(run)}/file?path=${encodeURIComponent(path)}${rev ? `&rev=${encodeURIComponent(rev)}` : ''}`, undefined, [], signal),
   // One run operation (docs/runs.md); `by` is the declared actor, `expectSeq` the sequence the view showed.
   runOp: (id: string, workflow: string, run: string, op: Record<string, unknown> & { op: string; by: string; expectSeq?: number }) =>
     call<RunOpResponse>('POST', `${ws(id)}/runs/${encodeURIComponent(workflow)}/${encodeURIComponent(run)}/ops`, op),
-  runExec: (id: string, workflow: string, run: string) => call<RunExecView>('GET', `${ws(id)}/runs/${encodeURIComponent(workflow)}/${encodeURIComponent(run)}/exec`),
-  runNotify: (id: string, workflow: string, run: string) => call<RunNotifyView>('GET', `${ws(id)}/runs/${encodeURIComponent(workflow)}/${encodeURIComponent(run)}/notify`),
-  runPresentations: (id: string, workflow: string, run: string) => call<{ presentations: PresentationView[] }>('GET', `${ws(id)}/runs/${encodeURIComponent(workflow)}/${encodeURIComponent(run)}/presentations`),
+  runExec: (id: string, workflow: string, run: string, signal?: AbortSignal) => call<RunExecView>('GET', `${ws(id)}/runs/${encodeURIComponent(workflow)}/${encodeURIComponent(run)}/exec`, undefined, [], signal),
+  runNotify: (id: string, workflow: string, run: string, signal?: AbortSignal) => call<RunNotifyView>('GET', `${ws(id)}/runs/${encodeURIComponent(workflow)}/${encodeURIComponent(run)}/notify`, undefined, [], signal),
+  runPresentations: (id: string, workflow: string, run: string, signal?: AbortSignal) => call<{ presentations: PresentationView[] }>('GET', `${ws(id)}/runs/${encodeURIComponent(workflow)}/${encodeURIComponent(run)}/presentations`, undefined, [], signal),
   presentation: (id: string, workflow: string, run: string, p: string, action: 'start' | 'stop', by: string) => call<{ ok: boolean }>('POST', `${ws(id)}/runs/${encodeURIComponent(workflow)}/${encodeURIComponent(run)}/presentations/${encodeURIComponent(p)}/${action}`, { by }),
   adjustRun: (id: string, workflow: string, run: string, body: { text: string; reason: string; by: string; dryRun: boolean; expectRevision?: string; expectSeq?: number }) => call<AdjustView>('POST', `${ws(id)}/runs/${encodeURIComponent(workflow)}/${encodeURIComponent(run)}/adjust`, body, [422]),
   retryCheckpoint: (id: string, workflow: string, run: string, checkpoint: number) => call<unknown>('POST', `${ws(id)}/runs/${encodeURIComponent(workflow)}/${encodeURIComponent(run)}/checkpoints/${checkpoint}/publish`),

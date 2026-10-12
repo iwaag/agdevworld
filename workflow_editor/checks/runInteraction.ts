@@ -221,6 +221,51 @@ try {
   check(after.sameElement && Math.abs(after.offset - pick.offset) <= 2, `the visible history entry (seq ${pick.seq}) keeps its element and position: ${JSON.stringify({ before: pick.offset, after: after.offset, same: after.sameElement })}`)
   await shot(page, 'p7ex2-run-interaction', false)
 
+  // 6. One refresh lifecycle: slow reads never overlap, the shown sequence
+  // never goes back, and a view left behind reads and writes nothing more.
+  console.log('refresh lifecycle')
+  const runBase = `/api/workspaces/chk/runs/ship/${R1.run}`
+  const family = (u: URL) => u.pathname === runBase ? 'run' : u.pathname === `${runBase}/exec` ? 'exec' : u.pathname === `${runBase}/notify` ? 'notify' : null
+  const inflight: Record<string, number> = {}, maxInflight: Record<string, number> = {}, reads: { family: string; at: number }[] = []
+  let delay = 1200
+  const slow = (u: URL) => family(u) !== null
+  await page.route(slow, async route => {
+    const f = family(new URL(route.request().url()))!
+    reads.push({ family: f, at: performance.now() })
+    inflight[f] = (inflight[f] ?? 0) + 1
+    maxInflight[f] = Math.max(maxInflight[f] ?? 0, inflight[f])
+    await sleep(delay)
+    inflight[f]--
+    await route.continue().catch(() => {})
+  })
+  await page.evaluate(() => {
+    const s = document.querySelector('.run-summary') as HTMLElement
+    const log: number[] = [Number(s.dataset.seq)]
+    ;(window as unknown as { __seqs: number[] }).__seqs = log
+    new MutationObserver(() => log.push(Number(s.dataset.seq))).observe(s, { attributes: true, attributeFilter: ['data-seq'] })
+  })
+  let lastSeq = 0
+  for (let i = 0; i < 6; i++) { lastSeq = (await op(R1, { op: 'node.progress', node: 'build', text: `slow ${i + 1}` })).seq; await sleep(400) }
+  const converged = await waitSeq(lastSeq, 15_000)
+  await sleep(4000) // a few host-cadence ticks against slow reads
+  const seqs = await page.evaluate(() => (window as unknown as { __seqs: number[] }).__seqs)
+  result.lifecycle = { maxInflight, seqs, converged }
+  check(converged !== null, `slow reads still converge on the latest sequence ${lastSeq} (${Math.round(converged ?? -1)} ms)`)
+  check(seqs.every((x, i) => i === 0 || x >= seqs[i - 1]), `the shown sequence never goes back: ${seqs.join(' → ')}`)
+  check(Object.values(maxInflight).every(n => n === 1), `no read overlaps another of its kind: ${JSON.stringify(maxInflight)}`)
+
+  delay = 2500
+  await op(R1, { op: 'node.progress', node: 'build', text: 'before leaving' })
+  await sleep(300) // the change is announced and its read is in flight
+  await page.evaluate(() => { location.hash = '#/ws/chk' })
+  const left = performance.now()
+  await sleep(5000)
+  const afterLeaving = reads.filter(r => r.at > left + 100)
+  const runViewGone = await page.evaluate(() => !document.querySelector('.run-side') && !document.querySelector('.run-summary'))
+  result.leaving = { readsAfter: afterLeaving.length, runViewGone }
+  check(runViewGone && afterLeaving.length === 0, `a view left mid-read starts no further reads and leaves nothing behind (${afterLeaving.length} reads after leaving)`)
+  await page.unroute(slow)
+
   const pageErrors = errors.filter(e => !/^Failed to load resource/.test(e))
   check(pageErrors.length === 0, `no page errors${pageErrors.length ? `: ${pageErrors.slice(0, 3).join(' | ')}` : ''}`)
 } finally {

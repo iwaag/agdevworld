@@ -78,6 +78,10 @@ await op(R1, { op: 'question.ask', question: '', node: 'ask', text: 'Which map s
 for (let i = 0; i < 40; i++) await op(R1, { op: 'node.progress', node: 'build', text: `history filler ${i + 1}` })
 // A stop with no attempt open holds the run at once: the resume form shows.
 await op(R1, { op: 'run.stop', reason: 'look before continuing' })
+// A run at a node boundary (nothing running), where an adjustment applies.
+const R2 = (await createRun(ws, { workflow: 'ship', input: { kind: 'braindump', text: 'Adjustment check.', author: 'Check Person' }, executor, by: 'Omni Agent', via: 'cli' })).ref
+await op(R2, { op: 'node.start', node: 'survey' })
+await op(R2, { op: 'node.complete', node: 'survey', outcome: 'Surveyed.' })
 // A long, wide file (unbreakable lines overflow even pre-wrap): both of its scroll offsets can move.
 await writeFile(join(runDirOf(R1), 'long.md'), Array.from({ length: 300 }, (_, i) => `line ${String(i + 1).padStart(3, '0')} ${'0123456789'.repeat(30)}`).join('\n') + '\n')
 
@@ -221,6 +225,122 @@ try {
   result.history = { before: pick, after }
   check(after.sameElement && Math.abs(after.offset - pick.offset) <= 2, `the visible history entry (seq ${pick.seq}) keeps its element and position: ${JSON.stringify({ before: pick.offset, after: after.offset, same: after.sameElement })}`)
   await shot(page, 'p7ex2-run-interaction', false)
+
+  // 7. The selected node shows its question as a summary; its link reaches
+  // the one canonical answer form.
+  console.log('canonical answer form')
+  await page.locator('.side-sec[data-section="history"]').evaluate(el => el.closest('.run-side')!.scrollTop = 0)
+  await page.locator('.node[data-id="ask"]').click()
+  await page.waitForSelector('.node-detail[data-node="ask"]')
+  const forms = await page.evaluate(() => ({ inDetail: document.querySelectorAll('.node-detail textarea').length, answerControls: document.querySelectorAll('[aria-label="Answer to q1"]').length }))
+  await page.locator('.node-detail a[data-action="goto-question"][data-question="q1"]').click()
+  const reached = await page.evaluate(() => { const a = document.activeElement as HTMLElement | null; return { label: a?.getAttribute('aria-label'), inQuestions: !!a?.closest('.questions .question[data-question="q1"]') } })
+  result.canonical = { forms, reached }
+  check(forms.inDetail === 0 && forms.answerControls === 1 && reached.label === 'Answer to q1' && reached.inQuestions, `one answer form; the selected node's link focuses it under Questions: ${JSON.stringify({ forms, reached })}`)
+
+  // 8. Submission: only the exact submitted, unchanged draft is cleared;
+  // text typed while the request is in flight survives; a double click
+  // records once; a failure keeps the text.
+  console.log('submission ownership')
+  const opsUrl = `**/api/workspaces/chk/runs/ship/${R1.run}/ops`
+  await page.route(opsUrl, async route => { await sleep(1500); await route.continue() })
+  const ans = page.locator(answer)
+  await ans.fill('Medium')
+  const button = page.locator('.questions .question[data-question="q1"] .answer-form button.primary')
+  await button.click()
+  await button.click({ force: true }).catch(() => {})
+  await ans.press('End')
+  await page.keyboard.type(' or large')
+  const doubleDisabled = await button.isDisabled()
+  await waitFor(async () => !(await button.isDisabled()), 8000)
+  await sleep(500)
+  let rec = JSON.parse(await (await import('node:fs/promises')).readFile(join(runDirOf(R1), 'run.json'), 'utf8')) as { questions: Record<string, { answers: { text: string }[] }> }
+  const afterFlight = { value: await ans.inputValue(), answers: rec.questions.q1.answers.map(a => a.text), disabledDuringFlight: doubleDisabled }
+  check(afterFlight.value === 'Medium or large' && afterFlight.answers.length === 1 && afterFlight.answers[0] === 'Medium' && doubleDisabled,
+    `text typed during the request survives, the double click records once: ${JSON.stringify(afterFlight)}`)
+  await button.click()
+  await waitFor(async () => (await ans.inputValue()) === '', 8000)
+  rec = JSON.parse(await (await import('node:fs/promises')).readFile(join(runDirOf(R1), 'run.json'), 'utf8'))
+  check(await ans.inputValue() === '' && rec.questions.q1.answers.at(-1)?.text === 'Medium or large', 'an unchanged submitted draft is cleared once recorded')
+  await page.unroute(opsUrl)
+  await page.route(opsUrl, route => route.fulfill({ status: 500, json: { error: 'injected failure' } }))
+  await ans.fill('Kept on failure')
+  await button.click()
+  await waitFor(async () => /injected failure/.test(await page.locator('.banners').innerText()))
+  check(await ans.inputValue() === 'Kept on failure' && /Not recorded: injected failure/.test(await page.locator('.banners').innerText()), 'a failed submission keeps the draft and says why')
+  await page.unroute(opsUrl)
+  await ans.fill('')
+
+  // 9. A question withdrawn while its answer is being composed: status and
+  // submission change at once, the control stays editable until the
+  // composition ends, then turns read-only with the text kept.
+  console.log('withdrawal during composition')
+  const q2 = (await op(R1, { op: 'question.ask', question: '', text: 'Any colour preference?', to: 'Check Person' })).seq
+  await waitSeq(q2)
+  const answer2 = '.questions .question[data-question="q2"] textarea'
+  await page.locator(answer2).click()
+  await track(answer2)
+  await cdp.send('Input.imeSetComposition', { text: 'あお', selectionStart: 2, selectionEnd: 2 })
+  const wd = (await op(R1, { op: 'question.withdraw', question: 'q2', reason: 'no longer needed' })).seq
+  await waitSeq(wd)
+  await sleep(300)
+  const during = await page.evaluate(() => {
+    const el = (window as unknown as { __tracked: HTMLTextAreaElement }).__tracked
+    const card = el.closest('.question') as HTMLElement
+    return { connected: el.isConnected, focused: document.activeElement === el, readOnly: el.readOnly, button: (card.querySelector('.answer-form button') as HTMLButtonElement).disabled, state: card.className }
+  })
+  await cdp.send('Input.insertText', { text: '青' })
+  await sleep(100)
+  const ended = await page.evaluate(() => {
+    const el = (window as unknown as { __tracked: HTMLTextAreaElement }).__tracked
+    return { connected: el.isConnected, readOnly: el.readOnly, value: el.value, note: (el.parentElement!.querySelector('.closed-note') as HTMLElement).innerText }
+  })
+  result.withdrawal = { during, ended }
+  check(during.connected && during.focused && !during.readOnly && during.button && /q-withdrawn/.test(during.state), `withdrawn mid-composition: status and submission change, the control stays editable: ${JSON.stringify(during)}`)
+  check(ended.connected && ended.readOnly && ended.value === '青' && /withdrawn/.test(ended.note), `after the composition: read-only, text kept, reason shown: ${JSON.stringify(ended)}`)
+
+  // 10. An adjustment preview counts only for what it inspected.
+  console.log('adjustment preview binding')
+  await page.goto(`${BASE}/#/ws/chk/run/${R2.workflow}/${R2.run}`)
+  await page.waitForSelector('.run-summary[data-seq]')
+  await page.getByLabel('Your name').fill('Check Person')
+  await page.locator('details.adjust summary').click()
+  const yaml = page.getByLabel('Adjusted definition')
+  const reasonBox = page.getByLabel('Adjustment reason')
+  const base = await yaml.inputValue()
+  const adjusted = base.replace('edges:\n', '  extra: {type: do, name: extra, description: Extra., repositories: [docs]}\nedges:\n') + '  - {from: join, to: extra}\n'
+  await yaml.fill(adjusted)
+  await reasonBox.fill('an extra step')
+  const apply = page.locator('details.adjust').getByRole('button', { name: 'Apply' })
+  const previewBtn = page.locator('details.adjust').getByRole('button', { name: 'Preview' })
+  await previewBtn.click()
+  await waitFor(async () => !(await apply.isDisabled()), 6000)
+  const fresh = !(await apply.isDisabled())
+  result.previewText = await page.locator('.adjust-preview').innerText().catch(() => '')
+  await reasonBox.fill('an extra step, edited')
+  const afterEdit = await apply.isDisabled()
+  await reasonBox.fill('an extra step')
+  const restored = !(await apply.isDisabled())
+  const moved = (await op(R2, { op: 'question.ask', question: '', text: 'Moved past the preview?', to: 'Check Person' })).seq
+  await waitSeq(moved)
+  await sleep(200)
+  const afterMove = { disabled: await apply.isDisabled(), note: await page.locator('.adjust-preview .stale-note').innerText().catch(() => '') }
+  const adjustUrl = `**/api/workspaces/chk/runs/ship/${R2.run}/adjust`
+  await page.route(adjustUrl, async route => { await sleep(1500); await route.continue() })
+  await previewBtn.click()
+  await sleep(300)
+  await yaml.press('End')
+  await page.keyboard.type('# edited while the preview was in flight\n')
+  await sleep(2000)
+  const late = { disabled: await apply.isDisabled(), preview: await page.locator('.adjust-preview').count() }
+  await page.unroute(adjustUrl)
+  result.adjustPreview = { fresh, afterEdit, restored, afterMove, late }
+  check(fresh && afterEdit && restored && afterMove.disabled && /moved on/.test(afterMove.note), `Apply follows the preview's text, reason, revision and sequence: ${JSON.stringify({ fresh, afterEdit, restored, afterMove })}`)
+  check(late.disabled && late.preview === 0, `a preview answered after the draft changed is not shown and enables nothing: ${JSON.stringify(late)}`)
+  await yaml.fill(base)
+  await reasonBox.fill('')
+  await page.goto(`${BASE}/#/ws/chk/run/${R1.workflow}/${R1.run}`)
+  await page.waitForSelector('.run-summary[data-seq]')
 
   // 6. One refresh lifecycle: slow reads never overlap, the shown sequence
   // never goes back, and a view left behind reads and writes nothing more.

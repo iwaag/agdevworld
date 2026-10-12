@@ -49,8 +49,59 @@ const show = (el: HTMLElement, on: boolean) => { if (el.hidden === on) el.hidden
 const setDisabled = (el: HTMLButtonElement, off: boolean) => { if (el.disabled !== off) el.disabled = off }
 const list = (xs: string[]) => xs.filter(x => !x.startsWith('_')).join(', ') || '—'
 
+// A control the person types into. Its text is the draft: no background
+// update assigns its value. Edits are versioned, so a submission clears only
+// the exact text it sent and never what was typed while it was in flight; a
+// second submission waits for the first. When the operation stops applying,
+// its buttons are disabled at once, but a composing control stays attached
+// and editable until the composition ends — only then does it become
+// read-only, its text kept, with the reason beside it.
+class Owned<E extends HTMLTextAreaElement | HTMLInputElement = HTMLTextAreaElement> {
+  readonly el: E
+  readonly note = h('p.small.warn-text.closed-note')
+  private composing = false
+  private busy = false
+  private version = 0
+  private closed: string | null = null
+  private allowed = true
+  private readonly buttons: HTMLButtonElement[] = []
+  constructor(el: E) {
+    this.el = el
+    this.note.hidden = true
+    el.addEventListener('input', () => { this.version++ })
+    el.addEventListener('compositionstart', () => { this.composing = true })
+    el.addEventListener('compositionend', () => { this.composing = false; this.sync() })
+  }
+  controls(...buttons: HTMLButtonElement[]) { this.buttons.push(...buttons); this.sync(); return this }
+  // Being typed into: focused or composing.
+  get active() { return this.composing || document.activeElement === this.el }
+  get kept() { return this.el.value.trim() !== '' || this.active }
+  // Open (null) or closed for a reason; `allowed` gates the buttons only.
+  set(closed: string | null, allowed = closed === null) { this.closed = closed; this.allowed = allowed; this.sync() }
+  private sync() {
+    setText(this.note, this.closed ?? '')
+    show(this.note, this.closed !== null)
+    const ro = this.closed !== null && !this.composing
+    if (this.el.readOnly !== ro) this.el.readOnly = ro
+    for (const b of this.buttons) setDisabled(b, !this.allowed || this.closed !== null || this.busy)
+  }
+  // Sends the text as it is now; true when the operation recorded it.
+  async submit(send: (text: string) => Promise<boolean>): Promise<boolean> {
+    if (this.busy) return false
+    const text = this.el.value, version = this.version
+    this.busy = true; this.sync()
+    try {
+      const ok = await send(text)
+      if (ok && this.version === version && this.el.value === text) this.el.value = ''
+      return ok
+    } finally { this.busy = false; this.sync() }
+  }
+}
+
 // One question's card: its display, and the one canonical answer form.
-interface QuestionItem { id: string; root: HTMLElement; display: HTMLElement; form?: { root: HTMLElement; ta: HTMLTextAreaElement; button: HTMLButtonElement } }
+interface QuestionItem { id: string; root: HTMLElement; display: HTMLElement; form?: { root: HTMLElement; draft: Owned; button: HTMLButtonElement } }
+// An inspected adjustment, bound to exactly what it inspected.
+interface Preview { text: string; reason: string; revision: string; seq: number; view: AdjustView }
 
 export class RunSide {
   readonly el = h('aside.run-side', { 'aria-label': 'Run details' })
@@ -64,17 +115,17 @@ export class RunSide {
   private readonly instructions = section('instructions', h('div.questions'))
   private readonly presentations = section('presentations', h('div.sec-body'))
   private readonly definition = section('definition', h('div.sec-body'))
-  private readonly adjust: { root: HTMLDetailsElement; ta: HTMLTextAreaElement; reason: HTMLInputElement; preview: HTMLElement; apply: HTMLButtonElement; base: string | null; result: AdjustView | null }
+  private readonly adjust: { root: HTMLDetailsElement; ta: Owned; reason: Owned<HTMLInputElement>; preview: HTMLElement; previewButton: HTMLButtonElement; apply: HTMLButtonElement; base: string | null; result: Preview | null; busy: boolean }
   private readonly catalog = section('catalog', h('div.sec-body'))
   private readonly related = section('related', h('div.sec-body'))
   private readonly files = section('files', h('div.sec-body'))
   private readonly fileView = { root: h('div.file-view'), head: h('div.row.tight'), status: h('p.small'), pre: h('pre'), path: '' }
   private readonly execution = section('execution', h('div.sec-body'))
-  private readonly resume: { root: HTMLElement; ta: HTMLTextAreaElement; button: HTMLButtonElement }
+  private readonly resume: { root: HTMLElement; draft: Owned; button: HTMLButtonElement }
   private readonly execMore = h('div.sec-body')
   private readonly coordination = section('coordination', h('div.sec-body'))
   private readonly result = section('result', h('div.sec-body'))
-  private readonly decide: { root: HTMLElement; evidence: HTMLInputElement; accept: HTMLButtonElement; reject: HTMLButtonElement; cancel: HTMLButtonElement }
+  private readonly decide: { root: HTMLElement; evidence: Owned<HTMLInputElement>; accept: HTMLButtonElement; reject: HTMLButtonElement; cancel: HTMLButtonElement; busy: boolean }
   private readonly history = section('history', h('ol.history', { reversed: true }))
   private historyShown = ''
 
@@ -82,16 +133,18 @@ export class RunSide {
     this.act = actions
     this.actor = h('input', { value: actorName, placeholder: 'your name', 'aria-label': 'Your name', size: 14 })
 
-    const ta = h('textarea.yaml', { rows: 12, 'aria-label': 'Adjusted definition', spellcheck: false })
-    const reason = h('input', { placeholder: 'why the run changes', 'aria-label': 'Adjustment reason' })
+    const ta = new Owned(h('textarea.yaml', { rows: 12, 'aria-label': 'Adjusted definition', spellcheck: false }))
+    const reason = new Owned(h('input', { placeholder: 'why the run changes', 'aria-label': 'Adjustment reason' }))
     const preview = h('div.adjust-preview-slot')
+    const previewButton = h('button', 'Preview')
     const apply = h('button.primary', { disabled: true, title: 'Preview first' }, 'Apply')
     const adjustRoot = h('details.adjust', h('summary.small', 'Adjust future work'),
       h('p.small.muted', 'Edit the definition in force. Only pending work may change; started and finished work, bindings and execution settings stay. The reusable workflow file is not changed.'),
-      ta, reason, preview, h('div.row.tight', h('button', { onclick: () => void this.sendAdjust(true) }, 'Preview'), apply))
+      ta.el, reason.el, ta.note, preview, h('div.row.tight', previewButton, apply))
+    previewButton.addEventListener('click', () => void this.sendAdjust(true))
     apply.addEventListener('click', () => void this.sendAdjust(false))
-    this.adjust = { root: adjustRoot, ta, reason, preview, apply, base: null, result: null }
-    ta.addEventListener('input', () => { this.adjust.result = null; this.renderPreview() })
+    this.adjust = { root: adjustRoot, ta, reason, preview, previewButton, apply, base: null, result: null, busy: false }
+    for (const c of [ta.el, reason.el]) c.addEventListener('input', () => this.renderPreview())
     this.definition.root.append(adjustRoot)
 
     const fv = this.fileView
@@ -99,21 +152,25 @@ export class RunSide {
     fv.root.hidden = true
     this.files.root.append(fv.root)
 
-    const instruction = h('textarea', { rows: 2, placeholder: 'what the executor should do now (after looking at the working tree)', 'aria-label': 'Resume instruction' })
     const resumeButton = h('button.primary', 'Resume')
+    const instruction = new Owned(h('textarea', { rows: 2, placeholder: 'what the executor should do now (after looking at the working tree)', 'aria-label': 'Resume instruction' })).controls(resumeButton)
     resumeButton.addEventListener('click', () => {
-      const text = instruction.value
-      if (!text.trim()) { this.act.notice('error', 'A resume needs your instruction.'); return }
-      void this.act.record({ op: 'run.resume', reason: text }, 'Resumed: the executor is queued.').then(ok => { if (ok && instruction.value === text) instruction.value = '' })
+      if (!instruction.el.value.trim()) { this.act.notice('error', 'A resume needs your instruction.'); return }
+      if (!this.data.shown?.record?.control.hold) { this.act.notice('error', 'The run is not held: there is nothing to resume.'); return }
+      void instruction.submit(text => this.act.record({ op: 'run.resume', reason: text }, 'Resumed: the executor is queued.'))
     })
-    this.resume = { root: h('div.resume-form', instruction, h('div.row.tight', resumeButton)), ta: instruction, button: resumeButton }
+    this.resume = { root: h('div.resume-form', instruction.el, instruction.note, h('div.row.tight', resumeButton)), draft: instruction, button: resumeButton }
     this.execution.root.append(this.resume.root, this.execMore)
 
-    const evidence = h('input', { placeholder: 'evidence: what you checked (report, commit, demo…)', 'aria-label': 'Decision evidence' })
+    const evidence = new Owned(h('input', { placeholder: 'evidence: what you checked (report, commit, demo…)', 'aria-label': 'Decision evidence' }))
     const decide = (decision: 'accepted' | 'rejected') => {
-      const text = evidence.value
-      if (!text.trim()) { this.act.notice('error', 'A decision needs its evidence.'); return }
-      void this.act.record({ op: 'run.decide', decision, evidence: text }, `Recorded: result ${decision}.`).then(ok => { if (ok && evidence.value === text) evidence.value = '' })
+      if (!evidence.el.value.trim()) { this.act.notice('error', 'A decision needs its evidence.'); return }
+      const rec = this.data.shown?.record
+      if (decision === 'accepted' && rec?.execution.state !== 'completed') { this.act.notice('error', 'A result can be accepted once every node is completed.'); return }
+      this.decide.busy = true
+      this.updateDecideButtons()
+      void evidence.submit(text => this.act.record({ op: 'run.decide', decision, evidence: text }, `Recorded: result ${decision}.`))
+        .finally(() => { this.decide.busy = false; this.updateDecideButtons() })
     }
     const accept = h('button.primary', { onclick: () => decide('accepted') }, 'Accept result')
     const reject = h('button.danger', { onclick: () => decide('rejected') }, 'Reject result')
@@ -124,7 +181,7 @@ export class RunSide {
         if (why?.trim()) void this.act.record({ op: 'run.cancel', reason: why }, 'Recorded: the run is cancelled.')
       },
     }, 'Cancel run')
-    this.decide = { root: h('div.decide', evidence, h('div.row.tight', accept, reject, cancel)), evidence, accept, reject, cancel }
+    this.decide = { root: h('div.decide', evidence.el, h('div.row.tight', accept, reject, cancel)), evidence, accept, reject, cancel, busy: false }
     this.result.root.append(this.decide.root)
 
     this.el.append(this.placeholder,
@@ -140,8 +197,8 @@ export class RunSide {
 
   // Text the person typed that is not recorded yet.
   isDirty(): boolean {
-    const typed = [...this.qItems.values()].map(q => q.form?.ta.value ?? '').concat(this.resume.ta.value, this.decide.evidence.value, this.adjust.reason.value)
-    return typed.some(v => v.trim() !== '') || (this.adjust.base !== null && this.adjust.ta.value !== this.adjust.base)
+    const typed = [...this.qItems.values()].map(q => q.form?.draft.el.value ?? '').concat(this.resume.draft.el.value, this.decide.evidence.el.value, this.adjust.reason.el.value)
+    return typed.some(v => v.trim() !== '') || (this.adjust.base !== null && this.adjust.ta.el.value !== this.adjust.base)
   }
 
   // An explicit request to answer a question: reveal its one form.
@@ -149,7 +206,7 @@ export class RunSide {
     const item = this.qItems.get(id)
     if (!item) return
     item.root.scrollIntoView({ block: 'nearest' })
-    item.form?.ta.focus({ preventScroll: true })
+    item.form?.draft.el.focus({ preventScroll: true })
   }
 
   // ---- update -----------------------------------------------------------------
@@ -286,24 +343,24 @@ export class RunSide {
     if (open) {
       if (!f.root.isConnected) item.root.append(f.root)
       setText(f.button, st === 'answered' ? 'Record another answer' : 'Record answer')
-      setDisabled(f.button, this.frozen)
-    } else {
-      setDisabled(f.button, true)
-      if (!f.ta.value.trim() && document.activeElement !== f.ta) f.root.remove()
-    }
+      f.draft.set(null, !this.frozen)
+    } else if (f.draft.kept) {
+      f.draft.set(`${q.withdrawn ? 'The question was withdrawn' : rec.cancelled ? 'The run is cancelled' : q.takenUp ? 'The answer was taken up' : 'The question is closed'}: nothing more can be recorded here. Your text is kept, not sent.`)
+    } else f.root.remove()
   }
 
   private answerForm(id: string) {
-    const ta = h('textarea', { rows: 3, 'aria-label': `Answer to ${id}`, placeholder: 'Your answer' })
     const button = h('button.primary', 'Record answer')
+    const draft = new Owned(h('textarea', { rows: 3, 'aria-label': `Answer to ${id}`, placeholder: 'Your answer' })).controls(button)
     button.addEventListener('click', () => {
-      const text = ta.value
-      if (!text.trim()) return
-      const name = this.data.shown?.record?.executor.name ?? 'the executor'
-      void this.act.record({ op: 'question.answer', question: id, text }, `Answer to ${id} recorded in run.json. Continue the conversation with ${name} in VS Code; recording does not notify it.`)
-        .then(ok => { if (ok && ta.value === text) ta.value = '' })
+      if (!draft.el.value.trim()) return
+      // The question and the run as last read, not as they were when the form was made.
+      const rec = this.data.shown?.record
+      const q = rec?.questions[id]
+      if (!rec || !q || !this.answerable(rec, q)) { this.act.notice('error', `${id} can no longer be answered here.`); return }
+      void draft.submit(text => this.act.record({ op: 'question.answer', question: id, text }, `Answer to ${id} recorded in run.json. Continue the conversation with ${rec.executor.name} in VS Code; recording does not notify it.`))
     })
-    return { root: h('div.answer-form', ta, h('div.row.tight', button), h('p.small.muted', 'Stored in run.json as your answer. It does not start or wake the IDE agent; tell it in VS Code.')), ta, button }
+    return { root: h('div.answer-form', draft.el, draft.note, h('div.row.tight', button), h('p.small.muted', 'Stored in run.json as your answer. It does not start or wake the IDE agent; tell it in VS Code.')), draft, button }
   }
 
   // Additional instructions (p6): received from the person, acknowledged by
@@ -362,33 +419,62 @@ export class RunSide {
     const open = !this.data.rev && !rec.cancelled && rec.execution.state !== 'completed'
     // The definition in force fills the form once; the text is the person's from then on.
     const active = this.data.shown?.revisions?.at(-1)?.text ?? this.data.shown?.bundle[rec.definition.root]?.text ?? ''
-    if (a.base === null) { a.base = active; a.ta.value = active }
+    if (a.base === null) { a.base = active; a.ta.el.value = active }
+    const closed = open ? null : `The run is ${rec.cancelled ? 'cancelled' : 'completed'}: it can no longer be adjusted. Your text is kept, not sent.`
+    a.ta.set(closed); a.reason.set(closed)
     if (open) { if (!a.root.isConnected) this.definition.root.append(a.root) }
-    else if (a.ta.value === a.base && !a.reason.value.trim() && !a.root.contains(document.activeElement)) a.root.remove()
+    else if (a.ta.el.value === a.base && !a.reason.el.value.trim() && !a.ta.active && !a.reason.active) a.root.remove()
     this.renderPreview()
   }
 
+  // The preview counts only for what it inspected: the same text and reason,
+  // the same revision in force and the same run sequence (the server checks
+  // both again on apply). Anything else leaves Apply disabled.
   private renderPreview() {
     const a = this.adjust
+    const rec = this.data?.shown?.record
     const p = a.result
-    patchContent(a.preview, p ? h(`div.banner.${p.ok ? 'ok' : 'error'}.small.adjust-preview`,
-      p.ok ? `Applicable to ${p.parent}: ` : `Not applicable (${p.problems.map(x => x.code).join(', ')}): `,
-      `work added ${list(p.authored.added)}; removed ${list(p.authored.removed)}; changed ${p.authored.changed.map(c => `${c.id} (${c.fields.join(', ')})`).join(', ') || '—'}; new edges ${p.graph.edgesAdded.filter(([x, y]) => !x.startsWith('_') || !y.startsWith('_')).map(([x, y]) => `${x} → ${y}`).join('; ') || '—'}`,
-      ...p.problems.map(x => h('div', `${x.code}: ${x.message}`))) : null)
-    setDisabled(a.apply, !p?.ok)
-    const title = p?.ok ? 'Apply as a new revision' : 'Preview first'
+    const edited = !!p && (a.ta.el.value !== p.text || a.reason.el.value !== p.reason)
+    const moved = !!p && !!rec && ((rec.definition.active ?? 'r1') !== p.revision || rec.seq !== p.seq)
+    const current = !!p && !edited && !moved
+    const v = p?.view
+    patchContent(a.preview, v ? h(`div.banner.${v.ok ? 'ok' : 'error'}.small.adjust-preview${current ? '' : '.stale'}`,
+      v.ok ? `Applicable to ${v.parent}: ` : `Not applicable (${v.problems.map(x => x.code).join(', ')}): `,
+      `work added ${list(v.authored.added)}; removed ${list(v.authored.removed)}; changed ${v.authored.changed.map(c => `${c.id} (${c.fields.join(', ')})`).join(', ') || '—'}; new edges ${v.graph.edgesAdded.filter(([x, y]) => !x.startsWith('_') || !y.startsWith('_')).map(([x, y]) => `${x} → ${y}`).join('; ') || '—'}`,
+      ...v.problems.map(x => h('div', `${x.code}: ${x.message}`)),
+      current ? null : h('div.stale-note', edited ? 'Edited since this preview: preview again before applying.' : `The run moved on since this preview (${p!.revision}, seq ${p!.seq} → ${rec!.definition.active ?? 'r1'}, seq ${rec!.seq}): preview again before applying.`)) : null)
+    const ok = current && !!v?.ok && !a.busy && !a.ta.el.readOnly
+    setDisabled(a.apply, !ok)
+    setDisabled(a.previewButton, a.busy || a.ta.el.readOnly)
+    const title = ok ? 'Apply as a new revision' : 'Preview first'
     if (a.apply.title !== title) a.apply.title = title
   }
 
   private async sendAdjust(dryRun: boolean) {
     const a = this.adjust
     const rec = this.data.shown?.record
-    if (!rec) return
-    if (!a.reason.value.trim()) { this.act.notice('error', 'An adjustment needs its reason.'); return }
-    const r = await this.act.adjust({ text: a.ta.value, reason: a.reason.value, dryRun, expectRevision: rec.definition.active ?? 'r1', expectSeq: rec.seq })
-    a.result = r
-    if (!dryRun && r?.ok) { a.result = null; a.reason.value = ''; a.base = null }
+    if (!rec || a.busy || (!dryRun && !a.result)) return
+    const sent: Omit<Preview, 'view'> = dryRun
+      ? { text: a.ta.el.value, reason: a.reason.el.value, revision: rec.definition.active ?? 'r1', seq: rec.seq }
+      : a.result!
+    if (!sent.reason.trim()) { this.act.notice('error', 'An adjustment needs its reason.'); return }
+    a.busy = true
     this.renderPreview()
+    try {
+      const view = await this.act.adjust({ text: sent.text, reason: sent.reason, dryRun, expectRevision: sent.revision, expectSeq: sent.seq })
+      if (dryRun) {
+        // A preview of text that has changed meanwhile is not shown at all.
+        a.result = view && a.ta.el.value === sent.text && a.reason.el.value === sent.reason ? { ...sent, view } : null
+      } else if (view?.ok) {
+        a.result = null
+        if (a.reason.el.value === sent.reason) a.reason.el.value = ''
+        // The applied text becomes the base; the next reading fills the form with the new revision only if it was not edited.
+        if (a.ta.el.value === sent.text) a.base = null
+      } else if (view) a.result = { ...sent, view }
+    } finally {
+      a.busy = false
+      this.renderPreview()
+    }
   }
 
   private updateCatalog(rec: RunRecord) {
@@ -474,9 +560,10 @@ export class RunSide {
       d.execView ? h('p.small.muted', `Executor: ${d.execView.executor.state}${d.execView.executor.detail ? ` — ${d.execView.executor.detail}` : ''}`) : null,
       h('div.row.tight', h('button', { disabled: frozen || !!rec.control.hold || !!rec.control.stop || sit === 'completed', title: 'Stop execution; the run stays resumable', dataset: { action: 'stop-run' } }, 'Stop')))
     const held = !!rec.control.hold
-    if (held) { if (!this.resume.root.isConnected) this.execution.root.insertBefore(this.resume.root, this.execMore) }
-    else if (!this.resume.ta.value.trim() && document.activeElement !== this.resume.ta) this.resume.root.remove()
-    setDisabled(this.resume.button, frozen || !held)
+    const r = this.resume.draft
+    if (held) { if (!this.resume.root.isConnected) this.execution.root.insertBefore(this.resume.root, this.execMore); r.set(null, !frozen) }
+    else if (r.kept) r.set('The run is no longer held: there is nothing to resume. Your text is kept, not sent.')
+    else this.resume.root.remove()
     const ev = d.execView
     const queued = ev?.jobs.filter(j => j.state === 'queued' || j.state === 'claimed') ?? []
     patchContent(this.execMore,
@@ -524,10 +611,15 @@ export class RunSide {
       h('p.small.muted', completed
         ? 'Execution completed: every node recorded completion. Accepting the result is your separate decision.'
         : `Execution is ${rec.execution.state}. A result can be accepted once every node is completed; it can be rejected at any time.`))
-    const frozen = this.frozen
-    setDisabled(this.decide.accept, !completed || frozen)
-    setDisabled(this.decide.reject, frozen)
-    setDisabled(this.decide.cancel, !!rec.cancelled || frozen)
+    this.updateDecideButtons()
+  }
+
+  private updateDecideButtons() {
+    const rec = this.data.shown?.record
+    const off = this.frozen || this.decide.busy || !rec
+    setDisabled(this.decide.accept, off || rec!.execution.state !== 'completed')
+    setDisabled(this.decide.reject, off)
+    setDisabled(this.decide.cancel, off || !!rec!.cancelled)
   }
 
   // Newest first; every entry keeps its element while it exists.

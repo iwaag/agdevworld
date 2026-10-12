@@ -106,6 +106,13 @@ try {
     check(m1 === 'simple' && await mode(p2) === 'detail' && !errs.length, `storage that throws: Simple, and the toggle still works for the page (${errs.join('; ')})`)
     await ctx.close()
   }
+  await page.locator('.display-toggle button[data-display="simple"]').focus()
+  await page.keyboard.press('Tab')
+  const tabbed = await page.evaluate(() => (document.activeElement as HTMLElement | null)?.dataset.display)
+  await page.keyboard.press('Space')
+  check(tabbed === 'detail' && await mode(page) === 'detail' && await page.evaluate(() => (document.activeElement as HTMLElement | null)?.dataset.display) === 'detail', 'keyboard: Tab reaches Detail, Space switches, the focus stays on the toggle')
+  await page.keyboard.press('Shift+Tab'); await page.keyboard.press('Enter')
+  check(await mode(page) === 'simple', 'keyboard: Shift+Tab and Enter switch back')
   for (const [what, url] of [['Dashboard', '/'], ['Project', '/ws/sample'], ['Workflow', '/ws/sample/wf/improve.yaml'], ['Run', `/ws/sample/run/improve/run-completed`], ['User nodes', '/nodes']] as const) {
     await page.goto(`${BASE}/#${url}`); await page.waitForSelector('.display-toggle'); await sleep(200)
     const last = await page.evaluate(() => { const t = document.querySelector('.top-actions')!; const kids = [...t.children].filter(c => (c as HTMLElement).offsetParent !== null); return kids.at(-1)?.classList.contains('display-toggle') })

@@ -310,6 +310,7 @@ export function renderProjectView(root: HTMLElement, wsId: string): ViewHandle {
     const card = h('section.card.workflows', h('h2', 'Workflows'), h('p.muted.small.d-only', 'devdocs/workflows/ in this workspace'))
     if (!data) return card
     if (!data.workflowsDir.exists) card.append(h('div.banner.warn', data.workflowsDir.reason ?? 'no workflow directory'))
+    if (!data.workflows.length) card.append(h('p.muted', 'No workflow yet.', h('span.s-only', ' Create one in Detail.')))
     for (const w of data.workflows) {
       const approved = w.approvals && w.approvals.intent === 'approved' && w.approvals.definition === 'approved'
       const simpleState = w.problem ? h('span.tile-state.error', icon('alert', 'icon'), 'Cannot be read')

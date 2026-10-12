@@ -661,6 +661,12 @@ IDE agent. The person continues the conversation in VS Code. An answer is not
 a decision on the result and does not resume a held run; those stay separate
 operations with their own preconditions (p8 keeps them apart in the view).
 
+In Simple (p8/ex1) the run view shows the focus card's forms — answers, the
+resume instruction, the decision, Stop — and the graph; the operations listed
+under a side section above (Execution and publication, Result and decision,
+Presentations, Definition, Coordination) are Detail's, reached by its toggle
+or by the focus card's links, which switch to Detail and open the section.
+
 `test/runs.test.ts` ("operation parity") runs every operation once through the CLI module and once over HTTP, and requires the
 same record apart from route and times.
 

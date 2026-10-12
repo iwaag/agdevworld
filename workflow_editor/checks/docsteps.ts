@@ -85,8 +85,16 @@ const allVisible = (p: Page) => p.evaluate(() => {
 })
 // The icon sits inside its card's lower-right corner (p8): 10 px from the
 // right edge and 9 px from the bottom, at 26 px, scaled with the view.
+// The canvas redraws its cards when a background read lands; a box read
+// across such a redraw is null (the p6/p7 "null bounding box"), so the pair
+// is read again (p8/ex1).
 async function attached(p: Page, id: string): Promise<boolean> {
-  const card = (await p.locator(`.node[data-id="${id}"]`).boundingBox())!, icon = (await p.locator(`.report-icon[data-step="_report.${id}"]`).boundingBox())!
+  let card = null, icon = null
+  for (let i = 0; i < 10 && (!card || !icon); i++) {
+    card = await p.locator(`.node[data-id="${id}"]`).boundingBox(); icon = await p.locator(`.report-icon[data-step="_report.${id}"]`).boundingBox()
+    if (!card || !icon) await new Promise(r => setTimeout(r, 100))
+  }
+  if (!card || !icon) return false
   const k = icon.width / 26
   return Math.abs(icon.x - (card.x + card.width - 36 * k)) <= 1.5 && Math.abs(icon.y - (card.y + card.height - 35 * k)) <= 1.5
 }

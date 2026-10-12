@@ -301,6 +301,28 @@ graph fits at a readable scale (72 %); otherwise at that scale from the
 graph's start (a run: its current position) with an in-view count and Fit.
 A size change never resets the person's zoom or pan.
 
+**Simple and Detail (p8/ex1).** Every screen's top bar ends with the same
+**Simple | Detail** toggle (`src/displayMode.ts`). It is a per-browser
+preference (`workflow-editor.display`), Simple by default and when storage is
+unreadable, and separate from the graph's Compact/Mini (`workflow-editor.mode`,
+offered in Detail only). Simple shows the purpose, the situation and the
+person's next action: the Dashboard's project tiles (name, purpose, status
+icons, waiting runs, Open project); the project's name and purpose, the
+request form, recent runs and workflows with one state each; the
+workflow's name, purpose, one approval state, Add node, Save and the graph;
+the run's title, progress, focus card with its forms and the graph; User
+nodes' cards. Simple cards carry an icon, a name and a state; a selection
+shows its compact explanation and everyday edit. Commit ids, remotes,
+branches, paths, backend identifiers, exact times, record sections and the
+outcome list are Detail's. Contextual entries ("Project settings", "New
+project", the approval state, "More details", "Reports & files", "All
+records", "Adjust future work", "Edit template") switch to Detail and reveal
+their target. Both modes are one DOM — `.d-only` and `.s-only` elements,
+nothing rebuilt or cloned — so drafts, selections, open panels and sections,
+scroll positions (per screen and mode) and file offsets survive a switch; a
+switch asked during an IME composition waits for it to end. The top bars stay
+in view, so the toggle is one click away anywhere.
+
 **How the run view stays live (p7/ex2).** The view is built once and kept up
 to date in place, so whatever arrives never interrupts typing or reading:
 
@@ -416,6 +438,18 @@ decision, executor activity and connection, controls behind panels and
 disclosures, drafts across closing and background updates, focus returns,
 framing, and that connections stay attached to their cards.
 `npm run build && node checks/simplerUi.ts [--keep]`.
+
+`checks/displayMode.ts` (p8/ex1) checks Simple and Detail on those states
+(port 8214): the preference and its toggle (fresh, reload, navigation,
+malformed and blocked storage), what Simple leaves out and Detail keeps,
+the contextual entries, every run state's task in Simple, missing executor
+facts and a lost connection, drafts, panels, sections, scroll and file offsets
+across switches, a synthetic composition deferring a switch, preview validity,
+background updates, one display listener per view, and the graph across a
+switch (selection, place, Compact/Mini kept, alignment, editing in Simple).
+`npm run build && node checks/displayMode.ts`. `checks/displayShots.ts --out
+<dir>` captures every screen in both modes at 1440 × 1000 and 1280 × 800.
+Browser checks written for the full screens open in Detail (`checks/lib.ts`).
 
 `checks/appearance.ts` (p7) checks node appearance on its own temporary
 project and private service (port 8198): presets, the inspector's icon and

@@ -466,7 +466,21 @@ a.button.panel-toggle[hidden] { display: none; }
 .actor-row { display: flex; flex-direction: column; gap: 2px; padding-bottom: 8px; border-bottom: 1px solid #eef0f3; }
 .actor-row label { display: flex; align-items: center; gap: 6px; }
 .actor-row input { width: 160px; }
-.side-sec h3 { margin: 12px 0 6px; font-size: 14px; }
+.side-sec { border-bottom: 1px solid #eef0f3; }
+.side-sec h3 { margin: 0; font-size: 14px; font-weight: 600; }
+.side-card { border: 1px solid var(--line); border-radius: 12px; padding: 10px 12px; margin-bottom: 6px; background: #fbfcfd; }
+.side-card > h3 { margin-bottom: 6px; }
+.side-card .node-detail { border: 0; padding: 0; background: transparent; }
+.sec-toggle { width: 100%; border: 0; border-radius: 0; background: transparent; padding: 11px 2px; justify-content: flex-start; gap: 8px; text-align: left; white-space: normal; }
+.sec-toggle:hover:not(:disabled) { background: #f6f7f9; }
+.sec-toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.sec-chevron { color: var(--muted); transition: transform .12s; }
+.side-sec.open .sec-chevron { transform: rotate(90deg); }
+.side-sec[data-attention="warn"] .sec-toggle h3 { color: var(--warn); }
+.side-sec[data-attention="error"] .sec-toggle h3 { color: var(--error); }
+.side-sec[data-attention] .sec-toggle h3::after { content: " ●"; font-size: 10px; vertical-align: middle; }
+.sec-content { padding: 0 2px 12px; }
+.needs ul { margin: 2px 0 0; padding-left: 18px; width: 100%; }
 .side-sec h4 { margin: 10px 0 4px; font-size: 13px; }
 .node-detail { border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; background: #fafbfc; }
 dl.kv { display: grid; grid-template-columns: 90px 1fr; gap: 2px 8px; font-size: 12px; margin: 6px 0; }

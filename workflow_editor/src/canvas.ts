@@ -538,7 +538,7 @@ export class Canvas {
 
   private installPanZoom() {
     this.el.addEventListener('pointerdown', e => {
-      if (e.button !== 0 || (e.target as HTMLElement).closest('.node, .step-card, .zoom-controls, .edge, .report-icon, .final-step')) return
+      if (e.button !== 0 || (e.target as HTMLElement).closest('.node, .step-card, .zoom-controls, .frame-note, .edge, .report-icon, .final-step')) return
       this.events.select(null)
       const start = { x: e.clientX, y: e.clientY, vx: this.view.x, vy: this.view.y }
       this.el.setPointerCapture(e.pointerId)

@@ -40,11 +40,13 @@ const nodeLabel = (w: Workflow, id: string) => (w.nodes[id]?.name || id)
 // apply until they choose.
 const groupState = new Map<string, boolean>()
 function group(key: string, title: string, summary: string | null, open: boolean, ...body: (HTMLElement | null)[]): HTMLDetailsElement {
-  const d = h('details.insp-group', { dataset: { group: key } },
-    h('summary', h('span.group-title', title), summary ? h('span.group-summary', summary) : null),
-    h('div.group-body', ...body.filter((x): x is HTMLElement => !!x)))
+  const head = h('summary', h('span.group-title', title), summary ? h('span.group-summary', summary) : null)
+  const d = h('details.insp-group', { dataset: { group: key } }, head, h('div.group-body', ...body.filter((x): x is HTMLElement => !!x)))
   d.open = groupState.get(key) ?? open
-  d.addEventListener('toggle', () => groupState.set(key, d.open))
+  // Recorded at the activation itself (click, Enter or Space on the summary):
+  // the toggle event comes later, possibly after a rebuild has replaced this
+  // element.
+  head.addEventListener('click', () => groupState.set(key, !d.open))
   return d
 }
 

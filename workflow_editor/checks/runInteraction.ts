@@ -120,6 +120,11 @@ try {
   await page.goto(`${BASE}/#/ws/chk/run/${R1.workflow}/${R1.run}`)
   await page.waitForSelector('.run-summary[data-seq]')
   await page.getByLabel('Your name').fill('Check Person')
+  // The side sections are disclosures, closed until the person opens them
+  // (p8); the person's choice is kept in this browser. Open them all, as a
+  // person reading the records would.
+  const closedToggle = page.locator('.run-side .sec-toggle[aria-expanded="false"]:visible')
+  while (await closedToggle.count()) await closedToggle.first().click()
 
   // Marks the control and records its composition events; later reads ask
   // whether that same element is still connected and focused.

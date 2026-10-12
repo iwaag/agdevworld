@@ -232,8 +232,11 @@ export function renderRunView(root: HTMLElement, wsId: string, workflow: string,
   }
 
   // Links and buttons in built display name their action; it is handled
-  // here, with the state of this moment.
-  root.addEventListener('click', e => {
+  // here, with the state of this moment. The listener is on the shared app
+  // root, so it is removed with the view: a disposed view must never act on
+  // a click in its successor (p8 found a click reaching every run view
+  // visited before, with that view's run).
+  const onClick = (e: MouseEvent) => {
     const el = (e.target as Element).closest<HTMLElement>('[data-action]')
     if (!el || !root.contains(el)) return
     const d = el.dataset
@@ -262,7 +265,8 @@ export function renderRunView(root: HTMLElement, wsId: string, workflow: string,
         break
       }
     }
-  })
+  }
+  root.addEventListener('click', onClick)
 
   // ---- rendering --------------------------------------------------------------
 
@@ -482,7 +486,7 @@ export function renderRunView(root: HTMLElement, wsId: string, workflow: string,
   void refresh.request('full')
   void loadProjectName()
   return {
-    dispose: () => { disposed = true; fileRequest++; refresh.dispose(); stream?.close(); canvas.dispose(); clearInterval(clock); clearInterval(execTimer) },
+    dispose: () => { disposed = true; root.removeEventListener('click', onClick); fileRequest++; refresh.dispose(); stream?.close(); canvas.dispose(); clearInterval(clock); clearInterval(execTimer) },
     isDirty: () => side.isDirty(),
   }
 }

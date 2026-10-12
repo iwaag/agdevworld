@@ -82,6 +82,8 @@ try {
   await page.goto(`${service.base}/#/ws/rts/run/improve/run-001`)
   const link = page.locator('.review-link a.button.primary')
   await link.waitFor()
+  // Side sections are disclosures (p8), closed until opened; the choice is kept in this browser.
+  for (const t = page.locator('.run-side .sec-toggle[aria-expanded="false"]:visible'); await t.count();) await t.first().click()
   check((await link.textContent())?.includes('Open the review: Barracks upgrades'), 'the run view shows one prominent review link')
   check(await link.getAttribute('href') === served.url, `it points at the live instance (${served.url})`)
   check((await page.locator('.review-link').textContent())?.includes('opens on this host'), 'it says the address opens on this host')

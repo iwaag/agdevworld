@@ -164,7 +164,7 @@ try {
   const facts = await page.locator('.run-facts').innerText()
   check(/Work\s*2 completed · 2 pending/.test(facts) && /Documentation steps\s*1 running · 2 completed · 3 pending/.test(facts), `work and documentation are counted apart: ${facts.replace(/\n/g, ' | ')}`)
   check(/Writing report on\s*build/.test(await page.locator('.run-now').innerText()), 'summary: “Writing report on build”')
-  check(/Coordination \(Zulip\)[^\n]*\s*Not announced: Zulip coordination is not configured on this host/.test(await page.locator('.run-side').innerText()), 'the run view states its Zulip coordination (here: not configured)')
+  check(/Coordination \(Zulip\) — not configured/.test(await page.locator('.run-side').innerText()), 'the run view states its Zulip coordination in the section label, closed or open (here: not configured)')
   await page.click('button[title="Show the whole graph"]')
   await sleep(150)
   check(await allVisible(page), 'run view: Fit includes the generated steps')

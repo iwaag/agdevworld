@@ -108,6 +108,8 @@ try {
   console.log('run view')
   await page.goto(hash(R1))
   await page.waitForSelector('.node[data-id="join"] .run-status')
+  // Side sections are disclosures (p8), closed until opened; the choice is kept in this browser.
+  for (const t = page.locator('.run-side .sec-toggle[aria-expanded="false"]:visible'); await t.count();) await t.first().click()
   const labels = Object.fromEntries(await Promise.all(['survey', 'build', 'ask', 'handoff', 'join'].map(async id => [id, await cardText(id)])))
   result.labels = labels
   check(labels.survey === 'Completed' && labels.build === 'Running (reported)' && labels.ask === 'Waiting · Check Person' && labels.handoff === 'Waiting · Release board' && labels.join === 'Pending',

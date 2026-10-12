@@ -48,12 +48,28 @@ export interface SideActions {
   notice(kind: 'ok' | 'error' | 'warn', text: string): void
 }
 
-interface Section { root: HTMLElement; title: HTMLElement }
+// A side section (p8): a labelled disclosure. The label carries the
+// section's name, its counts and — through `attention` — any problem or
+// action it holds, so a closed section still says what needs the person.
+// Its open state is the person's: background updates never open or close
+// it; explicit navigation (a link to a file, a question, a section) opens it.
+interface Section { key: string; root: HTMLElement; title: HTMLElement; toggle: HTMLButtonElement; content: HTMLElement }
 
 function section(key: string, ...body: Node[]): Section {
   const title = h('h3')
-  return { root: h('section.side-sec', { dataset: { key: `sec:${key}`, section: key } }, title, ...body), title }
+  const toggle = h('button.sec-toggle', { type: 'button', 'aria-expanded': 'false', 'aria-controls': `sec-${key}` }, icon('chevron', 'icon small sec-chevron'), title)
+  const content = h('div.sec-content', { id: `sec-${key}`, hidden: true }, ...body)
+  return { key, root: h('section.side-sec', { dataset: { key: `sec:${key}`, section: key } }, toggle, content), title, toggle, content }
 }
+// The selected node: always shown while a node is selected, not a disclosure.
+function card(key: string, ...body: Node[]): Section {
+  const title = h('h3')
+  const content = h('div.sec-content', ...body)
+  return { key, root: h('section.side-sec.side-card', { dataset: { key: `sec:${key}`, section: key } }, title, content), title, toggle: h('button'), content }
+}
+const OPEN_KEY = 'workflow-editor.run-sections'
+function storedOpen(): Record<string, boolean> { try { return JSON.parse(localStorage.getItem(OPEN_KEY) ?? '{}') as Record<string, boolean> } catch { return {} } }
+function storeOpen(v: Record<string, boolean>) { try { localStorage.setItem(OPEN_KEY, JSON.stringify(v)) } catch { /* per-viewer convenience only */ } }
 const setText = (el: HTMLElement, text: string) => { if (el.textContent !== text) el.textContent = text }
 const show = (el: HTMLElement, on: boolean) => { if (el.hidden === on) el.hidden = !on }
 const setDisabled = (el: HTMLButtonElement, off: boolean) => { if (el.disabled !== off) el.disabled = off }
@@ -141,7 +157,7 @@ export class RunSide {
   private readonly placeholder = h('p.muted.side-placeholder')
   private readonly actor: HTMLInputElement
   private readonly actorRow: HTMLElement
-  private readonly selected = section('selected', h('div.sec-body'))
+  private readonly selected = card('selected', h('div.sec-body'))
   private readonly questions = section('questions', h('div.questions'), h('p.muted.small', 'No resolved questions yet.'))
   private readonly qItems = new Map<string, QuestionItem>()
   private readonly instructions = section('instructions', h('div.questions'))
@@ -160,6 +176,8 @@ export class RunSide {
   private readonly decide: { root: HTMLElement; evidence: Owned<HTMLInputElement>; accept: HTMLButtonElement; reject: HTMLButtonElement; cancel: HTMLButtonElement; busy: boolean }
   private readonly history = section('history', h('ol.history', { reversed: true }))
   private historyShown = ''
+  private readonly opened = storedOpen() // the person's open sections (per viewer)
+  private readonly disclosures: Section[]
 
   // Controls are created here once and attached by the updates when their
   // operation applies, so a historical view never carries a form.
@@ -184,7 +202,7 @@ export class RunSide {
     const fv = this.fileView
     fv.root.append(fv.head, fv.status, fv.pre)
     fv.root.hidden = true
-    this.files.root.append(fv.root)
+    this.files.content.append(fv.root)
 
     const resumeButton = h('button.primary', 'Resume')
     const instruction = new Owned(h('textarea', { rows: 2, placeholder: 'what the executor should do now (after looking at the working tree)', 'aria-label': 'Resume instruction' })).controls(resumeButton)
@@ -195,7 +213,7 @@ export class RunSide {
     })
     this.resume = { root: h('div.resume-form', h('label.small', { htmlFor: 'resume-instruction' }, 'Your instruction for the executor'), instruction.el, instruction.note, h('div.row.tight', resumeButton)), draft: instruction, button: resumeButton }
     instruction.el.id = 'resume-instruction'
-    this.execution.root.append(this.execMore)
+    this.execution.content.append(this.execMore)
 
     const evidence = new Owned(h('input', { placeholder: 'evidence: what you checked (report, commit, demo…)', 'aria-label': 'Decision evidence' }))
     const decide = (decision: 'accepted' | 'rejected') => {
@@ -218,6 +236,11 @@ export class RunSide {
     }, 'Cancel run')
     this.decide = { root: h('div.decide', evidence.el, h('div.row.tight', accept, reject, cancel)), evidence, accept, reject, cancel, busy: false }
 
+    this.disclosures = [this.questions, this.instructions, this.presentations, this.definition, this.catalog, this.related, this.files, this.execution, this.coordination, this.result, this.history]
+    for (const sec of this.disclosures) {
+      this.setOpen(sec, this.opened[sec.key] ?? false)
+      sec.toggle.addEventListener('click', () => { this.setOpen(sec, sec.content.hidden === true); this.opened[sec.key] = !sec.content.hidden; storeOpen(this.opened) })
+    }
     this.focus.append(this.focusDisplay, this.focusQuestions, this.holdSlot, this.decideSlot, this.focusLinks)
     this.el.append(this.placeholder, this.actorRow,
       ...[this.selected, this.questions, this.instructions, this.presentations, this.definition, this.catalog, this.related, this.files, this.execution, this.coordination, this.result, this.history].map(s => s.root))
@@ -229,6 +252,18 @@ export class RunSide {
   // The approver from the registry, only into a name nobody has typed.
   suggestActor(name: string) { if (!this.actor.value && document.activeElement !== this.actor) this.actor.value = name }
   focusActor() { this.actor.scrollIntoView({ block: 'nearest' }); this.actor.focus() }
+
+  private setOpen(sec: Section, open: boolean) {
+    if (sec.content.hidden === !open) return
+    sec.content.hidden = !open
+    sec.toggle.setAttribute('aria-expanded', String(open))
+    sec.root.classList.toggle('open', open)
+  }
+  // A problem or an action a closed section holds, in its label.
+  private attend(sec: Section, kind: 'error' | 'warn' | null) {
+    const v = kind ?? ''
+    if ((sec.root.dataset.attention ?? '') !== v) { if (kind) sec.root.dataset.attention = kind; else delete sec.root.dataset.attention }
+  }
 
   // Text the person typed that is not recorded yet.
   isDirty(): boolean {
@@ -242,6 +277,7 @@ export class RunSide {
   revealQuestion(id: string) {
     const item = this.qItems.get(id)
     if (!item) return
+    if (this.questions.content.contains(item.root)) this.setOpen(this.questions, true)
     if (item.form && !item.form.root.isConnected && this.data.shown?.record && this.answerable(this.data.shown.record, this.data.shown.record.questions[id])) { item.showForm = true; this.updateQuestions(this.data.shown.record) }
     item.root.scrollIntoView({ block: 'nearest' })
     item.form?.draft.el.focus({ preventScroll: true })
@@ -252,12 +288,13 @@ export class RunSide {
     this.resume.draft.el.focus({ preventScroll: true })
   }
   revealSection(key: string, focus?: string) {
-    const sec = [this.questions, this.instructions, this.presentations, this.definition, this.catalog, this.related, this.files, this.execution, this.coordination, this.result, this.history].find(s => s.root.dataset.section === key)
+    const sec = this.disclosures.find(s => s.key === key)
     if (!sec || sec.root.hidden) return
+    this.setOpen(sec, true)
     sec.root.scrollIntoView({ block: 'start' })
     if (focus === 'adjust' && this.adjust.root.isConnected) { this.adjust.root.open = true; this.adjust.ta.el.focus({ preventScroll: true }) }
   }
-  revealFile() { if (!this.fileView.root.hidden || this.data?.viewing) this.fileView.root.scrollIntoView({ block: 'nearest' }) }
+  revealFile() { this.setOpen(this.files, true); this.fileView.root.scrollIntoView({ block: 'nearest' }) }
 
   // ---- update -----------------------------------------------------------------
 
@@ -282,15 +319,20 @@ export class RunSide {
     if (pane.scrollTop <= 0 || !this.data) return null
     const top = pane.getBoundingClientRect().top
     const below = (el: Element) => el.getBoundingClientRect().bottom > top + 1
+    // Sections are disclosures (p8): a closed one is held by its label, and
+    // only displayed items are candidates.
     const sec = [...pane.querySelectorAll<HTMLElement>(':scope > section.side-sec:not([hidden])')].find(below)
     if (!sec) return null
     let el: HTMLElement = sec
+    const label = sec.querySelector<HTMLElement>(':scope > .sec-toggle, :scope > h3') ?? sec
+    const shown = (x: Element) => !x.closest('[hidden]')
     if (sec === this.history.root) {
-      const first = [...(this.history.root.children[1] as HTMLElement).children].find(below) as HTMLElement | undefined
-      el = !first || (first === this.history.root.children[1].firstElementChild && this.history.title.getBoundingClientRect().top >= top) ? this.history.title : first
+      const list = this.history.content.children[0] as HTMLElement
+      const first = shown(list) ? [...list.children].find(below) as HTMLElement | undefined : undefined
+      el = !first || (first === list.firstElementChild && this.history.toggle.getBoundingClientRect().top >= top) ? this.history.toggle : first
     } else {
-      const items = [...sec.querySelectorAll<HTMLElement>('[data-key]')]
-      el = items.find(x => x.getBoundingClientRect().top >= top) ?? sec
+      const items = [...sec.querySelectorAll<HTMLElement>('[data-key]')].filter(shown)
+      el = items.find(x => x.getBoundingClientRect().top >= top) ?? (label.getBoundingClientRect().top >= top ? label : sec)
     }
     return { el, offset: el.getBoundingClientRect().top - top, scrollTop: pane.scrollTop }
   }
@@ -410,6 +452,18 @@ export class RunSide {
       const unfinished = Object.entries(rec.nodes).filter(([, n]) => n.state === 'cancelled' && n.started).map(([id]) => name(id))
       if (unfinished.length) blocks.push(h('p.small.muted', `Started and then cancelled: ${unfinished.join(', ')}. Anything they had begun (a server, a branch) may need cleaning up by hand.`))
     }
+    // Problems that need the person, wherever their section is (closed or not).
+    if (!d.rev) {
+      const pubs = (d.execView?.checkpoints ?? []).filter(c => c.state === 'failed' || c.state === 'attention').length
+      const stuck = Object.values(rec.presentations ?? {}).filter(p => p.state === 'stop-failed' || p.state === 'failed')
+      const need: (Node | null)[] = [
+        pubs ? h('li', `Publication: ${pubs} checkpoint${pubs === 1 ? '' : 's'} need${pubs === 1 ? 's' : ''} you — `, h('a', { href: '#', dataset: { action: 'goto-section', section: 'execution' } }, 'Execution and publication')) : null,
+        ...stuck.map(p => h('li', `${p.id}: ${p.state === 'stop-failed' ? 'its stop could not be verified' : 'its last start failed'} — `, h('a', { href: '#', dataset: { action: 'goto-section', section: 'presentations' } }, 'Presentations'))),
+        d.notifyView?.failed || d.notifyView?.problem ? h('li', 'Zulip coordination is failing — ', h('a', { href: '#', dataset: { action: 'goto-section', section: 'coordination' } }, 'Coordination')) : null,
+        d.execError ? h('li', `This host's execution facts could not be read (${d.execError}); the executor line shows the last facts.`) : null,
+      ].filter(Boolean)
+      if (need.length) blocks.push(h('div.needs.banner.warn', h('strong', 'Needs attention'), h('ul', ...need)))
+    }
     // Conditions beside the main one, so none is hidden by it.
     if (hold && kind !== 'held' && !d.rev) blocks.push(h('p.small.warn-text', `The run is also held (${hold.kind}): `, h('a', { href: '#', dataset: { action: 'goto-resume' } }, 'resume it below')))
     if (ex.failed.length && kind !== 'failed' && !rec.cancelled) blocks.push(h('p.small.error', `Failed: ${ex.failed.map(name).join(', ')}.`))
@@ -423,8 +477,8 @@ export class RunSide {
     // The decision: here when a completed run has none; otherwise at the side (Result).
     const decideHere = !d.rev && ex.state === 'completed' && !last && !rec.cancelled
     if (!d.rev) {
-      if (!this.decide.evidence.kept) place(this.decide.root, decideHere ? this.decideSlot : this.result.root)
-      else if (!this.decide.root.isConnected) place(this.decide.root, this.result.root)
+      if (!this.decide.evidence.kept) place(this.decide.root, decideHere ? this.decideSlot : this.result.content)
+      else if (!this.decide.root.isConnected) place(this.decide.root, this.result.content)
     }
     show(this.decideSlot, this.decideSlot.childElementCount > 0)
     show(this.holdSlot, this.holdSlot.childElementCount > 0)
@@ -466,7 +520,7 @@ export class RunSide {
     const sit = situation(rec)
     return h('div.active-block',
       steps.length ? h('ul.active-list', ...steps) : h('p.small.muted', 'No node is recorded as running.'),
-      h('p.small.executor-line', icon('do', 'icon tiny'), ` Executor: ${host}${d.execView ? ` · executor ${d.execView.executor.state}` : ''}`),
+      h('p.small.executor-line', `Executor: ${host}${d.execView ? ` · executor ${d.execView.executor.state}` : ''}`),
       h('div.row.tight.focus-actions', h('button', { title: 'Stop execution; the run stays resumable', dataset: { action: 'stop-run' }, disabled: this.frozen || !!rec.control.hold || !!rec.control.stop || sit === 'completed' }, icon('stop', 'icon tiny'), 'Stop'),
         rec.control.stop ? h('span.small.warn-text', `Stop requested by ${rec.control.stop.by}; waiting for the process to end.`) : null))
   }
@@ -497,7 +551,7 @@ export class RunSide {
     show(this.selected.root, on)
     if (!on) return
     setText(this.selected.title, 'Selected node')
-    patchContent(this.selected.root.children[1] as HTMLElement, this.nodeDetail(rec, id!))
+    patchContent(this.selected.content.children[0] as HTMLElement, this.nodeDetail(rec, id!))
   }
 
   private nodeDetail(rec: RunRecord, id: string): HTMLElement {
@@ -579,8 +633,8 @@ export class RunSide {
     const sideList = qs.filter(q => !focusList.includes(q)).reverse()
     const resolved = sideList.length
     setText(this.questions.title, `Questions (${resolved} resolved)`)
-    const box = this.questions.root.children[1] as HTMLElement
-    show(this.questions.root.children[2] as HTMLElement, !resolved)
+    const box = this.questions.content.children[0] as HTMLElement
+    show(this.questions.content.children[1] as HTMLElement, !resolved)
     const arrange = (container: HTMLElement, items: Question[]) => {
       let at = container.firstChild
       for (const q of items) {
@@ -652,7 +706,8 @@ export class RunSide {
     if (!ins.length) return
     const pending = ins.filter(i => !i.ack).length
     setText(this.instructions.title, `Instructions (${pending ? `${pending} not acknowledged` : 'all acknowledged'})`)
-    patchContent(this.instructions.root.children[1] as HTMLElement, ...ins.slice().reverse().map(i => h(`div.question.q-${i.ack ? 'taken-up' : 'answered'}`, { dataset: { instruction: i.id, key: `i:${i.id}` } },
+    this.attend(this.instructions, pending ? 'warn' : null)
+    patchContent(this.instructions.content.children[0] as HTMLElement, ...ins.slice().reverse().map(i => h(`div.question.q-${i.ack ? 'taken-up' : 'answered'}`, { dataset: { instruction: i.id, key: `i:${i.id}` } },
       h('div.q-head', h('strong', i.id), chip(i.ack ? 'completed' : 'waiting', i.ack ? `acknowledged: ${i.ack.response}` : 'received'), h('span.muted.small', ` from ${i.from} via ${i.via} · ${when(i.at)}${i.during.length ? ` · while ${i.during.join(', ')} ran` : ''}`)),
       h('p.q-text', i.text),
       i.ack ? h('p.small.ok-text', `${i.ack.by}: ${i.ack.note}`) : h('p.small.muted', `${rec.executor.name} reads it at the next node boundary; no node starts before it is acknowledged.`))))
@@ -670,10 +725,11 @@ export class RunSide {
     const stopped = all.filter(p => p.state === 'stopped').length
     const parts = [live ? `${live} live` : '', unserved > 0 ? `${unserved} recorded open, not served` : '', stopped ? `${stopped} stopped` : '', all.some(p => p.state === 'failed' || p.state === 'stop-failed') ? 'a problem' : ''].filter(Boolean)
     setText(this.presentations.title, `Presentations (${parts.join(', ') || `${all.length} registered`})`)
+    this.attend(this.presentations, all.some(p => p.state === 'failed' || p.state === 'stop-failed') ? 'error' : unserved > 0 && !rec.cancelled && rec.execution.state !== 'completed' ? 'warn' : unserved > 0 ? 'error' : null)
     const rev = this.data.rev
     const finished = !!rec.cancelled || rec.execution.state === 'completed'
     const STATE: Record<string, string> = { registered: 'completed', available: 'running', stopped: 'cancelled', failed: 'failed', 'stop-failed': 'failed' }
-    patchContent(this.presentations.root.children[1] as HTMLElement, ...all.slice().reverse().map(p => {
+    patchContent(this.presentations.content.children[0] as HTMLElement, ...all.slice().reverse().map(p => {
       const v = this.data.presentViews.find(x => x.id === p.id)
       const asked = Object.values(rec.questions).filter(q => q.presentation?.id === p.id)
       const decided = rec.decisions.filter(d => d.confirmation?.presentation?.id === p.id)
@@ -694,7 +750,7 @@ export class RunSide {
   private updateDefinition(rec: RunRecord) {
     setText(this.definition.title, `Definition (${rec.definition.active ?? 'r1'} in force)`)
     const revs = rec.definition.revisions ?? []
-    patchContent(this.definition.root.children[1] as HTMLElement,
+    patchContent(this.definition.content.children[0] as HTMLElement,
       h('p.small', h('strong', 'r1'), ` original snapshot — definition/${rec.definition.root}.yaml, ${when(rec.created)}`),
       ...revs.map(v => h('div.revision', { dataset: { revision: v.revision, key: `r:${v.revision}` } },
         h('p.small', h('strong', v.revision), ` from ${v.parent} · ${v.by} · ${when(v.at)} · source: ${v.source.kind === 'request' ? `the original request (${v.source.input})` : v.source.kind}${'question' in v.source ? ` ${v.source.question}` : 'instruction' in v.source ? ` ${v.source.instruction}` : ''}`),
@@ -708,7 +764,7 @@ export class RunSide {
     if (a.base === null) { a.base = active; a.ta.el.value = active }
     const closed = open ? null : `The run is ${rec.cancelled ? 'cancelled' : 'completed'}: it can no longer be adjusted. Your text is kept, not sent.`
     a.ta.set(closed); a.reason.set(closed)
-    if (open) { if (!a.root.isConnected) this.definition.root.append(a.root) }
+    if (open) { if (!a.root.isConnected) this.definition.content.append(a.root) }
     else if (a.ta.el.value === a.base && !a.reason.el.value.trim() && !a.ta.active && !a.reason.active) a.root.remove()
     this.renderPreview()
   }
@@ -765,7 +821,7 @@ export class RunSide {
 
   private updateCatalog(rec: RunRecord) {
     const cat = this.data.shown?.catalog
-    const body = this.catalog.root.children[1] as HTMLElement
+    const body = this.catalog.content.children[0] as HTMLElement
     const given = rec.history.filter(e => e.op === 'attempt.begin').map(e => (e as { attempt: string; settings?: { catalog?: { state: string; sha256?: string } } }))
     if (!cat || cat.state === 'none') { setText(this.catalog.title, 'Node catalog'); patchContent(body, h('p.muted.small', 'None supplied: this run was created before node catalogs (p7/ex1).')); return }
     if (cat.state === 'unavailable') { setText(this.catalog.title, 'Node catalog (unavailable)'); patchContent(body, h('div.banner.warn.small', 'Your node catalog could not be read when this run was created: ', cat.problem, '. The agent was told that your expectations are not known for this run.')); return }
@@ -788,7 +844,7 @@ export class RunSide {
     show(this.related.root, rel.length > 0)
     if (!rel.length) return
     setText(this.related.title, 'Related runs')
-    patchContent(this.related.root.children[1] as HTMLElement, ...rel)
+    patchContent(this.related.content.children[0] as HTMLElement, ...rel)
   }
 
   private updateFiles(r: RunResponse) {
@@ -796,7 +852,8 @@ export class RunSide {
     const recorded = r.artifacts.filter(a => !(a.path.startsWith(`${r.dir}/`) && !a.path.slice(r.dir.length + 1).includes('/')))
     const missing = recorded.filter(a => !a.exists).length
     setText(this.files.title, `Reports and files (${r.files.length}${missing ? `, ${missing} missing` : ''})`)
-    patchContent(this.files.root.children[1] as HTMLElement,
+    this.attend(this.files, missing ? 'warn' : null)
+    patchContent(this.files.content.children[0] as HTMLElement,
       h('p.small.muted', `${r.dir}/ — open these in VS Code to edit; here they are read-only.`),
       h('ul.files', ...r.files.map(f => h('li', { dataset: { key: `f:${f.name}` } }, fileLink(f.name), h('span.muted.small', ` ${f.size} B${f.modified ? ` · ${ago(f.modified)}` : ''}`)))),
       recorded.length ? h('h4', 'Recorded artifacts') : null,
@@ -840,7 +897,8 @@ export class RunSide {
     const sit = situation(rec)
     const ev = d.execView
     const problems = (ev?.checkpoints ?? []).filter(c => c.state === 'failed' || c.state === 'attention').length
-    setText(this.execution.title, `Execution and publication${d.execError ? ' (host facts unavailable)' : problems ? ` (${problems} publication problem${problems === 1 ? '' : 's'})` : ''}`)
+    setText(this.execution.title, `Execution and publication${d.execError ? ' (host facts unavailable)' : problems ? ` (${problems} publication problem${problems === 1 ? '' : 's'})` : rec.control.hold ? ' (held)' : ''}`)
+    this.attend(this.execution, problems ? 'error' : d.execError || rec.control.hold ? 'warn' : null)
     const open = ev?.attempts.find(a => a.state !== 'ended')
     const SIT: Record<string, string> = {
       executing: 'Executing', stopping: 'Stop requested — waiting for the process to end', 'awaiting-person': 'Awaiting a person — no process runs meanwhile',
@@ -849,7 +907,7 @@ export class RunSide {
     }
     const process = open ? (open.alive === true ? `process ${open.pid} alive` : open.alive === false ? (open.pid ? `process ${open.pid} not seen alive` : 'launching') : 'process on another host') : ''
     const frozen = this.frozen || !!rec.cancelled
-    patchContent(this.execution.root.children[1] as HTMLElement,
+    patchContent(this.execution.content.children[0] as HTMLElement,
       h('div.row.tight', h(`span.chip.sit-${sit}`, SIT[sit] ?? sit), process ? h('span.muted.small', process) : null),
       rec.control.hold ? h('p.small', `Held (${rec.control.hold.kind}) since ${when(rec.control.hold.since)} by ${rec.control.hold.by}: ${rec.control.hold.reason}. `, h('a', { href: '#', dataset: { action: 'goto-resume' } }, 'Resume with an instruction')) : null,
       d.execError ? h('div.banner.warn', `Execution facts of this host could not be read: ${d.execError}`) : null,
@@ -877,7 +935,8 @@ export class RunSide {
     show(this.coordination.root, !this.data.rev && !!v)
     if (this.data.rev || !v) return
     setText(this.coordination.title, `Coordination (Zulip)${v.failed || v.problem ? ' — needs attention' : !v.configured ? ' — not configured' : ''}`)
-    const body = this.coordination.root.children[1] as HTMLElement
+    this.attend(this.coordination, v.failed || v.problem ? 'error' : v.uncertain ? 'warn' : null)
+    const body = this.coordination.content.children[0] as HTMLElement
     if (!v.configured) { patchContent(body, h('p.small.muted', `Not announced: Zulip coordination is not configured on this host${v.problem ? ` (${v.problem})` : ''}.`)); return }
     patchContent(body,
       v.skipped ? h('p.small.muted', `Not announced: ${v.skipped}.`) : null,
@@ -897,7 +956,7 @@ export class RunSide {
     const last = rec.decisions.at(-1)
     setText(this.result.title, `Result and decision${last ? ` (${last.decision})` : ''}`)
     const completed = rec.execution.state === 'completed'
-    patchContent(this.result.root.children[1] as HTMLElement,
+    patchContent(this.result.content.children[0] as HTMLElement,
       ...rec.decisions.map((d, i) => h(`div.banner.${d.decision === 'accepted' ? 'ok' : 'error'}`, { dataset: { key: `d:${i}` } }, `${d.decision} by ${d.by} (${when(d.at)}) — evidence: ${d.evidence}${d.note ? ` — ${d.note}` : ''}`)),
       h('p.small.muted', completed
         ? (this.decide.root.parentElement === this.decideSlot ? 'Execution completed: every node recorded completion. Accepting the result is your separate decision (offered above).' : 'Execution completed: every node recorded completion. Accepting the result is your separate decision.')
@@ -920,7 +979,7 @@ export class RunSide {
     this.historyShown = shownKey
     const history = rec.history.slice().reverse()
     setText(this.history.title, `History (${history.length})`)
-    patchContent(this.history.root.children[1] as HTMLElement, ...history.map(e => {
+    patchContent(this.history.content.children[0] as HTMLElement, ...history.map(e => {
       const d = e as unknown as Record<string, unknown>
       const moves = Object.entries(e.change.nodes ?? {}).map(([n, [a, b]]) => `${n}: ${a ?? '—'} → ${b}`)
       if (e.change.execution) moves.push(`run: ${e.change.execution[0] ?? '—'} → ${e.change.execution[1]}`)

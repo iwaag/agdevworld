@@ -19,7 +19,7 @@ import {
 import type { SourceRef } from '../shared/intake.ts'
 import { atomicWrite, inside, readTextOrNull } from './files.ts'
 import { MANIFEST_KIND } from '../shared/review.ts'
-import { parseSnapshot, type CatalogContext, type CatalogSnapshot } from '../shared/catalog.ts'
+import { parseSnapshot, type CatalogContext, type CatalogSnapshot, type RunCatalog } from '../shared/catalog.ts'
 import { withLock } from './lock.ts'
 import { blobSizeAt, listAt, resolveRev, RevError, showAt, type DevdocsInfo, type DevdocsRev } from './devdocs.ts'
 import { RequestError, WORKFLOWS_DIR, type Workspace } from './workspace.ts'
@@ -232,9 +232,7 @@ async function loadCatalogSnapshot(src: Source, rec: RunRecord, bundle: Bundle):
   return null
 }
 
-// What a run was given of the person's node catalog (p7/ex1): the frozen
-// snapshot, why there is none, or that the run predates catalogs.
-export type RunCatalog = { state: 'supplied'; file: string; sha256: string; snapshot: CatalogSnapshot } | { state: 'unavailable'; problem: string } | { state: 'none' }
+// What a run was given of the person's node catalog (p7/ex1).
 export function catalogOf(record: RunRecord, bundle: { catalog?: CatalogSnapshot }): RunCatalog {
   const c = record.context?.catalog
   if (!c) return { state: 'none' }
@@ -391,6 +389,7 @@ export async function runResponse(ws: Workspace, ref: RunRef, opts: { rev?: stri
     ...(reading.bundle.revisions ? { revisions: reading.bundle.revisions.map(r => ({ revision: r.revision, file: r.file, workflow: r.workflow, text: r.text })) } : {}),
     sources: opts.rev ? [] : await compareSources(ws, reading.bundle, record?.definition),
     files: reading.files ?? [], predecessor, artifacts,
+    ...(record ? { catalog: catalogOf(record, reading.bundle) } : {}),
   }
 }
 

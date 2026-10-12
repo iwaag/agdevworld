@@ -218,6 +218,19 @@ running, no unacknowledged instruction), as a new immutable revision
                   wfe run ask <run> <node> --about-adjustment <n> …, then
                   apply the same file with --source agreement:<q>
 Writes the revision file and run.json (one history entry).`,
+  nodes: `wfe run nodes <run> [--show <template>]
+
+The person's node catalog as this run was given it at creation (docs/catalog.md):
+the activities they recognize as distinct workflow steps, each with how they
+expect it to appear (expectation) and what the agent performing it does
+(description). A catalog edit after the run was created does not change it.
+The person recognizes these activities as distinct steps. When relevant to
+the run's request, they generally expect them to be visible as workflow
+nodes; whether and where is the designer's choice, made from the request and
+the current workflow. A node from one of them: wfe nodes instantiate
+<template> --run <run> --file <draft> (wfe nodes help), then wfe run adjust.
+Also says when the catalog was unavailable at creation, or when the run
+predates catalogs. Reads only.`,
   revisions: `wfe run revisions <run> [--show r<n>] [--diff r<a> r<b>]
 
 The run's definition revisions: the original (r1) and each adjustment —
@@ -264,6 +277,7 @@ export function runIndex(): string {
   decide <run>             record acceptance or rejection of the result
   adjust <run>             change the run's future work (a recorded revision)
   revisions <run>          the original definition and each adjustment
+  nodes <run>              the person's node catalog as this run was given it
 
 wfe run help <subcommand> for inputs, reads/writes and results.
 ${COMMON}`
@@ -356,6 +370,9 @@ export function describeRun(r: RunResponse, opts: { history?: boolean; url?: str
     lines.push(`  ${id.padEnd(20)} approvals at creation: intent ${d.approvals.intent}, definition ${d.approvals.definition}${now ? `; ${now}` : ''}`)
   }
   if (rec.definition.revisions?.length) lines.push(`Adjusted: revision ${rec.definition.active} in force (${rec.definition.revisions.map(v => `${v.revision} from ${v.parent} by ${v.by}: ${first(v.reason, 80)}`).join('; ')}); the original stays in definition/ (wfe run revisions)`)
+  // The person's node catalog this run was given (p7/ex1).
+  const cat = r.catalog
+  if (cat) lines.push(cat.state === 'supplied' ? `Node catalog: ${cat.snapshot.templates.length ? `${cat.snapshot.templates.length} template${cat.snapshot.templates.length === 1 ? '' : 's'} (${cat.snapshot.templates.map(t => `${t.id} r${t.revision}`).join(', ')})` : 'empty'}, frozen at creation in ${cat.file} (sha256 ${cat.sha256.slice(0, 12)}…; wfe run nodes)` : cat.state === 'unavailable' ? `Node catalog: unavailable when the run was created — ${cat.problem}` : 'Node catalog: none supplied (created before p7/ex1)')
   if (rec.predecessor) lines.push(`Predecessor: ${runKey(rec.predecessor)}${r.predecessor?.problem ? ` — ${r.predecessor.problem}` : r.predecessor?.execution ? ` (${r.predecessor.execution})` : ''}`)
   lines.push(`Created ${rec.created}; started ${rec.started ?? '—'}; ended ${rec.ended ?? '—'}; last update ${ago(rec.updated)}; seq ${rec.seq}`)
   if (rec.cancelled) lines.push(`Cancelled by ${rec.cancelled.by}: ${rec.cancelled.reason}`)
@@ -615,6 +632,26 @@ export async function runCommand(c: RunCli): Promise<number> {
       const res = await wrap(() => adjustRun(ws, r, { text, reason: need(c, 'reason', 'why the run changes'), source, dryRun: c.flag('dry-run'), propose: c.opt('propose'), expectRevision: c.opt('expect-revision') }, { by, via: 'cli', expectSeq, attempt, receipt }))
       c.out(adjustText(res, runKey(r)), res)
       return res.ok ? 0 : 1
+    }
+    case 'nodes': {
+      const r = await ref()
+      const resp = await wrap(() => runResponse(ws, r))
+      if (!resp.record) throw c.refused(`run ${runKey(r)} cannot be used: ${resp.problem?.message}`)
+      const cat = resp.catalog!
+      const { full } = await import('./nodes.ts')
+      if (cat.state !== 'supplied') { c.out(cat.state === 'unavailable' ? `The person's node catalog could not be read when ${runKey(r)} was created: ${cat.problem}` : `${runKey(r)} was created before node catalogs (p7/ex1); none was supplied.`, cat); return 0 }
+      const show = c.opt('show')
+      if (show) {
+        const t = cat.snapshot.templates.find(x => x.id === show)
+        if (!t) throw c.refused(`the run's catalog has no template "${show}" (${cat.snapshot.templates.map(x => x.id).join(', ') || 'none'})`)
+        c.out(full(t), t)
+        return 0
+      }
+      const { CATALOG_MEANING } = await import('../shared/catalog.ts')
+      c.out(cat.snapshot.templates.length
+        ? [`Node catalog of ${runKey(r)}, frozen at creation (${cat.snapshot.taken}; ${cat.file}):`, CATALOG_MEANING, '', ...cat.snapshot.templates.map(t => full(t)).join('\n\n').split('\n')].join('\n')
+        : `The person's node catalog was empty when ${runKey(r)} was created: no activity is named as one they expect as its own node.`, cat)
+      return 0
     }
     case 'revisions': {
       const r = await ref()

@@ -4,7 +4,7 @@
 // See docs/runs.md for the contract.
 import { canonicalJson } from './canonical.ts'
 import type { EffectiveGraph, StepSpec } from './compile.ts'
-import type { CatalogContext } from './catalog.ts'
+import type { AttemptCatalog, CatalogContext } from './catalog.ts'
 import { INSTRUCTION_RESPONSES, type SourceRef } from './intake.ts'
 import { ID_PATTERN, normalizeRepoPath, type Edge } from './model.ts'
 
@@ -57,7 +57,8 @@ export const hostOf = (e: Executor) => e.host ?? e.name
 // and the backend it resolved to, and the guides composed into its
 // instructions — the host's common contract and the project's guides — by
 // content hash.
-export interface AttemptSettings { agent: string; profile: string | null; backend: string | null; contract: { name: string; sha256: string } | null; guides: { path: string; sha256: string }[] }
+// catalog (p7/ex1): the run's node-catalog snapshot this attempt was given.
+export interface AttemptSettings { agent: string; profile: string | null; backend: string | null; contract: { name: string; sha256: string } | null; guides: { path: string; sha256: string }[]; catalog?: AttemptCatalog }
 export interface BundleEntry {
   file: string // run-relative, definition/<id>.yaml
   source: string // project-relative file it was copied from
@@ -481,7 +482,14 @@ function attemptSettings(v: unknown): AttemptSettings {
     if (!path || path === '.') fail('shape', `settings.guides[${i}] path must be project-relative`)
     return { path: path!, sha256: hash((g as Record<string, unknown>).sha256, `settings.guides[${i}]`) }
   })
-  return { agent: text(o.agent, 'settings.agent'), profile: optText(o.profile, 'settings.profile') || null, backend: optText(o.backend, 'settings.backend') || null, contract, guides }
+  let catalog: AttemptCatalog | undefined
+  if (o.catalog !== undefined) {
+    const c = o.catalog as Record<string, unknown>
+    if (isObj(c) && c.state === 'unavailable') catalog = { state: 'unavailable' }
+    else if (isObj(c) && c.state === 'supplied' && typeof c.templates === 'number' && Number.isInteger(c.templates) && c.templates >= 0) catalog = { state: 'supplied', sha256: hash(c.sha256, 'settings.catalog'), templates: c.templates }
+    else fail('shape', 'settings.catalog must be {state: supplied, sha256, templates} or {state: unavailable}')
+  }
+  return { agent: text(o.agent, 'settings.agent'), profile: optText(o.profile, 'settings.profile') || null, backend: optText(o.backend, 'settings.backend') || null, contract, guides, ...(catalog ? { catalog } : {}) }
 }
 
 function emptyNode(): NodeRecord {

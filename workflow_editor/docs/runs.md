@@ -30,6 +30,8 @@ devdocs/runs/<workflow-id>/<run-id>/
   report-<node>.md      a report per authored node (default policy)
   report.md             the final report (default policy)
   run.json              the record: current state and its history
+  context/
+    node-catalog.json   the person's node catalog as the run was given it (p7/ex1, catalog.md)
   definition/
     <workflow-id>.yaml  the run's workflow, copied byte for byte
   …                     anything else the executor writes (manual policy: names are its choice)
@@ -153,6 +155,16 @@ before anything is written.
 Definition approval stays a statement about a definition. Its state is
 recorded and shown; it is not a gate, not permission to execute and not
 acceptance of a result.
+
+**The person's node catalog (p7/ex1).** Every entrance freezes the
+operating area's node catalog into `context/node-catalog.json` and records
+`context.catalog` (`supplied` with file, sha256, generation and count; or
+`unavailable` with the problem). An empty catalog is an explicit empty
+snapshot. Reading checks the file by hash, like the bundle. Each attempt is
+given this snapshot in its brief and records it in `attempt.begin`'s
+`settings.catalog`; a later catalog edit reaches new runs only. The input's
+`sha256` is recorded with it (what a request-sourced adjustment binds to).
+See [catalog.md](catalog.md).
 
 Repository context: at creation the record keeps, for the project root and
 each repository the bundled workflows bind, the checked-out commit, the branch
@@ -636,6 +648,7 @@ HTTP routes call them; neither needs the other running.
 | Answer | `answer <run> <q>` | same | run view → question → Answer |
 | Attach an artifact | `attach <run> <path>` | same | — (reports listed and readable) |
 | Decide on the result | `decide <run> --decision …` | same | run view → Accept / Reject |
+| The node catalog the run was given (p7/ex1) | `nodes <run> [--show <template>]` | `GET runs/<wf>/<run>` (`catalog`) | run view → Node catalog |
 
 The browser offers the person's operations: answering, deciding on the
 result, and stopping the run. Execution records (start, complete, wait, …)

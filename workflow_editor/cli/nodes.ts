@@ -105,6 +105,7 @@ export async function nodesCommand(c: NodesCli): Promise<number> {
     return r
   }
   switch (sub ?? 'list') {
+    case 'help': console.log(NODES_HELP); return 0
     case 'list': {
       const r = await live()
       const head = r.initializedNow ? `Created ${r.file} with the presets present and cleanup as your templates.\n` : ''

@@ -259,6 +259,21 @@ export function renderRunView(root: HTMLElement, wsId: string, workflow: string,
     return h('section.side-sec', h('h3', title), ...body)
   }
 
+  // The person's node catalog as this run was given it (p7/ex1): the frozen
+  // snapshot, and which attempts recorded receiving it.
+  function catalogSection(rec: RunRecord): HTMLElement {
+    const cat = shown?.catalog
+    const given = rec.history.filter(e => e.op === 'attempt.begin').map(e => (e as { attempt: string; settings?: { catalog?: { state: string; sha256?: string } } }))
+    if (!cat || cat.state === 'none') return section('Node catalog', h('p.muted.small', 'None supplied: this run was created before node catalogs (p7/ex1).'))
+    if (cat.state === 'unavailable') return section('Node catalog (unavailable)', h('div.banner.warn.small', 'Your node catalog could not be read when this run was created: ', cat.problem, '. The agent was told that your expectations are not known for this run.'))
+    const same = given.filter(a => a.settings?.catalog?.state === 'supplied' && a.settings.catalog.sha256 === cat.sha256).length
+    const t = cat.snapshot.templates
+    return section(`Node catalog (${t.length} template${t.length === 1 ? '' : 's'}, as given)`,
+      h('p.muted.small', `Frozen when the run was created (${when(cat.snapshot.taken)}). Edits to your catalog since then do not reach this run. ${given.length ? `${same} of ${given.length} attempt${given.length === 1 ? '' : 's'} recorded receiving this snapshot (sha256 ${cat.sha256.slice(0, 12)}…).` : 'No attempt has begun yet.'}`),
+      t.length ? h('ul.catalog-given', ...t.map(x => h('li', { dataset: { template: x.id } }, h('strong', x.name), ' ', h('code', x.id), h('span.muted.small', ` ${x.type}, revision ${x.revision}`), h('div.small.expectation', h('span.muted', 'Expects: '), x.expectation))))
+        : h('p.muted.small', 'Your catalog was empty: the agent was told you named no activity you expect as its own node.'))
+  }
+
   function nodeDetail(rec: RunRecord, id: string): HTMLElement {
     const n: NodeRecord = rec.nodes[id]
     const wf = activeWorkflow(shown, rec)
@@ -378,6 +393,7 @@ export function renderRunView(root: HTMLElement, wsId: string, workflow: string,
 
     if (rec.presentations) side.append(section('Presentations', ...presentationPanel(rec)))
     side.append(section(`Definition (${rec.definition.active ?? 'r1'} in force)`, ...revisionPanel(rec)))
+    side.append(catalogSection(rec))
 
     const rel: (Node | null)[] = []
     if (r!.predecessor) rel.push(h('div', 'Predecessor: ', h('a', { href: runHash(wsId, r!.predecessor.ref) }, r!.predecessor.ref)))

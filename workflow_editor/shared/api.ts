@@ -4,6 +4,7 @@ import type { ApprovalState } from './canonical.ts'
 import type { ApprovalKind, Issue, Project, Workflow } from './model.ts'
 import type { RepositoryInfo } from './validate.ts'
 import type { ExecutionState, RunRecord } from './run.ts'
+import type { RunCatalog } from './catalog.ts'
 
 export interface FileProblem {
   kind: 'malformed' | 'unsupported' | 'shape' | 'missing' | 'unreadable'
@@ -200,6 +201,7 @@ export interface RunResponse {
   files: RunFile[]
   predecessor?: RelatedRun
   artifacts: { path: string; exists: boolean }[]
+  catalog?: RunCatalog // what the run was given of the person's node catalog (p7/ex1)
 }
 
 export interface RunOpResponse { ok: true; seq: number; record: RunRecord }

@@ -153,6 +153,7 @@ test('claim: the workflow\'s profile and guides are resolved, recorded with atte
   assert.deepEqual(rec.control.attempt?.settings, {
     agent: 'ppt-agent', profile: 'sonnet', backend: 'claude_code / anthropic/claude-sonnet-5', contract: OFFER.contract,
     guides: [{ path: 'agent/guide.md', sha256: hash('# p agent\nFacts of the project.\n') }, { path: 'agent/make.md', sha256: hash('# make runs\n') }],
+    catalog: { state: 'supplied', sha256: (rec.context.catalog as { sha256: string }).sha256, templates: 2 }, // p7/ex1: the run's snapshot
   })
   assert.equal(rec.control.attempt?.backend, 'claude_code / anthropic/claude-sonnet-5')
   const entry = rec.history.find(h => h.op === 'attempt.begin') as unknown as { settings: unknown }

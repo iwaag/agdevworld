@@ -49,6 +49,26 @@ export type CatalogContext =
   | { state: 'supplied'; file: string; sha256: string; generation: number; templates: number }
   | { state: 'unavailable'; problem: string }
 
+// What a run was given, as views and the brief read it: the frozen
+// snapshot, why there is none, or that the run predates catalogs.
+export type RunCatalog = { state: 'supplied'; file: string; sha256: string; snapshot: CatalogSnapshot } | { state: 'unavailable'; problem: string } | { state: 'none' }
+// What an attempt records it was given (attempt.begin settings).
+export type AttemptCatalog = { state: 'supplied'; sha256: string; templates: number } | { state: 'unavailable' }
+
+// The run's catalog in an attempt's brief (docs/catalog.md, "Delivered").
+// The meaning is stated once; each template's id, name, type and
+// expectation follow; tool usage stays in the tools' help.
+export const CATALOG_MEANING = 'The person recognizes these activities as distinct steps. When relevant to this request, they generally expect them to be visible as workflow nodes. Choose whether and where to represent them using the request and the current workflow.'
+export function catalogBrief(c: RunCatalog, run: string): string[] {
+  if (c.state === 'none') return []
+  if (c.state === 'unavailable') return ['', `The person's node catalog could not be read when this run was created (${c.problem}), so which activities they expect as distinct workflow nodes is not known for this run.`]
+  const t = c.snapshot.templates
+  if (!t.length) return ['', 'The person\'s node catalog was empty when this run was created: they have named no activity they expect as a workflow node of its own.']
+  return ['', `The person's node catalog, as it was when this run was created (wfe run nodes ${run} shows each template in full):`, CATALOG_MEANING,
+    ...t.map(x => `- ${x.id} "${x.name}" (${x.type}, revision ${x.revision}): ${x.expectation.trim().split('\n').join(' ')}`),
+    `A node from one of them goes into a draft of this run's definition with wfe nodes instantiate <template> --run ${run} --file <draft> (wfe nodes help); the draft becomes future work with wfe run adjust (wfe run help adjust).`]
+}
+
 // A node's provenance (docs/contract.md, "Template provenance"): outside
 // every digest and the compiled graph.
 export interface TemplateRef { id: string; revision: number; expectation: string }

@@ -24,7 +24,8 @@ import { assertWorkspaceAllowed, loadBoundary } from './boundary.ts'
 import type { Gitea } from './gitea.ts'
 import { baseline, publish, type Baseline, type RepoStep } from './publish.ts'
 import { loadRegistry, observe, type Registration } from './registry.ts'
-import { createRun, listRuns, readRun, runDir, runOp } from './runs.ts'
+import { catalogOf, createRun, listRuns, readRun, runDir, runOp } from './runs.ts'
+import { catalogBrief } from '../shared/catalog.ts'
 import { named, openStore, transaction } from './sqlite.ts'
 import { inside } from './files.ts'
 import { RequestError, Workspace } from './workspace.ts'
@@ -216,7 +217,10 @@ export class ExecStore {
       if (!claimed) return { idle: 'another executor claimed it first' }
       const base: Baseline = await baseline(ws)
       try {
-        const settings: AttemptSettings = { agent: execution.agent, profile: execution.profile, backend: execution.backend, contract: offer.contract ?? null, guides: execution.guides.map(g => ({ path: g.path, sha256: g.sha256 })) }
+        // The run's catalog snapshot (p7/ex1): every attempt is given the same one.
+        const cat = rec.context?.catalog
+        const catalog = cat ? (cat.state === 'supplied' ? { state: 'supplied' as const, sha256: cat.sha256, templates: cat.templates } : { state: 'unavailable' as const }) : undefined
+        const settings: AttemptSettings = { agent: execution.agent, profile: execution.profile, backend: execution.backend, contract: offer.contract ?? null, guides: execution.guides.map(g => ({ path: g.path, sha256: g.sha256 })), ...(catalog ? { catalog } : {}) }
         await runOp(ws, ref, { op: 'attempt.begin', attempt: id, reason: job.kind, ...(execution.backend ? { backend: execution.backend } : {}), settings }, { by: this.executor, via: 'exec' })
       } catch (e) {
         this.run('UPDATE attempts SET state = \'ended\', ended = ?, outcome = \'refused\' WHERE id = ?', now(), id)
@@ -276,7 +280,8 @@ export class ExecStore {
   // The facts an attempt starts from, for its prompt: what to do now and
   // where the record is. The guide (autolab's) says how.
   async brief(ws: Workspace, ref: RunRef, job: JobRow): Promise<string> {
-    const r = (await readRun(ws, ref)).record!
+    const reading = await readRun(ws, ref)
+    const r = reading.record!
     const lines = [`Run: ${r.project} / ${runKey(ref)} (record ${runDir(ref)}/run.json)`, `Agent: you perform this run as ${r.executor.name}${hostOf(r.executor) !== r.executor.name ? `; the execution host ${hostOf(r.executor)} launched you and publishes your work` : ''}.`, `Workspace: ${ws.root}`, `Why this attempt: ${job.reason}`]
     if (job.kind === 'start') lines.push(`The person's request is ${runDir(ref)}/${r.input.file} (author ${r.input.author ?? r.input.requester}).`)
     const resume = [...r.history].reverse().find(e => e.op === 'run.resume') as (RunRecord['history'][number] & { reason?: string }) | undefined
@@ -288,6 +293,7 @@ export class ExecStore {
     lines.push(`Ready: ${r.execution.ready.join(', ') || '(none)'}; running: ${r.execution.active.join(', ') || '(none)'}.`)
     lines.push(...instructionBrief(r))
     lines.push(...presentationBrief(r))
+    lines.push(...catalogBrief(catalogOf(r, reading.bundle), runKey(ref)))
     if (r.definition.revisions?.length) lines.push('', `Definition: revision ${r.definition.active} is in force (adjusted ${r.definition.revisions.length} time${r.definition.revisions.length === 1 ? '' : 's'}; wfe run revisions <run>); the original is definition/${r.definition.root}.yaml.`)
     lines.push(...documentationBrief(r))
     return lines.join('\n')

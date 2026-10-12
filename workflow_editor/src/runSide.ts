@@ -252,6 +252,20 @@ export class RunSide {
     if (Math.abs(delta) >= 1) pane.scrollTop += delta
   }
 
+  // This host's facts changed (execution, coordination, presentations): only
+  // the sections that show them are brought up to date.
+  updateHost(d: RunData) {
+    const rec = d.shown?.record
+    if (!rec) return
+    const anchor = this.captureAnchor()
+    this.data = d
+    this.updateQuestions(rec) // presentation links in questions
+    this.updatePresentations(rec)
+    this.updateExecution(rec)
+    this.updateCoordination()
+    if (anchor) this.restoreAnchor(anchor)
+  }
+
   private apply(d: RunData) {
     this.data = d
     const r = d.shown

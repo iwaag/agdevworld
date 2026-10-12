@@ -168,10 +168,14 @@ try {
   // 3. A heartbeat-only change (executor.at) leaves the answer form untouched.
   console.log('heartbeat only')
   let beat = 0
+  let hostMode: 'beat' | 'unavailable' | 'fail' = 'beat'
   await page.route(`**/api/workspaces/chk/runs/ship/${R1.run}/exec`, async route => {
+    if (hostMode === 'fail') { await route.fulfill({ status: 500, json: { error: 'injected host failure' } }); return }
     const res = await route.fetch()
     const body = await res.json() as { executor: { state: string; detail?: string; at?: string } }
-    body.executor = { state: 'available', detail: 'check-harness; idle', at: new Date(Date.UTC(2026, 9, 12, 0, 0, beat++)).toISOString() }
+    body.executor = hostMode === 'beat'
+      ? { state: 'available', detail: 'check-harness; idle', at: new Date(Date.UTC(2026, 9, 12, 0, 0, beat++)).toISOString() }
+      : { state: 'unavailable', detail: 'check-harness last reported 50 s ago', at: new Date(Date.UTC(2026, 9, 12, 0, 0, beat++)).toISOString() }
     await route.fulfill({ response: res, json: body })
   })
   await sleep(4000) // the first intercepted read moves executor state to available
@@ -181,13 +185,36 @@ try {
     const log: number[] = []
     ;(window as unknown as { __mut: number[] }).__mut = log
     new MutationObserver(ms => log.push(ms.length)).observe(form, { subtree: true, childList: true, attributes: true, characterData: true })
+    // Anywhere in the pane: no element added, removed or re-attributed (relative
+    // times may age in their own text nodes when the 30 s clock ticks).
+    const pane: string[] = []
+    ;(window as unknown as { __pane: string[] }).__pane = pane
+    new MutationObserver(ms => { for (const m of ms) pane.push(`${m.type}:${(m.target as Element).className ?? m.target.nodeName}`) }).observe(document.querySelector('.run-side')!, { subtree: true, childList: true, attributes: true })
   })
   const beats0 = beat
   await sleep(7000)
   const t3 = await tracked()
   const mutations = await page.evaluate(() => (window as unknown as { __mut: number[] }).__mut.reduce((a, b) => a + b, 0))
   result.heartbeat = { reads: beat - beats0, mutations, tracked: t3 }
+  const paneMutations = await page.evaluate(() => (window as unknown as { __pane: string[] }).__pane)
   check(beat - beats0 >= 2 && t3.connected && t3.sets === 0 && mutations === 0, `heartbeat-only reads (${beat - beats0}) leave the answer form untouched: connected ${t3.connected}, value writes ${t3.sets}, mutations ${mutations}`)
+  check(paneMutations.length === 0, `and no element in the pane is added, removed or re-attributed: ${paneMutations.slice(0, 5).join(', ') || 'none'}`)
+
+  // 3b. A meaningful host change shows within the cadence; a failing host
+  // read is reported without touching drafts and is retried until it recovers.
+  const execText = () => page.locator('.side-sec[data-section="execution"]').innerText()
+  hostMode = 'unavailable'
+  const unavailable = await waitFor(async () => /Executor: unavailable — check-harness last reported 50 s ago/.test(await execText()), 6000)
+  check(unavailable !== null, `an executor that became unavailable is shown within ${Math.round(unavailable ?? -1)} ms`)
+  await page.locator(answer).fill('kept through a host failure')
+  hostMode = 'fail'
+  const failing = await waitFor(async () => /could not be read: injected host failure/.test(await execText()), 6000)
+  const duringFailure = { draft: await page.locator(answer).inputValue(), seq: await seqShown(), stillShowsFacts: /Executor: unavailable/.test(await execText()) }
+  hostMode = 'beat'
+  const recovered = await waitFor(async () => !/could not be read/.test(await execText()) && /Executor: available/.test(await execText()), 8000)
+  check(failing !== null && duringFailure.draft === 'kept through a host failure' && duringFailure.seq > 0 && duringFailure.stillShowsFacts && recovered !== null,
+    `a host read failure is reported beside the last facts, keeps the draft and the run, and clears on the next good read: ${JSON.stringify({ failing: failing !== null, ...duringFailure, recovered: recovered !== null })}`)
+  await page.locator(answer).fill('')
   await page.unroute(`**/api/workspaces/chk/runs/ship/${R1.run}/exec`)
 
   // 4. File view offsets survive a run update.
@@ -411,6 +438,24 @@ try {
   check(failed?.head === 'another\n' && /Could not read it again: injected read failure/.test(failed.status), `a failed re-read keeps the shown text and says so: ${JSON.stringify(failed)}`)
   await page.unroute(u => u.pathname.endsWith('/file'))
   await page.locator('.file-view button.icon-btn').click()
+
+  // 13. Losing and regaining the service while an answer is composed.
+  console.log('disconnect and reconnect during composition')
+  await page.locator(answer).click()
+  await track(answer)
+  await cdp.send('Input.imeSetComposition', { text: 'せつぞく', selectionStart: 4, selectionEnd: 4 })
+  await service.stop()
+  const lost = await waitFor(async () => /not live/.test(await page.locator('.live-state').innerText()), 8000)
+  const offline = await tracked()
+  const during2 = (await op(R1, { op: 'question.ask', question: '', text: 'Asked while the view was offline?', to: 'Check Person' })).seq
+  await service.start()
+  const back = await waitSeq(during2, 10_000)
+  await cdp.send('Input.insertText', { text: '接続' })
+  const online = await tracked()
+  result.reconnect = { lost, offline, back, online }
+  check(lost !== null && offline.connected && offline.focused && back !== null && online.connected && online.focused && online.value === '接続' && online.comp.includes('compositionend:接続'),
+    `disconnect and reconnect keep the composing control; the change made meanwhile shows: ${JSON.stringify({ lost: lost !== null, back: back !== null, value: online.value, connected: online.connected })}`)
+  await page.locator(answer).fill('')
 
   // 6. One refresh lifecycle: slow reads never overlap, the shown sequence
   // never goes back, and a view left behind reads and writes nothing more.

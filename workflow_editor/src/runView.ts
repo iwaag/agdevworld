@@ -45,6 +45,7 @@ export function renderRunView(root: HTMLElement, wsId: string, workflow: string,
   let execError = ''
   let presentViews: PresentationView[] = [] // what this host observes of the run's presentations (p7)
   let canvasShown = '' // what the canvas was last drawn from
+  let hostShown = '' // the host facts last displayed (without the heartbeat time)
 
   const crumbs = h('div.crumbs')
   const refreshButton = h('button', { title: 'Re-read the run now', onclick: () => void refresh.request('full') }, 'Refresh')
@@ -80,13 +81,24 @@ export function renderRunView(root: HTMLElement, wsId: string, workflow: string,
     const presentations = rev ? undefined : rec?.presentations ? await outcome(api.runPresentations(wsId, workflow, run, signal).then(x => x.presentations)) : { ok: true as const, value: [] }
     return { run: runOut, exec, notify, presentations }
   }
-  function applyBatch(b: Batch) {
+  // A host batch whose facts differ only in the executor's heartbeat time
+  // displays nothing new and touches nothing; otherwise only the parts that
+  // show host facts are brought up to date. A full batch updates the view.
+  const hostFacts = () => JSON.stringify([execView && { ...execView, executor: { ...execView.executor, at: undefined } }, execError, notifyView, presentViews])
+  function applyBatch(b: Batch, kind: RefreshKind) {
     const before = resp
     if (b.run?.ok) { resp = b.run.value; loadError = ''; if (b.run.value.record) shown = b.run.value } else if (b.run) loadError = b.run.error
     // A failed host read keeps the last facts beside its error; nothing else is cleared.
     if (b.exec?.ok) { execView = b.exec.value; execError = '' } else if (b.exec) execError = b.exec.error
     if (b.notify?.ok) notifyView = b.notify.value
     if (b.presentations?.ok) presentViews = b.presentations.value
+    const facts = hostFacts()
+    const hostChanged = facts !== hostShown
+    hostShown = facts
+    if (kind === 'host') {
+      if (hostChanged && !disposed) { renderSummary(); side.updateHost({ wsId, rev, shown, resp, execView, execError, notifyView, presentViews, selection, viewing }) }
+      return
+    }
     render()
     // The open file is read again when the run folder says it changed (or,
     // outside the folder, on every full reading); a historical view is fixed.

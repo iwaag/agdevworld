@@ -342,6 +342,76 @@ try {
   await page.goto(`${BASE}/#/ws/chk/run/${R1.workflow}/${R1.run}`)
   await page.waitForSelector('.run-summary[data-seq]')
 
+  // 11. Reading position in the pane: a section growing above the entry being
+  // read, the top of the history, and the top of the pane.
+  console.log('pane reading position')
+  const paneRead = (seq?: number) => page.evaluate(s => {
+    const side = document.querySelector('.run-side') as HTMLElement
+    const top = side.getBoundingClientRect().top
+    const lis = [...side.querySelectorAll('ol.history li')] as HTMLLIElement[]
+    const li = s === undefined ? lis.find(x => x.getBoundingClientRect().top > top + 100)! : lis.find(x => x.value === s)!
+    const heading = side.querySelector('.side-sec[data-section="history"] h3')!
+    return { seq: li.value, offset: li.getBoundingClientRect().top - top, heading: heading.getBoundingClientRect().top - top, first: lis[0].value, scrollTop: side.scrollTop }
+  }, seq)
+  await page.evaluate(() => { const side = document.querySelector('.run-side') as HTMLElement; side.scrollTop = side.scrollHeight })
+  const reading = await paneRead()
+  await writeFile(join(runDirOf(R1), 'grown-1.md'), 'a new report\n')
+  await writeFile(join(runDirOf(R1), 'grown-2.md'), 'another\n')
+  const insSeq = (await op(R1, { op: 'instruction.receive', text: 'Please keep the map small.', from: 'Check Person' })).seq
+  await waitSeq(insSeq)
+  await waitFor(async () => (await page.locator('.run-side .file-link', { hasText: 'grown-2.md' }).count()) > 0)
+  await sleep(300)
+  const grown = await paneRead(reading.seq)
+  check(Math.abs(grown.offset - reading.offset) <= 2, `sections growing above (files, Instructions) keep the entry being read in place: ${reading.offset.toFixed(1)} → ${grown.offset.toFixed(1)}`)
+
+  await page.evaluate(() => { const side = document.querySelector('.run-side') as HTMLElement; const hd = side.querySelector('.side-sec[data-section="history"] h3') as HTMLElement; side.scrollTop += hd.getBoundingClientRect().top - side.getBoundingClientRect().top - 20 })
+  const atHistoryTop = await paneRead()
+  const newest = await progress('newest at the top of history')
+  const afterTop = await paneRead()
+  const newestSeq = (await (await import('node:fs/promises')).readFile(join(runDirOf(R1), 'run.json'), 'utf8').then(t => JSON.parse(t) as { seq: number })).seq
+  check(newest !== null && Math.abs(afterTop.heading - atHistoryTop.heading) <= 2 && afterTop.first === newestSeq, `at the top of the history the heading stays and the new entry shows beneath it: heading ${atHistoryTop.heading.toFixed(1)} → ${afterTop.heading.toFixed(1)}, first entry seq ${afterTop.first} (latest ${newestSeq})`)
+
+  await page.evaluate(() => { (document.querySelector('.run-side') as HTMLElement).scrollTop = 0 })
+  await progress('at the very top')
+  const topNow = await page.evaluate(() => (document.querySelector('.run-side') as HTMLElement).scrollTop)
+  check(topNow === 0, `at the top of the pane it stays at the top (${topNow})`)
+
+  // 12. The open file: the same file changing keeps its offsets (clamped),
+  // another file starts at the top, and a late response never wins.
+  console.log('file content changes')
+  const preState = () => page.evaluate(() => { const p = document.querySelector('.file-view pre') as HTMLElement | null; const st = document.querySelector('.file-view p') as HTMLElement | null; return p ? { top: p.scrollTop, left: p.scrollLeft, head: p.textContent!.slice(0, 12), max: p.scrollHeight - p.clientHeight, status: st && !st.hidden ? st.innerText : '' } : null })
+  await page.locator('.run-side .file-link', { hasText: 'long.md' }).first().click()
+  await waitFor(async () => (await preState())?.head === 'line 001 0123')
+  await page.evaluate(() => { const p = document.querySelector('.file-view pre')!; p.scrollTop = 500; p.scrollLeft = 120 })
+  await writeFile(join(runDirOf(R1), 'long.md'), Array.from({ length: 300 }, (_, i) => `LINE ${String(i + 1).padStart(3, '0')} ${'abcdefghij'.repeat(30)}`).join('\n') + '\n')
+  await waitFor(async () => (await preState())?.head === 'LINE 001 abc', 8000)
+  const changed = await preState()
+  check(changed?.head === 'LINE 001 abc' && changed.top === 500 && changed.left === 120, `the same file changing shows its new text at the same offsets: ${JSON.stringify(changed)}`)
+  await writeFile(join(runDirOf(R1), 'long.md'), Array.from({ length: 30 }, (_, i) => `short ${i + 1} ${'abcdefghij'.repeat(30)}`).join('\n') + '\n')
+  await waitFor(async () => (await preState())?.head === 'short 1 abcd', 8000)
+  const shrunk = await preState()
+  check(shrunk?.head === 'short 1 abcd' && shrunk.top === shrunk.max && shrunk.left === 120, `a shorter version clamps the offset to its end: ${JSON.stringify(shrunk)}`)
+  await page.locator('.run-side .file-link', { hasText: 'grown-1.md' }).first().click()
+  await waitFor(async () => (await preState())?.head === 'a new report')
+  const other = await preState()
+  check(other?.top === 0 && other.left === 0, `another file starts at its top: ${JSON.stringify(other)}`)
+  const fileUrl = (u: URL) => u.pathname.endsWith('/file') && u.searchParams.get('path') === 'long.md'
+  await page.route(fileUrl, async route => { await sleep(1500); await route.continue().catch(() => {}) })
+  await page.locator('.run-side .file-link', { hasText: 'long.md' }).first().click()
+  await sleep(100)
+  await page.locator('.run-side .file-link', { hasText: 'grown-2.md' }).first().click()
+  await sleep(2500)
+  const raced = await page.evaluate(() => ({ head: document.querySelector('.file-view pre')?.textContent?.slice(0, 7), path: (document.querySelector('.file-view strong') as HTMLElement | null)?.innerText }))
+  check(raced.head === 'another' && raced.path === 'grown-2.md', `a late response for the first file does not replace the second: ${JSON.stringify(raced)}`)
+  await page.unroute(fileUrl)
+  await page.route(u => u.pathname.endsWith('/file') && u.searchParams.get('path') === 'grown-2.md', route => route.fulfill({ status: 500, json: { error: 'injected read failure' } }))
+  await writeFile(join(runDirOf(R1), 'grown-2.md'), 'another, changed\n')
+  await waitFor(async () => /injected read failure/.test((await preState())?.status ?? ''), 8000)
+  const failed = await preState()
+  check(failed?.head === 'another\n' && /Could not read it again: injected read failure/.test(failed.status), `a failed re-read keeps the shown text and says so: ${JSON.stringify(failed)}`)
+  await page.unroute(u => u.pathname.endsWith('/file'))
+  await page.locator('.file-view button.icon-btn').click()
+
   // 6. One refresh lifecycle: slow reads never overlap, the shown sequence
   // never goes back, and a view left behind reads and writes nothing more.
   console.log('refresh lifecycle')

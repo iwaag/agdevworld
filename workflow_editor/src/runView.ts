@@ -81,12 +81,20 @@ export function renderRunView(root: HTMLElement, wsId: string, workflow: string,
     return { run: runOut, exec, notify, presentations }
   }
   function applyBatch(b: Batch) {
+    const before = resp
     if (b.run?.ok) { resp = b.run.value; loadError = ''; if (b.run.value.record) shown = b.run.value } else if (b.run) loadError = b.run.error
     // A failed host read keeps the last facts beside its error; nothing else is cleared.
     if (b.exec?.ok) { execView = b.exec.value; execError = '' } else if (b.exec) execError = b.exec.error
     if (b.notify?.ok) notifyView = b.notify.value
     if (b.presentations?.ok) presentViews = b.presentations.value
     render()
+    // The open file is read again when the run folder says it changed (or,
+    // outside the folder, on every full reading); a historical view is fixed.
+    if (b.run?.ok && !rev && viewing?.text !== undefined && fileStamp(before, viewing.path) !== fileStamp(resp, viewing.path)) void readFile(viewing.path, false)
+  }
+  const fileStamp = (r: RunResponse | null, path: string) => {
+    const f = r?.files.find(x => x.name === path || `${r.dir}/${x.name}` === path)
+    return f ? `${f.size}:${f.modified}` : `unlisted:${Math.random()}`
   }
   const refresh = new RefreshCoordinator<Batch>(readBatch, applyBatch)
 
@@ -158,24 +166,27 @@ export function renderRunView(root: HTMLElement, wsId: string, workflow: string,
   function select(id: string | null) {
     selection = id
     renderCanvas()
-    renderSide()
+    renderSide(true)
   }
 
   // Each read has its own identity: a late response for one file never
   // replaces another file, a newer read of the same file or a disposed view.
-  async function openFile(path: string) {
+  // Opening another file is the person's navigation; reading the open one
+  // again (`explicit` false, or the same file clicked again) keeps what is
+  // shown until the new text arrives.
+  async function readFile(path: string, explicit: boolean) {
     const id = ++fileRequest
-    viewing = { path }
-    renderSide()
+    const kept = viewing?.path === path ? viewing.text : undefined
+    if (kept === undefined) { viewing = { path }; renderSide(explicit) }
     let next: typeof viewing
     try {
       next = { path, text: (await api.runFile(wsId, workflow, run, path, rev ? shown?.rev ?? rev : undefined)).text }
     } catch (e) {
-      next = { path, error: (e as Error).message }
+      next = { path, text: kept, error: (e as Error).message }
     }
     if (disposed || id !== fileRequest) return
     viewing = next
-    renderSide()
+    renderSide(explicit)
   }
 
   // Links and buttons in built display name their action; it is handled
@@ -188,8 +199,8 @@ export function renderRunView(root: HTMLElement, wsId: string, workflow: string,
     switch (d.action) {
       case 'node': select(d.node!); canvas.reveal(d.node!); break
       case 'close-node': select(null); break
-      case 'file': void openFile(d.path!); break
-      case 'close-file': fileRequest++; viewing = null; renderSide(); break
+      case 'file': void readFile(d.path!, true); break
+      case 'close-file': fileRequest++; viewing = null; renderSide(true); break
       case 'goto-question': side.revealQuestion(d.question!); break
       case 'present-start': void presentation(d.presentation!, 'start'); break
       case 'present-stop': void presentation(d.presentation!, 'stop'); break
@@ -322,9 +333,9 @@ export function renderRunView(root: HTMLElement, wsId: string, workflow: string,
     }, sel)
   }
 
-  function renderSide() {
+  function renderSide(explicit = false) {
     if (disposed) return
-    side.update({ wsId, rev, shown, resp, execView, execError, notifyView, presentViews, selection, viewing })
+    side.update({ wsId, rev, shown, resp, execView, execError, notifyView, presentViews, selection, viewing }, explicit)
   }
 
   function render() {

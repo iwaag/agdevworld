@@ -371,7 +371,7 @@ label.inline { display: flex; align-items: center; gap: 6px; }
 .node.run-completed, .step-card.run-completed { box-shadow: 0 0 0 2px #8dc9a7; }
 .node.in-run.selected, .step-card.in-run.selected { box-shadow: 0 0 0 3px var(--accent), 0 4px 14px rgba(20,24,30,.16); }
 
-.run-side { background: #fff; border-left: 1px solid var(--line); padding: 14px 18px; overflow-y: auto; display: flex; flex-direction: column; gap: 6px; max-height: calc(100vh - 40px); }
+.run-side { background: #fff; border-left: 1px solid var(--line); padding: 14px 18px; overflow-y: auto; display: flex; flex-direction: column; gap: 6px; max-height: calc(100vh - 40px); overflow-anchor: none; /* the view holds the reading position itself (runSide.ts) */ }
 .actor-row { display: flex; flex-direction: column; gap: 2px; padding-bottom: 8px; border-bottom: 1px solid #eef0f3; }
 .actor-row label { display: flex; align-items: center; gap: 6px; }
 .actor-row input { width: 160px; }
@@ -397,7 +397,7 @@ ul.notes, ul.files { margin: 4px 0; padding-left: 18px; font-size: 13px; }
 .file-link { color: var(--accent); text-decoration: none; }
 .file-link:hover { text-decoration: underline; }
 .file-view { border: 1px solid var(--line); border-radius: 8px; padding: 8px; margin-top: 6px; }
-.file-view pre { max-height: 360px; overflow: auto; }
+.file-view pre { max-height: 360px; overflow: auto; overflow-anchor: none; }
 .decide { display: flex; flex-direction: column; gap: 6px; }
 ol.history { margin: 0; padding-left: 26px; font-size: 13px; display: flex; flex-direction: column; gap: 6px; }
 ol.history code { font-size: 12px; background: #eef0f3; border-radius: 4px; padding: 0 4px; }

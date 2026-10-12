@@ -211,7 +211,48 @@ export class RunSide {
 
   // ---- update -----------------------------------------------------------------
 
-  update(d: RunData) {
+  // `explicit` marks the person's own navigation (selecting a node, opening a
+  // file), which may move the viewport; every other update keeps the reader's
+  // place in the pane.
+  update(d: RunData, explicit = false) {
+    const anchor = explicit ? null : this.captureAnchor()
+    this.apply(d)
+    if (anchor) this.restoreAnchor(anchor)
+  }
+
+  // The reading position (p7/ex2): the first keyed item the reader sees at
+  // the top of the pane, and its offset from the pane's top edge. At the very
+  // top nothing is held, so new history entries show. When the newest
+  // history entry is the first visible one, the History heading is held
+  // instead of it, so newer entries appear beneath the heading rather than
+  // above the viewport. The pane has overflow-anchor: none: this is its one
+  // anchoring mechanism.
+  private captureAnchor(): { el: HTMLElement; offset: number; scrollTop: number } | null {
+    const pane = this.el
+    if (pane.scrollTop <= 0 || !this.data) return null
+    const top = pane.getBoundingClientRect().top
+    const below = (el: Element) => el.getBoundingClientRect().bottom > top + 1
+    const sec = [...pane.querySelectorAll<HTMLElement>(':scope > section.side-sec:not([hidden])')].find(below)
+    if (!sec) return null
+    let el: HTMLElement = sec
+    if (sec === this.history.root) {
+      const first = [...(this.history.root.children[1] as HTMLElement).children].find(below) as HTMLElement | undefined
+      el = !first || (first === this.history.root.children[1].firstElementChild && this.history.title.getBoundingClientRect().top >= top) ? this.history.title : first
+    } else {
+      const items = [...sec.querySelectorAll<HTMLElement>('[data-key]')]
+      el = items.find(x => x.getBoundingClientRect().top >= top) ?? sec
+    }
+    return { el, offset: el.getBoundingClientRect().top - top, scrollTop: pane.scrollTop }
+  }
+
+  private restoreAnchor(a: { el: HTMLElement; offset: number; scrollTop: number }) {
+    const pane = this.el
+    if (!a.el.isConnected || a.el.closest('[hidden]')) { pane.scrollTop = a.scrollTop; return } // removed: the previous offset, clamped
+    const delta = a.el.getBoundingClientRect().top - pane.getBoundingClientRect().top - a.offset
+    if (Math.abs(delta) >= 1) pane.scrollTop += delta
+  }
+
+  private apply(d: RunData) {
     this.data = d
     const r = d.shown
     const rec = r?.record
@@ -529,12 +570,19 @@ export class RunSide {
       fv.pre.textContent = ''
       fv.pre.scrollTop = 0; fv.pre.scrollLeft = 0
     }
-    setText(fv.status, v.error ?? (v.text === undefined ? 'Loading…' : ''))
+    // A read error after content was shown is reported beside it, never by blanking it.
+    setText(fv.status, v.error ? `${v.text !== undefined ? 'Could not read it again' : 'Could not read it'}: ${v.error}` : v.text === undefined ? 'Loading…' : '')
     const cls = v.error ? 'small error' : 'small muted'
     if (fv.status.className !== cls) fv.status.className = cls
     show(fv.status, !!v.error || v.text === undefined)
     show(fv.pre, v.text !== undefined)
-    if (v.text !== undefined && fv.pre.textContent !== v.text) fv.pre.textContent = v.text
+    if (v.text !== undefined && fv.pre.textContent !== v.text) {
+      // The same file changed: its offsets stay, clamped to the new content.
+      const { scrollTop, scrollLeft } = fv.pre
+      fv.pre.textContent = v.text
+      fv.pre.scrollTop = scrollTop
+      fv.pre.scrollLeft = scrollLeft
+    }
   }
 
   // What runs, what waits and what is published: the record's control state

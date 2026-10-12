@@ -83,11 +83,12 @@ const allVisible = (p: Page) => p.evaluate(() => {
   return [...document.querySelectorAll<HTMLElement>('.canvas .node, .canvas .step-card, .canvas .report-icon, .canvas .final-step')].filter(e => !e.hidden)
     .every(e => { const r = e.getBoundingClientRect(); return r.left >= c.left - 1 && r.right <= c.right + 1 && r.top >= c.top - 1 && r.bottom <= c.bottom + 1 })
 })
-// The icon overlaps its card's lower-right corner: 18 px in, 12 px out.
+// The icon sits inside its card's lower-right corner (p8): 10 px from the
+// right edge and 9 px from the bottom, at 26 px, scaled with the view.
 async function attached(p: Page, id: string): Promise<boolean> {
   const card = (await p.locator(`.node[data-id="${id}"]`).boundingBox())!, icon = (await p.locator(`.report-icon[data-step="_report.${id}"]`).boundingBox())!
-  const k = icon.width / 30
-  return Math.abs(icon.x - (card.x + card.width - 18 * k)) <= 1.5 && Math.abs(icon.y - (card.y + card.height - 18 * k)) <= 1.5
+  const k = icon.width / 26
+  return Math.abs(icon.x - (card.x + card.width - 36 * k)) <= 1.5 && Math.abs(icon.y - (card.y + card.height - 35 * k)) <= 1.5
 }
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms))
 
@@ -104,15 +105,15 @@ try {
   check(icon.w < 40 && icon.h < 40, `report icons are small (${icon.w}×${icon.h})`)
   let ok = true
   for (const id of ['survey', 'build', 'ask', 'join']) ok = ok && await attached(page, id)
-  check(ok, 'every report icon sits at its card\'s lower-right corner')
+  check(ok, 'every report icon sits inside its card\'s lower-right corner')
   check(/Report on survey/.test(await page.locator('.report-icon[data-step="_report.survey"]').getAttribute('aria-label') ?? ''), 'report icons have an accessible label')
-  check(/a run adds the plan talk, 4 reports and the final report/.test(await page.locator('.policy-state').innerText()), 'status line describes the preview')
-  await page.click('button[title="Fit graph"]')
+  check(/plan talk, 4 reports, final report/.test(await page.locator('.policy-state').innerText()), 'the policy chip describes the preview')
+  await page.click('button[title="Show the whole graph"]')
   await sleep(150)
   check(await allVisible(page), 'Fit includes the plan card, the icons and the final report')
   await shot(page, 'p5-docsteps-editor-default', false)
   for (let i = 0; i < 3; i++) await page.click('button[title="Zoom in"]')
-  await page.click('button[title="Fit graph"]')
+  await page.click('button[title="Show the whole graph"]')
   await sleep(150)
   check(await allVisible(page), 'zoom then Fit keeps everything visible')
 
@@ -139,6 +140,7 @@ try {
   // 4. Switching the policy changes the preview and the approval state.
   console.log('policy switch')
   await page.locator('.canvas').click({ position: { x: 20, y: 20 } })
+  await page.getByRole('button', { name: 'Workflow settings' }).click()
   await page.selectOption('select[aria-label="Documentation policy"]', 'manual')
   await sleep(200)
   check(await page.locator('.report-icon').count() === 0 && await page.locator('.final-step').count() === 0 && await page.locator('.step-card.step-plan').count() === 0, 'manual policy: no generated steps in the preview')
@@ -163,7 +165,7 @@ try {
   check(/Work\s*2 completed · 2 pending/.test(facts) && /Documentation steps\s*1 running · 2 completed · 3 pending/.test(facts), `work and documentation are counted apart: ${facts.replace(/\n/g, ' | ')}`)
   check(/Writing report on\s*build/.test(await page.locator('.run-now').innerText()), 'summary: “Writing report on build”')
   check(/Coordination \(Zulip\)\s*Not announced: Zulip coordination is not configured on this host/.test(await page.locator('.run-side').innerText()), 'the run view states its Zulip coordination (here: not configured)')
-  await page.click('button[title="Fit graph"]')
+  await page.click('button[title="Show the whole graph"]')
   await sleep(150)
   check(await allVisible(page), 'run view: Fit includes the generated steps')
   await shot(page, 'p5-docsteps-run', false)

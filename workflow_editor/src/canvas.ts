@@ -19,9 +19,14 @@ export type Selection = { kind: 'node'; id: string } | { kind: 'edge'; index: nu
 
 // Text glyphs so a state is readable without its color.
 export const STATE_GLYPH: Record<string, string> = { pending: '○', ready: '◇', blocked: '⊘', running: '✎', waiting: '⏸', completed: '✓', failed: '✕', cancelled: '–' }
-const REPORT_SIZE = 30 // the report icon's diameter, px
-const REPORT_INSET = 18 // how far it overlaps its card's lower-right corner, px
-const FINAL = { width: 150, height: 52 }
+const REPORT_SIZE = 26 // the report icon's side, px
+const REPORT_INSET = { x: 10, y: 9 } // its distance from its card's lower-right corner, inside the card, px
+const FINAL = { width: 176, height: 70 }
+// The initial view (p8): never larger than 1, and never smaller than a
+// scale at which card names stay readable. A graph that does not fit at that
+// scale opens at it, from its start, with a note and Fit for the whole.
+const READABLE: Record<DisplayMode, number> = { compact: 0.72, mini: 0.95 }
+const MARGIN = 40
 
 export interface CanvasContext {
   repositories: RepositoryStatus[]
@@ -33,6 +38,9 @@ export interface CanvasContext {
   // The effective graph whose generated steps are drawn around the authored
   // cards (p5): the compiled draft in the editor, the frozen graph in a run.
   effective?: Pick<EffectiveGraph, 'nodes' | 'edges'> | null
+  // Where the reader's attention belongs (the run view's current position):
+  // an initial view that cannot show everything readably is centred on it.
+  focus?: string[]
 }
 
 export interface CanvasEvents {
@@ -69,10 +77,18 @@ export class Canvas {
   private selection: Selection = null
   private points = new Map<string, Point>()
   readonly events: CanvasEvents
-  private fitted = false
+  private framed = false // the first view was set at a real size
+  private size = { w: 0, h: 0 } // the canvas element's size, kept by an observer
+  private boxes: { x: number; y: number; w: number; h: number }[] = [] // every card's surface box, for the in-view count
+  private readonly zoomLabel = h('span.zoom-level', { 'aria-live': 'off' })
+  private readonly frameNote = h('div.frame-note', { hidden: true })
   // A card that grows or shrinks after it was placed (fonts, badges, a
   // status line) carries its report icon and the step edges with it.
-  private resized = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(() => { if (this.ctx?.effective) { this.placeSteps(); this.drawEdges() } })
+  private resized = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(() => { if (this.ctx?.effective) { this.placeSteps(); this.drawEdges() } this.measure() })
+  // The canvas itself changes size when a side panel opens or closes, or the
+  // window changes. The view is never reset for that: the person's zoom and
+  // pan stay, and only the first real size sets the initial view.
+  private sized = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(() => this.onResize())
 
   constructor(events: CanvasEvents) {
     this.events = events
@@ -80,12 +96,14 @@ export class Canvas {
     this.svg.classList.add('edges')
     this.surface = h('div.surface')
     this.surface.append(this.svg)
-    this.el = h('div.canvas', { tabIndex: 0, 'aria-label': 'Workflow canvas' }, this.surface,
+    this.el = h('div.canvas', { tabIndex: 0, 'aria-label': 'Workflow canvas' }, this.surface, this.frameNote,
       h('div.zoom-controls',
-        h('button', { title: 'Zoom in', onclick: () => this.zoomBy(1.2) }, '+'),
-        h('button', { title: 'Zoom out', onclick: () => this.zoomBy(1 / 1.2) }, '−'),
-        h('button', { title: 'Fit graph', onclick: () => this.fit() }, 'Fit')))
+        h('button', { title: 'Zoom out', 'aria-label': 'Zoom out', onclick: () => this.zoomBy(1 / 1.2) }, '−'),
+        this.zoomLabel,
+        h('button', { title: 'Zoom in', 'aria-label': 'Zoom in', onclick: () => this.zoomBy(1.2) }, '+'),
+        h('button', { title: 'Show the whole graph', onclick: () => this.fit() }, 'Fit')))
     this.installPanZoom()
+    this.sized?.observe(this.el)
     // Focus and scrollIntoView scroll even an overflow-hidden box. Turn such a
     // scroll into a pan so the surface, edges and controls stay consistent.
     this.el.addEventListener('scroll', () => {
@@ -112,10 +130,64 @@ export class Canvas {
   // Keyboard focus on a card (after the inspector closes).
   focusCard(id: string) { this.surface.querySelector<HTMLElement>(`.node[data-id="${CSS.escape(id)}"]`)?.focus({ preventScroll: true }) }
 
-  // The initial view of a freshly opened graph.
-  frame() { this.fit() }
+  // The initial view of a freshly opened graph (the framing rule above):
+  // the whole graph, centred, at the largest scale up to 1 — or, when that
+  // would be below the readable scale, the readable scale from the graph's
+  // start (its left edge, the entry rank centred vertically), with a note
+  // saying how much is in view and Fit for all of it.
+  frame() {
+    const all = this.cardBoxes()
+    const r = this.size
+    if (!all.length || !r.w) { this.view = { x: 0, y: 0, k: 1 }; this.applyView(); return }
+    const b = bounds(all)
+    const fitK = Math.min(1, (r.w - 2 * MARGIN) / (b.w || 1), (r.h - 2 * MARGIN) / (b.h || 1))
+    const readable = READABLE[this.mode]
+    if (fitK >= readable) {
+      this.view.k = fitK
+      this.view.x = (r.w - b.w * fitK) / 2 - b.x * fitK
+      this.view.y = (r.h - b.h * fitK) / 2 - b.y * fitK
+    } else {
+      const k = readable
+      this.view.k = k
+      // The focus (a run's current position) when there is one, else the
+      // start of the graph (its leftmost column); never past the graph's edges.
+      const focus = (this.ctx.focus ?? []).map(id => this.surface.querySelector<HTMLElement>(`.node[data-id="${CSS.escape(id)}"], .step-card[data-step="${CSS.escape(id)}"], .final-step[data-step="${CSS.escape(id)}"]`)).filter((e): e is HTMLElement => !!e && !e.hidden).map(e => this.surfaceBox(e))
+      const start = all.filter(c => c.x < b.x + 1.5 * STEP_X * METRICS[this.mode].scale)
+      const f = bounds(focus.length ? focus : start)
+      const clamp = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, v))
+      this.view.x = focus.length ? clamp(r.w / 2 - (f.x + f.w / 2) * k, r.w - MARGIN - (b.x + b.w) * k, MARGIN - b.x * k) : MARGIN - b.x * k
+      this.view.y = b.h * k <= r.h - 2 * MARGIN ? (r.h - b.h * k) / 2 - b.y * k : clamp(r.h / 2 - (f.y + f.h / 2) * k, r.h - MARGIN - (b.y + b.h) * k, MARGIN - b.y * k)
+    }
+    this.applyView()
+  }
 
-  dispose() { this.resized?.disconnect() }
+  // Disconnects what the canvas observes (the view's dispose calls it).
+  dispose() { this.resized?.disconnect(); this.sized?.disconnect() }
+
+  private onResize() {
+    const w = this.el.clientWidth, h = this.el.clientHeight
+    if (w === this.size.w && h === this.size.h) return
+    this.size = { w, h }
+    if (!this.framed && w && this.draft) { this.framed = true; this.frame() } else this.applyView()
+  }
+
+  private cardBoxes() {
+    return [...this.surface.querySelectorAll<HTMLElement>('.node, .step-card, .report-icon, .final-step')].filter(c => !c.hidden).map(c => this.surfaceBox(c))
+  }
+
+  // Cards' boxes for the in-view count, read once per render or move.
+  private measure() { this.boxes = [...this.surface.querySelectorAll<HTMLElement>('.node, .step-card, .final-step')].filter(c => !c.hidden).map(c => this.surfaceBox(c)); this.updateNote() }
+
+  private updateNote() {
+    const { x, y, k } = this.view, r = this.size
+    const inView = this.boxes.filter(b => b.x * k + x >= 0 && (b.x + b.w) * k + x <= r.w && b.y * k + y >= 0 && (b.y + b.h) * k + y <= r.h).length
+    const partial = !!r.w && this.boxes.length > 0 && inView < this.boxes.length
+    if (this.frameNote.hidden === partial) this.frameNote.hidden = !partial
+    if (partial) {
+      const text = `${inView} of ${this.boxes.length} cards fully in view`
+      if (this.frameNote.firstChild?.textContent !== text) this.frameNote.replaceChildren(h('span', text), h('button.link-btn', { onclick: () => this.fit() }, 'Fit to see all'))
+    }
+  }
 
   setMode(mode: DisplayMode) { this.mode = mode; this.el.dataset.mode = mode }
   getView() { return { ...this.view } }
@@ -134,8 +206,9 @@ export class Canvas {
     }
     this.renderSteps()
     this.drawEdges()
+    this.measure()
     this.applyView()
-    if (!this.fitted && this.el.isConnected) { this.fitted = true; requestAnimationFrame(() => this.fit()) }
+    if (!this.framed && this.el.isConnected && this.el.clientWidth) { this.size = { w: this.el.clientWidth, h: this.el.clientHeight }; this.framed = true; this.frame() }
   }
 
   // ---- cards ------------------------------------------------------------
@@ -170,13 +243,6 @@ export class Canvas {
     })
     const head = h('div.node-head', icon(iconOf(node.type, node.appearance), 'icon type-icon'), h('span.type-label', TYPE_LABEL[t] ?? (node.type || 'no type')))
     card.append(head, h('div.node-title', title))
-    const run = this.ctx.run?.[id]
-    if (run) {
-      card.classList.add('in-run', `run-${run.state}`)
-      card.dataset.state = run.state
-      card.setAttribute('aria-label', `${card.getAttribute('aria-label')}, ${run.label}`)
-      card.append(h(`div.run-status.state-${run.state}`, { title: run.title ?? run.label }, `${STATE_GLYPH[run.state] ?? ''} ${run.label}`))
-    }
     if (this.mode === 'compact') {
       if (node.type === 'delegate') {
         card.append(h(`div.delegate-target${target ? '' : '.missing'}`, '→ ', target ? (target.name || target.id) : node.workflow ? `${node.workflow} (missing)` : 'no target'))
@@ -186,7 +252,18 @@ export class Canvas {
     } else if (node.type === 'delegate') {
       card.append(h(`div.delegate-target.small${target ? '' : '.missing'}`, '→ ', target ? (target.name || target.id) : node.workflow || 'no target'))
     }
-    if (node.repositories.length) card.append(this.bindingBadges(node.repositories))
+    // The foot: the run state (run view) or the repository bindings
+    // (editor), left; the report icon is placed in the right corner.
+    const foot = h('div.node-foot')
+    const run = this.ctx.run?.[id]
+    if (run) {
+      card.classList.add('in-run', `run-${run.state}`)
+      card.dataset.state = run.state
+      card.setAttribute('aria-label', `${card.getAttribute('aria-label')}, ${run.label}`)
+      foot.append(h(`div.run-status.state-${run.state}`, { title: run.title ?? run.label }, h('span.glyph', { 'aria-hidden': 'true' }, STATE_GLYPH[run.state] ?? ''), ` ${run.label}`))
+    } else if (node.repositories.length) foot.append(this.bindingBadges(node.repositories))
+    if (this.ctx.effective?.nodes[`_report.${id}`]) card.classList.add('has-report')
+    card.append(foot)
     if (!this.ctx.readonly) card.append(h('span.port', { title: 'Drag to another node to connect', dataset: { port: id } }))
     this.installCardDrag(card, id)
     return card
@@ -231,22 +308,22 @@ export class Canvas {
         const el = h('div.step-card.step-plan.type-talk', { dataset: { step: id }, style: { width: `${m.width}px`, minHeight: `${m.height}px` } },
           h('div.node-head', icon('talk', 'icon type-icon'), h('span.type-label', 'Plan talk')),
           h('div.node-title', 'Agree the plan'),
-          this.mode === 'compact' ? h('div.node-desc', 'plan.md — written, then agreed with the person before any work') : null)
-        if (run) el.append(h(`div.run-status.state-${run.state}`, `${STATE_GLYPH[run.state] ?? ''} ${run.label}`))
+          this.mode === 'compact' ? h('div.node-desc', 'Write plan.md and agree it with the person before any work.') : null)
+        if (run) el.append(h('div.node-foot', h(`div.run-status.state-${run.state}`, h('span.glyph', { 'aria-hidden': 'true' }, STATE_GLYPH[run.state] ?? ''), ` ${run.label}`)))
         this.stepState(el, id, 'Plan talk: plan.md')
         this.surface.append(el)
       } else if (step.kind === 'report') {
         const owner = step.for ?? ''
         const title = this.draft.nodes[owner]?.name || owner
         const el = h('div.report-icon', { dataset: { step: id, for: owner }, style: { width: `${REPORT_SIZE}px`, height: `${REPORT_SIZE}px` } },
-          icon('doc', 'icon tiny'), h('span.glyph', { 'aria-hidden': 'true' }, run ? STATE_GLYPH[run.state] ?? '' : ''))
+          icon('doc', 'icon small'), h('span.glyph', { 'aria-hidden': 'true' }, run ? STATE_GLYPH[run.state] ?? '' : ''))
         if (run?.state === 'running') el.append(h('span.report-label', 'Writing report'))
         this.stepState(el, id, `Report on ${title}: ${step.output}`)
         this.surface.append(el)
       } else {
         const el = h('div.final-step', { dataset: { step: id }, style: { width: `${FINAL.width}px`, minHeight: `${FINAL.height}px` } },
-          h('div.final-head', icon('doc', 'icon small'), h('strong', 'Final report')), h('div.small', step.output),
-          run ? h(`div.run-status.state-${run.state}`, `${STATE_GLYPH[run.state] ?? ''} ${run.label}`) : null)
+          h('div.final-head', icon('doc', 'icon'), h('span.type-label', 'Document')), h('strong.final-title', 'Final report'), h('div.final-file', step.output),
+          run ? h(`div.run-status.state-${run.state}`, h('span.glyph', { 'aria-hidden': 'true' }, STATE_GLYPH[run.state] ?? ''), ` ${run.label}`) : null)
         this.stepState(el, id, 'Final report: report.md')
         this.surface.append(el)
       }
@@ -280,13 +357,13 @@ export class Canvas {
       if (step.kind === 'report') {
         const b = this.cardBox(step.for ?? '')
         if (!b) { el.hidden = true; continue }
-        x = b.x + b.w - REPORT_INSET; y = b.y + b.h - REPORT_INSET
+        x = b.x + b.w - REPORT_SIZE - REPORT_INSET.x; y = b.y + b.h - REPORT_SIZE - REPORT_INSET.y
       } else if (step.kind === 'plan') {
         const es = entries.map(e => this.cardBox(e)!).filter(Boolean)
         x = Math.min(...es.map(b => b.x)) - STEP_X * m.scale; y = mean(es.map(b => b.y))
       } else {
         const ts = terminals.map(t => this.cardBox(t)!).filter(Boolean)
-        x = Math.max(...boxes.map(b => b.x + b.w)) + (STEP_X * m.scale - m.width); y = mean(ts.map(b => b.y + b.h / 2)) - FINAL.height / 2
+        x = Math.max(...boxes.map(b => b.x + b.w)) + (STEP_X * m.scale - m.width); y = mean(ts.map(b => b.y + b.h / 2)) - (el.offsetHeight || FINAL.height) / 2
       }
       el.hidden = false
       el.style.left = `${x}px`; el.style.top = `${y}px`
@@ -416,7 +493,7 @@ export class Canvas {
         card.removeEventListener('pointermove', move)
         card.removeEventListener('pointerup', up)
         card.removeEventListener('pointercancel', up)
-        if (moved) this.events.move(id, this.points.get(id)!)
+        if (moved) { this.measure(); this.events.move(id, this.points.get(id)!) }
         else this.events.select({ kind: 'node', id })
       }
       card.addEventListener('pointermove', move)
@@ -480,16 +557,16 @@ export class Canvas {
     this.applyView()
   }
 
+  // The whole graph, explicitly (the Fit button): as large as fits, up to 1.
   fit() {
-    const cards = [...this.surface.querySelectorAll<HTMLElement>('.node, .step-card, .report-icon, .final-step')].filter(c => !c.hidden).map(c => this.surfaceBox(c))
-    const r = this.el.getBoundingClientRect()
-    if (!cards.length || !r.width) { this.view = { x: 0, y: 0, k: 1 }; this.applyView(); return }
-    const minX = Math.min(...cards.map(c => c.x)), minY = Math.min(...cards.map(c => c.y))
-    const maxX = Math.max(...cards.map(c => c.x + c.w)), maxY = Math.max(...cards.map(c => c.y + c.h))
-    const k = Math.min(1.2, (r.width - 80) / (maxX - minX || 1), (r.height - 80) / (maxY - minY || 1))
+    const cards = this.cardBoxes()
+    const r = this.size.w ? this.size : { w: this.el.clientWidth, h: this.el.clientHeight }
+    if (!cards.length || !r.w) { this.view = { x: 0, y: 0, k: 1 }; this.applyView(); return }
+    const b = bounds(cards)
+    const k = Math.min(1, (r.w - 2 * MARGIN) / (b.w || 1), (r.h - 2 * MARGIN) / (b.h || 1))
     this.view.k = Math.max(0.25, k)
-    this.view.x = (r.width - (maxX - minX) * this.view.k) / 2 - minX * this.view.k
-    this.view.y = (r.height - (maxY - minY) * this.view.k) / 2 - minY * this.view.k
+    this.view.x = (r.w - b.w * this.view.k) / 2 - b.x * this.view.k
+    this.view.y = (r.h - b.h * this.view.k) / 2 - b.y * this.view.k
     this.applyView()
   }
 
@@ -505,5 +582,13 @@ export class Canvas {
     this.surface.style.transform = `translate(${this.view.x}px, ${this.view.y}px) scale(${this.view.k})`
     this.el.style.backgroundPosition = `${this.view.x}px ${this.view.y}px`
     this.el.style.backgroundSize = `${22 * this.view.k}px ${22 * this.view.k}px`
+    const pct = `${Math.round(this.view.k * 100)}%`
+    if (this.zoomLabel.textContent !== pct) this.zoomLabel.textContent = pct
+    this.updateNote()
   }
+}
+
+function bounds(bs: { x: number; y: number; w: number; h: number }[]) {
+  const x = Math.min(...bs.map(c => c.x)), y = Math.min(...bs.map(c => c.y))
+  return { x, y, w: Math.max(...bs.map(c => c.x + c.w)) - x, h: Math.max(...bs.map(c => c.y + c.h)) - y }
 }

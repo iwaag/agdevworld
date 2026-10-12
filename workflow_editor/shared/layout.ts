@@ -10,8 +10,8 @@ export type DisplayMode = 'compact' | 'mini'
 
 export interface Metrics { width: number; height: number; scale: number }
 export const METRICS: Record<DisplayMode, Metrics> = {
-  compact: { width: 232, height: 132, scale: 1 },
-  mini: { width: 150, height: 66, scale: 0.66 },
+  compact: { width: 240, height: 128, scale: 1 },
+  mini: { width: 156, height: 64, scale: 0.66 },
 }
 export const STEP_X = 300
 export const STEP_Y = 168

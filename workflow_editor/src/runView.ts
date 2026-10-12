@@ -61,7 +61,7 @@ export function renderRunView(root: HTMLElement, wsId: string, workflow: string,
     h('header.wf-top.run-top',
       h('div.wf-row1', crumbs, h('div.top-actions', liveState, refreshButton)),
       summary, banners),
-    h('main.wf-body', h('div.canvas-col', legend, canvas.el), side.el),
+    h('main.wf-body.run-body', h('div.canvas-col', legend, canvas.el), side.el),
   )
 
   // ---- reading ----------------------------------------------------------------
@@ -340,9 +340,21 @@ export function renderRunView(root: HTMLElement, wsId: string, workflow: string,
     // Bindings resolve against the repositories recorded at creation.
     const repositories = rec.context.repositories.map(c => ({ path: c.path, name: c.path, kind: c.path === '.' ? 'root' as const : 'submodule' as const, category: 'other' as const, initialized: true, dirty: c.dirty ?? 0 }))
     canvas.render(wf, {
-      repositories, readonly: true, errorNodes: new Set(), run: status, effective: eff?.policy === 'default' ? eff : null,
+      repositories, readonly: true, errorNodes: new Set(), run: status, effective: eff?.policy === 'default' ? eff : null, focus: focusOf(rec),
       workflows: Object.entries(r!.bundle).filter(([, b]) => b.workflow).map(([id, b]) => ({ file: b.file, id, name: b.workflow!.name, errors: 0, warnings: 0, delegates: [] })),
     }, sel)
+  }
+
+  // The run's current position, for the initial view of a large graph:
+  // what runs or waits, else what failed, else the end of a completed run,
+  // else what is ready.
+  function focusOf(rec: RunRecord): string[] {
+    const ex = rec.execution
+    const now = [...ex.active, ...ex.waiting.map(w => w.node)]
+    if (now.length) return now
+    if (ex.failed.length) return ex.failed
+    if (ex.state === 'completed') { const eff = effectiveOf(rec); return eff?.nodes['_final-report'] ? ['_final-report'] : Object.keys(rec.nodes).slice(-1) }
+    return ex.ready
   }
 
   function renderSide(explicit = false) {
@@ -385,10 +397,10 @@ export function renderRunView(root: HTMLElement, wsId: string, workflow: string,
   const execTimer = rev ? undefined : setInterval(() => { if (shown?.record && !refresh.busy) void refresh.request('host') }, 3000)
 
   render()
-  void refresh.request('full').then(() => { if (!disposed) canvas.fit() })
+  void refresh.request('full')
   void loadProjectName()
   return {
-    dispose: () => { disposed = true; fileRequest++; refresh.dispose(); stream?.close(); clearInterval(clock); clearInterval(execTimer) },
+    dispose: () => { disposed = true; fileRequest++; refresh.dispose(); stream?.close(); canvas.dispose(); clearInterval(clock); clearInterval(execTimer) },
     isDirty: () => side.isDirty(),
   }
 }

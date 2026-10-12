@@ -400,7 +400,7 @@ export function renderWorkflowView(root: HTMLElement, wsId: string, file: string
       const status = s?.status ?? 'unapproved'
       return h(`div.approval-record.${status}`, { dataset: { kind } },
         h('strong', kind === 'intent' ? 'Intent' : 'Definition'), ' ',
-        h(`span.approval-pill.${status}`, { dataset: { kind, status } }, STATUS_TEXT[status]),
+        h(`span.state-tag.${status}`, STATUS_TEXT[status]),
         h('div.small.muted', s?.record ? `${status === 'stale' ? 'Last approved' : 'Approved'} by ${s.record.approver}, ${when(s.record.at)}` : 'Not approved yet.'))
     }))
     const issues = validateWorkflow(draft, context())
@@ -536,7 +536,7 @@ export function renderWorkflowView(root: HTMLElement, wsId: string, file: string
   window.addEventListener('keydown', onKey)
 
   renderCrumbs()
-  void load({}).then(() => canvas.frame())
+  void load({})
   void loadProjectName()
 
   return {

@@ -7,7 +7,7 @@ import { seed } from '../scripts/seed.ts'
 import { gitOk, LOCAL_TRANSPORT } from '../server/git.ts'
 import { parseWorkflow } from '../server/yamlDoc.ts'
 import { BASE, check, done, FIXTURE, open, shot, wsDir } from './lib.ts'
-import { addBinding, addNode, connectDrag, connectVia, dragNode, ideSave, pillStatus, save, selectNode, waitFor } from './ui.ts'
+import { addBinding, addNode, connectDrag, connectVia, dragNode, ideSave, openIntent, pillStatus, save, selectNode, waitFor } from './ui.ts'
 
 const A = wsDir('a'), B = wsDir('b')
 const WF = 'e2e-release.yaml'
@@ -47,6 +47,7 @@ await page.getByLabel('New workflow name').fill('E2E Release')
 await page.getByRole('button', { name: 'Create' }).click()
 await page.waitForFunction(() => location.hash.endsWith('/wf/e2e-release.yaml'))
 await page.waitForSelector('.wf-name:not([disabled])')
+await openIntent(page)
 await page.getByLabel('Workflow intent').fill('Release a service safely: study conventions, build and agree in parallel,\nverify, then hand repository setup to its own workflow.')
 await addBinding(page, 'tools', 'study/tools', 'readonly')
 await addBinding(page, 'runtime', 'wedo/runtime', 'editable')
@@ -91,13 +92,15 @@ check(afterUi.includes('name: Build candidate') && afterUi.includes('changelog f
 step(5, 'Validation and recovery: a missing reference, then malformed YAML')
 await ideSave(wfPath(A), afterUi.replace('workflow: repo-setup', 'workflow: repo-setupp'))
 check(await waitFor(() => page.locator(`.node[data-id="${hand}"] .delegate-target.missing`).isVisible(), 'missing ref'), 'the reloaded delegate card marks its target missing')
-check(await page.locator('.v-summary.error').innerText() === '1 error, 0 warnings', 'missing delegate target is the one error')
+check(/^1 error, \d+ warnings?$/.test(await page.locator('.v-summary.error').innerText()), `missing delegate target is the one error: ${await page.locator('.v-summary.error').innerText()}`)
+await openIntent(page)
 check(await page.getByRole('button', { name: 'Approve definition' }).isDisabled(), 'definition cannot be approved with errors')
 await shot(page, 'e2e-5-missing-reference', false)
 await selectNode(page, hand)
 await page.getByLabel('Delegate target').selectOption('repo-setup')
 await save(page)
-check(await page.locator('.v-summary.ok').isVisible(), 'fixed in the UI: valid again')
+// Since p4 a delegate node also carries the warning that it is display only, so "valid" means no errors.
+check(await waitFor(async () => /^0 errors?, \d+ warnings?$|^Valid$/.test(await page.locator('.v-summary').innerText()), 'valid'), 'fixed in the UI: no errors again')
 const valid = await readFile(wfPath(A), 'utf8')
 await ideSave(wfPath(A), valid.replace('edges:\n', 'edges:\n  - {from: [broken\n'))
 check(await waitFor(() => page.locator('.banner.error:has-text("malformed")').isVisible(), 'malformed'), 'malformed YAML is reported, last valid graph kept')
@@ -108,6 +111,7 @@ check(await waitFor(async () => !(await page.locator('.banner.error').isVisible(
 
 // 6 ------------------------------------------------------------------------
 step(6, 'Approve intent and definition; stale on description and intent changes; layout keeps approval')
+await openIntent(page)
 await page.getByLabel('Approver').fill('e2e-author')
 await page.getByRole('button', { name: 'Approve intent' }).click()
 check(await waitFor(async () => (await pillStatus(page, 'intent')) === 'approved', 'intent approved'), 'intent approved')
@@ -127,6 +131,7 @@ check(await pillStatus(page, 'definition') === 'stale', 'saved description chang
 check((await readFile(wfPath(A), 'utf8')).includes('approver: e2e-author'), 'stale approval record is kept, not erased')
 await shot(page, 'e2e-6-definition-stale', false)
 
+await openIntent(page)
 await page.getByLabel('Workflow intent').fill('Release a service safely and on schedule: study conventions, build and agree in parallel,\nverify, then hand repository setup to its own workflow.')
 await save(page)
 check(await pillStatus(page, 'intent') === 'stale' && await pillStatus(page, 'definition') === 'stale', 'intent change: both stale')
@@ -137,7 +142,7 @@ await waitFor(async () => (await pillStatus(page, 'intent')) === 'approved', 're
 await page.getByRole('button', { name: 'Approve definition' }).click()
 check(await waitFor(async () => (await pillStatus(page, 'definition')) === 'approved' && (await pillStatus(page, 'intent')) === 'approved', 'reapproved'), 'reapproved both')
 const beforeMove = parseWorkflow(await readFile(wfPath(A), 'utf8'))
-await page.getByRole('button', { name: 'Fit' }).click()
+await page.getByRole('button', { name: 'Fit', exact: true }).click()
 await dragNode(page, hand, 60, 90)
 await save(page)
 const afterMove = parseWorkflow(await readFile(wfPath(A), 'utf8'))

@@ -58,15 +58,39 @@ export async function captureStates(base: string, s: States, titles: Record<stri
       }
       await wf('pipeline.yaml')
       await take('def-large', 'Definition, a large graph (16 nodes, 16 reports)')
+      if (!small) {
+        await wf('improve.yaml')
+        await page.getByRole('button', { name: 'Intent & approvals' }).click()
+        await take('def-intent', 'Definition, "Intent & approvals" opened')
+        await page.getByRole('button', { name: 'Intent & approvals' }).click()
+        await page.getByRole('button', { name: 'Workflow settings' }).click()
+        await take('def-settings', 'Definition, "Workflow settings" opened')
+        await page.keyboard.press('Escape')
+        await page.getByRole('button', { name: 'Add node', exact: true }).click()
+        await take('def-add-node', 'Definition, the Add node menu (base types and templates)')
+        await page.keyboard.press('Escape')
+        await wf('longtext.yaml')
+        await page.locator('.node[data-id="reproduce"]').click()
+        await take('def-longtext', 'Definition, long Japanese and English names and text, a node selected')
+      }
 
       for (const k of Object.keys(titles)) {
-        if (small && !['plan', 'review', 'accepted', 'completed', 'failed'].includes(k)) continue
+        if (small && !['plan', 'review', 'accepted', 'completed', 'failed', 'held', 'branch', 'longtext'].includes(k)) continue
         await run(k)
         await take(`run-${k}`, `Run: ${titles[k]}`, k === 'working' ? 'host facts synthetic (/exec answered with an alive attempt)' : undefined)
       }
       if (!small) {
         await run('working', `/at/${s.commit}`)
         await take('run-history', 'Run: historical view (as committed before Verify)')
+        await run('completed')
+        await page.getByRole('button', { name: 'Run details' }).click()
+        for (const t = page.locator('.run-side .sec-toggle[aria-expanded="false"]:visible'); await t.count();) await t.first().click()
+        await page.locator('.node[data-id="present"]').click()
+        await page.evaluate(() => { window.scrollTo(0, 0); (document.querySelector('.run-side') as HTMLElement).scrollTop = 0 })
+        await take('run-completed-details', 'Run: completed, with Run details, every side section and a selected node opened', 'side pane scrolled to its top; it scrolls on its own')
+        await page.evaluate(() => { const s = document.querySelector('.run-side') as HTMLElement; s.scrollTop = s.scrollHeight })
+        await take('run-completed-details-end', 'Run: completed, side pane scrolled to its end (execution, coordination, result, history)')
+        await page.evaluate(() => { try { localStorage.removeItem('workflow-editor.run-sections') } catch { /* ignore */ } })
       }
       await page.close()
     }

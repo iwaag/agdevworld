@@ -296,7 +296,11 @@ export function renderWorkflowView(root: HTMLElement, wsId: string, file: string
     selection = { kind: 'node', id }
     settingsOpen = false
     update(true)
-    requestAnimationFrame(() => { if (disposed) return; canvas.reveal(id); inspector.querySelector<HTMLInputElement>('input[aria-label="Node name"]')?.focus({ preventScroll: true }) })
+    // The new node's name, at once (a later focus could take the keyboard
+    // from wherever the person went meanwhile); the card is revealed once
+    // the narrower canvas is laid out.
+    inspector.querySelector<HTMLInputElement>('input[aria-label="Node name"]')?.focus({ preventScroll: true })
+    requestAnimationFrame(() => { if (!disposed) canvas.reveal(id) })
   }
 
   function connect(from: string, to: string) {

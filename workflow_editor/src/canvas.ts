@@ -206,6 +206,9 @@ export class Canvas {
 
   render(draft: Workflow, ctx: CanvasContext, selection: Selection) {
     this.draft = draft; this.ctx = ctx; this.selection = selection
+    // Cards are rebuilt: a card that had the keyboard focus gets it back (p8).
+    const active = document.activeElement instanceof HTMLElement && this.surface.contains(document.activeElement) ? document.activeElement : null
+    const refocus = active ? (active.dataset.id ? `.node[data-id="${CSS.escape(active.dataset.id)}"]` : active.dataset.step ? `[data-step="${CSS.escape(active.dataset.step)}"]` : null) : null
     this.points = positions(draft)
     for (const old of this.surface.querySelectorAll('.node, .step-card, .report-icon, .final-step')) old.remove()
     const m = METRICS[this.mode]
@@ -218,6 +221,7 @@ export class Canvas {
     }
     this.renderSteps()
     this.drawEdges()
+    if (refocus) this.surface.querySelector<HTMLElement>(refocus)?.focus({ preventScroll: true })
     this.measure()
     this.applyView()
     if (!this.framed && this.el.isConnected && this.el.clientWidth) { this.size = { w: this.el.clientWidth, h: this.el.clientHeight }; this.framed = true; this.frame() }

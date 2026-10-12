@@ -2,8 +2,24 @@
 import { rename, writeFile } from 'node:fs/promises'
 import type { Page } from 'playwright-core'
 
+// Workflow settings (p8): opened explicitly, in the inspector column.
+export async function openSettings(page: Page) {
+  if (!(await page.getByLabel('New binding key').isVisible())) await page.getByRole('button', { name: 'Workflow settings' }).click()
+}
+
+// Intent & approvals (p8): the authoritative intent and both approvals, behind one entry.
+export async function openIntent(page: Page) {
+  if (!(await page.getByLabel('Workflow intent').isVisible())) await page.getByRole('button', { name: 'Intent & approvals' }).click()
+}
+
+// An inspector group (p8: Appearance, Repositories, Connections), opened if closed.
+export async function openGroup(page: Page, group: string) {
+  const g = page.locator(`.inspector .insp-group[data-group="${group}"]`)
+  if (!(await g.evaluate(e => (e as HTMLDetailsElement).open))) await g.locator('summary').click()
+}
+
 export async function addBinding(page: Page, key: string, path: string, access: string) {
-  await page.locator('.canvas').click({ position: { x: 8, y: 8 } }) // select nothing
+  await openSettings(page)
   await page.getByLabel('New binding key').fill(key)
   await page.getByLabel('New binding path').selectOption(path)
   await page.getByLabel('New binding access').selectOption(access)
@@ -12,7 +28,8 @@ export async function addBinding(page: Page, key: string, path: string, access: 
 }
 
 export async function addNode(page: Page, type: string, name: string, description: string, repos: string[] = []): Promise<string> {
-  await page.getByRole('button', { name: `Add ${type} node` }).click()
+  await page.getByRole('button', { name: 'Add node', exact: true }).click() // the Add node menu (p8)
+  await page.getByRole('menuitem', { name: `Add ${type} node` }).click()
   await page.getByLabel('Node name').fill(name)
   await page.getByLabel('Node description').fill(description)
   for (const r of repos) await page.getByLabel(`Bind ${r}`).check()
@@ -20,7 +37,7 @@ export async function addNode(page: Page, type: string, name: string, descriptio
 }
 
 export async function fit(page: Page) {
-  await page.getByRole('button', { name: 'Fit' }).click()
+  await page.getByRole('button', { name: 'Fit', exact: true }).click()
 }
 
 export async function selectNode(page: Page, id: string) {
@@ -30,6 +47,7 @@ export async function selectNode(page: Page, id: string) {
 
 export async function connectVia(page: Page, from: string, to: string) {
   await selectNode(page, from)
+  await openGroup(page, 'connections')
   await page.getByLabel('Connect to node').selectOption(to)
   await page.locator('.inspector button', { hasText: 'Connect' }).click()
 }

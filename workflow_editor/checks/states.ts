@@ -106,6 +106,24 @@ edges:
   - {from: find, to: rewrite}
   - {from: rewrite, to: links}
 `
+// Long and mixed-language text: names, a purpose and questions that wrap.
+const LONGTEXT = `schema: ag.workflow.v2
+id: longtext
+name: 長いテキストの確認 — why the nightly synchronisation of very large settings files sometimes fails
+intent: |
+  夜間の設定同期がときどき失敗する原因を調べ、再現手順と修正案をまとめる。The intent continues in English to check that a long, mixed-language purpose is shortened in the title band without being cut from the panel.
+documentation:
+  policy: manual
+repositories:
+  docs: {path: devdocs, access: editable}
+nodes:
+  investigate: {type: study, name: 既存の設定ファイルの同期処理を調査して失敗する条件を特定する, description: 同期ログと設定ファイルのサイズを照らし合わせ、失敗した夜の共通点を探す。ログが欠けている夜は推測せず、欠けていると記録する。, repositories: [docs]}
+  reproduce: {type: do, name: Reproduce the failure with a synthetic 80 MB settings file and a throttled network, description: A long English description that goes on for several lines to check the two-line limit on the card and the full text in the inspector and in the run view's node details., repositories: [docs]}
+  ask: {type: talk, name: 修正方針を相談, description: 再現結果を見せて、修正方針を相談する。, repositories: [docs]}
+edges:
+  - {from: investigate, to: reproduce}
+  - {from: reproduce, to: ask}
+`
 // A larger graph: three lanes that fork and join over eight ranks.
 function pipeline(): string {
   const lanes = ['assets', 'engine', 'ui']
@@ -157,6 +175,7 @@ export const STATE_TITLES: Record<string, string> = {
   branch: 'Branch and join: two open questions',
   large: 'Large graph, not started',
   broken: 'Malformed run.json',
+  longtext: 'Long Japanese and English text, an open question',
 }
 
 export async function buildStates(root: string, opts: { answerBase: string; ports: [number, number] }): Promise<States> {
@@ -176,6 +195,7 @@ export async function buildStates(root: string, opts: { answerBase: string; port
   await writeFile(join(wfDir, 'explore.yaml'), EXPLORE)
   await writeFile(join(wfDir, 'tidy.yaml'), TIDY)
   await writeFile(join(wfDir, 'pipeline.yaml'), pipeline())
+  await writeFile(join(wfDir, 'longtext.yaml'), LONGTEXT)
   await writeFile(join(wfDir, 'broken.yaml'), 'schema: ag.workflow.v2\nid: broken\nname: [unclosed\n')
   // What the presentation serves, and its request-specific explanation.
   await mkdir(join(dir, 'app'), { recursive: true })
@@ -331,6 +351,13 @@ export async function buildStates(root: string, opts: { answerBase: string; port
 
   // A large graph, not started.
   runs.large = await create('pipeline', 'run-large', 'Ship the three-lane release.')
+
+  // Long, mixed-language text and an open question in Japanese.
+  runs.longtext = await create('longtext', 'run-jp', '夜間の設定同期が失敗する原因を調べてください。')
+  await work(runs.longtext, 'investigate', '失敗した 6 晩のうち 5 晩で、設定ファイルが 64 MB を超えていた。残りの 1 晩はログが欠けていて判断できない。')
+  await work(runs.longtext, 'reproduce', 'Reproduced with an 80 MB file on a network throttled to 2 Mbit/s: the upload times out after 120 s and the partial file is kept as if complete.')
+  await op(runs.longtext, { op: 'node.start', node: 'ask' })
+  await op(runs.longtext, { op: 'question.ask', question: '', node: 'ask', to: 'Sample Person', text: '再現できました。80 MB の設定ファイルを 2 Mbit/s に絞った回線で送ると、120 秒でタイムアウトし、途中までのファイルが完全なものとして残ります。\n\n修正方針を二つ考えています。(1) 分割アップロードにして、各部分のハッシュを確かめる。(2) 一時ファイルに書いてから置き換える。どちらで進めますか。両方でもかまいません。' })
 
   // A malformed run.json.
   runs.broken = await create('tidy', 'run-broken', 'A run whose record is damaged.')

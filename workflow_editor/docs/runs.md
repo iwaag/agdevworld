@@ -403,6 +403,18 @@ other node is refused (`not-result-confirmation`): plan agreement never
 becomes acceptance, and the person does not approve twice. An ambiguous
 answer is the executor's to follow up with another question.
 
+### Presentations and adjustments (p7)
+
+A run may present its result for review — a frozen bundle served on this
+host with an explanation, bound to the confirmation question and decision —
+and may change its future work through recorded revisions of its
+definition. Both are additive parts of this record (`presentations`,
+`definition.revisions`, `definition.active`, absent until first used) with
+their own operations (`presentation.register`, `presentation.observe`,
+`run.adjust`): see [presentations.md](presentations.md) and
+[adjustments.md](adjustments.md). Execution completion is refused while a
+presentation is open (`presentation-open`).
+
 ### Artifacts
 
 `attach` records a project-relative path (usually a report in the run

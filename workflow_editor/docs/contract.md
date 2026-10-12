@@ -161,6 +161,44 @@ nodes:
 - `confirms: result` is valid on one talk node per workflow. The compiler
   (`ag.wfe-compile.v2`) keeps it in the frozen graph.
 
+### Appearance (p7)
+
+A node may say how it looks, independently of what it does:
+
+```yaml
+nodes:
+  present:
+    type: do
+    name: Present
+    appearance: {icon: present, color: teal}
+```
+
+| Field | Values | Default |
+| --- | --- | --- |
+| `icon` | `study`, `do`, `delegate`, `talk`, `present`, `cleanup`, `test`, `doc`, `build`, `review`, `flag` | the type's icon |
+| `color` | `blue`, `amber`, `violet`, `teal`, `green`, `rose`, `slate`, `orange` | the type's color |
+
+- Appearance is display only. It is not part of either approval digest,
+  not part of the compiled graph and not read by any execution rule: the
+  type, permissions, prompts and states of a node are what they were. A
+  change of appearance alone leaves definition approval and plan agreement
+  as they were and is never a run adjustment.
+- Colors are named tokens of the editor's palette, not free CSS, so state
+  stays readable: a custom color tints the card's head band and edge; the
+  state line, its glyph and its text keep their own colors. Every state is
+  still said in text and glyph.
+- An unknown icon or color is a warning (`appearance-icon`,
+  `appearance-color`) and is drawn with the type's default; the file keeps
+  what was written.
+- **Presets** in the editor's palette create ordinary nodes with an
+  appearance and an editable starting name and description: *Present*
+  (`do`, icon `present`, color `teal`) and *Clean up* (`do`, icon `cleanup`,
+  color `slate`). What a presentation is lives in
+  [presentations.md](presentations.md); the preset only makes the node
+  recognizable.
+- Run snapshots keep the YAML byte for byte, so a run view and a history
+  view show the appearance the run was created (or adjusted) with.
+
 ### devdocs storage modes (p4)
 
 | Mode | What devdocs is | Owning repository and path |
@@ -307,7 +345,8 @@ declared approver and the time:
    and, when declared (p6), `execution`, `intake` and a node's `confirms`.
 
 Excluded from both digests: workflow `id` and `name`, approvals, layout,
-fields outside the contract, comments, key order and YAML formatting.
+node appearance (p7), fields outside the contract, comments, key order and
+YAML formatting.
 
 Digest = `sha256:` + hex SHA-256 of the UTF-8 canonical JSON of a projection:
 

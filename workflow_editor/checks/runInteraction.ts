@@ -287,9 +287,15 @@ try {
   check(afterFlight.value === 'Medium or large' && afterFlight.answers.length === 1 && afterFlight.answers[0] === 'Medium' && doubleDisabled,
     `text typed during the request survives, the double click records once: ${JSON.stringify(afterFlight)}`)
   await button.click()
-  await waitFor(async () => (await ans.inputValue()) === '', 8000)
+  // p8: once the draft is recorded and empty, the answered question shows
+  // its receipt and offers "Record another answer" instead of an empty form.
+  await waitFor(async () => !(await page.locator(answer).count()), 8000)
   rec = JSON.parse(await (await import('node:fs/promises')).readFile(join(runDirOf(R1), 'run.json'), 'utf8'))
-  check(await ans.inputValue() === '' && rec.questions.q1.answers.at(-1)?.text === 'Medium or large', 'an unchanged submitted draft is cleared once recorded')
+  const receipt = await page.locator('.question[data-question="q1"]').innerText()
+  check(!(await page.locator(answer).count()) && rec.questions.q1.answers.at(-1)?.text === 'Medium or large' && /has not recorded taking it up yet/.test(receipt),
+    'an unchanged submitted draft is recorded and cleared; the question shows its receipt instead of the form')
+  await page.locator('.question[data-question="q1"] button.another').click()
+  check(await page.locator(answer).evaluate(el => document.activeElement === el && (el as HTMLTextAreaElement).value === ''), '"Record another answer" brings the same form back, focused and empty')
   await page.unroute(opsUrl)
   await page.route(opsUrl, route => route.fulfill({ status: 500, json: { error: 'injected failure' } }))
   await ans.fill('Kept on failure')
@@ -442,6 +448,9 @@ try {
 
   // 13. Losing and regaining the service while an answer is composed.
   console.log('disconnect and reconnect during composition')
+  // q1 is answered: its form is offered again on request (p8).
+  const openAnswer = async () => { if (!(await page.locator(answer).count())) await page.locator('.question[data-question="q1"] button.another').click() }
+  await openAnswer()
   await page.locator(answer).click()
   await track(answer)
   await cdp.send('Input.imeSetComposition', { text: 'せつぞく', selectionStart: 4, selectionEnd: 4 })
@@ -461,6 +470,7 @@ try {
   // 14. Every form across SSE progress, a file change and heartbeats: the
   // same controls, no value written, internal scrolling, focus and selection kept.
   console.log('all forms across updates')
+  await openAnswer()
   await page.locator('details.adjust summary').click()
   const formLabels = ['Your name', 'Answer to q1', 'Resume instruction', 'Adjusted definition', 'Adjustment reason', 'Decision evidence']
   const longText = Array.from({ length: 30 }, (_, i) => `draft line ${i + 1}`).join('\n')
@@ -527,10 +537,12 @@ try {
   const commit = (await gitOk(dir, ['rev-parse', 'HEAD'])).trim()
   await page.goto(`${BASE}/#/ws/chk/run/${R1.workflow}/${R1.run}/at/${commit}`)
   await page.waitForSelector('.run-summary[data-seq]')
-  const hist = await page.evaluate(() => ({ textareas: document.querySelectorAll('.run-side textarea').length, banner: /As committed/.test((document.querySelector('.banners') as HTMLElement).innerText), live: (document.querySelector('.live-state') as HTMLElement).innerText }))
+  const hist = await page.evaluate(() => ({ textareas: [...document.querySelectorAll<HTMLElement>('.run-body textarea, .run-body input')].filter(e => !e.closest('[hidden]')).length, banner: /As committed/.test((document.querySelector('.banners') as HTMLElement).innerText), live: (document.querySelector('.live-state') as HTMLElement).innerText }))
   check(hist.textareas === 0 && hist.banner && hist.live === 'history', `the historical view offers no forms: ${JSON.stringify(hist)}`)
   await page.goto(`${BASE}/#/ws/chk/run/${R1.workflow}/${R1.run}`)
   await page.waitForSelector('.run-summary[data-seq]')
+  await page.waitForSelector('.question[data-question="q1"]')
+  await openAnswer()
   await page.getByLabel('Answer to q1').fill('kept while the record is broken')
   await track(answer)
   const good = await (await import('node:fs/promises')).readFile(join(runDirOf(R1), 'run.json'), 'utf8')

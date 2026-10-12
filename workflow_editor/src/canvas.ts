@@ -90,8 +90,14 @@ export class Canvas {
   // pan stay, and only the first real size sets the initial view.
   private sized = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(() => this.onResize())
 
-  constructor(events: CanvasEvents) {
+  // `autoHeight`: the canvas takes the height its graph needs at the initial
+  // scale, within these bounds, once, when it is first framed (the run view;
+  // the editor's canvas fills its column).
+  private readonly autoHeight?: { min: number; max: number }
+
+  constructor(events: CanvasEvents, opts: { autoHeight?: { min: number; max: number } } = {}) {
     this.events = events
+    this.autoHeight = opts.autoHeight
     this.svg = document.createElementNS(NS, 'svg')
     this.svg.classList.add('edges')
     this.surface = h('div.surface')
@@ -137,11 +143,17 @@ export class Canvas {
   // saying how much is in view and Fit for all of it.
   frame() {
     const all = this.cardBoxes()
-    const r = this.size
+    const r = { ...this.size }
     if (!all.length || !r.w) { this.view = { x: 0, y: 0, k: 1 }; this.applyView(); return }
     const b = bounds(all)
-    const fitK = Math.min(1, (r.w - 2 * MARGIN) / (b.w || 1), (r.h - 2 * MARGIN) / (b.h || 1))
     const readable = READABLE[this.mode]
+    if (this.autoHeight) {
+      const { min, max } = this.autoHeight
+      const k = Math.max(readable, Math.min(1, (r.w - 2 * MARGIN) / (b.w || 1), (max - 2 * MARGIN) / (b.h || 1)))
+      const want = Math.round(Math.min(max, Math.max(min, b.h * k + 2 * MARGIN + 36)))
+      if (this.el.clientHeight !== want) { this.el.style.height = `${want}px`; r.h = this.size.h = this.el.clientHeight }
+    }
+    const fitK = Math.min(1, (r.w - 2 * MARGIN) / (b.w || 1), (r.h - 2 * MARGIN) / (b.h || 1))
     if (fitK >= readable) {
       this.view.k = fitK
       this.view.x = (r.w - b.w * fitK) / 2 - b.x * fitK

@@ -110,7 +110,7 @@ try {
   console.log('After the stop')
   await pr.stop(ws, R, 'p1')
   await page.reload()
-  await page.locator('.run-summary .review-link').waitFor()
+  await page.locator('.focus .review-link').waitFor()
   check(await page.locator('.review-link a.button.primary').count() === 0, 'no live link is offered for a stopped presentation')
   check((await page.locator('.review-link').textContent())?.includes('no longer served'), 'the run view says it is no longer served')
   check((await page.locator('.presentation[data-presentation="p1"]').textContent())?.includes('Stopped'), 'the presentation keeps its record, marked stopped')

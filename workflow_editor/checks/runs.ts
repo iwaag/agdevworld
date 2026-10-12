@@ -168,7 +168,7 @@ try {
   check(rec.nodes.ask.state === 'waiting' && rec.questions.q1.takenUp === null, 'the node still waits; the answer is not taken up')
   await waitFor(async () => /to take up/.test(await cardText('ask')))
   check(await cardText('ask') === 'Answered · Omni Agent to take up' && /ask → next move: Omni Agent \(answer recorded, not yet taken up\)/.test(await page.locator('.run-now').innerText()), `card and summary say who holds the next move: "${await cardText('ask')}"`)
-  check(/does not notify it|does not start or wake/.test(await page.locator('.run-side').innerText()), 'the view says recording does not wake the IDE agent')
+  check(/does not wake the executor/.test(await page.locator('.run-body').innerText()), 'the view says recording does not wake the executor')
   await shot(page, 'p4-run-answered', false)
 
   // 7. An answer typed against an outdated view is refused, not applied.
@@ -177,6 +177,7 @@ try {
   await page.route(viewUrl, r => r.abort())
   const moved = (await op(R1, { op: 'node.progress', node: 'build', text: 'moved on' })).seq
   await sleep(1500)
+  await page.locator('.question[data-question="q1"] button.another').click() // an answered question offers its form on request (p8)
   await page.getByLabel('Answer to q1').fill('A late second answer')
   await page.locator('.question[data-question="q1"] button.primary').first().click()
   await waitFor(async () => /changed since this view was read/.test(await page.locator('.banners').innerText()))

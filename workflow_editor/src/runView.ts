@@ -5,21 +5,28 @@
 // answering a question, deciding on the result, cancelling the run. It never
 // edits a definition, and recording an answer does not wake any agent.
 //
+// Layout (p8): a slim header (crumbs, connection, Refresh); a title band
+// that names the run and keeps four facts apart — recorded execution
+// progress, the human decision, executor activity and (in the header)
+// connection health — with "Run details" for timestamps, backend and
+// provenance; the main column with the focus card (the person's current
+// task, runSide.ts) above the graph; and the side pane (runSide.ts).
+//
 // The view is built once (p7/ex2). Reads go through one refresh coordinator
 // (runRefresh.ts); each part is brought up to date in place — the header and
-// summary by patching, the right pane by its persistent sections
-// (runSide.ts), the canvas only when its graph, states or selection change.
+// title band by patching, the focus card and the side pane by their
+// persistent sections, the canvas only when its graph, states or selection change.
 import { backendFact } from '../shared/backend.ts'
 import type { RunResponse } from '../shared/api.ts'
-import { effectiveOf, holderOf, isOpen, runKey, situation, type RunRecord } from '../shared/run.ts'
+import { effectiveOf, holderOf, situation, type RunRecord } from '../shared/run.ts'
 import { api, ApiError, type AdjustView, type PresentationView, type RunExecView, type RunNotifyView } from './api.ts'
 import { Canvas, STATE_GLYPH } from './canvas.ts'
-import { splitCounts } from '../shared/compile.ts'
+import { FINAL_STEP, splitCounts } from '../shared/compile.ts'
 import { h, when } from './dom.ts'
 import { icon } from './icons.ts'
 import { live } from './live.ts'
 import { patchContent } from './patch.ts'
-import { activeWorkflow, ago, chip, fact, line, nodeLabel, nodeLink, runHash, STATE_LABEL } from './runCommon.ts'
+import { activeWorkflow, ago, chip, fact, line, nodeLabel, nodeLink, runHash, runTitle, STATE_LABEL } from './runCommon.ts'
 import { outcome, RefreshCoordinator, type Outcome, type RefreshKind } from './runRefresh.ts'
 import { RunSide } from './runSide.ts'
 import type { ViewHandle } from './main.ts'
@@ -27,6 +34,12 @@ import type { ViewHandle } from './main.ts'
 const ACTOR_KEY = 'workflow-editor.actor'
 function stored(key: string, fallback: string) { try { return localStorage.getItem(key) ?? fallback } catch { return fallback } }
 function store(key: string, value: string) { try { localStorage.setItem(key, value) } catch { /* per-viewer convenience only */ } }
+
+const SITUATION: Record<string, string> = {
+  executing: 'Executor: executing', stopping: 'Executor: stop requested', 'awaiting-person': 'Executor: idle, waiting for a person',
+  stopped: 'Executor: held (stopped)', interrupted: 'Executor: held (interrupted)', unknown: 'Executor: unknown — look before resuming',
+  completed: 'Executor: idle', cancelled: 'Executor: idle (cancelled)', 'not-started': 'Executor: not started', idle: 'Executor: idle',
+}
 
 export function renderRunView(root: HTMLElement, wsId: string, workflow: string, run: string, rev?: string): ViewHandle {
   const ref = `${workflow}/${run}`
@@ -47,22 +60,37 @@ export function renderRunView(root: HTMLElement, wsId: string, workflow: string,
   let canvasShown = '' // what the canvas was last drawn from
   let hostShown = '' // the host facts last displayed (without the heartbeat time)
 
-  const crumbs = h('div.crumbs')
-  const refreshButton = h('button', { title: 'Re-read the run now', onclick: () => void refresh.request('full') }, 'Refresh')
+  const crumbs = h('nav.crumbs', { 'aria-label': 'Breadcrumb' })
+  const refreshButton = h('button.ghost-dark', { title: 'Re-read the run now', onclick: () => void refresh.request('full') }, 'Refresh')
   const liveState = h('span.live-state')
   const banners = h('div.banners')
-  const summary = h('div.run-summary')
-  const canvas = new Canvas({ select: sel => select(sel?.kind === 'node' || sel?.kind === 'step' ? sel.id : null), move: () => {}, connect: () => {} })
+  // The title band; `.run-summary` carries the sequence and state this view shows (checks read them).
+  const titleMain = h('div.title-main')
+  const titleFacts = h('div.run-facts-row')
+  const detailsToggle = h('button.panel-toggle', { 'aria-expanded': 'false', 'aria-controls': 'run-details', onclick: () => toggleDetails() }, icon('list', 'icon small'), 'Run details')
+  const openDefinition = h('a.button.panel-toggle', { hidden: true }, icon('doc', 'icon small'), 'Open current definition')
+  const summary = h('section.title-band.run-summary', titleMain, h('div.title-side', titleFacts, h('div.title-actions', openDefinition, detailsToggle)))
+  const details = h('section.run-details#run-details', { hidden: true, 'aria-label': 'Run details' })
+  const canvas = new Canvas({ select: sel => select(sel?.kind === 'node' || sel?.kind === 'step' ? sel.id : null), move: () => {}, connect: () => {} }, { autoHeight: { min: 300, max: 620 } })
   canvas.setMode('compact')
+  const graphHead = h('div.graph-head')
   const legend = h('div.run-legend')
   const side = new RunSide({ record, adjust, notice }, stored(ACTOR_KEY, ''))
+  const graphCard = h('section.graph-card', graphHead, canvas.el, legend)
 
   root.append(
-    h('header.wf-top.run-top',
-      h('div.wf-row1', crumbs, h('div.top-actions', liveState, refreshButton)),
-      summary, banners),
-    h('main.wf-body.run-body', h('div.canvas-col', legend, canvas.el), side.el),
+    h('header.app-header.run-top', crumbs, h('div.top-actions', liveState, refreshButton)),
+    summary, details, banners,
+    h('main.run-body',
+      h('div.run-col', side.focus, graphCard),
+      side.el),
   )
+
+  function toggleDetails(open = details.hidden === true) {
+    details.hidden = !open
+    detailsToggle.setAttribute('aria-expanded', String(open))
+    detailsToggle.classList.toggle('active', open)
+  }
 
   // ---- reading ----------------------------------------------------------------
 
@@ -96,7 +124,7 @@ export function renderRunView(root: HTMLElement, wsId: string, workflow: string,
     const hostChanged = facts !== hostShown
     hostShown = facts
     if (kind === 'host') {
-      if (hostChanged && !disposed) { renderSummary(); side.updateHost({ wsId, rev, shown, resp, execView, execError, notifyView, presentViews, selection, viewing }) }
+      if (hostChanged && !disposed) { renderSummary(); side.updateHost(data()) }
       return
     }
     render()
@@ -109,6 +137,7 @@ export function renderRunView(root: HTMLElement, wsId: string, workflow: string,
     return f ? `${f.size}:${f.modified}` : `unlisted:${Math.random()}`
   }
   const refresh = new RefreshCoordinator<Batch>(readBatch, applyBatch)
+  const data = () => ({ wsId, rev, shown, resp, execView, execError, notifyView, presentViews, selection, viewing, connected })
 
   async function loadProjectName() {
     const p = await api.project(wsId).catch(() => null)
@@ -126,7 +155,7 @@ export function renderRunView(root: HTMLElement, wsId: string, workflow: string,
 
   function actorName(what: string): string | null {
     const name = side.actorName.trim()
-    if (!name) { notice('error', `Enter your name first (${what}).`); return null }
+    if (!name) { notice('error', `Enter your name first (${what}).`); side.focusActor(); return null }
     store(ACTOR_KEY, name)
     return name
   }
@@ -190,6 +219,7 @@ export function renderRunView(root: HTMLElement, wsId: string, workflow: string,
     const id = ++fileRequest
     const kept = viewing?.path === path ? viewing.text : undefined
     if (kept === undefined) { viewing = { path }; renderSide(explicit) }
+    if (explicit) side.revealFile()
     let next: typeof viewing
     try {
       next = { path, text: (await api.runFile(wsId, workflow, run, path, rev ? shown?.rev ?? rev : undefined)).text }
@@ -214,13 +244,21 @@ export function renderRunView(root: HTMLElement, wsId: string, workflow: string,
       case 'file': void readFile(d.path!, true); break
       case 'close-file': fileRequest++; viewing = null; renderSide(true); break
       case 'goto-question': side.revealQuestion(d.question!); break
+      case 'goto-resume': side.revealResume(); break
+      case 'goto-section': side.revealSection(d.section!, d.focus); break
       case 'present-start': void presentation(d.presentation!, 'start'); break
       case 'present-stop': void presentation(d.presentation!, 'stop'); break
       case 'retry-checkpoint': void retryCheckpoint(Number(d.checkpoint)); break
       case 'dismiss': opNotice = null; renderBanners(); break
+      case 'details': toggleDetails(true); details.scrollIntoView({ block: 'nearest' }); break
       case 'stop-run': {
         const reason = prompt('Stop this run? It stays resumable. Reason:')
         if (reason?.trim()) void record({ op: 'run.stop', reason }, 'Stop recorded.')
+        break
+      }
+      case 'cancel-run': {
+        const why = prompt('Cancel this run? Every pending, running or waiting node is cancelled. Reason:')
+        if (why?.trim()) void record({ op: 'run.cancel', reason: why }, 'Recorded: the run is cancelled.')
         break
       }
     }
@@ -232,36 +270,88 @@ export function renderRunView(root: HTMLElement, wsId: string, workflow: string,
     patchContent(crumbs,
       h('a', { href: '#/' }, 'Projects'), h('span.sep', '/'),
       h('a', { href: `#/ws/${encodeURIComponent(wsId)}` }, projectName), h('span.sep', '/'),
-      h('span.muted', 'run'), h('strong.run-ref', ref),
+      h('span', 'Run'), h('span.sep', '/'), h('strong.run-ref.here', ref),
       rev ? h('span.pill.warn', `as committed at ${rev.slice(0, 10)}`) : null)
   }
 
   function renderLive() {
-    patchContent(liveState, rev ? h('span.pill', 'history') : connected ? h('span.pill.ok', 'live') : h('span.pill.warn', 'not live'))
+    patchContent(liveState, rev ? h('span.pill', { title: 'A historical reading: nothing here is live' }, 'history') : connected ? h('span.pill.ok', h('span.dot.on'), 'live') : h('span.pill.warn', h('span.dot.off'), 'not live'))
   }
 
+  // The title band: what the run is, and its separate facts.
   function renderSummary() {
     const r = shown
     const rec = r?.record
-    if (!rec) { patchContent(summary, h('p.muted', loadError ? '' : 'Loading run…')); return }
+    detailsToggle.hidden = !rec
+    if (!rec) { patchContent(titleMain, h('h1.run-name', ref), h('p.muted', loadError || resp?.problem ? 'No usable record.' : 'Loading run…')); patchContent(titleFacts); patchContent(details); return }
     if (summary.dataset.seq !== String(rec.seq)) summary.dataset.seq = String(rec.seq) // the sequence this view shows (checks read it)
     if (summary.dataset.state !== rec.execution.state) summary.dataset.state = rec.execution.state
     const ex = rec.execution
+    const wf = activeWorkflow(r, rec)
+    const t = runTitle(rec, wf?.name)
+    patchContent(titleMain,
+      h('h1.run-name', { title: t.title }, t.title),
+      h('p.run-lead', statusLine(rec)),
+      h('p.wf-file', `${t.sub} · ${rec.definition.revisions?.length ? `adjusted, ${rec.definition.active ?? 'r1'} in force` : 'fixed snapshot'}`))
+    const last = rec.decisions.at(-1)
+    const accepted = last?.decision === 'accepted'
+    const sit = situation(rec)
+    const open = execView?.attempts.find(a => a.state !== 'ended')
+    const process = rev ? '' : open ? (open.alive === true ? ' · process alive' : open.alive === false ? (open.pid ? ' · process not seen alive' : ' · launching') : ' · on another host') : ''
+    patchContent(titleFacts,
+      chip(ex.state, ex.state === 'completed' ? '✓ Completed' : ex.state === 'stopped' ? 'Nothing can proceed' : STATE_LABEL[ex.state] ?? ex.state),
+      last ? h(`span.decision-chip.${accepted ? 'ok' : 'error'}`, { title: `${last.decision} by ${last.by}, ${when(last.at)}${last.confirmation ? ` (from ${last.confirmation.question})` : ''}` },
+        accepted ? (ex.state !== 'completed' && !rec.cancelled ? 'Accepted · cleanup pending' : 'Accepted') : 'Rejected') : ex.state === 'completed' ? h('span.decision-chip.none', 'No decision') : null,
+      rev ? null : h(`span.chip.sit-${sit}`, { title: 'What runs now: this host\'s execution facts, separate from the recorded node states' }, `${SITUATION[sit] ?? sit}${process}`))
     const src = r!.sources.find(s => s.workflow === rec.definition.root)
+    openDefinition.hidden = !src?.file
+    if (src?.file) {
+      const href = `#/ws/${encodeURIComponent(wsId)}/wf/${encodeURIComponent(src.file.replace(/^devdocs\/workflows\//, ''))}`
+      if (openDefinition.getAttribute('href') !== href) openDefinition.setAttribute('href', href)
+      openDefinition.title = 'The editable, reusable definition in devdocs/workflows; this run follows its own fixed copy'
+    }
+    renderDetails(rec)
+  }
+
+  // One deterministic line from recorded facts: no generated prose.
+  function statusLine(rec: RunRecord): string {
+    const ex = rec.execution
+    const eff = effectiveOf(rec)
+    const split = eff?.policy === 'default' ? splitCounts(eff, rec.nodes) : null
+    const tally = (c: Record<string, number>) => `${c.completed ?? 0} of ${Object.values(c).reduce((a, b) => a + b, 0)}`
+    const counts = split ? `work ${tally(split.work)} completed · documentation ${tally(split.docs)}` : `${tally(ex.counts)} nodes completed`
+    if (rec.cancelled) return `Cancelled by ${rec.cancelled.by}: ${rec.cancelled.reason}`
+    const parts = [
+      ...ex.active.map(n => `${label(rec, n)}: in progress`),
+      ...ex.waiting.map(w => `${label(rec, w.node)}: waits for ${holderOf(rec, w.node)}`),
+      ...ex.failed.map(n => `${label(rec, n)}: failed`),
+    ]
+    const text = `${parts.length ? `${parts.join(' · ')} — ` : ''}${counts}`
+    return text.charAt(0).toUpperCase() + text.slice(1)
+  }
+  const label = (rec: RunRecord, id: string) => {
+    const wf = activeWorkflow(shown, rec)
+    const step = effectiveOf(rec)?.nodes[id]?.step
+    return step ? (step.kind === 'plan' ? 'Plan talk' : step.kind === 'report' ? `Report on ${wf?.nodes[step.for ?? '']?.name ?? step.for}` : 'Final report') : wf?.nodes[id]?.name || id
+  }
+
+  // Run details: timestamps, backend, provenance and the full position.
+  function renderDetails(rec: RunRecord) {
+    const r = shown!
+    const ex = rec.execution
+    const src = r.sources.find(s => s.workflow === rec.definition.root)
     const srcText = !src ? null : src.status === 'same' ? 'current definition: same as this snapshot' : src.status === 'changed' ? 'current definition: changed since this snapshot' : src.status === 'deleted' ? 'current definition: deleted' : `snapshot: ${src.detail}`
     const input = rec.input
     const last = rec.decisions.at(-1)
-    patchContent(summary,
-      h('div.run-title',
-        chip(ex.state), situationChip(rec), h('span.run-wf', { title: 'The run follows this fixed copy; editing the workflow does not change it.' }, icon('doc', 'icon small'), `Snapshot of ${rec.definition.root}`),
-        src?.file ? h('a.button.small-btn', { href: `#/ws/${encodeURIComponent(wsId)}/wf/${encodeURIComponent(src.file.replace(/^devdocs\/workflows\//, ''))}`, title: 'The editable definition in devdocs/workflows; it may differ from this run' }, 'Open current definition') : null,
-        srcText ? h(`span.src-state.${src!.status}`, srcText + (src?.renamed ? ` (now ${src.file})` : '')) : null),
+    patchContent(details,
       h('div.run-facts',
         fact('Input', input.kind === 'braindump' ? `braindump.md — the words of ${input.author}${input.recordedBy ? `, recorded by ${input.recordedBy}` : ''}` : `request.md — by ${input.requester}${input.onBehalfOf ? ` on behalf of ${input.onBehalfOf}` : ''}`),
         fact('Executor', `${rec.executor.name} · ${backendFact(rec.executor.backend, rev || !execView ? null : execView.attempts)}`, 'executor'),
         fact('Created', when(rec.created)), fact('Started', rec.started ? when(rec.started) : '—'), fact('Ended', rec.ended ? when(rec.ended) : '—'),
         fact('Last recorded update', `${when(rec.updated)} (${ago(rec.updated)})`, 'last-update'),
-        ...countFacts(rec)),
+        ...countFacts(rec),
+        h(`div.fact.run-title.src-state.${src?.status ?? 'none'}`, h('span.k', 'Definition'), h('span.v', `${rec.definition.root} · ${rec.definition.active ?? 'r1'} in force${srcText ? ` · ${srcText}${src?.renamed ? ` (now ${src.file})` : ''}` : ''}`)),
+        rec.control.attempt ? fact('Open attempt', `${rec.control.attempt.id} since ${when(rec.control.attempt.began)}`) : rec.control.last ? fact('Last attempt', `${rec.control.last.id}: ${rec.control.last.outcome}, ${when(rec.control.last.ended)}`) : null),
       h('div.run-now',
         line('Active', ex.active.length ? ex.active.map(n => effectiveOf(rec)?.nodes[n]?.step?.kind === 'report' ? h('span', 'Writing report on ', nodeLink(n, effectiveOf(rec)!.nodes[n].step!.for ?? n)) : nodeLink(n)) : ['—']),
         line('Waiting', ex.waiting.length ? ex.waiting.map(w => h('span', nodeLink(w.node), ` → next move: ${holderOf(rec, w.node)}`)) : ['—']),
@@ -270,28 +360,7 @@ export function renderRunView(root: HTMLElement, wsId: string, workflow: string,
         ex.blocked.length ? line('Blocked', ex.blocked.map(n => nodeLink(n)), 'warn') : null,
         rec.cancelled ? line('Cancelled', [`by ${rec.cancelled.by}: ${rec.cancelled.reason}`], 'error') : null,
         last ? line('Decision', [`${last.decision} by ${last.by}`, ...(last.decision === 'accepted' && rec.execution.state !== 'completed' && !rec.cancelled ? [h('span.chip.warn.cleanup-pending', { title: 'The result is accepted; the run completes after what it serves is stopped and its last steps are done' }, 'accepted · cleanup pending')] : [])], last.decision === 'accepted' ? 'ok' : 'error') : null),
-      reviewLink(rec),
-      h('p.run-note', '“Running” on a node means the executor recorded a start. Whether a process is executing now is the execution host\'s fact, shown under Execution; the time since the last update says neither.'),
-    )
-  }
-
-  // The one-click review (p7): the latest live presentation, prominently;
-  // a recorded but not served one says so instead of offering a dead link.
-  function reviewLink(rec: RunRecord): HTMLElement | null {
-    if (rev || !rec.presentations) return null
-    const live = presentViews.filter(v => v.live).at(-1)
-    if (live) return h('div.review-link', h('a.button.primary', { href: live.url!, target: '_blank', rel: 'noopener', dataset: { presentation: live.id } }, icon('present', 'icon small'), `Open the review: ${live.title}`),
-      h('span.small', ` ${live.id} · revision ${live.revision.slice(7, 19)}${live.local ? ' · opens on this host' : ''}`))
-    const open = Object.values(rec.presentations).filter(isOpen)
-    if (open.length) return h('div.review-link.not-live', h('span.chip.warn', `${open.map(p => p.id).join(', ')} recorded as ${open[0].state}, but not served now`), h('span.small', ' — see Presentations to start it again or record its stop'))
-    const last = Object.values(rec.presentations).at(-1)!
-    return h('div.review-link.stopped', h('span.chip', `${last.id} ${last.state}`), h('span.small.muted', last.state === 'stopped' ? ' — no longer served; its files and decision stay in the run folder' : ''))
-  }
-
-  function situationChip(rec: RunRecord): HTMLElement | null {
-    const sit = situation(rec)
-    const LABEL: Record<string, string> = { executing: 'Executing', stopping: 'Stopping', 'awaiting-person': 'Awaiting a person', stopped: 'Stopped', interrupted: 'Interrupted', unknown: 'Unknown — look before resuming' }
-    return LABEL[sit] ? h(`span.chip.sit-${sit}`, { title: 'What runs now (Execution, at the side)' }, LABEL[sit]) : null
+      h('p.run-note', '“Running” on a node means the executor recorded a start. Whether a process is executing now is the execution host\'s fact (the executor chip, and Execution at the side); the time since the last update says neither.'))
   }
 
   // Authored work and documentation steps are counted apart (p5): "5 of 7"
@@ -314,14 +383,27 @@ export function renderRunView(root: HTMLElement, wsId: string, workflow: string,
       resp && !resp.record ? h('div.banner.error', h('strong', missing ? `${ref} has no readable run.json` : `run.json cannot be used (${resp.problem?.code ?? resp.problem?.kind})`), ` — ${resp.problem?.message}. `,
         shown ? `Showing the last valid reading (seq ${shown.record!.seq}) read-only; nothing is recorded until the files are fixed. wfe run check names the difference.` : 'Nothing is shown until the files are fixed.') : null,
       rev && resp?.revInfo ? h('div.banner.warn', `As committed in the ${resp.revInfo.owner === 'root' ? 'project root' : 'devdocs repository'} at ${resp.revInfo.commit.slice(0, 10)}${resp.revInfo.root ? ` (the devdocs gitlink of root commit ${resp.revInfo.root.slice(0, 10)})` : ''} (${when(resp.revInfo.date)}): “${resp.revInfo.subject}”. Read-only. `, h('a.button', { href: runHash(wsId, ref) }, 'Open the current run')) : null,
-      opNotice ? h(`div.banner.${opNotice.kind}`, opNotice.text, h('button.icon-btn', { dataset: { action: 'dismiss' } }, '×')) : null)
+      opNotice ? h(`div.banner.${opNotice.kind}`, opNotice.text, h('button.icon-btn', { 'aria-label': 'Dismiss', dataset: { action: 'dismiss' } }, '×')) : null)
   }
 
-  function renderLegend() {
-    patchContent(legend, h('span.muted.small', 'Node states:'),
-      ...['pending', 'ready', 'running', 'waiting', 'completed', 'failed', 'cancelled', 'blocked'].map(s => chip(s, `${STATE_GLYPH[s]} ${STATE_LABEL[s]}`)),
-      h('span.muted.small', ' · the graph is this run’s fixed copy; click a node for details'),
-      (shown?.record ? effectiveOf(shown.record)?.policy : undefined) === 'default' ? h('span.muted.small.legend-doc', ' · the small icon on a card is its report; “Writing report” marks the one being written') : null)
+  // The graph card: the definition in force, the two counts, and a legend of
+  // the states this run has.
+  function renderGraphHead() {
+    const rec = shown?.record
+    if (!rec) { patchContent(graphHead); patchContent(legend); return }
+    const eff = effectiveOf(rec)
+    const split = eff?.policy === 'default' ? splitCounts(eff, rec.nodes) : null
+    const tally = (c: Record<string, number>) => `${c.completed ?? 0}/${Object.values(c).reduce((a, b) => a + b, 0)}`
+    patchContent(graphHead,
+      h('h2', 'Run workflow'),
+      h('span.chip', { title: 'The run follows this fixed copy; editing the reusable workflow does not change it' }, rec.definition.revisions?.length ? `Fixed snapshot · ${rec.definition.active ?? 'r1'} in force` : 'Fixed snapshot · r1'),
+      h('span.chip.muted', icon('lock', 'icon tiny'), 'Read-only'),
+      h('span.graph-counts.small', split ? `Work ${tally(split.work)} completed · Documentation ${tally(split.docs)} completed` : `${tally(rec.execution.counts)} completed · manual documentation`),
+      h('span.muted.small.graph-hint', 'Select a card to inspect its record'))
+    const states = new Set(Object.keys(rec.nodes).map(id => nodeLabel(rec, id).state))
+    const present = ['pending', 'ready', 'running', 'waiting', 'completed', 'failed', 'cancelled', 'blocked'].filter(s => states.has(s))
+    patchContent(legend, ...present.map(s => chip(s, `${STATE_GLYPH[s]} ${STATE_LABEL[s]}`)),
+      eff?.policy === 'default' ? h('span.muted.small.legend-doc', 'The small icon in a card’s corner is its report; “Writing report” marks the one being written.') : null)
   }
 
   // The canvas is drawn again only when what it shows changed.
@@ -329,7 +411,7 @@ export function renderRunView(root: HTMLElement, wsId: string, workflow: string,
     const r = shown
     const rec = r?.record
     const wf = rec ? activeWorkflow(r, rec) : undefined
-    canvas.el.hidden = !wf
+    graphCard.hidden = !wf
     if (!rec || !wf) return
     const status = Object.fromEntries(Object.keys(rec.nodes).map(id => [id, nodeLabel(rec, id)]))
     const eff = effectiveOf(rec)
@@ -353,13 +435,13 @@ export function renderRunView(root: HTMLElement, wsId: string, workflow: string,
     const now = [...ex.active, ...ex.waiting.map(w => w.node)]
     if (now.length) return now
     if (ex.failed.length) return ex.failed
-    if (ex.state === 'completed') { const eff = effectiveOf(rec); return eff?.nodes['_final-report'] ? ['_final-report'] : Object.keys(rec.nodes).slice(-1) }
+    if (ex.state === 'completed') { const eff = effectiveOf(rec); return eff?.nodes[FINAL_STEP] ? [FINAL_STEP] : Object.keys(rec.nodes).slice(-1) }
     return ex.ready
   }
 
   function renderSide(explicit = false) {
     if (disposed) return
-    side.update({ wsId, rev, shown, resp, execView, execError, notifyView, presentViews, selection, viewing }, explicit)
+    side.update(data(), explicit)
   }
 
   function render() {
@@ -368,8 +450,8 @@ export function renderRunView(root: HTMLElement, wsId: string, workflow: string,
     renderLive()
     renderBanners()
     renderSummary()
+    renderGraphHead()
     renderCanvas()
-    renderLegend()
     renderSide()
   }
 
@@ -378,7 +460,7 @@ export function renderRunView(root: HTMLElement, wsId: string, workflow: string,
   const related = () => {
     const keys = new Set([ref])
     const rec = shown?.record
-    if (rec?.predecessor) keys.add(runKey(rec.predecessor))
+    if (rec?.predecessor) keys.add(`${rec.predecessor.workflow}/${rec.predecessor.run}`)
     return keys
   }
   const stream = rev ? null : live(api.eventsUrl(wsId), {

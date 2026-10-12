@@ -1,11 +1,20 @@
-// The run view's right pane (p7/ex2). Its shell is built once: every section
-// keeps one root, its display is brought up to date in place (patch.ts), and
-// its controls — the name, answers, the resume instruction, the adjusted
-// definition and its reason, the decision's evidence — are created once and
-// never rebuilt, so focus, selection, composition and internal scrolling
-// survive whatever the run, the host or the connection does meanwhile.
-// runView.ts keeps the server snapshot and the operations; the pane reads the
-// data it is given and asks the view to act.
+// The run view's persistent parts (p7/ex2, p8): the focus card in the main
+// column — the person's current task — and the side pane with the selected
+// node and the run's records. Every section keeps one root, its display is
+// brought up to date in place (patch.ts), and its controls — the name,
+// answers, the resume instruction, the adjusted definition and its reason,
+// the decision's evidence — are created once and never rebuilt, so focus,
+// selection, composition and internal scrolling survive whatever the run,
+// the host or the connection does meanwhile.
+//
+// A control's home can change with the run's state (an open question is
+// answered in the focus card, a resolved one is a record at the side; the
+// decision is offered in the focus card when a completed run has none). It
+// moves only while it holds no draft and is not being typed into: a control
+// in use stays where the person is, with the reason it no longer applies.
+//
+// runView.ts keeps the server snapshot and the operations; this module reads
+// the data it is given and asks the view to act.
 import type { RunResponse } from '../shared/api.ts'
 import { effectiveOf, holderOf, isOpen, questionState, runKey, situation, type Question, type RunRecord } from '../shared/run.ts'
 import { reportStep } from '../shared/compile.ts'
@@ -15,7 +24,7 @@ import { stepFacts, stepLabel } from './inspector.ts'
 import { h, when } from './dom.ts'
 import { icon } from './icons.ts'
 import { patchContent } from './patch.ts'
-import { activeWorkflow, ago, chip, fileLink, nodeLabel, nodeLink, runHash } from './runCommon.ts'
+import { activeWorkflow, ago, chip, descendants, fileLink, nodeLabel, nodeLink, runHash, topoOrder } from './runCommon.ts'
 
 export interface RunData {
   wsId: string
@@ -28,6 +37,7 @@ export interface RunData {
   presentViews: PresentationView[]
   selection: string | null
   viewing: { path: string; text?: string; error?: string } | null
+  connected?: boolean
 }
 
 export interface SideActions {
@@ -48,6 +58,16 @@ const setText = (el: HTMLElement, text: string) => { if (el.textContent !== text
 const show = (el: HTMLElement, on: boolean) => { if (el.hidden === on) el.hidden = !on }
 const setDisabled = (el: HTMLButtonElement, off: boolean) => { if (el.disabled !== off) el.disabled = off }
 const list = (xs: string[]) => xs.filter(x => !x.startsWith('_')).join(', ') || '—'
+// Recorded text as one sentence: its own final stop, or one added.
+const sentence = (t: string) => (/[.!?。！？]\s*$/.test(t) ? t.trim() : `${t.trim()}.`)
+// Never move what the person is typing in (moving a focused control blurs it).
+const inUse = (el: Element) => el.contains(document.activeElement)
+function place(el: HTMLElement, parent: HTMLElement, before: ChildNode | null = null): boolean {
+  if (el.parentElement === parent && el.nextSibling === before) return true
+  if (el.isConnected && inUse(el)) return false
+  parent.insertBefore(el, before)
+  return true
+}
 
 // A control the person types into. Its text is the draft: no background
 // update assigns its value. Edits are versioned, so a submission clears only
@@ -99,18 +119,30 @@ class Owned<E extends HTMLTextAreaElement | HTMLInputElement = HTMLTextAreaEleme
 }
 
 // One question's card: its display, and the one canonical answer form.
-interface QuestionItem { id: string; root: HTMLElement; display: HTMLElement; form?: { root: HTMLElement; draft: Owned; button: HTMLButtonElement } }
+// `another`: an answered question offers its form for a further answer only
+// when the person asks for it (or is already using it).
+interface QuestionItem { id: string; root: HTMLElement; display: HTMLElement; another: HTMLButtonElement; showForm: boolean; form?: { root: HTMLElement; draft: Owned; button: HTMLButtonElement } }
 // An inspected adjustment, bound to exactly what it inspected.
 interface Preview { text: string; reason: string; revision: string; seq: number; view: AdjustView }
 
 export class RunSide {
   readonly el = h('aside.run-side', { 'aria-label': 'Run details' })
+  // The focus card (main column): the current task, then the open
+  // questions with their forms, the resume form while held, the decision
+  // while a completed run has none, and the links to the outcome.
+  readonly focus = h('section.focus', { 'aria-label': 'Current task' })
+  private readonly focusDisplay = h('div.focus-display')
+  private readonly focusQuestions = h('div.questions.focus-questions')
+  private readonly holdSlot = h('div.focus-slot.hold-slot')
+  private readonly decideSlot = h('div.focus-slot.decide-slot')
+  private readonly focusLinks = h('div.focus-links')
   private data!: RunData
   private readonly act: SideActions
   private readonly placeholder = h('p.muted.side-placeholder')
   private readonly actor: HTMLInputElement
+  private readonly actorRow: HTMLElement
   private readonly selected = section('selected', h('div.sec-body'))
-  private readonly questions = section('questions', h('div.questions'), h('p.muted.small', 'No questions recorded.'))
+  private readonly questions = section('questions', h('div.questions'), h('p.muted.small', 'No resolved questions yet.'))
   private readonly qItems = new Map<string, QuestionItem>()
   private readonly instructions = section('instructions', h('div.questions'))
   private readonly presentations = section('presentations', h('div.sec-body'))
@@ -134,6 +166,7 @@ export class RunSide {
   constructor(actions: SideActions, actorName: string) {
     this.act = actions
     this.actor = h('input', { value: actorName, placeholder: 'your name', 'aria-label': 'Your name', size: 14 })
+    this.actorRow = h('div.actor-row', h('label.small', 'Recording as ', this.actor), h('span.muted.small', 'declared, like an approver; saved in this browser'))
 
     const ta = new Owned(h('textarea.yaml', { rows: 12, 'aria-label': 'Adjusted definition', spellcheck: false }))
     const reason = new Owned(h('input', { placeholder: 'why the run changes', 'aria-label': 'Adjustment reason' }))
@@ -160,7 +193,8 @@ export class RunSide {
       if (!this.data.shown?.record?.control.hold) { this.act.notice('error', 'The run is not held: there is nothing to resume.'); return }
       void instruction.submit(text => this.act.record({ op: 'run.resume', reason: text }, 'Resumed: the executor is queued.'))
     })
-    this.resume = { root: h('div.resume-form', instruction.el, instruction.note, h('div.row.tight', resumeButton)), draft: instruction, button: resumeButton }
+    this.resume = { root: h('div.resume-form', h('label.small', { htmlFor: 'resume-instruction' }, 'Your instruction for the executor'), instruction.el, instruction.note, h('div.row.tight', resumeButton)), draft: instruction, button: resumeButton }
+    instruction.el.id = 'resume-instruction'
     this.execution.root.append(this.execMore)
 
     const evidence = new Owned(h('input', { placeholder: 'evidence: what you checked (report, commit, demo…)', 'aria-label': 'Decision evidence' }))
@@ -184,8 +218,8 @@ export class RunSide {
     }, 'Cancel run')
     this.decide = { root: h('div.decide', evidence.el, h('div.row.tight', accept, reject, cancel)), evidence, accept, reject, cancel, busy: false }
 
-    this.el.append(this.placeholder,
-      h('div.actor-row', h('label.small', 'Recording as ', this.actor), h('span.muted.small', 'declared, like an approver; saved in this browser')),
+    this.focus.append(this.focusDisplay, this.focusQuestions, this.holdSlot, this.decideSlot, this.focusLinks)
+    this.el.append(this.placeholder, this.actorRow,
       ...[this.selected, this.questions, this.instructions, this.presentations, this.definition, this.catalog, this.related, this.files, this.execution, this.coordination, this.result, this.history].map(s => s.root))
   }
 
@@ -194,6 +228,7 @@ export class RunSide {
   get actorName() { return this.actor.value }
   // The approver from the registry, only into a name nobody has typed.
   suggestActor(name: string) { if (!this.actor.value && document.activeElement !== this.actor) this.actor.value = name }
+  focusActor() { this.actor.scrollIntoView({ block: 'nearest' }); this.actor.focus() }
 
   // Text the person typed that is not recorded yet.
   isDirty(): boolean {
@@ -201,13 +236,28 @@ export class RunSide {
     return typed.some(v => v.trim() !== '') || (this.adjust.base !== null && this.adjust.ta.el.value !== this.adjust.base)
   }
 
-  // An explicit request to answer a question: reveal its one form.
+  // ---- explicit navigation (may move the viewport) ---------------------------
+
+  // A request to answer a question: reveal its one form.
   revealQuestion(id: string) {
     const item = this.qItems.get(id)
     if (!item) return
+    if (item.form && !item.form.root.isConnected && this.data.shown?.record && this.answerable(this.data.shown.record, this.data.shown.record.questions[id])) { item.showForm = true; this.updateQuestions(this.data.shown.record) }
     item.root.scrollIntoView({ block: 'nearest' })
     item.form?.draft.el.focus({ preventScroll: true })
   }
+  revealResume() {
+    if (!this.resume.root.isConnected) return
+    this.resume.root.scrollIntoView({ block: 'nearest' })
+    this.resume.draft.el.focus({ preventScroll: true })
+  }
+  revealSection(key: string, focus?: string) {
+    const sec = [this.questions, this.instructions, this.presentations, this.definition, this.catalog, this.related, this.files, this.execution, this.coordination, this.result, this.history].find(s => s.root.dataset.section === key)
+    if (!sec || sec.root.hidden) return
+    sec.root.scrollIntoView({ block: 'start' })
+    if (focus === 'adjust' && this.adjust.root.isConnected) { this.adjust.root.open = true; this.adjust.ta.el.focus({ preventScroll: true }) }
+  }
+  revealFile() { if (!this.fileView.root.hidden || this.data?.viewing) this.fileView.root.scrollIntoView({ block: 'nearest' }) }
 
   // ---- update -----------------------------------------------------------------
 
@@ -253,7 +303,7 @@ export class RunSide {
   }
 
   // This host's facts changed (execution, coordination, presentations): only
-  // the sections that show them are brought up to date.
+  // the parts that show them are brought up to date.
   updateHost(d: RunData) {
     const rec = d.shown?.record
     if (!rec) return
@@ -263,6 +313,7 @@ export class RunSide {
     this.updatePresentations(rec)
     this.updateExecution(rec)
     this.updateCoordination()
+    this.updateFocus(d.shown!, rec)
     if (anchor) this.restoreAnchor(anchor)
   }
 
@@ -274,10 +325,13 @@ export class RunSide {
     if (!r || !rec) {
       setText(this.placeholder, d.resp?.problem ? 'No usable record.' : 'Loading…')
       show(this.placeholder, true)
+      show(this.actorRow, false)
       for (const s of sections) show(s.root, false)
+      patchContent(this.focusDisplay, h('h2.focus-head', d.resp?.problem ? 'No usable record' : 'Loading…'), d.resp?.problem ? h('p.focus-lead', 'run.json cannot be read; the banner above says why. Nothing can be recorded until the files are fixed.') : null)
       return
     }
     show(this.placeholder, false)
+    show(this.actorRow, !d.rev)
     for (const s of [this.questions, this.definition, this.catalog, this.files, this.history]) show(s.root, true)
     this.updateSelected(rec)
     this.updateQuestions(rec)
@@ -291,9 +345,151 @@ export class RunSide {
     this.updateCoordination()
     this.updateResult(rec)
     this.updateHistory(rec)
+    this.updateFocus(r, rec)
   }
 
   private get frozen() { return !!(this.data.resp && !this.data.resp.record) }
+
+  // ---- the focus card ---------------------------------------------------------
+
+  // The person's current task, chosen from the run's recorded state: a
+  // question to answer (a result review first), an answer waiting to be
+  // taken up, a hold to resume, a failure, an accepted result still cleaning
+  // up, the outcome of a completed or cancelled run, or the work in
+  // progress. Everything here comes from the record and this host's facts.
+  private updateFocus(r: RunResponse, rec: RunRecord) {
+    const d = this.data
+    const ex = rec.execution
+    const wf = activeWorkflow(r, rec)
+    const name = (id: string) => (wf && effectiveOf(rec) ? stepLabel(wf, effectiveOf(rec)!, id) : wf?.nodes[id]?.name || id)
+    const answerable = Object.values(rec.questions).filter(q => this.answerable(rec, q))
+    const asking = answerable.filter(q => questionState(q) === 'open')
+    const last = rec.decisions.at(-1)
+    const accepted = last?.decision === 'accepted'
+    const hold = rec.control.hold
+    const isReview = (q: Question) => !!q.presentation || (!!q.node && wf?.nodes[q.node]?.confirms === 'result')
+    let kind: string, head: string, lead: string | Node
+    if (d.rev) { kind = 'history'; head = 'A recorded state'; lead = `As committed at ${d.rev.slice(0, 10)}: what was recorded then, read-only. This host's live facts and the operations are not shown.` }
+    else if (rec.cancelled) { kind = 'cancelled'; head = 'Cancelled'; lead = `${rec.cancelled.by}, ${when(rec.cancelled.at)}: ${rec.cancelled.reason}` }
+    else if (asking.length) {
+      const review = asking.some(isReview)
+      kind = review ? 'review' : 'question'
+      head = review ? 'Ready for your review' : asking.length > 1 ? `${asking.length} questions wait for your answer` : 'A question waits for your answer'
+      lead = review ? 'Open the review, then answer the question below. Your answer is recorded; the executor records the decision when it takes the answer up.' : `${rec.executor.name} asked; your answer is recorded in run.json and does not wake the executor — tell it where you work with it.`
+    } else if (answerable.length) {
+      kind = 'answered'; head = 'Your answer is recorded'
+      lead = `${rec.executor.name} has not taken it up yet: the next move is theirs. Recording an answer does not wake the executor.`
+    } else if (hold) { kind = 'held'; head = `Held (${hold.kind})`; lead = `${hold.by}, ${when(hold.since)}: ${sentence(hold.reason)} Nothing runs until it is resumed with an instruction.` }
+    else if (ex.failed.length) {
+      kind = 'failed'; head = `${ex.failed.map(name).join(', ')} failed`
+      const work = ex.blocked.filter(n => !effectiveOf(rec)?.nodes[n]?.step), docs = ex.blocked.length - work.length
+      lead = ex.blocked.length ? `Blocked by it: ${work.map(name).join(', ') || 'no work'}${docs ? ` (and ${docs} documentation step${docs === 1 ? '' : 's'})` : ''}.` : 'Nothing depends on it.'
+    }
+    else if (accepted && ex.state !== 'completed') { kind = 'accepted'; head = 'Accepted — cleanup is still running'; lead = `The result was accepted${last!.confirmation ? ` from ${last!.confirmation.question}` : ''}; the run completes after its remaining steps.` }
+    else if (ex.state === 'completed') { kind = 'completed'; head = !last ? 'Completed — no decision recorded' : accepted ? 'Completed and accepted' : 'Completed — result rejected'; lead = !last ? 'Every node recorded completion. Accepting the result is your separate decision.' : `${last.decision === 'accepted' ? 'Accepted' : 'Rejected'} by ${last.by}${last.confirmation ? ` from ${last.confirmation.question} (${last.confirmation.from}'s answer)` : ''}, ${when(last.at)}.` }
+    else if (ex.active.length || rec.control.attempt) { kind = 'working'; head = 'Work in progress'; lead = 'Nothing is needed from you now.' }
+    else if (ex.state === 'not-started') { kind = 'not-started'; head = 'Not started'; lead = `Waiting for ${rec.executor.name} to start.` }
+    else { kind = 'idle'; head = 'Waiting for the executor'; lead = ex.ready.length ? `Ready to start: ${ex.ready.map(name).join(', ')}.` : 'Nothing is running and nothing is ready.' }
+    if (this.focus.dataset.kind !== kind) this.focus.dataset.kind = kind
+
+    const blocks: (Node | null)[] = [h('h2.focus-head', head), h('p.focus-lead', lead)]
+    // The one-click review, while it is served (p7); otherwise what became of it.
+    if (!d.rev) blocks.push(this.reviewLink(rec, kind))
+    if (kind === 'working' || kind === 'accepted') blocks.push(this.activeBlock(rec, name))
+    if (kind === 'held') blocks.push(h('p.small.muted', 'Look at the working tree first; the instruction tells the executor what to do now. ', h('a', { href: '#', dataset: { action: 'goto-section', section: 'execution' } }, 'Execution details')))
+    if (kind === 'failed') blocks.push(
+      h('ul.failures', ...ex.failed.map(n => { const f = rec.nodes[n].failure; return h('li', { dataset: { key: `fail:${n}` } }, nodeLink(n, name(n)), f ? `: ${f.reason} (${f.by}, ${when(f.at)})` : '') })),
+      h('p.small', `${rec.executor.name} can start a failed node again. You can change the work that is still pending, or end the run.`),
+      h('div.row.tight.focus-actions',
+        h('button', { dataset: { action: 'goto-section', section: 'definition', focus: 'adjust' } }, 'Adjust future work'),
+        h('button.danger', { dataset: { action: 'cancel-run' }, disabled: this.frozen }, 'Cancel run')))
+    if (kind === 'completed' || kind === 'accepted' || kind === 'cancelled' || kind === 'history') blocks.push(this.outcomes(rec, wf, name))
+    if (kind === 'cancelled') {
+      const still = Object.values(rec.presentations ?? {}).filter(isOpen)
+      if (still.length) blocks.push(h('div.banner.warn.small', `${still.map(p => p.id).join(', ')} still recorded as ${still[0].state}: `, ...still.map(p => h('button', { dataset: { action: 'present-stop', presentation: p.id } }, `Stop ${p.id}`))))
+      const unfinished = Object.entries(rec.nodes).filter(([, n]) => n.state === 'cancelled' && n.started).map(([id]) => name(id))
+      if (unfinished.length) blocks.push(h('p.small.muted', `Started and then cancelled: ${unfinished.join(', ')}. Anything they had begun (a server, a branch) may need cleaning up by hand.`))
+    }
+    // Conditions beside the main one, so none is hidden by it.
+    if (hold && kind !== 'held' && !d.rev) blocks.push(h('p.small.warn-text', `The run is also held (${hold.kind}): `, h('a', { href: '#', dataset: { action: 'goto-resume' } }, 'resume it below')))
+    if (ex.failed.length && kind !== 'failed' && !rec.cancelled) blocks.push(h('p.small.error', `Failed: ${ex.failed.map(name).join(', ')}.`))
+    patchContent(this.focusDisplay, ...blocks)
+
+    // The resume form lives here while the run is held.
+    const r2 = this.resume.draft
+    if (hold && !d.rev) { place(this.resume.root, this.holdSlot); r2.set(null, !this.frozen && !rec.cancelled) }
+    else if (r2.kept && this.resume.root.isConnected) r2.set('The run is no longer held: there is nothing to resume. Your text is kept, not sent.')
+    else if (!inUse(this.resume.root)) this.resume.root.remove()
+    // The decision: here when a completed run has none; otherwise at the side (Result).
+    const decideHere = !d.rev && ex.state === 'completed' && !last && !rec.cancelled
+    if (!d.rev) {
+      if (!this.decide.evidence.kept) place(this.decide.root, decideHere ? this.decideSlot : this.result.root)
+      else if (!this.decide.root.isConnected) place(this.decide.root, this.result.root)
+    }
+    show(this.decideSlot, this.decideSlot.childElementCount > 0)
+    show(this.holdSlot, this.holdSlot.childElementCount > 0)
+
+    // Links to the outcome and the request.
+    const files = new Set(r.files.map(f => f.name))
+    patchContent(this.focusLinks,
+      files.has('report.md') ? fileLink('report.md', 'Read final report') : null,
+      files.has(rec.input.file) ? fileLink(rec.input.file, 'Original request') : null,
+      h('a.focus-link', { href: '#', dataset: { action: 'goto-section', section: 'files' } }, `Reports & files (${r.files.length})`),
+      h('a.focus-link', { href: '#', dataset: { action: 'details' } }, 'Run details'))
+    for (const a of this.focusLinks.querySelectorAll<HTMLElement>('.file-link')) a.classList.add('focus-link')
+  }
+
+  // The review link (p7): the latest live presentation, prominently; one
+  // recorded but not served says so instead of offering a dead link.
+  private reviewLink(rec: RunRecord, kind: string): HTMLElement | null {
+    if (!rec.presentations) return null
+    const live = this.data.presentViews.filter(v => v.live).at(-1)
+    if (live) return h('div.review-link', h('a.button.primary', { href: live.url!, target: '_blank', rel: 'noopener', dataset: { presentation: live.id } }, icon('present', 'icon small'), `Open the review: ${live.title}`),
+      h('span.small', ` ${live.id} · revision ${live.revision.slice(7, 19)}${live.local ? ' · opens on this host' : ''}`))
+    const open = Object.values(rec.presentations).filter(isOpen)
+    if (open.length && kind === 'cancelled') return null // the cancelled card offers their stop
+    if (open.length) return h('div.review-link.not-live', h('span.chip.warn', `${open.map(p => p.id).join(', ')} recorded as ${open[0].state}, but not served now`), h('span.small', ' — '), h('a.small', { href: '#', dataset: { action: 'goto-section', section: 'presentations' } }, 'start it again or record its stop'))
+    if (kind === 'working' || kind === 'question') return null
+    const last = Object.values(rec.presentations).at(-1)!
+    return h('div.review-link.stopped', icon('present', 'icon small'), h('span', h('strong', `${last.title}`), ` — ${last.id} ${last.state}`), h('span.small.muted', last.state === 'stopped' ? ' · no longer served; its files and the decision stay in the run folder' : ''))
+  }
+
+  // What runs now: recorded activity beside this host's facts, with Stop.
+  private activeBlock(rec: RunRecord, name: (id: string) => string): HTMLElement {
+    const ex = rec.execution
+    const d = this.data
+    const open = d.execView?.attempts.find(a => a.state !== 'ended')
+    const host = d.execError ? `this host's execution facts could not be read (${d.execError})`
+      : open ? (open.alive === true ? `attempt ${open.id}: process ${open.pid} alive on this host` : open.alive === false ? (open.pid ? `attempt ${open.id}: process ${open.pid} not seen alive` : `attempt ${open.id} launching`) : `attempt ${open.id} runs on another host`)
+        : rec.control.attempt ? `attempt ${rec.control.attempt.id} is open in the record; this host shows no process for it` : 'no attempt is open'
+    const steps = ex.active.map(n => { const st = effectiveOf(rec)?.nodes[n]?.step; return h('li', { dataset: { key: `act:${n}` } }, st?.kind === 'report' ? h('span', 'Writing ', nodeLink(n, name(n))) : nodeLink(n, name(n)), rec.nodes[n].notes.at(-1) ? h('span.muted.small', ` — ${rec.nodes[n].notes.at(-1)!.text.split('\n')[0].slice(0, 140)}`) : null) })
+    const sit = situation(rec)
+    return h('div.active-block',
+      steps.length ? h('ul.active-list', ...steps) : h('p.small.muted', 'No node is recorded as running.'),
+      h('p.small.executor-line', icon('do', 'icon tiny'), ` Executor: ${host}${d.execView ? ` · executor ${d.execView.executor.state}` : ''}`),
+      h('div.row.tight.focus-actions', h('button', { title: 'Stop execution; the run stays resumable', dataset: { action: 'stop-run' }, disabled: this.frozen || !!rec.control.hold || !!rec.control.stop || sit === 'completed' }, icon('stop', 'icon tiny'), 'Stop'),
+        rec.control.stop ? h('span.small.warn-text', `Stop requested by ${rec.control.stop.by}; waiting for the process to end.`) : null))
+  }
+
+  // The recorded outcomes, each with the step it came from, in dependency
+  // order. A run with a result confirmation lists what came after it (its
+  // cleanup) apart, so the delivered work is not read from the last event.
+  private outcomes(rec: RunRecord, wf: ReturnType<typeof activeWorkflow>, name: (id: string) => string): HTMLElement | null {
+    if (!wf) return null
+    const ids = topoOrder(Object.keys(wf.nodes).filter(id => rec.nodes[id]), wf.edges)
+    const confirm = ids.find(id => wf.nodes[id].confirms === 'result')
+    const after = confirm ? descendants(confirm, wf.edges) : new Set<string>()
+    const item = (id: string) => h('li', { dataset: { key: `out:${id}` } }, h('strong', nodeLink(id, name(id))), h('span', `: ${rec.nodes[id].outcome!.text}`))
+    const main = ids.filter(id => rec.nodes[id].outcome && !after.has(id)), later = ids.filter(id => rec.nodes[id].outcome && after.has(id))
+    if (!main.length && !later.length) return h('p.small.muted', 'No outcome is recorded.')
+    return h('div.outcomes',
+      h('h3', 'Recorded outcomes'),
+      h('ol.outcome-list', ...main.map(item)),
+      later.length ? h('h4', `After ${name(confirm!)}`) : null,
+      later.length ? h('ol.outcome-list.after', ...later.map(item)) : null)
+  }
+
+  // ---- the selected node (side, read-only) --------------------------------------
 
   private updateSelected(rec: RunRecord) {
     const id = this.data.selection
@@ -314,68 +510,89 @@ export class RunSide {
     const { state, label } = nodeLabel(rec, id)
     const box = h('div.node-detail', { dataset: { node: id, key: `node:${id}` } })
     const label2 = (x: string) => (wf && eff ? stepLabel(wf, eff, x) : x)
-    box.append(h('div.insp-head', icon(step ? 'doc' : def?.type ?? 'unknown', 'icon'), h('h3', step ? label2(id) : def?.name || id), h('code', id), h('button.icon-btn', { title: 'Close', dataset: { action: 'close-node' } }, '×')))
-    box.append(h('div.chips', chip(state, `${STATE_GLYPH[state] ?? ''} ${label}`), h('span.chip', step ? 'Documentation step' : TYPE_LABEL[def?.type ?? ''] ?? def?.type ?? '?')))
+    box.append(h('div.insp-head', icon(step ? 'doc' : def?.type ?? 'unknown', 'icon'), h('h3', step ? label2(id) : def?.name || id), h('code', id), h('button.icon-btn', { title: 'Close', 'aria-label': 'Close the selected node', dataset: { action: 'close-node' } }, '×')))
+    box.append(h('div.chips', chip(state, `${STATE_GLYPH[state] ?? ''} ${label}`), h('span.chip', step ? 'Documentation step' : TYPE_LABEL[def?.type ?? ''] ?? def?.type ?? '?'), h('span.chip.muted', icon('lock', 'icon tiny'), 'Read-only')))
     if (def?.description) box.append(h('p.small', def.description))
     // Made from one of the person's templates (p7/ex1): its provenance as written in this revision.
     if (def?.template) box.append(h('div.template-field.small', h('span.muted', 'From template '), h('code', def.template.id), ` revision ${def.template.revision}. `,
       h('div.template-provenance', h('span.muted', 'Expected: '), def.template.expectation)))
+    // Added by an adjustment (p7): which revision brought it in.
+    const added = (rec.definition.revisions ?? []).find(v => v.diff.added.includes(id))
+    if (added) box.append(h('p.small.muted', `Added in revision ${added.revision}: ${added.reason}`))
     if (step && eff) {
       // The document: missing, written but unrecorded, or checked.
       const file = r.files.find(f => f.name === step.output)
       const path = `${r.dir}/${step.output}`
       const docState = n.document ? `checked when recorded: ${n.document.bytes} bytes, sha256 ${n.document.sha256.slice(0, 12)}…${file ? '' : ' — the file is gone now'}` : file ? (state === 'running' ? 'being written — not yet recorded' : 'written, not recorded as complete') : 'not written yet'
-      box.append(h(`div.doc-state${n.document ? '.ok' : file ? '.unfinished' : '.missing'}`, h('strong', step.output), ': ', docState, ' ', file ? fileLink(path, 'Open') : null))
+      box.append(h(`div.doc-state${n.document ? (file ? '.ok' : '.missing') : file ? '.unfinished' : '.missing'}`, h('strong', step.output), ': ', docState, ' ', file ? fileLink(path, 'Open') : null))
       if (n.agreement) box.append(h('p.small.ok-text', `Agreed: the answer to ${n.agreement.question} was taken up for this plan.md.`))
       box.append(...stepFacts(eff, id, label2))
     } else if (eff?.nodes[reportStep(id)]) {
       const rs = reportStep(id)
       box.append(h('p.small', 'Its report: ', nodeLink(rs, `report-${id}.md`), ` — ${nodeLabel(rec, rs).label}. Successors wait for the report, not only for this work.`))
     }
-    const rows: [string, string][] = [['Started', n.started ? when(n.started) : '—'], ['Ended', n.ended ? when(n.ended) : '—'], ['Last update', n.updated ? `${when(n.updated)} (${ago(n.updated)})` : '—']]
-    box.append(h('dl.kv', ...rows.flatMap(([k, v]) => [h('dt', k), h('dd', v)])))
+    if (n.outcome) box.append(h('div.outcome', h('strong', 'Recorded outcome: '), n.outcome.text, ...n.outcome.artifacts.map(a => h('div.small', fileLink(a)))))
     if (n.wait) {
       const on = n.wait.on
       box.append(h('div.wait-box', h('strong', 'Waiting: '), n.wait.reason, h('br'), 'Next move: ', h('strong', holderOf(rec, id)),
         'external' in on ? h('div.small', `Awaiting: ${on.external}`) : null))
     }
-    if (n.outcome) box.append(h('div.outcome', h('strong', 'Outcome: '), n.outcome.text, ...n.outcome.artifacts.map(a => h('div.small', fileLink(a)))))
     if (n.failure) box.append(h('div.banner.error', `Failed (${n.failure.by}, ${when(n.failure.at)}): ${n.failure.reason}`))
     if (n.cancellation) box.append(h('div.banner.warn', `Cancelled (${n.cancellation.by}, ${when(n.cancellation.at)}): ${n.cancellation.reason}`))
+    const rows: [string, string][] = [['Started', n.started ? when(n.started) : '—'], ['Ended', n.ended ? when(n.ended) : '—'], ['Last update', n.updated ? `${when(n.updated)} (${ago(n.updated)})` : '—']]
+    box.append(h('dl.kv', ...rows.flatMap(([k, v]) => [h('dt', k), h('dd', v)])))
     if (n.notes.length) box.append(h('h4', 'Notes'), h('ul.notes', ...n.notes.map(x => h('li', h('span.muted.small', `${when(x.at)} · ${x.by}: `), x.text))))
-    // The node's questions as summaries; each is answered in its one form under Questions.
+    // The node's questions as summaries; each is answered in its one form.
     const qs = Object.values(rec.questions).filter(q => q.node === id)
     if (qs.length) box.append(h('h4', 'Questions of this node'), ...qs.map(q => {
       const st = questionState(q)
       return h(`div.question-summary.q-${st}`, { dataset: { question: q.id, key: `qs:${q.id}` } }, h('strong', q.id), ' ', chip(questionChip(st), st), ' ',
         h('span.small', q.text.split('\n')[0].slice(0, 160)), ' ',
-        h('a.small', { href: '#', dataset: { action: 'goto-question', question: q.id } }, this.answerable(rec, q) ? 'Answer under Questions' : 'Show under Questions'))
+        h('a.small', { href: '#', dataset: { action: 'goto-question', question: q.id } }, this.answerable(rec, q) ? 'Answer it' : 'Show it'))
     }))
     return box
   }
+
+  // ---- questions ------------------------------------------------------------------
 
   private answerable(rec: RunRecord, q: Question) {
     const st = questionState(q)
     return (st === 'open' || st === 'answered') && !this.data.rev && !rec.cancelled
   }
 
+  // Open and answered questions are the person's task (the focus card,
+  // oldest first); taken-up and withdrawn ones are records (the side,
+  // newest first). A question whose form holds a draft stays in the focus
+  // card until the draft is gone.
   private updateQuestions(rec: RunRecord) {
-    const qs = Object.values(rec.questions).slice().reverse()
-    setText(this.questions.title, `Questions (${qs.filter(q => ['open', 'answered'].includes(questionState(q))).length} open)`)
-    const box = this.questions.root.children[1] as HTMLElement
-    show(this.questions.root.children[2] as HTMLElement, !qs.length)
-    let at = box.firstElementChild
+    const qs = Object.values(rec.questions)
     for (const q of qs) {
-      let item = this.qItems.get(q.id)
-      if (!item) {
-        const display = h('div.q-display')
-        item = { id: q.id, root: h('div.question', { dataset: { question: q.id, key: `q:${q.id}` } }, display), display }
-        this.qItems.set(q.id, item)
-      }
-      if (item.root === at) at = at.nextElementSibling
-      else box.insertBefore(item.root, at)
-      this.updateQuestion(rec, q, item)
+      if (this.qItems.has(q.id)) continue
+      const display = h('div.q-display')
+      const another = h('button.link-btn.another', 'Record another answer')
+      const item: QuestionItem = { id: q.id, root: h('div.question', { dataset: { question: q.id, key: `q:${q.id}` } }, display), display, another, showForm: false }
+      another.addEventListener('click', () => { item.showForm = true; const r = this.data.shown?.record; if (r) this.updateQuestions(r); item.form?.draft.el.focus() })
+      this.qItems.set(q.id, item)
     }
+    const kept = (q: Question) => !!this.qItems.get(q.id)!.form?.draft.kept
+    const focusList = qs.filter(q => this.answerable(rec, q) || kept(q))
+    const sideList = qs.filter(q => !focusList.includes(q)).reverse()
+    const resolved = sideList.length
+    setText(this.questions.title, `Questions (${resolved} resolved)`)
+    const box = this.questions.root.children[1] as HTMLElement
+    show(this.questions.root.children[2] as HTMLElement, !resolved)
+    const arrange = (container: HTMLElement, items: Question[]) => {
+      let at = container.firstChild
+      for (const q of items) {
+        const item = this.qItems.get(q.id)!
+        if (item.root === at) at = at.nextSibling
+        else place(item.root, container, at)
+        this.updateQuestion(rec, q, item)
+      }
+    }
+    arrange(this.focusQuestions, focusList)
+    arrange(box, sideList)
+    show(this.focusQuestions, this.focusQuestions.childElementCount > 0)
   }
 
   private updateQuestion(rec: RunRecord, q: Question, item: QuestionItem) {
@@ -383,23 +600,29 @@ export class RunSide {
     const cls = `question q-${st}`
     if (item.root.className !== cls) item.root.className = cls
     const v = q.presentation ? this.data.presentViews.find(x => x.id === q.presentation!.id) : undefined
+    const doc = q.document ? this.data.shown?.files.find(f => `${this.data.shown!.dir}/${f.name}` === q.document!.path || f.name === q.document!.path.split('/').pop()) : undefined
     patchContent(item.display,
       h('div.q-head', h('strong', q.id), chip(questionChip(st), st), h('span.muted.small', ` to ${q.to}${q.node ? ` · node ${q.node}` : ''} · asked by ${q.askedBy}, ${ago(q.asked)}`)),
       h('p.q-text', q.text),
       q.presentation ? h('p.small', 'About presentation ', h('strong', q.presentation.id), ` (revision ${q.presentation.revision.slice(7, 19)}) — `, v?.live ? h('a', { href: v.url!, target: '_blank', rel: 'noopener' }, 'open the review ↗') : h('span.muted', 'not served now')) : null,
+      q.document ? h('p.small', 'About ', doc ? fileLink(`${this.data.shown!.dir}/${doc.name}`, q.document.path.split('/').pop()!) : h('code', q.document.path), doc ? '' : ' (not in the run folder now)') : null,
       ...q.answers.map((a, i) => h('div.answer', { dataset: { key: `a:${i}` } }, h('span.muted.small', `Answer ${i}${q.takenUp?.answer === i ? ' — taken up' : ''} · from ${a.from}${a.by !== a.from ? `, recorded by ${a.by}` : ''} via ${a.via} · ${when(a.at)}`), h('div', a.text))),
       q.takenUp ? h('p.small.ok-text', `Taken up by ${q.takenUp.by} ${ago(q.takenUp.at)}.`) : null,
       q.withdrawn ? h('p.small', `Withdrawn by ${q.withdrawn.by}: ${q.withdrawn.reason}`) : null,
-      st === 'answered' ? h('p.small.muted', `The answer is recorded; ${rec.executor.name} has not recorded taking it up yet.`) : null)
+      st === 'answered' ? h('p.small.muted.receipt', `The answer is recorded; ${rec.executor.name} has not recorded taking it up yet. Next move: ${rec.executor.name}.`) : null)
     const open = this.answerable(rec, q)
     if (open && !item.form) item.form = this.answerForm(q.id)
     const f = item.form
+    // An answered question offers another answer on request; an open one always.
+    const wantForm = open && (st === 'open' || item.showForm || !!f?.draft.kept)
+    if (open && st === 'answered' && !wantForm) { if (!item.another.isConnected) item.root.append(item.another) } else item.another.remove()
     if (!f) return
-    if (open) {
+    if (wantForm) {
       if (!f.root.isConnected) item.root.append(f.root)
       setText(f.button, st === 'answered' ? 'Record another answer' : 'Record answer')
       f.draft.set(null, !this.frozen)
     } else if (f.draft.kept) {
+      if (!f.root.isConnected) item.root.append(f.root)
       f.draft.set(`${q.withdrawn ? 'The question was withdrawn' : rec.cancelled ? 'The run is cancelled' : q.takenUp ? 'The answer was taken up' : 'The question is closed'}: nothing more can be recorded here. Your text is kept, not sent.`)
     } else f.root.remove()
   }
@@ -413,9 +636,12 @@ export class RunSide {
       const rec = this.data.shown?.record
       const q = rec?.questions[id]
       if (!rec || !q || !this.answerable(rec, q)) { this.act.notice('error', `${id} can no longer be answered here.`); return }
-      void draft.submit(text => this.act.record({ op: 'question.answer', question: id, text }, `Answer to ${id} recorded in run.json. Continue the conversation with ${rec.executor.name} in VS Code; recording does not notify it.`))
+      void draft.submit(text => this.act.record({ op: 'question.answer', question: id, text }, `Answer to ${id} recorded in run.json. Continue the conversation with ${rec.executor.name} where you work with it; recording does not notify it.`)).then(ok => {
+        const item = this.qItems.get(id)
+        if (ok && item && draft.el.value === '') { item.showForm = false; const r = this.data.shown?.record; if (r) this.updateQuestions(r) }
+      })
     })
-    return { root: h('div.answer-form', draft.el, draft.note, h('div.row.tight', button), h('p.small.muted', 'Stored in run.json as your answer. It does not start or wake the IDE agent; tell it in VS Code.')), draft, button }
+    return { root: h('div.answer-form', draft.el, draft.note, h('div.row.tight', button), h('p.small.muted', 'Stored in run.json as your answer. It does not start or wake the executor; tell it where you work with it.')), draft, button }
   }
 
   // Additional instructions (p6): received from the person, acknowledged by
@@ -438,11 +664,16 @@ export class RunSide {
   private updatePresentations(rec: RunRecord) {
     show(this.presentations.root, !!rec.presentations)
     if (!rec.presentations) return
-    setText(this.presentations.title, 'Presentations')
+    const all = Object.values(rec.presentations)
+    const live = all.filter(p => this.data.presentViews.find(x => x.id === p.id)?.live).length
+    const unserved = all.filter(p => isOpen(p)).length - live
+    const stopped = all.filter(p => p.state === 'stopped').length
+    const parts = [live ? `${live} live` : '', unserved > 0 ? `${unserved} recorded open, not served` : '', stopped ? `${stopped} stopped` : '', all.some(p => p.state === 'failed' || p.state === 'stop-failed') ? 'a problem' : ''].filter(Boolean)
+    setText(this.presentations.title, `Presentations (${parts.join(', ') || `${all.length} registered`})`)
     const rev = this.data.rev
     const finished = !!rec.cancelled || rec.execution.state === 'completed'
     const STATE: Record<string, string> = { registered: 'completed', available: 'running', stopped: 'cancelled', failed: 'failed', 'stop-failed': 'failed' }
-    patchContent(this.presentations.root.children[1] as HTMLElement, ...Object.values(rec.presentations).slice().reverse().map(p => {
+    patchContent(this.presentations.root.children[1] as HTMLElement, ...all.slice().reverse().map(p => {
       const v = this.data.presentViews.find(x => x.id === p.id)
       const asked = Object.values(rec.questions).filter(q => q.presentation?.id === p.id)
       const decided = rec.decisions.filter(d => d.confirmation?.presentation?.id === p.id)
@@ -561,9 +792,10 @@ export class RunSide {
   }
 
   private updateFiles(r: RunResponse) {
-    setText(this.files.title, 'Reports and files')
     // Recorded artifacts outside the run folder; the folder's own files are listed above.
     const recorded = r.artifacts.filter(a => !(a.path.startsWith(`${r.dir}/`) && !a.path.slice(r.dir.length + 1).includes('/')))
+    const missing = recorded.filter(a => !a.exists).length
+    setText(this.files.title, `Reports and files (${r.files.length}${missing ? `, ${missing} missing` : ''})`)
     patchContent(this.files.root.children[1] as HTMLElement,
       h('p.small.muted', `${r.dir}/ — open these in VS Code to edit; here they are read-only.`),
       h('ul.files', ...r.files.map(f => h('li', { dataset: { key: `f:${f.name}` } }, fileLink(f.name), h('span.muted.small', ` ${f.size} B${f.modified ? ` · ${ago(f.modified)}` : ''}`)))),
@@ -580,7 +812,7 @@ export class RunSide {
     if (!v) { fv.path = ''; return }
     if (v.path !== fv.path) {
       fv.path = v.path
-      patchContent(fv.head, h('strong', v.path), h('button.icon-btn', { dataset: { action: 'close-file' } }, '×'))
+      patchContent(fv.head, h('strong', v.path), h('button.icon-btn', { 'aria-label': 'Close the file', dataset: { action: 'close-file' } }, '×'))
       fv.pre.textContent = ''
       fv.pre.scrollTop = 0; fv.pre.scrollLeft = 0
     }
@@ -605,9 +837,11 @@ export class RunSide {
     const d = this.data
     show(this.execution.root, !d.rev)
     if (d.rev) return
-    setText(this.execution.title, 'Execution')
     const sit = situation(rec)
-    const open = d.execView?.attempts.find(a => a.state !== 'ended')
+    const ev = d.execView
+    const problems = (ev?.checkpoints ?? []).filter(c => c.state === 'failed' || c.state === 'attention').length
+    setText(this.execution.title, `Execution and publication${d.execError ? ' (host facts unavailable)' : problems ? ` (${problems} publication problem${problems === 1 ? '' : 's'})` : ''}`)
+    const open = ev?.attempts.find(a => a.state !== 'ended')
     const SIT: Record<string, string> = {
       executing: 'Executing', stopping: 'Stop requested — waiting for the process to end', 'awaiting-person': 'Awaiting a person — no process runs meanwhile',
       stopped: 'Stopped — resumes only when you resume it', interrupted: 'Interrupted — look at the working tree, then resume', unknown: 'Unknown — the process was lost; look, then resume',
@@ -617,16 +851,10 @@ export class RunSide {
     const frozen = this.frozen || !!rec.cancelled
     patchContent(this.execution.root.children[1] as HTMLElement,
       h('div.row.tight', h(`span.chip.sit-${sit}`, SIT[sit] ?? sit), process ? h('span.muted.small', process) : null),
-      rec.control.hold ? h('p.small', `Held (${rec.control.hold.kind}) since ${when(rec.control.hold.since)} by ${rec.control.hold.by}: ${rec.control.hold.reason}`) : null,
+      rec.control.hold ? h('p.small', `Held (${rec.control.hold.kind}) since ${when(rec.control.hold.since)} by ${rec.control.hold.by}: ${rec.control.hold.reason}. `, h('a', { href: '#', dataset: { action: 'goto-resume' } }, 'Resume with an instruction')) : null,
       d.execError ? h('div.banner.warn', `Execution facts of this host could not be read: ${d.execError}`) : null,
-      d.execView ? h('p.small.muted', `Executor: ${d.execView.executor.state}${d.execView.executor.detail ? ` — ${d.execView.executor.detail}` : ''}`) : null,
+      ev ? h('p.small.muted', `Executor: ${ev.executor.state}${ev.executor.detail ? ` — ${ev.executor.detail}` : ''}`) : null,
       h('div.row.tight', h('button', { disabled: frozen || !!rec.control.hold || !!rec.control.stop || sit === 'completed', title: 'Stop execution; the run stays resumable', dataset: { action: 'stop-run' } }, 'Stop')))
-    const held = !!rec.control.hold
-    const r = this.resume.draft
-    if (held) { if (!this.resume.root.isConnected) this.execution.root.insertBefore(this.resume.root, this.execMore); r.set(null, !frozen) }
-    else if (r.kept) r.set('The run is no longer held: there is nothing to resume. Your text is kept, not sent.')
-    else this.resume.root.remove()
-    const ev = d.execView
     const queued = ev?.jobs.filter(j => j.state === 'queued' || j.state === 'claimed') ?? []
     patchContent(this.execMore,
       queued.length ? h('p.small', 'Queued: ', ...queued.map(j => `${j.kind} (${j.state}) — ${j.reason}`)) : null,
@@ -648,7 +876,7 @@ export class RunSide {
     const v = this.data.notifyView
     show(this.coordination.root, !this.data.rev && !!v)
     if (this.data.rev || !v) return
-    setText(this.coordination.title, 'Coordination (Zulip)')
+    setText(this.coordination.title, `Coordination (Zulip)${v.failed || v.problem ? ' — needs attention' : !v.configured ? ' — not configured' : ''}`)
     const body = this.coordination.root.children[1] as HTMLElement
     if (!v.configured) { patchContent(body, h('p.small.muted', `Not announced: Zulip coordination is not configured on this host${v.problem ? ` (${v.problem})` : ''}.`)); return }
     patchContent(body,
@@ -666,14 +894,14 @@ export class RunSide {
   private updateResult(rec: RunRecord) {
     show(this.result.root, !this.data.rev)
     if (this.data.rev) return
-    setText(this.result.title, 'Result')
-    if (!this.decide.root.isConnected) this.result.root.append(this.decide.root)
+    const last = rec.decisions.at(-1)
+    setText(this.result.title, `Result and decision${last ? ` (${last.decision})` : ''}`)
     const completed = rec.execution.state === 'completed'
     patchContent(this.result.root.children[1] as HTMLElement,
       ...rec.decisions.map((d, i) => h(`div.banner.${d.decision === 'accepted' ? 'ok' : 'error'}`, { dataset: { key: `d:${i}` } }, `${d.decision} by ${d.by} (${when(d.at)}) — evidence: ${d.evidence}${d.note ? ` — ${d.note}` : ''}`)),
       h('p.small.muted', completed
-        ? 'Execution completed: every node recorded completion. Accepting the result is your separate decision.'
-        : `Execution is ${rec.execution.state}. A result can be accepted once every node is completed; it can be rejected at any time.`))
+        ? (this.decide.root.parentElement === this.decideSlot ? 'Execution completed: every node recorded completion. Accepting the result is your separate decision (offered above).' : 'Execution completed: every node recorded completion. Accepting the result is your separate decision.')
+        : `Execution is ${rec.execution.state}. A result can be accepted once every node is completed; it can be rejected, or the run cancelled, at any time.`))
     this.updateDecideButtons()
   }
 

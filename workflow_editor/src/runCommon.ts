@@ -44,6 +44,36 @@ export function nodeLabel(rec: RunRecord, id: string): { state: string; label: s
   return { state, label, title }
 }
 
+// What the run view calls a run (p8): the title of its latest presentation
+// when it has one — the result as the executor named it for the person —
+// otherwise its workflow's name; the run reference always beside it.
+// Recorded data only: nothing is generated or summarised.
+export function runTitle(rec: RunRecord, workflowName?: string): { title: string; sub: string } {
+  const p = Object.values(rec.presentations ?? {}).at(-1)
+  const name = workflowName || rec.workflow
+  return p ? { title: p.title, sub: `${name} · ${rec.workflow}/${rec.run}` } : { title: name, sub: `${rec.workflow}/${rec.run}` }
+}
+
+// Authored nodes in dependency order (a stable topological order: file
+// order among nodes whose predecessors are all listed).
+export function topoOrder(ids: string[], edges: { from: string; to: string }[]): string[] {
+  const set = new Set(ids)
+  const preds = new Map(ids.map(id => [id, edges.filter(e => e.to === id && set.has(e.from) && e.from !== id).map(e => e.from)]))
+  const out: string[] = [], done = new Set<string>()
+  while (out.length < ids.length) {
+    const next = ids.find(id => !done.has(id) && preds.get(id)!.every(p => done.has(p))) ?? ids.find(id => !done.has(id))! // a cycle: file order
+    out.push(next); done.add(next)
+  }
+  return out
+}
+
+// Every node reachable from `from` (its descendants).
+export function descendants(from: string, edges: { from: string; to: string }[]): Set<string> {
+  const out = new Set<string>(), todo = [from]
+  while (todo.length) { const n = todo.pop()!; for (const e of edges) if (e.from === n && !out.has(e.to)) { out.add(e.to); todo.push(e.to) } }
+  return out
+}
+
 // The authored definition in force (p7): the latest adjusted revision, or
 // the snapshot taken at creation.
 export function activeWorkflow(r: RunResponse | null, rec: RunRecord) {

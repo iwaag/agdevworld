@@ -220,7 +220,7 @@ export function stepFacts(eff: Pick<EffectiveGraph, 'nodes' | 'edges'>, id: stri
   const before = eff.edges.filter(e => e.to === id).map(e => label(e.from))
   const after = eff.edges.filter(e => e.from === id).map(e => label(e.to))
   const out: (HTMLElement | null)[] = [
-    h('p.small', step.purpose, ' — ', h('code', step.output)),
+    h('p.small', step.purpose, h('span.d-only', ' — ', h('code', step.output))),
     h('dl.kv.d-only', h('dt', 'Waits for'), h('dd', before.join(', ') || 'nothing: the run starts with it'), h('dt', 'Then'), h('dd', after.join(', ') || 'nothing: the run ends with it')),
     step.kind === 'report' ? h('p.small.muted.d-only', `Successors of ${label(step.for ?? '')} wait for this report, not only for its work.`) : null,
     h('details.instructions.d-only', h('summary.small', 'Instructions the executing agent is given'), h('pre.small', step.instructions)),

@@ -12,10 +12,16 @@ export const SHOTS = join(FIXTURE, 'screenshots')
 export const BASE = process.env.WFE_URL ?? 'http://127.0.0.1:5175'
 export const wsDir = (id: string) => join(FIXTURE, 'workspaces', id)
 
-export async function open(width = 1400, height = 900): Promise<{ browser: Browser; page: Page; errors: string[] }> {
+// Checks written for the full screens open in Detail (p8/ex1): a fresh
+// browser would start in Simple. `display: null` keeps the fresh default
+// (checks/displayMode.ts). Only an unset preference is filled, so a check
+// that switches keeps its choice across navigation.
+export async function open(width = 1400, height = 900, opts: { display?: 'simple' | 'detail' | null } = {}): Promise<{ browser: Browser; page: Page; errors: string[] }> {
   await mkdir(SHOTS, { recursive: true })
   const browser = await chromium.launch()
   const page = await browser.newPage({ viewport: { width, height } })
+  const display = opts.display === undefined ? 'detail' : opts.display
+  if (display) await page.addInitScript(d => { try { if (!localStorage.getItem('workflow-editor.display')) localStorage.setItem('workflow-editor.display', d) } catch { /* storage unavailable: Simple */ } }, display)
   const errors: string[] = []
   page.on('console', m => { if (m.type() === 'error') errors.push(m.text()) })
   page.on('pageerror', e => errors.push(String(e)))

@@ -308,7 +308,7 @@ export class Canvas {
       card.classList.add('in-run', `run-${run.state}`)
       card.dataset.state = run.state
       card.setAttribute('aria-label', `${card.getAttribute('aria-label')}, ${run.label}`)
-      foot.append(h(`div.run-status.state-${run.state}`, { title: run.title ?? run.label }, h('span.glyph', { 'aria-hidden': 'true' }, STATE_GLYPH[run.state] ?? ''), ` ${run.label}`))
+      foot.append(h(`div.run-status.state-${run.state}`, { title: run.title ?? run.label }, h('span.glyph', { 'aria-hidden': 'true' }, STATE_GLYPH[run.state] ?? ''), ` ${this.simple ? shortLabel(run) : run.label}`))
     } else if (node.repositories.length && !this.simple) foot.append(this.bindingBadges(node.repositories))
     if (this.ctx.effective?.nodes[`_report.${id}`]) card.classList.add('has-report')
     card.append(foot)
@@ -357,7 +357,7 @@ export class Canvas {
           h('div.node-head', icon('talk', 'icon type-icon'), this.simple ? null : h('span.type-label', 'Plan talk')),
           h('div.node-title', 'Agree the plan'),
           this.mode === 'compact' && !this.simple ? h('div.node-desc', 'Write plan.md and agree it with the person before any work.') : null)
-        if (run) el.append(h('div.node-foot', h(`div.run-status.state-${run.state}`, h('span.glyph', { 'aria-hidden': 'true' }, STATE_GLYPH[run.state] ?? ''), ` ${run.label}`)))
+        if (run) el.append(h('div.node-foot', h(`div.run-status.state-${run.state}`, { title: run.title ?? run.label }, h('span.glyph', { 'aria-hidden': 'true' }, STATE_GLYPH[run.state] ?? ''), ` ${this.simple ? shortLabel(run) : run.label}`)))
         this.stepState(el, id, 'Plan talk: plan.md')
         this.surface.append(el)
       } else if (step.kind === 'report') {
@@ -634,6 +634,13 @@ export class Canvas {
     if (this.zoomLabel.textContent !== pct) this.zoomLabel.textContent = pct
     this.updateNote()
   }
+}
+
+// Simple's state words on a card: the state, and an answer awaiting take-up
+// kept apart from a wait (the full label is the card's title and name).
+const SHORT: Record<string, string> = { running: 'Running', waiting: 'Waiting' }
+function shortLabel(run: { state: string; label: string }): string {
+  return /^Answered/.test(run.label) ? 'Answered' : SHORT[run.state] ?? run.label
 }
 
 function bounds(bs: { x: number; y: number; w: number; h: number }[]) {

@@ -42,7 +42,7 @@ import {
   DELAYED_AFTER_MS, type DocLink, type NoticeKind, type RenderContext,
 } from '../shared/notify.ts'
 import type { IntakeStore, RequestRow } from './intake.ts'
-import { notableEvents, questionState, runKey, type NotableEvent, type RunRecord, type RunRef } from '../shared/run.ts'
+import { notableEvents, openPresentations, questionState, runKey, type NotableEvent, type RunRecord, type RunRef } from '../shared/run.ts'
 import { assertWorkspaceAllowed, loadBoundary } from './boundary.ts'
 import type { CheckpointRow, ExecStore } from './exec.ts'
 import { git } from './git.ts'
@@ -182,6 +182,7 @@ const MIGRATIONS: Migration[] = [
 // in its run topic. Events that need the person go to both. A run requested
 // elsewhere keeps one topic.
 const REQUEST_ONLY = new Set(['question', 'answered', 'instructed', 'acknowledged', 'accepted', 'notice'])
+// presented and cleanup-failed (p7) need the person: both conversations.
 const RUN_ONLY = new Set(['started', 'reported', 'node-completed'])
 export function destinationsOf(type: string, requested: boolean): ('run' | 'request')[] {
   if (!requested) return ['run']
@@ -686,7 +687,18 @@ export class NotifyStore {
       if (ex.ready.length) return `${rec.executor.name}: ${ex.ready.map(id => rec.definition.effective?.nodes[id]?.step?.purpose ?? id).join(', ')}`
       return undefined
     }
+    // Where each presentation is served now (p7): resolved from this host's
+    // present store when the message is rendered, frozen with the delivery.
+    const addresses = new Map<string, { url: string; local: boolean; live: boolean } | null>()
+    if (rec?.presentations) {
+      const { Presenter } = await import('./present.ts')
+      let pr: InstanceType<typeof Presenter> | null = null
+      try { pr = new Presenter({ area: this.area, registryFile: this.registryFile }) } catch { pr = null }
+      try { for (const p of Object.values(rec.presentations)) addresses.set(p.id, pr ? await pr.address(p.instance).catch(() => null) : null) } finally { pr?.close() }
+    }
     const ctx: RenderContext = {
+      presentation: id => addresses.get(id) ?? null,
+      openPresentations: rec ? openPresentations(rec).map(p => p.id) : [],
       ref: label, executor: rec?.executor.name ?? 'the executor', request, answerRoute, runLink: runView, link,
       label: id => authored?.nodes[id]?.name || id, openQuestion: id => !!rec?.questions[id] && ['open', 'answered'].includes(questionState(rec.questions[id])),
       now: at, next: nextOf(), person: cfg.person,

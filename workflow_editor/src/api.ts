@@ -14,6 +14,14 @@ export interface RunExecView {
   executor: { state: string; detail?: string; at?: string }
 }
 
+// What each presentation's record says and what this host observes (p7,
+// server/present.ts view).
+export interface PresentationView {
+  id: string; title: string; node: string; revision: string; state: string; instance: string | null
+  url: string | null; local: boolean; live: boolean; files: number
+  observed: { alive: boolean; identity: boolean; detail: string; instance: string; port: number; pid: number | null; state: string } | null
+}
+
 export class ApiError extends Error {
   status: number
   detail?: unknown
@@ -73,6 +81,8 @@ export const api = {
     call<RunOpResponse>('POST', `${ws(id)}/runs/${encodeURIComponent(workflow)}/${encodeURIComponent(run)}/ops`, op),
   runExec: (id: string, workflow: string, run: string) => call<RunExecView>('GET', `${ws(id)}/runs/${encodeURIComponent(workflow)}/${encodeURIComponent(run)}/exec`),
   runNotify: (id: string, workflow: string, run: string) => call<RunNotifyView>('GET', `${ws(id)}/runs/${encodeURIComponent(workflow)}/${encodeURIComponent(run)}/notify`),
+  runPresentations: (id: string, workflow: string, run: string) => call<{ presentations: PresentationView[] }>('GET', `${ws(id)}/runs/${encodeURIComponent(workflow)}/${encodeURIComponent(run)}/presentations`),
+  presentation: (id: string, workflow: string, run: string, p: string, action: 'start' | 'stop', by: string) => call<{ ok: boolean }>('POST', `${ws(id)}/runs/${encodeURIComponent(workflow)}/${encodeURIComponent(run)}/presentations/${encodeURIComponent(p)}/${action}`, { by }),
   retryCheckpoint: (id: string, workflow: string, run: string, checkpoint: number) => call<unknown>('POST', `${ws(id)}/runs/${encodeURIComponent(workflow)}/${encodeURIComponent(run)}/checkpoints/${checkpoint}/publish`),
   requestRun: (id: string, input: { workflow: string; text: string; author: string; receipt: string }) =>
     call<{ ok: true; duplicate: boolean; ref: { workflow: string; run: string }; job: { id: number; state: string } }>('POST', `${ws(id)}/runs`, input),

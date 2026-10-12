@@ -4,19 +4,20 @@
 // shared/run.ts; this module only reads and writes files. The CLI and the
 // service both call it.
 import { createHash } from 'node:crypto'
-import { lstat, mkdir, readdir, readFile, realpath, stat, writeFile } from 'node:fs/promises'
+import { copyFile, lstat, mkdir, readdir, readFile, realpath, rm, stat, writeFile } from 'node:fs/promises'
 import { join, sep } from 'node:path'
 import type { FileProblem, RelatedRun, RunFile, RunResponse, RunSummary, SourceComparison } from '../shared/api.ts'
 import { approvalStates, canonicalJson, semanticDigest } from '../shared/canonical.ts'
 import { authoredNode, COMPILER_VERSION, compile, isGenerated, type EffectiveGraph, type StepSpec } from '../shared/compile.ts'
 import { ID_PATTERN, normalizeRepoPath, type Workflow } from '../shared/model.ts'
 import {
-  checkRecord, delegateNodes, documentPath, hostOf, operate, RUN_ID, RunError, runFolder, RUNS_ROOT, runKey, validRunRef,
+  checkRecord, delegateNodes, documentPath, hostOf, operate, presentationFolder, RUN_ID, RunError, runFolder, RUNS_ROOT, runKey, validRunRef, type Presentation,
   type BundleEntry, type DefinitionRef, type DocumentEvidence, type EntrustRef, type Executor, type OpInput, type RepoContext, type RunGraph,
   type EntryMeta, type RunInput, type RunRecord, type RunRef,
 } from '../shared/run.ts'
 import type { SourceRef } from '../shared/intake.ts'
 import { atomicWrite, inside, readTextOrNull } from './files.ts'
+import { MANIFEST_KIND } from '../shared/review.ts'
 import { withLock } from './lock.ts'
 import { blobSizeAt, listAt, resolveRev, RevError, showAt, type DevdocsInfo, type DevdocsRev } from './devdocs.ts'
 import { RequestError, WORKFLOWS_DIR, type Workspace } from './workspace.ts'
@@ -596,7 +597,13 @@ async function runOpLocked(ws: Workspace, ref: RunRef, input: OpInput & EntryMet
   // when a decision is recorded from it: checked here, on disk (p6).
   if (op.op === 'question.ask') {
     delete op.subject
-    if (op.subjects?.length) op.subject = await Promise.all(op.subjects.map(p => checkSubject(ws, p)))
+    if (op.presentation !== undefined) {
+      // A presentation's files, as they are on disk now (p7); the reducer
+      // compares them with the registered manifest.
+      if (op.subjects?.length) throw new RequestError(400, 'a question presents either a presentation or loose files (--subject), not both')
+      const p = record.presentations?.[op.presentation]
+      if (p) op.subject = await Promise.all(p.files.map(f => checkSubject(ws, f.path)))
+    } else if (op.subjects?.length) op.subject = await Promise.all(op.subjects.map(p => checkSubject(ws, p)))
     delete op.subjects
   }
   if (op.op === 'run.decide') {
@@ -617,6 +624,97 @@ async function runOpLocked(ws: Workspace, ref: RunRef, input: OpInput & EntryMet
   if (next === record) return { record, ref, duplicate: true }
   await writeRecord(dir, next)
   return { record: next, ref }
+}
+
+// ---- presentations (p7, docs/presentations.md) -------------------------------------
+
+export interface RegisterOptions {
+  node: string
+  source: string // project-relative directory whose files are presented
+  entry: string // the file to open, relative to source
+  review: string // project-relative Markdown: what changed, how to use it, what to check
+  title: string
+}
+const MAX_PRESENT_FILES = 2000
+const MAX_PRESENT_BYTES = 200 * 1024 * 1024
+const MAX_REVIEW = 64 * 1024
+
+// The files of a directory to present: regular files only, no symbolic
+// links, no dot-entries (.git, .DS_Store …), bounded in count and size.
+async function presentedFiles(dir: string): Promise<string[]> {
+  const out: string[] = []
+  let total = 0
+  const walk = async (rel: string) => {
+    for (const e of (await readdir(join(dir, rel), { withFileTypes: true })).sort((a, b) => (a.name < b.name ? -1 : 1))) {
+      if (e.name.startsWith('.') || e.name === 'node_modules') continue
+      const r = rel ? `${rel}/${e.name}` : e.name
+      if (e.isSymbolicLink()) throw new RequestError(422, `${r} is a symbolic link; a presentation holds copies of regular files only`, { code: 'presentation-source' })
+      if (e.isDirectory()) { await walk(r); continue }
+      if (!e.isFile()) continue
+      total += (await stat(join(dir, r))).size
+      out.push(r)
+      if (out.length > MAX_PRESENT_FILES || total > MAX_PRESENT_BYTES) throw new RequestError(422, `the source has more than ${MAX_PRESENT_FILES} files or ${MAX_PRESENT_BYTES} bytes; present a smaller bundle`, { code: 'presentation-source' })
+    }
+  }
+  await walk('')
+  return out
+}
+
+// Freezes a result as presentation p<n> of the run and records it, under
+// the run's lock: the files are copied into the run folder, the manifest
+// written, and the registration recorded — or, if the record refuses it,
+// the copy removed again. A retransmission (same receipt) changes nothing.
+export async function registerPresentation(ws: Workspace, ref: RunRef, o: RegisterOptions, ctx: OpContext & { attempt?: string; receipt?: string }): Promise<{ record: RunRecord; presentation: Presentation; duplicate?: boolean }> {
+  const file = join(await inside(ws.root, runDir(ref)), RUN_FILE)
+  return withLock(file, async () => {
+    const { record } = await usableRun(ws, ref)
+    const dup = ctx.receipt ? record.history.find(h => h.receipt === ctx.receipt) : undefined
+    if (dup && dup.op === 'presentation.register') return { record, presentation: record.presentations![(dup as unknown as { presentation: string }).presentation], duplicate: true }
+    const id = `p${Object.keys(record.presentations ?? {}).length + 1}`
+    const source = normalizeRepoPath(o.source)
+    if (!source) throw new RequestError(400, `source "${o.source}" must be a project-relative directory`)
+    const srcAbs = await inside(ws.root, source)
+    const sl = await lstat(srcAbs).catch(() => null)
+    if (!sl?.isDirectory()) throw new RequestError(422, `${source} is not a directory of the workspace`, { code: 'presentation-source' })
+    if ((await realpath(srcAbs)).startsWith((await realpath(await inside(ws.root, runDir(ref)))) + sep)) throw new RequestError(422, 'the source is inside the run folder; present the result where it was made', { code: 'presentation-source' })
+    const names = await presentedFiles(srcAbs)
+    const entry = normalizeRepoPath(o.entry)
+    if (!entry || !names.includes(entry)) throw new RequestError(422, `the entry "${o.entry}" is not a file of ${source}`, { code: 'presentation-source' })
+    const reviewRel = normalizeRepoPath(o.review)
+    if (!reviewRel || reviewRel === '.') throw new RequestError(400, `review "${o.review}" must be a project-relative file`)
+    const reviewAbs = await inside(ws.root, reviewRel)
+    const rl = await lstat(reviewAbs).catch(() => null)
+    if (!rl?.isFile() || rl.isSymbolicLink()) throw new RequestError(422, `${reviewRel} is not a regular file; write the review first`, { code: 'presentation-review' })
+    if (rl.size === 0 || rl.size > MAX_REVIEW) throw new RequestError(422, `${reviewRel} is ${rl.size === 0 ? 'empty' : `larger than ${MAX_REVIEW} bytes`}`, { code: 'presentation-review' })
+    const folderRel = presentationFolder(ref, id)
+    const folder = await inside(ws.root, folderRel)
+    // A folder left by a registration that crashed before its record: not
+    // part of the run, replaced.
+    await rm(folder, { recursive: true, force: true })
+    await mkdir(join(folder, 'content'), { recursive: true })
+    const files: { path: string; sha256: string; bytes: number }[] = []
+    try {
+      for (const n of names) {
+        await mkdir(join(folder, 'content', n, '..'), { recursive: true })
+        await copyFile(join(srcAbs, n), join(folder, 'content', n))
+        const bytes = await readFile(join(folder, 'content', n))
+        files.push({ path: `content/${n}`, sha256: sha256(bytes), bytes: bytes.length })
+      }
+      const review = await readFile(reviewAbs)
+      await writeFile(join(folder, 'review.md'), review)
+      files.push({ path: 'review.md', sha256: sha256(review), bytes: review.length })
+      files.sort((a, b) => (a.path < b.path ? -1 : 1))
+      const body = { kind: MANIFEST_KIND, entry: `content/${entry}`, review: 'review.md', files }
+      const revision = `sha256:${sha256(canonicalJson(body))}`
+      await writeFile(join(folder, 'manifest.json'), `${JSON.stringify({ ...body, presentation: id, revision, source }, null, 2)}\n`)
+      const input = { op: 'presentation.register' as const, presentation: id, node: o.node, title: o.title, manifest: { revision, entry: body.entry, review: 'review.md', files: files.map(f => ({ ...f, path: `${folderRel}/${f.path}` })) }, ...(ctx.attempt ? { attempt: ctx.attempt } : {}), ...(ctx.receipt ? { receipt: ctx.receipt } : {}) }
+      const r = await runOpLocked(ws, ref, input, ctx)
+      return { record: r.record, presentation: r.record.presentations![id] }
+    } catch (e) {
+      await rm(folder, { recursive: true, force: true })
+      throw e
+    }
+  }, { what: `run ${runKey(ref)}` })
 }
 
 // The document a step writes: a regular, nonempty file inside the run

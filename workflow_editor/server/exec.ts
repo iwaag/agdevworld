@@ -73,6 +73,15 @@ export function instructionBrief(r: RunRecord): string[] {
     ...pending.flatMap(i => [`- ${i.id}, from ${i.from} at ${i.at}${i.during.length ? ` (while ${i.during.join(', ')} ran)` : ''}:`, ...i.text.split('\n').map(l => `    ${l}`)]),
   ]
 }
+// The run's presentations as the attempt starts (p7): which revision each
+// is, its recorded state, and which questions asked about it. Whether one
+// is served now is `wfe present status <run>`.
+export function presentationBrief(r: RunRecord): string[] {
+  const all = Object.values(r.presentations ?? {})
+  if (!all.length) return []
+  return ['', 'Presentations of this run (wfe present status <run> says what is served now):',
+    ...all.map(p => `- ${p.id} "${p.title}" from ${p.node}: ${p.state}${p.last ? ` (${p.last.detail})` : ''}; revision ${p.revision.slice(7, 19)}…${Object.values(r.questions).filter(q => q.presentation?.id === p.id).map(q => `; asked in ${q.id}`).join('')}`)]
+}
 const now = () => new Date().toISOString()
 const alive = (pid: number | null) => { if (!pid) return false; try { process.kill(pid, 0); return true } catch (e) { return (e as NodeJS.ErrnoException).code === 'EPERM' } }
 
@@ -278,6 +287,7 @@ export class ExecStore {
     }
     lines.push(`Ready: ${r.execution.ready.join(', ') || '(none)'}; running: ${r.execution.active.join(', ') || '(none)'}.`)
     lines.push(...instructionBrief(r))
+    lines.push(...presentationBrief(r))
     lines.push(...documentationBrief(r))
     return lines.join('\n')
   }
@@ -329,11 +339,21 @@ export class ExecStore {
     return { record: r.record, job }
   }
 
-  async cancel(ws: Workspace, ref: RunRef, by: string, reason: string, via: string) {
+  // Cancellation is final; what the run serves is stopped through this path
+  // of its own (p7), whatever successors the graph has. A failed stop is
+  // recorded (stop-failed) beside the cancellation and retried with
+  // `wfe present stop <run> --all`.
+  async cancel(ws: Workspace, ref: RunRef, by: string, reason: string, via: string): Promise<{ record: RunRecord; cleanup: { presentation: string; ok: boolean; detail: string }[] }> {
     const r = await runOp(ws, ref, { op: 'run.cancel', reason }, { by, via })
     this.run('UPDATE attempts SET stop_requested = ? WHERE workspace = ? AND workflow = ? AND run = ? AND state != \'ended\'', now(), ws.reg.id, ref.workflow, ref.run)
     this.run('UPDATE jobs SET state = \'dropped\', note = \'cancelled\' WHERE workspace = ? AND workflow = ? AND run = ? AND state = \'queued\'', ws.reg.id, ref.workflow, ref.run)
-    return r.record
+    let cleanup: { presentation: string; ok: boolean; detail: string }[] = []
+    if (r.record.presentations) {
+      const { Presenter } = await import('./present.ts')
+      const pr = new Presenter({ registryFile: this.ctx.registryFile, area: this.ctx.area, by })
+      try { cleanup = await pr.stop(ws, ref, 'all', { by }) } catch (e) { cleanup = [{ presentation: '*', ok: false, detail: (e as Error).message }] } finally { pr.close() }
+    }
+    return { record: (await readRun(ws, ref)).record ?? r.record, cleanup }
   }
 
   // Attempts whose process should be terminated now (stop or cancel requested).

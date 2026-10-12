@@ -118,14 +118,47 @@ export interface Question {
   withdrawn: { by: string; at: string; reason: string } | null
   document?: DocumentEvidence // asked from the plan step: the plan.md it asked about (p5)
   subject?: DocumentEvidence[] // asked from the result-confirmation node: the deliverables it presents (p6)
+  presentation?: { id: string; revision: string } // the presentation it asks about (p7); subject = its files
 }
 export interface Artifact { path: string; node: string | null; title: string; by: string; at: string }
+// A presentation (p7, docs/presentations.md): one frozen revision of the
+// run's result, copied into the run folder by the file layer, served on this
+// host for a person's review. The record names its files by hash, the
+// revision (the manifest digest) and the lifecycle facts this host
+// observed; where it is served (port, process) is host state, referenced
+// here only by the instance id.
+export const PRESENTATION_ID = /^p[0-9]{1,6}$/
+export const PRESENTATION_STATES = ['registered', 'available', 'stopped', 'failed', 'stop-failed'] as const
+export type PresentationState = typeof PRESENTATION_STATES[number]
+export const OBSERVATIONS = ['available', 'stopped', 'failed', 'stop-failed'] as const
+export type Observation = typeof OBSERVATIONS[number]
+export interface PresentationManifest {
+  revision: string // sha256:<hex> of the canonical manifest
+  entry: string // folder-relative: content/<path>
+  review: string // folder-relative: review.md
+  files: DocumentEvidence[] // project-relative paths inside the presentation folder
+}
+export interface Presentation extends PresentationManifest {
+  id: string
+  node: string // the node that registered it
+  title: string
+  folder: string // project-relative: devdocs/runs/<wf>/<run>/presentations/<p>
+  registered: { at: string; by: string; attempt: string | null }
+  state: PresentationState
+  instance: string | null // the serving instance last observed (a logical reference)
+  last: { at: string; by: string; status: Observation; detail: string } | null
+}
+// Open: something may still be serving it.
+export const isOpen = (p: Pick<Presentation, 'state'>) => p.state === 'available' || p.state === 'stop-failed'
+export const openPresentations = (s: Pick<RunState, 'presentations'>): Presentation[] => Object.values(s.presentations ?? {}).filter(isOpen)
+export const presentationFolder = (r: RunRef, id: string) => `${runFolder(r)}/presentations/${id}`
+const presentationNumber = (id: string) => Number(id.slice(1))
 export interface Decision {
   decision: 'accepted' | 'rejected'; by: string; at: string; evidence: string; note: string
   // A decision the person gave by answering the result-confirmation
   // question (p6): which question and answer, whose words, and the
   // deliverables (by hash) it confirmed.
-  confirmation?: { question: string; answer: number; from: string; source?: SourceRef; subject: DocumentEvidence[] }
+  confirmation?: { question: string; answer: number; from: string; source?: SourceRef; subject: DocumentEvidence[]; presentation?: { id: string; revision: string } }
 }
 export interface Execution {
   state: ExecutionState
@@ -166,6 +199,7 @@ export interface RunState {
   nodes: Record<string, NodeRecord>
   questions: Record<string, Question>
   instructions?: Record<string, Instruction> // present once the first one arrives (p6)
+  presentations?: Record<string, Presentation> // present once the first one is registered (p7)
   artifacts: Artifact[]
   decisions: Decision[]
   cancelled: { reason: string; at: string; by: string } | null
@@ -187,7 +221,7 @@ export type OpInput =
   | { op: 'node.complete'; node: string; outcome: string; artifacts?: string[]; document?: DocumentEvidence; agreement?: string }
   | { op: 'node.fail'; node: string; reason: string }
   | { op: 'node.cancel'; node: string; reason: string }
-  | { op: 'question.ask'; question: string; node?: string; text: string; to: string; document?: DocumentEvidence; plan?: boolean; subjects?: string[]; subject?: DocumentEvidence[] }
+  | { op: 'question.ask'; question: string; node?: string; text: string; to: string; document?: DocumentEvidence; plan?: boolean; subjects?: string[]; subject?: DocumentEvidence[]; presentation?: string }
   | { op: 'question.answer'; question: string; text: string; from?: string; source?: SourceRef }
   | { op: 'instruction.receive'; instruction?: string; text: string; from: string; source?: SourceRef }
   | { op: 'instruction.ack'; instructions: string[]; response: string; note: string }
@@ -200,14 +234,16 @@ export type OpInput =
   | { op: 'attempt.end'; attempt: string; outcome: AttemptOutcome; detail?: string }
   | { op: 'run.stop'; reason: string }
   | { op: 'run.resume'; reason: string }
+  | { op: 'presentation.register'; presentation?: string; node: string; title: string; manifest?: PresentationManifest }
+  | { op: 'presentation.observe'; presentation: string; status: Observation; instance?: string; detail?: string }
 
 export const OPS = ['run.create', 'node.start', 'node.progress', 'node.wait', 'node.complete', 'node.fail', 'node.cancel',
   'question.ask', 'question.answer', 'question.take-up', 'question.withdraw', 'instruction.receive', 'instruction.ack', 'artifact.attach', 'run.cancel', 'run.decide',
-  'attempt.begin', 'attempt.end', 'run.stop', 'run.resume'] as const
+  'attempt.begin', 'attempt.end', 'run.stop', 'run.resume', 'presentation.register', 'presentation.observe'] as const
 // The executor's own reports. While an attempt is open they must carry its
 // id (`attempt`), so a stopped or superseded attempt cannot write into the
 // record of the one that replaced it.
-export const EXECUTOR_OPS: readonly string[] = ['node.start', 'node.progress', 'node.wait', 'node.complete', 'node.fail', 'question.ask', 'question.take-up', 'question.withdraw', 'instruction.ack', 'artifact.attach']
+export const EXECUTOR_OPS: readonly string[] = ['node.start', 'node.progress', 'node.wait', 'node.complete', 'node.fail', 'question.ask', 'question.take-up', 'question.withdraw', 'instruction.ack', 'artifact.attach', 'presentation.register']
 
 // Received instructions the executor has not acknowledged, in arrival order.
 export const pendingInstructions = (s: Pick<RunState, 'instructions'>): Instruction[] => Object.values(s.instructions ?? {}).filter(i => !i.ack)
@@ -223,6 +259,7 @@ export interface Change {
   instruction?: [string | null, string]
   execution?: [ExecutionState | null, ExecutionState]
   hold?: [HoldKind | null, HoldKind | null]
+  presentation?: [string, PresentationState | null, PresentationState] // id, from, to (p7)
 }
 export type HistoryEntry = OpInput & EntryMeta & { seq: number; at: string; by: string; via: string; change: Change }
 export interface RunRecord extends RunState { history: HistoryEntry[] }
@@ -347,6 +384,23 @@ function subjectOf(v: unknown, what: string): DocumentEvidence {
   if (typeof d.sha256 !== 'string' || !/^[0-9a-f]{64}$/.test(d.sha256)) fail('shape', `${what}: sha256 must be 64 hex digits`)
   if (typeof d.bytes !== 'number' || !Number.isInteger(d.bytes) || d.bytes <= 0) fail('document-empty', `${what}: ${path} is empty`)
   return { path: path!, sha256: d.sha256 as string, bytes: d.bytes as number }
+}
+
+// A registered presentation's manifest (p7): computed by the file layer;
+// here only its shape and that every path lies in the presentation's folder.
+function manifestOf(v: unknown, folder: string): PresentationManifest {
+  if (!isObj(v)) return fail('presentation-missing', 'a presentation needs the manifest the file layer writes (wfe present register copies the files first)')
+  const m = v as Record<string, unknown>
+  if (typeof m.revision !== 'string' || !/^sha256:[0-9a-f]{64}$/.test(m.revision)) fail('shape', 'the manifest revision must be sha256:<64 hex digits>')
+  if (!Array.isArray(m.files) || !m.files.length) fail('shape', 'the manifest lists no files')
+  const files = (m.files as unknown[]).map((f, i) => subjectOf(f, `manifest file ${i + 1}`))
+  for (const f of files) if (!f.path.startsWith(`${folder}/`)) fail('shape', `manifest file ${f.path} is outside ${folder}/`)
+  const local = (x: unknown, what: string) => {
+    const p = typeof x === 'string' ? normalizeRepoPath(x) : null
+    if (!p || p === '.' || !files.some(f => f.path === `${folder}/${p}`)) fail('shape', `the manifest ${what} "${String(x)}" is not one of its files`)
+    return p!
+  }
+  return { revision: m.revision as string, entry: local(m.entry, 'entry'), review: local(m.review, 'review'), files }
 }
 
 function attemptSettings(v: unknown): AttemptSettings {
@@ -484,7 +538,12 @@ export function apply(prev: RunState | null, e: HistoryEntry | (OpInput & EntryM
       } else if (e.document !== undefined || e.agreement !== undefined) fail('shape', `node "${e.node}" is authored work; documents and plan agreement belong to documentation steps`)
       // The last completion of the run is a boundary too: input received
       // before it is considered, whichever node it is.
-      if (Object.entries(s.nodes).every(([id, x]) => id === e.node || x.state === 'completed')) boundary(`completing ${e.node}, the last node of the run`)
+      if (Object.entries(s.nodes).every(([id, x]) => id === e.node || x.state === 'completed')) {
+        boundary(`completing ${e.node}, the last node of the run`)
+        // A run is complete only after what it serves has stopped (p7).
+        const open = openPresentations(s)
+        if (open.length) fail('presentation-open', `completing ${e.node} would complete the run, but ${open.map(p => `presentation ${p.id} is ${p.state}`).join(', ')}; stop it and verify the shutdown first (wfe present stop <run> --all)`)
+      }
       n.outcome = { text: text(e.outcome, 'the outcome'), artifacts }
       n.ended = at
       for (const path of artifacts) s.artifacts.push({ path, node: e.node, title: '', by, at })
@@ -530,9 +589,19 @@ export function apply(prev: RunState | null, e: HistoryEntry | (OpInput & EntryM
       // them by hash (the file layer checks them), so a confirmation is of
       // exactly those files.
       if (e.node && graph.nodes[e.node]?.confirms === 'result') {
-        if (!Array.isArray(e.subject) || !e.subject.length) fail('subject-missing', `${e.node} confirms the result: name the deliverables it presents (--subject <path>, written first)`)
+        if (!Array.isArray(e.subject) || !e.subject.length) fail('subject-missing', `${e.node} confirms the result: name the deliverables it presents (--presentation <p>, or --subject <path> written first)`)
         q.subject = e.subject!.map((d, i) => subjectOf(d, `subject ${i + 1}`))
-      } else if (e.subject !== undefined) fail('shape', 'only a question from the result-confirmation node presents deliverables')
+        // A presentation (p7): the question asks about exactly its files,
+        // checked on disk by the file layer against the registered manifest.
+        if (e.presentation !== undefined) {
+          const p = s.presentations?.[e.presentation]
+          if (!p) fail('presentation-unknown', `presentation "${e.presentation}" does not exist in this run`)
+          if (p!.state !== 'available') fail('presentation-unavailable', `presentation ${p!.id} is ${p!.state}; ask about it once it is served (wfe present start)`)
+          const same = q.subject.length === p!.files.length && p!.files.every(f => q.subject!.some(x => x.path === f.path && x.sha256 === f.sha256))
+          if (!same) fail('presentation-changed', `the files of presentation ${p!.id} differ from its manifest; register the result again`)
+          q.presentation = { id: p!.id, revision: p!.revision }
+        }
+      } else if (e.subject !== undefined || e.presentation !== undefined) fail('shape', 'only a question from the result-confirmation node presents deliverables')
       if (e.node !== undefined && e.node !== null) {
         const n = node(e.node)
         if (n.state !== 'running') fail('state', `node "${e.node}" is ${n.state}; a question waits from a running node${n.state === 'waiting' ? ' (it already waits on something)' : ''}`)
@@ -699,6 +768,11 @@ export function apply(prev: RunState | null, e: HistoryEntry | (OpInput & EntryM
       const index = e.answer ?? taken.answer
       if (index !== taken.answer) fail('shape', `answer ${index} of ${q.id} was not the one taken up (${taken.answer})`)
       if (s.decisions.some(d => d.confirmation?.question === q.id)) fail('decision-exists', `a decision from ${q.id} is already recorded`)
+      // An answer about one presentation never accepts a later one (p7).
+      if (q.presentation) {
+        const later = Object.values(s.presentations ?? {}).filter(p => presentationNumber(p.id) > presentationNumber(q.presentation!.id)).map(p => p.id)
+        if (later.length) fail('presentation-superseded', `${q.id} asked about presentation ${q.presentation.id}; ${later.join(', ')} ${later.length === 1 ? 'was' : 'were'} registered after it. Ask about the latest presentation`)
+      }
       const now = (e.subject ?? []).map((d, i) => subjectOf(d, `subject ${i + 1}`))
       const asked = q.subject ?? []
       const changed = asked.filter(a => !now.some(n => n.path === a.path && n.sha256 === a.sha256))
@@ -707,8 +781,45 @@ export function apply(prev: RunState | null, e: HistoryEntry | (OpInput & EntryM
       s.decisions.push({
         decision: e.decision, by, at, note: optText(e.note, 'note'),
         evidence: optText(e.evidence, 'evidence') || `${q.id} answer ${index} from ${a.from}${a.source ? ` (Zulip message ${a.source.message})` : ''}, confirming ${asked.map(x => `${x.path} (${x.sha256.slice(0, 12)})`).join(', ')}`,
-        confirmation: { question: q.id, answer: index, from: a.from, ...(a.source ? { source: a.source } : {}), subject: asked },
+        confirmation: { question: q.id, answer: index, from: a.from, ...(a.source ? { source: a.source } : {}), subject: asked, ...(q.presentation ? { presentation: q.presentation } : {}) },
       })
+      break
+    }
+    case 'presentation.register': {
+      live()
+      if (s.execution.state === 'completed') fail('run-completed', 'the run\'s execution is completed; nothing more is presented')
+      const n = node(e.node)
+      if (n.state !== 'running') fail('state', `node "${e.node}" is ${n.state}; a presentation is registered from a running node`)
+      const all = s.presentations ?? {}
+      const id = e.presentation || `p${Object.keys(all).length + 1}`
+      if (!PRESENTATION_ID.test(id)) fail('shape', `presentation id "${id}" must match ${PRESENTATION_ID.source}`)
+      if (id in all) fail('presentation-exists', `presentation ${id} already exists`)
+      const m = manifestOf(e.manifest, presentationFolder(s, id))
+      const p: Presentation = { id, node: e.node, title: text(e.title, 'the title'), folder: presentationFolder(s, id), ...m, registered: { at, by, attempt: e.attempt ?? null }, state: 'registered', instance: null, last: null }
+      s.presentations = { ...all, [id]: p }
+      n.updated = at
+      change.presentation = [id, null, 'registered']
+      break
+    }
+    case 'presentation.observe': {
+      // A fact this host observed about a serving instance: not an
+      // execution report, not fenced by an attempt. After a cancellation
+      // only the shutdown is still recorded.
+      const p = s.presentations?.[e.presentation]
+      if (!p) return fail('presentation-unknown', `presentation "${String(e.presentation)}" does not exist in this run`)
+      if (!(OBSERVATIONS as readonly string[]).includes(e.status)) fail('shape', `status must be one of ${OBSERVATIONS.join(', ')}`)
+      if (e.status === 'available' || e.status === 'failed') {
+        live()
+        if (s.execution.state === 'completed') fail('run-completed', 'the run\'s execution is completed; its presentations are not served again')
+      }
+      if (e.status === 'failed' && p.state === 'available') fail('state', `presentation ${p.id} is available (instance ${p.instance}); a failed start does not replace it`)
+      const instance = optText(e.instance, 'instance') || null
+      if (e.status === 'available' && !instance) fail('missing', 'an available presentation names its serving instance')
+      if (instance && !/^pi-[0-9a-z-]{4,64}$/.test(instance)) fail('shape', 'an instance id is pi-<letters and digits>')
+      const before = p.state
+      const next: Presentation = { ...p, state: e.status, instance: instance ?? p.instance, last: { at, by, status: e.status, detail: optText(e.detail, 'detail') } }
+      s.presentations = { ...s.presentations, [p.id]: next }
+      change.presentation = [p.id, before, e.status]
       break
     }
     default:
@@ -865,6 +976,7 @@ export function situation(s: Pick<RunState, 'control' | 'execution' | 'cancelled
 export type NotableType = 'started' | 'question' | 'answered' | 'reported' | 'node-completed' | 'failed' | 'held' | 'resumed' | 'completed' | 'decided' | 'cancelled'
   | 'instructed' | 'acknowledged' // p6: an additional instruction received, and taken up
   | 'accepted' | 'notice' // p6, request topic only: the request became a run; a reply about a post (server/notify.ts)
+  | 'presented' | 'cleanup-failed' // p7: a presentation became available for review; its shutdown could not be verified
 export interface NotableEvent {
   id: string
   seq: number
@@ -885,6 +997,8 @@ export interface NotableEvent {
   instructions?: string[] // instructed / acknowledged (p6)
   response?: string // acknowledged: incorporate | clarify | new-run
   confirms?: boolean // a question from the result-confirmation node
+  presentation?: string // presented / cleanup-failed, and a question about a presentation (p7)
+  title?: string // the presentation's title
 }
 // The hold an entry recorded, as the reducer worded it at that point (the
 // state keeps only the current hold): replayed from the frozen graph.
@@ -912,7 +1026,7 @@ export function notableEvents(r: RunRecord, sinceSeq = 0): NotableEvent[] {
     if (e.op === 'attempt.begin' && r.history.find(h => h.op === 'attempt.begin')!.seq === e.seq) push('started', false, d.reason ?? '')
     else if (e.op === 'question.ask') {
       const q = r.questions[d.question]
-      push('question', true, d.text, { question: d.question, holder: d.to, node: step ? undefined : d.node, step: step ? d.node : undefined, document: q?.document?.path, ...(q?.subject ? { subject: q.subject.map(x => x.path), confirms: true } : {}) })
+      push('question', true, d.text, { question: d.question, holder: d.to, node: step ? undefined : d.node, step: step ? d.node : undefined, document: q?.document?.path, ...(q?.subject ? { subject: q.presentation ? [] : q.subject.map(x => x.path), confirms: true } : {}), ...(q?.presentation ? { presentation: q.presentation.id } : {}) })
     } else if (e.op === 'question.answer') push('answered', false, `answer to ${d.question} recorded`, { question: d.question, holder: r.executor.name })
     else if (e.op === 'node.complete' && step?.kind === 'report') push('reported', false, d.outcome, { node: step.for ?? undefined, step: d.node, document: (e as unknown as { document?: DocumentEvidence }).document?.path })
     else if (e.op === 'node.complete' && step?.kind === 'final-report') push('completed', true, d.outcome, { step: d.node, document: (e as unknown as { document?: DocumentEvidence }).document?.path })
@@ -927,11 +1041,17 @@ export function notableEvents(r: RunRecord, sinceSeq = 0): NotableEvent[] {
     if (e.change.execution?.[1] === 'completed' && !(step?.kind === 'final-report')) push('completed', true, d.outcome ?? 'every node completed', e.op === 'node.complete' && !step ? { node: d.node } : {})
     if (e.op === 'run.decide') {
       const dec = r.decisions.find(x => x.at === e.at && x.by === e.by && x.decision === d.decision)
-      push('decided', true, dec?.evidence ?? d.evidence ?? '', { decision: d.decision as 'accepted' | 'rejected', ...(dec?.confirmation ? { confirmation: { question: dec.confirmation.question, from: dec.confirmation.from }, subject: dec.confirmation.subject.map(x => x.path) } : {}) })
+      push('decided', true, dec?.evidence ?? d.evidence ?? '', { decision: d.decision as 'accepted' | 'rejected', ...(dec?.confirmation ? { confirmation: { question: dec.confirmation.question, from: dec.confirmation.from }, subject: dec.confirmation.presentation ? [] : dec.confirmation.subject.map(x => x.path), ...(dec.confirmation.presentation ? { presentation: dec.confirmation.presentation.id } : {}) } : {}) })
     }
     if (e.op === 'instruction.receive') push('instructed', false, d.text, { instructions: [e.change.instruction?.[1] ?? ''], holder: r.executor.name })
     if (e.op === 'instruction.ack') push('acknowledged', false, d.note, { instructions: (e as unknown as { instructions: string[] }).instructions, response: d.response })
     if (e.op === 'run.cancel') push('cancelled', true, d.reason)
+    if (e.op === 'presentation.observe' && (d.status === 'available' || d.status === 'stop-failed')) {
+      const p = r.presentations?.[d.presentation]
+      const extra = { presentation: d.presentation, title: p?.title ?? d.presentation, node: p?.node }
+      if (d.status === 'available') push('presented', true, d.detail ?? '', extra)
+      else push('cleanup-failed', true, d.detail ?? '', extra)
+    }
   }
   return out
 }

@@ -459,3 +459,12 @@ ol.history code { font-size: 12px; background: #eef0f3; border-radius: 4px; padd
 .doc-state.unfinished { border-color: #e0b35c; background: #fff7e6; }
 .doc-state.missing { border-color: #e2a7a2; background: var(--error-bg); }
 details.instructions pre { white-space: pre-wrap; background: #f6f7f9; border-radius: 6px; padding: 6px 8px; }
+
+/* Presentations (p7) */
+.review-link { display: flex; align-items: center; gap: 8px; margin: 8px 0 4px; flex-wrap: wrap; }
+.review-link a.button.primary { font-size: 15px; padding: 8px 16px; background: var(--accent); border-color: var(--accent); color: #fff; }
+.review-link .icon.small { width: 18px; height: 18px; }
+.presentation { border: 1px solid var(--line); border-radius: 10px; padding: 8px 10px; margin-bottom: 8px; background: #fff; }
+.presentation.p-available { border-color: #6fb3d6; }
+.presentation.p-stop-failed, .presentation.p-failed { border-color: #e2a7a2; background: var(--error-bg); }
+.chip.cleanup-pending { margin-left: 6px; }

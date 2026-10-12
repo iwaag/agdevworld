@@ -240,6 +240,7 @@ node cli/wfe.ts help          # from the checkout (or: npm run wfe -- help)
 | `add-repo` | `git submodule add`, as the project view does |
 | `workflow new`, `validate`, `approve`, `arrange` | workflows: template, validation, approvals, auto-arrange |
 | `run create`, `list`, `show`, `check`, `access`, `start`, `complete`, `ask`, `answer`, … | workflow runs (docs/runs.md) |
+| `present register|start|status|stop|reconcile` | presentations of a run's result (docs/presentations.md) |
 | `serve` | build the UI and start the service for this registry |
 
 `--registry` / `WFE_REGISTRY`, `--area` / `WFE_AREA` and `--port` /
@@ -325,6 +326,12 @@ npm run build && node checks/runs.ts [--repeat 20] [--keep]
 project and private service (port 8198): presets, the inspector's icon and
 color, saving, and that a custom color keeps the run state's words, glyph,
 pill and ring. `npm run build && node checks/appearance.ts [--keep]`.
+
+`checks/review.ts` (p7) checks the review on its own project, private
+service (port 8199) and a real presentation instance: the run view's one
+review link, the review screen with the running result and its
+explanation, the answer link, what is not served, and the run view after
+the stop. `npm run build && node checks/review.ts [--keep]`.
 
 These start their own service on a temporary area and registry (after
 `npm run build`):

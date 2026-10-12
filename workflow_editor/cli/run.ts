@@ -118,7 +118,7 @@ Dependent nodes stay blocked. Writes run.json.`,
 
 Discontinues one node, or (without <node>) the whole run: every pending,
 running or waiting node is cancelled in the same entry. Final. Writes run.json.`,
-  ask: `wfe run ask <run> [<node>] --question <text> --to <who> [--id q<n>] [--about-plan] [--subject <path>]...
+  ask: `wfe run ask <run> [<node>] --question <text> --to <who> [--id q<n>] [--about-plan] [--subject <path>]... [--presentation <p>]
 
 Records a question (ids q1, q2, … unless --id). With <node>, the running node
 then waits on it and <who> holds the next move. A question from _plan needs
@@ -126,7 +126,9 @@ plan.md written first and records which plan.md it asks about. --about-plan asks
 about a revised plan.md later in the run (the same evidence: its hash), when
 the person's input changed the agreed work. From the result-confirmation node
 (confirms: result) the question presents the deliverables with --subject
-(project-relative files, written first; recorded by hash). Writes run.json.`,
+(project-relative files, written first; recorded by hash), or a served
+presentation with --presentation <p> (wfe present): its files by hash and its
+revision; the answer then binds that revision only. Writes run.json.`,
   answer: `wfe run answer <run> <question> --answer <text> [--from <person>]
 
 Records an answer to that question. The waiting node stays waiting until the
@@ -486,8 +488,9 @@ export async function runCommand(c: RunCli): Promise<number> {
         ? op({ op: 'node.cancel', node: args[1], reason: need(c, 'reason', 'why it is discontinued') }, () => `Recorded: ${args[1]} cancelled.`)
         : (async () => {
           const r = await ref()
-          const rec = await wrap(() => c.exec().cancel(ws, r, by ?? 'person', need(c, 'reason', 'why the run is discontinued'), 'cli'))
-          return report(r, rec, 'Recorded: the run is cancelled. An executing attempt is terminated by the executor; nothing it reports afterwards is recorded.')
+          const { record: rec, cleanup } = await wrap(() => c.exec().cancel(ws, r, by ?? 'person', need(c, 'reason', 'why the run is discontinued'), 'cli'))
+          const bad = cleanup.filter(x => !x.ok)
+          return report(r, rec, `Recorded: the run is cancelled. An executing attempt is terminated by the executor; nothing it reports afterwards is recorded.${cleanup.length ? `\nPresentations: ${cleanup.map(x => `${x.presentation} ${x.ok ? 'stopped' : `NOT STOPPED (${x.detail}); retry: wfe present stop ${runKey(r)} --all`}`).join('; ')}` : ''}${bad.length ? '' : ''}`)
         })()
     case 'stop': {
       const r = await ref()
@@ -499,7 +502,7 @@ export async function runCommand(c: RunCli): Promise<number> {
       const res = await wrap(() => c.exec().resume(ws, r, by ?? 'person', need(c, 'reason', 'the resume instruction: what the executor should do now'), 'cli', receipt))
       return report(r, res.record, `Recorded: resumed.${res.job ? ` Queued job ${res.job.id} (${res.job.state}).` : ''}`)
     }
-    case 'ask': return op({ op: 'question.ask', question: c.opt('id') ?? '', node: args[1], text: need(c, 'question', 'the question'), to: need(c, 'to', 'to whom it is addressed'), ...(c.flag('about-plan') ? { plan: true } : {}), ...(c.opts('subject').length ? { subjects: c.opts('subject').map(p => projectPath(ws, p)) } : {}) },
+    case 'ask': return op({ op: 'question.ask', question: c.opt('id') ?? '', node: args[1], text: need(c, 'question', 'the question'), to: need(c, 'to', 'to whom it is addressed'), ...(c.flag('about-plan') ? { plan: true } : {}), ...(c.opts('subject').length ? { subjects: c.opts('subject').map(p => projectPath(ws, p)) } : {}), ...(c.opt('presentation') ? { presentation: c.opt('presentation') } : {}) },
       rec => { const q = Object.values(rec.questions).at(-1)!; return `Recorded question ${q.id} to ${q.to}${q.node ? `; ${q.node} waits on it` : ''}.` })
     case 'answer': {
       if (!args[1]) throw c.usage('<question> is required')

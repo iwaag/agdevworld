@@ -6,8 +6,8 @@
 // edits a definition, and recording an answer does not wake any agent.
 import { backendFact } from '../shared/backend.ts'
 import type { RunResponse } from '../shared/api.ts'
-import { holderOf, questionState, runKey, situation, type NodeRecord, type Question, type RunRecord } from '../shared/run.ts'
-import { api, ApiError, type RunExecView, type RunNotifyView } from './api.ts'
+import { holderOf, isOpen, questionState, runKey, situation, type NodeRecord, type Question, type RunRecord } from '../shared/run.ts'
+import { api, ApiError, type PresentationView, type RunExecView, type RunNotifyView } from './api.ts'
 import { Canvas, STATE_GLYPH, TYPE_LABEL } from './canvas.ts'
 import { splitCounts, reportStep } from '../shared/compile.ts'
 import { stepFacts, stepLabel } from './inspector.ts'
@@ -74,6 +74,7 @@ export function renderRunView(root: HTMLElement, wsId: string, workflow: string,
   let execView: RunExecView | null = null
   let notifyView: RunNotifyView | null = null
   let execError = ''
+  let presentViews: PresentationView[] = [] // what this host observes of the run's presentations (p7)
 
   const crumbs = h('div.crumbs')
   const refreshButton = h('button', { title: 'Re-read the run now', onclick: () => void load({}) }, 'Refresh')
@@ -102,6 +103,7 @@ export function renderRunView(root: HTMLElement, wsId: string, workflow: string,
       if (!rev) {
         try { execView = await api.runExec(wsId, workflow, run); execError = '' } catch (e) { execView = null; execError = (e as Error).message }
         notifyView = await api.runNotify(wsId, workflow, run).catch(() => null)
+        presentViews = r.record?.presentations ? (await api.runPresentations(wsId, workflow, run).catch(() => ({ presentations: [] }))).presentations : []
       }
       loadError = ''
       if (r.record) shown = r
@@ -184,9 +186,23 @@ export function renderRunView(root: HTMLElement, wsId: string, workflow: string,
         ex.failed.length ? line('Failed', ex.failed.map(n => nodeLink(n)), 'error') : null,
         ex.blocked.length ? line('Blocked', ex.blocked.map(n => nodeLink(n)), 'warn') : null,
         rec.cancelled ? line('Cancelled', [`by ${rec.cancelled.by}: ${rec.cancelled.reason}`], 'error') : null,
-        rec.decisions.length ? line('Decision', [`${rec.decisions.at(-1)!.decision} by ${rec.decisions.at(-1)!.by}`], rec.decisions.at(-1)!.decision === 'accepted' ? 'ok' : 'error') : null),
+        rec.decisions.length ? line('Decision', [`${rec.decisions.at(-1)!.decision} by ${rec.decisions.at(-1)!.by}`, ...(rec.decisions.at(-1)!.decision === 'accepted' && rec.execution.state !== 'completed' && !rec.cancelled ? [h('span.chip.warn.cleanup-pending', { title: 'The result is accepted; the run completes after what it serves is stopped and its last steps are done' }, 'accepted · cleanup pending')] : [])], rec.decisions.at(-1)!.decision === 'accepted' ? 'ok' : 'error') : null),
+      reviewLink(rec) ?? '',
       h('p.run-note', '“Running” on a node means the executor recorded a start. Whether a process is executing now is the execution host\'s fact, shown under Execution; the time since the last update says neither.'),
     )
+  }
+
+  // The one-click review (p7): the latest live presentation, prominently;
+  // a recorded but not served one says so instead of offering a dead link.
+  function reviewLink(rec: RunRecord): HTMLElement | null {
+    if (rev || !rec.presentations) return null
+    const live = presentViews.filter(v => v.live).at(-1)
+    if (live) return h('div.review-link', h('a.button.primary', { href: live.url!, target: '_blank', rel: 'noopener', dataset: { presentation: live.id } }, icon('present', 'icon small'), `Open the review: ${live.title}`),
+      h('span.small', ` ${live.id} · revision ${live.revision.slice(7, 19)}${live.local ? ' · opens on this host' : ''}`))
+    const open = Object.values(rec.presentations).filter(isOpen)
+    if (open.length) return h('div.review-link.not-live', h('span.chip.warn', `${open.map(p => p.id).join(', ')} recorded as ${open[0].state}, but not served now`), h('span.small', ' — see Presentations to start it again or record its stop'))
+    const last = Object.values(rec.presentations).at(-1)!
+    return h('div.review-link.stopped', h('span.chip', `${last.id} ${last.state}`), h('span.small.muted', last.state === 'stopped' ? ' — no longer served; its files and decision stay in the run folder' : ''))
   }
 
   function situationChip(rec: RunRecord): HTMLElement | null {
@@ -282,6 +298,10 @@ export function renderRunView(root: HTMLElement, wsId: string, workflow: string,
     const card = h(`div.question.q-${st}`, { dataset: { question: q.id } })
     card.append(h('div.q-head', h('strong', q.id), chip(st === 'open' ? 'waiting' : st === 'answered' ? 'running' : st === 'taken-up' ? 'completed' : 'cancelled', st), h('span.muted.small', ` to ${q.to}${q.node ? ` · node ${q.node}` : ''} · asked by ${q.askedBy}, ${ago(q.asked)}`)))
     card.append(h('p.q-text', q.text))
+    if (q.presentation) {
+      const v = presentViews.find(x => x.id === q.presentation!.id)
+      card.append(h('p.small', 'About presentation ', h('strong', q.presentation.id), ` (revision ${q.presentation.revision.slice(7, 19)}) — `, v?.live ? h('a', { href: v.url!, target: '_blank', rel: 'noopener' }, 'open the review ↗') : h('span.muted', 'not served now')))
+    }
     q.answers.forEach((a, i) => card.append(h('div.answer', h('span.muted.small', `Answer ${i}${q.takenUp?.answer === i ? ' — taken up' : ''} · from ${a.from}${a.by !== a.from ? `, recorded by ${a.by}` : ''} via ${a.via} · ${when(a.at)}`), h('div', a.text))))
     if (q.takenUp) card.append(h('p.small.ok-text', `Taken up by ${q.takenUp.by} ${ago(q.takenUp.at)}.`))
     if (q.withdrawn) card.append(h('p.small', `Withdrawn by ${q.withdrawn.by}: ${q.withdrawn.reason}`))
@@ -346,6 +366,8 @@ export function renderRunView(root: HTMLElement, wsId: string, workflow: string,
           i.ack ? h('p.small.ok-text', `${i.ack.by}: ${i.ack.note}`) : h('p.small.muted', `${rec.executor.name} reads it at the next node boundary; no node starts before it is acknowledged.`))))))
     }
 
+    if (rec.presentations) side.append(section('Presentations', ...presentationPanel(rec)))
+
     const rel: (Node | null)[] = []
     if (r!.predecessor) rel.push(h('div', 'Predecessor: ', h('a', { href: runHash(wsId, r!.predecessor.ref) }, r!.predecessor.ref)))
     const input = rec.input
@@ -382,6 +404,35 @@ export function renderRunView(root: HTMLElement, wsId: string, workflow: string,
       const el = side.querySelector<HTMLTextAreaElement | HTMLInputElement>(`[data-focus-key="${CSS.escape(focusKey)}"]`)
       if (el) { el.focus(); if (caret && caret[0] !== null) el.setSelectionRange(caret[0], caret[1]) }
     }
+  }
+
+  // Presentations (p7): the record's state beside this host's observation;
+  // a link only while it is observed serving. Start again (recovery) and
+  // stop are the person's operations as well as the executor's.
+  function presentationPanel(rec: RunRecord): (Node | null)[] {
+    const out: (Node | null)[] = []
+    const act = async (p: string, action: 'start' | 'stop') => {
+      const name = actor.trim()
+      if (!name) { opNotice = { kind: 'error', text: 'Enter your name first (who asks for it).' }; render(); return }
+      try { await api.presentation(wsId, workflow, run, p, action, name); opNotice = { kind: 'ok', text: action === 'start' ? `Presentation ${p} is served.` : `Presentation ${p}: stop verified.` } } catch (e) { opNotice = { kind: 'error', text: `${action === 'start' ? 'Start' : 'Stop'} of ${p} failed: ${(e as Error).message}` } }
+      await load({})
+    }
+    const finished = !!rec.cancelled || rec.execution.state === 'completed'
+    for (const p of Object.values(rec.presentations ?? {}).slice().reverse()) {
+      const v = presentViews.find(x => x.id === p.id)
+      const asked = Object.values(rec.questions).filter(q => q.presentation?.id === p.id)
+      const decided = rec.decisions.filter(d => d.confirmation?.presentation?.id === p.id)
+      const STATE: Record<string, string> = { registered: 'completed', available: 'running', stopped: 'cancelled', failed: 'failed', 'stop-failed': 'failed' }
+      out.push(h(`div.presentation.p-${p.state}`, { dataset: { presentation: p.id } },
+        h('div.q-head', h('strong', p.id), chip(STATE[p.state] ?? 'pending', p.state), h('span.muted.small', ` ${p.title} · from ${p.node} · revision ${p.revision.slice(7, 19)} · ${p.files.length} files`)),
+        v?.live ? h('p.small', h('a.button.small-btn', { href: v.url!, target: '_blank', rel: 'noopener' }, 'Open the review ↗'), h('span.muted', ` ${v.url}${v.local ? ' (this host)' : ''}`))
+          : h('p.small.muted', isOpen(p) ? `Recorded ${p.state}, not served now${v?.observed ? `: ${v.observed.detail}` : ''}.` : p.state === 'stopped' ? `Stopped${p.last ? ` ${ago(p.last.at)}` : ''}: no longer served. ${p.last?.detail ?? ''}` : p.state === 'failed' ? `The last start failed: ${p.last?.detail ?? ''}` : 'Not served yet.'),
+        asked.length ? h('p.small', `Asked about in ${asked.map(q => `${q.id} (${questionState(q)})`).join(', ')}${decided.length ? `; result ${decided.map(d => d.decision).join(', ')} from ${decided.map(d => d.confirmation!.question).join(', ')}` : ''}.`) : null,
+        rev ? null : h('div.row.tight',
+          !finished && !v?.live ? h('button', { onclick: () => void act(p.id, 'start'), title: 'Serve this revision again on this host' }, p.state === 'registered' ? 'Start' : 'Start again') : null,
+          isOpen(p) || v?.live ? h('button', { onclick: () => void act(p.id, 'stop'), title: 'Stop the run\'s own instance and verify it is gone' }, p.state === 'stop-failed' ? 'Retry stop' : 'Stop') : null)))
+    }
+    return out
   }
 
   // What runs, what waits and what is published: the record's control state
@@ -530,7 +581,8 @@ export function renderRunView(root: HTMLElement, wsId: string, workflow: string,
     try {
       const v = await api.runExec(wsId, workflow, run)
       const nv = await api.runNotify(wsId, workflow, run).catch(() => null)
-      if (JSON.stringify(v) !== JSON.stringify(execView) || JSON.stringify(nv) !== JSON.stringify(notifyView)) { execView = v; notifyView = nv; execError = ''; renderSide(); renderSummary(shown) }
+      const pv = shown.record.presentations ? (await api.runPresentations(wsId, workflow, run).catch(() => ({ presentations: presentViews }))).presentations : []
+      if (JSON.stringify(v) !== JSON.stringify(execView) || JSON.stringify(nv) !== JSON.stringify(notifyView) || JSON.stringify(pv) !== JSON.stringify(presentViews)) { execView = v; notifyView = nv; presentViews = pv; execError = ''; renderSide(); renderSummary(shown) }
     } catch (e) { if (!execError) { execError = (e as Error).message; renderSide() } }
   }, 3000)
 

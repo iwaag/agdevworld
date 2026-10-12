@@ -70,11 +70,12 @@ person's same-origin rights):
 | `/.wfe-present/shutdown` | `POST`, with the owner token in `x-wfe-present-token`; anything else is refused |
 
 Nothing outside the presentation folder is served: not the workspace, the
-run's other files, the area's configuration or the store. Every response
-carries `Content-Security-Policy` with `frame-ancestors 'self'` and the
-explanation panel's own script-free policy; `content/` keeps the result's
-own scripts. At start the server checks every manifest hash and refuses to
-start on a mismatch.
+run's other files (not even `manifest.json` or the raw `review.md`), the
+area's configuration or the store. The review screen is served with a
+script-free policy (`default-src 'none'`, frames from itself only, not
+framable); `content/` keeps the result's own scripts and may only be framed
+by the review screen. At start the server checks every manifest hash and
+refuses to start on a mismatch.
 
 The explanation panel names where the answer belongs: the run's request
 topic when the run came from Zulip, otherwise the run view in agdevworld
@@ -149,7 +150,7 @@ manage instances in `present.sqlite`:
 | --- | --- |
 | A question waits for the person (no process runs) | stays served |
 | `run.stop` — the run is held, resumable | stays served: a paused review keeps its presentation |
-| `run.cancel` — final | the cancellation is recorded first; then every open presentation of the run is stopped through the cancellation's own cleanup path (`ExecStore.cancel` → `stopRun`), whatever successors the graph has. Failures are recorded as `stop-failed`, shown beside the cancellation, and retried with `wfe present stop <run> --all`; the run stays `cancelled` |
+| `run.cancel` — final | the cancellation is recorded first; then every open presentation of the run is stopped through the cancellation's own cleanup path (`ExecStore.cancel` → `Presenter.stop(…, 'all')`), whatever successors the graph has. Failures are recorded as `stop-failed`, shown beside the cancellation, and retried with `wfe present stop <run> --all`; the run stays `cancelled` |
 | Result accepted, cleanup not done | the run view and messages say **accepted; cleanup pending** |
 | Execution completion | refused while a presentation is open (`presentation-open`): the last completion — the final report under the default policy — waits until shutdown is verified |
 

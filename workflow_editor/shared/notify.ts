@@ -66,6 +66,11 @@ export interface RenderContext {
   requestTopic?: string // a link to the run's request topic, when it has one
   runTopic?: string // a link to the run's progress topic
   decision?: { decision: 'accepted' | 'rejected'; by: string; question?: string; from?: string } // the latest result decision now
+  // p7: where a presentation is served now (resolved from this host's
+  // state; `local`: the address opens only on the execution host), and
+  // which presentations are still open (cleanup pending).
+  presentation?: (id: string) => { url: string; local: boolean; live: boolean } | null
+  openPresentations?: string[]
 }
 
 const cut = (text: string, n: number) => { const t = text.replace(/\s+/g, ' ').trim(); return t.length > n ? `${t.slice(0, Math.max(0, n - 1))}…` : t }
@@ -83,12 +88,20 @@ function lines(e: NotableEvent, c: RenderContext): { head: string; free: string;
   switch (e.type) {
     case 'accepted': return { head: `**Request received** — ${c.executor} performs it as run ${c.ref}.`, free: '', tail: [...(c.runTopic ? [`Progress: ${c.runTopic}`] : []), ...(c.next ? [`Next: ${c.next}`] : []), 'Reply here: answers to questions, further instructions.'] }
     case 'started': return { head: `**Started** — ${c.executor} took up the request${c.request ? ':' : '.'}`, free: c.request ? `“${c.request}”` : '', tail: [...(c.requestTopic ? [`Request and conversation: ${c.requestTopic}`] : []), ...(c.next ? [`Next: ${c.next}`] : [])] }
+    case 'presented': {
+      const at = e.presentation ? c.presentation?.(e.presentation) : null
+      const where = at ? (at.live ? `[Open the review](${at.url})${at.local ? ' — opens on the execution host (this address is local to it)' : ''}` : `no longer served (${at.url} was its address)`) : 'its address is not known on this host'
+      return { head: `**Ready for review — ${e.title ?? e.presentation}** (${e.presentation}): the result and what to check, on one screen.`, free: '', tail: [where, `Your answer goes ${inRequest ? 'here' : 'to the question that follows'}; the review screen says where.`] }
+    }
+    case 'cleanup-failed': return { head: `**Cleanup failed — presentation ${e.presentation}** could not be verified as stopped:`, free: e.text, tail: [`Next: retry with \`wfe present stop ${c.ref} --all\` on the execution host; the result decision stands.`] }
     case 'question': {
       const stale = e.question && !c.openQuestion(e.question)
       return {
         head: `**Question for ${e.holder}**${e.step === '_plan' ? ' — agree to the plan' : e.confirms ? ' — confirm the result' : node ? ` — ${node}` : ''} (${e.question})${stale ? ' — already answered or closed; no action needed' : ''}`,
         free: firstLine(e.text) === e.text.trim() ? e.text.trim() : e.text.trim().replace(/\n+/g, ' / '),
-        tail: [...(doc ? [`${e.step === '_plan' ? 'Plan' : 'Document'}: ${doc}`] : []), ...(subject ? [`Deliverables: ${subject}`] : []), ...(stale ? [] : [`Answer: ${c.answerRoute(e.question ?? '')}`])],
+        tail: [...(doc ? [`${e.step === '_plan' ? 'Plan' : 'Document'}: ${doc}`] : []), ...(subject ? [`Deliverables: ${subject}`] : []),
+          ...(e.presentation ? [(p => `Review: ${p ? (p.live ? `[presentation ${e.presentation}](${p.url})${p.local ? ' (opens on the execution host)' : ''}` : `presentation ${e.presentation} is no longer served`) : `presentation ${e.presentation}`}`)(c.presentation?.(e.presentation) ?? null)] : []),
+          ...(stale ? [] : [`Answer: ${c.answerRoute(e.question ?? '')}`])],
       }
     }
     case 'answered': return inRequest
@@ -114,7 +127,7 @@ function lines(e: NotableEvent, c: RenderContext): { head: string; free: string;
         ...(inRequest ? ['This request is complete; a new request needs a new request topic.'] : [])],
     }
     case 'decided': return e.confirmation
-      ? { head: `**Result ${e.decision}** — ${e.confirmation.from}'s answer to ${e.confirmation.question}, recorded by ${e.by}.`, free: '', tail: subject ? [`Confirmed: ${subject}`] : [] }
+      ? { head: `**Result ${e.decision}** — ${e.confirmation.from}'s answer to ${e.confirmation.question}, recorded by ${e.by}.`, free: '', tail: [...(subject ? [`Confirmed: ${subject}`] : []), ...(e.presentation ? [`Confirmed: presentation ${e.presentation}, the revision it showed.`] : []), ...(c.openPresentations?.length ? [`Cleanup pending: presentation ${c.openPresentations.join(', ')} still served; the run completes after it is stopped.`] : [])] }
       : { head: `**Result ${e.decision}** by ${e.by}.`, free: e.text ? `Evidence: ${e.text}` : '', tail: [] }
     case 'cancelled': return { head: `**Run cancelled** by ${e.by}:`, free: e.text, tail: [] }
   }

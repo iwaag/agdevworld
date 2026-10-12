@@ -277,7 +277,7 @@ export function createHandler(config: ServiceConfig) {
         }
         const ref: RunRef = { workflow: parts[4] ?? '', run: parts[5] ?? '' }
         const sub = parts[6]
-        if (!ref.workflow || !ref.run || (parts.length > 7 && sub !== 'checkpoints')) throw new RequestError(404, 'not found')
+        if (!ref.workflow || !ref.run || (parts.length > 7 && sub !== 'checkpoints' && sub !== 'presentations')) throw new RequestError(404, 'not found')
         if (!sub && method === 'GET') return send(res, 200, await runResponse(ws, ref, { rev: url.searchParams.get('rev') || undefined }))
         if (sub === 'exec' && method === 'GET') return send(res, 200, needExec().runView(ws.reg.id, ref))
         // Zulip coordination of this run: its topic, what is still owed, problems.
@@ -287,11 +287,35 @@ export function createHandler(config: ServiceConfig) {
           try { return send(res, 200, n.runStatus((await ws.readProject()).project?.id ?? '', ref)) } finally { n.close() }
         }
         if (sub === 'checkpoints' && parts[7] && parts[8] === 'publish' && method === 'POST') return send(res, 200, await needExec().publishCheckpoint(Number(parts[7])))
+        // Presentations (p7): what each record says and what this host
+        // observes now; the person's start (recovery) and stop.
+        if (sub === 'presentations') {
+          const { Presenter } = await import('./present.ts')
+          if (!parts[7] && method === 'GET') {
+            const rec = (await runResponse(ws, ref)).record
+            if (!rec?.presentations) return send(res, 200, { presentations: [] })
+            const pr = new Presenter({ registryFile: config.registryFile, area })
+            try { return send(res, 200, { presentations: await pr.view(ws, rec) }) } finally { pr.close() }
+          }
+          if (parts[7] && (parts[8] === 'start' || parts[8] === 'stop') && method === 'POST') {
+            const input = await body(req) as Record<string, unknown>
+            const by = typeof input.by === 'string' && input.by.trim() ? input.by.trim() : ''
+            if (!by) throw new RequestError(400, 'by is required: the name of who asks for it')
+            const pr = new Presenter({ registryFile: config.registryFile, area, by })
+            try {
+              if (parts[8] === 'start') return send(res, 200, { ok: true, ...(await pr.start(ws, ref, parts[7], { by })) })
+              const results = await pr.stop(ws, ref, parts[7] === 'all' ? 'all' : parts[7], { by })
+              return send(res, results.every(x => x.ok) ? 200 : 409, { ok: results.every(x => x.ok), results })
+            } finally { pr.close() }
+          }
+          throw new RequestError(404, `no route for ${method} ${url.pathname}`)
+        }
         if (sub === 'file' && method === 'GET') return send(res, 200, await readRunFile(ws, ref, url.searchParams.get('path') ?? '', { rev: url.searchParams.get('rev') ?? undefined }))
         if (sub === 'ops' && method === 'POST') {
           const input = await body(req) as Record<string, unknown>
-          const offered = OPS.filter(o => o !== 'run.create' && !o.startsWith('attempt.'))
-          if (!(offered as readonly string[]).includes(input.op as string)) throw new RequestError(400, `op must be one of ${offered.join(', ')} (attempts are the execution host's)`)
+          // Attempts and presentation facts are the execution host's; adjustments have their own route.
+          const offered = OPS.filter(o => o !== 'run.create' && !o.startsWith('attempt.') && !o.startsWith('presentation.') && (o as string) !== 'run.adjust')
+          if (!(offered as readonly string[]).includes(input.op as string)) throw new RequestError(400, `op must be one of ${offered.join(', ')} (attempts and presentation facts are the execution host's)`)
           const by = typeof input.by === 'string' ? input.by : ''
           if (!by.trim()) throw new RequestError(400, 'by is required: the name of who records this')
           const expectSeq = typeof input.expectSeq === 'number' ? input.expectSeq : undefined
@@ -301,7 +325,7 @@ export function createHandler(config: ServiceConfig) {
           // The person's control operations go through execution management,
           // which also terminates, queues or publishes as they require.
           if (x && op.op === 'run.stop') { const rec = await x.stop(ws, ref, by, reason, 'browser'); return send(res, 200, { ok: true, seq: rec.seq, record: rec }) }
-          if (x && op.op === 'run.cancel') { const rec = await x.cancel(ws, ref, by, reason, 'browser'); return send(res, 200, { ok: true, seq: rec.seq, record: rec }) }
+          if (x && op.op === 'run.cancel') { const { record: rec, cleanup } = await x.cancel(ws, ref, by, reason, 'browser'); return send(res, 200, { ok: true, seq: rec.seq, record: rec, cleanup }) }
           if (x && op.op === 'run.resume') { const r = await x.resume(ws, ref, by, reason, 'browser', typeof op.receipt === 'string' ? op.receipt : undefined); return send(res, 200, { ok: true, seq: r.record.seq, record: r.record, job: r.job }) }
           const r = await runOp(ws, ref, op as unknown as OpInput, { by, via: 'browser', expectSeq })
           const extra: Record<string, unknown> = { duplicate: r.duplicate ?? false }

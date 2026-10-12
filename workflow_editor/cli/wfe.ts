@@ -4,7 +4,7 @@
 // service, so no command needs it running. `wfe help` is the index.
 import { spawn } from 'node:child_process'
 import { realpathSync } from 'node:fs'
-import { dirname, join, resolve } from 'node:path'
+import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import type { Diagnostic, RepositoryStatus, WorkflowSummary } from '../shared/api.ts'
 import { autoArrange } from '../shared/layout.ts'
@@ -254,6 +254,30 @@ A person's request to the executor (autolab): creates the run with their
 words as braindump.md and queues its start. The same receipt twice queues
 once. Refused while another run of the executor holds the workspace (it has
 begun and has not completed or been cancelled); use another workspace.`,
+  present: `wfe present <subcommand> …   (presentations of a run's result; docs/presentations.md)
+
+register <run> <node> --source <dir> --entry <file> --review <file.md> --title <text>
+                                  freeze the files of <dir> (project-relative) as the
+                                  run's next presentation (p1, p2 …): they are copied into
+                                  devdocs/runs/<wf>/<run>/presentations/<p>/ with the
+                                  review text and a manifest of hashes; the revision is
+                                  the manifest's digest. From a running node, by the
+                                  executing attempt (WFE_ATTEMPT). Later edits of <dir>
+                                  never change a registered presentation
+start <run> <p>                   serve it on this host, in a session of its own (it
+                                  outlives the attempt, a human wait, a stopped run and
+                                  a service restart). Records it available only after
+                                  its identity, review screen and entry answered. A
+                                  second start returns the instance that serves it
+stop <run> <p> | stop <run> --all stop the run's own instances and verify they are gone
+                                  (process ended, port no longer answers); records
+                                  stopped, or stop-failed (retry). Repeating is harmless
+status [<run>]                    what each presentation's record says and what this host
+                                  observes now; the review link only when it is live
+reconcile                         after a restart: mark instances whose process is gone
+Ask about a presentation: wfe run ask <run> <node> --presentation <p> … (the
+result-confirmation question; the answer binds that revision). Host settings:
+<area>/present.json {bind, publicBase, ports, answerBase}.`,
   exec: `wfe exec <subcommand> …   (the executor's interface; JSON output)
 
 claim [--backend <text>] [--profiles-json <{name: backend}>] [--contract <name>=<sha256>]
@@ -415,6 +439,7 @@ Projects and workspaces
   intake <subcommand>       requests from Zulip: status, messages, receive, process … (autolab fetches)
   exec <subcommand>         the executor's interface: claim, started, finished, stops, reconcile …
   notify <subcommand>       Zulip coordination: status, deliveries, claim, resolve … (autolab delivers)
+  present <subcommand>      presentations of a run's result: register, start, status, stop, reconcile
 
 Workflows (by file name or id)
   workflow new <id>         create devdocs/workflows/<id>.yaml from the template
@@ -630,6 +655,65 @@ let execStore: ExecStore | undefined
 async function openExec(p: Parsed): Promise<ExecStore> {
   execStore ??= new ExecStore({ registryFile: registryFile(p), area: areaDir(p), gitea: await giteaOf(p) })
   return execStore
+}
+
+// Presentations of a run's result (p7): frozen bundles in the run folder,
+// served on this host by instances that outlive the attempt.
+async function cmdPresent(p: Parsed): Promise<number> {
+  const [sub, runArg, third] = p.positional
+  const { Presenter } = await import('../server/present.ts')
+  const { registerPresentation, resolveRef } = await import('../server/runs.ts')
+  const pr = new Presenter({ registryFile: registryFile(p), area: areaDir(p), by: opt(p, 'by') })
+  const need = (k: string) => { const v = opt(p, k); if (!v?.trim()) throw new UsageError(`--${k} is required`); return v }
+  try {
+    if (sub === 'reconcile') { const notes = await pr.reconcile(); out(notes.join('\n') || 'Every recorded instance is serving or stopped as recorded.', { ok: true, notes }); return 0 }
+    const ws = await workspace(p)
+    const ref = async () => { if (!runArg) throw new UsageError(`${sub} <run> …`); return resolveRef(ws, runArg) }
+    switch (sub) {
+      case 'register': {
+        const r = await ref()
+        if (!third) throw new UsageError('register <run> <node> --source <dir> --entry <file> --review <file.md> --title <text>')
+        const attempt = opt(p, 'attempt') ?? process.env.WFE_ATTEMPT ?? undefined
+        const rel = (x: string) => { const a = resolve(x); const r2 = relative(ws.root, a); return !r2.startsWith('..') && !isAbsolute(r2) && (isAbsolute(x) || relative(ws.root, process.cwd()) !== '') ? (r2.split(sep).join('/') || '.') : x }
+        const res = await registerPresentation(ws, r, { node: third, source: rel(need('source')), entry: need('entry'), review: rel(need('review')), title: need('title') }, { by: opt(p, 'by'), via: 'cli', attempt, receipt: opt(p, 'receipt') })
+        const pz = res.presentation
+        out(`${res.duplicate ? 'Already registered (same receipt): ' : 'Registered '}presentation ${pz.id} of ${r.workflow}/${r.run}: ${pz.files.length} files frozen in ${pz.folder}/ (revision ${pz.revision.slice(7, 19)}…).\nNext: wfe present start ${r.workflow}/${r.run} ${pz.id}`, { ok: true, presentation: pz, duplicate: !!res.duplicate })
+        return 0
+      }
+      case 'start': {
+        const r = await ref()
+        if (!third) throw new UsageError('start <run> <presentation>')
+        const res = await pr.start(ws, r, third, { by: opt(p, 'by') })
+        out(res.state === 'starting' ? `Presentation ${third} is being started by another request (instance ${res.instance.id}); ask again in a few seconds.`
+          : `${res.reused ? 'Already served' : 'Serving'} presentation ${third}: ${res.url}${res.local ? ' (opens on this host only)' : ''}\nInstance ${res.instance.id}, pid ${res.instance.pid}; it keeps serving after this attempt ends. Stop: wfe present stop ${r.workflow}/${r.run} ${third}`, { ok: true, ...res })
+        return 0
+      }
+      case 'stop': {
+        const r = await ref()
+        const which = p.flags.has('all') ? 'all' : third
+        if (!which) throw new UsageError('stop <run> <presentation> | stop <run> --all')
+        const res = await pr.stop(ws, r, which, { by: opt(p, 'by') })
+        const bad = res.filter(x => !x.ok)
+        out(res.length ? res.map(x => `${x.presentation}: ${x.ok ? 'stopped' : 'NOT VERIFIED'} — ${x.detail}`).join('\n') : 'Nothing of this run is served or open.', { ok: !bad.length, results: res })
+        return bad.length ? 1 : 0
+      }
+      case 'status': {
+        const refs = runArg ? [await ref()] : (await import('../server/runs.ts').then(m => m.listRuns(ws))).map(x => ({ workflow: x.workflow, run: x.run }))
+        const views = []
+        for (const r of refs) {
+          const rec = (await import('../server/runs.ts').then(m => m.readRun(ws, r))).record
+          if (!rec?.presentations) continue
+          views.push({ ref: `${r.workflow}/${r.run}`, presentations: await pr.view(ws, rec) })
+        }
+        out(views.length ? views.flatMap(v => [v.ref, ...v.presentations.map(x => `  ${x.id} ${x.state.padEnd(11)} ${x.title} — ${x.live ? `LIVE ${x.url}${x.local ? ' (this host)' : ''}` : x.observed ? `not live: ${x.observed.detail}${['available', 'stop-failed'].includes(x.state) ? ' (recover: wfe present start or stop)' : ''}` : 'never served'}  revision ${x.revision.slice(7, 19)}…`)]).join('\n') : 'No presentations.', { ok: true, runs: views })
+        return 0
+      }
+    }
+  } catch (e) {
+    if (e instanceof RequestError) throw new Refused(e.message, e.detail)
+    throw e
+  } finally { pr.close() }
+  throw new UsageError('wfe present register|start|stop|status|reconcile')
 }
 
 // The executor's interface to this host's execution management. Every
@@ -930,7 +1014,7 @@ async function cmdDashboard(p: Parsed): Promise<number> {
 }
 
 const COMMANDS: Record<string, (p: Parsed) => Promise<number>> = {
-  run: cmdRun, project: cmdProject, repo: cmdRepo, dashboard: cmdDashboard, exec: cmdExec, request: cmdRequest, notify: cmdNotify, intake: cmdIntake,
+  run: cmdRun, present: cmdPresent, project: cmdProject, repo: cmdRepo, dashboard: cmdDashboard, exec: cmdExec, request: cmdRequest, notify: cmdNotify, intake: cmdIntake,
   create: cmdCreate, register: cmdRegister, list: cmdList, status: cmdStatus, validate: cmdValidate,
   approve: cmdApprove, arrange: cmdArrange, 'add-repo': cmdAddRepo, workflow: cmdWorkflow, serve: cmdServe, setup: cmdSetup,
   version: cmdVersion,

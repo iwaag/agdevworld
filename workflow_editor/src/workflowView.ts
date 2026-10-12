@@ -1,10 +1,14 @@
-// Workflow editor: top area (name, intent, validation, save, approvals),
-// canvas and inspector. The file on disk is the authority; the view holds a
-// draft until an explicit Save, and guards the draft against external changes.
+// Workflow editor: a slim header (crumbs, save), a title band (name,
+// purpose, approval states, validation and the two explicit entry points —
+// "Intent & approvals" and "Workflow settings"), the canvas with its toolbar,
+// and an inspector that opens for a selection or for settings (p8). The file
+// on disk is the authority; the view holds a draft until an explicit Save,
+// and guards the draft against external changes. Opening or closing a panel
+// never saves or discards anything: every panel edits the same draft.
 import type { FileProblem, WorkflowResponse } from '../shared/api.ts'
 import { approvalStates, canonicalJson, type ApprovalState } from '../shared/canonical.ts'
 import { compile } from '../shared/compile.ts'
-import { NODE_TYPES, cloneWorkflow, type ApprovalKind, type NodeType, type Workflow } from '../shared/model.ts'
+import { NODE_TYPES, cloneWorkflow, type ApprovalKind, type Issue, type NodeType, type Workflow } from '../shared/model.ts'
 import { instantiate, type NodeTemplate } from '../shared/catalog.ts'
 import { hasErrors, validateWorkflow, type ValidationContext } from '../shared/validate.ts'
 import { api } from './api.ts'
@@ -21,6 +25,14 @@ const APPROVER_KEY = 'workflow-editor.approver'
 function stored(key: string, fallback: string) { try { return localStorage.getItem(key) ?? fallback } catch { return fallback } }
 function store(key: string, value: string) { try { localStorage.setItem(key, value) } catch { /* per-viewer convenience only */ } }
 
+// What each base type is for, in the Add node palette.
+const TYPE_HINT: Record<string, string> = {
+  study: 'Read, research, compare',
+  do: 'Change or produce something',
+  talk: 'Ask or agree with a person',
+  delegate: 'Hand off to another workflow (display only)',
+}
+
 export function renderWorkflowView(root: HTMLElement, wsId: string, file: string): ViewHandle {
   let resp: WorkflowResponse | null = null
   let saved: Workflow | null = null // last valid content read from disk
@@ -32,33 +44,63 @@ export function renderWorkflowView(root: HTMLElement, wsId: string, file: string
   let saveState = ''
   let notice = ''
   let selection: Selection = null
+  let settingsOpen = false // the inspector shows Workflow settings (explicitly opened)
+  let opener: HTMLElement | null = null // what opened the inspector, for focus on close
   let mode = stored(MODE_KEY, 'compact') as DisplayMode
   let projectName = 'Project'
   let approvals: Record<ApprovalKind, ApprovalState> | null = null
   let approvalError = ''
-  let defaultApprover = ''
   let disposed = false
   let connected = true
 
   const dirty = () => !!draft && !!saved && canonicalJson(draft) !== canonicalJson(saved)
   const readonly = () => !!problem
+  const inspectorOpen = () => !!selection || settingsOpen
 
   // ---- static structure (inputs keep focus across updates) --------------
   // Disabled until the file is loaded, so nothing typed early is overwritten.
   const nameInput = h('input.wf-name', { 'aria-label': 'Workflow name', placeholder: 'Workflow name', disabled: true })
-  const intentInput = h('textarea.intent-text', { rows: 3, 'aria-label': 'Workflow intent', placeholder: 'What this workflow is for. Everything else is reviewed against it.', disabled: true })
-  const crumbs = h('div.crumbs')
+  const intentInput = h('textarea.intent-text', { rows: 4, 'aria-label': 'Workflow intent', placeholder: 'What this workflow is for. Everything else is reviewed against it.', disabled: true })
+  intentInput.id = 'intent'
+  const approverInput = h('input#approver', { placeholder: 'approver', 'aria-label': 'Approver', size: 14, value: stored(APPROVER_KEY, '') })
+  const approveIntent = h('button', { onclick: () => void approve('intent'), title: 'Approve the saved intent' }, 'Approve intent')
+  const approveDefinition = h('button', { onclick: () => void approve('definition') }, 'Approve definition')
+  const crumbs = h('nav.crumbs', { 'aria-label': 'Breadcrumb' })
   const saveButton = h('button.primary', { onclick: () => void save() }, 'Save')
-  const refreshButton = h('button', { title: 'Re-read the file and the repositories\' Git state now', onclick: () => void load({ refresh: true }) }, 'Refresh')
+  const refreshButton = h('button.ghost-dark', { title: 'Re-read the file and the repositories\' Git state now', onclick: () => void load({ refresh: true }) }, 'Refresh')
   const saveStateEl = h('span.save-state')
-  const modeSwitch = h('div.mode-switch', { role: 'group', 'aria-label': 'Display mode' })
-  const approvalBox = h('div.approval-box')
-  const statusLine = h('div.status-line')
+  const purpose = h('p.wf-purpose')
+  const fileLine = h('p.wf-file')
+  const approvalPills = h('div.pills.approval-pills', { 'aria-label': 'Approval states' })
+  const validation = h('button.v-summary', { title: 'Validation: open the full list in Workflow settings', onclick: () => openSettings(validation, 'validation') })
+  const intentToggle = h('button.panel-toggle', { 'aria-expanded': 'false', 'aria-controls': 'intent-panel', onclick: () => toggleIntent() }, icon('person', 'icon small'), 'Intent & approvals')
+  const settingsToggle = h('button.panel-toggle', { 'aria-pressed': 'false', onclick: () => (settingsOpen ? closeInspector() : openSettings(settingsToggle)) }, icon('settings', 'icon small'), 'Workflow settings')
+  const approvalRecords = h('div.approval-records')
+  const approvalNote = h('p.small.muted')
+  const approvalErrorEl = h('p.error.small')
+  const intentPanel = h('section.intent-panel#intent-panel', { hidden: true, 'aria-label': 'Intent and approvals' },
+    h('div.intent-col',
+      h('label.panel-label', { htmlFor: 'intent' }, icon('intent', 'icon small'), 'Workflow intent (ground truth)'),
+      intentInput,
+      h('p.small.muted', 'Everything else in the workflow is reviewed against this text. Approving it records the saved text and its digest.')),
+    h('div.approval-col',
+      h('div.panel-label', 'Approvals'),
+      approvalRecords,
+      h('div.approve-actions', h('label.small', 'Declared approver ', approverInput), approveIntent, approveDefinition),
+      approvalNote, approvalErrorEl))
   const banners = h('div.banners')
-  const toolbar = h('div.toolbar')
-  const inspector = h('aside.inspector', { 'aria-label': 'Inspector' })
+  const modeSwitch = h('div.mode-switch', { role: 'group', 'aria-label': 'Display mode' })
+  const palette = h('div.palette', { hidden: true, role: 'menu', 'aria-label': 'Add node' })
+  const addButton = h('button.add-trigger', { 'aria-haspopup': 'menu', 'aria-expanded': 'false', onclick: () => togglePalette() }, icon('plus', 'icon small'), 'Add node', icon('caret', 'icon small'))
+  const arrangeButton = h('button.arrange', {
+    title: 'Lay the graph out by rank. Only positions change; approvals are unaffected.',
+    onclick: () => { if (!draft || readonly()) return; autoArrange(draft); update(false); canvas.fit() },
+  }, 'Auto-arrange')
+  const policyChip = h('button.policy-state', { title: 'Documentation policy: open Workflow settings', onclick: () => openSettings(policyChip, 'policy') })
+  const toolbar = h('div.toolbar', h('div.add-wrap', addButton, palette), h('span.toolbar-sep'), modeSwitch, arrangeButton, h('span.toolbar-fill'), policyChip)
+  const inspector = h('aside.inspector', { 'aria-label': 'Inspector', hidden: true })
   const canvas = new Canvas({
-    select: sel => { selection = sel; update(true) },
+    select: sel => { if (sel) { settingsOpen = false; opener = null } selection = sel; update(true); if (sel) revealSoon(sel) },
     move: (id, p) => {
       if (!draft || readonly()) return
       if (Object.keys(draft.nodes).some(n => !draft!.layout.nodes[n])) completeLayout(draft)
@@ -68,51 +110,103 @@ export function renderWorkflowView(root: HTMLElement, wsId: string, file: string
     connect: (from, to) => connect(from, to),
   })
   canvas.setMode(mode)
+  const hint = h('div.canvas-hint', 'Select a card to inspect it. Drag a card to move it, its right handle onto another card to connect; drag the background to pan.')
+  canvas.el.append(hint)
   const rawView = h('pre.raw')
+  const body = h('main.wf-body', h('div.canvas-col', toolbar, canvas.el, rawView), inspector)
 
   root.append(
-    h('header.wf-top',
-      h('div.wf-row1', crumbs, h('div.top-actions', modeSwitch, refreshButton, saveStateEl, saveButton)),
-      h('div.wf-row2',
-        h('div.wf-title', nameInput, approvalBox),
-        h('div.intent-box', icon('intent', 'icon intent-icon'), h('div.intent-main', h('label', { htmlFor: 'intent' }, 'Workflow Intent (Ground Truth)'), intentInput))),
-      statusLine, banners),
-    h('main.wf-body', h('div.canvas-col', toolbar, canvas.el, rawView), inspector),
+    h('header.app-header', crumbs, h('div.top-actions', refreshButton, saveStateEl, saveButton)),
+    h('section.title-band',
+      h('div.title-main', nameInput, purpose, fileLine),
+      h('div.title-side', approvalPills, h('div.title-actions', validation, intentToggle, settingsToggle))),
+    intentPanel,
+    banners,
+    body,
   )
-  intentInput.id = 'intent'
 
   nameInput.addEventListener('input', () => { if (draft) { draft.name = nameInput.value; update(false) } })
   intentInput.addEventListener('input', () => { if (draft) { draft.intent = intentInput.value; update(false) } })
 
-  for (const t of NODE_TYPES) {
-    toolbar.append(h(`button.add-node.type-${t}`, { onclick: () => addNode(t), 'aria-label': `Add ${TYPE_LABEL[t]} node` }, icon(t, 'icon small'), `+ ${TYPE_LABEL[t]}`))
+  // ---- panels ---------------------------------------------------------------
+
+  function toggleIntent(open = intentPanel.hidden === true) {
+    intentPanel.hidden = !open
+    intentToggle.setAttribute('aria-expanded', String(open))
+    intentToggle.classList.toggle('active', open)
+    if (open) intentInput.focus({ preventScroll: true })
   }
-  // The person's templates (p7/ex1, docs/catalog.md): "Add node" offers
-  // them beside the basic types; each adds an ordinary node with the
-  // template's copy, appearance and provenance.
-  const templateBar = h('span.palette-templates', { 'aria-label': 'Your node templates' })
-  toolbar.append(templateBar)
+
+  function openSettings(from: HTMLElement, section?: string) {
+    selection = null
+    settingsOpen = true
+    opener = from
+    update(true)
+    const target = section ? inspector.querySelector<HTMLElement>(`[data-section="${section}"]`) : null
+    const head = inspector.querySelector<HTMLElement>('.insp-head h3')
+    ;(target ?? head)?.scrollIntoView({ block: 'nearest' })
+    ;(target ?? head)?.focus({ preventScroll: true })
+  }
+
+  function closeInspector() {
+    const back = opener
+    const wasNode = selection?.kind === 'node' ? selection.id : null
+    selection = null
+    settingsOpen = false
+    opener = null
+    update(true)
+    if (back?.isConnected) back.focus()
+    else if (wasNode) canvas.focusCard(wasNode)
+  }
+
+  // The inspector takes width from the canvas: after it opens, the selected
+  // card is brought into view if it was covered.
+  function revealSoon(sel: NonNullable<Selection>) {
+    if (sel.kind === 'edge') return
+    requestAnimationFrame(() => { if (!disposed) canvas.reveal(sel.id) })
+  }
+
+  // ---- Add node palette (base types and the person's templates) -----------
+
+  function togglePalette(open = palette.hidden === true) {
+    if (open && (readonly() || !draft)) return
+    palette.hidden = !open
+    addButton.setAttribute('aria-expanded', String(open))
+    if (open) palette.querySelector<HTMLElement>('button:not([disabled])')?.focus()
+  }
+  const closePalette = (focusTrigger = false) => { if (!palette.hidden) { togglePalette(false); if (focusTrigger) addButton.focus() } }
+  palette.addEventListener('keydown', e => {
+    const items = [...palette.querySelectorAll<HTMLElement>('button:not([disabled]), a')]
+    const at = items.indexOf(document.activeElement as HTMLElement)
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') { e.preventDefault(); items[(at + (e.key === 'ArrowDown' ? 1 : items.length - 1)) % items.length]?.focus() }
+    if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); closePalette(true) }
+  })
+  const onOutside = (e: PointerEvent) => { if (!palette.hidden && !(e.target as Element).closest('.add-wrap')) closePalette() }
+  document.addEventListener('pointerdown', onOutside)
+
+  const typeItems = NODE_TYPES.map(t => h(`button.add-node.type-${t}`, { role: 'menuitem', onclick: () => { closePalette(); addNode(t) }, 'aria-label': `Add ${TYPE_LABEL[t]} node` },
+    icon(t, 'icon small'), h('span.item-main', h('strong', TYPE_LABEL[t]), h('span.item-hint', TYPE_HINT[t] ?? ''))))
+  // The person's templates (p7/ex1, docs/catalog.md): each adds an ordinary
+  // node with the template's copy, appearance and provenance.
+  const templateBar = h('div.palette-templates', { 'aria-label': 'Your node templates' })
+  palette.append(h('div.palette-head', 'Basic types'), h('div.palette-group', ...typeItems), h('div.palette-head', 'Your templates'), templateBar)
   let templates: NodeTemplate[] = []
   async function loadTemplates() {
     try {
       const c = await api.catalog()
-      if (c.state !== 'ok') { templates = []; templateBar.replaceChildren(h('span.chip.error', { title: c.problem }, 'your node catalog is unavailable'), h('a.small', { href: '#/nodes' }, 'User nodes')); return }
+      if (c.state !== 'ok') { templates = []; templateBar.replaceChildren(h('p.chip.error', { title: c.problem }, 'Your node catalog is unavailable'), h('a.small.palette-link', { href: '#/nodes' }, 'Open User nodes')); return }
       templates = c.catalog.templates
-      templateBar.replaceChildren(h('span.muted.small', 'Yours:'),
+      templateBar.replaceChildren(
         ...templates.map(t => h(`button.add-node.template${t.appearance?.color ? `.color-${t.appearance.color}` : ''}`, {
-          onclick: () => addFromTemplate(t.id), dataset: { template: t.id },
+          role: 'menuitem', onclick: () => { closePalette(); addFromTemplate(t.id) }, dataset: { template: t.id },
           'aria-label': `Add ${t.name} node (your template ${t.id}, a ${TYPE_LABEL[t.type] ?? t.type} node)`,
           title: `Your template ${t.id} (revision ${t.revision}), a ${TYPE_LABEL[t.type] ?? t.type} node.\nYou expect: ${t.expectation}`,
-        }, icon(t.appearance?.icon || t.type, 'icon small'), `+ ${t.name}`)),
-        h('a.small', { href: '#/nodes', title: 'Edit your node templates' }, templates.length ? 'edit…' : 'none yet — User nodes'))
-    } catch (e) { templateBar.replaceChildren(h('span.chip.error', { title: (e as Error).message }, 'templates not read')) }
+        }, icon(t.appearance?.icon || t.type, 'icon small'), h('span.item-main', h('strong', t.name), h('span.item-hint', `${TYPE_LABEL[t.type] ?? t.type} · ${t.expectation.split('\n')[0]}`)))),
+        ...(templates.length ? [] : [h('p.small.muted', 'None yet.')]),
+        h('a.small.palette-link', { href: '#/nodes', title: 'Edit your node templates' }, 'Manage templates in User nodes'))
+    } catch (e) { templateBar.replaceChildren(h('p.chip.error', { title: (e as Error).message }, 'Templates not read')) }
   }
   void loadTemplates()
-  toolbar.append(h('button.arrange', {
-    title: 'Lay the graph out by rank. Only positions change; approvals are unaffected.',
-    onclick: () => { if (!draft || readonly()) return; autoArrange(draft); update(false); canvas.fit() },
-  }, 'Auto-arrange'))
-  toolbar.append(h('span.toolbar-hint', 'Drag a card to move it, drag its right handle onto another card to connect, drag the background to pan.'))
 
   // ---- data ---------------------------------------------------------------
 
@@ -165,9 +259,9 @@ export function renderWorkflowView(root: HTMLElement, wsId: string, file: string
     const p = await api.project(wsId).catch(() => null)
     if (p?.project?.name) projectName = p.project.name
     const list = await api.workspaces().catch(() => null)
-    defaultApprover = list?.approver ?? ''
+    // The registry's approver, only into a name nobody has typed.
+    if (list?.approver && !approverInput.value && document.activeElement !== approverInput) approverInput.value = list.approver
     renderCrumbs()
-    renderApprovals()
   }
 
   // ---- edits --------------------------------------------------------------
@@ -181,9 +275,7 @@ export function renderWorkflowView(root: HTMLElement, wsId: string, file: string
     const at = freeSlot(draft, canvas.visibleCentre(), selection?.kind === 'node' ? selection.id : undefined)
     draft.nodes[id] = { type, name: '', description: '', repositories: [] }
     draft.layout.nodes[id] = at
-    selection = { kind: 'node', id }
-    update(true)
-    canvas.reveal(id)
+    selectNew(id)
   }
 
   // A node from one of the person's templates: the shared instantiation
@@ -197,9 +289,14 @@ export function renderWorkflowView(root: HTMLElement, wsId: string, file: string
     const r = instantiate(draft, t)
     draft.nodes[r.node] = r.workflow.nodes[r.node]
     draft.layout.nodes[r.node] = at
-    selection = { kind: 'node', id: r.node }
+    selectNew(r.node)
+  }
+
+  function selectNew(id: string) {
+    selection = { kind: 'node', id }
+    settingsOpen = false
     update(true)
-    canvas.reveal(r.node)
+    requestAnimationFrame(() => { if (disposed) return; canvas.reveal(id); inspector.querySelector<HTMLInputElement>('input[aria-label="Node name"]')?.focus({ preventScroll: true }) })
   }
 
   function connect(from: string, to: string) {
@@ -207,6 +304,7 @@ export function renderWorkflowView(root: HTMLElement, wsId: string, file: string
     if (draft.edges.some(e => e.from === from && e.to === to)) { notice = `${from} → ${to} already exists.`; update(false); return }
     draft.edges.push({ from, to })
     selection = { kind: 'edge', index: draft.edges.length - 1 }
+    settingsOpen = false
     update(true)
   }
 
@@ -246,8 +344,8 @@ export function renderWorkflowView(root: HTMLElement, wsId: string, file: string
 
   async function approve(kind: ApprovalKind) {
     approvalError = ''
-    const approver = (document.getElementById('approver') as HTMLInputElement | null)?.value.trim() ?? ''
-    if (!approver) { approvalError = 'Enter the approver name.'; renderApprovals(); return }
+    const approver = approverInput.value.trim()
+    if (!approver) { approvalError = 'Enter the approver name.'; renderApprovals(); approverInput.focus(); return }
     store(APPROVER_KEY, approver)
     try {
       const r = await api.approve(wsId, file, kind, approver)
@@ -259,13 +357,21 @@ export function renderWorkflowView(root: HTMLElement, wsId: string, file: string
     }
   }
 
+  // An issue leads to what it is about: a node or a connection on the
+  // canvas, or the settings that hold a binding or the policy.
+  function showIssue(i: Issue) {
+    if (i.node && draft?.nodes[i.node]) { canvas.events.select({ kind: 'node', id: i.node }); return }
+    if (i.edge !== undefined && draft?.edges[i.edge]) { canvas.events.select({ kind: 'edge', index: i.edge }); return }
+    openSettings(validation, i.binding ? 'bindings' : i.field === 'documentation' ? 'policy' : 'validation')
+  }
+
   // ---- rendering ----------------------------------------------------------
 
   function renderCrumbs() {
     crumbs.replaceChildren(
       h('a', { href: '#/' }, 'Projects'), h('span.sep', '/'),
       h('a', { href: `#/ws/${encodeURIComponent(wsId)}` }, projectName), h('span.sep', '/'),
-      h('span.muted', `workflows/${file}`), h('span.pill', `workspace ${wsId}`))
+      h('span.here', 'Workflow'))
   }
 
   function renderModeSwitch() {
@@ -275,29 +381,36 @@ export function renderWorkflowView(root: HTMLElement, wsId: string, file: string
     }, m === 'compact' ? 'Compact' : 'Mini')))
   }
 
+  const STATUS_TEXT: Record<string, string> = { approved: 'approved', stale: 'changed since approval', unapproved: 'draft' }
   function renderApprovals() {
-    approvalBox.replaceChildren()
-    if (!draft) return
+    if (!draft) { approvalPills.replaceChildren(); return }
     const states = approvals
     const pill = (kind: ApprovalKind) => {
       const s = states?.[kind]
       const status = s?.status ?? 'unapproved'
-      const label = `${kind === 'intent' ? 'Intent' : 'Definition'}: ${status === 'approved' ? 'approved' : status === 'stale' ? 'changed since approval' : 'draft'}`
+      const label = `${kind === 'intent' ? 'Intent' : 'Definition'}: ${STATUS_TEXT[status]}`
       const title = s?.record ? `Approved by ${s.record.approver} at ${when(s.record.at)}\napproved ${s.record.digest}\ncurrent  ${s.digest}` : `current ${s?.digest ?? ''}`
-      return h(`span.approval-pill.${status}`, { title, dataset: { kind, status } }, icon(status === 'approved' ? 'check' : status === 'stale' ? 'alert' : 'doc', 'icon small'), label,
-        s?.record ? h('span.by', ` · ${s.record.approver}`) : null)
+      return h(`span.approval-pill.${status}`, { title, dataset: { kind, status } }, icon(status === 'approved' ? 'check' : status === 'stale' ? 'alert' : 'doc', 'icon small'), label)
     }
     const both = states?.intent.status === 'approved' && states.definition.status === 'approved'
-    approvalBox.append(h('div.pills', both ? h('span.approval-pill.approved.author', icon('check', 'icon small'), 'Author Approved') : null, pill('intent'), pill('definition')))
-    if (dirty()) approvalBox.append(h('span.muted.small', 'States reflect the unsaved draft. Save before approving.'))
+    approvalPills.replaceChildren(...(both ? [h('span.approval-pill.approved.author', { title: 'Intent and definition are both approved as saved' }, 'Author approved')] : []), pill('intent'), pill('definition'))
+    // The panel: each approval's record, and the two separate actions.
+    approvalRecords.replaceChildren(...(['intent', 'definition'] as ApprovalKind[]).map(kind => {
+      const s = states?.[kind]
+      const status = s?.status ?? 'unapproved'
+      return h(`div.approval-record.${status}`, { dataset: { kind } },
+        h('strong', kind === 'intent' ? 'Intent' : 'Definition'), ' ',
+        h(`span.approval-pill.${status}`, { dataset: { kind, status } }, STATUS_TEXT[status]),
+        h('div.small.muted', s?.record ? `${status === 'stale' ? 'Last approved' : 'Approved'} by ${s.record.approver}, ${when(s.record.at)}` : 'Not approved yet.'))
+    }))
     const issues = validateWorkflow(draft, context())
     const canAct = !dirty() && !readonly()
-    const approver = h('input#approver', { value: stored(APPROVER_KEY, defaultApprover), placeholder: 'approver', 'aria-label': 'Approver', size: 12 })
-    approvalBox.append(h('div.approve-actions',
-      h('label.small', 'Declared approver ', approver),
-      h('button', { disabled: !canAct || !draft.intent.trim(), onclick: () => void approve('intent'), title: 'Approve the saved intent' }, 'Approve intent'),
-      h('button', { disabled: !canAct || hasErrors(issues), onclick: () => void approve('definition'), title: hasErrors(issues) ? 'The definition has validation errors' : 'Approve the saved definition' }, 'Approve definition')))
-    if (approvalError) approvalBox.append(h('p.error.small', approvalError))
+    approveIntent.disabled = !canAct || !draft.intent.trim()
+    approveDefinition.disabled = !canAct || hasErrors(issues)
+    approveDefinition.title = hasErrors(issues) ? 'The definition has validation errors' : 'Approve the saved definition'
+    approvalNote.textContent = readonly() ? 'The file cannot be used now; nothing can be approved.' : dirty() ? 'States reflect the unsaved draft. Save before approving.' : 'Approvals record the saved file; a later change shows here as "changed since approval".'
+    approvalErrorEl.textContent = approvalError
+    approvalErrorEl.hidden = !approvalError
   }
 
   function renderBanners() {
@@ -319,45 +432,55 @@ export function renderWorkflowView(root: HTMLElement, wsId: string, file: string
         h('button', { onclick: () => void load({ force: true }) }, 'Reload from disk (discard my edits)')))
     }
     if (saveError) banners.append(h('div.banner.error', saveError))
-    if (notice) banners.append(h('div.banner.warn', notice, h('button.icon-btn', { onclick: () => { notice = ''; renderBanners() } }, '×')))
+    if (notice) banners.append(h('div.banner.warn', notice, h('button.icon-btn', { 'aria-label': 'Dismiss', onclick: () => { notice = ''; renderBanners() } }, '×')))
   }
 
   function update(rebuildInspector: boolean, fromDisk = false) {
     if (disposed) return
     renderCrumbs()
     renderModeSwitch()
+    fileLine.textContent = `workflows/${file} · workspace ${wsId}`
     if (!draft) {
       nameInput.disabled = intentInput.disabled = true
       rawView.textContent = resp?.text ?? ''
       rawView.hidden = !resp?.text
       canvas.el.hidden = true
       renderBanners()
-      statusLine.replaceChildren()
+      validation.hidden = true
+      policyChip.hidden = true
       saveButton.disabled = true
+      addButton.disabled = arrangeButton.disabled = settingsToggle.disabled = intentToggle.disabled = true
+      purpose.textContent = ''
       return
     }
     canvas.el.hidden = false
     rawView.hidden = true
     if (fromDisk || document.activeElement !== nameInput) nameInput.value = draft.name
     if (fromDisk || document.activeElement !== intentInput) intentInput.value = draft.intent
-    intentInput.rows = Math.min(8, Math.max(2, intentInput.value.split('\n').reduce((n, line) => n + Math.max(1, Math.ceil(line.length / 56)), 0)))
+    intentInput.rows = Math.min(10, Math.max(3, intentInput.value.split('\n').reduce((n, line) => n + Math.max(1, Math.ceil(line.length / 72)), 0)))
     nameInput.disabled = intentInput.disabled = readonly()
-    for (const b of toolbar.querySelectorAll('button')) (b as HTMLButtonElement).disabled = readonly()
+    addButton.disabled = arrangeButton.disabled = readonly()
+    settingsToggle.disabled = intentToggle.disabled = false
+    if (readonly()) closePalette()
+    // The purpose preview: the intent's first line; the whole text is in the panel.
+    const first = draft.intent.split('\n').map(x => x.trim()).find(Boolean)
+    purpose.replaceChildren(first ? h('span', { title: draft.intent }, first) : h('span.warn-text', 'No intent yet — write it under Intent & approvals.'))
     const issues = validateWorkflow(draft, context())
     const errors = issues.filter(i => i.severity === 'error'), warnings = issues.filter(i => i.severity === 'warning')
+    validation.hidden = false
+    validation.className = `v-summary${errors.length ? ' error' : warnings.length ? ' warn' : ' ok'}`
+    validation.replaceChildren(icon(errors.length || warnings.length ? 'alert' : 'check', 'icon small'),
+      errors.length || warnings.length ? `${errors.length} error${errors.length === 1 ? '' : 's'}, ${warnings.length} warning${warnings.length === 1 ? '' : 's'}` : 'Valid')
     // The same compiler run creation uses: what a run of this draft adds.
     const compiled = compile(draft)
     const effective = compiled.ok && compiled.graph.policy === 'default' ? compiled.graph : null
     const reports = effective ? Object.values(effective.nodes).filter(n => n.step?.kind === 'report').length : 0
-    statusLine.replaceChildren(
-      h(`span.v-summary${errors.length ? '.error' : warnings.length ? '.warn' : '.ok'}`, icon(errors.length ? 'alert' : 'check', 'icon small'),
-        errors.length || warnings.length ? `${errors.length} error${errors.length === 1 ? '' : 's'}, ${warnings.length} warning${warnings.length === 1 ? '' : 's'}` : 'Structure and references valid'),
-      ...(errors.length ? [h('span.muted.small', 'Drafts with errors can be saved but not approved. Select nothing to see the full list.')] : []),
-      h('span.policy-state.small', { dataset: { policy: draft.documentation.policy || 'none' } }, icon('doc', 'icon tiny'),
-        draft.documentation.policy === 'default'
-          ? (effective ? `Documentation: default — a run adds the plan talk, ${reports} report${reports === 1 ? '' : 's'} and the final report (shown on the canvas)` : `Documentation: default — preview unavailable: ${!compiled.ok ? compiled.message : ''}`)
-          : draft.documentation.policy === 'manual' ? 'Documentation: manual — a run adds no plan or reports' : `Documentation policy ${draft.documentation.policy ? `"${draft.documentation.policy}" is not supported` : 'is not declared'} — choose one with nothing selected`),
-    )
+    const policy = draft.documentation.policy
+    policyChip.hidden = false
+    policyChip.dataset.policy = policy || 'none'
+    policyChip.replaceChildren(icon('doc', 'icon tiny'),
+      policy === 'default' ? (effective ? `Default documentation: plan talk, ${reports} report${reports === 1 ? '' : 's'}, final report` : `Default documentation — preview unavailable: ${!compiled.ok ? compiled.message : ''}`)
+        : policy === 'manual' ? 'Manual documentation: no plan or reports' : `Documentation policy ${policy ? `"${policy}" is not supported` : 'not declared'}`)
     saveButton.disabled = readonly() || !dirty()
     saveStateEl.textContent = saveError ? 'Save failed' : problem ? 'Read-only' : dirty() ? 'Unsaved changes' : (saveState || 'Saved')
     saveStateEl.className = `save-state${saveError ? ' error' : dirty() ? ' dirty' : ''}`
@@ -365,12 +488,18 @@ export function renderWorkflowView(root: HTMLElement, wsId: string, file: string
     if (selection?.kind === 'edge' && !draft.edges[selection.index]) selection = null
     if (selection?.kind === 'step' && !effective?.nodes[selection.id]) selection = null
     canvas.render(draft, { repositories: resp?.repositories ?? [], workflows: resp?.workflows ?? [], errorNodes: new Set(errors.map(i => i.node).filter((n): n is string => !!n)), readonly: readonly(), effective }, selection)
-    if (rebuildInspector) renderInspector(inspector, {
+    const open = inspectorOpen()
+    if (inspector.hidden === open) { inspector.hidden = !open; body.classList.toggle('with-inspector', open) }
+    settingsToggle.setAttribute('aria-pressed', String(settingsOpen))
+    settingsToggle.classList.toggle('active', settingsOpen)
+    hint.hidden = !!selection
+    if (rebuildInspector && open) renderInspector(inspector, {
       draft, selection, repositories: resp?.repositories ?? [], workflows: resp?.workflows ?? [], issues, readonly: readonly(), file, effective, templates,
-    }, { changed: rebuild => update(rebuild), select: sel => { selection = sel; update(true) }, deleteNode, deleteEdge, connect })
+    }, { changed: rebuild => update(rebuild), select: sel => canvas.events.select(sel), deleteNode, deleteEdge, connect, close: closeInspector, issue: showIssue })
     renderBanners()
+    renderApprovals()
     const snapshot = draft
-    void approvalStates(snapshot).then(s => { if (draft === snapshot) { approvals = s; renderApprovals() } })
+    void approvalStates(snapshot).then(s => { if (draft === snapshot && !disposed) { approvals = s; renderApprovals() } })
   }
 
   // ---- external changes ----------------------------------------------------
@@ -393,21 +522,25 @@ export function renderWorkflowView(root: HTMLElement, wsId: string, file: string
 
   const onKey = (e: KeyboardEvent) => {
     const t = e.target as HTMLElement
+    if ((e.metaKey || e.ctrlKey) && e.key === 's') { e.preventDefault(); void save(); return }
     if (t.closest('input, textarea, select')) return
-    if ((e.key === 'Delete' || e.key === 'Backspace') && selection) {
+    if (e.key === 'Escape') {
+      if (!palette.hidden) { closePalette(true); return }
+      if (inspectorOpen() && !t.closest('.palette')) { e.preventDefault(); closeInspector(); return }
+    }
+    if ((e.key === 'Delete' || e.key === 'Backspace') && selection && !t.closest('.inspector')) {
       e.preventDefault()
       if (selection.kind === 'node') deleteNode(selection.id); else if (selection.kind === 'edge') deleteEdge(selection.index)
     }
-    if ((e.metaKey || e.ctrlKey) && e.key === 's') { e.preventDefault(); void save() }
   }
   window.addEventListener('keydown', onKey)
 
   renderCrumbs()
-  void load({}).then(() => canvas.fit())
+  void load({}).then(() => canvas.frame())
   void loadProjectName()
 
   return {
-    dispose: () => { disposed = true; stream.close(); window.removeEventListener('keydown', onKey) },
+    dispose: () => { disposed = true; stream.close(); canvas.dispose(); window.removeEventListener('keydown', onKey); document.removeEventListener('pointerdown', onOutside) },
     isDirty: dirty,
   }
 }

@@ -1,6 +1,9 @@
-// The inspector edits the selected node or edge, or the workflow's repository
-// bindings when nothing is selected. It mutates the draft and tells the view
-// whether the inspector itself must be rebuilt (structure) or not (typing).
+// The inspector edits the selected node or edge, explains a generated step,
+// or holds the workflow's settings (documentation policy, repository
+// bindings, validation) when they are opened explicitly. It mutates the
+// draft and tells the view whether the inspector itself must be rebuilt
+// (structure) or not (typing). Its groups keep their open state across
+// rebuilds (p8): a rebuild after a checkbox never folds what the person opened.
 import type { RepositoryStatus, WorkflowSummary } from '../shared/api.ts'
 import type { EffectiveGraph } from '../shared/compile.ts'
 import type { NodeTemplate } from '../shared/catalog.ts'
@@ -27,15 +30,34 @@ export interface InspectorActions {
   deleteNode(id: string): void
   deleteEdge(index: number): void
   connect(from: string, to: string): void
+  close(): void // closes the inspector (deselects, or closes settings)
+  issue(i: Issue): void // leads to what an issue is about
 }
 
 const nodeLabel = (w: Workflow, id: string) => (w.nodes[id]?.name || id)
 
+// Which groups the person has opened or closed, by name; the defaults
+// apply until they choose.
+const groupState = new Map<string, boolean>()
+function group(key: string, title: string, summary: string | null, open: boolean, ...body: (HTMLElement | null)[]): HTMLDetailsElement {
+  const d = h('details.insp-group', { dataset: { group: key } },
+    h('summary', h('span.group-title', title), summary ? h('span.group-summary', summary) : null),
+    h('div.group-body', ...body.filter((x): x is HTMLElement => !!x)))
+  d.open = groupState.get(key) ?? open
+  d.addEventListener('toggle', () => groupState.set(key, d.open))
+  return d
+}
+
+function head(iconName: string | null, title: string, id: string | null, actions: InspectorActions): HTMLElement {
+  return h('div.insp-head', iconName ? icon(iconName, 'icon') : null, h('h3', { tabIndex: -1 }, title), id ? h('code', id) : null,
+    h('button.icon-btn.insp-close', { title: 'Close (Esc)', 'aria-label': 'Close the inspector', onclick: () => actions.close() }, icon('close', 'icon small')))
+}
+
 function issueList(issues: Issue[], actions: InspectorActions): HTMLElement {
-  return h('ul.issues', issues.map(i => h(`li.${i.severity}`, {
-    onclick: () => { if (i.node) actions.select({ kind: 'node', id: i.node }); else if (i.edge !== undefined) actions.select({ kind: 'edge', index: i.edge }) },
-    style: { cursor: i.node || i.edge !== undefined ? 'pointer' : 'default' },
-  }, i.message)))
+  return h('ul.issues', issues.map(i => {
+    const goes = !!(i.node || i.edge !== undefined || i.binding)
+    return h(`li.${i.severity}`, goes ? h('a', { href: '#', onclick: (e: Event) => { e.preventDefault(); actions.issue(i) } }, i.message) : i.message)
+  }))
 }
 
 function resolveRepo(ctx: InspectorContext, path: string) {
@@ -45,12 +67,17 @@ function resolveRepo(ctx: InspectorContext, path: string) {
 }
 
 export function renderInspector(panel: HTMLElement, ctx: InspectorContext, actions: InspectorActions) {
+  // The panel's own scroll position survives a rebuild of its content.
+  const top = panel.scrollTop
+  const same = panel.dataset.shows === JSON.stringify(ctx.selection)
   panel.replaceChildren()
   const sel = ctx.selection
   if (sel?.kind === 'node' && ctx.draft.nodes[sel.id]) panel.append(...nodePanel(ctx, sel.id, actions))
   else if (sel?.kind === 'edge' && ctx.draft.edges[sel.index]) panel.append(...edgePanel(ctx, sel.index, actions))
   else if (sel?.kind === 'step' && ctx.effective?.nodes[sel.id]?.step) panel.append(...stepPanel(ctx, sel.id, actions))
   else panel.append(...workflowPanel(ctx, actions))
+  panel.dataset.shows = JSON.stringify(ctx.selection)
+  panel.scrollTop = same ? top : 0
 }
 
 function nodePanel(ctx: InspectorContext, id: string, actions: InspectorActions): HTMLElement[] {
@@ -58,17 +85,15 @@ function nodePanel(ctx: InspectorContext, id: string, actions: InspectorActions)
   const n = w.nodes[id]
   const ro = ctx.readonly
   const typeOptions = (NODE_TYPES as readonly string[]).includes(n.type) ? [...NODE_TYPES] : [n.type, ...NODE_TYPES]
-  const out: HTMLElement[] = [
-    h('div.insp-head', icon(iconOf(n.type, n.appearance), 'icon'), h('h3', nodeLabel(w, id)), h('code', id)),
+  const out: (HTMLElement | null)[] = [
+    head(iconOf(n.type, n.appearance), nodeLabel(w, id), id, actions),
+    h('label.field', h('span', 'Name'), h('input', { value: n.name, disabled: ro, 'aria-label': 'Node name', placeholder: TYPE_LABEL[n.type] ?? '', oninput: (e: Event) => { n.name = (e.target as HTMLInputElement).value; actions.changed(false) } })),
+    h('label.field', h('span', 'Description'), h('textarea', { rows: 5, value: n.description, disabled: ro, 'aria-label': 'Node description', oninput: (e: Event) => { n.description = (e.target as HTMLTextAreaElement).value; actions.changed(false) } })),
     h('label.field', h('span', 'Type'), h('select', {
       disabled: ro, 'aria-label': 'Node type',
       onchange: (e: Event) => { n.type = (e.target as HTMLSelectElement).value; actions.changed(true) },
     }, typeOptions.map(t => h('option', { value: t, selected: t === n.type }, TYPE_LABEL[t] ?? `${t || '(none)'} — unknown`)))),
-    h('label.field', h('span', 'Name'), h('input', { value: n.name, disabled: ro, 'aria-label': 'Node name', placeholder: TYPE_LABEL[n.type] ?? '', oninput: (e: Event) => { n.name = (e.target as HTMLInputElement).value; actions.changed(false) } })),
-    h('label.field', h('span', 'Description'), h('textarea', { rows: 5, value: n.description, disabled: ro, 'aria-label': 'Node description', oninput: (e: Event) => { n.description = (e.target as HTMLTextAreaElement).value; actions.changed(false) } })),
-    appearanceField(n, ro, actions),
-    n.template ? provenanceField(n.template, ctx.templates) : null,
-  ].filter((x): x is HTMLElement => !!x)
+  ]
   if (n.type === 'delegate' || n.workflow) {
     const known = ctx.workflows.filter(s => s.id)
     const options = [h('option', { value: '' }, '— choose a workflow —'), ...known.map(s => h('option', { value: s.id!, selected: s.id === n.workflow }, `${s.name || s.id} (${s.id})${s.file === ctx.file ? ' — this workflow' : ''}`))]
@@ -79,13 +104,14 @@ function nodePanel(ctx: InspectorContext, id: string, actions: InspectorActions)
     }, options)))
     if (n.type === 'delegate') out.push(h('p.banner.warn.small', 'Delegate execution is not supported: this node is definition and display only, and runs of a workflow with a delegate node are refused by the browser, the API and the CLI alike.'))
   }
+  out.push(appearanceField(n, ro, actions))
   // Repository bindings of this node
   const bindings = Object.entries(w.repositories)
-  const repoBox = h('div.field', h('span', 'Repositories'))
-  if (!bindings.length) repoBox.append(h('p.muted.small', 'This workflow declares no repository bindings. Add them with nothing selected.'))
+  const repoBody = h('div.field-list')
+  if (!bindings.length) repoBody.append(h('p.muted.small', 'This workflow declares no repository bindings. Add them in Workflow settings.'))
   for (const [key, b] of bindings) {
     const repo = resolveRepo(ctx, b.path)
-    repoBox.append(h('label.check', h('input', {
+    repoBody.append(h('label.check', h('input', {
       type: 'checkbox', checked: n.repositories.includes(key), disabled: ro, 'aria-label': `Bind ${key}`,
       onchange: (e: Event) => {
         if ((e.target as HTMLInputElement).checked) n.repositories.push(key)
@@ -96,10 +122,11 @@ function nodePanel(ctx: InspectorContext, id: string, actions: InspectorActions)
     h(`span.access-badge.${repo ? (b.access === 'editable' ? 'editable' : 'readonly') : 'unresolved'}`, repo ? (b.access === 'editable' ? 'Editable' : 'Read-only') : 'unresolved')))
   }
   for (const ref of n.repositories.filter(r => !(r in w.repositories))) {
-    repoBox.append(h('div.check.unresolved', icon('alert', 'icon small'), h('span', `${ref} — not declared`),
-      h('button.icon-btn', { disabled: ro, title: 'Remove reference', onclick: () => { n.repositories = n.repositories.filter(r => r !== ref); actions.changed(true) } }, '×')))
+    repoBody.append(h('div.check.unresolved', icon('alert', 'icon small'), h('span', `${ref} — not declared`),
+      h('button.icon-btn', { disabled: ro, title: 'Remove reference', 'aria-label': `Remove reference ${ref}`, onclick: () => { n.repositories = n.repositories.filter(r => r !== ref); actions.changed(true) } }, '×')))
   }
-  out.push(repoBox)
+  const bound = n.repositories.map(r => `${r}${w.repositories[r] ? ` · ${w.repositories[r].access === 'editable' ? 'editable' : 'read-only'}` : ' · not declared'}`).join(', ')
+  out.push(group('repositories', 'Repositories', bound || 'none', true, repoBody))
   // Connections
   const incoming = w.edges.map((e, i) => ({ e, i })).filter(x => x.e.to === id)
   const outgoing = w.edges.map((e, i) => ({ e, i })).filter(x => x.e.from === id)
@@ -107,13 +134,16 @@ function nodePanel(ctx: InspectorContext, id: string, actions: InspectorActions)
     h('button.icon-btn', { disabled: ro, title: 'Delete connection', 'aria-label': `Delete connection ${label}`, onclick: () => actions.deleteEdge(i) }, '×'))
   const targets = Object.keys(w.nodes).filter(t => t !== id && !w.edges.some(e => e.from === id && e.to === t))
   const pick = h('select', { disabled: ro, 'aria-label': 'Connect to node' }, h('option', { value: '' }, '— node —'), targets.map(t => h('option', { value: t }, `${nodeLabel(w, t)} (${t})`)))
-  out.push(h('div.field', h('span', 'Waits for'), incoming.length ? h('ul.edges-list', incoming.map(x => edgeRow(`${nodeLabel(w, x.e.from)} → this`, x.i))) : h('p.muted.small', 'Nothing: starts when the workflow starts.')),
+  const chain = [incoming.map(x => nodeLabel(w, x.e.from)).join(', ') || 'start', 'this', outgoing.map(x => nodeLabel(w, x.e.to)).join(', ') || 'end'].join(' → ')
+  out.push(group('connections', 'Connections', chain, false,
+    h('div.field', h('span', 'Waits for'), incoming.length ? h('ul.edges-list', incoming.map(x => edgeRow(`${nodeLabel(w, x.e.from)} → this`, x.i))) : h('p.muted.small', 'Nothing: starts when the workflow starts.')),
     h('div.field', h('span', 'Then'), outgoing.length ? h('ul.edges-list', outgoing.map(x => edgeRow(`this → ${nodeLabel(w, x.e.to)}`, x.i))) : h('p.muted.small', 'Nothing: an end of the workflow.'),
-      h('div.row.tight', pick, h('button', { disabled: ro, onclick: () => { if (pick.value) actions.connect(id, pick.value) } }, 'Connect'))))
+      h('div.row.tight', pick, h('button', { disabled: ro, onclick: () => { if (pick.value) actions.connect(id, pick.value) } }, 'Connect')))))
+  if (n.template) out.push(provenanceField(n.template, ctx.templates))
   const nodeIssues = ctx.issues.filter(i => i.node === id)
   if (nodeIssues.length) out.push(issueList(nodeIssues, actions))
   out.push(h('div.insp-foot', h('button.danger', { disabled: ro, onclick: () => actions.deleteNode(id) }, 'Delete node')))
-  return out
+  return out.filter((x): x is HTMLElement => !!x)
 }
 
 // Template provenance (p7/ex1): where the node came from and what the
@@ -122,10 +152,11 @@ function nodePanel(ctx: InspectorContext, id: string, actions: InspectorActions)
 function provenanceField(t: NonNullable<Workflow['nodes'][string]['template']>, catalog?: Pick<NodeTemplate, 'id' | 'revision'>[]): HTMLElement {
   const now = catalog?.find(x => x.id === t.id)
   const since = !catalog ? '' : !now ? ' The template is no longer in your catalog.' : now.revision !== t.revision ? ` Your catalog has revision ${now.revision} now; this node keeps what it was made from.` : ''
-  return h('div.field.template-field', h('span', 'Made from your template'),
-    h('div.small', h('code', t.id), ` revision ${t.revision}.${since}`),
-    h('div.template-provenance', { 'aria-label': 'Template expectation' }, h('span.muted', 'You expected: '), t.expectation || '—'),
-    h('p.muted.small', 'Provenance only: outside approval and the executed graph. Edit the node freely; the catalog is not changed.'))
+  return group('template', 'Made from your template', `${t.id} · revision ${t.revision}`, false,
+    h('div.field.template-field',
+      h('div.small', h('code', t.id), ` revision ${t.revision}.${since}`),
+      h('div.template-provenance', { 'aria-label': 'Template expectation' }, h('span.muted', 'You expected: '), t.expectation || '—'),
+      h('p.muted.small', 'Provenance only: outside approval and the executed graph. Edit the node freely; the catalog is not changed.')))
 }
 
 // Appearance (p7): how the card looks. Display only — it changes neither
@@ -141,7 +172,8 @@ function appearanceField(n: Workflow['nodes'][string], ro: boolean, actions: Ins
     ...(current && !known.includes(current) ? [h('option', { value: current, selected: true }, `${current} — unknown`)] : []),
     ...known.map(v => h('option', { value: v, selected: v === current }, label(v))),
   ]
-  return h('div.field', h('span', 'Appearance'),
+  const summary = [n.appearance?.icon ? `icon ${n.appearance.icon}` : '', n.appearance?.color ? `color ${n.appearance.color}` : ''].filter(Boolean).join(' · ') || 'type default'
+  return group('appearance', 'Appearance', summary, false,
     h('div.appearance-row',
       h('select', { disabled: ro, 'aria-label': 'Node icon', onchange: (e: Event) => set('icon', (e.target as HTMLSelectElement).value) }, options(APPEARANCE_ICONS, n.appearance?.icon ?? '', v => `icon: ${v}`)),
       h('select', { disabled: ro, 'aria-label': 'Node color', onchange: (e: Event) => set('color', (e.target as HTMLSelectElement).value) }, options(APPEARANCE_COLORS, n.appearance?.color ?? '', v => `color: ${v}`))),
@@ -152,7 +184,7 @@ function edgePanel(ctx: InspectorContext, index: number, actions: InspectorActio
   const w = ctx.draft
   const e = w.edges[index]
   return [
-    h('div.insp-head', h('h3', 'Connection')),
+    head(null, 'Connection', null, actions),
     h('p', h('a', { href: '#', onclick: (ev: Event) => { ev.preventDefault(); actions.select({ kind: 'node', id: e.from }) } }, nodeLabel(w, e.from)), ' → ',
       h('a', { href: '#', onclick: (ev: Event) => { ev.preventDefault(); actions.select({ kind: 'node', id: e.to }) } }, nodeLabel(w, e.to))),
     h('p.muted.small', `"${nodeLabel(w, e.to)}" waits for "${nodeLabel(w, e.from)}" to complete.`),
@@ -193,10 +225,9 @@ export const stepLabel = (w: Pick<Workflow, 'nodes'>, eff: Pick<EffectiveGraph, 
 function stepPanel(ctx: InspectorContext, id: string, actions: InspectorActions): HTMLElement[] {
   const eff = ctx.effective!
   return [
-    h('div.insp-head', icon('doc', 'icon'), h('h3', stepLabel(ctx.draft, eff, id)), h('code', id)),
+    head('doc', stepLabel(ctx.draft, eff, id), id, actions),
     h('p.banner.ok.small', 'Generated by the default documentation policy. It is not part of the file and cannot be edited or moved; it follows the cards it belongs to.'),
     ...stepFacts(eff, id, x => stepLabel(ctx.draft, eff, x)),
-    h('div.insp-foot', h('button', { onclick: () => actions.select(null) }, 'Workflow settings')),
   ]
 }
 
@@ -210,19 +241,22 @@ function workflowPanel(ctx: InspectorContext, actions: InspectorActions): HTMLEl
   }, known ? null : h('option', { value: w.documentation.policy, selected: true }, w.documentation.policy ? `${w.documentation.policy} — unsupported` : '— not declared —'),
   h('option', { value: 'default', selected: w.documentation.policy === 'default' }, 'default — plan talk, a report per node, final report'),
   h('option', { value: 'manual', selected: w.documentation.policy === 'manual' }, 'manual — documents only when asked'))
+  const sectionHead = (key: string, title: string) => h('h4.settings-head', { dataset: { section: key }, tabIndex: -1 }, title)
   const out: HTMLElement[] = [
-    h('div.insp-head', h('h3', 'Workflow settings'), h('code', w.id || ctx.file)),
-    h('label.field.policy-field', h('span', 'Documentation policy'), policy),
+    head('settings', 'Workflow settings', w.id || ctx.file, actions),
+    sectionHead('policy', 'Documentation policy'),
+    h('label.field.policy-field', policy),
     h('p.muted.small', w.documentation.policy === 'manual'
       ? 'Runs follow the graph as drawn. No plan or report is generated or required; a node description or the person can still ask for documents.'
       : 'Runs plan with the person first (plan.md), report every node (report-<node>.md) and end with report.md. Changing the policy changes the definition approval, never an existing run.'),
-    h('h3', 'Repository bindings'),
+    sectionHead('bindings', 'Repository bindings'),
+    h('p.muted.small', 'Bindings name the project repositories this workflow uses and declare its access. Each node chooses among them in its inspector.'),
   ]
-  out.push(h('p.muted.small', 'Bindings name the project repositories this workflow uses and declare its access. Select a node to edit it.'))
   const table = h('div.bindings')
   for (const [key, b] of Object.entries(w.repositories)) {
     const used = Object.values(w.nodes).filter(n => n.repositories.includes(key)).length
-    table.append(h('div.binding-row', { dataset: { binding: key } },
+    const bad = ctx.issues.some(i => i.binding === key)
+    table.append(h(`div.binding-row${bad ? '.has-issue' : ''}`, { dataset: { binding: key } },
       h('strong', key),
       pathSelect(ctx, b.path, ro, v => { b.path = v; actions.changed(true) }, `Path of ${key}`),
       h('select', { disabled: ro, 'aria-label': `Access of ${key}`, onchange: (e: Event) => { b.access = (e.target as HTMLSelectElement).value; actions.changed(true) } },
@@ -239,7 +273,7 @@ function workflowPanel(ctx: InspectorContext, actions: InspectorActions): HTMLEl
   let path = ''
   const access = h('select', { disabled: ro, 'aria-label': 'New binding access' }, ACCESS_LEVELS.map(a => h('option', { value: a }, a)))
   const error = h('p.error.small')
-  out.push(h('div.add-binding', h('h4', 'Add binding'),
+  out.push(h('div.add-binding', h('div.small.muted', 'Add binding'),
     h('div.row.tight', key, pathSelect(ctx, '', ro, v => { path = v }, 'New binding path'), access,
       h('button', {
         disabled: ro,
@@ -252,6 +286,6 @@ function workflowPanel(ctx: InspectorContext, actions: InspectorActions): HTMLEl
           actions.changed(true)
         },
       }, 'Add')), error))
-  out.push(h('h4', 'Validation'), ctx.issues.length ? issueList(ctx.issues, actions) : h('p.muted.small', 'No issues found. Validation checks structure and references, not whether the graph fulfils the intent.'))
+  out.push(sectionHead('validation', 'Validation'), ctx.issues.length ? issueList(ctx.issues, actions) : h('p.muted.small', 'No issues found. Validation checks structure and references, not whether the graph fulfils the intent.'))
   return out
 }

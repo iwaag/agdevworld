@@ -68,7 +68,7 @@ export class Canvas {
   private mode: DisplayMode = 'compact'
   private selection: Selection = null
   private points = new Map<string, Point>()
-  private events: CanvasEvents
+  readonly events: CanvasEvents
   private fitted = false
   // A card that grows or shrinks after it was placed (fonts, badges, a
   // status line) carries its report icon and the step edges with it.
@@ -108,6 +108,14 @@ export class Canvas {
     if (c.top + dy < r.top + m) dy = r.top + m - c.top
     if (dx || dy) { this.view.x += dx; this.view.y += dy; this.applyView() }
   }
+
+  // Keyboard focus on a card (after the inspector closes).
+  focusCard(id: string) { this.surface.querySelector<HTMLElement>(`.node[data-id="${CSS.escape(id)}"]`)?.focus({ preventScroll: true }) }
+
+  // The initial view of a freshly opened graph.
+  frame() { this.fit() }
+
+  dispose() { this.resized?.disconnect() }
 
   setMode(mode: DisplayMode) { this.mode = mode; this.el.dataset.mode = mode }
   getView() { return { ...this.view } }

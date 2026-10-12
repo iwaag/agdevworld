@@ -66,7 +66,40 @@ export interface BundleEntry {
 // `effective` (p5): the graph the run follows, compiled from the root
 // workflow and its documentation policy at creation and frozen here. A run
 // created before p5 has none and follows its authored graph.
-export interface DefinitionRef { root: string; workflows: Record<string, BundleEntry>; warnings: string[]; effective?: EffectiveGraph }
+// `revisions` and `active` (p7, docs/adjustments.md): adjustments of the
+// run's future work, each a complete authored definition (by file and hash)
+// and its complete compiled graph; `effective` stays the original (r1).
+export interface DefinitionRef { root: string; workflows: Record<string, BundleEntry>; warnings: string[]; effective?: EffectiveGraph; active?: string; revisions?: Revision[] }
+export const REVISION_ID = /^r[0-9]{1,4}$/
+export type AdjustSource =
+  | { kind: 'answer'; question: string; answer?: number } // the person asked for it in an answer that was taken up
+  | { kind: 'instruction'; instruction: string } // an acknowledged additional instruction asked for it
+  | { kind: 'agreement'; question: string } // the person agreed to this exact proposal (the question's document)
+  | { kind: 'person'; by?: string } // a person applies it themselves
+export interface AdjustDiff { added: string[]; removed: string[]; changed: string[]; edgesAdded: [string, string][]; edgesRemoved: [string, string][] }
+export interface Revision {
+  revision: string // r2, r3, …
+  parent: string // the revision it was made from (r1 = the original)
+  file: string // run-relative: definition/<revision>/<workflow>.yaml
+  sha256: string // of the file's bytes
+  definitionDigest: string // the definition-approval projection of that file
+  effective: EffectiveGraph // the whole compiled graph, frozen
+  reason: string
+  source: AdjustSource
+  diff: AdjustDiff
+  at: string
+  by: string
+}
+// The revision in force and its graph: the latest adjustment, or the
+// original snapshot.
+export const activeRevision = (d: Pick<DefinitionRef, 'active' | 'revisions'>): string => d.active ?? 'r1'
+export const effectiveOf = (r: { definition: DefinitionRef }): EffectiveGraph | undefined => r.definition.revisions?.at(-1)?.effective ?? r.definition.effective
+// Every node any revision of the run had, for reading history entries
+// (a node id means the same thing in every revision that has it).
+export function anyRevisionNode(r: { definition: DefinitionRef }, id: string): EffectiveGraph['nodes'][string] | undefined {
+  for (const rev of [...(r.definition.revisions ?? [])].reverse()) if (rev.effective.nodes[id]) return rev.effective.nodes[id]
+  return r.definition.effective?.nodes[id]
+}
 export interface RepoContext { path: string; head: string | null; branch: string | null; dirty: number | null }
 
 export type WaitOn = { question: string } | { external: string }
@@ -221,7 +254,7 @@ export type OpInput =
   | { op: 'node.complete'; node: string; outcome: string; artifacts?: string[]; document?: DocumentEvidence; agreement?: string }
   | { op: 'node.fail'; node: string; reason: string }
   | { op: 'node.cancel'; node: string; reason: string }
-  | { op: 'question.ask'; question: string; node?: string; text: string; to: string; document?: DocumentEvidence; plan?: boolean; subjects?: string[]; subject?: DocumentEvidence[]; presentation?: string }
+  | { op: 'question.ask'; question: string; node?: string; text: string; to: string; document?: DocumentEvidence; plan?: boolean; subjects?: string[]; subject?: DocumentEvidence[]; presentation?: string; adjustment?: string }
   | { op: 'question.answer'; question: string; text: string; from?: string; source?: SourceRef }
   | { op: 'instruction.receive'; instruction?: string; text: string; from: string; source?: SourceRef }
   | { op: 'instruction.ack'; instructions: string[]; response: string; note: string }
@@ -236,10 +269,11 @@ export type OpInput =
   | { op: 'run.resume'; reason: string }
   | { op: 'presentation.register'; presentation?: string; node: string; title: string; manifest?: PresentationManifest }
   | { op: 'presentation.observe'; presentation: string; status: Observation; instance?: string; detail?: string }
+  | { op: 'run.adjust'; revision: string; parent: string; file: string; sha256: string; definitionDigest: string; effective: EffectiveGraph; reason: string; source: AdjustSource; diff?: AdjustDiff }
 
 export const OPS = ['run.create', 'node.start', 'node.progress', 'node.wait', 'node.complete', 'node.fail', 'node.cancel',
   'question.ask', 'question.answer', 'question.take-up', 'question.withdraw', 'instruction.receive', 'instruction.ack', 'artifact.attach', 'run.cancel', 'run.decide',
-  'attempt.begin', 'attempt.end', 'run.stop', 'run.resume', 'presentation.register', 'presentation.observe'] as const
+  'attempt.begin', 'attempt.end', 'run.stop', 'run.resume', 'presentation.register', 'presentation.observe', 'run.adjust'] as const
 // The executor's own reports. While an attempt is open they must carry its
 // id (`attempt`), so a stopped or superseded attempt cannot write into the
 // record of the one that replaced it.
@@ -260,6 +294,7 @@ export interface Change {
   execution?: [ExecutionState | null, ExecutionState]
   hold?: [HoldKind | null, HoldKind | null]
   presentation?: [string, PresentationState | null, PresentationState] // id, from, to (p7)
+  revision?: [string, string] // the revision in force before and after (p7)
 }
 export type HistoryEntry = OpInput & EntryMeta & { seq: number; at: string; by: string; via: string; change: Change }
 export interface RunRecord extends RunState { history: HistoryEntry[] }
@@ -384,6 +419,35 @@ function subjectOf(v: unknown, what: string): DocumentEvidence {
   if (typeof d.sha256 !== 'string' || !/^[0-9a-f]{64}$/.test(d.sha256)) fail('shape', `${what}: sha256 must be 64 hex digits`)
   if (typeof d.bytes !== 'number' || !Number.isInteger(d.bytes) || d.bytes <= 0) fail('document-empty', `${what}: ${path} is empty`)
   return { path: path!, sha256: d.sha256 as string, bytes: d.bytes as number }
+}
+
+function adjustSource(v: unknown): AdjustSource {
+  if (!isObj(v)) return fail('shape', 'an adjustment names its source: an answer, an instruction, an agreement or a person')
+  const o = v as Record<string, unknown>
+  if (o.kind === 'answer') return { kind: 'answer', question: text(o.question, 'source.question'), ...(o.answer !== undefined ? { answer: Number(o.answer) } : {}) }
+  if (o.kind === 'instruction') return { kind: 'instruction', instruction: text(o.instruction, 'source.instruction') }
+  if (o.kind === 'agreement') return { kind: 'agreement', question: text(o.question, 'source.question') }
+  if (o.kind === 'person') return { kind: 'person', ...(typeof o.by === 'string' && o.by.trim() ? { by: o.by.trim() } : {}) }
+  return fail('shape', 'source.kind is answer, instruction, agreement or person')
+}
+
+const hasCycle = (ids: string[], next: (id: string) => string[]): boolean => {
+  const st = new Map<string, number>()
+  const visit = (id: string): boolean => { st.set(id, 1); for (const t of next(id)) { if (st.get(t) === 1) return true; if (!st.has(t) && visit(t)) return true } st.set(id, 2); return false }
+  return ids.some(id => !st.has(id) && visit(id))
+}
+
+// What an adjustment changed, node by node and edge by edge.
+export function graphDiff(a: RunGraph, b: RunGraph): AdjustDiff {
+  const key = (e: Edge) => `${e.from}\0${e.to}`
+  const ea = new Set(a.edges.map(key)), eb = new Set(b.edges.map(key))
+  return {
+    added: Object.keys(b.nodes).filter(n => !(n in a.nodes)).sort(),
+    removed: Object.keys(a.nodes).filter(n => !(n in b.nodes)).sort(),
+    changed: Object.keys(b.nodes).filter(n => n in a.nodes && canonicalJson(a.nodes[n]) !== canonicalJson(b.nodes[n])).sort(),
+    edgesAdded: b.edges.filter(e => !ea.has(key(e))).map(e => [e.from, e.to] as [string, string]).sort(),
+    edgesRemoved: a.edges.filter(e => !eb.has(key(e))).map(e => [e.from, e.to] as [string, string]).sort(),
+  }
 }
 
 // A registered presentation's manifest (p7): computed by the file layer;
@@ -584,6 +648,11 @@ export function apply(prev: RunState | null, e: HistoryEntry | (OpInput & EntryM
         const plan = Object.values(graph.nodes).find(n => n.step?.kind === 'plan')?.step
         if (!plan) fail('shape', 'this run has no plan step; there is no plan.md to ask about')
         q.document = evidence(e.document, 'asking about the revised plan', documentPath(s, plan!))
+      } else if (e.adjustment) {
+        // A proposed adjustment (p7): the question records the proposal's
+        // file by hash, so an agreement names exactly what it agreed to.
+        if (!/^[a-z0-9][a-z0-9_.-]{0,63}$/.test(e.adjustment)) fail('shape', `proposal name "${e.adjustment}" is invalid`)
+        q.document = evidence(e.document, 'asking about a proposed adjustment', `${runFolder(s)}/definition/proposals/${e.adjustment}.yaml`)
       } else if (e.document !== undefined) fail('shape', 'only a question about the plan records a document')
       // The result confirmation presents deliverables; the question records
       // them by hash (the file layer checks them), so a confirmation is of
@@ -761,7 +830,9 @@ export function apply(prev: RunState | null, e: HistoryEntry | (OpInput & EntryM
       const q = question(e.question)
       const confirming = q.node ? graph.nodes[q.node]?.confirms === 'result' : false
       if (!confirming) fail('not-result-confirmation', `question ${q.id} was ${q.node ? `asked from ${q.node}` : 'asked from no node'}, which does not confirm the result${q.node && stepOf(graph, q.node)?.kind === 'plan' ? ' (plan agreement is not acceptance of the result)' : ''}; only the result-confirmation question's answer becomes a decision`)
-      const latest = Object.values(s.questions).filter(x => x.node === q.node).at(-1)!
+      // The latest question from any result-confirmation node (p7: a
+      // correction adds a new confirming node; the old one keeps its meaning).
+      const latest = Object.values(s.questions).filter(x => x.node && graph.nodes[x.node]?.confirms === 'result').at(-1)!
       if (latest.id !== q.id) fail('not-result-confirmation', `question ${latest.id} was asked after ${q.id}; the decision is the answer to the latest confirmation question`)
       const taken = q.takenUp
       if (!taken) return fail('no-answer', `question ${q.id} is ${questionState(q)}; a decision is an answer that was taken up`)
@@ -799,6 +870,74 @@ export function apply(prev: RunState | null, e: HistoryEntry | (OpInput & EntryM
       s.presentations = { ...all, [id]: p }
       n.updated = at
       change.presentation = [id, null, 'registered']
+      break
+    }
+    case 'run.adjust': {
+      // A change of the run's future work (p7, docs/adjustments.md), at a
+      // node boundary, authorized by the person's records.
+      live()
+      if (s.execution.state === 'completed') fail('run-completed', 'the run\'s execution is completed; its definition is not adjusted any more')
+      const source = adjustSource(e.source)
+      if (ctl.attempt) {
+        if (e.attempt !== ctl.attempt.id) fail(e.attempt ? 'attempt-stale' : 'attempt-open', `attempt ${ctl.attempt.id} is executing this run; only it adjusts the run meanwhile${source.kind === 'person' ? ' (a person\'s adjustment waits until no attempt is open)' : ''}`)
+      } else if (e.attempt) fail('attempt-stale', `attempt ${e.attempt} is not open`)
+      const revisions = s.definition.revisions ?? []
+      const active = activeRevision(s.definition)
+      if (e.parent !== active) fail('revision-outdated', `the adjustment was made from ${String(e.parent)}, but ${active} is in force; read the run again and adjust the current revision`)
+      const id = `r${revisions.length + 2}`
+      if (e.revision !== id) fail('shape', `the next revision is ${id}, not ${String(e.revision)}`)
+      if (typeof e.file !== 'string' || e.file !== `definition/${id}/${s.workflow}.yaml`) fail('shape', `the revision file is definition/${id}/${s.workflow}.yaml`)
+      if (typeof e.sha256 !== 'string' || !/^[0-9a-f]{64}$/.test(e.sha256)) fail('shape', 'sha256 must be 64 hex digits')
+      if (typeof e.definitionDigest !== 'string' || !/^sha256:[0-9a-f]{64}$/.test(e.definitionDigest)) fail('shape', 'definitionDigest must be sha256:<hex>')
+      const running = Object.keys(s.nodes).filter(n => s.nodes[n].state === 'running')
+      if (running.length) fail('mid-node', `${running.join(', ')} ${running.length === 1 ? 'is' : 'are'} running; an adjustment applies at a node boundary, when no node runs`)
+      boundary('adjusting the run')
+      const next = e.effective
+      if (!isObj(next) || !isObj(next.nodes) || !Array.isArray(next.edges) || typeof next.compiler !== 'string') fail('shape', 'the adjustment carries its whole compiled graph')
+      const cur = s.definition.effective
+      if (cur && next.policy !== cur.policy) fail('adjust-access', `the documentation policy is ${cur.policy}; an adjustment does not change it`)
+      const nodes = next.nodes as Record<string, RunGraph['nodes'][string]>
+      const edges = next.edges as Edge[]
+      for (const ed of edges) if (!(ed?.from in nodes) || !(ed?.to in nodes) || ed.from === ed.to) fail('adjust-graph', `edge ${String(ed?.from)} → ${String(ed?.to)} names an unknown node or loops`)
+      const outs = new Map<string, string[]>()
+      for (const ed of edges) outs.set(ed.from, [...(outs.get(ed.from) ?? []), ed.to])
+      if (hasCycle(Object.keys(nodes), x => outs.get(x) ?? [])) fail('adjust-graph', 'the adjusted graph has a cycle')
+      if (Object.values(nodes).some(n => n.type === 'delegate')) fail('adjust-graph', 'delegate nodes are not executed; an adjustment does not add one')
+      for (const nid of Object.keys(nodes)) if (!(nid.startsWith('_') ? /^_[a-z0-9_.-]+$/.test(nid) : ID_PATTERN.test(nid))) fail('adjust-graph', `node id "${nid}" is invalid`)
+      // Work that is not pending keeps its identity, meaning and dependencies.
+      const incoming = (g: { edges: Edge[] }, nid: string) => g.edges.filter(x => x.to === nid).map(x => x.from).sort()
+      for (const [nid, rec] of Object.entries(s.nodes)) {
+        if (rec.state === 'pending') continue
+        const what = Object.values(s.questions).some(q => q.node === nid && ['open', 'answered'].includes(questionState(q))) ? 'adjust-question' : nid.startsWith('_') ? 'adjust-generated' : 'adjust-started'
+        if (!nodes[nid]) fail(what, `${nid} is ${rec.state}; started, waiting or finished work is not removed`)
+        if (canonicalJson(nodes[nid]) !== canonicalJson(graph.nodes[nid])) fail(what, `${nid} is ${rec.state}; its type, step and meaning stay as they were`)
+        if (canonicalJson(incoming({ edges }, nid)) !== canonicalJson(incoming(graph, nid))) fail('adjust-dependencies', `${nid} is ${rec.state}; the work it waited for (${incoming(graph, nid).join(', ') || 'nothing'}) stays its dependency`)
+      }
+      if (canonicalJson({ nodes, edges }) === canonicalJson({ nodes: graph.nodes, edges: graph.edges })) fail('adjust-nothing', 'the adjustment changes no executable work (appearance and layout alone are not adjustments)')
+      // Authorized by the person's records.
+      if (source.kind === 'answer') {
+        const q = question(source.question)
+        if (!q.takenUp) fail('adjust-unauthorized', `${q.id} has no answer taken up; an adjustment from an answer follows the answer the executor took up`)
+        if (source.answer !== undefined && source.answer !== q.takenUp!.answer) fail('adjust-unauthorized', `answer ${source.answer} of ${q.id} is not the one taken up`)
+      } else if (source.kind === 'instruction') {
+        const ins = s.instructions?.[source.instruction]
+        if (!ins) fail('adjust-unauthorized', `instruction "${source.instruction}" does not exist in this run`)
+        if (!ins!.ack) fail('adjust-unauthorized', `instruction ${source.instruction} is not acknowledged; acknowledge it (wfe run ack) before adjusting the run for it`)
+      } else if (source.kind === 'agreement') {
+        const q = question(source.question)
+        if (!q.takenUp) fail('adjust-unauthorized', `${q.id} has no answer taken up; agreement is an answer that was taken up`)
+        if (!q.document || q.document.sha256 !== e.sha256) fail('adjust-unauthorized', `${q.id} did not ask about this exact definition (the proposal's hash differs); ask about the proposal you apply`)
+      }
+      const diff = graphDiff(graph, { nodes, edges })
+      const rev: Revision = { revision: id, parent: active, file: e.file, sha256: e.sha256, definitionDigest: e.definitionDigest, effective: next as EffectiveGraph, reason: text(e.reason, 'the reason'), source, diff, at, by }
+      s.definition = { ...s.definition, active: id, revisions: [...revisions, rev] }
+      // Unchanged nodes keep their records; new work starts pending; removed
+      // (pending) work leaves the state, its history stays as it was.
+      for (const nid of Object.keys(s.nodes)) if (!(nid in nodes)) delete s.nodes[nid]
+      for (const nid of Object.keys(nodes).sort()) if (!(nid in s.nodes)) s.nodes[nid] = emptyNode()
+      s.nodes = Object.fromEntries(Object.keys(s.nodes).sort().map(k2 => [k2, s.nodes[k2]]))
+      change.revision = [active, id]
+      graph = { nodes, edges }
       break
     }
     case 'presentation.observe': {
@@ -874,6 +1013,8 @@ export function apply(prev: RunState | null, e: HistoryEntry | (OpInput & EntryM
 // Replays a whole history. Throws RunError naming the entry that fails.
 export function replay(history: unknown[], graph: RunGraph): { state: RunState; changes: Change[] } {
   let state: RunState | null = null
+  // The graph in force: the original until an adjustment, then the one it carries (p7).
+  let g = graph
   const changes: Change[] = []
   history.forEach((raw, i) => {
     if (!isObj(raw)) fail('shape', `history entry ${i + 1} is not an object`)
@@ -881,9 +1022,10 @@ export function replay(history: unknown[], graph: RunGraph): { state: RunState; 
     if (e.seq !== i + 1) fail('sequence', `history entry ${i + 1} has seq ${String(e.seq)}; expected ${i + 1}`)
     if (!(OPS as readonly string[]).includes(e.op)) fail('op-unknown', `history ${e.seq}: unknown operation "${String(e.op)}"`)
     try {
-      const r = apply(state, e, graph)
+      const r = apply(state, e, g)
       state = r.state
       changes.push(r.change)
+      if (e.op === 'run.adjust') g = graphOfState(r.state) ?? g
     } catch (err) {
       if (err instanceof RunError) throw new RunError(err.code, `history ${e.seq} (${e.op}): ${err.message}`)
       throw new RunError('shape', `history ${e.seq} (${e.op}): ${(err as Error).message}`)
@@ -891,6 +1033,13 @@ export function replay(history: unknown[], graph: RunGraph): { state: RunState; 
   })
   if (!state) fail('empty', 'the history is empty')
   return { state: state!, changes }
+}
+
+// The graph a run follows now: its latest revision's, or the one it was
+// created with (p7). Undefined for records without a frozen graph.
+export function graphOfState(s: { definition: DefinitionRef }): RunGraph | undefined {
+  const eff = effectiveOf(s)
+  return eff ? { nodes: eff.nodes, edges: eff.edges } : undefined
 }
 
 export function stateOf(record: RunRecord): RunState {
@@ -977,6 +1126,7 @@ export type NotableType = 'started' | 'question' | 'answered' | 'reported' | 'no
   | 'instructed' | 'acknowledged' // p6: an additional instruction received, and taken up
   | 'accepted' | 'notice' // p6, request topic only: the request became a run; a reply about a post (server/notify.ts)
   | 'presented' | 'cleanup-failed' // p7: a presentation became available for review; its shutdown could not be verified
+  | 'adjusted' // p7: the run's future work was adjusted (a new revision)
 export interface NotableEvent {
   id: string
   seq: number
@@ -999,6 +1149,8 @@ export interface NotableEvent {
   confirms?: boolean // a question from the result-confirmation node
   presentation?: string // presented / cleanup-failed, and a question about a presentation (p7)
   title?: string // the presentation's title
+  revision?: string // adjusted: the revision now in force
+  adjusted?: { added: string[]; removed: string[] } // adjusted: authored work added and removed
 }
 // The hold an entry recorded, as the reducer worded it at that point (the
 // state keeps only the current hold): replayed from the frozen graph.
@@ -1014,6 +1166,7 @@ export function notableEvents(r: RunRecord, sinceSeq = 0): NotableEvent[] {
   const out: NotableEvent[] = []
   const eff = r.definition.effective
   const reporting = eff?.policy === 'default'
+  const stepAt = (id: string) => anyRevisionNode(r, id)?.step
   let started = false
   for (const e of r.history) {
     const d = e as unknown as Record<string, string>
@@ -1022,7 +1175,7 @@ export function notableEvents(r: RunRecord, sinceSeq = 0): NotableEvent[] {
     if (e.seq <= sinceSeq) continue
     const push = (type: NotableType, critical: boolean, text: string, extra: Partial<NotableEvent> = {}) =>
       out.push({ id: `${r.project}/${r.workflow}/${r.run}#${e.seq}:${type}`, seq: e.seq, type, at: e.at, by: e.by, critical, text, ...extra })
-    const step = typeof d.node === 'string' ? eff?.nodes[d.node]?.step : undefined
+    const step = typeof d.node === 'string' ? stepAt(d.node) : undefined
     if (e.op === 'attempt.begin' && r.history.find(h => h.op === 'attempt.begin')!.seq === e.seq) push('started', false, d.reason ?? '')
     else if (e.op === 'question.ask') {
       const q = r.questions[d.question]
@@ -1046,6 +1199,10 @@ export function notableEvents(r: RunRecord, sinceSeq = 0): NotableEvent[] {
     if (e.op === 'instruction.receive') push('instructed', false, d.text, { instructions: [e.change.instruction?.[1] ?? ''], holder: r.executor.name })
     if (e.op === 'instruction.ack') push('acknowledged', false, d.note, { instructions: (e as unknown as { instructions: string[] }).instructions, response: d.response })
     if (e.op === 'run.cancel') push('cancelled', true, d.reason)
+    if (e.op === 'run.adjust') {
+      const diff = (e as unknown as { diff?: AdjustDiff }).diff ?? r.definition.revisions?.find(x => x.revision === d.revision)?.diff
+      push('adjusted', false, d.reason, { revision: d.revision, ...(diff ? { adjusted: { added: diff.added.filter(x => !x.startsWith('_')), removed: diff.removed.filter(x => !x.startsWith('_')) } } : {}) })
+    }
     if (e.op === 'presentation.observe' && (d.status === 'available' || d.status === 'stop-failed')) {
       const p = r.presentations?.[d.presentation]
       const extra = { presentation: d.presentation, title: p?.title ?? d.presentation, node: p?.node }

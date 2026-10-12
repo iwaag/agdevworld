@@ -311,6 +311,16 @@ export function createHandler(config: ServiceConfig) {
           throw new RequestError(404, `no route for ${method} ${url.pathname}`)
         }
         if (sub === 'file' && method === 'GET') return send(res, 200, await readRunFile(ws, ref, url.searchParams.get('path') ?? '', { rev: url.searchParams.get('rev') ?? undefined }))
+        // An adjustment of the run's future work (p7): inspect (dryRun) or apply.
+        if (sub === 'adjust' && method === 'POST') {
+          const input = await body(req) as Record<string, unknown>
+          const by = typeof input.by === 'string' ? input.by.trim() : ''
+          if (!by) throw new RequestError(400, 'by is required: the name of who adjusts the run')
+          const { adjustRun } = await import('./runs.ts')
+          const source = (input.source && typeof input.source === 'object' ? input.source : { kind: 'person', by }) as never
+          const r = await adjustRun(ws, ref, { text: str(input.text, 'the adjusted definition'), reason: str(input.reason, 'the reason'), source, dryRun: input.dryRun === true, expectRevision: typeof input.expectRevision === 'string' ? input.expectRevision : undefined }, { by, via: 'browser', expectSeq: typeof input.expectSeq === 'number' ? input.expectSeq : undefined })
+          return send(res, r.ok ? 200 : 422, r)
+        }
         if (sub === 'ops' && method === 'POST') {
           const input = await body(req) as Record<string, unknown>
           // Attempts and presentation facts are the execution host's; adjustments have their own route.

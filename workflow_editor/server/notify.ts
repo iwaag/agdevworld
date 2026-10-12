@@ -42,7 +42,7 @@ import {
   DELAYED_AFTER_MS, type DocLink, type NoticeKind, type RenderContext,
 } from '../shared/notify.ts'
 import type { IntakeStore, RequestRow } from './intake.ts'
-import { notableEvents, openPresentations, questionState, runKey, type NotableEvent, type RunRecord, type RunRef } from '../shared/run.ts'
+import { effectiveOf, notableEvents, openPresentations, questionState, runKey, type NotableEvent, type RunRecord, type RunRef } from '../shared/run.ts'
 import { assertWorkspaceAllowed, loadBoundary } from './boundary.ts'
 import type { CheckpointRow, ExecStore } from './exec.ts'
 import { git } from './git.ts'
@@ -684,7 +684,7 @@ export class NotifyStore {
       if (!rec) return undefined
       const ex = rec.execution
       if (ex.waiting.length) return ex.waiting.map(w => `${w.node} waits for ${w.holder}`).join('; ')
-      if (ex.ready.length) return `${rec.executor.name}: ${ex.ready.map(id => rec.definition.effective?.nodes[id]?.step?.purpose ?? id).join(', ')}`
+      if (ex.ready.length) return `${rec.executor.name}: ${ex.ready.map(id => effectiveOf(rec)?.nodes[id]?.step?.purpose ?? id).join(', ')}`
       return undefined
     }
     // Where each presentation is served now (p7): resolved from this host's

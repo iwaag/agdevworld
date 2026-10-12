@@ -10,8 +10,9 @@ import type { FileProblem, RelatedRun, RunFile, RunResponse, RunSummary, SourceC
 import { approvalStates, canonicalJson, semanticDigest } from '../shared/canonical.ts'
 import { authoredNode, COMPILER_VERSION, compile, isGenerated, type EffectiveGraph, type StepSpec } from '../shared/compile.ts'
 import { ID_PATTERN, normalizeRepoPath, type Workflow } from '../shared/model.ts'
+import { validateWorkflow } from '../shared/validate.ts'
 import {
-  checkRecord, delegateNodes, documentPath, hostOf, operate, presentationFolder, RUN_ID, RunError, runFolder, RUNS_ROOT, runKey, validRunRef, type Presentation,
+  activeRevision, checkRecord, delegateNodes, documentPath, graphOfState, hostOf, operate, presentationFolder, type AdjustSource, type AdjustDiff, graphDiff, RUN_ID, RunError, runFolder, RUNS_ROOT, runKey, validRunRef, type Presentation,
   type BundleEntry, type DefinitionRef, type DocumentEvidence, type EntrustRef, type Executor, type OpInput, type RepoContext, type RunGraph,
   type EntryMeta, type RunInput, type RunRecord, type RunRef,
 } from '../shared/run.ts'
@@ -81,7 +82,7 @@ function gitSource(info: DevdocsInfo, rev: DevdocsRev, runRel: string): Source {
   }
 }
 
-interface Bundle { entries: Record<string, { file: string; text?: string; workflow?: Workflow; problem?: string }>; graph?: RunGraph; problem?: string }
+interface Bundle { entries: Record<string, { file: string; text?: string; workflow?: Workflow; problem?: string }>; graph?: RunGraph; problem?: string; revisions?: { revision: string; file: string; text: string; workflow: Workflow }[] }
 
 async function loadBundle(src: Source, def: unknown): Promise<Bundle> {
   const out: Bundle = { entries: {} }
@@ -135,6 +136,11 @@ async function readFrom(src: Source, expect: RunRef & { project?: string }, cach
     bundle.graph = frozen
     const checked = checkRecord(raw, bundle.graph)
     if (!checked.ok) return { text, problem: { kind: 'shape', message: checked.message, code: checked.code }, bundle }
+    // Adjusted revisions (p7): each file as recorded, its graph what its
+    // authored nodes say; operations follow the revision in force.
+    const revProblem = await loadRevisions(src, checked.record, bundle)
+    if (revProblem) return { text, problem: { kind: 'shape', message: revProblem, code: 'bundle' }, bundle }
+    bundle.graph = graphOfState(checked.record) ?? bundle.graph
     if (expect.project !== undefined && checked.record.project !== expect.project) {
       return { text, problem: { kind: 'shape', message: `${RUN_FILE} belongs to project "${checked.record.project}", not "${expect.project}"`, code: 'location' }, bundle }
     }
@@ -175,8 +181,37 @@ function followedGraph(def: DefinitionRef, bundle: Bundle): RunGraph | string {
 async function bundleSigs(dir: string): Promise<string> {
   const defDir = join(dir, DEFINITION_DIR)
   const names = (await readdir(defDir).catch(() => [] as string[])).sort()
-  const sigs = await Promise.all(names.map(async n => `${n}:${await sigOf(join(defDir, n))}`))
+  const sigs = await Promise.all(names.map(async n => {
+    // Revision folders (p7): their files count too.
+    const inner = /^r[0-9]+$/.test(n) ? (await readdir(join(defDir, n)).catch(() => [] as string[])).sort() : []
+    return `${n}:${await sigOf(join(defDir, n))}${(await Promise.all(inner.map(async f => `/${f}:${await sigOf(join(defDir, n, f))}`))).join('')}`
+  }))
   return sigs.join(',')
+}
+
+// Reads every adjusted revision of a run: the file must have its recorded
+// bytes, hold the run's workflow, and its graph's authored nodes must be
+// what the file says (and, by the current compiler, exactly what it
+// compiles to). A problem makes the record unusable; nothing is recompiled.
+async function loadRevisions(src: Source, rec: RunRecord, bundle: Bundle): Promise<string | null> {
+  const out: NonNullable<Bundle['revisions']> = []
+  for (const rev of rec.definition.revisions ?? []) {
+    const text = await src.text(rev.file)
+    if (text === null) return `${rev.file} (revision ${rev.revision}) is missing`
+    if (sha256(text) !== rev.sha256) return `${rev.file} differs from its recorded sha256 (revision ${rev.revision} was changed)`
+    const parsed = parseWorkflow(text)
+    if (!parsed.ok) return `${rev.file}: ${parsed.problem.message}`
+    if (parsed.model.id !== rec.definition.root) return `${rev.file} holds workflow "${parsed.model.id}", not "${rec.definition.root}"`
+    const authored = (g: RunGraph) => canonicalJson(Object.fromEntries(Object.entries(g.nodes).filter(([id]) => !isGenerated(id))))
+    if (authored(rev.effective) !== authored(graphOf(parsed.model))) return `revision ${rev.revision}'s frozen graph differs from ${rev.file}`
+    if (rev.effective.compiler === COMPILER_VERSION) {
+      const again = compile(parsed.model)
+      if (!again.ok || canonicalJson(again.graph) !== canonicalJson(rev.effective)) return `revision ${rev.revision}'s frozen graph differs from what ${COMPILER_VERSION} produces for ${rev.file}`
+    }
+    out.push({ revision: rev.revision, file: rev.file, text, workflow: parsed.model })
+  }
+  if (out.length) bundle.revisions = out
+  return null
 }
 
 export async function readRun(ws: Workspace, ref: RunRef): Promise<Reading & { dir: string }> {
@@ -193,7 +228,7 @@ async function projectId(ws: Workspace): Promise<string | undefined> {
 }
 
 // Throws RequestError when the run cannot be operated on.
-async function usableRun(ws: Workspace, ref: RunRef): Promise<{ record: RunRecord; graph: RunGraph; dir: string; bundle: Bundle }> {
+export async function usableRun(ws: Workspace, ref: RunRef): Promise<{ record: RunRecord; graph: RunGraph; dir: string; bundle: Bundle }> {
   const r = await readRun(ws, ref)
   if (r.problem?.code === 'missing') {
     const exists = await stat(r.dir).then(() => true, () => false)
@@ -320,7 +355,8 @@ export async function runResponse(ws: Workspace, ref: RunRef, opts: { rev?: stri
   return {
     workspace: ws.reg.id, ref: runKey(ref), dir: rel, rev: revInfo?.commit, revInfo,
     record, problem: reading.problem,
-    bundle: Object.fromEntries(Object.entries(reading.bundle.entries).map(([id, e]) => [id, { file: e.file, workflow: e.workflow, problem: e.problem }])),
+    bundle: Object.fromEntries(Object.entries(reading.bundle.entries).map(([id, e]) => [id, { file: e.file, workflow: e.workflow, problem: e.problem, text: e.text }])),
+    ...(reading.bundle.revisions ? { revisions: reading.bundle.revisions.map(r => ({ revision: r.revision, file: r.file, workflow: r.workflow, text: r.text })) } : {}),
     sources: opts.rev ? [] : await compareSources(ws, reading.bundle, record?.definition),
     files: reading.files ?? [], predecessor, artifacts,
   }
@@ -588,7 +624,12 @@ async function runOpLocked(ws: Workspace, ref: RunRef, input: OpInput & EntryMet
   const planAsked = op.op === 'question.ask' && op.plan ? Object.values(graph.nodes).find(n => n.step?.kind === 'plan')?.step : undefined
   const step = planAsked ?? ((op.op === 'node.complete' || op.op === 'question.ask') && op.node ? graph.nodes[op.node]?.step : undefined)
   if (op.op === 'node.complete' || op.op === 'question.ask') delete op.document // never taken from the caller
-  if (step && (op.op === 'node.complete' || step.kind === 'plan')) {
+  if (op.op === 'question.ask' && op.adjustment) {
+    // A proposed adjustment (p7): the proposal file, by hash.
+    const checked = await checkRunFile(ws, ref, `${DEFINITION_DIR}/proposals/${op.adjustment}.yaml`)
+    if ('problem' in checked) throw new RequestError(422, `asking about adjustment ${op.adjustment}: ${checked.problem}`, { code: 'document-missing' })
+    ;(op as { document?: DocumentEvidence }).document = checked
+  } else if (step && (op.op === 'node.complete' || step.kind === 'plan')) {
     const checked = await checkDocument(ws, ref, step)
     if ('problem' in checked) docProblem = checked.problem
     else (op as { document?: DocumentEvidence }).document = checked
@@ -624,6 +665,142 @@ async function runOpLocked(ws: Workspace, ref: RunRef, input: OpInput & EntryMet
   if (next === record) return { record, ref, duplicate: true }
   await writeRecord(dir, next)
   return { record: next, ref }
+}
+
+// ---- adjustments (p7, docs/adjustments.md) -----------------------------------------
+
+export interface AdjustOptions {
+  text: string // the whole adjusted definition (the active revision, edited)
+  reason: string
+  source: AdjustSource
+  dryRun?: boolean // inspect only: the difference and every refusal, nothing written
+  propose?: string // write it as definition/proposals/<name>.yaml to ask about (agreement)
+  expectRevision?: string // refuse unless this revision is in force
+}
+export interface AuthoredDiff { added: string[]; removed: string[]; changed: { id: string; fields: string[] }[]; restyled: string[] }
+export interface AdjustResult {
+  ok: boolean
+  dryRun: boolean
+  parent: string // the revision it was made from
+  revision?: string // the revision it became (applied)
+  proposal?: string // run-relative proposal file (propose)
+  authored: AuthoredDiff // what the author changed
+  graph: AdjustDiff // the effective graph's difference, generated steps included
+  problems: { code: string; message: string }[]
+  record?: RunRecord
+}
+
+const NODE_FIELDS = ['type', 'name', 'description', 'repositories', 'workflow', 'confirms'] as const
+function authoredDiff(a: Workflow, b: Workflow): AuthoredDiff {
+  const fields = (x: Workflow['nodes'][string], y: Workflow['nodes'][string]) => NODE_FIELDS.filter(f => canonicalJson(x[f] ?? null) !== canonicalJson(y[f] ?? null))
+  return {
+    added: Object.keys(b.nodes).filter(n => !(n in a.nodes)).sort(),
+    removed: Object.keys(a.nodes).filter(n => !(n in b.nodes)).sort(),
+    changed: Object.keys(b.nodes).filter(n => n in a.nodes && fields(a.nodes[n], b.nodes[n]).length).sort().map(id => ({ id, fields: fields(a.nodes[id], b.nodes[id]) })),
+    restyled: Object.keys(b.nodes).filter(n => n in a.nodes && canonicalJson(a.nodes[n].appearance ?? null) !== canonicalJson(b.nodes[n].appearance ?? null)).sort(),
+  }
+}
+
+// The active revision's authored definition and its text.
+function activeDefinition(record: RunRecord, bundle: Bundle): { text: string; workflow: Workflow } {
+  const last = bundle.revisions?.at(-1)
+  if (last) return { text: last.text, workflow: last.workflow }
+  const root = bundle.entries[record.definition.root]
+  return { text: root.text!, workflow: root.workflow! }
+}
+
+// Inspects, proposes or applies an adjustment of a run's future work, under
+// the run's lock: the file-level rules here (access, authored fields of
+// started work, validation), the record rules in the reducer (boundary,
+// state, authorization). The revision file is written before run.json; a
+// refusal removes it again.
+export async function adjustRun(ws: Workspace, ref: RunRef, o: AdjustOptions, ctx: OpContext & { attempt?: string; receipt?: string }): Promise<AdjustResult> {
+  const file = join(await inside(ws.root, runDir(ref)), RUN_FILE)
+  return withLock(file, async () => {
+    const { record, graph, dir, bundle } = await usableRun(ws, ref)
+    const parent = activeRevision(record.definition)
+    const active = activeDefinition(record, bundle)
+    const problems: AdjustResult['problems'] = []
+    const problem = (code: string, message: string) => problems.push({ code, message })
+    const empty: AuthoredDiff = { added: [], removed: [], changed: [], restyled: [] }
+    const parsed = parseWorkflow(o.text)
+    if (!parsed.ok) return { ok: false, dryRun: !!o.dryRun, parent, authored: empty, graph: graphDiff(graph, graph), problems: [{ code: 'adjust-graph', message: `the adjusted definition cannot be read: ${parsed.problem.message}` }] }
+    const next = parsed.model
+    if (next.id !== record.definition.root) problem('adjust-graph', `the adjusted definition is workflow "${next.id}", not "${record.definition.root}"`)
+    if (o.expectRevision && o.expectRevision !== parent) problem('revision-outdated', `${parent} is in force, not ${o.expectRevision}; read the run again`)
+    for (const k of ['repositories', 'execution', 'intake', 'documentation'] as const) if (canonicalJson(next[k]) !== canonicalJson(active.workflow[k])) problem('adjust-access', `${k} differs from the run's definition; an adjustment never changes access, who performs the run, its intake or its documentation policy`)
+    for (const [id, n] of Object.entries(active.workflow.nodes)) {
+      const st = record.nodes[id]?.state
+      if (!st || st === 'pending') continue
+      const open = Object.values(record.questions).some(q => q.node === id && !q.takenUp && !q.withdrawn)
+      if (!next.nodes[id]) { problem(open ? 'adjust-question' : 'adjust-started', `${id} is ${st}${open ? ' with an open question' : ''}; it is not removed`); continue }
+      const changed = NODE_FIELDS.filter(f => canonicalJson(n[f] ?? null) !== canonicalJson(next.nodes[id][f] ?? null))
+      if (changed.length) problem(open ? 'adjust-question' : 'adjust-started', `${id} is ${st}; its ${changed.join(', ')} stay as they were`)
+    }
+    // One result confirmation among unfinished nodes: a correction adds a
+    // new confirming talk after the completed one.
+    const confirming = Object.entries(next.nodes).filter(([, n]) => n.confirms === 'result').map(([id]) => id)
+    const unfinished = confirming.filter(id => record.nodes[id]?.state !== 'completed')
+    for (const i of validateWorkflow(next)) {
+      if (i.severity !== 'error') continue
+      if (i.code === 'confirms-duplicate' && unfinished.length <= 1) continue
+      problem('adjust-graph', i.message)
+    }
+    const compiled = compile(next)
+    if (!compiled.ok) problem('adjust-graph', compiled.message)
+    const authored = authoredDiff(active.workflow, next)
+    const newGraph = compiled.ok ? { nodes: compiled.graph.nodes, edges: compiled.graph.edges } : graph
+    const gdiff = graphDiff(graph, newGraph)
+    const base = { dryRun: !!o.dryRun, parent, authored, graph: gdiff }
+    const revision = `r${(record.definition.revisions?.length ?? 0) + 2}`
+    const revFile = `${DEFINITION_DIR}/${revision}/${record.definition.root}.yaml`
+    const input = compiled.ok ? {
+      op: 'run.adjust' as const, revision, parent, file: revFile, sha256: sha256(o.text), definitionDigest: await semanticDigest('definition', next), effective: compiled.graph,
+      reason: o.reason, source: o.source, ...(ctx.attempt ? { attempt: ctx.attempt } : {}), ...(ctx.receipt ? { receipt: ctx.receipt } : {}),
+    } : null
+    // The record's own rules, tried on a copy, so an inspection lists them too.
+    if (input && !o.propose) {
+      try { operate(record, structuredClone(input), { at: (ctx.now ?? new Date()).toISOString(), by: ctx.by?.trim() || record.executor.name, via: ctx.via, graph, expectSeq: ctx.expectSeq }) } catch (e) {
+        if (!(e instanceof RunError)) throw e
+        if (!problems.some(p => p.code === e.code)) problem(e.code, e.message)
+      }
+    }
+    if (problems.length || o.dryRun) return { ok: !problems.length, ...base, problems }
+    if (o.propose) {
+      if (!ID_PATTERN.test(o.propose)) throw new RequestError(400, `proposal name "${o.propose}" must match ${ID_PATTERN.source}`)
+      const rel = `${DEFINITION_DIR}/proposals/${o.propose}.yaml`
+      const asked = Object.values(record.questions).find(q => q.document?.path === `${runDir(ref)}/${rel}`)
+      if (asked && asked.document!.sha256 !== sha256(o.text)) throw new RequestError(409, `${rel} was asked about in ${asked.id}; a changed proposal gets a new name`, { code: 'proposal-asked' })
+      await mkdir(join(dir, DEFINITION_DIR, 'proposals'), { recursive: true })
+      await atomicWrite(join(dir, rel), o.text)
+      return { ok: true, ...base, proposal: rel, problems }
+    }
+    const abs = join(dir, revFile)
+    // An unreferenced file of this revision number is a leftover of an
+    // interrupted adjustment: replaced.
+    await mkdir(join(dir, DEFINITION_DIR, revision), { recursive: true })
+    await atomicWrite(abs, o.text)
+    try {
+      const r = await runOpLocked(ws, ref, input!, ctx)
+      return { ok: true, ...base, revision, problems, record: r.record }
+    } catch (e) {
+      await rm(join(dir, DEFINITION_DIR, revision), { recursive: true, force: true })
+      throw e
+    }
+  }, { what: `run ${runKey(ref)}` })
+}
+
+// A file of the run folder (not a link out of it), by hash.
+async function checkRunFile(ws: Workspace, ref: RunRef, rel: string): Promise<DocumentEvidence | { problem: string }> {
+  let folder: string
+  try { folder = await realpath(await inside(ws.root, runDir(ref))) } catch (e) { return { problem: (e as Error).message } }
+  const abs = join(folder, rel)
+  const l = await lstat(abs).catch(() => null)
+  if (!l?.isFile() || l.isSymbolicLink()) return { problem: `${runDir(ref)}/${rel} is not a file; write it first (wfe run adjust … --propose)` }
+  if (!(await realpath(abs)).startsWith(folder + sep)) return { problem: `${rel} resolves outside the run folder` }
+  const bytes = await readFile(abs)
+  if (!bytes.length) return { problem: `${rel} is empty` }
+  return { path: `${runDir(ref)}/${rel}`, sha256: sha256(bytes), bytes: bytes.length }
 }
 
 // ---- presentations (p7, docs/presentations.md) -------------------------------------

@@ -468,3 +468,8 @@ details.instructions pre { white-space: pre-wrap; background: #f6f7f9; border-ra
 .presentation.p-available { border-color: #6fb3d6; }
 .presentation.p-stop-failed, .presentation.p-failed { border-color: #e2a7a2; background: var(--error-bg); }
 .chip.cleanup-pending { margin-left: 6px; }
+
+/* Revisions (p7) */
+.revision { border-left: 3px solid var(--line); padding-left: 8px; margin-bottom: 6px; }
+details.adjust textarea.yaml { width: 100%; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
+details.adjust input { width: 100%; margin: 6px 0; }

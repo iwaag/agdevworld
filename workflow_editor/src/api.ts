@@ -22,6 +22,14 @@ export interface PresentationView {
   observed: { alive: boolean; identity: boolean; detail: string; instance: string; port: number; pid: number | null; state: string } | null
 }
 
+// The result of inspecting or applying an adjustment (p7, server/runs.ts adjustRun).
+export interface AdjustView {
+  ok: boolean; dryRun: boolean; parent: string; revision?: string
+  authored: { added: string[]; removed: string[]; changed: { id: string; fields: string[] }[]; restyled: string[] }
+  graph: { added: string[]; removed: string[]; changed: string[]; edgesAdded: [string, string][]; edgesRemoved: [string, string][] }
+  problems: { code: string; message: string }[]
+}
+
 export class ApiError extends Error {
   status: number
   detail?: unknown
@@ -83,6 +91,7 @@ export const api = {
   runNotify: (id: string, workflow: string, run: string) => call<RunNotifyView>('GET', `${ws(id)}/runs/${encodeURIComponent(workflow)}/${encodeURIComponent(run)}/notify`),
   runPresentations: (id: string, workflow: string, run: string) => call<{ presentations: PresentationView[] }>('GET', `${ws(id)}/runs/${encodeURIComponent(workflow)}/${encodeURIComponent(run)}/presentations`),
   presentation: (id: string, workflow: string, run: string, p: string, action: 'start' | 'stop', by: string) => call<{ ok: boolean }>('POST', `${ws(id)}/runs/${encodeURIComponent(workflow)}/${encodeURIComponent(run)}/presentations/${encodeURIComponent(p)}/${action}`, { by }),
+  adjustRun: (id: string, workflow: string, run: string, body: { text: string; reason: string; by: string; dryRun: boolean; expectRevision?: string; expectSeq?: number }) => call<AdjustView>('POST', `${ws(id)}/runs/${encodeURIComponent(workflow)}/${encodeURIComponent(run)}/adjust`, body, [422]),
   retryCheckpoint: (id: string, workflow: string, run: string, checkpoint: number) => call<unknown>('POST', `${ws(id)}/runs/${encodeURIComponent(workflow)}/${encodeURIComponent(run)}/checkpoints/${checkpoint}/publish`),
   requestRun: (id: string, input: { workflow: string; text: string; author: string; receipt: string }) =>
     call<{ ok: true; duplicate: boolean; ref: { workflow: string; run: string }; job: { id: number; state: string } }>('POST', `${ws(id)}/runs`, input),

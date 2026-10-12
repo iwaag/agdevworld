@@ -7,9 +7,9 @@ import type { RunResponse } from '../shared/api.ts'
 import { accessAt } from '../shared/access.ts'
 import { normalizeRepoPath } from '../shared/model.ts'
 import { splitCounts } from '../shared/compile.ts'
-import { EXECUTOR_OPS, holderOf, hostOf, notableEvents, questionState, runKey, type EntrustRef, type HistoryEntry, type Instruction, type OpInput, type RunRecord, type RunRef } from '../shared/run.ts'
+import { effectiveOf, EXECUTOR_OPS, holderOf, hostOf, notableEvents, questionState, runKey, type EntrustRef, type HistoryEntry, type Instruction, type OpInput, type RunRecord, type RunRef } from '../shared/run.ts'
 import {
-  checkRun, createRun, listRuns, resolveRef, runDir, runOp, runResponse, type CreateRunOptions,
+  adjustRun, checkRun, createRun, listRuns, resolveRef, runDir, runOp, runResponse, type AdjustResult, type CreateRunOptions,
 } from '../server/runs.ts'
 import { RequestError, type Workspace } from '../server/workspace.ts'
 import type { ExecStore } from '../server/exec.ts'
@@ -118,13 +118,15 @@ Dependent nodes stay blocked. Writes run.json.`,
 
 Discontinues one node, or (without <node>) the whole run: every pending,
 running or waiting node is cancelled in the same entry. Final. Writes run.json.`,
-  ask: `wfe run ask <run> [<node>] --question <text> --to <who> [--id q<n>] [--about-plan] [--subject <path>]... [--presentation <p>]
+  ask: `wfe run ask <run> [<node>] --question <text> --to <who> [--id q<n>] [--about-plan] [--about-adjustment <name>] [--subject <path>]... [--presentation <p>]
 
 Records a question (ids q1, q2, … unless --id). With <node>, the running node
 then waits on it and <who> holds the next move. A question from _plan needs
 plan.md written first and records which plan.md it asks about. --about-plan asks
 about a revised plan.md later in the run (the same evidence: its hash), when
-the person's input changed the agreed work. From the result-confirmation node
+the person's input changed the agreed work. --about-adjustment <name> asks
+about a proposed adjustment (wfe run adjust … --propose <name>), recorded by
+hash. From the result-confirmation node
 (confirms: result) the question presents the deliverables with --subject
 (project-relative files, written first; recorded by hash), or a served
 presentation with --presentation <p> (wfe present): its files by hash and its
@@ -196,6 +198,31 @@ before changing something; nothing enforces them at the OS level. Reads only.`,
 Records an artifact reference (a report, a result file). <path> is
 project-relative, relative to the current directory, or a file name in the
 run folder. A missing file is recorded and shown as missing. Writes run.json.`,
+  adjust: `wfe run adjust <run> --definition <file|-> --reason <text> --source <source> [--dry-run] [--propose <name>] [--expect-revision r<n>]
+
+Changes the run's future work (docs/adjustments.md): <file> is the whole
+definition in force (wfe run revisions <run> --show), edited. Only pending
+work may change: nodes added, removed or rewired, a pending cleanup moved
+after a new confirmation. Started, waiting and finished work keeps its
+identity, meaning and dependencies; bindings, execution settings, intake
+and documentation policy never change. Applied at a node boundary (nothing
+running, no unacknowledged instruction), as a new immutable revision
+(definition/r<n>/<workflow>.yaml) recorded in run.json; the original stays.
+  --source answer:<q>[:<n>]   the person's answer asked for it (taken up)
+           instruction:<i>    an acknowledged instruction asked for it
+           agreement:<q>      the person agreed to this exact proposal
+           person             a person applies it (no attempt open)
+  --dry-run       print the difference and every refusal; write nothing
+  --propose <n>   write definition/proposals/<n>.yaml to ask about first:
+                  wfe run ask <run> <node> --about-adjustment <n> …, then
+                  apply the same file with --source agreement:<q>
+Writes the revision file and run.json (one history entry).`,
+  revisions: `wfe run revisions <run> [--show r<n>] [--diff r<a> r<b>]
+
+The run's definition revisions: the original (r1) and each adjustment —
+parent, reason, source, who, when and what it changed. --show prints a
+revision's definition; --diff compares two (authored nodes and edges).
+Reads only.`,
   decide: `wfe run decide <run> --decision accepted|rejected --evidence <ref> --by <person> [--note <text>]
 wfe run decide <run> --decision accepted|rejected --question <q> [--note <text>]
 
@@ -234,6 +261,8 @@ export function runIndex(): string {
   access <run> [<path>]... what the run's definition declares for a path
   attach <run> <path>      record an artifact
   decide <run>             record acceptance or rejection of the result
+  adjust <run>             change the run's future work (a recorded revision)
+  revisions <run>          the original definition and each adjustment
 
 wfe run help <subcommand> for inputs, reads/writes and results.
 ${COMMON}`
@@ -325,10 +354,11 @@ export function describeRun(r: RunResponse, opts: { history?: boolean; url?: str
     const now = !s ? '' : s.status === 'same' ? `current ${s.file}: same${s.renamed ? ' (renamed)' : ''}` : s.status === 'changed' ? `current ${s.file}: changed since the snapshot${s.renamed ? ' (renamed)' : ''}` : s.status === 'deleted' ? 'current source: deleted' : `bundle: ${s.detail}`
     lines.push(`  ${id.padEnd(20)} approvals at creation: intent ${d.approvals.intent}, definition ${d.approvals.definition}${now ? `; ${now}` : ''}`)
   }
+  if (rec.definition.revisions?.length) lines.push(`Adjusted: revision ${rec.definition.active} in force (${rec.definition.revisions.map(v => `${v.revision} from ${v.parent} by ${v.by}: ${first(v.reason, 80)}`).join('; ')}); the original stays in definition/ (wfe run revisions)`)
   if (rec.predecessor) lines.push(`Predecessor: ${runKey(rec.predecessor)}${r.predecessor?.problem ? ` — ${r.predecessor.problem}` : r.predecessor?.execution ? ` (${r.predecessor.execution})` : ''}`)
   lines.push(`Created ${rec.created}; started ${rec.started ?? '—'}; ended ${rec.ended ?? '—'}; last update ${ago(rec.updated)}; seq ${rec.seq}`)
   if (rec.cancelled) lines.push(`Cancelled by ${rec.cancelled.by}: ${rec.cancelled.reason}`)
-  const eff = rec.definition.effective
+  const eff = effectiveOf(rec) // the revision in force (p7)
   const count = (c: Record<string, number>) => Object.entries(c).filter(([, n]) => n).map(([k, n]) => `${n} ${k}`).join(', ') || 'none'
   if (eff) {
     const split = splitCounts(eff, rec.nodes)
@@ -369,6 +399,15 @@ export function describeRun(r: RunResponse, opts: { history?: boolean; url?: str
   if (r.files.length) lines.push(`Files in ${r.dir}/: ${r.files.map(f => f.name).join(', ')}; the fixed definition in definition/`)
   const hist = opts.history ? rec.history : rec.history.slice(-5)
   lines.push(opts.history ? 'History:' : `History (last ${hist.length} of ${rec.history.length}; --history for all):`, ...hist.map(entryLine))
+  return lines.join('\n')
+}
+
+function adjustText(r: AdjustResult, ref: string): string {
+  const a = r.authored
+  const lines = [r.problems.length ? `Not ${r.dryRun ? 'applicable' : 'applied'} (from ${r.parent}):` : r.revision ? `Applied: ${ref} now follows ${r.revision} (from ${r.parent}).` : r.proposal ? `Proposal written: ${r.proposal} (nothing applied). Ask about it: wfe run ask ${ref} <node> --about-adjustment <name> …` : `Applicable to ${r.parent} (dry run; nothing written).`]
+  for (const p of r.problems) lines.push(`  ${p.code}: ${p.message}`)
+  lines.push(`  work added: ${a.added.join(', ') || '—'}; removed: ${a.removed.join(', ') || '—'}; changed: ${a.changed.map(c => `${c.id} (${c.fields.join(', ')})`).join(', ') || '—'}${a.restyled.length ? `; restyled: ${a.restyled.join(', ')}` : ''}`)
+  lines.push(`  graph: +${r.graph.added.length} −${r.graph.removed.length} nodes, +${r.graph.edgesAdded.length} −${r.graph.edgesRemoved.length} edges${r.graph.edgesAdded.length ? ` (new: ${r.graph.edgesAdded.map(([f, t]) => `${f} → ${t}`).join('; ')})` : ''}`)
   return lines.join('\n')
 }
 
@@ -502,7 +541,7 @@ export async function runCommand(c: RunCli): Promise<number> {
       const res = await wrap(() => c.exec().resume(ws, r, by ?? 'person', need(c, 'reason', 'the resume instruction: what the executor should do now'), 'cli', receipt))
       return report(r, res.record, `Recorded: resumed.${res.job ? ` Queued job ${res.job.id} (${res.job.state}).` : ''}`)
     }
-    case 'ask': return op({ op: 'question.ask', question: c.opt('id') ?? '', node: args[1], text: need(c, 'question', 'the question'), to: need(c, 'to', 'to whom it is addressed'), ...(c.flag('about-plan') ? { plan: true } : {}), ...(c.opts('subject').length ? { subjects: c.opts('subject').map(p => projectPath(ws, p)) } : {}), ...(c.opt('presentation') ? { presentation: c.opt('presentation') } : {}) },
+    case 'ask': return op({ op: 'question.ask', question: c.opt('id') ?? '', node: args[1], text: need(c, 'question', 'the question'), to: need(c, 'to', 'to whom it is addressed'), ...(c.flag('about-plan') ? { plan: true } : {}), ...(c.opts('subject').length ? { subjects: c.opts('subject').map(p => projectPath(ws, p)) } : {}), ...(c.opt('presentation') ? { presentation: c.opt('presentation') } : {}), ...(c.opt('about-adjustment') ? { adjustment: c.opt('about-adjustment') } : {}) },
       rec => { const q = Object.values(rec.questions).at(-1)!; return `Recorded question ${q.id} to ${q.to}${q.node ? `; ${q.node} waits on it` : ''}.` })
     case 'answer': {
       if (!args[1]) throw c.usage('<question> is required')
@@ -564,6 +603,46 @@ export async function runCommand(c: RunCli): Promise<number> {
       if (!args[1]) throw c.usage('<path> is required')
       const path = artifactPath(ws, r, args[1])
       return op({ op: 'artifact.attach', path, node: c.opt('node'), title: c.opt('title') }, () => `Recorded artifact ${path}.`, r)
+    }
+    case 'adjust': {
+      const r = await ref()
+      const text = readInput(c, need(c, 'definition', 'the adjusted definition file (- for standard input)'))
+      const src = need(c, 'source', 'answer:<q>[:<n>] | instruction:<i> | agreement:<q> | person')
+      const m = /^(answer|instruction|agreement):([a-z0-9]+)(?::(\d+))?$/.exec(src)
+      const source = src === 'person' ? { kind: 'person' as const, ...(by ? { by } : {}) } : m?.[1] === 'answer' ? { kind: 'answer' as const, question: m[2], ...(m[3] ? { answer: Number(m[3]) } : {}) } : m?.[1] === 'instruction' ? { kind: 'instruction' as const, instruction: m[2] } : m?.[1] === 'agreement' ? { kind: 'agreement' as const, question: m[2] } : null
+      if (!source) throw c.usage(`--source "${src}" must be answer:<q>[:<n>], instruction:<i>, agreement:<q> or person`)
+      const res = await wrap(() => adjustRun(ws, r, { text, reason: need(c, 'reason', 'why the run changes'), source, dryRun: c.flag('dry-run'), propose: c.opt('propose'), expectRevision: c.opt('expect-revision') }, { by, via: 'cli', expectSeq, attempt, receipt }))
+      c.out(adjustText(res, runKey(r)), res)
+      return res.ok ? 0 : 1
+    }
+    case 'revisions': {
+      const r = await ref()
+      const resp = await wrap(() => runResponse(ws, r))
+      const rec = resp.record
+      if (!rec) throw c.refused(`run ${runKey(r)} cannot be used: ${resp.problem?.message}`)
+      const texts: Record<string, string> = { r1: '' }
+      const root = resp.bundle[rec.definition.root]
+      const original = await wrap(() => import('../server/runs.ts').then(m => m.readRunFile(ws, r, `definition/${rec.definition.root}.yaml`).catch(() => null)))
+      texts.r1 = original?.text ?? `(${root?.file})`
+      for (const v of resp.revisions ?? []) texts[v.revision] = v.text ?? ''
+      const show = c.opt('show')
+      if (show) { if (!(show in texts)) throw c.refused(`no revision ${show} (${Object.keys(texts).join(', ')})`); c.out(texts[show], { revision: show, text: texts[show] }); return 0 }
+      const diff = c.opts('diff')
+      if (diff.length || c.flag('diff')) {
+        const [a, b] = diff.length === 2 ? diff : [c.opt('diff') ?? 'r1', args[1] ?? rec.definition.active ?? 'r1']
+        const wf = (id: string) => id === 'r1' ? root?.workflow : resp.revisions?.find(v => v.revision === id)?.workflow
+        const wa = wf(a), wb = wf(b)
+        if (!wa || !wb) throw c.refused(`no revision ${!wa ? a : b}`)
+        const add = Object.keys(wb.nodes).filter(n => !(n in wa.nodes)), rem = Object.keys(wa.nodes).filter(n => !(n in wb.nodes))
+        const ek = (e: { from: string; to: string }) => `${e.from} → ${e.to}`
+        const ea = new Set(wa.edges.map(ek)), eb = new Set(wb.edges.map(ek))
+        c.out([`${a} → ${b}`, `  nodes added: ${add.join(', ') || '—'}`, `  nodes removed: ${rem.join(', ') || '—'}`, `  edges added: ${[...eb].filter(x => !ea.has(x)).join('; ') || '—'}`, `  edges removed: ${[...ea].filter(x => !eb.has(x)).join('; ') || '—'}`].join('\n'), { from: a, to: b, added: add, removed: rem })
+        return 0
+      }
+      const lines = [`Run ${runKey(r)}: revision ${rec.definition.active ?? 'r1'} in force.`, `  r1  the original snapshot (definition/${rec.definition.root}.yaml, created ${rec.created})`]
+      for (const v of rec.definition.revisions ?? []) lines.push(`  ${v.revision}  from ${v.parent} by ${v.by} at ${v.at} (${v.source.kind}${'question' in v.source ? ` ${v.source.question}` : 'instruction' in v.source ? ` ${v.source.instruction}` : ''}): ${first(v.reason, 120)}`, `      added ${v.diff.added.join(', ') || '—'}; removed ${v.diff.removed.join(', ') || '—'}; ${v.file}`)
+      c.out(lines.join('\n'), { active: rec.definition.active ?? 'r1', revisions: rec.definition.revisions ?? [] })
+      return 0
     }
     case 'decide': {
       const decision = need(c, 'decision', 'accepted or rejected')

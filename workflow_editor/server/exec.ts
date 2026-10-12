@@ -19,7 +19,7 @@ import { hostname } from 'node:os'
 import { join } from 'node:path'
 import type { DatabaseSync } from 'node:sqlite'
 import { normalizeRepoPath } from '../shared/model.ts'
-import { holderOf, hostOf, pendingInstructions, runKey, situation, type AttemptSettings, type RunRecord, type RunRef } from '../shared/run.ts'
+import { effectiveOf, holderOf, hostOf, pendingInstructions, runKey, situation, type AttemptSettings, type RunRecord, type RunRef } from '../shared/run.ts'
 import { assertWorkspaceAllowed, loadBoundary } from './boundary.ts'
 import type { Gitea } from './gitea.ts'
 import { baseline, publish, type Baseline, type RepoStep } from './publish.ts'
@@ -46,7 +46,7 @@ const sha256 = (b: string | Buffer) => createHash('sha256').update(b).digest('he
 // policy, and for every documentation step that is running or ready, its
 // purpose, its document and the instructions frozen with the run.
 export function documentationBrief(r: RunRecord): string[] {
-  const eff = r.definition.effective
+  const eff = effectiveOf(r) // the revision in force (p7)
   if (!eff) return ['Documentation policy: none (this run was created before p5); write plans and reports only where a node or the person asks.']
   if (eff.policy === 'manual') return ['Documentation policy: manual. No plan or report is a step of this run; write documents only where a node description or the person asks for them.']
   const out = ['Documentation policy: default. _plan, _report.<node> and _final-report are steps of this run, recorded like any node (start, complete); each completes only when its document is a nonempty file of the run folder.']
@@ -288,6 +288,7 @@ export class ExecStore {
     lines.push(`Ready: ${r.execution.ready.join(', ') || '(none)'}; running: ${r.execution.active.join(', ') || '(none)'}.`)
     lines.push(...instructionBrief(r))
     lines.push(...presentationBrief(r))
+    if (r.definition.revisions?.length) lines.push('', `Definition: revision ${r.definition.active} is in force (adjusted ${r.definition.revisions.length} time${r.definition.revisions.length === 1 ? '' : 's'}; wfe run revisions <run>); the original is definition/${r.definition.root}.yaml.`)
     lines.push(...documentationBrief(r))
     return lines.join('\n')
   }

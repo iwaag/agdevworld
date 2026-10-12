@@ -93,6 +93,7 @@ function lines(e: NotableEvent, c: RenderContext): { head: string; free: string;
       const where = at ? (at.live ? `[Open the review](${at.url})${at.local ? ' — opens on the execution host (this address is local to it)' : ''}` : `no longer served (${at.url} was its address)`) : 'its address is not known on this host'
       return { head: `**Ready for review — ${e.title ?? e.presentation}** (${e.presentation}): the result and what to check, on one screen.`, free: '', tail: [where, `Your answer goes ${inRequest ? 'here' : 'to the question that follows'}; the review screen says where.`] }
     }
+    case 'adjusted': return { head: `**Plan adjusted** (${e.revision}) by ${e.by}${e.adjusted?.added.length ? ` — added ${e.adjusted.added.map(c.label).join(', ')}` : ''}${e.adjusted?.removed.length ? `${e.adjusted?.added.length ? ';' : ' —'} removed ${e.adjusted.removed.map(c.label).join(', ')}` : ''}:`, free: e.text, tail: c.next ? [`Next: ${c.next}`] : [] }
     case 'cleanup-failed': return { head: `**Cleanup failed — presentation ${e.presentation}** could not be verified as stopped:`, free: e.text, tail: [`Next: retry with \`wfe present stop ${c.ref} --all\` on the execution host; the result decision stands.`] }
     case 'question': {
       const stale = e.question && !c.openQuestion(e.question)

@@ -193,7 +193,9 @@ export interface RunResponse {
   revInfo?: HistoryRev
   record?: RunRecord
   problem?: FileProblem & { code?: string }
-  bundle: Record<string, { file: string; workflow?: Workflow; problem?: string }>
+  bundle: Record<string, { file: string; workflow?: Workflow; problem?: string; text?: string }>
+  // Adjusted revisions of the root workflow (p7), in order; the last is in force.
+  revisions?: { revision: string; file: string; workflow?: Workflow; text?: string }[]
   sources: SourceComparison[]
   files: RunFile[]
   predecessor?: RelatedRun

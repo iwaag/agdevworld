@@ -6,8 +6,8 @@
 // edits a definition, and recording an answer does not wake any agent.
 import { backendFact } from '../shared/backend.ts'
 import type { RunResponse } from '../shared/api.ts'
-import { holderOf, isOpen, questionState, runKey, situation, type NodeRecord, type Question, type RunRecord } from '../shared/run.ts'
-import { api, ApiError, type PresentationView, type RunExecView, type RunNotifyView } from './api.ts'
+import { effectiveOf, holderOf, isOpen, questionState, runKey, situation, type NodeRecord, type Question, type RunRecord } from '../shared/run.ts'
+import { api, ApiError, type AdjustView, type PresentationView, type RunExecView, type RunNotifyView } from './api.ts'
 import { Canvas, STATE_GLYPH, TYPE_LABEL } from './canvas.ts'
 import { splitCounts, reportStep } from '../shared/compile.ts'
 import { stepFacts, stepLabel } from './inspector.ts'
@@ -58,6 +58,12 @@ function nodeLabel(rec: RunRecord, id: string): { state: string; label: string; 
   return { state, label, title }
 }
 
+// The authored definition in force (p7): the latest adjusted revision, or
+// the snapshot taken at creation.
+function activeWorkflow(r: RunResponse | null, rec: RunRecord) {
+  return r?.revisions?.at(-1)?.workflow ?? r?.bundle[rec.definition.root]?.workflow
+}
+
 export function renderRunView(root: HTMLElement, wsId: string, workflow: string, run: string, rev?: string): ViewHandle {
   const ref = `${workflow}/${run}`
   let resp: RunResponse | null = null
@@ -75,6 +81,7 @@ export function renderRunView(root: HTMLElement, wsId: string, workflow: string,
   let notifyView: RunNotifyView | null = null
   let execError = ''
   let presentViews: PresentationView[] = [] // what this host observes of the run's presentations (p7)
+  let adjustPreview: AdjustView | null = null // the last inspection of a proposed adjustment (p7)
 
   const crumbs = h('div.crumbs')
   const refreshButton = h('button', { title: 'Re-read the run now', onclick: () => void load({}) }, 'Refresh')
@@ -180,7 +187,7 @@ export function renderRunView(root: HTMLElement, wsId: string, workflow: string,
         fact('Last recorded update', `${when(rec.updated)} (${ago(rec.updated)})`, 'last-update'),
         ...countFacts(rec)),
       h('div.run-now',
-        line('Active', ex.active.length ? ex.active.map(n => rec.definition.effective?.nodes[n]?.step?.kind === 'report' ? h('span', 'Writing report on ', nodeLink(n, rec.definition.effective.nodes[n].step!.for ?? n)) : nodeLink(n)) : ['—']),
+        line('Active', ex.active.length ? ex.active.map(n => effectiveOf(rec)?.nodes[n]?.step?.kind === 'report' ? h('span', 'Writing report on ', nodeLink(n, effectiveOf(rec)!.nodes[n].step!.for ?? n)) : nodeLink(n)) : ['—']),
         line('Waiting', ex.waiting.length ? ex.waiting.map(w => h('span', nodeLink(w.node), ` → next move: ${holderOf(rec, w.node)}`)) : ['—']),
         line('Ready', ex.ready.length ? ex.ready.map(n => nodeLink(n)) : ['—']),
         ex.failed.length ? line('Failed', ex.failed.map(n => nodeLink(n)), 'error') : null,
@@ -219,7 +226,7 @@ export function renderRunView(root: HTMLElement, wsId: string, workflow: string,
   function countFacts(rec: RunRecord): HTMLElement[] {
     const order = ['running', 'waiting', 'completed', 'failed', 'cancelled', 'pending']
     const count = (c: Record<string, number>) => order.filter(k => c[k]).map(k => `${c[k]} ${k}`).join(' · ') || '—'
-    const eff = rec.definition.effective
+    const eff = effectiveOf(rec)
     if (!eff) return [fact('Nodes', count(rec.execution.counts)), fact('Documentation', 'none (created before p5)')]
     if (eff.policy !== 'default') return [fact('Nodes', count(rec.execution.counts)), fact('Documentation', 'manual — no generated plan or reports')]
     const split = splitCounts(eff, rec.nodes)
@@ -243,7 +250,7 @@ export function renderRunView(root: HTMLElement, wsId: string, workflow: string,
     legend.replaceChildren(h('span.muted.small', 'Node states:'),
       ...['pending', 'ready', 'running', 'waiting', 'completed', 'failed', 'cancelled', 'blocked'].map(s => chip(s, `${STATE_GLYPH[s]} ${STATE_LABEL[s]}`)),
       h('span.muted.small', ' · the graph is this run’s fixed copy; click a node for details'),
-      ...(shown?.record?.definition.effective?.policy === 'default' ? [h('span.muted.small.legend-doc', ' · the small icon on a card is its report; “Writing report” marks the one being written')] : []))
+      ...((shown?.record ? effectiveOf(shown.record)?.policy : undefined) === 'default' ? [h('span.muted.small.legend-doc', ' · the small icon on a card is its report; “Writing report” marks the one being written')] : []))
   }
 
   // ---- side panel -------------------------------------------------------------
@@ -254,9 +261,9 @@ export function renderRunView(root: HTMLElement, wsId: string, workflow: string,
 
   function nodeDetail(rec: RunRecord, id: string): HTMLElement {
     const n: NodeRecord = rec.nodes[id]
-    const wf = shown?.bundle[rec.definition.root]?.workflow
+    const wf = activeWorkflow(shown, rec)
     const def = wf?.nodes[id]
-    const eff = rec.definition.effective
+    const eff = effectiveOf(rec)
     const step = eff?.nodes[id]?.step
     const { state, label } = nodeLabel(rec, id)
     const box = h('div.node-detail', { dataset: { node: id } })
@@ -367,6 +374,7 @@ export function renderRunView(root: HTMLElement, wsId: string, workflow: string,
     }
 
     if (rec.presentations) side.append(section('Presentations', ...presentationPanel(rec)))
+    side.append(section(`Definition (${rec.definition.active ?? 'r1'} in force)`, ...revisionPanel(rec)))
 
     const rel: (Node | null)[] = []
     if (r!.predecessor) rel.push(h('div', 'Predecessor: ', h('a', { href: runHash(wsId, r!.predecessor.ref) }, r!.predecessor.ref)))
@@ -432,6 +440,52 @@ export function renderRunView(root: HTMLElement, wsId: string, workflow: string,
           !finished && !v?.live ? h('button', { onclick: () => void act(p.id, 'start'), title: 'Serve this revision again on this host' }, p.state === 'registered' ? 'Start' : 'Start again') : null,
           isOpen(p) || v?.live ? h('button', { onclick: () => void act(p.id, 'stop'), title: 'Stop the run\'s own instance and verify it is gone' }, p.state === 'stop-failed' ? 'Retry stop' : 'Stop') : null)))
     }
+    return out
+  }
+
+  // Revisions (p7): the original snapshot, each adjustment with its reason,
+  // source and difference, and the person's own adjustment of future work
+  // (inspect first, then apply; the same operation as wfe run adjust).
+  function revisionPanel(rec: RunRecord): (Node | null)[] {
+    const out: (Node | null)[] = []
+    const revs = rec.definition.revisions ?? []
+    const list = (xs: string[]) => xs.filter(x => !x.startsWith('_')).join(', ') || '—'
+    out.push(h('p.small', h('strong', 'r1'), ` original snapshot — definition/${rec.definition.root}.yaml, ${when(rec.created)}`))
+    for (const v of revs) out.push(h('div.revision', { dataset: { revision: v.revision } },
+      h('p.small', h('strong', v.revision), ` from ${v.parent} · ${v.by} · ${when(v.at)} · source: ${v.source.kind}${'question' in v.source ? ` ${v.source.question}` : 'instruction' in v.source ? ` ${v.source.instruction}` : ''}`),
+      h('p.small', v.reason),
+      h('p.small.muted', `added ${list(v.diff.added)}; removed ${list(v.diff.removed)}; ${v.file}`)))
+    if (!revs.length) out.push(h('p.small.muted', 'Not adjusted: the run follows its original snapshot.'))
+    if (rev || rec.cancelled || rec.execution.state === 'completed') return out
+    const active = shown?.revisions?.at(-1)?.text ?? shown?.bundle[rec.definition.root]?.text ?? ''
+    const key = 'adjust-text'
+    const ta = h('textarea.yaml', { rows: 12, 'aria-label': 'Adjusted definition', value: drafts.get(key) ?? active, dataset: { focusKey: key }, spellcheck: false })
+    ta.addEventListener('input', () => { drafts.set(key, ta.value); adjustPreview = null })
+    const reason = h('input', { placeholder: 'why the run changes', 'aria-label': 'Adjustment reason', value: drafts.get('adjust-reason') ?? '', dataset: { focusKey: 'adjust-reason' } })
+    reason.addEventListener('input', () => drafts.set('adjust-reason', reason.value))
+    const send = async (dryRun: boolean) => {
+      const name = actor.trim()
+      if (!name) { opNotice = { kind: 'error', text: 'Enter your name first (who adjusts the run).' }; render(); return }
+      if (!reason.value.trim()) { opNotice = { kind: 'error', text: 'An adjustment needs its reason.' }; render(); return }
+      try {
+        const r = await api.adjustRun(wsId, workflow, run, { text: ta.value, reason: reason.value, by: name, dryRun, expectRevision: rec.definition.active ?? 'r1', expectSeq: rec.seq })
+        adjustPreview = r
+        if (!dryRun && r.ok) { drafts.delete(key); drafts.delete('adjust-reason'); adjustPreview = null; opNotice = { kind: 'ok', text: `Adjusted: ${r.revision} is in force.` } }
+      } catch (e) { opNotice = { kind: 'error', text: `Not adjusted: ${(e as Error).message}` } }
+      await load({})
+    }
+    const p = adjustPreview
+    out.push(h('details.adjust', { open: drafts.has(key) || !!p },
+      h('summary.small', 'Adjust future work'),
+      h('p.small.muted', 'Edit the definition in force. Only pending work may change; started and finished work, bindings and execution settings stay. The reusable workflow file is not changed.'),
+      ta, reason,
+      p ? h(`div.banner.${p.ok ? 'ok' : 'error'}.small.adjust-preview`,
+        p.ok ? `Applicable to ${p.parent}: ` : `Not applicable (${p.problems.map(x => x.code).join(', ')}): `,
+        `work added ${list(p.authored.added)}; removed ${list(p.authored.removed)}; changed ${p.authored.changed.map(c => `${c.id} (${c.fields.join(', ')})`).join(', ') || '—'}; new edges ${p.graph.edgesAdded.filter(([a, b]) => !a.startsWith('_') || !b.startsWith('_')).map(([a, b]) => `${a} → ${b}`).join('; ') || '—'}`,
+        ...p.problems.map(x => h('div', `${x.code}: ${x.message}`))) : null,
+      h('div.row.tight',
+        h('button', { onclick: () => void send(true) }, 'Preview'),
+        h('button.primary', { disabled: !p?.ok, title: p?.ok ? 'Apply as a new revision' : 'Preview first', onclick: () => void send(false) }, 'Apply'))))
     return out
   }
 
@@ -537,14 +591,14 @@ export function renderRunView(root: HTMLElement, wsId: string, workflow: string,
     const r = shown
     renderSummary(r)
     const rec = r?.record
-    const wf = rec ? r!.bundle[rec.definition.root]?.workflow : undefined
+    const wf = rec ? activeWorkflow(r, rec) : undefined
     canvas.el.hidden = !wf
     if (rec && wf) {
       const status = Object.fromEntries(Object.keys(rec.nodes).map(id => [id, nodeLabel(rec, id)]))
       const sel = selection && rec.nodes[selection] ? { kind: 'node' as const, id: selection } : null
       // Bindings resolve against the repositories recorded at creation.
       const repositories = rec.context.repositories.map(c => ({ path: c.path, name: c.path, kind: c.path === '.' ? 'root' as const : 'submodule' as const, category: 'other' as const, initialized: true, dirty: c.dirty ?? 0 }))
-      const eff = rec.definition.effective
+      const eff = effectiveOf(rec)
       const sel2 = selection && eff?.nodes[selection]?.step ? { kind: 'step' as const, id: selection } : sel
       canvas.render(wf, {
         repositories, readonly: true, errorNodes: new Set(), run: status, effective: eff?.policy === 'default' ? eff : null,

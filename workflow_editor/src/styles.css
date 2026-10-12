@@ -21,6 +21,15 @@
   --talk: #86cdb9; --talk-bg: #e5f6f1;
   --delegate: #5e3d91; --delegate-bg: #6b479f;
   --unknown: #b0b5bd; --unknown-bg: #f0f1f3;
+  /* appearance palette (p7): border and a light fill; state keeps its own colors */
+  --c-blue: #6d8fd6; --c-blue-bg: #eaf0fc;
+  --c-amber: #d9a441; --c-amber-bg: #fcf1db;
+  --c-violet: #9c84c4; --c-violet-bg: #f1ecf9;
+  --c-teal: #3fa59a; --c-teal-bg: #e1f4f1;
+  --c-green: #5fae6e; --c-green-bg: #e7f5e9;
+  --c-rose: #d27a8c; --c-rose-bg: #fbeaee;
+  --c-slate: #7d8794; --c-slate-bg: #eceef1;
+  --c-orange: #e08a4f; --c-orange-bg: #fcebdf;
   font-size: 14px;
   font-family: Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
   color: var(--text);
@@ -212,6 +221,32 @@ pre { white-space: pre-wrap; font-size: 12px; background: rgba(0,0,0,.05); paddi
 .node.type-delegate { background: var(--delegate-bg); border-color: var(--delegate); color: #fff; }
 .node.type-unknown { background: var(--unknown-bg); border-color: var(--unknown); border-style: dashed; }
 .node-head { display: flex; align-items: center; gap: 8px; }
+/* A node's own color (p7) replaces its type's fill and border only. Text stays
+   dark, and the run state keeps its own ring, pill, glyph and words. */
+.node.color-blue { background: var(--c-blue-bg); border-color: var(--c-blue); color: var(--text); }
+.node.color-blue .node-head { border-bottom: 3px solid var(--c-blue); margin: -12px -14px 0; padding: 8px 14px 6px; border-radius: 14px 14px 0 0; }
+.node.color-amber { background: var(--c-amber-bg); border-color: var(--c-amber); color: var(--text); }
+.node.color-amber .node-head { border-bottom: 3px solid var(--c-amber); margin: -12px -14px 0; padding: 8px 14px 6px; border-radius: 14px 14px 0 0; }
+.node.color-violet { background: var(--c-violet-bg); border-color: var(--c-violet); color: var(--text); }
+.node.color-violet .node-head { border-bottom: 3px solid var(--c-violet); margin: -12px -14px 0; padding: 8px 14px 6px; border-radius: 14px 14px 0 0; }
+.node.color-teal { background: var(--c-teal-bg); border-color: var(--c-teal); color: var(--text); }
+.node.color-teal .node-head { border-bottom: 3px solid var(--c-teal); margin: -12px -14px 0; padding: 8px 14px 6px; border-radius: 14px 14px 0 0; }
+.node.color-green { background: var(--c-green-bg); border-color: var(--c-green); color: var(--text); }
+.node.color-green .node-head { border-bottom: 3px solid var(--c-green); margin: -12px -14px 0; padding: 8px 14px 6px; border-radius: 14px 14px 0 0; }
+.node.color-rose { background: var(--c-rose-bg); border-color: var(--c-rose); color: var(--text); }
+.node.color-rose .node-head { border-bottom: 3px solid var(--c-rose); margin: -12px -14px 0; padding: 8px 14px 6px; border-radius: 14px 14px 0 0; }
+.node.color-slate { background: var(--c-slate-bg); border-color: var(--c-slate); color: var(--text); }
+.node.color-slate .node-head { border-bottom: 3px solid var(--c-slate); margin: -12px -14px 0; padding: 8px 14px 6px; border-radius: 14px 14px 0 0; }
+.node.color-orange { background: var(--c-orange-bg); border-color: var(--c-orange); color: var(--text); }
+.node.color-orange .node-head { border-bottom: 3px solid var(--c-orange); margin: -12px -14px 0; padding: 8px 14px 6px; border-radius: 14px 14px 0 0; }
+.node[class*=" color-"] .type-icon { color: #2f3640; }
+.node[class*=" color-"] .type-label { background: rgba(0,0,0,.07); }
+.node[class*=" color-"] .node-desc { color: #3d4450; }
+.add-node.preset { background: #fff; }
+.add-node.preset.color-teal { border-color: var(--c-teal); background: var(--c-teal-bg); }
+.add-node.preset.color-slate { border-color: var(--c-slate); background: var(--c-slate-bg); }
+.appearance-row { display: flex; gap: 6px; align-items: center; }
+.appearance-row select { flex: 1; }
 .type-icon { width: 30px; height: 30px; color: #2f3640; }
 .node.type-delegate .type-icon { color: #fff; }
 .type-label { font-size: 11px; text-transform: uppercase; letter-spacing: .06em; padding: 2px 8px; border-radius: 6px; background: rgba(0,0,0,.07); margin-left: auto; }

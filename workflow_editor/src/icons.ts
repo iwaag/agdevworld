@@ -18,6 +18,19 @@ export const ICONS: Record<string, string> = {
   doc: svg('<path d="M7 3.5h7l4 4V20a.5.5 0 0 1-.5.5h-10.5a.5.5 0 0 1-.5-.5V4a.5.5 0 0 1 .5-.5z"/><path d="M14 3.5V8h4M9 12h6M9 15.5h6"/>'),
   folder: svg('<path d="M3.5 7a1.5 1.5 0 0 1 1.5-1.5h4l2 2h8a1.5 1.5 0 0 1 1.5 1.5v8.5a1.5 1.5 0 0 1-1.5 1.5H5A1.5 1.5 0 0 1 3.5 17.5z"/>'),
   plus: svg('<path d="M12 5v14M5 12h14"/>'),
+  // appearance icons (p7)
+  // an easel with a play mark: a result shown to a person
+  present: svg('<rect x="3.5" y="4" width="17" height="11" rx="1.5"/><path d="m10.5 7.5 4 2-4 2z"/><path d="M12 15v3M8 21l4-3 4 3"/>'),
+  // a broom: stopping what the run started
+  cleanup: svg('<path d="M14.5 3.5 10 12"/><path d="M7 12h7l2.5 8.5h-12z"/><path d="M8.5 16.5 8 20.5M12 16.5v4"/>'),
+  // a flask
+  test: svg('<path d="M9.5 3.5h5M10.5 3.5v6L5 19a1 1 0 0 0 .9 1.5h12.2a1 1 0 0 0 .9-1.5l-5.5-9.5v-6"/><path d="M7.5 15h9"/>'),
+  // a hammer
+  build: svg('<path d="m13 7 4 4-9 9-4-4z"/><path d="m14.5 5.5 2-2 4 4-2 2"/>'),
+  // an eye
+  review: svg('<path d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12z"/><circle cx="12" cy="12" r="3"/>'),
+  // a flag
+  flag: svg('<path d="M5 21V4M5 4h11l-2 4 2 4H5"/>'),
 }
 
 export function icon(name: string, cls = 'icon'): HTMLSpanElement {

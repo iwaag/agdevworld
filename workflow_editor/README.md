@@ -321,6 +321,11 @@ commit, and the update latency. It writes its record and screenshots to
 npm run build && node checks/runs.ts [--repeat 20] [--keep]
 ```
 
+`checks/appearance.ts` (p7) checks node appearance on its own temporary
+project and private service (port 8198): presets, the inspector's icon and
+color, saving, and that a custom color keeps the run state's words, glyph,
+pill and ring. `npm run build && node checks/appearance.ts [--keep]`.
+
 These start their own service on a temporary area and registry (after
 `npm run build`):
 

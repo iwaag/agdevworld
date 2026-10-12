@@ -4,7 +4,7 @@
 import type { FileProblem, WorkflowResponse } from '../shared/api.ts'
 import { approvalStates, canonicalJson, type ApprovalState } from '../shared/canonical.ts'
 import { compile } from '../shared/compile.ts'
-import { NODE_TYPES, cloneWorkflow, type ApprovalKind, type NodeType, type Workflow } from '../shared/model.ts'
+import { NODE_PRESETS, NODE_TYPES, cloneWorkflow, type ApprovalKind, type NodeType, type Workflow } from '../shared/model.ts'
 import { hasErrors, validateWorkflow, type ValidationContext } from '../shared/validate.ts'
 import { api } from './api.ts'
 import { live, serial } from './live.ts'
@@ -86,6 +86,10 @@ export function renderWorkflowView(root: HTMLElement, wsId: string, file: string
   for (const t of NODE_TYPES) {
     toolbar.append(h(`button.add-node.type-${t}`, { onclick: () => addNode(t), 'aria-label': `Add ${TYPE_LABEL[t]} node` }, icon(t, 'icon small'), `+ ${TYPE_LABEL[t]}`))
   }
+  // Presets (p7): ordinary do nodes with an appearance and a starting text.
+  for (const [key, p] of Object.entries(NODE_PRESETS)) {
+    toolbar.append(h(`button.add-node.preset.color-${p.appearance.color}`, { onclick: () => addNode(p.type, key as keyof typeof NODE_PRESETS), 'aria-label': `Add ${p.name} node (a ${TYPE_LABEL[p.type]} node)`, title: `A ${TYPE_LABEL[p.type]} node that looks like "${p.name}"; name, description and appearance stay editable` }, icon(p.appearance.icon, 'icon small'), `+ ${p.name}`))
+  }
   toolbar.append(h('button.arrange', {
     title: 'Lay the graph out by rank. Only positions change; approvals are unaffected.',
     onclick: () => { if (!draft || readonly()) return; autoArrange(draft); update(false); canvas.fit() },
@@ -150,14 +154,16 @@ export function renderWorkflowView(root: HTMLElement, wsId: string, file: string
 
   // ---- edits --------------------------------------------------------------
 
-  function addNode(type: NodeType) {
+  function addNode(type: NodeType, preset?: keyof typeof NODE_PRESETS) {
     if (!draft || readonly()) return
+    const base = preset ?? type
     let n = 1
-    while (`${type}-${n}` in draft.nodes) n++
-    const id = `${type}-${n}`
+    while (`${base}-${n}` in draft.nodes) n++
+    const id = `${base}-${n}`
     if (Object.keys(draft.nodes).some(k => !draft!.layout.nodes[k])) completeLayout(draft)
     const at = freeSlot(draft, canvas.visibleCentre(), selection?.kind === 'node' ? selection.id : undefined)
-    draft.nodes[id] = { type, name: '', description: '', repositories: [] }
+    const p = preset ? NODE_PRESETS[preset] : undefined
+    draft.nodes[id] = p ? { type, name: p.name, description: p.description, repositories: [], appearance: { ...p.appearance } } : { type, name: '', description: '', repositories: [] }
     draft.layout.nodes[id] = at
     selection = { kind: 'node', id }
     update(true)

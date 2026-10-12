@@ -2,7 +2,7 @@
 // well-formed and that its references resolve; it never judges whether the
 // graph fulfils the intent. Errors block approval; drafts may still be saved.
 import {
-  ACCESS_LEVELS, CONFIRMS, DEVDOCS_MODES, DOC_POLICIES, ID_PATTERN, INTAKE_MODES, NODE_TYPES, PROFILE_PATTERN, PROJECT_SCHEMA, WORKFLOW_SCHEMA, normalizeRepoPath,
+  ACCESS_LEVELS, APPEARANCE_COLORS, APPEARANCE_ICONS, CONFIRMS, DEVDOCS_MODES, DOC_POLICIES, ID_PATTERN, INTAKE_MODES, NODE_TYPES, PROFILE_PATTERN, PROJECT_SCHEMA, WORKFLOW_SCHEMA, normalizeRepoPath,
   type Issue, type Project, type Workflow,
 } from './model.ts'
 
@@ -107,6 +107,10 @@ export function validateWorkflow(w: Workflow, ctx: ValidationContext = {}): Issu
     } else if (n.workflow) {
       issues.push(warn('workflow-on-non-delegate', `Node "${id}" is "${n.type}" but names a target workflow; only delegate nodes use it.`, { node: id }))
     }
+    // Appearance (p7) is display only: an unknown value is drawn with the
+    // type's default and kept in the file.
+    if (n.appearance?.icon && !(APPEARANCE_ICONS as readonly string[]).includes(n.appearance.icon)) issues.push(warn('appearance-icon', `Node "${id}" has icon "${n.appearance.icon}", which the editor does not draw (${APPEARANCE_ICONS.join(', ')}); the type's icon is shown.`, { node: id }))
+    if (n.appearance?.color && !(APPEARANCE_COLORS as readonly string[]).includes(n.appearance.color)) issues.push(warn('appearance-color', `Node "${id}" has color "${n.appearance.color}", which is not a palette color (${APPEARANCE_COLORS.join(', ')}); the type's color is shown.`, { node: id }))
     if (n.confirms) {
       if (!(CONFIRMS as readonly string[]).includes(n.confirms)) issues.push(err('confirms-kind', `Node "${id}" confirms "${n.confirms}"; expected ${CONFIRMS.join(' or ')}.`, { node: id }))
       else if (n.type !== 'talk') issues.push(err('confirms-type', `Node "${id}" confirms the result but is "${n.type}"; only a talk node asks the person.`, { node: id }))

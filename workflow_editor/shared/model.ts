@@ -29,6 +29,20 @@ export const INTAKE_MODES = ['requests'] as const
 // person's confirmation there maps to the result decision (docs/runs.md).
 export const CONFIRMS = ['result'] as const
 export const PROFILE_PATTERN = /^[a-z0-9][a-z0-9_.-]{0,63}$/
+// How a node looks (p7), independent of what it does: an icon and a color
+// token of the editor's palette. Display only — never part of a digest, the
+// compiled graph or an execution rule (docs/contract.md, "Appearance").
+export const APPEARANCE_ICONS = ['study', 'do', 'delegate', 'talk', 'present', 'cleanup', 'test', 'doc', 'build', 'review', 'flag'] as const
+export const APPEARANCE_COLORS = ['blue', 'amber', 'violet', 'teal', 'green', 'rose', 'slate', 'orange'] as const
+export interface Appearance { icon: string; color: string } // '' = the type's default
+// Palette presets: ordinary nodes with an appearance and a starting name and
+// description, all editable. The preset is not stored; the node is.
+export const NODE_PRESETS = {
+  present: { type: 'do', name: 'Present', appearance: { icon: 'present', color: 'teal' },
+    description: 'Prepare the result for the person: freeze it as a presentation with an explanation of what changed, how to use it and what to check; start its server and confirm the review link opens.' },
+  cleanup: { type: 'do', name: 'Clean up', appearance: { icon: 'cleanup', color: 'slate' },
+    description: 'Stop what this run started for the review (presentation servers) and verify that it stopped; record the outcome.' },
+} as const satisfies Record<string, { type: NodeType; name: string; description: string; appearance: Appearance }>
 export type ApprovalKind = typeof APPROVAL_KINDS[number]
 
 // Stable identifiers: workflow IDs, node IDs and repository binding keys.
@@ -44,6 +58,7 @@ export interface WorkflowNode {
   repositories: string[]
   workflow?: string
   confirms?: string // 'result' on the result-confirmation talk (p6)
+  appearance?: Appearance // display only (p7)
 }
 export interface Edge { from: string; to: string }
 export interface ApprovalRecord { digest: string; approver: string; at: string }
@@ -173,6 +188,10 @@ export function workflowFromData(raw: unknown): { workflow: Workflow; issues: Sh
     }
     if (value.workflow !== undefined && value.workflow !== null) node.workflow = text(value, 'workflow', path, issues)
     if (value.confirms !== undefined && value.confirms !== null) node.confirms = text(value, 'confirms', path, issues)
+    if (value.appearance !== undefined && value.appearance !== null) {
+      const a = map(value, 'appearance', path, issues)
+      node.appearance = { icon: text(a, 'icon', `${path}.appearance`, issues), color: text(a, 'color', `${path}.appearance`, issues) }
+    }
     w.nodes[key] = node
   }
   list(raw, 'edges', '$', issues).forEach((value, i) => {

@@ -3,8 +3,8 @@
 // whether the inspector itself must be rebuilt (structure) or not (typing).
 import type { RepositoryStatus, WorkflowSummary } from '../shared/api.ts'
 import type { EffectiveGraph } from '../shared/compile.ts'
-import { ACCESS_LEVELS, DOC_POLICIES, ID_PATTERN, NODE_TYPES, normalizeRepoPath, type Issue, type Workflow } from '../shared/model.ts'
-import { bindingCategory, TYPE_LABEL, type Selection } from './canvas.ts'
+import { ACCESS_LEVELS, APPEARANCE_COLORS, APPEARANCE_ICONS, DOC_POLICIES, ID_PATTERN, NODE_TYPES, normalizeRepoPath, type Issue, type Workflow } from '../shared/model.ts'
+import { bindingCategory, iconOf, TYPE_LABEL, type Selection } from './canvas.ts'
 import { h } from './dom.ts'
 import { icon } from './icons.ts'
 
@@ -57,13 +57,14 @@ function nodePanel(ctx: InspectorContext, id: string, actions: InspectorActions)
   const ro = ctx.readonly
   const typeOptions = (NODE_TYPES as readonly string[]).includes(n.type) ? [...NODE_TYPES] : [n.type, ...NODE_TYPES]
   const out: HTMLElement[] = [
-    h('div.insp-head', icon((NODE_TYPES as readonly string[]).includes(n.type) ? n.type : 'unknown', 'icon'), h('h3', nodeLabel(w, id)), h('code', id)),
+    h('div.insp-head', icon(iconOf(n.type, n.appearance), 'icon'), h('h3', nodeLabel(w, id)), h('code', id)),
     h('label.field', h('span', 'Type'), h('select', {
       disabled: ro, 'aria-label': 'Node type',
       onchange: (e: Event) => { n.type = (e.target as HTMLSelectElement).value; actions.changed(true) },
     }, typeOptions.map(t => h('option', { value: t, selected: t === n.type }, TYPE_LABEL[t] ?? `${t || '(none)'} — unknown`)))),
     h('label.field', h('span', 'Name'), h('input', { value: n.name, disabled: ro, 'aria-label': 'Node name', placeholder: TYPE_LABEL[n.type] ?? '', oninput: (e: Event) => { n.name = (e.target as HTMLInputElement).value; actions.changed(false) } })),
     h('label.field', h('span', 'Description'), h('textarea', { rows: 5, value: n.description, disabled: ro, 'aria-label': 'Node description', oninput: (e: Event) => { n.description = (e.target as HTMLTextAreaElement).value; actions.changed(false) } })),
+    appearanceField(n, ro, actions),
   ]
   if (n.type === 'delegate' || n.workflow) {
     const known = ctx.workflows.filter(s => s.id)
@@ -110,6 +111,26 @@ function nodePanel(ctx: InspectorContext, id: string, actions: InspectorActions)
   if (nodeIssues.length) out.push(issueList(nodeIssues, actions))
   out.push(h('div.insp-foot', h('button.danger', { disabled: ro, onclick: () => actions.deleteNode(id) }, 'Delete node')))
   return out
+}
+
+// Appearance (p7): how the card looks. Display only — it changes neither
+// approval nor what the node does.
+function appearanceField(n: Workflow['nodes'][string], ro: boolean, actions: InspectorActions): HTMLElement {
+  const set = (k: 'icon' | 'color', v: string) => {
+    const a = { icon: n.appearance?.icon ?? '', color: n.appearance?.color ?? '', [k]: v }
+    if (a.icon || a.color) n.appearance = a; else delete n.appearance
+    actions.changed(true)
+  }
+  const options = (known: readonly string[], current: string, label: (v: string) => string) => [
+    h('option', { value: '', selected: !current }, 'type default'),
+    ...(current && !known.includes(current) ? [h('option', { value: current, selected: true }, `${current} — unknown`)] : []),
+    ...known.map(v => h('option', { value: v, selected: v === current }, label(v))),
+  ]
+  return h('div.field', h('span', 'Appearance'),
+    h('div.appearance-row',
+      h('select', { disabled: ro, 'aria-label': 'Node icon', onchange: (e: Event) => set('icon', (e.target as HTMLSelectElement).value) }, options(APPEARANCE_ICONS, n.appearance?.icon ?? '', v => `icon: ${v}`)),
+      h('select', { disabled: ro, 'aria-label': 'Node color', onchange: (e: Event) => set('color', (e.target as HTMLSelectElement).value) }, options(APPEARANCE_COLORS, n.appearance?.color ?? '', v => `color: ${v}`))),
+    h('p.muted.small', 'Display only: the node does what its type says; approvals are not affected.'))
 }
 
 function edgePanel(ctx: InspectorContext, index: number, actions: InspectorActions): HTMLElement[] {

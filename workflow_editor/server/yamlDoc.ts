@@ -102,7 +102,7 @@ export const WORKFLOW_SHAPE = record({
   execution: record({ agent: scalar, profile: scalar, guides: list(scalar) }),
   intake: record({ zulip: scalar }),
   repositories: dict(record({ path: scalar, access: scalar }, true)),
-  nodes: dict(record({ type: scalar, name: scalar, confirms: scalar, description: scalar, repositories: list(scalar), workflow: scalar })),
+  nodes: dict(record({ type: scalar, name: scalar, confirms: scalar, appearance: record({ icon: scalar, color: scalar }, true), description: scalar, repositories: list(scalar), workflow: scalar })),
   edges: list(record({ from: scalar, to: scalar }, true)),
   approvals: record({ intent: approval, definition: approval }),
   layout: record({ nodes: dict(record({ x: scalar, y: scalar }, true)) }),
@@ -251,7 +251,9 @@ export function workflowForWrite(w: Workflow): Record<string, unknown> {
   const nodes: Record<string, unknown> = {}
   for (const [id, n] of Object.entries(w.nodes)) {
     nodes[id] = {
-      type: n.type, name: n.name || undefined, confirms: n.confirms || undefined, description: n.description,
+      type: n.type, name: n.name || undefined, confirms: n.confirms || undefined,
+      appearance: n.appearance && (n.appearance.icon || n.appearance.color) ? { icon: n.appearance.icon || undefined, color: n.appearance.color || undefined } : undefined,
+      description: n.description,
       repositories: n.repositories, workflow: n.workflow || undefined,
     }
   }

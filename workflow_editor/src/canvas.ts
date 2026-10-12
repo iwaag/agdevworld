@@ -2,7 +2,7 @@
 // It renders a workflow draft and reports user intents (select, move,
 // connect) through callbacks; the view owns the draft.
 import type { RepositoryStatus, WorkflowSummary } from '../shared/api.ts'
-import { NODE_TYPES, normalizeRepoPath, type Point, type Workflow } from '../shared/model.ts'
+import { APPEARANCE_COLORS, APPEARANCE_ICONS, NODE_TYPES, normalizeRepoPath, type Appearance, type Point, type Workflow } from '../shared/model.ts'
 import { h } from './dom.ts'
 import { icon } from './icons.ts'
 import { METRICS, PAD, positions, STEP_X, type DisplayMode } from '../shared/layout.ts'
@@ -42,6 +42,12 @@ export interface CanvasEvents {
 }
 
 const typeKey = (t: string) => ((NODE_TYPES as readonly string[]).includes(t) ? t : 'unknown')
+// A node's own appearance (p7), when it names a known icon or color; the
+// type's otherwise. Display only: state keeps its own text, glyph and color.
+export const iconOf = (type: string, a?: Appearance) => (a?.icon && (APPEARANCE_ICONS as readonly string[]).includes(a.icon) ? a.icon : typeKey(type))
+export const colorOf = (a?: Appearance) => (a?.color && (APPEARANCE_COLORS as readonly string[]).includes(a.color) ? a.color : null)
+// Edge colors of the palette, matching styles.css --c-<token>.
+const COLOR_HEX: Record<string, string> = { blue: '#6d8fd6', amber: '#d9a441', violet: '#9c84c4', teal: '#3fa59a', green: '#5fae6e', rose: '#d27a8c', slate: '#7d8794', orange: '#e08a4f' }
 
 export function bindingCategory(path: string): string {
   const p = normalizeRepoPath(path) ?? path
@@ -145,7 +151,8 @@ export class Canvas {
     const selected = this.selection?.kind === 'node' && this.selection.id === id
     const title = node.name || TYPE_LABEL[t] || node.type || id
     const target = node.type === 'delegate' && node.workflow ? this.ctx.workflows.find(w => w.id === node.workflow) : undefined
-    const card = h(`div.node.type-${t}${selected ? '.selected' : ''}${this.ctx.errorNodes.has(id) ? '.has-error' : ''}`, {
+    const color = colorOf(node.appearance)
+    const card = h(`div.node.type-${t}${color ? `.color-${color}` : ''}${selected ? '.selected' : ''}${this.ctx.errorNodes.has(id) ? '.has-error' : ''}`, {
       dataset: { id },
       role: 'button',
       tabIndex: 0,
@@ -153,7 +160,7 @@ export class Canvas {
       title: `${id} · ${TYPE_LABEL[t] ?? node.type}\n${node.description}`,
       style: { left: `${p.x * m.scale}px`, top: `${p.y * m.scale}px`, width: `${m.width}px`, minHeight: `${m.height}px` },
     })
-    const head = h('div.node-head', icon(t, 'icon type-icon'), h('span.type-label', TYPE_LABEL[t] ?? (node.type || 'no type')))
+    const head = h('div.node-head', icon(iconOf(node.type, node.appearance), 'icon type-icon'), h('span.type-label', TYPE_LABEL[t] ?? (node.type || 'no type')))
     card.append(head, h('div.node-title', title))
     const run = this.ctx.run?.[id]
     if (run) {
@@ -291,7 +298,7 @@ export class Canvas {
   private drawEdges() {
     this.svg.replaceChildren()
     const defs = document.createElementNS(NS, 'defs')
-    for (const [k, color] of Object.entries({ ...EDGE_COLOR, selected: '#3f6fd8' })) {
+    for (const [k, color] of Object.entries({ ...EDGE_COLOR, ...Object.fromEntries(Object.entries(COLOR_HEX).map(([c, v]) => [`c-${c}`, v])), selected: '#3f6fd8' })) {
       const marker = document.createElementNS(NS, 'marker')
       marker.id = `arrow-${k}`
       for (const [a, v] of Object.entries({ viewBox: '0 0 10 10', refX: '9', refY: '5', markerWidth: '7', markerHeight: '7', orient: 'auto-start-reverse' })) marker.setAttribute(a, v)
@@ -312,7 +319,8 @@ export class Canvas {
       const bend = Math.max(30, Math.abs(b.x - a.x) / 2)
       const d = `M${a.x},${a.y} C${a.x + bend},${a.y} ${b.x - bend},${b.y} ${b.x - 2},${b.y}`
       const selected = this.selection?.kind === 'edge' && this.selection.index === i
-      const color = selected ? 'selected' : typeKey(this.draft.nodes[e.from].type)
+      const own = colorOf(this.draft.nodes[e.from].appearance)
+      const color = selected ? 'selected' : own ? `c-${own}` : typeKey(this.draft.nodes[e.from].type)
       const g = document.createElementNS(NS, 'g')
       g.classList.add('edge'); if (selected) g.classList.add('selected')
       g.dataset.index = String(i); g.dataset.from = e.from; g.dataset.to = e.to
@@ -320,7 +328,7 @@ export class Canvas {
       hit.setAttribute('d', d); hit.classList.add('hit')
       const line = document.createElementNS(NS, 'path')
       line.setAttribute('d', d); line.classList.add('line')
-      line.setAttribute('stroke', selected ? '#3f6fd8' : EDGE_COLOR[color])
+      line.setAttribute('stroke', selected ? '#3f6fd8' : own ? COLOR_HEX[own] : EDGE_COLOR[color])
       line.setAttribute('marker-end', `url(#arrow-${color})`)
       const title = document.createElementNS(NS, 'title'); title.textContent = `${e.from} → ${e.to}`
       g.append(title, hit, line)

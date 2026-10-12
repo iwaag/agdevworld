@@ -1,0 +1,57 @@
+// What the run view's parts share: state labels, relative times, node
+// labels and the small builders of its display. Built display carries no
+// listeners; links and buttons name their action in data-action and the
+// view handles them in one place (runView.ts), reading its state then.
+import type { RunResponse } from '../shared/api.ts'
+import { holderOf, type RunRecord } from '../shared/run.ts'
+import { h, when } from './dom.ts'
+
+export const STATE_LABEL: Record<string, string> = {
+  pending: 'Pending', ready: 'Ready', blocked: 'Blocked', running: 'Running (reported)', waiting: 'Waiting',
+  completed: 'Completed', failed: 'Failed', cancelled: 'Cancelled',
+  'not-started': 'Not started', 'in-progress': 'In progress', stopped: 'Stopped',
+}
+
+export function ago(at: string | null | undefined, now = Date.now()): string {
+  if (!at) return '—'
+  const s = Math.max(0, Math.round((now - Date.parse(at)) / 1000))
+  return s < 90 ? `${s} s ago` : s < 5400 ? `${Math.round(s / 60)} min ago` : s < 172800 ? `${Math.round(s / 3600)} h ago` : `${Math.round(s / 86400)} d ago`
+}
+
+export const runHash = (ws: string, ref: string, rev?: string) =>
+  `#/ws/${encodeURIComponent(ws)}/run/${ref.split('/').map(encodeURIComponent).join('/')}${rev ? `/at/${encodeURIComponent(rev)}` : ''}`
+
+// The state a node is shown with: pending splits into ready / blocked / pending.
+function shownState(rec: RunRecord, id: string): string {
+  const n = rec.nodes[id]
+  if (n.state !== 'pending') return n.state
+  return rec.execution.ready.includes(id) ? 'ready' : rec.execution.blocked.includes(id) ? 'blocked' : 'pending'
+}
+
+export function nodeLabel(rec: RunRecord, id: string): { state: string; label: string; title: string } {
+  const n = rec.nodes[id]
+  const state = shownState(rec, id)
+  let label = STATE_LABEL[state] ?? state
+  let title = label
+  if (n.state === 'waiting' && n.wait) {
+    const on = n.wait.on
+    const q = 'question' in on ? rec.questions[on.question] : undefined
+    label = q && q.answers.length && !q.takenUp && !q.withdrawn ? `Answered · ${rec.executor.name} to take up` : `Waiting · ${n.wait.holder}`
+    title = `${n.wait.reason}; next move: ${holderOf(rec, id)}`
+  } else if (n.state === 'running') title = `The executor recorded a start at ${when(n.started ?? '')}; last update ${ago(n.updated)}. This is reported progress, not a check that anything runs.`
+  else if (state === 'blocked') title = 'A predecessor failed or was cancelled; this node cannot become ready.'
+  else if (state === 'ready') title = 'Every predecessor completed; the executor can start it.'
+  return { state, label, title }
+}
+
+// The authored definition in force (p7): the latest adjusted revision, or
+// the snapshot taken at creation.
+export function activeWorkflow(r: RunResponse | null, rec: RunRecord) {
+  return r?.revisions?.at(-1)?.workflow ?? r?.bundle[rec.definition.root]?.workflow
+}
+
+export const chip = (state: string, text = STATE_LABEL[state] ?? state) => h(`span.state-chip.state-${state}`, { dataset: { state } }, text)
+export const fact = (k: string, v: string, cls = '') => h(`div.fact${cls ? `.${cls}` : ''}`, h('span.k', k), h('span.v', v))
+export const line = (k: string, items: (Node | string | null)[], cls = '') => h(`div.now-line${cls ? `.${cls}` : ''}`, h('span.k', k), h('span.v', ...items.filter((x): x is Node | string => x !== null).flatMap((x, i) => (i ? [', ', x] : [x]))))
+export const nodeLink = (id: string, text = id) => h('a.node-link', { href: '#', dataset: { action: 'node', node: id } }, text)
+export const fileLink = (path: string, label = path) => h('a.file-link', { href: '#', title: 'Show this file here (read-only)', dataset: { action: 'file', path } }, label)

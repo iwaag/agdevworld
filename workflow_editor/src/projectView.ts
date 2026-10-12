@@ -8,7 +8,7 @@ import { h, short } from './dom.ts'
 import { diagnosticList } from './homeView.ts'
 import { icon } from './icons.ts'
 import type { ViewHandle } from './main.ts'
-import { ago, runHash, STATE_LABEL } from './runView.ts'
+import { ago, runHash, STATE_LABEL } from './runCommon.ts'
 
 const GROUPS: { key: RepositoryStatus['category'][]; title: string }[] = [
   { key: ['root', 'devdocs'], title: 'Fixed repositories' },

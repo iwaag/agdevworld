@@ -78,8 +78,8 @@ await op(R1, { op: 'question.ask', question: '', node: 'ask', text: 'Which map s
 for (let i = 0; i < 40; i++) await op(R1, { op: 'node.progress', node: 'build', text: `history filler ${i + 1}` })
 // A stop with no attempt open holds the run at once: the resume form shows.
 await op(R1, { op: 'run.stop', reason: 'look before continuing' })
-// A long, wide file: both of its scroll offsets can move.
-await writeFile(join(runDirOf(R1), 'long.md'), Array.from({ length: 300 }, (_, i) => `line ${String(i + 1).padStart(3, '0')} ${'wide '.repeat(60)}`).join('\n') + '\n')
+// A long, wide file (unbreakable lines overflow even pre-wrap): both of its scroll offsets can move.
+await writeFile(join(runDirOf(R1), 'long.md'), Array.from({ length: 300 }, (_, i) => `line ${String(i + 1).padStart(3, '0')} ${'0123456789'.repeat(30)}`).join('\n') + '\n')
 
 // ---- browser ---------------------------------------------------------------------------
 
@@ -192,7 +192,8 @@ try {
   await page.locator('.run-side .file-link', { hasText: 'long.md' }).first().click()
   await page.waitForSelector('.file-view pre')
   await waitFor(async () => /line 300/.test(await page.locator('.file-view pre').innerText()))
-  await page.evaluate(() => { const pre = document.querySelector('.file-view pre')!; pre.scrollTop = 400; pre.scrollLeft = 80 })
+  const set = await page.evaluate(() => { const pre = document.querySelector('.file-view pre')!; pre.scrollTop = 400; pre.scrollLeft = 80; return { top: pre.scrollTop, left: pre.scrollLeft, sw: pre.scrollWidth, cw: pre.clientWidth } })
+  result.fileScrollSet = set
   await progress('while reading the file')
   const pre = await page.evaluate(() => { const p = document.querySelector('.file-view pre')!; return { top: p.scrollTop, left: p.scrollLeft } })
   result.fileScroll = pre
@@ -207,7 +208,7 @@ try {
     side.scrollTop = side.scrollHeight
     const top = side.getBoundingClientRect().top
     const li = [...side.querySelectorAll('ol.history li')].find(x => x.getBoundingClientRect().top > top + 100) as HTMLLIElement
-    li.dataset.anchor = '1'
+    ;(li as HTMLLIElement & { __anchor?: boolean }).__anchor = true // a property: patched attributes would not keep a mark
     return { seq: li.value, offset: li.getBoundingClientRect().top - top, scrollTop: side.scrollTop }
   })
   for (let i = 0; i < 3; i++) await op(R1, { op: 'node.progress', node: 'build', text: `newer ${i + 1}` })
@@ -215,7 +216,7 @@ try {
   const after = await page.evaluate(seq => {
     const side = document.querySelector('.run-side') as HTMLElement
     const li = [...side.querySelectorAll('ol.history li')].find(x => (x as HTMLLIElement).value === seq) as HTMLLIElement
-    return { sameElement: li.dataset.anchor === '1', offset: li.getBoundingClientRect().top - side.getBoundingClientRect().top, scrollTop: side.scrollTop }
+    return { sameElement: (li as HTMLLIElement & { __anchor?: boolean }).__anchor === true, offset: li.getBoundingClientRect().top - side.getBoundingClientRect().top, scrollTop: side.scrollTop }
   }, pick.seq)
   result.history = { before: pick, after }
   check(after.sameElement && Math.abs(after.offset - pick.offset) <= 2, `the visible history entry (seq ${pick.seq}) keeps its element and position: ${JSON.stringify({ before: pick.offset, after: after.offset, same: after.sameElement })}`)

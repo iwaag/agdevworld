@@ -271,6 +271,9 @@ export function renderRunView(root: HTMLElement, wsId: string, workflow: string,
     box.append(h('div.insp-head', icon(step ? 'doc' : def?.type ?? 'unknown', 'icon'), h('h3', step ? label2(id) : def?.name || id), h('code', id), h('button.icon-btn', { title: 'Close', onclick: () => { selection = null; render() } }, '×')))
     box.append(h('div.chips', chip(state, `${STATE_GLYPH[state] ?? ''} ${label}`), h('span.chip', step ? 'Documentation step' : TYPE_LABEL[def?.type ?? ''] ?? def?.type ?? '?')))
     if (def?.description) box.append(h('p.small', def.description))
+    // Made from one of the person's templates (p7/ex1): its provenance as written in this revision.
+    if (def?.template) box.append(h('div.template-field.small', h('span.muted', 'From template '), h('code', def.template.id), ` revision ${def.template.revision}. `,
+      h('div.template-provenance', h('span.muted', 'Expected: '), def.template.expectation)))
     if (step && eff) {
       // The document: missing, written but unrecorded, or checked.
       const file = shown?.files.find(f => f.name === step.output)

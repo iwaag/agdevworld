@@ -366,7 +366,7 @@ export function renderWorkflowView(root: HTMLElement, wsId: string, file: string
     if (selection?.kind === 'step' && !effective?.nodes[selection.id]) selection = null
     canvas.render(draft, { repositories: resp?.repositories ?? [], workflows: resp?.workflows ?? [], errorNodes: new Set(errors.map(i => i.node).filter((n): n is string => !!n)), readonly: readonly(), effective }, selection)
     if (rebuildInspector) renderInspector(inspector, {
-      draft, selection, repositories: resp?.repositories ?? [], workflows: resp?.workflows ?? [], issues, readonly: readonly(), file, effective,
+      draft, selection, repositories: resp?.repositories ?? [], workflows: resp?.workflows ?? [], issues, readonly: readonly(), file, effective, templates,
     }, { changed: rebuild => update(rebuild), select: sel => { selection = sel; update(true) }, deleteNode, deleteEdge, connect })
     renderBanners()
     const snapshot = draft

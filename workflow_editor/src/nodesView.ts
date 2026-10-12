@@ -95,33 +95,43 @@ export function renderNodesView(root: HTMLElement): ViewHandle {
     const card = h('section.card.node-editor')
     if (!draft) { card.append(h('h2', 'Template'), h('p.muted', 'Select a template to edit it, or create a new one.')); return card }
     const d = draft
-    const set = (k: keyof TemplateContent, v: string) => { (d.content as unknown as Record<string, unknown>)[k] = v; render() }
-    const setA = (k: 'icon' | 'color', v: string) => { d.content.appearance = { icon: d.content.appearance?.icon ?? '', color: d.content.appearance?.color ?? '', [k]: v }; render() }
-    const problems = [...(d.revision === null && !ID_PATTERN.test(d.id.trim()) ? ['id must match a-z 0-9 . _ - (start with a letter or digit)'] : []), ...contentProblems(d.content)]
+    // Typing updates the draft and what derives from it (preview, problems,
+    // buttons) without rebuilding the inputs, so focus and a click into the
+    // next field are never lost.
+    const derived = h('div.derived')
+    const refresh = () => { message = null; main.querySelector('.message-slot')?.replaceChildren(); derived.replaceChildren(...derivedParts(d)) }
+    const set = (k: keyof TemplateContent) => (e: Event) => { (d.content as unknown as Record<string, unknown>)[k] = (e.target as HTMLInputElement).value; refresh() }
+    const setA = (k: 'icon' | 'color') => (e: Event) => { d.content.appearance = { icon: d.content.appearance?.icon ?? '', color: d.content.appearance?.color ?? '', [k]: (e.target as HTMLSelectElement).value }; refresh() }
     const opt = (list: readonly string[], cur: string, label: string) => [h('option', { value: '', selected: !cur }, `${label}: type default`), ...list.map(v => h('option', { value: v, selected: v === cur }, `${label}: ${v}`))]
     append(card, [
       h('h2', d.revision === null ? 'New template' : `Template ${d.id}`, d.revision !== null ? h('span.chip', `revision ${d.revision}`) : null),
-      d.revision === null ? h('label.field', h('span', 'Id (stable; never reused)'), h('input', { value: d.id, 'aria-label': 'Template id', placeholder: 'preliminary-research', oninput: (e: Event) => { d.id = (e.target as HTMLInputElement).value; refreshPreview() }, onchange: () => render() })) : null,
-      h('label.field', h('span', 'Name — the card label'), h('input', { value: d.content.name, 'aria-label': 'Template name', onchange: (e: Event) => set('name', (e.target as HTMLInputElement).value) })),
-      h('label.field', h('span', 'Type — how it runs'), h('select', { 'aria-label': 'Template type', onchange: (e: Event) => set('type', (e.target as HTMLSelectElement).value) },
+      d.revision === null ? h('label.field', h('span', 'Id (stable; never reused)'), h('input', { value: d.id, 'aria-label': 'Template id', placeholder: 'preliminary-research', oninput: (e: Event) => { d.id = (e.target as HTMLInputElement).value; refresh() } })) : null,
+      h('label.field', h('span', 'Name — the card label'), h('input', { value: d.content.name, 'aria-label': 'Template name', oninput: set('name') })),
+      h('label.field', h('span', 'Type — how it runs'), h('select', { 'aria-label': 'Template type', onchange: set('type') },
         TEMPLATE_TYPES.map(t => h('option', { value: t, selected: t === d.content.type }, `${TYPE_LABEL[t]} (${t})`)))),
-      h('label.field', h('span', 'Description — for the agent performing it: what to do and record'), h('textarea', { rows: 5, value: d.content.description, 'aria-label': 'Template description', onchange: (e: Event) => set('description', (e.target as HTMLTextAreaElement).value) })),
+      h('label.field', h('span', 'Description — for the agent performing it: what to do and record'), h('textarea', { rows: 5, value: d.content.description, 'aria-label': 'Template description', oninput: set('description') })),
       h('p.muted.small', 'Copied into the node\'s description when the template is used. The node then runs like any node of its type.'),
-      h('label.field', h('span', 'Expectation — for whoever designs the workflow: how you expect this to appear'), h('textarea', { rows: 3, value: d.content.expectation, 'aria-label': 'Template expectation', onchange: (e: Event) => set('expectation', (e.target as HTMLTextAreaElement).value) })),
+      h('label.field', h('span', 'Expectation — for whoever designs the workflow: how you expect this to appear'), h('textarea', { rows: 3, value: d.content.expectation, 'aria-label': 'Template expectation', oninput: set('expectation') })),
       h('p.muted.small', 'Agents planning a run are told that you recognize this activity as a distinct step and generally expect it as a visible node when it is relevant. They still decide whether and where.'),
       h('div.field', h('span', 'Appearance (display only)'), h('div.appearance-row',
-        h('select', { 'aria-label': 'Template icon', onchange: (e: Event) => setA('icon', (e.target as HTMLSelectElement).value) }, opt(APPEARANCE_ICONS, d.content.appearance?.icon ?? '', 'icon')),
-        h('select', { 'aria-label': 'Template color', onchange: (e: Event) => setA('color', (e.target as HTMLSelectElement).value) }, opt(APPEARANCE_COLORS, d.content.appearance?.color ?? '', 'color')))),
+        h('select', { 'aria-label': 'Template icon', onchange: setA('icon') }, opt(APPEARANCE_ICONS, d.content.appearance?.icon ?? '', 'icon')),
+        h('select', { 'aria-label': 'Template color', onchange: setA('color') }, opt(APPEARANCE_COLORS, d.content.appearance?.color ?? '', 'color')))),
+      derived,
+    ])
+    derived.replaceChildren(...derivedParts(d))
+    return card
+  }
+  function derivedParts(d: Draft): HTMLElement[] {
+    const problems = [...(d.revision === null && !ID_PATTERN.test(d.id.trim()) ? ['id must match a-z 0-9 . _ - (start with a letter or digit)'] : []), ...contentProblems(d.content)]
+    return [
       h('div.field', h('span', 'Preview'), h('div.preview-slot', templateCard(d.content))),
-      problems.length ? h('ul.diagnostics', problems.map(p => h('li.warning', p))) : null,
+      ...(problems.length ? [h('ul.diagnostics', problems.map(p => h('li.warning', p)))] : []),
       h('div.row',
         h('button.primary', { disabled: busy || !!problems.length || (d.revision !== null && !dirty()), onclick: save }, d.revision === null ? 'Create' : 'Save'),
         d.revision !== null ? h('button', { disabled: busy || !dirty(), onclick: () => { draft = JSON.parse(saved) as Draft; render() } }, 'Discard changes') : null,
         d.revision !== null ? h('button.danger', { disabled: busy, onclick: () => { if (confirm(`Delete template ${d.id}? Nodes made from it keep their content and provenance; the id is not reused.`)) void act(() => api.deleteTemplate(d.id, d.revision!, by.value.trim()), `Deleted ${d.id}.`, '') } }, 'Delete') : null),
-    ])
-    return card
+    ]
   }
-  function refreshPreview() { const slot = main.querySelector('.preview-slot'); if (slot && draft) slot.replaceChildren(templateCard(draft.content)) }
 
   function list(): HTMLElement {
     const card = h('section.card.node-list', h('h2', 'Your templates'))
@@ -154,7 +164,7 @@ export function renderNodesView(root: HTMLElement): ViewHandle {
       h('section.card.nodes-intro', h('h2', 'User nodes'),
         h('p', 'Activities you recognize as distinct workflow steps. Each is a reusable node over an existing type. In the workflow editor, "Add node" offers them beside the basic types. Agents performing a run receive this catalog (as it was when the run was created) as your expectations, with the tools to add such a node. Nothing is added to a workflow by itself.'),
         h('label.field.inline', h('span', 'Your name'), by)),
-      message,
+      h('div.message-slot', message),
       h('div.nodes-grid', list(), editor())])
     main.scrollTop = scroll
   }

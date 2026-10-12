@@ -242,9 +242,15 @@ pre { white-space: pre-wrap; font-size: 12px; background: rgba(0,0,0,.05); paddi
 .node[class*=" color-"] .type-icon { color: #2f3640; }
 .node[class*=" color-"] .type-label { background: rgba(0,0,0,.07); }
 .node[class*=" color-"] .node-desc { color: #3d4450; }
-.add-node.preset { background: #fff; }
-.add-node.preset.color-teal { border-color: var(--c-teal); background: var(--c-teal-bg); }
-.add-node.preset.color-slate { border-color: var(--c-slate); background: var(--c-slate-bg); }
+.add-node.template { background: #fff; }
+.add-node.template.color-blue { border-color: var(--c-blue); background: var(--c-blue-bg); }
+.add-node.template.color-amber { border-color: var(--c-amber); background: var(--c-amber-bg); }
+.add-node.template.color-violet { border-color: var(--c-violet); background: var(--c-violet-bg); }
+.add-node.template.color-teal { border-color: var(--c-teal); background: var(--c-teal-bg); }
+.add-node.template.color-green { border-color: var(--c-green); background: var(--c-green-bg); }
+.add-node.template.color-rose { border-color: var(--c-rose); background: var(--c-rose-bg); }
+.add-node.template.color-slate { border-color: var(--c-slate); background: var(--c-slate-bg); }
+.add-node.template.color-orange { border-color: var(--c-orange); background: var(--c-orange-bg); }
 .appearance-row { display: flex; gap: 6px; align-items: center; }
 .appearance-row select { flex: 1; }
 .type-icon { width: 30px; height: 30px; color: #2f3640; }

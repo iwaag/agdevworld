@@ -779,7 +779,9 @@ export async function adjustRun(ws: Workspace, ref: RunRef, o: AdjustOptions, ct
       if (!st || st === 'pending') continue
       const open = Object.values(record.questions).some(q => q.node === id && !q.takenUp && !q.withdrawn)
       if (!next.nodes[id]) { problem(open ? 'adjust-question' : 'adjust-started', `${id} is ${st}${open ? ' with an open question' : ''}; it is not removed`); continue }
-      const changed = NODE_FIELDS.filter(f => canonicalJson(n[f] ?? null) !== canonicalJson(next.nodes[id][f] ?? null))
+      // Provenance (p7/ex1) is no execution meaning, but the record of where
+      // started work came from is not rewritten either.
+      const changed = [...NODE_FIELDS, 'template' as const].filter(f => canonicalJson(n[f] ?? null) !== canonicalJson(next.nodes[id][f] ?? null))
       if (changed.length) problem(open ? 'adjust-question' : 'adjust-started', `${id} is ${st}; its ${changed.join(', ')} stay as they were`)
     }
     // One result confirmation among unfinished nodes: a correction adds a

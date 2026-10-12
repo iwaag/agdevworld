@@ -3,6 +3,7 @@
 // whether the inspector itself must be rebuilt (structure) or not (typing).
 import type { RepositoryStatus, WorkflowSummary } from '../shared/api.ts'
 import type { EffectiveGraph } from '../shared/compile.ts'
+import type { NodeTemplate } from '../shared/catalog.ts'
 import { ACCESS_LEVELS, APPEARANCE_COLORS, APPEARANCE_ICONS, DOC_POLICIES, ID_PATTERN, NODE_TYPES, normalizeRepoPath, type Issue, type Workflow } from '../shared/model.ts'
 import { bindingCategory, iconOf, TYPE_LABEL, type Selection } from './canvas.ts'
 import { h } from './dom.ts'
@@ -17,6 +18,7 @@ export interface InspectorContext {
   readonly: boolean
   file: string
   effective?: EffectiveGraph | null // the compiled draft (default policy), for step details
+  templates?: Pick<NodeTemplate, 'id' | 'revision'>[] // the person's catalog now (p7/ex1), to say how a node's template has moved on
 }
 
 export interface InspectorActions {
@@ -65,7 +67,8 @@ function nodePanel(ctx: InspectorContext, id: string, actions: InspectorActions)
     h('label.field', h('span', 'Name'), h('input', { value: n.name, disabled: ro, 'aria-label': 'Node name', placeholder: TYPE_LABEL[n.type] ?? '', oninput: (e: Event) => { n.name = (e.target as HTMLInputElement).value; actions.changed(false) } })),
     h('label.field', h('span', 'Description'), h('textarea', { rows: 5, value: n.description, disabled: ro, 'aria-label': 'Node description', oninput: (e: Event) => { n.description = (e.target as HTMLTextAreaElement).value; actions.changed(false) } })),
     appearanceField(n, ro, actions),
-  ]
+    n.template ? provenanceField(n.template, ctx.templates) : null,
+  ].filter((x): x is HTMLElement => !!x)
   if (n.type === 'delegate' || n.workflow) {
     const known = ctx.workflows.filter(s => s.id)
     const options = [h('option', { value: '' }, '— choose a workflow —'), ...known.map(s => h('option', { value: s.id!, selected: s.id === n.workflow }, `${s.name || s.id} (${s.id})${s.file === ctx.file ? ' — this workflow' : ''}`))]
@@ -111,6 +114,18 @@ function nodePanel(ctx: InspectorContext, id: string, actions: InspectorActions)
   if (nodeIssues.length) out.push(issueList(nodeIssues, actions))
   out.push(h('div.insp-foot', h('button.danger', { disabled: ro, onclick: () => actions.deleteNode(id) }, 'Delete node')))
   return out
+}
+
+// Template provenance (p7/ex1): where the node came from and what the
+// person expected of that activity. A record, not a link: the node does not
+// follow the catalog, and nothing here changes what the node does.
+function provenanceField(t: NonNullable<Workflow['nodes'][string]['template']>, catalog?: Pick<NodeTemplate, 'id' | 'revision'>[]): HTMLElement {
+  const now = catalog?.find(x => x.id === t.id)
+  const since = !catalog ? '' : !now ? ' The template is no longer in your catalog.' : now.revision !== t.revision ? ` Your catalog has revision ${now.revision} now; this node keeps what it was made from.` : ''
+  return h('div.field.template-field', h('span', 'Made from your template'),
+    h('div.small', h('code', t.id), ` revision ${t.revision}.${since}`),
+    h('div.template-provenance', { 'aria-label': 'Template expectation' }, h('span.muted', 'You expected: '), t.expectation || '—'),
+    h('p.muted.small', 'Provenance only: outside approval and the executed graph. Edit the node freely; the catalog is not changed.'))
 }
 
 // Appearance (p7): how the card looks. Display only — it changes neither

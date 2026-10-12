@@ -168,6 +168,12 @@ export class RunSide {
   private readonly related = section('related', h('div.sec-body'))
   private readonly files = section('files', h('div.sec-body'))
   private readonly fileView = { root: h('div.file-view'), head: h('div.row.tight'), status: h('p.small'), pre: h('pre'), path: '' }
+  // The open file (p8/ex1): its own card at the top of the pane, in both
+  // modes — "Read final report" opens it in Simple too. One element, so its
+  // offsets survive the switch.
+  private readonly fileCard = h('section.side-sec.side-card.file-card', { dataset: { key: 'sec:file', section: 'file' }, hidden: true })
+  // Simple: one entry to every record (Detail's sections).
+  private readonly recordsEntry = h('button.more-link.s-only.records-entry', { dataset: { action: 'records' } }, icon('list', 'icon small'), 'All records: questions, files, execution, history')
   private readonly execution = section('execution', h('div.sec-body'))
   private readonly resume: { root: HTMLElement; draft: Owned; button: HTMLButtonElement }
   private readonly execMore = h('div.sec-body')
@@ -184,7 +190,7 @@ export class RunSide {
   constructor(actions: SideActions, actorName: string) {
     this.act = actions
     this.actor = h('input', { value: actorName, placeholder: 'your name', 'aria-label': 'Your name', size: 14 })
-    this.actorRow = h('div.actor-row', h('label.small', 'Recording as ', this.actor), h('span.muted.small', 'declared, like an approver; saved in this browser'))
+    this.actorRow = h('div.actor-row', h('label.small', 'Recording as ', this.actor), h('span.muted.small.d-only', 'declared, like an approver; saved in this browser'))
 
     const ta = new Owned(h('textarea.yaml', { rows: 12, 'aria-label': 'Adjusted definition', spellcheck: false }))
     const reason = new Owned(h('input', { placeholder: 'why the run changes', 'aria-label': 'Adjustment reason' }))
@@ -201,8 +207,7 @@ export class RunSide {
 
     const fv = this.fileView
     fv.root.append(fv.head, fv.status, fv.pre)
-    fv.root.hidden = true
-    this.files.content.append(fv.root)
+    this.fileCard.append(fv.root)
 
     const resumeButton = h('button.primary', 'Resume')
     const instruction = new Owned(h('textarea', { rows: 2, placeholder: 'what the executor should do now (after looking at the working tree)', 'aria-label': 'Resume instruction' })).controls(resumeButton)
@@ -238,12 +243,14 @@ export class RunSide {
 
     this.disclosures = [this.questions, this.instructions, this.presentations, this.definition, this.catalog, this.related, this.files, this.execution, this.coordination, this.result, this.history]
     for (const sec of this.disclosures) {
+      sec.root.classList.add('d-only')
       this.setOpen(sec, this.opened[sec.key] ?? false)
       sec.toggle.addEventListener('click', () => { this.setOpen(sec, sec.content.hidden === true); this.opened[sec.key] = !sec.content.hidden; storeOpen(this.opened) })
     }
     this.focus.append(this.focusDisplay, this.focusQuestions, this.holdSlot, this.decideSlot, this.focusLinks)
-    this.el.append(this.placeholder, this.actorRow,
-      ...[this.selected, this.questions, this.instructions, this.presentations, this.definition, this.catalog, this.related, this.files, this.execution, this.coordination, this.result, this.history].map(s => s.root))
+    this.el.dataset.keepScroll = 'run-side'
+    this.el.append(this.placeholder, this.actorRow, this.fileCard,
+      ...[this.selected, this.questions, this.instructions, this.presentations, this.definition, this.catalog, this.related, this.files, this.execution, this.coordination, this.result, this.history].map(s => s.root), this.recordsEntry)
   }
 
   // ---- what the view reads --------------------------------------------------
@@ -294,7 +301,10 @@ export class RunSide {
     sec.root.scrollIntoView({ block: 'start' })
     if (focus === 'adjust' && this.adjust.root.isConnected) { this.adjust.root.open = true; this.adjust.ta.el.focus({ preventScroll: true }) }
   }
-  revealFile() { this.setOpen(this.files, true); this.fileView.root.scrollIntoView({ block: 'nearest' }) }
+  revealFile() { this.fileCard.scrollIntoView({ block: 'nearest' }) }
+  revealSelected() { if (!this.selected.root.hidden) this.selected.root.scrollIntoView({ block: 'nearest' }) }
+  // "All records" from Simple: the first section, with the keyboard on it.
+  revealRecords() { const first = this.disclosures.find(s => !s.root.hidden); first?.root.scrollIntoView({ block: 'start' }); first?.toggle.focus({ preventScroll: true }) }
 
   // ---- update -----------------------------------------------------------------
 
@@ -368,12 +378,14 @@ export class RunSide {
       setText(this.placeholder, d.resp?.problem ? 'No usable record.' : 'Loading…')
       show(this.placeholder, true)
       show(this.actorRow, false)
+      show(this.recordsEntry, false)
       for (const s of sections) show(s.root, false)
       patchContent(this.focusDisplay, h('h2.focus-head', d.resp?.problem ? 'No usable record' : 'Loading…'), d.resp?.problem ? h('p.focus-lead', 'run.json cannot be read; the banner above says why. Nothing can be recorded until the files are fixed.') : null)
       return
     }
     show(this.placeholder, false)
     show(this.actorRow, !d.rev)
+    show(this.recordsEntry, true)
     for (const s of [this.questions, this.definition, this.catalog, this.files, this.history]) show(s.root, true)
     this.updateSelected(rec)
     this.updateQuestions(rec)
@@ -412,7 +424,7 @@ export class RunSide {
     const isReview = (q: Question) => !!q.presentation || (!!q.node && wf?.nodes[q.node]?.confirms === 'result')
     let kind: string, head: string, lead: string | Node
     if (d.rev) { kind = 'history'; head = 'A recorded state'; lead = `As committed at ${d.rev.slice(0, 10)}: what was recorded then, read-only. This host's live facts and the operations are not shown.` }
-    else if (rec.cancelled) { kind = 'cancelled'; head = 'Cancelled'; lead = `${rec.cancelled.by}, ${when(rec.cancelled.at)}: ${rec.cancelled.reason}` }
+    else if (rec.cancelled) { kind = 'cancelled'; head = 'Cancelled'; lead = h('span', `${rec.cancelled.by}`, h('span.d-only', `, ${when(rec.cancelled.at)}`), `: ${rec.cancelled.reason}`) }
     else if (asking.length) {
       const review = asking.some(isReview)
       kind = review ? 'review' : 'question'
@@ -421,14 +433,14 @@ export class RunSide {
     } else if (answerable.length) {
       kind = 'answered'; head = 'Your answer is recorded'
       lead = `${rec.executor.name} has not taken it up yet: the next move is theirs. Recording an answer does not wake the executor.`
-    } else if (hold) { kind = 'held'; head = `Held (${hold.kind})`; lead = `${hold.by}, ${when(hold.since)}: ${sentence(hold.reason)} Nothing runs until it is resumed with an instruction.` }
+    } else if (hold) { kind = 'held'; head = `Held (${hold.kind})`; lead = h('span', `${hold.by}`, h('span.d-only', `, ${when(hold.since)}`), `: ${sentence(hold.reason)} Nothing runs until it is resumed with an instruction.`) }
     else if (ex.failed.length) {
       kind = 'failed'; head = `${ex.failed.map(name).join(', ')} failed`
       const work = ex.blocked.filter(n => !effectiveOf(rec)?.nodes[n]?.step), docs = ex.blocked.length - work.length
       lead = ex.blocked.length ? `Blocked by it: ${work.map(name).join(', ') || 'no work'}${docs ? ` (and ${docs} documentation step${docs === 1 ? '' : 's'})` : ''}.` : 'Nothing depends on it.'
     }
     else if (accepted && ex.state !== 'completed') { kind = 'accepted'; head = 'Accepted — cleanup is still running'; lead = `The result was accepted${last!.confirmation ? ` from ${last!.confirmation.question}` : ''}; the run completes after its remaining steps.` }
-    else if (ex.state === 'completed') { kind = 'completed'; head = !last ? 'Completed — no decision recorded' : accepted ? 'Completed and accepted' : 'Completed — result rejected'; lead = !last ? 'Every node recorded completion. Accepting the result is your separate decision.' : `${last.decision === 'accepted' ? 'Accepted' : 'Rejected'} by ${last.by}${last.confirmation ? ` from ${last.confirmation.question} (${last.confirmation.from}'s answer)` : ''}, ${when(last.at)}.` }
+    else if (ex.state === 'completed') { kind = 'completed'; head = !last ? 'Completed — no decision recorded' : accepted ? 'Completed and accepted' : 'Completed — result rejected'; lead = !last ? 'Every node recorded completion. Accepting the result is your separate decision.' : h('span', `${last.decision === 'accepted' ? 'Accepted' : 'Rejected'}${last.confirmation ? ` from ${last.confirmation.from}'s answer` : ` by ${last.by}`}`, h('span.d-only', `${last.confirmation ? ` (${last.confirmation.question}, recorded by ${last.by})` : ''}, ${when(last.at)}`), '.') }
     else if (ex.active.length || rec.control.attempt) { kind = 'working'; head = 'Work in progress'; lead = 'Nothing is needed from you now.' }
     else if (ex.state === 'not-started') { kind = 'not-started'; head = 'Not started'; lead = `Waiting for ${rec.executor.name} to start.` }
     else { kind = 'idle'; head = 'Waiting for the executor'; lead = ex.ready.length ? `Ready to start: ${ex.ready.map(name).join(', ')}.` : 'Nothing is running and nothing is ready.' }
@@ -440,11 +452,12 @@ export class RunSide {
     if (kind === 'working' || kind === 'accepted') blocks.push(this.activeBlock(rec, name))
     if (kind === 'held') blocks.push(h('p.small.muted', 'Look at the working tree first; the instruction tells the executor what to do now. ', h('a', { href: '#', dataset: { action: 'goto-section', section: 'execution' } }, 'Execution details')))
     if (kind === 'failed') blocks.push(
-      h('ul.failures', ...ex.failed.map(n => { const f = rec.nodes[n].failure; return h('li', { dataset: { key: `fail:${n}` } }, nodeLink(n, name(n)), f ? `: ${f.reason} (${f.by}, ${when(f.at)})` : '') })),
+      h('ul.failures', ...ex.failed.map(n => { const f = rec.nodes[n].failure; return h('li', { dataset: { key: `fail:${n}` } }, nodeLink(n, name(n)), f ? `: ${f.reason}` : '', f ? h('span.d-only.muted', ` (${f.by}, ${when(f.at)})`) : null) })),
       h('p.small', `${rec.executor.name} can start a failed node again. You can change the work that is still pending, or end the run.`),
       h('div.row.tight.focus-actions',
         h('button', { dataset: { action: 'goto-section', section: 'definition', focus: 'adjust' } }, 'Adjust future work'),
         h('button.danger', { dataset: { action: 'cancel-run' }, disabled: this.frozen }, 'Cancel run')))
+    // The full list of recorded outcomes is Detail's (p8/ex1).
     if (kind === 'completed' || kind === 'accepted' || kind === 'cancelled' || kind === 'history') blocks.push(this.outcomes(rec, wf, name))
     if (kind === 'cancelled') {
       const still = Object.values(rec.presentations ?? {}).filter(isOpen)
@@ -489,7 +502,7 @@ export class RunSide {
       files.has('report.md') ? fileLink('report.md', 'Read final report') : null,
       files.has(rec.input.file) ? fileLink(rec.input.file, 'Original request') : null,
       h('a.focus-link', { href: '#', dataset: { action: 'goto-section', section: 'files' } }, `Reports & files (${r.files.length})`),
-      h('a.focus-link', { href: '#', dataset: { action: 'details' } }, 'Run details'))
+      h('a.focus-link.d-only', { href: '#', dataset: { action: 'details' } }, 'Run details'))
     for (const a of this.focusLinks.querySelectorAll<HTMLElement>('.file-link')) a.classList.add('focus-link')
   }
 
@@ -499,13 +512,13 @@ export class RunSide {
     if (!rec.presentations) return null
     const live = this.data.presentViews.filter(v => v.live).at(-1)
     if (live) return h('div.review-link', h('a.button.primary', { href: live.url!, target: '_blank', rel: 'noopener', dataset: { presentation: live.id } }, icon('present', 'icon small'), `Open the review: ${live.title}`),
-      h('span.small', ` ${live.id} · revision ${live.revision.slice(7, 19)}${live.local ? ' · opens on this host' : ''}`))
+      h('span.small.d-only', ` ${live.id} · revision ${live.revision.slice(7, 19)}${live.local ? ' · opens on this host' : ''}`))
     const open = Object.values(rec.presentations).filter(isOpen)
     if (open.length && kind === 'cancelled') return null // the cancelled card offers their stop
     if (open.length) return h('div.review-link.not-live', h('span.chip.warn', `${open.map(p => p.id).join(', ')} recorded as ${open[0].state}, but not served now`), h('span.small', ' — '), h('a.small', { href: '#', dataset: { action: 'goto-section', section: 'presentations' } }, 'start it again or record its stop'))
     if (kind === 'working' || kind === 'question') return null
     const last = Object.values(rec.presentations).at(-1)!
-    return h('div.review-link.stopped', icon('present', 'icon small'), h('span', h('strong', `${last.title}`), ` — ${last.id} ${last.state}`), h('span.small.muted', last.state === 'stopped' ? ' · no longer served; its files and the decision stay in the run folder' : ''))
+    return h('div.review-link.stopped', icon('present', 'icon small'), h('span', h('strong', `${last.title}`), h('span.d-only', ` — ${last.id} ${last.state}`), h('span.s-only', last.state === 'stopped' ? ' — review stopped, no longer served' : ` — ${last.state}`)), h('span.small.muted.d-only', last.state === 'stopped' ? ' · no longer served; its files and the decision stay in the run folder' : ''))
   }
 
   // What runs now: recorded activity beside this host's facts, with Stop.
@@ -518,9 +531,14 @@ export class RunSide {
         : rec.control.attempt ? `attempt ${rec.control.attempt.id} is open in the record; this host shows no process for it` : 'no attempt is open'
     const steps = ex.active.map(n => { const st = effectiveOf(rec)?.nodes[n]?.step; return h('li', { dataset: { key: `act:${n}` } }, st?.kind === 'report' ? h('span', 'Writing ', nodeLink(n, name(n))) : nodeLink(n, name(n)), rec.nodes[n].notes.at(-1) ? h('span.muted.small', ` — ${rec.nodes[n].notes.at(-1)!.text.split('\n')[0].slice(0, 140)}`) : null) })
     const sit = situation(rec)
+    // Simple (p8/ex1): what this host observes, in a few words with an icon.
+    // A missing or failed observation never reads as healthy progress.
+    const [tone, seen] = rev(d) ? ['muted', ''] : d.execError ? ['warn', 'This host\'s execution facts cannot be read'] : open ? (open.alive === true ? ['ok', 'The executor is working on this host'] : open.alive === false ? (open.pid ? ['warn', 'No executor process is seen'] : ['muted', 'The executor is starting']) : ['muted', 'The executor runs on another host'])
+      : rec.control.attempt ? ['warn', 'No executor process is seen for the open attempt'] : ex.active.length ? ['warn', 'Recorded as running, but no attempt is open'] : ['muted', 'No attempt is open']
     return h('div.active-block',
       steps.length ? h('ul.active-list', ...steps) : h('p.small.muted', 'No node is recorded as running.'),
-      h('p.small.executor-line', `Executor: ${host}${d.execView ? ` · executor ${d.execView.executor.state}` : ''}`),
+      seen ? h(`p.s-only.observation.${tone}`, icon(tone === 'ok' ? 'play' : tone === 'warn' ? 'alert' : 'history', 'icon small'), seen) : null,
+      h('p.small.executor-line.d-only', `Executor: ${host}${d.execView ? ` · executor ${d.execView.executor.state}` : ''}`),
       h('div.row.tight.focus-actions', h('button', { title: 'Stop execution; the run stays resumable', dataset: { action: 'stop-run' }, disabled: this.frozen || !!rec.control.hold || !!rec.control.stop || sit === 'completed' }, icon('stop', 'icon tiny'), 'Stop'),
         rec.control.stop ? h('span.small.warn-text', `Stop requested by ${rec.control.stop.by}; waiting for the process to end.`) : null))
   }
@@ -535,8 +553,8 @@ export class RunSide {
     const after = confirm ? descendants(confirm, wf.edges) : new Set<string>()
     const item = (id: string) => h('li', { dataset: { key: `out:${id}` } }, h('strong', nodeLink(id, name(id))), h('span', `: ${rec.nodes[id].outcome!.text}`))
     const main = ids.filter(id => rec.nodes[id].outcome && !after.has(id)), later = ids.filter(id => rec.nodes[id].outcome && after.has(id))
-    if (!main.length && !later.length) return h('p.small.muted', 'No outcome is recorded.')
-    return h('div.outcomes',
+    if (!main.length && !later.length) return h('p.small.muted.d-only', 'No outcome is recorded.')
+    return h('div.outcomes.d-only',
       h('h3', 'Recorded outcomes'),
       h('ol.outcome-list', ...main.map(item)),
       later.length ? h('h4', `After ${name(confirm!)}`) : null,
@@ -564,26 +582,27 @@ export class RunSide {
     const { state, label } = nodeLabel(rec, id)
     const box = h('div.node-detail', { dataset: { node: id, key: `node:${id}` } })
     const label2 = (x: string) => (wf && eff ? stepLabel(wf, eff, x) : x)
-    box.append(h('div.insp-head', icon(step ? 'doc' : def?.type ?? 'unknown', 'icon'), h('h3', step ? label2(id) : def?.name || id), h('code', id), h('button.icon-btn', { title: 'Close', 'aria-label': 'Close the selected node', dataset: { action: 'close-node' } }, '×')))
-    box.append(h('div.chips', chip(state, `${STATE_GLYPH[state] ?? ''} ${label}`), h('span.chip', step ? 'Documentation step' : TYPE_LABEL[def?.type ?? ''] ?? def?.type ?? '?'), h('span.chip.muted', icon('lock', 'icon tiny'), 'Read-only')))
+    box.append(h('div.insp-head', icon(step ? 'doc' : def?.type ?? 'unknown', 'icon'), h('h3', step ? label2(id) : def?.name || id), h('code.d-only', id), h('button.icon-btn', { title: 'Close', 'aria-label': 'Close the selected node', dataset: { action: 'close-node' } }, '×')))
+    box.append(h('div.chips', chip(state, `${STATE_GLYPH[state] ?? ''} ${label}`), h('span.chip.d-only', step ? 'Documentation step' : TYPE_LABEL[def?.type ?? ''] ?? def?.type ?? '?'), h('span.chip.muted.d-only', icon('lock', 'icon tiny'), 'Read-only')))
     if (def?.description) box.append(h('p.small', def.description))
     // Made from one of the person's templates (p7/ex1): its provenance as written in this revision.
-    if (def?.template) box.append(h('div.template-field.small', h('span.muted', 'From template '), h('code', def.template.id), ` revision ${def.template.revision}. `,
+    if (def?.template) box.append(h('div.template-field.small.d-only', h('span.muted', 'From template '), h('code', def.template.id), ` revision ${def.template.revision}. `,
       h('div.template-provenance', h('span.muted', 'Expected: '), def.template.expectation)))
     // Added by an adjustment (p7): which revision brought it in.
     const added = (rec.definition.revisions ?? []).find(v => v.diff.added.includes(id))
-    if (added) box.append(h('p.small.muted', `Added in revision ${added.revision}: ${added.reason}`))
+    if (added) box.append(h('p.small.muted.d-only', `Added in revision ${added.revision}: ${added.reason}`))
     if (step && eff) {
       // The document: missing, written but unrecorded, or checked.
       const file = r.files.find(f => f.name === step.output)
       const path = `${r.dir}/${step.output}`
       const docState = n.document ? `checked when recorded: ${n.document.bytes} bytes, sha256 ${n.document.sha256.slice(0, 12)}…${file ? '' : ' — the file is gone now'}` : file ? (state === 'running' ? 'being written — not yet recorded' : 'written, not recorded as complete') : 'not written yet'
-      box.append(h(`div.doc-state${n.document ? (file ? '.ok' : '.missing') : file ? '.unfinished' : '.missing'}`, h('strong', step.output), ': ', docState, ' ', file ? fileLink(path, 'Open') : null))
-      if (n.agreement) box.append(h('p.small.ok-text', `Agreed: the answer to ${n.agreement.question} was taken up for this plan.md.`))
+      box.append(h(`div.doc-state${n.document ? (file ? '.ok' : '.missing') : file ? '.unfinished' : '.missing'}`, h('strong', step.output), h('span.d-only', ': ', docState), h('span.s-only', `: ${n.document ? (file ? 'written and checked' : 'the file is gone') : file ? (state === 'running' ? 'being written' : 'written, not recorded') : 'not written yet'}`), ' ', file ? fileLink(path, 'Open') : null))
+      if (n.agreement) box.append(h('p.small.ok-text.d-only', `Agreed: the answer to ${n.agreement.question} was taken up for this plan.md.`))
       box.append(...stepFacts(eff, id, label2))
     } else if (eff?.nodes[reportStep(id)]) {
       const rs = reportStep(id)
-      box.append(h('p.small', 'Its report: ', nodeLink(rs, `report-${id}.md`), ` — ${nodeLabel(rec, rs).label}. Successors wait for the report, not only for this work.`))
+      const rf = r.files.find(f => f.name === `report-${id}.md`)
+      box.append(h('p.small', 'Its report: ', nodeLink(rs, `report-${id}.md`), ` — ${nodeLabel(rec, rs).label}`, h('span.d-only', '. Successors wait for the report, not only for this work.'), rf ? h('span.s-only', ' · ', fileLink(`${r.dir}/${rf.name}`, 'Read it')) : null))
     }
     if (n.outcome) box.append(h('div.outcome', h('strong', 'Recorded outcome: '), n.outcome.text, ...n.outcome.artifacts.map(a => h('div.small', fileLink(a)))))
     if (n.wait) {
@@ -591,16 +610,19 @@ export class RunSide {
       box.append(h('div.wait-box', h('strong', 'Waiting: '), n.wait.reason, h('br'), 'Next move: ', h('strong', holderOf(rec, id)),
         'external' in on ? h('div.small', `Awaiting: ${on.external}`) : null))
     }
-    if (n.failure) box.append(h('div.banner.error', `Failed (${n.failure.by}, ${when(n.failure.at)}): ${n.failure.reason}`))
-    if (n.cancellation) box.append(h('div.banner.warn', `Cancelled (${n.cancellation.by}, ${when(n.cancellation.at)}): ${n.cancellation.reason}`))
+    if (n.failure) box.append(h('div.banner.error', 'Failed', h('span.d-only', ` (${n.failure.by}, ${when(n.failure.at)})`), `: ${n.failure.reason}`))
+    if (n.cancellation) box.append(h('div.banner.warn', 'Cancelled', h('span.d-only', ` (${n.cancellation.by}, ${when(n.cancellation.at)})`), `: ${n.cancellation.reason}`))
     const rows: [string, string][] = [['Started', n.started ? when(n.started) : '—'], ['Ended', n.ended ? when(n.ended) : '—'], ['Last update', n.updated ? `${when(n.updated)} (${ago(n.updated)})` : '—']]
-    box.append(h('dl.kv', ...rows.flatMap(([k, v]) => [h('dt', k), h('dd', v)])))
-    if (n.notes.length) box.append(h('h4', 'Notes'), h('ul.notes', ...n.notes.map(x => h('li', h('span.muted.small', `${when(x.at)} · ${x.by}: `), x.text))))
+    box.append(h('dl.kv.d-only', ...rows.flatMap(([k, v]) => [h('dt', k), h('dd', v)])))
+    // Simple: the latest observation of a node at work, nothing older.
+    if (n.notes.length && (n.state === 'running' || n.state === 'waiting')) box.append(h('p.small.s-only.latest-note', h('span.muted', 'Latest: '), n.notes.at(-1)!.text.split('\n')[0].slice(0, 200)))
+    box.append(h('div.insp-more.s-only', h('button.more-link', { type: 'button', dataset: { action: 'more-details' } }, icon('list', 'icon small'), 'More details: times, notes, its questions')))
+    if (n.notes.length) box.append(h('h4.d-only', 'Notes'), h('ul.notes.d-only', ...n.notes.map(x => h('li', h('span.muted.small', `${when(x.at)} · ${x.by}: `), x.text))))
     // The node's questions as summaries; each is answered in its one form.
     const qs = Object.values(rec.questions).filter(q => q.node === id)
-    if (qs.length) box.append(h('h4', 'Questions of this node'), ...qs.map(q => {
+    if (qs.length) box.append(h('h4.d-only', 'Questions of this node'), ...qs.map(q => {
       const st = questionState(q)
-      return h(`div.question-summary.q-${st}`, { dataset: { question: q.id, key: `qs:${q.id}` } }, h('strong', q.id), ' ', chip(questionChip(st), st), ' ',
+      return h(`div.question-summary.d-only.q-${st}`, { dataset: { question: q.id, key: `qs:${q.id}` } }, h('strong', q.id), ' ', chip(questionChip(st), st), ' ',
         h('span.small', q.text.split('\n')[0].slice(0, 160)), ' ',
         h('a.small', { href: '#', dataset: { action: 'goto-question', question: q.id } }, this.answerable(rec, q) ? 'Answer it' : 'Show it'))
     }))
@@ -656,11 +678,11 @@ export class RunSide {
     const v = q.presentation ? this.data.presentViews.find(x => x.id === q.presentation!.id) : undefined
     const doc = q.document ? this.data.shown?.files.find(f => `${this.data.shown!.dir}/${f.name}` === q.document!.path || f.name === q.document!.path.split('/').pop()) : undefined
     patchContent(item.display,
-      h('div.q-head', h('strong', q.id), chip(questionChip(st), st), h('span.muted.small', ` to ${q.to}${q.node ? ` · node ${q.node}` : ''} · asked by ${q.askedBy}, ${ago(q.asked)}`)),
+      h('div.q-head', h('strong', q.id), chip(questionChip(st), st), h('span.muted.small.d-only', ` to ${q.to}${q.node ? ` · node ${q.node}` : ''} · asked by ${q.askedBy}, ${ago(q.asked)}`)),
       h('p.q-text', q.text),
-      q.presentation ? h('p.small', 'About presentation ', h('strong', q.presentation.id), ` (revision ${q.presentation.revision.slice(7, 19)}) — `, v?.live ? h('a', { href: v.url!, target: '_blank', rel: 'noopener' }, 'open the review ↗') : h('span.muted', 'not served now')) : null,
+      q.presentation ? h('p.small', 'About presentation ', h('strong', q.presentation.id), h('span.d-only', ` (revision ${q.presentation.revision.slice(7, 19)})`), ' — ', v?.live ? h('a', { href: v.url!, target: '_blank', rel: 'noopener' }, 'open the review ↗') : h('span.muted', 'not served now')) : null,
       q.document ? h('p.small', 'About ', doc ? fileLink(`${this.data.shown!.dir}/${doc.name}`, q.document.path.split('/').pop()!) : h('code', q.document.path), doc ? '' : ' (not in the run folder now)') : null,
-      ...q.answers.map((a, i) => h('div.answer', { dataset: { key: `a:${i}` } }, h('span.muted.small', `Answer ${i}${q.takenUp?.answer === i ? ' — taken up' : ''} · from ${a.from}${a.by !== a.from ? `, recorded by ${a.by}` : ''} via ${a.via} · ${when(a.at)}`), h('div', a.text))),
+      ...q.answers.map((a, i) => h('div.answer', { dataset: { key: `a:${i}` } }, h('span.muted.small.d-only', `Answer ${i}${q.takenUp?.answer === i ? ' — taken up' : ''} · from ${a.from}${a.by !== a.from ? `, recorded by ${a.by}` : ''} via ${a.via} · ${when(a.at)}`), h('div', a.text))),
       q.takenUp ? h('p.small.ok-text', `Taken up by ${q.takenUp.by} ${ago(q.takenUp.at)}.`) : null,
       q.withdrawn ? h('p.small', `Withdrawn by ${q.withdrawn.by}: ${q.withdrawn.reason}`) : null,
       st === 'answered' ? h('p.small.muted.receipt', `The answer is recorded; ${rec.executor.name} has not recorded taking it up yet. Next move: ${rec.executor.name}.`) : null)
@@ -695,7 +717,7 @@ export class RunSide {
         if (ok && item && draft.el.value === '') { item.showForm = false; const r = this.data.shown?.record; if (r) this.updateQuestions(r) }
       })
     })
-    return { root: h('div.answer-form', draft.el, draft.note, h('div.row.tight', button), h('p.small.muted', 'Stored in run.json as your answer. It does not start or wake the executor; tell it where you work with it.')), draft, button }
+    return { root: h('div.answer-form', draft.el, draft.note, h('div.row.tight', button), h('p.small.muted.d-only', 'Stored in run.json as your answer. It does not start or wake the executor; tell it where you work with it.')), draft, button }
   }
 
   // Additional instructions (p6): received from the person, acknowledged by
@@ -865,7 +887,7 @@ export class RunSide {
   private updateFileView() {
     const fv = this.fileView
     const v = this.data.viewing
-    show(fv.root, !!v)
+    show(this.fileCard, !!v)
     if (!v) { fv.path = ''; return }
     if (v.path !== fv.path) {
       fv.path = v.path
@@ -990,4 +1012,5 @@ export class RunSide {
   }
 }
 
+const rev = (d: RunData) => !!d.rev
 const questionChip = (st: string) => (st === 'open' ? 'waiting' : st === 'answered' ? 'running' : st === 'taken-up' ? 'completed' : 'cancelled')

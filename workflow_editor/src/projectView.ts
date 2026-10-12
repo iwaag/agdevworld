@@ -6,6 +6,7 @@ import { api, ApiError } from './api.ts'
 import { live, serial } from './live.ts'
 import { h, short } from './dom.ts'
 import { diagnosticList } from './homeView.ts'
+import { displayToggle, showDetail } from './displayMode.ts'
 import { icon } from './icons.ts'
 import type { ViewHandle } from './main.ts'
 import { ago, runHash, STATE_LABEL } from './runCommon.ts'
@@ -98,11 +99,12 @@ export function renderProjectView(root: HTMLElement, wsId: string): ViewHandle {
     }, workspaces.map(w => h('option', { value: w.id, selected: w.id === wsId, disabled: !w.observed.available }, `${w.label}${w.observed.available ? '' : ' (unavailable)'}`)))
     header.replaceChildren(
       h('div.crumbs', h('a', { href: '#/' }, 'Projects'), h('span.sep', '/'), h('strong', name),
-        h('span.pill.ok', icon('check', 'icon small'), `workspace ${wsId}`)),
+        h('span.pill.ok.d-only', icon('check', 'icon small'), `workspace ${wsId}`)),
       h('div.top-actions',
         connected ? null : h('span.pill.warn', { title: 'Changes on disk are not shown until the editor service is reachable again; the view re-reads everything then.' }, 'Not connected — not live'),
-        h('button', { title: 'Re-read the project and the repositories\' Git state now', onclick: () => void load({ workspaces: true, refresh: true }) }, 'Refresh'),
-        h('label.ws-label', 'Workspace ', select)),
+        h('button.d-only', { title: 'Re-read the project and the repositories\' Git state now', onclick: () => void load({ workspaces: true, refresh: true }) }, 'Refresh'),
+        h('label.ws-label.d-only', 'Workspace ', select),
+        displayToggle()),
     )
   }
 
@@ -289,7 +291,7 @@ export function renderProjectView(root: HTMLElement, wsId: string): ViewHandle {
   }
 
   function renderWorkspaces(): HTMLElement {
-    const card = h('section.card.workspaces', h('h2', 'Workspaces'),
+    const card = h('section.card.workspaces.d-only', h('h2', 'Workspaces'),
       h('p.muted.small', 'Registered in this machine\'s local registry. Availability is what this service observes now; other hosts are not contacted.'))
     for (const w of workspaces) {
       const same = w.observed.projectId && data?.project?.id && w.observed.projectId === data.project.id
@@ -305,24 +307,31 @@ export function renderProjectView(root: HTMLElement, wsId: string): ViewHandle {
   }
 
   function renderWorkflows(): HTMLElement {
-    const card = h('section.card.workflows', h('h2', 'Workflows'), h('p.muted.small', 'devdocs/workflows/ in this workspace'))
+    const card = h('section.card.workflows', h('h2', 'Workflows'), h('p.muted.small.d-only', 'devdocs/workflows/ in this workspace'))
     if (!data) return card
     if (!data.workflowsDir.exists) card.append(h('div.banner.warn', data.workflowsDir.reason ?? 'no workflow directory'))
     for (const w of data.workflows) {
       const approved = w.approvals && w.approvals.intent === 'approved' && w.approvals.definition === 'approved'
+      const simpleState = w.problem ? h('span.tile-state.error', icon('alert', 'icon'), 'Cannot be read')
+        : w.errors ? h('span.tile-state.error', icon('alert', 'icon'), `${w.errors} error${w.errors > 1 ? 's' : ''}`)
+          : approved ? h('span.tile-state.calm', icon('check', 'icon'), 'Approved')
+            : w.approvals && (w.approvals.intent === 'stale' || w.approvals.definition === 'stale') ? h('span.tile-state.warn', icon('alert', 'icon'), 'Changed since approval')
+              : h('span.tile-state.muted', icon('doc', 'icon'), 'Draft')
       card.append(h('div.wf-row', { dataset: { file: w.file } },
-        h('div.wf-main', h('strong', w.name || w.id || w.file), h('span.muted.small', `${w.file}${w.id ? ` · id ${w.id}` : ''}`),
-          h('div.chips',
+        h('span.s-only.wf-icon', icon('flag', 'icon')),
+        h('div.wf-main', h('strong', w.name || w.id || w.file), h('span.muted.small.d-only', `${w.file}${w.id ? ` · id ${w.id}` : ''}`),
+          h('div.s-only', simpleState),
+          h('div.chips.d-only',
             w.problem ? h('span.chip.error', `${w.problem.kind}: ${w.problem.message}`) : null,
             w.approvals ? approvalChip('intent', w.approvals.intent) : null,
             w.approvals ? approvalChip('definition', w.approvals.definition) : null,
             approved ? h('span.chip.ok', 'Author approved') : null,
             w.errors && !w.problem ? h('span.chip.error', `${w.errors} error${w.errors > 1 ? 's' : ''}`) : null,
             w.warnings ? h('span.chip.warn', `${w.warnings} warning${w.warnings > 1 ? 's' : ''}`) : null)),
-        h('a.button', { href: `#/ws/${encodeURIComponent(wsId)}/wf/${encodeURIComponent(w.file)}` }, 'Open Editor')))
+        h('a.button', { href: `#/ws/${encodeURIComponent(wsId)}/wf/${encodeURIComponent(w.file)}` }, 'Open', h('span.d-only', ' Editor'))))
     }
     const { id, name, policy } = newWorkflow
-    card.append(h('div.create-wf', h('h3', 'New workflow'),
+    card.append(h('div.create-wf.d-only', h('h3', 'New workflow'),
       h('div.row', h('label.field', h('span', 'Id'), id), h('label.field', h('span', 'Name'), name), h('label.field', h('span', 'Documentation'), policy),
         h('button', {
           disabled: !data.workflowsDir.exists,
@@ -383,34 +392,77 @@ export function renderProjectView(root: HTMLElement, wsId: string): ViewHandle {
       },
     }, 'Request run')
     return h('div.request-run', h('h3', 'Request a run'),
-      h('p.muted.small', 'autolab performs it in this workspace: study, do and talk nodes; questions come back here. Another run cannot start in this workspace until the current one completes or is cancelled.'),
+      h('p.muted.small.d-only', 'autolab performs it in this workspace: study, do and talk nodes; questions come back here. Another run cannot start in this workspace until the current one completes or is cancelled.'),
       h('div.row', h('label.field', h('span', 'Workflow'), reqWorkflow), h('label.field', h('span', 'Your name'), reqAuthor)),
       reqText, h('div.save-row', go), reqResult)
   }
 
+  // A run's state as one recognizable icon and word (Simple; Detail keeps the chips).
+  function runState(r: RunSummary): HTMLElement {
+    if (r.problem) return h('span.run-badge.error', icon('alert', 'icon'), 'Cannot be read')
+    if (r.waiting?.length) return h('span.run-badge.attention', icon('question', 'icon'), 'Waits for you')
+    if (r.failed?.length) return h('span.run-badge.error', icon('alert', 'icon'), 'Failed')
+    const s = r.execution ?? 'problem'
+    if (s === 'completed') return h(`span.run-badge.${r.decision === 'rejected' ? 'error' : 'ok'}`, icon('check', 'icon'), r.decision === 'accepted' ? 'Accepted' : r.decision === 'rejected' ? 'Rejected' : 'Completed')
+    if (s === 'cancelled') return h('span.run-badge.muted', icon('stop', 'icon'), 'Cancelled')
+    if (s === 'stopped') return h('span.run-badge.warn', icon('stop', 'icon'), 'Held')
+    if (s === 'not-started') return h('span.run-badge.muted', icon('play', 'icon'), 'Not started')
+    return h('span.run-badge.active', icon('play', 'icon'), 'In progress')
+  }
+
+  const RECENT = 5
   function renderRuns() {
     runsCard.replaceChildren(h('div.card-head', h('h2', 'Runs')),
-      h('p.muted.small', 'devdocs/runs/<workflow>/<run>/ — executions recorded by their executor (wfe run). Each follows its own fixed copy of the workflow.'),
+      h('p.muted.small.d-only', 'devdocs/runs/<workflow>/<run>/ — executions recorded by their executor (wfe run). Each follows its own fixed copy of the workflow.'),
       renderRequest())
     if (runsError) runsCard.append(h('div.banner.error', runsError))
     if (!runs) { runsCard.append(h('p.muted.small', 'Loading…')); return }
     if (!runs.length) { runsCard.append(h('p.muted.small', 'No runs yet.')); return }
     const sorted = runs.slice().sort((a, b) => (b.updated ?? '').localeCompare(a.updated ?? '') || a.ref.localeCompare(b.ref))
-    for (const r of sorted) {
+    const wfName = (id: string) => data?.workflows.find(w => w.id === id)?.name || id
+    runsCard.append(h('h3.s-only.recent-head', 'Recent runs'))
+    sorted.forEach((r, i) => {
       const state = r.execution ?? 'problem'
-      runsCard.append(h('div.run-row', { dataset: { run: r.ref } },
+      runsCard.append(h(`div.run-row${i >= RECENT ? '.d-only' : ''}`, { dataset: { run: r.ref } },
+        h('span.s-only', runState(r)),
         h('div.wf-main',
-          h('strong', r.ref),
-          h('span.muted.small', r.problem ? r.dir : `${r.input === 'request' ? 'request' : 'braindump'} · ${r.executor} · updated ${ago(r.updated)}`),
-          h('div.chips',
+          h('strong.d-only', r.ref),
+          h('span.s-only.run-name-simple', h('strong', wfName(r.workflow)), h('span.muted', ` · ${r.run}`)),
+          h('span.muted.small.s-only', `updated ${ago(r.updated)}`),
+          h('span.muted.small.d-only', r.problem ? r.dir : `${r.input === 'request' ? 'request' : 'braindump'} · ${r.executor} · updated ${ago(r.updated)}`),
+          h('div.chips.d-only',
             r.problem ? h('span.chip.error', `cannot be used — ${r.problem.code ?? r.problem.kind}: ${r.problem.message}`) : h(`span.state-chip.state-${state}`, STATE_LABEL[state] ?? state),
             ...Object.entries(r.counts ?? {}).filter(([, n]) => n).map(([k, n]) => h('span.chip', `${n} ${k}`)),
             r.decision ? h(`span.chip.${r.decision === 'accepted' ? 'ok' : 'error'}`, r.decision) : null),
-          ...(r.waiting ?? []).map(w => h('span.small', `⏳ ${w.node} — next move: ${w.holder}`)),
-          r.ready?.length ? h('span.small', `▶ ready: ${r.ready.join(', ')}`) : null,
-          r.failed?.length ? h('span.small.error', `✖ failed: ${r.failed.join(', ')}`) : null),
-        h('a.button', { href: runHash(wsId, r.ref) }, 'Open run')))
-    }
+          ...(r.waiting ?? []).map(w => h('span.small.d-only', `⏳ ${w.node} — next move: ${w.holder}`)),
+          r.ready?.length ? h('span.small.d-only', `▶ ready: ${r.ready.join(', ')}`) : null,
+          r.failed?.length ? h('span.small.error.d-only', `✖ failed: ${r.failed.join(', ')}`) : null),
+        h('a.button', { href: runHash(wsId, r.ref) }, 'Open', h('span.d-only', ' run'))))
+    })
+    if (sorted.length > RECENT) runsCard.append(h('button.link-btn.s-only', { onclick: () => showDetail(() => runsCard.querySelectorAll<HTMLElement>('.run-row')[RECENT]?.scrollIntoView({ block: 'center' })) }, `All runs (${sorted.length})`))
+  }
+
+  // Simple (p8/ex1): the project's name and purpose, large, with one entry to
+  // its settings; the rest of the project card is Detail's.
+  function openSettings() {
+    showDetail(() => {
+      const card = main.querySelector<HTMLElement>('.project-meta')
+      card?.scrollIntoView({ block: 'start' })
+      card?.querySelector<HTMLElement>('input:not([disabled]), textarea:not([disabled])')?.focus({ preventScroll: true })
+    })
+  }
+  function renderHero(): HTMLElement {
+    const p = draft ?? saved
+    const intent = (saved?.intent ?? '').trim()
+    const first = intent.split(/\n\s*\n/)[0]
+    const issues = (data?.structure ?? []).filter(d => !d.code.startsWith('project-')).length
+    return h('section.project-hero.s-only',
+      h('div.hero-main',
+        h('h1', p?.name || p?.id || data?.project?.id || 'Project'),
+        intent ? h('p.hero-purpose', { title: intent }, first) : h('p.hero-purpose.muted', data?.problem ? 'project.yaml cannot be read.' : 'No purpose written yet.'),
+        data?.problem ? h('p.tile-state.error', icon('alert', 'icon'), 'project.yaml cannot be used — see Project settings') : issues ? h('p.tile-state.warn', icon('alert', 'icon'), 'This project is incomplete — see Project settings') : null,
+        dirty() ? h('p.tile-state.warn', icon('alert', 'icon'), 'Unsaved changes in Project settings') : null),
+      h('div.hero-actions', h('button', { onclick: openSettings }, icon('settings', 'icon small'), 'Project settings')))
   }
 
   function render() {
@@ -419,8 +471,9 @@ export function renderProjectView(root: HTMLElement, wsId: string): ViewHandle {
     // Refresh the retained card too, even when the runs response arrived first.
     renderRuns()
     main.replaceChildren(
-      h('div.col', renderProjectCard(), renderRepos()),
-      h('div.col', renderWorkspaces(), runsCard, renderWorkflows()),
+      renderHero(),
+      h('div.col.d-only', renderProjectCard(), renderRepos()),
+      h('div.col.project-work', renderWorkspaces(), runsCard, renderWorkflows()),
     )
   }
 

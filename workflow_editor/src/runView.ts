@@ -29,6 +29,7 @@ import { patchContent } from './patch.ts'
 import { activeWorkflow, ago, chip, fact, line, nodeLabel, nodeLink, runHash, runTitle, STATE_LABEL } from './runCommon.ts'
 import { outcome, RefreshCoordinator, type Outcome, type RefreshKind } from './runRefresh.ts'
 import { RunSide } from './runSide.ts'
+import { displayToggle, setDisplay } from './displayMode.ts'
 import type { ViewHandle } from './main.ts'
 
 const ACTOR_KEY = 'workflow-editor.actor'
@@ -61,25 +62,25 @@ export function renderRunView(root: HTMLElement, wsId: string, workflow: string,
   let hostShown = '' // the host facts last displayed (without the heartbeat time)
 
   const crumbs = h('nav.crumbs', { 'aria-label': 'Breadcrumb' })
-  const refreshButton = h('button.ghost-dark', { title: 'Re-read the run now', onclick: () => void refresh.request('full') }, 'Refresh')
+  const refreshButton = h('button.ghost-dark.d-only', { title: 'Re-read the run now', onclick: () => void refresh.request('full') }, 'Refresh')
   const liveState = h('span.live-state')
   const banners = h('div.banners')
   // The title band; `.run-summary` carries the sequence and state this view shows (checks read them).
   const titleMain = h('div.title-main')
   const titleFacts = h('div.run-facts-row')
-  const detailsToggle = h('button.panel-toggle', { 'aria-expanded': 'false', 'aria-controls': 'run-details', onclick: () => toggleDetails() }, icon('list', 'icon small'), 'Run details')
-  const openDefinition = h('a.button.panel-toggle', { hidden: true }, icon('doc', 'icon small'), 'Open current definition')
+  const detailsToggle = h('button.panel-toggle.d-only', { 'aria-expanded': 'false', 'aria-controls': 'run-details', onclick: () => toggleDetails() }, icon('list', 'icon small'), 'Run details')
+  const openDefinition = h('a.button.panel-toggle.d-only', { hidden: true }, icon('doc', 'icon small'), 'Open current definition')
   const summary = h('section.title-band.run-summary', titleMain, h('div.title-side', titleFacts, h('div.title-actions', openDefinition, detailsToggle)))
-  const details = h('section.run-details#run-details', { hidden: true, 'aria-label': 'Run details' })
+  const details = h('section.run-details.d-only#run-details', { hidden: true, 'aria-label': 'Run details' })
   const canvas = new Canvas({ select: sel => select(sel?.kind === 'node' || sel?.kind === 'step' ? sel.id : null), move: () => {}, connect: () => {} }, { autoHeight: { min: 300, max: 620 } })
   canvas.setMode('compact')
   const graphHead = h('div.graph-head')
-  const legend = h('div.run-legend')
+  const legend = h('div.run-legend.d-only')
   const side = new RunSide({ record, adjust, notice }, stored(ACTOR_KEY, ''))
   const graphCard = h('section.graph-card', graphHead, canvas.el, legend)
 
   root.append(
-    h('header.app-header.run-top', crumbs, h('div.top-actions', liveState, refreshButton)),
+    h('header.app-header.run-top', crumbs, h('div.top-actions', liveState, refreshButton, displayToggle())),
     summary, details, banners,
     h('main.run-body',
       h('div.run-col', side.focus, graphCard),
@@ -87,6 +88,7 @@ export function renderRunView(root: HTMLElement, wsId: string, workflow: string,
   )
 
   function toggleDetails(open = details.hidden === true) {
+    if (open) setDisplay('detail')
     details.hidden = !open
     detailsToggle.setAttribute('aria-expanded', String(open))
     detailsToggle.classList.toggle('active', open)
@@ -248,7 +250,9 @@ export function renderRunView(root: HTMLElement, wsId: string, workflow: string,
       case 'close-file': fileRequest++; viewing = null; renderSide(true); break
       case 'goto-question': side.revealQuestion(d.question!); break
       case 'goto-resume': side.revealResume(); break
-      case 'goto-section': side.revealSection(d.section!, d.focus); break
+      case 'goto-section': setDisplay('detail'); side.revealSection(d.section!, d.focus); break
+      case 'more-details': setDisplay('detail'); side.revealSelected(); break
+      case 'records': setDisplay('detail'); side.revealRecords(); break
       case 'present-start': void presentation(d.presentation!, 'start'); break
       case 'present-stop': void presentation(d.presentation!, 'stop'); break
       case 'retry-checkpoint': void retryCheckpoint(Number(d.checkpoint)); break
@@ -274,7 +278,7 @@ export function renderRunView(root: HTMLElement, wsId: string, workflow: string,
     patchContent(crumbs,
       h('a', { href: '#/' }, 'Projects'), h('span.sep', '/'),
       h('a', { href: `#/ws/${encodeURIComponent(wsId)}` }, projectName), h('span.sep', '/'),
-      h('span', 'Run'), h('span.sep', '/'), h('strong.run-ref.here', ref),
+      h('span', 'Run'), h('span.sep.d-only', '/'), h('strong.run-ref.here.d-only', ref),
       rev ? h('span.pill.warn', `as committed at ${rev.slice(0, 10)}`) : null)
   }
 
@@ -295,8 +299,8 @@ export function renderRunView(root: HTMLElement, wsId: string, workflow: string,
     const t = runTitle(rec, wf?.name)
     patchContent(titleMain,
       h('h1.run-name', { title: t.title }, t.title),
-      h('p.run-lead', statusLine(rec)),
-      h('p.wf-file', `${t.sub} · ${rec.definition.revisions?.length ? `adjusted, ${rec.definition.active ?? 'r1'} in force` : 'fixed snapshot'}`))
+      h('p.run-lead.d-only', statusLine(rec)),
+      h('p.wf-file.d-only', `${t.sub} · ${rec.definition.revisions?.length ? `adjusted, ${rec.definition.active ?? 'r1'} in force` : 'fixed snapshot'}`))
     const last = rec.decisions.at(-1)
     const accepted = last?.decision === 'accepted'
     const sit = situation(rec)
@@ -306,7 +310,7 @@ export function renderRunView(root: HTMLElement, wsId: string, workflow: string,
       chip(ex.state, ex.state === 'completed' ? '✓ Completed' : ex.state === 'stopped' ? 'Nothing can proceed' : STATE_LABEL[ex.state] ?? ex.state),
       last ? h(`span.decision-chip.${accepted ? 'ok' : 'error'}`, { title: `${last.decision} by ${last.by}, ${when(last.at)}${last.confirmation ? ` (from ${last.confirmation.question})` : ''}` },
         accepted ? (ex.state !== 'completed' && !rec.cancelled ? 'Accepted · cleanup pending' : 'Accepted') : 'Rejected') : ex.state === 'completed' ? h('span.decision-chip.none', 'No decision') : null,
-      rev ? null : h(`span.chip.sit-${sit}`, { title: 'What runs now: this host\'s execution facts, separate from the recorded node states' }, `${SITUATION[sit] ?? sit}${process}`))
+      rev ? null : h(`span.chip.d-only.sit-${sit}`, { title: 'What runs now: this host\'s execution facts, separate from the recorded node states' }, `${SITUATION[sit] ?? sit}${process}`))
     const src = r!.sources.find(s => s.workflow === rec.definition.root)
     openDefinition.hidden = !src?.file
     if (src?.file) {
@@ -400,10 +404,10 @@ export function renderRunView(root: HTMLElement, wsId: string, workflow: string,
     const tally = (c: Record<string, number>) => `${c.completed ?? 0}/${Object.values(c).reduce((a, b) => a + b, 0)}`
     patchContent(graphHead,
       h('h2', 'Run workflow'),
-      h('span.chip', { title: 'The run follows this fixed copy; editing the reusable workflow does not change it' }, rec.definition.revisions?.length ? `Fixed snapshot · ${rec.definition.active ?? 'r1'} in force` : 'Fixed snapshot · r1'),
-      h('span.chip.muted', icon('lock', 'icon tiny'), 'Read-only'),
-      h('span.graph-counts.small', split ? `Work ${tally(split.work)} completed · Documentation ${tally(split.docs)} completed` : `${tally(rec.execution.counts)} completed · manual documentation`),
-      h('span.muted.small.graph-hint', 'Select a card to inspect its record'))
+      h('span.chip.d-only', { title: 'The run follows this fixed copy; editing the reusable workflow does not change it' }, rec.definition.revisions?.length ? `Fixed snapshot · ${rec.definition.active ?? 'r1'} in force` : 'Fixed snapshot · r1'),
+      h('span.chip.muted.d-only', icon('lock', 'icon tiny'), 'Read-only'),
+      h('span.graph-counts.small.d-only', split ? `Work ${tally(split.work)} completed · Documentation ${tally(split.docs)} completed` : `${tally(rec.execution.counts)} completed · manual documentation`),
+      h('span.muted.small.graph-hint.d-only', 'Select a card to inspect its record'))
     const states = new Set(Object.keys(rec.nodes).map(id => nodeLabel(rec, id).state))
     const present = ['pending', 'ready', 'running', 'waiting', 'completed', 'failed', 'cancelled', 'blocked'].filter(s => states.has(s))
     patchContent(legend, ...present.map(s => chip(s, `${STATE_GLYPH[s]} ${STATE_LABEL[s]}`)),

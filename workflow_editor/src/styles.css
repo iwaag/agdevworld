@@ -601,3 +601,18 @@ details.adjust input { width: 100%; margin: 6px 0; }
 .field.inline { flex-direction: row; align-items: center; gap: 8px; }
 .palette-templates { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
 .template-provenance { border-left: 3px solid var(--line); padding: 4px 8px; margin: 6px 0; font-size: 12px; white-space: pre-wrap; }
+
+/* ==== Simple and Detail (p8/ex1, displayMode.ts) ==========================
+   One DOM for both modes: .d-only is Detail's, .s-only is Simple's. */
+html[data-display="simple"] .d-only { display: none !important; }
+html[data-display="detail"] .s-only { display: none !important; }
+.display-toggle { display: inline-flex; border: 1px solid #4b525d; border-radius: 9px; overflow: hidden; background: rgba(255,255,255,.04); }
+.display-toggle button { border: 0; border-radius: 0; background: transparent; color: var(--top-muted); padding: 5px 13px; font-size: 13px; font-weight: 500; }
+.display-toggle button[aria-pressed="true"] { background: #eef1f5; color: #1c1f25; font-weight: 650; }
+.display-toggle button:hover:not([aria-pressed="true"]) { color: var(--top-text); }
+.display-toggle button:focus-visible { outline: 2px solid #8fb0f0; outline-offset: -2px; }
+.more-link { display: inline-flex; align-items: center; gap: 6px; border: 1px solid var(--line); background: #fff; color: var(--text); border-radius: 8px; padding: 5px 11px; font-size: 13px; }
+.more-link .icon { width: 15px; height: 15px; }
+html[data-display="simple"] .wf-body.settings-open { grid-template-columns: minmax(0, 1fr); }
+html[data-display="simple"] .wf-body.settings-open .inspector { display: none; }
+html[data-display="simple"] .v-summary.ok { display: none; }

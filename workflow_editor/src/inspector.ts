@@ -11,6 +11,7 @@ import { ACCESS_LEVELS, APPEARANCE_COLORS, APPEARANCE_ICONS, DOC_POLICIES, ID_PA
 import { bindingCategory, iconOf, TYPE_LABEL, type Selection } from './canvas.ts'
 import { h } from './dom.ts'
 import { icon } from './icons.ts'
+import { setDisplay } from './displayMode.ts'
 
 export interface InspectorContext {
   draft: Workflow
@@ -36,12 +37,18 @@ export interface InspectorActions {
 
 const nodeLabel = (w: Workflow, id: string) => (w.nodes[id]?.name || id)
 
+// Simple shows a selection's compact explanation and its everyday edit;
+// "More details" is the same inspector in Detail (p8/ex1).
+function moreDetails(what: string): HTMLElement {
+  return h('div.insp-more.s-only', h('button.more-link', { type: 'button', onclick: (e: Event) => { const panel = (e.currentTarget as HTMLElement).closest('.inspector'); setDisplay('detail'); panel?.querySelector<HTMLElement>('.insp-head h3')?.focus({ preventScroll: true }) } }, icon('settings', 'icon small'), `More details: ${what}`))
+}
+
 // Which groups the person has opened or closed, by name; the defaults
 // apply until they choose.
 const groupState = new Map<string, boolean>()
 function group(key: string, title: string, summary: string | null, open: boolean, ...body: (HTMLElement | null)[]): HTMLDetailsElement {
   const head = h('summary', h('span.group-title', title), summary ? h('span.group-summary', summary) : null)
-  const d = h('details.insp-group', { dataset: { group: key } }, head, h('div.group-body', ...body.filter((x): x is HTMLElement => !!x)))
+  const d = h('details.insp-group.d-only', { dataset: { group: key } }, head, h('div.group-body', ...body.filter((x): x is HTMLElement => !!x)))
   d.open = groupState.get(key) ?? open
   // Recorded at the activation itself (click, Enter or Space on the summary):
   // the toggle event comes later, possibly after a rebuild has replaced this
@@ -51,7 +58,7 @@ function group(key: string, title: string, summary: string | null, open: boolean
 }
 
 function head(iconName: string | null, title: string, id: string | null, actions: InspectorActions): HTMLElement {
-  return h('div.insp-head', iconName ? icon(iconName, 'icon') : null, h('h3', { tabIndex: -1 }, title), id ? h('code', id) : null,
+  return h('div.insp-head', iconName ? icon(iconName, 'icon') : null, h('h3', { tabIndex: -1 }, title), id ? h('code.d-only', id) : null,
     h('button.icon-btn.insp-close', { title: 'Close (Esc)', 'aria-label': 'Close the inspector', onclick: () => actions.close() }, icon('close', 'icon small')))
 }
 
@@ -79,6 +86,7 @@ export function renderInspector(panel: HTMLElement, ctx: InspectorContext, actio
   else if (sel?.kind === 'step' && ctx.effective?.nodes[sel.id]?.step) panel.append(...stepPanel(ctx, sel.id, actions))
   else panel.append(...workflowPanel(ctx, actions))
   panel.dataset.shows = JSON.stringify(ctx.selection)
+  panel.dataset.panel = sel?.kind ?? 'settings'
   panel.scrollTop = same ? top : 0
 }
 
@@ -91,7 +99,7 @@ function nodePanel(ctx: InspectorContext, id: string, actions: InspectorActions)
     head(iconOf(n.type, n.appearance), nodeLabel(w, id), id, actions),
     h('label.field', h('span', 'Name'), h('input', { value: n.name, disabled: ro, 'aria-label': 'Node name', placeholder: TYPE_LABEL[n.type] ?? '', oninput: (e: Event) => { n.name = (e.target as HTMLInputElement).value; actions.changed(false) } })),
     h('label.field', h('span', 'Description'), h('textarea', { rows: 5, value: n.description, disabled: ro, 'aria-label': 'Node description', oninput: (e: Event) => { n.description = (e.target as HTMLTextAreaElement).value; actions.changed(false) } })),
-    h('label.field', h('span', 'Type'), h('select', {
+    h('label.field.d-only', h('span', 'Type'), h('select', {
       disabled: ro, 'aria-label': 'Node type',
       onchange: (e: Event) => { n.type = (e.target as HTMLSelectElement).value; actions.changed(true) },
     }, typeOptions.map(t => h('option', { value: t, selected: t === n.type }, TYPE_LABEL[t] ?? `${t || '(none)'} — unknown`)))),
@@ -100,12 +108,13 @@ function nodePanel(ctx: InspectorContext, id: string, actions: InspectorActions)
     const known = ctx.workflows.filter(s => s.id)
     const options = [h('option', { value: '' }, '— choose a workflow —'), ...known.map(s => h('option', { value: s.id!, selected: s.id === n.workflow }, `${s.name || s.id} (${s.id})${s.file === ctx.file ? ' — this workflow' : ''}`))]
     if (n.workflow && !known.some(s => s.id === n.workflow)) options.push(h('option', { value: n.workflow, selected: true }, `${n.workflow} (missing)`))
-    out.push(h('label.field', h('span', n.type === 'delegate' ? 'Delegate to workflow' : 'Target workflow (only used by delegate nodes)'), h('select', {
+    out.push(h('label.field.d-only', h('span', n.type === 'delegate' ? 'Delegate to workflow' : 'Target workflow (only used by delegate nodes)'), h('select', {
       disabled: ro, 'aria-label': 'Delegate target',
       onchange: (e: Event) => { const v = (e.target as HTMLSelectElement).value; if (v) n.workflow = v; else delete n.workflow; actions.changed(true) },
     }, options)))
-    if (n.type === 'delegate') out.push(h('p.banner.warn.small', 'Delegate execution is not supported: this node is definition and display only, and runs of a workflow with a delegate node are refused by the browser, the API and the CLI alike.'))
+    if (n.type === 'delegate') out.push(h('p.banner.warn.small.d-only', 'Delegate execution is not supported: this node is definition and display only, and runs of a workflow with a delegate node are refused by the browser, the API and the CLI alike.'))
   }
+  out.push(moreDetails('type, appearance, repositories, connections'))
   out.push(appearanceField(n, ro, actions))
   // Repository bindings of this node
   const bindings = Object.entries(w.repositories)
@@ -144,7 +153,7 @@ function nodePanel(ctx: InspectorContext, id: string, actions: InspectorActions)
   if (n.template) out.push(provenanceField(n.template, ctx.templates))
   const nodeIssues = ctx.issues.filter(i => i.node === id)
   if (nodeIssues.length) out.push(issueList(nodeIssues, actions))
-  out.push(h('div.insp-foot', h('button.danger', { disabled: ro, onclick: () => actions.deleteNode(id) }, 'Delete node')))
+  out.push(h('div.insp-foot.d-only', h('button.danger', { disabled: ro, onclick: () => actions.deleteNode(id) }, 'Delete node')))
   return out.filter((x): x is HTMLElement => !!x)
 }
 
@@ -191,7 +200,8 @@ function edgePanel(ctx: InspectorContext, index: number, actions: InspectorActio
       h('a', { href: '#', onclick: (ev: Event) => { ev.preventDefault(); actions.select({ kind: 'node', id: e.to }) } }, nodeLabel(w, e.to))),
     h('p.muted.small', `"${nodeLabel(w, e.to)}" waits for "${nodeLabel(w, e.from)}" to complete.`),
     issueList(ctx.issues.filter(i => i.edge === index), actions),
-    h('div.insp-foot', h('button.danger', { disabled: ctx.readonly, onclick: () => actions.deleteEdge(index) }, 'Delete connection')),
+    moreDetails('delete the connection'),
+    h('div.insp-foot.d-only', h('button.danger', { disabled: ctx.readonly, onclick: () => actions.deleteEdge(index) }, 'Delete connection')),
   ]
 }
 
@@ -211,9 +221,9 @@ export function stepFacts(eff: Pick<EffectiveGraph, 'nodes' | 'edges'>, id: stri
   const after = eff.edges.filter(e => e.from === id).map(e => label(e.to))
   const out: (HTMLElement | null)[] = [
     h('p.small', step.purpose, ' — ', h('code', step.output)),
-    h('dl.kv', h('dt', 'Waits for'), h('dd', before.join(', ') || 'nothing: the run starts with it'), h('dt', 'Then'), h('dd', after.join(', ') || 'nothing: the run ends with it')),
-    step.kind === 'report' ? h('p.small.muted', `Successors of ${label(step.for ?? '')} wait for this report, not only for its work.`) : null,
-    h('details.instructions', h('summary.small', 'Instructions the executing agent is given'), h('pre.small', step.instructions)),
+    h('dl.kv.d-only', h('dt', 'Waits for'), h('dd', before.join(', ') || 'nothing: the run starts with it'), h('dt', 'Then'), h('dd', after.join(', ') || 'nothing: the run ends with it')),
+    step.kind === 'report' ? h('p.small.muted.d-only', `Successors of ${label(step.for ?? '')} wait for this report, not only for its work.`) : null,
+    h('details.instructions.d-only', h('summary.small', 'Instructions the executing agent is given'), h('pre.small', step.instructions)),
   ]
   return out.filter((x): x is HTMLElement => !!x)
 }
@@ -228,8 +238,10 @@ function stepPanel(ctx: InspectorContext, id: string, actions: InspectorActions)
   const eff = ctx.effective!
   return [
     head('doc', stepLabel(ctx.draft, eff, id), id, actions),
-    h('p.banner.ok.small', 'Generated by the default documentation policy. It is not part of the file and cannot be edited or moved; it follows the cards it belongs to.'),
+    h('p.banner.ok.small.d-only', 'Generated by the default documentation policy. It is not part of the file and cannot be edited or moved; it follows the cards it belongs to.'),
+    h('p.small.s-only', 'Generated by the documentation policy; it follows its card.'),
     ...stepFacts(eff, id, x => stepLabel(ctx.draft, eff, x)),
+    moreDetails('what it waits for and its instructions'),
   ]
 }
 

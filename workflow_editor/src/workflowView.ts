@@ -17,6 +17,7 @@ import { Canvas, TYPE_LABEL, type Selection } from './canvas.ts'
 import { h, when } from './dom.ts'
 import { icon } from './icons.ts'
 import { renderInspector } from './inspector.ts'
+import { displayToggle, setDisplay } from './displayMode.ts'
 import { autoArrange, completeLayout, freeSlot, type DisplayMode } from '../shared/layout.ts'
 import type { ViewHandle } from './main.ts'
 
@@ -67,18 +68,20 @@ export function renderWorkflowView(root: HTMLElement, wsId: string, file: string
   const approveDefinition = h('button', { onclick: () => void approve('definition') }, 'Approve definition')
   const crumbs = h('nav.crumbs', { 'aria-label': 'Breadcrumb' })
   const saveButton = h('button.primary', { onclick: () => void save() }, 'Save')
-  const refreshButton = h('button.ghost-dark', { title: 'Re-read the file and the repositories\' Git state now', onclick: () => void load({ refresh: true }) }, 'Refresh')
+  const refreshButton = h('button.ghost-dark.d-only', { title: 'Re-read the file and the repositories\' Git state now', onclick: () => void load({ refresh: true }) }, 'Refresh')
   const saveStateEl = h('span.save-state')
   const purpose = h('p.wf-purpose')
-  const fileLine = h('p.wf-file')
-  const approvalPills = h('div.pills.approval-pills', { 'aria-label': 'Approval states' })
+  const fileLine = h('p.wf-file.d-only')
+  const approvalPills = h('div.pills.approval-pills.d-only', { 'aria-label': 'Approval states' })
+  // Simple (p8/ex1): one approval state, which is also the entry to Intent & approvals.
+  const simpleApproval = h('button.simple-approval.s-only', { onclick: () => toggleIntent(true) })
   const validation = h('button.v-summary', { title: 'Validation: open the full list in Workflow settings', onclick: () => openSettings(validation, 'validation') })
-  const intentToggle = h('button.panel-toggle', { 'aria-expanded': 'false', 'aria-controls': 'intent-panel', onclick: () => toggleIntent() }, icon('person', 'icon small'), 'Intent & approvals')
-  const settingsToggle = h('button.panel-toggle', { 'aria-pressed': 'false', onclick: () => (settingsOpen ? closeInspector() : openSettings(settingsToggle)) }, icon('settings', 'icon small'), 'Workflow settings')
+  const intentToggle = h('button.panel-toggle.d-only', { 'aria-expanded': 'false', 'aria-controls': 'intent-panel', onclick: () => toggleIntent() }, icon('person', 'icon small'), 'Intent & approvals')
+  const settingsToggle = h('button.panel-toggle.d-only', { 'aria-pressed': 'false', onclick: () => (settingsOpen ? closeInspector() : openSettings(settingsToggle)) }, icon('settings', 'icon small'), 'Workflow settings')
   const approvalRecords = h('div.approval-records')
   const approvalNote = h('p.small.muted')
   const approvalErrorEl = h('p.error.small')
-  const intentPanel = h('section.intent-panel#intent-panel', { hidden: true, 'aria-label': 'Intent and approvals' },
+  const intentPanel = h('section.intent-panel.d-only#intent-panel', { hidden: true, 'aria-label': 'Intent and approvals' },
     h('div.intent-col',
       h('label.panel-label', { htmlFor: 'intent' }, icon('intent', 'icon small'), 'Workflow intent (ground truth)'),
       intentInput,
@@ -89,15 +92,15 @@ export function renderWorkflowView(root: HTMLElement, wsId: string, file: string
       h('div.approve-actions', h('label.small', 'Declared approver ', approverInput), approveIntent, approveDefinition),
       approvalNote, approvalErrorEl))
   const banners = h('div.banners')
-  const modeSwitch = h('div.mode-switch', { role: 'group', 'aria-label': 'Display mode' })
+  const modeSwitch = h('div.mode-switch.d-only', { role: 'group', 'aria-label': 'Display mode' })
   const palette = h('div.palette', { hidden: true, role: 'menu', 'aria-label': 'Add node' })
   const addButton = h('button.add-trigger', { 'aria-haspopup': 'menu', 'aria-expanded': 'false', onclick: () => togglePalette() }, icon('plus', 'icon small'), 'Add node', icon('caret', 'icon small'))
-  const arrangeButton = h('button.arrange', {
+  const arrangeButton = h('button.arrange.d-only', {
     title: 'Lay the graph out by rank. Only positions change; approvals are unaffected.',
     onclick: () => { if (!draft || readonly()) return; autoArrange(draft); update(false); canvas.fit() },
   }, 'Auto-arrange')
-  const policyChip = h('button.policy-state', { title: 'Documentation policy: open Workflow settings', onclick: () => openSettings(policyChip, 'policy') })
-  const toolbar = h('div.toolbar', h('div.add-wrap', addButton, palette), h('span.toolbar-sep'), modeSwitch, arrangeButton, h('span.toolbar-fill'), policyChip)
+  const policyChip = h('button.policy-state.d-only', { title: 'Documentation policy: open Workflow settings', onclick: () => openSettings(policyChip, 'policy') })
+  const toolbar = h('div.toolbar', h('div.add-wrap', addButton, palette), h('span.toolbar-sep.d-only'), modeSwitch, arrangeButton, h('span.toolbar-fill'), policyChip)
   const inspector = h('aside.inspector', { 'aria-label': 'Inspector', hidden: true })
   const canvas = new Canvas({
     select: sel => { if (sel) { settingsOpen = false; opener = null } selection = sel; update(true); if (sel) revealSoon(sel) },
@@ -110,16 +113,16 @@ export function renderWorkflowView(root: HTMLElement, wsId: string, file: string
     connect: (from, to) => connect(from, to),
   })
   canvas.setMode(mode)
-  const hint = h('div.canvas-hint', 'Select a card to inspect it. Drag a card to move it, its right handle onto another card to connect; drag the background to pan.')
+  const hint = h('div.canvas-hint.d-only', 'Select a card to inspect it. Drag a card to move it, its right handle onto another card to connect; drag the background to pan.')
   canvas.el.append(hint)
   const rawView = h('pre.raw')
   const body = h('main.wf-body', h('div.canvas-col', toolbar, canvas.el, rawView), inspector)
 
   root.append(
-    h('header.app-header', crumbs, h('div.top-actions', refreshButton, saveStateEl, saveButton)),
+    h('header.app-header', crumbs, h('div.top-actions', refreshButton, saveStateEl, saveButton, displayToggle())),
     h('section.title-band',
       h('div.title-main', nameInput, purpose, fileLine),
-      h('div.title-side', approvalPills, h('div.title-actions', validation, intentToggle, settingsToggle))),
+      h('div.title-side', approvalPills, h('div.title-actions', simpleApproval, validation, intentToggle, settingsToggle))),
     intentPanel,
     banners,
     body,
@@ -130,7 +133,10 @@ export function renderWorkflowView(root: HTMLElement, wsId: string, file: string
 
   // ---- panels ---------------------------------------------------------------
 
+  // Intent & approvals and Workflow settings are Detail's: opening either
+  // from Simple (its status, a validation issue, the policy) switches first.
   function toggleIntent(open = intentPanel.hidden === true) {
+    if (open) setDisplay('detail')
     intentPanel.hidden = !open
     intentToggle.setAttribute('aria-expanded', String(open))
     intentToggle.classList.toggle('active', open)
@@ -138,6 +144,7 @@ export function renderWorkflowView(root: HTMLElement, wsId: string, file: string
   }
 
   function openSettings(from: HTMLElement, section?: string) {
+    setDisplay('detail')
     selection = null
     settingsOpen = true
     opener = from
@@ -398,6 +405,12 @@ export function renderWorkflowView(root: HTMLElement, wsId: string, file: string
     }
     const both = states?.intent.status === 'approved' && states.definition.status === 'approved'
     approvalPills.replaceChildren(...(both ? [h('span.approval-pill.approved.author', { title: 'Intent and definition are both approved as saved' }, 'Author approved')] : []), pill('intent'), pill('definition'))
+    const stale = states?.intent.status === 'stale' || states?.definition.status === 'stale'
+    const simple = both ? 'approved' : stale ? 'stale' : 'unapproved'
+    simpleApproval.className = `simple-approval s-only approval-pill ${simple}`
+    simpleApproval.dataset.status = simple
+    simpleApproval.title = 'Intent & approvals: the whole intent, the approval records and the two approvals'
+    simpleApproval.replaceChildren(icon(both ? 'check' : stale ? 'alert' : 'doc', 'icon small'), both ? 'Approved' : stale ? 'Changed since approval' : 'Not approved yet', icon('chevron', 'icon tiny'))
     // The panel: each approval's record, and the two separate actions.
     approvalRecords.replaceChildren(...(['intent', 'definition'] as ApprovalKind[]).map(kind => {
       const s = states?.[kind]
@@ -494,6 +507,8 @@ export function renderWorkflowView(root: HTMLElement, wsId: string, file: string
     canvas.render(draft, { repositories: resp?.repositories ?? [], workflows: resp?.workflows ?? [], errorNodes: new Set(errors.map(i => i.node).filter((n): n is string => !!n)), readonly: readonly(), effective }, selection)
     const open = inspectorOpen()
     if (inspector.hidden === open) { inspector.hidden = !open; body.classList.toggle('with-inspector', open) }
+    // Workflow settings are Detail's: Simple keeps them open but out of sight (p8/ex1).
+    body.classList.toggle('settings-open', settingsOpen)
     settingsToggle.setAttribute('aria-pressed', String(settingsOpen))
     settingsToggle.classList.toggle('active', settingsOpen)
     hint.hidden = !!selection

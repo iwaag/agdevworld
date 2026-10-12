@@ -7,6 +7,8 @@ import type { AgdevResult, CreateProjectResult, DashboardProject, DashboardRepos
 import { api } from './api.ts'
 import { live } from './live.ts'
 import { append, h, when } from './dom.ts'
+import { displayToggle, showDetail } from './displayMode.ts'
+import { icon } from './icons.ts'
 import type { ViewHandle } from './main.ts'
 
 export function diagnosticList(diags: Diagnostic[]): HTMLElement | null {
@@ -28,7 +30,7 @@ export function renderHomeView(root: HTMLElement): ViewHandle {
   // loopback agdev origin.
   const agdevworld = location.pathname.startsWith('/wfe/') ? '/' : 'http://localhost:8093/'
   const header = h('header.topbar', h('div.crumbs', h('a.back-to-world', { href: agdevworld, title: 'agdevworld operation room' }, '← agdevworld'), h('span.sep', '|'), h('strong', 'agdev'), h('span.sep', '/'), h('span.muted', 'Dashboard')),
-    h('div.top-actions', h('a.button', { href: '#/nodes', title: 'The activities you expect as distinct workflow nodes (your node catalog)' }, 'User nodes'), h('span.live-state.muted.small'), h('button', { onclick: () => void load() }, 'Refresh')))
+    h('div.top-actions', h('a.button', { href: '#/nodes', title: 'The activities you expect as distinct workflow nodes (your node catalog)' }, 'User nodes'), h('span.live-state.muted.small.d-only'), h('button.d-only', { onclick: () => void load() }, 'Refresh'), displayToggle()))
   const main = h('main.dashboard')
   root.append(header, main)
 
@@ -183,8 +185,50 @@ export function renderHomeView(root: HTMLElement): ViewHandle {
     return bar
   }
 
+  // ---- Simple (p8/ex1): each project's name, purpose, status and opening ----------------
+
+  const runHref = (ws: string, ref: string) => `#/ws/${encodeURIComponent(ws)}/run/${ref.split('/').map(encodeURIComponent).join('/')}`
+  function tile(name: string, purpose: string | undefined, workspaces: DashboardWorkspace[], problem: string | null, key: string): HTMLElement {
+    const open = workspaces.find(w => w.available)
+    const sum = (k: 'ongoing' | 'waitingOnPerson' | 'problems') => workspaces.reduce((n, w) => n + (w.runs?.[k] ?? 0), 0)
+    const waiting = workspaces.flatMap(w => (w.runs?.list ?? []).filter(r => r.waiting.length).map(r => ({ ws: w.id, r })))
+    const status: HTMLElement[] = []
+    if (problem) status.push(h('span.tile-state.error', icon('alert', 'icon'), problem))
+    if (!workspaces.length) status.push(h('span.tile-state.warn', icon('alert', 'icon'), 'No workspace on this host'))
+    else if (!open) status.push(h('span.tile-state.warn', icon('alert', 'icon'), 'Its workspace is not available'))
+    if (workspaces.some(w => w.available && !w.runs)) status.push(h('span.tile-state.warn', icon('alert', 'icon'), 'Runs could not be read'))
+    const ongoing = sum('ongoing'), broken = sum('problems')
+    // Runs that wait on someone (the list says who holds the next move).
+    if (waiting.length) status.push(h('span.tile-state.attention', icon('question', 'icon'), `${waiting.length} run${waiting.length === 1 ? '' : 's'} waiting`))
+    if (ongoing) status.push(h('span.tile-state.active', icon('play', 'icon'), `${ongoing} run${ongoing === 1 ? '' : 's'} in progress`))
+    if (broken) status.push(h('span.tile-state.error', icon('alert', 'icon'), `${broken} run${broken === 1 ? '' : 's'} cannot be read`))
+    if (!status.length) status.push(h('span.tile-state.calm', icon('check', 'icon'), 'Nothing running'))
+    return h('article.project-tile', { dataset: { tile: key } },
+      h('div.tile-head', icon('folder', 'icon tile-icon'), h('h2', name)),
+      purpose ? h('p.tile-purpose', purpose) : null,
+      h('div.tile-states', ...status),
+      waiting.length ? h('ul.tile-waits', ...waiting.slice(0, 4).map(({ ws, r }) => h('li', h('a', { href: runHref(ws, r.ref) }, icon('question', 'icon small'), r.ref.split('/').join(' · ')), h('span.muted', ` — next move: ${r.waiting.map(x => x.holder).join(', ')}`)))) : null,
+      h('div.tile-actions', open ? h('a.button.primary', { href: `#/ws/${encodeURIComponent(open.id)}` }, 'Open project', icon('chevron', 'icon small'))
+        : h('button', { onclick: () => showDetail(() => main.querySelector<HTMLElement>(`.project-entry[data-project="${CSS.escape(key)}"]`)?.scrollIntoView({ block: 'center' })) }, 'Workspace options')))
+  }
+
+  function renderSimple(): HTMLElement {
+    const box = h('section.dash-simple.s-only')
+    const createEntry = h('button.primary', { onclick: () => showDetail(() => { const c = main.querySelector<HTMLElement>('.create-project'); c?.scrollIntoView({ block: 'start' }); f.id.focus({ preventScroll: true }) }) }, icon('plus', 'icon small'), 'New project')
+    box.append(h('div.simple-head', h('h1', 'Projects'), createEntry))
+    if (loadError) { box.append(h('div.banner.error', icon('alert', 'icon small'), 'The dashboard cannot be read now. ', h('span.small', loadError))); return box }
+    if (!data) { box.append(h('p.muted', 'Loading…')); return box }
+    if (data.gitea.state !== 'ok') box.append(h('div.banner.warn', icon('alert', 'icon small'), data.gitea.state === 'unconfigured' ? 'Gitea is not configured: projects cannot be created or obtained here.' : 'Gitea cannot be reached: projects cannot be created or obtained now.'))
+    const tiles = [
+      ...data.projects.map(p => tile(p.name ?? p.id, p.intent?.split('\n').map(x => x.trim()).find(Boolean), p.workspaces, p.definition.error ? 'Its definition could not be read' : p.root.error ? 'Its repository could not be read' : null, p.id)),
+      ...data.unlinkedWorkspaces.map(w => tile(w.label, undefined, [w], null, `ws:${w.id}`)),
+    ]
+    box.append(tiles.length ? h('div.project-tiles', ...tiles) : h('p.empty-note', data.registry.exists ? 'No project is registered yet.' : 'No project yet. Create one, or register an existing one in Detail.'))
+    return box
+  }
+
   function render() {
-    main.replaceChildren(renderStatus(), h('div.dash-grid', h('div.col', renderProjects(), renderRepositories()), renderEntrances()))
+    main.replaceChildren(renderSimple(), h('div.dash-detail.d-only', renderStatus(), h('div.dash-grid', h('div.col', renderProjects(), renderRepositories()), renderEntrances())))
   }
 
   // The registry may change from the CLI or another view; the page follows

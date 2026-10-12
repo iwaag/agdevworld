@@ -95,9 +95,25 @@ An adjustment names its **source**, and the reducer checks it:
 | `{kind: "instruction", instruction}` | the person's additional instruction asked for it | the instruction exists and was acknowledged |
 | `{kind: "agreement", question}` | the executor proposed a change of the agreed scope and the person agreed to it | the question was asked about this exact proposal (its `document` is the proposed revision file, by hash), and its answer was taken up |
 | `{kind: "person", by}` | a person applies it themselves (CLI, browser) | recorded as declared, like an approval; not allowed while an attempt is open |
+| `{kind: "request", input, sha256}` (p7/ex1) | the run's original braindump or entrusted request already asks for this work (research before implementing, a review step it names) | `input` is the run's own input file (`braindump.md` or `request.md`), `sha256` equals the hash recorded with `run.create` (`input.sha256`), and the file on disk still has that hash. A run created before p7/ex1 recorded no input hash and cannot use this source |
 
 Routine implementation choices already authorized by the person's request
-are not adjustments and need no prompt. A material change of agreed scope
+are not adjustments and need no prompt.
+
+**From the original request (p7/ex1).** When the request itself asks for
+work that the graph does not show (the formation-movement request of
+`improve-game/run-004` asked for Web research before implementing), the
+executor may add that work with source `request`, without a separate
+permission question. Plan agreement is still a separate record: the plan
+says which nodes the run will add or where the activity is integrated, and
+the person agrees to the plan as usual. The adjustment is applied at a
+boundary like any other. Applying it while `_plan` is running is `mid-node`;
+it can be applied once the plan is agreed (`_plan` completed) and before the
+work it precedes starts. The source states *why*. It is not a claim that the
+person approved a particular graph, and it never covers a change of scope the
+request does not contain: that needs `agreement`. The person's node catalog
+(catalog.md) says which activities they expect as visible nodes. It never
+adds nodes by itself. A material change of agreed scope
 that the person did not ask for needs `agreement`: write the proposal
 (`wfe run adjust … --propose`, which writes
 `definition/proposals/<name>.yaml` and prints the difference), ask about it

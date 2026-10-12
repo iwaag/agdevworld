@@ -199,6 +199,26 @@ nodes:
 - Run snapshots keep the YAML byte for byte, so a run view and a history
   view show the appearance the run was created (or adjusted) with.
 
+### Template provenance (p7/ex1)
+
+A node made from a template of the person's node catalog
+([catalog.md](catalog.md)) records where it came from:
+
+```yaml
+nodes:
+  research:
+    type: study
+    name: Preliminary research
+    description: Research how this is usually done …
+    template: {id: preliminary-research, revision: 2, expectation: "I expect a study node before …"}
+```
+
+`template` (`id`, `revision`, `expectation`) is provenance. Like appearance,
+it is outside both approval digests and the compiled graph, and a change to
+it alone is never a run adjustment. The node's type, name, description and
+repositories are ordinary semantic fields. Editing the catalog never changes
+a workflow, and a workflow never reads the catalog.
+
 ### devdocs storage modes (p4)
 
 | Mode | What devdocs is | Owning repository and path |
@@ -345,7 +365,7 @@ declared approver and the time:
    and, when declared (p6), `execution`, `intake` and a node's `confirms`.
 
 Excluded from both digests: workflow `id` and `name`, approvals, layout,
-node appearance (p7), fields outside the contract, comments, key order and
+node appearance (p7), template provenance (p7/ex1), fields outside the contract, comments, key order and
 YAML formatting.
 
 Digest = `sha256:` + hex SHA-256 of the UTF-8 canonical JSON of a projection:

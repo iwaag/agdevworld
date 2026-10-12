@@ -5,7 +5,7 @@ import type { RepositoryStatus, WorkflowSummary } from '../shared/api.ts'
 import { APPEARANCE_COLORS, APPEARANCE_ICONS, NODE_TYPES, normalizeRepoPath, type Appearance, type Point, type Workflow } from '../shared/model.ts'
 import { h } from './dom.ts'
 import { icon } from './icons.ts'
-import { METRICS, PAD, positions, STEP_X, type DisplayMode } from '../shared/layout.ts'
+import { METRICS, PAD, positions, STEP_X, type DisplayMode, type Metrics } from '../shared/layout.ts'
 import { FINAL_STEP, PLAN_STEP, type EffectiveGraph } from '../shared/compile.ts'
 
 const NS = 'http://www.w3.org/2000/svg'
@@ -27,6 +27,11 @@ const FINAL = { width: 176, height: 70 }
 // scale opens at it, from its start, with a note and Fit for the whole.
 const READABLE: Record<DisplayMode, number> = { compact: 0.72, mini: 0.95 }
 const MARGIN = 40
+// Simple (p8/ex1): its own card — a large icon, the name and the state —
+// on the same stored positions, drawn closer together so more of a graph
+// is readable at once. Compact/Mini stay Detail's choice and are kept.
+const SIMPLE: Metrics = { width: 200, height: 96, scale: 0.76 }
+const SIMPLE_READABLE = 0.9
 
 export interface CanvasContext {
   repositories: RepositoryStatus[]
@@ -74,6 +79,8 @@ export class Canvas {
   private draft!: Workflow
   private ctx!: CanvasContext
   private mode: DisplayMode = 'compact'
+  private simple = false
+  private keep: { x: number; y: number } | null = null // the layout point at the centre, across a switch
   private selection: Selection = null
   private points = new Map<string, Point>()
   readonly events: CanvasEvents
@@ -146,7 +153,7 @@ export class Canvas {
     const r = { ...this.size }
     if (!all.length || !r.w) { this.view = { x: 0, y: 0, k: 1 }; this.applyView(); return }
     const b = bounds(all)
-    const readable = READABLE[this.mode]
+    const readable = this.simple ? SIMPLE_READABLE : READABLE[this.mode]
     if (this.autoHeight) {
       const { min, max } = this.autoHeight
       const k = Math.max(readable, Math.min(1, (r.w - 2 * MARGIN) / (b.w || 1), (max - 2 * MARGIN) / (b.h || 1)))
@@ -164,7 +171,7 @@ export class Canvas {
       // The focus (a run's current position) when there is one, else the
       // start of the graph (its leftmost column); never past the graph's edges.
       const focus = (this.ctx.focus ?? []).map(id => this.surface.querySelector<HTMLElement>(`.node[data-id="${CSS.escape(id)}"], .step-card[data-step="${CSS.escape(id)}"], .final-step[data-step="${CSS.escape(id)}"]`)).filter((e): e is HTMLElement => !!e && !e.hidden).map(e => this.surfaceBox(e))
-      const start = all.filter(c => c.x < b.x + 1.5 * STEP_X * METRICS[this.mode].scale)
+      const start = all.filter(c => c.x < b.x + 1.5 * STEP_X * this.metrics().scale)
       const f = bounds(focus.length ? focus : start)
       const clamp = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, v))
       this.view.x = focus.length ? clamp(r.w / 2 - (f.x + f.w / 2) * k, r.w - MARGIN - (b.x + b.w) * k, MARGIN - b.x * k) : MARGIN - b.x * k
@@ -202,6 +209,21 @@ export class Canvas {
   }
 
   setMode(mode: DisplayMode) { this.mode = mode; this.el.dataset.mode = mode }
+  private metrics(): Metrics { return this.simple ? SIMPLE : METRICS[this.mode] }
+
+  // Simple or Detail presentation. The view redraws afterwards; the point of
+  // the graph at the canvas's centre stays there and the zoom is kept — the
+  // person's place, not a new framing.
+  setSimple(on: boolean) {
+    if (on === this.simple) return
+    if (this.framed && this.size.w) {
+      const c = this.toSurface(this.el.getBoundingClientRect().left + this.size.w / 2, this.el.getBoundingClientRect().top + this.size.h / 2)
+      const s = this.metrics().scale
+      this.keep = { x: c.x / s, y: c.y / s }
+    }
+    this.simple = on
+    this.el.dataset.display = on ? 'simple' : 'detail'
+  }
   getView() { return { ...this.view } }
 
   render(draft: Workflow, ctx: CanvasContext, selection: Selection) {
@@ -211,7 +233,7 @@ export class Canvas {
     const refocus = active ? (active.dataset.id ? `.node[data-id="${CSS.escape(active.dataset.id)}"]` : active.dataset.step ? `[data-step="${CSS.escape(active.dataset.step)}"]` : null) : null
     this.points = positions(draft)
     for (const old of this.surface.querySelectorAll('.node, .step-card, .report-icon, .final-step')) old.remove()
-    const m = METRICS[this.mode]
+    const m = this.metrics()
     this.resized?.disconnect()
     for (const [id, node] of Object.entries(draft.nodes)) {
       const p = this.points.get(id)!
@@ -222,6 +244,12 @@ export class Canvas {
     this.renderSteps()
     this.drawEdges()
     if (refocus) this.surface.querySelector<HTMLElement>(refocus)?.focus({ preventScroll: true })
+    if (this.keep) {
+      const s = this.metrics().scale
+      this.view.x = this.size.w / 2 - this.keep.x * s * this.view.k
+      this.view.y = this.size.h / 2 - this.keep.y * s * this.view.k
+      this.keep = null
+    }
     this.measure()
     this.applyView()
     if (!this.framed && this.el.isConnected && this.el.clientWidth) { this.size = { w: this.el.clientWidth, h: this.el.clientHeight }; this.framed = true; this.frame() }
@@ -257,9 +285,13 @@ export class Canvas {
       title: `${id} · ${TYPE_LABEL[t] ?? node.type}\n${node.description}`,
       style: { left: `${p.x * m.scale}px`, top: `${p.y * m.scale}px`, width: `${m.width}px`, minHeight: `${m.height}px` },
     })
-    const head = h('div.node-head', icon(iconOf(node.type, node.appearance), 'icon type-icon'), h('span.type-label', TYPE_LABEL[t] ?? (node.type || 'no type')))
+    const head = h('div.node-head', icon(iconOf(node.type, node.appearance), 'icon type-icon'), this.simple ? null : h('span.type-label', TYPE_LABEL[t] ?? (node.type || 'no type')))
     card.append(head, h('div.node-title', title))
-    if (this.mode === 'compact') {
+    if (this.simple) {
+      // The type stays in the card's accessible name and its title; the
+      // description, bindings and type label are the selection's and Detail's.
+      if (node.type === 'delegate') card.append(h(`div.delegate-target.small${target ? '' : '.missing'}`, '→ ', target ? (target.name || target.id) : node.workflow || 'no target'))
+    } else if (this.mode === 'compact') {
       if (node.type === 'delegate') {
         card.append(h(`div.delegate-target${target ? '' : '.missing'}`, '→ ', target ? (target.name || target.id) : node.workflow ? `${node.workflow} (missing)` : 'no target'))
         card.append(h('div.unsupported.small', { title: 'Delegate nodes are definition and display only; a run of this workflow is refused' }, 'execution not supported'))
@@ -277,7 +309,7 @@ export class Canvas {
       card.dataset.state = run.state
       card.setAttribute('aria-label', `${card.getAttribute('aria-label')}, ${run.label}`)
       foot.append(h(`div.run-status.state-${run.state}`, { title: run.title ?? run.label }, h('span.glyph', { 'aria-hidden': 'true' }, STATE_GLYPH[run.state] ?? ''), ` ${run.label}`))
-    } else if (node.repositories.length) foot.append(this.bindingBadges(node.repositories))
+    } else if (node.repositories.length && !this.simple) foot.append(this.bindingBadges(node.repositories))
     if (this.ctx.effective?.nodes[`_report.${id}`]) card.classList.add('has-report')
     card.append(foot)
     if (!this.ctx.readonly) card.append(h('span.port', { title: 'Drag to another node to connect', dataset: { port: id } }))
@@ -316,15 +348,15 @@ export class Canvas {
   private renderSteps() {
     const eff = this.ctx.effective
     if (!eff) return
-    const m = METRICS[this.mode]
+    const m = this.metrics()
     for (const id of this.steps()) {
       const step = eff.nodes[id].step!
       const run = this.ctx.run?.[id]
       if (step.kind === 'plan') {
         const el = h('div.step-card.step-plan.type-talk', { dataset: { step: id }, style: { width: `${m.width}px`, minHeight: `${m.height}px` } },
-          h('div.node-head', icon('talk', 'icon type-icon'), h('span.type-label', 'Plan talk')),
+          h('div.node-head', icon('talk', 'icon type-icon'), this.simple ? null : h('span.type-label', 'Plan talk')),
           h('div.node-title', 'Agree the plan'),
-          this.mode === 'compact' ? h('div.node-desc', 'Write plan.md and agree it with the person before any work.') : null)
+          this.mode === 'compact' && !this.simple ? h('div.node-desc', 'Write plan.md and agree it with the person before any work.') : null)
         if (run) el.append(h('div.node-foot', h(`div.run-status.state-${run.state}`, h('span.glyph', { 'aria-hidden': 'true' }, STATE_GLYPH[run.state] ?? ''), ` ${run.label}`)))
         this.stepState(el, id, 'Plan talk: plan.md')
         this.surface.append(el)
@@ -338,7 +370,7 @@ export class Canvas {
         this.surface.append(el)
       } else {
         const el = h('div.final-step', { dataset: { step: id }, style: { width: `${FINAL.width}px`, minHeight: `${FINAL.height}px` } },
-          h('div.final-head', icon('doc', 'icon'), h('span.type-label', 'Document')), h('strong.final-title', 'Final report'), h('div.final-file', step.output),
+          h('div.final-head', icon('doc', 'icon'), this.simple ? null : h('span.type-label', 'Document')), h('strong.final-title', 'Final report'), this.simple ? null : h('div.final-file', step.output),
           run ? h(`div.run-status.state-${run.state}`, h('span.glyph', { 'aria-hidden': 'true' }, STATE_GLYPH[run.state] ?? ''), ` ${run.label}`) : null)
         this.stepState(el, id, 'Final report: report.md')
         this.surface.append(el)
@@ -350,7 +382,7 @@ export class Canvas {
   private cardBox(id: string): { x: number; y: number; w: number; h: number } | null {
     const p = this.points.get(id)
     if (!p) return null
-    const m = METRICS[this.mode]
+    const m = this.metrics()
     const el = this.surface.querySelector<HTMLElement>(`.node[data-id="${CSS.escape(id)}"]`)
     return { x: p.x * m.scale, y: p.y * m.scale, w: m.width, h: el?.offsetHeight || m.height }
   }
@@ -359,7 +391,7 @@ export class Canvas {
   private placeSteps() {
     const eff = this.ctx.effective
     if (!eff) return
-    const m = METRICS[this.mode]
+    const m = this.metrics()
     const ids = Object.keys(this.draft.nodes)
     const entries = ids.filter(id => !this.draft.edges.some(e => e.to === id && e.from in this.draft.nodes))
     const terminals = ids.filter(id => !this.draft.edges.some(e => e.from === id && e.to in this.draft.nodes))
@@ -389,7 +421,7 @@ export class Canvas {
   // ---- edges ------------------------------------------------------------
 
   private anchor(id: string, side: 'out' | 'in'): Point {
-    const m = METRICS[this.mode]
+    const m = this.metrics()
     const el = this.surface.querySelector<HTMLElement>(`.node[data-id="${CSS.escape(id)}"]`)
     const p = this.points.get(id) ?? { x: 0, y: 0 }
     const height = el?.offsetHeight || m.height
@@ -409,7 +441,7 @@ export class Canvas {
     }
     this.svg.append(defs)
     let maxX = 0, maxY = 0
-    const m = METRICS[this.mode]
+    const m = this.metrics()
     for (const p of this.points.values()) { maxX = Math.max(maxX, p.x * m.scale + m.width); maxY = Math.max(maxY, p.y * m.scale + m.height * 2) }
     maxX += this.ctx.effective?.nodes[FINAL_STEP] ? STEP_X : 0
     this.drawStepEdges()
@@ -488,7 +520,7 @@ export class Canvas {
       e.stopPropagation()
       const port = (e.target as HTMLElement).closest('[data-port]')
       if (port) { this.startConnect(id, e); return }
-      const m = METRICS[this.mode]
+      const m = this.metrics()
       const start = this.points.get(id)!
       const origin = this.toSurface(e.clientX, e.clientY)
       let moved = false
@@ -590,7 +622,7 @@ export class Canvas {
   visibleCentre(): Point {
     const r = this.el.getBoundingClientRect()
     const c = this.toSurface(r.left + r.width / 2, r.top + r.height / 2)
-    const s = METRICS[this.mode].scale
+    const s = this.metrics().scale
     return { x: Math.round(c.x / s - METRICS.compact.width / 2), y: Math.round(c.y / s - METRICS.compact.height / 2) }
   }
 

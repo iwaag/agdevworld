@@ -29,7 +29,7 @@ import { patchContent } from './patch.ts'
 import { activeWorkflow, ago, chip, fact, line, nodeLabel, nodeLink, runHash, runTitle, STATE_LABEL } from './runCommon.ts'
 import { outcome, RefreshCoordinator, type Outcome, type RefreshKind } from './runRefresh.ts'
 import { RunSide } from './runSide.ts'
-import { displayToggle, setDisplay } from './displayMode.ts'
+import { displayToggle, isSimple, onDisplay, setDisplay } from './displayMode.ts'
 import type { ViewHandle } from './main.ts'
 
 const ACTOR_KEY = 'workflow-editor.actor'
@@ -74,6 +74,13 @@ export function renderRunView(root: HTMLElement, wsId: string, workflow: string,
   const details = h('section.run-details.d-only#run-details', { hidden: true, 'aria-label': 'Run details' })
   const canvas = new Canvas({ select: sel => select(sel?.kind === 'node' || sel?.kind === 'step' ? sel.id : null), move: () => {}, connect: () => {} }, { autoHeight: { min: 300, max: 620 } })
   canvas.setMode('compact')
+  canvas.setSimple(isSimple())
+  const offDisplay = onDisplay(d => {
+    canvas.setSimple(d === 'simple')
+    canvasShown = ''
+    renderCanvas()
+    if (selection) requestAnimationFrame(() => { if (!disposed && selection) canvas.reveal(selection) })
+  })
   const graphHead = h('div.graph-head')
   const legend = h('div.run-legend.d-only')
   const side = new RunSide({ record, adjust, notice }, stored(ACTOR_KEY, ''))
@@ -210,6 +217,8 @@ export function renderRunView(root: HTMLElement, wsId: string, workflow: string,
     selection = id
     renderCanvas()
     renderSide(true)
+    // In Simple the side pane may have just appeared and narrowed the canvas.
+    if (id) requestAnimationFrame(() => { if (!disposed && selection === id) canvas.reveal(id) })
   }
 
   // Each read has its own identity: a late response for one file never
@@ -299,6 +308,7 @@ export function renderRunView(root: HTMLElement, wsId: string, workflow: string,
     const t = runTitle(rec, wf?.name)
     patchContent(titleMain,
       h('h1.run-name', { title: t.title }, t.title),
+      progress(rec),
       h('p.run-lead.d-only', statusLine(rec)),
       h('p.wf-file.d-only', `${t.sub} · ${rec.definition.revisions?.length ? `adjusted, ${rec.definition.active ?? 'r1'} in force` : 'fixed snapshot'}`))
     const last = rec.decisions.at(-1)
@@ -319,6 +329,19 @@ export function renderRunView(root: HTMLElement, wsId: string, workflow: string,
       openDefinition.title = 'The editable, reusable definition in devdocs/workflows; this run follows its own fixed copy'
     }
     renderDetails(rec)
+  }
+
+  // Simple (p8/ex1): the authored work done, as a bar and a few words; the
+  // documentation steps and every other count are Detail's.
+  function progress(rec: RunRecord): HTMLElement {
+    const eff = effectiveOf(rec)
+    const c = eff?.policy === 'default' ? splitCounts(eff, rec.nodes).work : rec.execution.counts
+    const total = Object.values(c).reduce((a, b) => a + b, 0), doneN = c.completed ?? 0
+    const pct = total ? Math.round((doneN / total) * 100) : 0
+    const bad = rec.execution.failed.length > 0
+    return h('div.run-progress.s-only', { role: 'img', 'aria-label': `${doneN} of ${total} work steps completed` },
+      h('span.bar', h(`span.fill${bad ? '.bad' : doneN === total && total ? '.full' : ''}`, { style: { width: `${pct}%` } })),
+      h('span.bar-text', `${doneN} of ${total} steps done`))
   }
 
   // One deterministic line from recorded facts: no generated prose.
@@ -459,8 +482,10 @@ export function renderRunView(root: HTMLElement, wsId: string, workflow: string,
     renderBanners()
     renderSummary()
     renderGraphHead()
-    renderCanvas()
+    // The side first: in Simple it decides whether the canvas has its width
+    // when the graph is framed for the first time.
     renderSide()
+    renderCanvas()
   }
 
   // ---- live updates -----------------------------------------------------------
@@ -490,7 +515,7 @@ export function renderRunView(root: HTMLElement, wsId: string, workflow: string,
   void refresh.request('full')
   void loadProjectName()
   return {
-    dispose: () => { disposed = true; root.removeEventListener('click', onClick); fileRequest++; refresh.dispose(); stream?.close(); canvas.dispose(); clearInterval(clock); clearInterval(execTimer) },
+    dispose: () => { disposed = true; offDisplay(); root.removeEventListener('click', onClick); fileRequest++; refresh.dispose(); stream?.close(); canvas.dispose(); clearInterval(clock); clearInterval(execTimer) },
     isDirty: () => side.isDirty(),
   }
 }

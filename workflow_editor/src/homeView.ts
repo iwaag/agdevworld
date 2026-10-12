@@ -207,7 +207,8 @@ export function renderHomeView(root: HTMLElement): ViewHandle {
       h('div.tile-head', icon('folder', 'icon tile-icon'), h('h2', name)),
       purpose ? h('p.tile-purpose', purpose) : null,
       h('div.tile-states', ...status),
-      waiting.length ? h('ul.tile-waits', ...waiting.slice(0, 4).map(({ ws, r }) => h('li', h('a', { href: runHref(ws, r.ref) }, icon('question', 'icon small'), r.ref.split('/').join(' · ')), h('span.muted', ` — next move: ${r.waiting.map(x => x.holder).join(', ')}`)))) : null,
+      waiting.length ? h('ul.tile-waits', ...waiting.slice(0, 4).map(({ ws, r }) => h('li', h('a', { href: runHref(ws, r.ref) }, icon('question', 'icon small'), r.ref.split('/').join(' · ')), h('span.muted', ` — next move: ${[...new Set(r.waiting.map(x => x.holder.replace(/\s*\(.*$/, '')))].join(', ')}`)))) : null,
+      waiting.length > 4 ? h('p.small.muted', `and ${waiting.length - 4} more in the project`) : null,
       h('div.tile-actions', open ? h('a.button.primary', { href: `#/ws/${encodeURIComponent(open.id)}` }, 'Open project', icon('chevron', 'icon small'))
         : h('button', { onclick: () => showDetail(() => main.querySelector<HTMLElement>(`.project-entry[data-project="${CSS.escape(key)}"]`)?.scrollIntoView({ block: 'center' })) }, 'Workspace options')))
   }

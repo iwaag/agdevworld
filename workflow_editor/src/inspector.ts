@@ -40,7 +40,7 @@ const nodeLabel = (w: Workflow, id: string) => (w.nodes[id]?.name || id)
 // Simple shows a selection's compact explanation and its everyday edit;
 // "More details" is the same inspector in Detail (p8/ex1).
 function moreDetails(what: string): HTMLElement {
-  return h('div.insp-more.s-only', h('button.more-link', { type: 'button', onclick: (e: Event) => { const panel = (e.currentTarget as HTMLElement).closest('.inspector'); setDisplay('detail'); panel?.querySelector<HTMLElement>('.insp-head h3')?.focus({ preventScroll: true }) } }, icon('settings', 'icon small'), `More details: ${what}`))
+  return h('div.insp-more.s-only', h('button.more-link', { type: 'button', onclick: (e: Event) => { const panel = (e.currentTarget as HTMLElement).closest('.inspector'); setDisplay('detail'); panel?.querySelector<HTMLElement>('.insp-head h3')?.focus({ preventScroll: true }) } }, icon('settings', 'icon small'), 'More details'), h('span.small.muted', ` ${what}`))
 }
 
 // Which groups the person has opened or closed, by name; the defaults

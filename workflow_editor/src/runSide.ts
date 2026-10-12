@@ -63,7 +63,7 @@ function section(key: string, ...body: Node[]): Section {
 }
 // The selected node: always shown while a node is selected, not a disclosure.
 function card(key: string, ...body: Node[]): Section {
-  const title = h('h3')
+  const title = h('h3.d-only')
   const content = h('div.sec-content', ...body)
   return { key, root: h('section.side-sec.side-card', { dataset: { key: `sec:${key}`, section: key } }, title, content), title, toggle: h('button'), content }
 }
@@ -172,8 +172,9 @@ export class RunSide {
   // modes — "Read final report" opens it in Simple too. One element, so its
   // offsets survive the switch.
   private readonly fileCard = h('section.side-sec.side-card.file-card', { dataset: { key: 'sec:file', section: 'file' }, hidden: true })
-  // Simple: one entry to every record (Detail's sections).
-  private readonly recordsEntry = h('button.more-link.s-only.records-entry', { dataset: { action: 'records' } }, icon('list', 'icon small'), 'All records: questions, files, execution, history')
+  // Simple: what the pane is for while nothing is selected or open.
+  private readonly sideHint = h('div.side-hint.s-only', icon('flag', 'icon'), h('p', 'Select a step in the graph to see what it recorded.'))
+
   private readonly execution = section('execution', h('div.sec-body'))
   private readonly resume: { root: HTMLElement; draft: Owned; button: HTMLButtonElement }
   private readonly execMore = h('div.sec-body')
@@ -249,8 +250,8 @@ export class RunSide {
     }
     this.focus.append(this.focusDisplay, this.focusQuestions, this.holdSlot, this.decideSlot, this.focusLinks)
     this.el.dataset.keepScroll = 'run-side'
-    this.el.append(this.placeholder, this.actorRow, this.fileCard,
-      ...[this.selected, this.questions, this.instructions, this.presentations, this.definition, this.catalog, this.related, this.files, this.execution, this.coordination, this.result, this.history].map(s => s.root), this.recordsEntry)
+    this.el.append(this.placeholder, this.actorRow, this.sideHint, this.fileCard,
+      ...[this.selected, this.questions, this.instructions, this.presentations, this.definition, this.catalog, this.related, this.files, this.execution, this.coordination, this.result, this.history].map(s => s.root))
   }
 
   // ---- what the view reads --------------------------------------------------
@@ -378,14 +379,14 @@ export class RunSide {
       setText(this.placeholder, d.resp?.problem ? 'No usable record.' : 'Loading…')
       show(this.placeholder, true)
       show(this.actorRow, false)
-      show(this.recordsEntry, false)
+      show(this.sideHint, false)
       for (const s of sections) show(s.root, false)
       patchContent(this.focusDisplay, h('h2.focus-head', d.resp?.problem ? 'No usable record' : 'Loading…'), d.resp?.problem ? h('p.focus-lead', 'run.json cannot be read; the banner above says why. Nothing can be recorded until the files are fixed.') : null)
       return
     }
     show(this.placeholder, false)
     show(this.actorRow, !d.rev)
-    show(this.recordsEntry, true)
+    show(this.sideHint, !(d.selection && rec.nodes[d.selection]) && !d.viewing)
     for (const s of [this.questions, this.definition, this.catalog, this.files, this.history]) show(s.root, true)
     this.updateSelected(rec)
     this.updateQuestions(rec)
@@ -446,7 +447,10 @@ export class RunSide {
     else { kind = 'idle'; head = 'Waiting for the executor'; lead = ex.ready.length ? `Ready to start: ${ex.ready.map(name).join(', ')}.` : 'Nothing is running and nothing is ready.' }
     if (this.focus.dataset.kind !== kind) this.focus.dataset.kind = kind
 
-    const blocks: (Node | null)[] = [h('h2.focus-head', head), h('p.focus-lead', lead)]
+    // The situation's icon, large: what kind of task this is before any word is read (p8/ex1).
+    const FOCUS_ICON: Record<string, string> = { review: 'present', question: 'question', answered: 'history', held: 'stop', failed: 'alert', accepted: 'check', completed: 'check', cancelled: 'stop', working: 'play', history: 'history', 'not-started': 'play', idle: 'play' }
+    const done = kind === 'completed' && last?.decision === 'rejected' ? 'failed' : kind === 'completed' && !last ? 'pending' : kind
+    const blocks: (Node | null)[] = [h('div.focus-top', h(`span.focus-icon.tone-${done}`, icon(FOCUS_ICON[kind] ?? 'flag', 'icon')), h('div.focus-words', h('h2.focus-head', head), h('p.focus-lead', lead)))]
     // The one-click review, while it is served (p7); otherwise what became of it.
     if (!d.rev) blocks.push(this.reviewLink(rec, kind))
     if (kind === 'working' || kind === 'accepted') blocks.push(this.activeBlock(rec, name))
@@ -495,15 +499,21 @@ export class RunSide {
     }
     show(this.decideSlot, this.decideSlot.childElementCount > 0)
     show(this.holdSlot, this.holdSlot.childElementCount > 0)
+    // Simple (p8/ex1): the pane is shown for a selection, an open file, or a
+    // form that records under the person's name; otherwise the main column
+    // takes its width. Detail always shows it.
+    const forms = !d.rev && (this.focusQuestions.childElementCount > 0 || this.holdSlot.childElementCount > 0 || this.decideSlot.childElementCount > 0 || kind === 'working' || kind === 'accepted' || kind === 'failed')
+    const quiet = !forms && !(d.selection && rec.nodes[d.selection]) && !d.viewing
+    this.el.classList.toggle('quiet', quiet)
 
     // Links to the outcome and the request.
     const files = new Set(r.files.map(f => f.name))
     patchContent(this.focusLinks,
-      files.has('report.md') ? fileLink('report.md', 'Read final report') : null,
-      files.has(rec.input.file) ? fileLink(rec.input.file, 'Original request') : null,
-      h('a.focus-link', { href: '#', dataset: { action: 'goto-section', section: 'files' } }, `Reports & files (${r.files.length})`),
-      h('a.focus-link.d-only', { href: '#', dataset: { action: 'details' } }, 'Run details'))
-    for (const a of this.focusLinks.querySelectorAll<HTMLElement>('.file-link')) a.classList.add('focus-link')
+      files.has('report.md') ? docLink('report.md', 'Read final report') : null,
+      files.has(rec.input.file) ? docLink(rec.input.file, 'Original request') : null,
+      h('a.focus-link', { href: '#', dataset: { action: 'goto-section', section: 'files' } }, icon('list', 'icon small'), `Reports & files (${r.files.length})`),
+      h('a.focus-link.d-only', { href: '#', dataset: { action: 'details' } }, 'Run details'),
+      h('a.focus-link.s-only.records-entry', { href: '#', dataset: { action: 'records' }, title: 'Every record of the run: questions, presentations, the definition, files, execution, coordination, the decision and history' }, icon('history', 'icon small'), 'All records'))
   }
 
   // The review link (p7): the latest live presentation, prominently; one
@@ -616,7 +626,7 @@ export class RunSide {
     box.append(h('dl.kv.d-only', ...rows.flatMap(([k, v]) => [h('dt', k), h('dd', v)])))
     // Simple: the latest observation of a node at work, nothing older.
     if (n.notes.length && (n.state === 'running' || n.state === 'waiting')) box.append(h('p.small.s-only.latest-note', h('span.muted', 'Latest: '), n.notes.at(-1)!.text.split('\n')[0].slice(0, 200)))
-    box.append(h('div.insp-more.s-only', h('button.more-link', { type: 'button', dataset: { action: 'more-details' } }, icon('list', 'icon small'), 'More details: times, notes, its questions')))
+    box.append(h('div.insp-more.s-only', h('button.more-link', { type: 'button', dataset: { action: 'more-details' } }, icon('list', 'icon small'), 'More details'), h('span.small.muted', ' times, notes, its questions')))
     if (n.notes.length) box.append(h('h4.d-only', 'Notes'), h('ul.notes.d-only', ...n.notes.map(x => h('li', h('span.muted.small', `${when(x.at)} · ${x.by}: `), x.text))))
     // The node's questions as summaries; each is answered in its one form.
     const qs = Object.values(rec.questions).filter(q => q.node === id)
@@ -1013,4 +1023,5 @@ export class RunSide {
 }
 
 const rev = (d: RunData) => !!d.rev
+const docLink = (path: string, label: string) => { const a = fileLink(path, label); a.classList.add('focus-link'); a.prepend(icon('doc', 'icon small')); return a }
 const questionChip = (st: string) => (st === 'open' ? 'waiting' : st === 'answered' ? 'running' : st === 'taken-up' ? 'completed' : 'cancelled')

@@ -17,7 +17,7 @@ import { Canvas, TYPE_LABEL, type Selection } from './canvas.ts'
 import { h, when } from './dom.ts'
 import { icon } from './icons.ts'
 import { renderInspector } from './inspector.ts'
-import { displayToggle, setDisplay } from './displayMode.ts'
+import { displayToggle, isSimple, onDisplay, setDisplay } from './displayMode.ts'
 import { autoArrange, completeLayout, freeSlot, type DisplayMode } from '../shared/layout.ts'
 import type { ViewHandle } from './main.ts'
 
@@ -113,6 +113,14 @@ export function renderWorkflowView(root: HTMLElement, wsId: string, file: string
     connect: (from, to) => connect(from, to),
   })
   canvas.setMode(mode)
+  canvas.setSimple(isSimple())
+  // Simple and Detail draw different cards: redraw them, keep the selection
+  // and the person's place, and bring a selected card into view (p8/ex1).
+  const offDisplay = onDisplay(d => {
+    canvas.setSimple(d === 'simple')
+    update(false)
+    if (selection && selection.kind !== 'edge') revealSoon(selection)
+  })
   const hint = h('div.canvas-hint.d-only', 'Select a card to inspect it. Drag a card to move it, its right handle onto another card to connect; drag the background to pan.')
   canvas.el.append(hint)
   const rawView = h('pre.raw')
@@ -480,7 +488,8 @@ export function renderWorkflowView(root: HTMLElement, wsId: string, file: string
     settingsToggle.disabled = intentToggle.disabled = false
     if (readonly()) closePalette()
     // The purpose preview: the intent's first line; the whole text is in the panel.
-    const first = draft.intent.split('\n').map(x => x.trim()).find(Boolean)
+    // The intent's first paragraph (a hard-wrapped sentence reads as one).
+    const first = draft.intent.trim().split(/\n\s*\n/)[0]?.split('\n').map(x => x.trim()).join(' ')
     purpose.replaceChildren(first ? h('span', { title: draft.intent }, first) : h('span.warn-text', 'No intent yet — write it under Intent & approvals.'))
     const issues = validateWorkflow(draft, context())
     const errors = issues.filter(i => i.severity === 'error'), warnings = issues.filter(i => i.severity === 'warning')
@@ -559,7 +568,7 @@ export function renderWorkflowView(root: HTMLElement, wsId: string, file: string
   void loadProjectName()
 
   return {
-    dispose: () => { disposed = true; stream.close(); canvas.dispose(); window.removeEventListener('keydown', onKey); document.removeEventListener('pointerdown', onOutside) },
+    dispose: () => { disposed = true; offDisplay(); stream.close(); canvas.dispose(); window.removeEventListener('keydown', onKey); document.removeEventListener('pointerdown', onOutside) },
     isDirty: dirty,
   }
 }

@@ -283,6 +283,44 @@ opens it). Work and documentation steps are counted apart. Under `manual`
 nothing is added. Changing the policy changes the preview and makes the
 definition approval stale; it never changes a saved run.
 
+**How the run view stays live (p7/ex2).** The view is built once and kept up
+to date in place, so whatever arrives never interrupts typing or reading:
+
+- **One refresh coordinator per view** (`src/runRefresh.ts`). The first load,
+  SSE changes, reconnection, the 3 s host-facts cadence and the person's own
+  operations all request a `full` or a `host` refresh. One batch runs at a
+  time; requests made meanwhile merge into the next, and `full` subsumes
+  `host`. A batch's reads are concurrent, and their results are published
+  together, each with its own error. An operation awaits the batch that
+  shows its result. Leaving the view aborts reads and ignores anything that
+  still completes. File reads carry their own identity, so a late response
+  never replaces another file.
+- **Persistent right pane** (`src/runSide.ts`). Each section has one root.
+  Display is patched (`src/patch.ts`): unchanged nodes are not written, and
+  keyed items (questions, history entries, attempts, …) keep their elements.
+  Controls are created once, attached when their operation applies, and
+  never rebuilt. Built display carries no listeners: links and buttons name a
+  `data-action` that the view handles with the state of that moment.
+- **Input ownership.** The text in a control is the draft, and no background
+  update writes it. A submission clears only the exact text it sent. Typing
+  while it is in flight is kept, and a second submission waits for the first.
+  When an operation stops applying (question withdrawn, run cancelled or no
+  longer held), submission is disabled at once. A composing control stays
+  editable until the composition ends, then turns read-only with the text
+  kept and the reason shown. An adjustment preview enables Apply only for the
+  text, reason, revision and sequence it inspected.
+- **Reading position.** The pane holds its own anchor
+  (`overflow-anchor: none`): the first visible item keeps its place when
+  content changes above it. At the top of the history, new entries show
+  beneath the heading. The open file keeps its scroll offsets when its
+  content changes, and starts at the top when another file is opened. The
+  person's own navigation is not anchored.
+- **Scoped updates.** A host refresh whose only change is the executor's
+  heartbeat time renders nothing. Other host changes update only Questions,
+  Presentations, Execution, Coordination and the summary. Connection changes
+  update only the live pill and banners. The canvas is drawn again only when
+  its graph, states or selection change.
+
 ## Checks
 
 ```sh
@@ -321,6 +359,17 @@ commit, and the update latency. It writes its record and screenshots to
 ```sh
 npm run build && node checks/runs.ts [--repeat 20] [--keep]
 ```
+
+`checks/runInteraction.ts` (p7/ex2) checks input and reading state in the
+run view on its own temporary project and private service (port 8202).
+Background updates come from real SSE progress, file changes, intercepted
+heartbeats, host failures and a service restart. It checks that they keep
+each control, its focus, selection, internal scroll and a synthetic IME
+composition (CDP `Input.imeSetComposition`); that file and history positions
+are held; that submissions, withdrawals, cancellations, conflicts and
+adjustment previews are handled safely; and that slow reads never overlap or
+roll back. Synthetic composition is not the macOS Japanese IME, which is
+checked by hand. `npm run build && node checks/runInteraction.ts [--keep]`.
 
 `checks/appearance.ts` (p7) checks node appearance on its own temporary
 project and private service (port 8198): presets, the inspector's icon and

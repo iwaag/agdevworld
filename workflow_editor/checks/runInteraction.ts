@@ -36,6 +36,7 @@ const { PrivateService } = await import('./bench/service.ts')
 const { createProject } = await import('../server/create.ts')
 const { loadRegistry } = await import('../server/registry.ts')
 const { createRun, runOp } = await import('../server/runs.ts')
+const { gitOk } = await import('../server/git.ts')
 const { Workspace } = await import('../server/workspace.ts')
 
 // ---- data ----------------------------------------------------------------------------
@@ -455,6 +456,119 @@ try {
   result.reconnect = { lost, offline, back, online }
   check(lost !== null && offline.connected && offline.focused && back !== null && online.connected && online.focused && online.value === '接続' && online.comp.includes('compositionend:接続'),
     `disconnect and reconnect keep the composing control; the change made meanwhile shows: ${JSON.stringify({ lost: lost !== null, back: back !== null, value: online.value, connected: online.connected })}`)
+  await page.locator(answer).fill('')
+
+  // 14. Every form across SSE progress, a file change and heartbeats: the
+  // same controls, no value written, internal scrolling, focus and selection kept.
+  console.log('all forms across updates')
+  await page.locator('details.adjust summary').click()
+  const formLabels = ['Your name', 'Answer to q1', 'Resume instruction', 'Adjusted definition', 'Adjustment reason', 'Decision evidence']
+  const longText = Array.from({ length: 30 }, (_, i) => `draft line ${i + 1}`).join('\n')
+  for (const l of formLabels) await page.getByLabel(l, { exact: true }).fill(l === 'Your name' ? 'Check Person' : l === 'Adjusted definition' ? `${await page.getByLabel(l, { exact: true }).inputValue()}${longText}` : l === 'Answer to q1' ? longText : `${l} draft`)
+  const formsBefore = await page.evaluate(labels => {
+    const els = labels.map(l => document.querySelector(`[aria-label="${l}"]`) as HTMLTextAreaElement & { __sets?: number })
+    ;(window as unknown as { __forms: typeof els }).__forms = els
+    for (const el of els) { el.dataset.tracked = '1'; el.__sets = 0 }
+    els[1].scrollTop = 120; els[3].scrollTop = 200
+    els[1].focus(); els[1].setSelectionRange(3, 9)
+    return els.map(el => ({ value: el.value, scrollTop: el.scrollTop }))
+  }, formLabels)
+  await progress('forms 1')
+  await writeFile(join(runDirOf(R1), 'grown-3.md'), 'file change during typing\n')
+  await waitFor(async () => (await page.locator('.run-side .file-link', { hasText: 'grown-3.md' }).count()) > 0)
+  await progress('forms 2')
+  await sleep(3500) // at least one host-cadence read
+  const formsAfter = await page.evaluate(() => {
+    const els = (window as unknown as { __forms: (HTMLTextAreaElement & { __sets?: number })[] }).__forms
+    return { items: els.map(el => ({ connected: el.isConnected, value: el.value, scrollTop: el.scrollTop, sets: el.__sets ?? 0 })), focused: document.activeElement === els[1], selection: [els[1].selectionStart, els[1].selectionEnd] }
+  })
+  result.forms = { formsBefore, formsAfter }
+  const formsOk = formsAfter.items.every((x, i) => x.connected && x.value === formsBefore[i].value && x.sets === 0 && x.scrollTop === formsBefore[i].scrollTop)
+  check(formsOk && formsAfter.focused && formsAfter.selection[0] === 3 && formsAfter.selection[1] === 9,
+    `six forms keep their control, text, internal scroll (answer ${formsAfter.items[1].scrollTop}, YAML ${formsAfter.items[3].scrollTop}) and get no value writes; focus and selection [3, 9] kept: ${JSON.stringify({ sets: formsAfter.items.map(x => x.sets), focused: formsAfter.focused, selection: formsAfter.selection })}`)
+
+  // 15. A conflicting submission (409) keeps the text and says so.
+  console.log('conflicting submission')
+  await page.route(opsUrl, route => route.fulfill({ status: 409, json: { error: 'the run changed since this view was read (seq 1 ≠ 2)' } }))
+  await page.locator('.questions .question[data-question="q1"] .answer-form button.primary').click()
+  await waitFor(async () => /changed since this view was read/.test(await page.locator('.banners').innerText()))
+  check(await page.getByLabel('Answer to q1').inputValue() === longText && /submit again \(your text is kept\)/.test(await page.locator('.banners').innerText()), 'a conflicting submission is refused, the text kept and the reason given')
+  await page.unroute(opsUrl)
+  for (const l of formLabels.slice(1)) if (l !== 'Adjusted definition') await page.getByLabel(l, { exact: true }).fill('')
+
+  // 16. The run is cancelled while an answer is composed: status and
+  // submission change at once; the control stays until the composition ends.
+  console.log('cancellation during composition')
+  await page.goto(`${BASE}/#/ws/chk/run/${R2.workflow}/${R2.run}`)
+  await page.waitForSelector('.run-summary[data-seq]')
+  const r2Answer = '.questions .question[data-question="q1"] textarea'
+  await page.locator(r2Answer).click()
+  await track(r2Answer)
+  await cdp.send('Input.imeSetComposition', { text: 'きゃんせる', selectionStart: 5, selectionEnd: 5 })
+  const cancelled = (await op(R2, { op: 'run.cancel', reason: 'cancelled during composition' })).seq
+  await waitSeq(cancelled)
+  await sleep(300)
+  const cDuring = await page.evaluate(() => {
+    const el = (window as unknown as { __tracked: HTMLTextAreaElement }).__tracked
+    return { connected: el.isConnected, focused: document.activeElement === el, readOnly: el.readOnly, button: (el.closest('.answer-form')!.querySelector('button') as HTMLButtonElement).disabled, state: (document.querySelector('.run-summary') as HTMLElement).dataset.state }
+  })
+  await cdp.send('Input.insertText', { text: 'キャンセル' })
+  await sleep(100)
+  const cEnded = await page.evaluate(() => { const el = (window as unknown as { __tracked: HTMLTextAreaElement }).__tracked; return { connected: el.isConnected, readOnly: el.readOnly, value: el.value, note: (el.parentElement!.querySelector('.closed-note') as HTMLElement).innerText } })
+  result.cancellation = { cDuring, cEnded }
+  check(cDuring.connected && cDuring.focused && !cDuring.readOnly && cDuring.button && cDuring.state === 'cancelled', `cancelled mid-composition: state and submission change, the control stays editable: ${JSON.stringify(cDuring)}`)
+  check(cEnded.connected && cEnded.readOnly && cEnded.value === 'キャンセル' && /run is cancelled/.test(cEnded.note), `after the composition: read-only, text kept, reason shown: ${JSON.stringify(cEnded)}`)
+
+  // 17. A historical view is read-only; a malformed record keeps unrelated
+  // local state and blocks only submission.
+  console.log('historical and malformed')
+  await gitOk(dir, ['add', '-A', 'devdocs'])
+  await gitOk(dir, ['commit', '-q', '-m', 'check: interaction state'])
+  const commit = (await gitOk(dir, ['rev-parse', 'HEAD'])).trim()
+  await page.goto(`${BASE}/#/ws/chk/run/${R1.workflow}/${R1.run}/at/${commit}`)
+  await page.waitForSelector('.run-summary[data-seq]')
+  const hist = await page.evaluate(() => ({ textareas: document.querySelectorAll('.run-side textarea').length, banner: /As committed/.test((document.querySelector('.banners') as HTMLElement).innerText), live: (document.querySelector('.live-state') as HTMLElement).innerText }))
+  check(hist.textareas === 0 && hist.banner && hist.live === 'history', `the historical view offers no forms: ${JSON.stringify(hist)}`)
+  await page.goto(`${BASE}/#/ws/chk/run/${R1.workflow}/${R1.run}`)
+  await page.waitForSelector('.run-summary[data-seq]')
+  await page.getByLabel('Answer to q1').fill('kept while the record is broken')
+  await track(answer)
+  const good = await (await import('node:fs/promises')).readFile(join(runDirOf(R1), 'run.json'), 'utf8')
+  await writeFile(join(runDirOf(R1), 'run.json'), good.slice(0, 120))
+  const broke = await waitFor(async () => /run\.json cannot be used/.test(await page.locator('.banners').innerText()))
+  const answerButton = page.locator('.questions .question[data-question="q1"] .answer-form button.primary')
+  const whileBroken = { ...(await tracked()), disabled: await answerButton.isDisabled() }
+  await writeFile(join(runDirOf(R1), 'run.json'), good)
+  const repaired = await waitFor(async () => !/cannot be used/.test(await page.locator('.banners').innerText()))
+  const afterRepair = { ...(await tracked()), disabled: await answerButton.isDisabled() }
+  result.malformed = { whileBroken, afterRepair }
+  check(broke !== null && whileBroken.connected && whileBroken.value === 'kept while the record is broken' && whileBroken.disabled && repaired !== null && afterRepair.connected && afterRepair.value === 'kept while the record is broken' && !afterRepair.disabled,
+    `a malformed record blocks submission and keeps the control and draft; repair re-enables it: ${JSON.stringify({ broken: whileBroken.disabled, repaired: !afterRepair.disabled, value: afterRepair.value })}`)
+  await page.getByLabel('Answer to q1').fill('')
+
+  // 18. A composition spanning heartbeat-only reads and a file change.
+  console.log('composition across heartbeats and a file change')
+  let beat2 = 0
+  const execUrl = `**/api/workspaces/chk/runs/ship/${R1.run}/exec`
+  await page.route(execUrl, async route => {
+    const res = await route.fetch()
+    const body = await res.json() as { executor: { state: string; detail?: string; at?: string } }
+    body.executor = { state: 'available', detail: 'check-harness; idle', at: new Date(Date.UTC(2026, 9, 12, 1, 0, beat2++)).toISOString() }
+    await route.fulfill({ response: res, json: body })
+  })
+  await page.locator(answer).click()
+  await track(answer)
+  await cdp.send('Input.imeSetComposition', { text: 'はーと', selectionStart: 3, selectionEnd: 3 })
+  await sleep(7000)
+  await writeFile(join(runDirOf(R1), 'grown-4.md'), 'changed while composing\n')
+  await waitFor(async () => (await page.locator('.run-side .file-link', { hasText: 'grown-4.md' }).count()) > 0)
+  const mid2 = await tracked()
+  await cdp.send('Input.insertText', { text: '心臓' })
+  const end2 = await tracked()
+  await page.unroute(execUrl)
+  result.compositionHostFile = { beats: beat2, mid2, end2 }
+  check(beat2 >= 2 && mid2.connected && mid2.focused && end2.connected && end2.value === '心臓' && end2.comp.includes('compositionend:心臓') && end2.sets === 0,
+    `a composition spanning ${beat2} heartbeat reads and a file change completes in the same control: ${JSON.stringify({ value: end2.value, sets: end2.sets, connected: end2.connected })}`)
   await page.locator(answer).fill('')
 
   // 6. One refresh lifecycle: slow reads never overlap, the shown sequence

@@ -129,6 +129,8 @@ export class RunSide {
   private readonly history = section('history', h('ol.history', { reversed: true }))
   private historyShown = ''
 
+  // Controls are created here once and attached by the updates when their
+  // operation applies, so a historical view never carries a form.
   constructor(actions: SideActions, actorName: string) {
     this.act = actions
     this.actor = h('input', { value: actorName, placeholder: 'your name', 'aria-label': 'Your name', size: 14 })
@@ -145,7 +147,6 @@ export class RunSide {
     apply.addEventListener('click', () => void this.sendAdjust(false))
     this.adjust = { root: adjustRoot, ta, reason, preview, previewButton, apply, base: null, result: null, busy: false }
     for (const c of [ta.el, reason.el]) c.addEventListener('input', () => this.renderPreview())
-    this.definition.root.append(adjustRoot)
 
     const fv = this.fileView
     fv.root.append(fv.head, fv.status, fv.pre)
@@ -160,7 +161,7 @@ export class RunSide {
       void instruction.submit(text => this.act.record({ op: 'run.resume', reason: text }, 'Resumed: the executor is queued.'))
     })
     this.resume = { root: h('div.resume-form', instruction.el, instruction.note, h('div.row.tight', resumeButton)), draft: instruction, button: resumeButton }
-    this.execution.root.append(this.resume.root, this.execMore)
+    this.execution.root.append(this.execMore)
 
     const evidence = new Owned(h('input', { placeholder: 'evidence: what you checked (report, commit, demo…)', 'aria-label': 'Decision evidence' }))
     const decide = (decision: 'accepted' | 'rejected') => {
@@ -182,7 +183,6 @@ export class RunSide {
       },
     }, 'Cancel run')
     this.decide = { root: h('div.decide', evidence.el, h('div.row.tight', accept, reject, cancel)), evidence, accept, reject, cancel, busy: false }
-    this.result.root.append(this.decide.root)
 
     this.el.append(this.placeholder,
       h('div.actor-row', h('label.small', 'Recording as ', this.actor), h('span.muted.small', 'declared, like an approver; saved in this browser')),
@@ -667,6 +667,7 @@ export class RunSide {
     show(this.result.root, !this.data.rev)
     if (this.data.rev) return
     setText(this.result.title, 'Result')
+    if (!this.decide.root.isConnected) this.result.root.append(this.decide.root)
     const completed = rec.execution.state === 'completed'
     patchContent(this.result.root.children[1] as HTMLElement,
       ...rec.decisions.map((d, i) => h(`div.banner.${d.decision === 'accepted' ? 'ok' : 'error'}`, { dataset: { key: `d:${i}` } }, `${d.decision} by ${d.by} (${when(d.at)}) — evidence: ${d.evidence}${d.note ? ` — ${d.note}` : ''}`)),

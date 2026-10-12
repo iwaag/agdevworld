@@ -283,3 +283,23 @@ test('an interrupted adjustment (revision file written, run.json not) leaves the
   assert.equal(await readFile(join(folder, 'definition', 'r2', 'improve.yaml'), 'utf8'), text)
   assert.equal((await rec(ws, ref)).definition.active, 'r2')
 })
+
+test('command line: wfe run adjust --dry-run inspects without writing; wfe present stop --all is a flag', async () => {
+  const { ws, ref, folder, area } = await setup()
+  await advance(ws, ref, folder, ['implement'])
+  const { main } = await import('../cli/wfe.ts')
+  const file = join(area, 'next.yaml')
+  await writeFile(file, FLOW(BASE_NODES + node('extra', 'do'), [...BASE_EDGES, ['cleanup', 'extra']]))
+  const registry = join(area, 'registry.json')
+  const out: string[] = []
+  const log = console.log
+  console.log = (...a: unknown[]) => { out.push(a.join(' ')) }
+  try {
+    assert.equal(await main(['run', 'adjust', 'improve/run-001', '--definition', file, '--reason', 'r', '--source', 'person', '--dry-run', '--by', 'Pat', '--workspace', 'p', '--registry', registry, '--area', area]), 0)
+    assert.match(out.join('\n'), /Applicable to r1 \(dry run; nothing written\)/)
+    assert.equal((await rec(ws, ref)).definition.active, undefined)
+    out.length = 0
+    assert.equal(await main(['present', 'stop', 'improve/run-001', '--all', '--workspace', 'p', '--registry', registry, '--area', area]), 0)
+    assert.match(out.join('\n'), /Nothing of this run is served or open/)
+  } finally { console.log = log }
+})

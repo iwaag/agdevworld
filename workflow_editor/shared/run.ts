@@ -851,7 +851,7 @@ export function apply(prev: RunState | null, e: HistoryEntry | (OpInput & EntryM
       const a = q.answers[index]
       s.decisions.push({
         decision: e.decision, by, at, note: optText(e.note, 'note'),
-        evidence: optText(e.evidence, 'evidence') || `${q.id} answer ${index} from ${a.from}${a.source ? ` (Zulip message ${a.source.message})` : ''}, confirming ${asked.map(x => `${x.path} (${x.sha256.slice(0, 12)})`).join(', ')}`,
+        evidence: optText(e.evidence, 'evidence') || `${q.id} answer ${index} from ${a.from}${a.source ? ` (Zulip message ${a.source.message})` : ''}, confirming ${q.presentation ? `presentation ${q.presentation.id} (revision ${q.presentation.revision.slice(7, 19)}, ${asked.length} files)` : asked.map(x => `${x.path} (${x.sha256.slice(0, 12)})`).join(', ')}`,
         confirmation: { question: q.id, answer: index, from: a.from, ...(a.source ? { source: a.source } : {}), subject: asked, ...(q.presentation ? { presentation: q.presentation } : {}) },
       })
       break

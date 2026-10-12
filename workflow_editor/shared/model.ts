@@ -35,14 +35,8 @@ export const PROFILE_PATTERN = /^[a-z0-9][a-z0-9_.-]{0,63}$/
 export const APPEARANCE_ICONS = ['study', 'do', 'delegate', 'talk', 'present', 'cleanup', 'test', 'doc', 'build', 'review', 'flag'] as const
 export const APPEARANCE_COLORS = ['blue', 'amber', 'violet', 'teal', 'green', 'rose', 'slate', 'orange'] as const
 export interface Appearance { icon: string; color: string } // '' = the type's default
-// Palette presets: ordinary nodes with an appearance and a starting name and
-// description, all editable. The preset is not stored; the node is.
-export const NODE_PRESETS = {
-  present: { type: 'do', name: 'Present', appearance: { icon: 'present', color: 'teal' },
-    description: 'Prepare the result for the person: freeze it as a presentation with an explanation of what changed, how to use it and what to check; start its server and confirm the review link opens.' },
-  cleanup: { type: 'do', name: 'Clean up', appearance: { icon: 'cleanup', color: 'slate' },
-    description: 'Stop what this run started for the review (presentation servers) and verify that it stopped; record the outcome.' },
-} as const satisfies Record<string, { type: NodeType; name: string; description: string; appearance: Appearance }>
+// Node presets moved into the person's node catalog in p7/ex1
+// (shared/catalog.ts SEEDS, docs/catalog.md).
 export type ApprovalKind = typeof APPROVAL_KINDS[number]
 
 // Stable identifiers: workflow IDs, node IDs and repository binding keys.
@@ -59,7 +53,11 @@ export interface WorkflowNode {
   workflow?: string
   confirms?: string // 'result' on the result-confirmation talk (p6)
   appearance?: Appearance // display only (p7)
+  template?: TemplateRef // provenance (p7/ex1): the catalog template it was made from; outside digests and the compiled graph
 }
+// Where a node came from (p7/ex1, docs/catalog.md): the template's id and
+// revision, and its expectation at that revision.
+export interface TemplateRef { id: string; revision: number; expectation: string }
 export interface Edge { from: string; to: string }
 export interface ApprovalRecord { digest: string; approver: string; at: string }
 export interface Point { x: number; y: number }
@@ -191,6 +189,12 @@ export function workflowFromData(raw: unknown): { workflow: Workflow; issues: Sh
     if (value.appearance !== undefined && value.appearance !== null) {
       const a = map(value, 'appearance', path, issues)
       node.appearance = { icon: text(a, 'icon', `${path}.appearance`, issues), color: text(a, 'color', `${path}.appearance`, issues) }
+    }
+    if (value.template !== undefined && value.template !== null) {
+      const t = map(value, 'template', path, issues)
+      const rev = t.revision
+      if (typeof rev !== 'number' || !Number.isInteger(rev) || rev < 1) issues.push({ path: `${path}.template.revision`, message: 'expected a positive integer' })
+      node.template = { id: text(t, 'id', `${path}.template`, issues), revision: typeof rev === 'number' ? rev : 0, expectation: text(t, 'expectation', `${path}.template`, issues) }
     }
     w.nodes[key] = node
   }

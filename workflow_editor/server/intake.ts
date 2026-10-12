@@ -340,7 +340,7 @@ export class IntakeStore {
         if (held) return this.refuse(row, b, `workspace ${ws.reg.id} is held by run ${held}, which has not completed; one run works in a workspace at a time. Open a new request topic once it has finished.`)
         try {
           ref = (await createRun(ws, {
-            workflow: b.workflow, receipt, executor: { host: this.exec?.executor ?? 'autolab' }, by: person, via: 'zulip',
+            workflow: b.workflow, receipt, executor: { host: this.exec?.executor ?? 'autolab' }, by: person, via: 'zulip', area: this.area,
             input: { kind: 'braindump', text: row.content, author: person, source: this.source(row) },
           })).ref
         } catch (e) {

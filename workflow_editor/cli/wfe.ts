@@ -21,6 +21,7 @@ import { RequestError, Workspace } from '../server/workspace.ts'
 import { listRuns } from '../server/runs.ts'
 import { setupArea } from './setup.ts'
 import { runCommand, runIndex } from './run.ts'
+import { NODES_HELP, nodesCommand } from './nodes.ts'
 import { codeVersion } from '../server/version.ts'
 import { assertNotRetired, assertWorkspaceAllowed, loadBoundary, retiredByUrl } from '../server/boundary.ts'
 
@@ -153,6 +154,7 @@ function workflowLine(w: WorkflowSummary) {
 // ---- help --------------------------------------------------------------------
 
 const HELP: Record<string, string> = {
+  nodes: NODES_HELP,
   create: `wfe create <dir> --name <name> [--id <id>] [--intent <text>] [--goal <text>]... [--devdocs directory|submodule] [--devdocs-source <path|url>] [--resume]
 
 Creates a new project and registers it as a workspace. With a Gitea setting
@@ -443,6 +445,8 @@ Projects and workspaces
 
 Workflows (by file name or id)
   workflow new <id>         create devdocs/workflows/<id>.yaml from the template
+  nodes <subcommand>        the person's node catalog: list, show, create, update, delete,
+                            example, instantiate (a template into a workflow or a run draft)
   validate [<workflow>]     validation issues
   approve <wf> <kind>       record an intent or definition approval by a named approver
   arrange <workflow>        auto-arrange the layout
@@ -648,6 +652,7 @@ async function cmdRun(p: Parsed): Promise<number> {
     refused: (m, detail) => new Refused(m, detail),
     serviceUrl: async () => { const s = await serviceState(p); return s.running && s.sameRegistry ? s.url : null },
     exec: () => execStore!,
+    area: () => areaDir(p),
   }).finally(() => { execStore?.close(); execStore = undefined })
 }
 
@@ -1017,7 +1022,18 @@ const COMMANDS: Record<string, (p: Parsed) => Promise<number>> = {
   run: cmdRun, present: cmdPresent, project: cmdProject, repo: cmdRepo, dashboard: cmdDashboard, exec: cmdExec, request: cmdRequest, notify: cmdNotify, intake: cmdIntake,
   create: cmdCreate, register: cmdRegister, list: cmdList, status: cmdStatus, validate: cmdValidate,
   approve: cmdApprove, arrange: cmdArrange, 'add-repo': cmdAddRepo, workflow: cmdWorkflow, serve: cmdServe, setup: cmdSetup,
-  version: cmdVersion,
+  version: cmdVersion, nodes: cmdNodes,
+}
+
+// The person's node catalog (p7/ex1): templates, examples, instantiation.
+async function cmdNodes(p: Parsed): Promise<number> {
+  const reg = await loadRegistry(registryFile(p)).catch(() => null)
+  return nodesCommand({
+    positional: p.positional, opt: k => opt(p, k), opts: k => p.opts.get(k) ?? [],
+    area: () => areaDir(p), by: () => reg?.approver || undefined,
+    workspace: () => workspace(p), workflowFile, out,
+    usage: m => new UsageError(m), refused: (m, d) => new Refused(m, d),
+  })
 }
 
 async function cmdVersion(): Promise<number> {

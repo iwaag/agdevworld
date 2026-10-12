@@ -204,6 +204,40 @@ export function createHandler(config: ServiceConfig) {
         throw new RequestError(404, `no route for ${method} ${url.pathname}`)
       }
 
+      // ---- the person's node catalog (p7/ex1, docs/catalog.md) ----
+      if (a === 'nodes') {
+        const { addExample, createTemplate, deleteTemplate, readCatalog, updateTemplate } = await import('./catalog.ts')
+        const { EXAMPLES } = await import('../shared/catalog.ts')
+        const content = (input: Record<string, unknown>) => ({
+          name: typeof input.name === 'string' ? input.name : '', type: typeof input.type === 'string' ? input.type : '',
+          description: typeof input.description === 'string' ? input.description : '', expectation: typeof input.expectation === 'string' ? input.expectation : '',
+          ...(isObj(input.appearance) ? { appearance: { icon: String(input.appearance.icon ?? ''), color: String(input.appearance.color ?? '') } } : {}),
+        })
+        if (!wsId && method === 'GET') {
+          const r = await readCatalog(area)
+          return send(res, 200, { ...r, examples: Object.entries(EXAMPLES).map(([id, c]) => ({ id, ...c })) })
+        }
+        if (!wsId && method === 'POST') {
+          const input = await body(req) as Record<string, unknown>
+          return send(res, 201, { ok: true, ...(await createTemplate(area, str(input.id, 'id'), content(input), typeof input.by === 'string' ? input.by : '')) })
+        }
+        if (wsId === 'examples' && b && method === 'POST') {
+          const input = await body(req) as Record<string, unknown>
+          return send(res, 201, { ok: true, ...(await addExample(area, b, typeof input.by === 'string' ? input.by : '', typeof input.id === 'string' && input.id.trim() ? input.id.trim() : undefined)) })
+        }
+        if (wsId && !b && method === 'PUT') {
+          const input = await body(req) as Record<string, unknown>
+          if (typeof input.expectRevision !== 'number') throw new RequestError(400, 'expectRevision is required: the revision the edit was based on')
+          return send(res, 200, { ok: true, ...(await updateTemplate(area, wsId, content(input), input.expectRevision, typeof input.by === 'string' ? input.by : '')) })
+        }
+        if (wsId && !b && method === 'DELETE') {
+          const rev = Number(url.searchParams.get('revision'))
+          if (!Number.isInteger(rev) || rev < 1) throw new RequestError(400, 'revision is required: the revision being deleted')
+          return send(res, 200, { ok: true, ...(await deleteTemplate(area, wsId, rev, url.searchParams.get('by') ?? '')) })
+        }
+        throw new RequestError(404, `no route for ${method} ${url.pathname}`)
+      }
+
       // The home page's stream: registry changes only.
       if (a === 'events' && method === 'GET') {
         if (!config.watcher) throw new RequestError(404, 'watching is disabled')
@@ -381,6 +415,15 @@ export function createHandler(config: ServiceConfig) {
           config.watcher?.noteOwnWrite(ws, `devdocs/workflows/${file}`, saved.rev)
           return send(res, 200, { ok: true, ...saved })
         }
+      }
+      // A node from a template of the person's catalog (p7/ex1), into the saved file.
+      if (b === 'workflows' && file && action === 'instantiate' && method === 'POST') {
+        const input = await body(req) as Record<string, unknown>
+        const list = (v: unknown, what: string) => { if (v === undefined) return undefined; if (!texts(v)) throw new RequestError(400, `${what} must be a list of text`); return v as string[] }
+        const { instantiateIntoWorkflow } = await import('./catalog.ts')
+        const r = await instantiateIntoWorkflow(area, ws, file, str(input.template, 'template'), { id: typeof input.id === 'string' && input.id.trim() ? input.id.trim() : undefined, repositories: list(input.repositories, 'repositories'), after: list(input.after, 'after'), before: list(input.before, 'before') })
+        config.watcher?.noteOwnWrite(ws, `devdocs/workflows/${file}`, r.rev)
+        return send(res, 200, { ok: true, ...r })
       }
       if (b === 'workflows' && file && action === 'approve' && method === 'POST') {
         const input = await body(req) as Record<string, unknown>

@@ -25,6 +25,7 @@ export interface RunCli {
   refused: (m: string, detail?: unknown) => Error
   serviceUrl: () => Promise<string | null> // the editor's base URL when it serves this registry
   exec: () => ExecStore // this host's execution management (queue, attempts, publication)
+  area: () => string // the operating area (its node catalog is frozen into new runs, p7/ex1)
 }
 
 const COMMON = `Common options: --by <name> (who records; default the run's executor),
@@ -475,7 +476,7 @@ export async function runCommand(c: RunCli): Promise<number> {
       const predecessor = c.opt('predecessor') ? await wrap(() => resolveRef(ws, c.opt('predecessor')!)) : undefined
       const r = await wrap(() => createRun(ws, {
         workflow, name: c.opt('name'), input, executor, plan: c.opt('plan') !== undefined ? readInput(c, c.opt('plan')!) : undefined,
-        predecessor, by: by ?? executor.name, via: 'cli',
+        predecessor, by: by ?? executor.name, via: 'cli', area: c.area(),
       }))
       const url = await link(runKey(r.ref))
       c.out([`Created run ${runKey(r.ref)} in ${r.dir}/`, ...r.files.map(f => `  ${f}`),

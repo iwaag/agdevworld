@@ -5,7 +5,8 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { approvalStates, canonicalJson, semanticDigest } from '../shared/canonical.ts'
 import { compile } from '../shared/compile.ts'
-import { NODE_PRESETS, cloneWorkflow, emptyWorkflow, type Workflow } from '../shared/model.ts'
+import { cloneWorkflow, emptyWorkflow, type Workflow } from '../shared/model.ts'
+import { instantiate, SEEDS } from '../shared/catalog.ts'
 import { operate, type RunGraph, type RunRecord } from '../shared/run.ts'
 import { validateWorkflow } from '../shared/validate.ts'
 import { parseWorkflow, renderWorkflow } from '../server/yamlDoc.ts'
@@ -90,13 +91,13 @@ test('unknown icons and colors are display warnings, never errors', () => {
   assert.ok(!r.ok && r.problem.kind === 'shape' && /appearance/.test(r.problem.message))
 })
 
+// Since p7/ex1 the presets are the catalog's seed templates (shared/catalog.ts).
 test('presets make ordinary do nodes that run like any do node', () => {
-  for (const p of Object.values(NODE_PRESETS)) assert.equal(p.type, 'do')
-  const w = emptyWorkflow('w', 'W')
+  for (const p of Object.values(SEEDS)) assert.equal(p.type, 'do')
+  let w = emptyWorkflow('w', 'W')
   w.intent = 'x'; w.documentation.policy = 'manual'
-  w.nodes.show = { type: 'do', name: NODE_PRESETS.present.name, description: NODE_PRESETS.present.description, repositories: [], appearance: { ...NODE_PRESETS.present.appearance } }
-  w.nodes.tidy = { type: 'do', name: NODE_PRESETS.cleanup.name, description: NODE_PRESETS.cleanup.description, repositories: [], appearance: { ...NODE_PRESETS.cleanup.appearance } }
-  w.edges = [{ from: 'show', to: 'tidy' }]
+  w = instantiate(w, { id: 'present', revision: 1, ...SEEDS.present }, { id: 'show' }).workflow
+  w = instantiate(w, { id: 'cleanup', revision: 1, ...SEEDS.cleanup }, { id: 'tidy', after: ['show'] }).workflow
   const c = compile(w)
   assert.ok(c.ok)
   assert.deepEqual(c.graph.nodes, { show: { type: 'do' }, tidy: { type: 'do' } })

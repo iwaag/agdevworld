@@ -28,7 +28,7 @@ export function renderHomeView(root: HTMLElement): ViewHandle {
   // loopback agdev origin.
   const agdevworld = location.pathname.startsWith('/wfe/') ? '/' : 'http://localhost:8093/'
   const header = h('header.topbar', h('div.crumbs', h('a.back-to-world', { href: agdevworld, title: 'agdevworld operation room' }, '← agdevworld'), h('span.sep', '|'), h('strong', 'agdev'), h('span.sep', '/'), h('span.muted', 'Dashboard')),
-    h('div.top-actions', h('span.live-state.muted.small'), h('button', { onclick: () => void load() }, 'Refresh')))
+    h('div.top-actions', h('a.button', { href: '#/nodes', title: 'The activities you expect as distinct workflow nodes (your node catalog)' }, 'User nodes'), h('span.live-state.muted.small'), h('button', { onclick: () => void load() }, 'Refresh')))
   const main = h('main.dashboard')
   root.append(header, main)
 

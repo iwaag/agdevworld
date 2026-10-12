@@ -1,4 +1,4 @@
-// Node appearance in the browser (p7 step 2): presets in the palette, the
+// Node appearance in the browser (p7 step 2): presets (catalog templates since p7/ex1) in the palette, the
 // inspector's icon and color, saving, and — in the run view — that a node's
 // own color never replaces its state's words, glyph or colors. Builds its own
 // temporary project and private service.
@@ -83,11 +83,13 @@ try {
   check(await page.locator('.node[data-id="present"]').evaluate(e => e.classList.contains('color-teal') && e.classList.contains('type-do')), 'the presentation node keeps its type and shows its own color')
   check(await page.locator('.node[data-id="present"] .type-label').textContent() === 'Do', 'its type label still says Do')
   check(await page.locator('.node[data-id="implement"]').evaluate(e => ![...e.classList].some(c => c.startsWith('color-'))), 'a node without appearance uses its type\'s look')
-  const presetButtons = await page.locator('button.add-node.preset').allTextContents()
-  check(presetButtons.some(t => t.includes('Present')) && presetButtons.some(t => t.includes('Clean up')), `the palette offers the presets (${presetButtons.join(', ')})`)
+  // Since p7/ex1 the presets are the person's catalog templates (seeded once).
+  await page.locator('button.add-node.template').first().waitFor()
+  const presetButtons = await page.locator('button.add-node.template').allTextContents()
+  check(presetButtons.some(t => t.includes('Present')) && presetButtons.some(t => t.includes('Clean up')), `the palette offers the seeded templates (${presetButtons.join(', ')})`)
   const approvedBefore = await page.locator('.approval-box, .approvals').first().textContent().catch(() => '')
-  await page.locator('button.add-node.preset', { hasText: 'Clean up' }).click()
-  const added = page.locator('.node[data-id="cleanup-1"]')
+  await page.locator('button.add-node.template', { hasText: 'Clean up' }).click()
+  const added = page.locator('.node[data-id="cleanup-2"]')
   await added.waitFor()
   check(await added.evaluate(e => e.classList.contains('color-slate') && e.classList.contains('type-do')), 'a preset adds an ordinary do node with the preset look')
   await page.locator('.node[data-id="implement"]').click()
@@ -97,7 +99,7 @@ try {
   await page.waitForTimeout(600)
   const saved = await readFile(join(dir, 'devdocs', 'workflows', 'show.yaml'), 'utf8')
   check(/implement:[\s\S]*?appearance: \{color: orange\}/.test(saved), 'saving writes the appearance in flow style')
-  check(/cleanup-1:\n    type: do\n    name: Clean up/.test(saved), 'the preset node is saved as a do node with its name')
+  check(/cleanup-2:\n    type: do\n    name: Clean up/.test(saved), 'the template node is saved as a do node with its name')
   const approvedAfter = await page.locator('.approval-box, .approvals').first().textContent().catch(() => '')
   check(!/stale/i.test(approvedAfter ?? '') || /stale/i.test(approvedBefore ?? ''), 'restyling did not make an approval stale (adding a node did change the definition)')
   await shot(page, 'p7-appearance-editor')

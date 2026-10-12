@@ -14,11 +14,12 @@ import { validateWorkflow } from '../shared/validate.ts'
 import {
   activeRevision, checkRecord, delegateNodes, documentPath, graphOfState, hostOf, operate, presentationFolder, type AdjustSource, type AdjustDiff, graphDiff, RUN_ID, RunError, runFolder, RUNS_ROOT, runKey, validRunRef, type Presentation,
   type BundleEntry, type DefinitionRef, type DocumentEvidence, type EntrustRef, type Executor, type OpInput, type RepoContext, type RunGraph,
-  type EntryMeta, type RunInput, type RunRecord, type RunRef,
+  type EntryMeta, type RunInput, type RunRecord, type RunRef, type RunState,
 } from '../shared/run.ts'
 import type { SourceRef } from '../shared/intake.ts'
 import { atomicWrite, inside, readTextOrNull } from './files.ts'
 import { MANIFEST_KIND } from '../shared/review.ts'
+import { parseSnapshot, type CatalogContext, type CatalogSnapshot } from '../shared/catalog.ts'
 import { withLock } from './lock.ts'
 import { blobSizeAt, listAt, resolveRev, RevError, showAt, type DevdocsInfo, type DevdocsRev } from './devdocs.ts'
 import { RequestError, WORKFLOWS_DIR, type Workspace } from './workspace.ts'
@@ -26,6 +27,8 @@ import { parseWorkflow } from './yamlDoc.ts'
 
 export const RUN_FILE = 'run.json'
 export const DEFINITION_DIR = 'definition'
+// The person's node catalog as a run was given it (p7/ex1, docs/catalog.md).
+export const CATALOG_SNAPSHOT = 'context/node-catalog.json'
 const MAX_RUNS = 500
 const MAX_FILES = 200
 const MAX_READ = 1024 * 1024
@@ -82,7 +85,7 @@ function gitSource(info: DevdocsInfo, rev: DevdocsRev, runRel: string): Source {
   }
 }
 
-interface Bundle { entries: Record<string, { file: string; text?: string; workflow?: Workflow; problem?: string }>; graph?: RunGraph; problem?: string; revisions?: { revision: string; file: string; text: string; workflow: Workflow }[] }
+interface Bundle { entries: Record<string, { file: string; text?: string; workflow?: Workflow; problem?: string }>; graph?: RunGraph; problem?: string; revisions?: { revision: string; file: string; text: string; workflow: Workflow }[]; catalog?: CatalogSnapshot }
 
 async function loadBundle(src: Source, def: unknown): Promise<Bundle> {
   const out: Bundle = { entries: {} }
@@ -141,6 +144,10 @@ async function readFrom(src: Source, expect: RunRef & { project?: string }, cach
     const revProblem = await loadRevisions(src, checked.record, bundle)
     if (revProblem) return { text, problem: { kind: 'shape', message: revProblem, code: 'bundle' }, bundle }
     bundle.graph = graphOfState(checked.record) ?? bundle.graph
+    // The person's node catalog as the run was given it (p7/ex1): checked
+    // by hash like the bundle, never re-read from the live catalog.
+    const catProblem = await loadCatalogSnapshot(src, checked.record, bundle)
+    if (catProblem) return { text, problem: { kind: 'shape', message: catProblem, code: 'bundle' }, bundle }
     if (expect.project !== undefined && checked.record.project !== expect.project) {
       return { text, problem: { kind: 'shape', message: `${RUN_FILE} belongs to project "${checked.record.project}", not "${expect.project}"`, code: 'location' }, bundle }
     }
@@ -214,11 +221,36 @@ async function loadRevisions(src: Source, rec: RunRecord, bundle: Bundle): Promi
   return null
 }
 
+async function loadCatalogSnapshot(src: Source, rec: RunRecord, bundle: Bundle): Promise<string | null> {
+  const c = rec.context?.catalog
+  if (!c || c.state !== 'supplied') return null
+  if (c.file !== CATALOG_SNAPSHOT) return `run.json names the catalog snapshot ${String(c.file)}, not ${CATALOG_SNAPSHOT}`
+  const text = await src.text(c.file)
+  if (text === null) return `${c.file} (the node catalog this run was given) is missing`
+  if (sha256(text) !== c.sha256) return `${c.file} differs from its recorded sha256 (the run's catalog snapshot was changed)`
+  try { bundle.catalog = parseSnapshot(JSON.parse(text)) } catch (e) { return `${c.file}: ${(e as Error).message}` }
+  return null
+}
+
+// What a run was given of the person's node catalog (p7/ex1): the frozen
+// snapshot, why there is none, or that the run predates catalogs.
+export type RunCatalog = { state: 'supplied'; file: string; sha256: string; snapshot: CatalogSnapshot } | { state: 'unavailable'; problem: string } | { state: 'none' }
+export function catalogOf(record: RunRecord, bundle: { catalog?: CatalogSnapshot }): RunCatalog {
+  const c = record.context?.catalog
+  if (!c) return { state: 'none' }
+  if (c.state === 'unavailable') return { state: 'unavailable', problem: c.problem }
+  return { state: 'supplied', file: `${runDir(record)}/${c.file}`, sha256: c.sha256, snapshot: bundle.catalog! }
+}
+export async function runCatalog(ws: Workspace, ref: RunRef): Promise<RunCatalog> {
+  const { record, bundle } = await usableRun(ws, ref)
+  return catalogOf(record, bundle)
+}
+
 export async function readRun(ws: Workspace, ref: RunRef): Promise<Reading & { dir: string }> {
   const rel = runDir(ref)
   const dir = await inside(ws.root, rel)
   const project = await projectId(ws)
-  const key = `${dir}\0${project}\0${await sigOf(join(dir, RUN_FILE))}\0${await bundleSigs(dir)}`
+  const key = `${dir}\0${project}\0${await sigOf(join(dir, RUN_FILE))}\0${await bundleSigs(dir)}\0${await sigOf(join(dir, CATALOG_SNAPSHOT))}`
   return { ...(await readFrom(fsSource(dir), { ...ref, project }, key)), dir }
 }
 
@@ -418,6 +450,9 @@ export interface CreateRunOptions {
   // The idempotency key of the input (p6: the Zulip post), carried by
   // run.create; findRunByReceipt finds the run again after a crash.
   receipt?: string
+  // The operating area whose node catalog the run is given (p7/ex1): every
+  // entrance passes it; the snapshot is frozen into the run folder.
+  area?: string
   by: string
   via: string
   now?: Date
@@ -497,6 +532,7 @@ async function writeRun(ws: Workspace, ref: RunRef, files: Record<string, string
   await mkdir(join(dir, DEFINITION_DIR))
   const written: string[] = []
   for (const [name, text] of Object.entries(files)) {
+    if (name.includes('/')) await mkdir(join(dir, name.slice(0, name.lastIndexOf('/'))), { recursive: true })
     await writeFile(join(dir, name), text, { flag: 'wx' })
     written.push(`${rel}/${name}`)
   }
@@ -512,10 +548,11 @@ function inputOf(o: CreateRunOptions['input']): { input: RunInput; files: Record
     const input: RunInput = { kind: 'braindump', file: 'braindump.md', author: o.author.trim() }
     if (o.recordedBy?.trim() && o.recordedBy.trim() !== input.author) input.recordedBy = o.recordedBy.trim()
     if (o.source) input.source = o.source
+    input.sha256 = sha256(o.text) // what a request-sourced adjustment binds to (p7/ex1)
     return { input, files: { 'braindump.md': o.text } }
   }
   if (!o.requester?.trim()) throw new RequestError(400, 'a request needs its requester: the agent that wrote it (--requester)')
-  const input: RunInput = { kind: 'request', file: 'request.md', requester: o.requester.trim(), entrustedBy: validEntrust(o.entrustedBy) }
+  const input: RunInput = { kind: 'request', file: 'request.md', requester: o.requester.trim(), entrustedBy: validEntrust(o.entrustedBy), sha256: sha256(o.text) }
   if (o.onBehalfOf?.trim()) input.onBehalfOf = o.onBehalfOf.trim()
   const files: Record<string, string> = { 'request.md': o.text }
   if (o.original !== undefined) { input.original = 'original-input.md'; files['original-input.md'] = o.original }
@@ -538,7 +575,15 @@ export async function createRun(ws: Workspace, o: CreateRunOptions): Promise<Cre
   const ref = validRef({ workflow: src.root, run: o.name ?? await nextRunId(ws, src.root) })
   if (o.predecessor) validRunRef(o.predecessor, 'predecessor')
   const definition = await definitionRef(src.root, src.files, src.warnings)
-  const context = await repoContext(ws, src.files)
+  const context: { repositories: RepoContext[]; catalog?: CatalogContext } = await repoContext(ws, src.files)
+  if (o.area) {
+    const { snapshotForRun } = await import('./catalog.ts')
+    const snap = await snapshotForRun(o.area)
+    if (snap.state === 'supplied') {
+      files[CATALOG_SNAPSHOT] = snap.text
+      context.catalog = { state: 'supplied', file: CATALOG_SNAPSHOT, sha256: snap.sha256, generation: snap.snapshot.generation, templates: snap.snapshot.templates.length }
+    } else context.catalog = { state: 'unavailable', problem: snap.problem }
+  }
   const compiled = compile(src.files[src.root].workflow)
   if (!compiled.ok) throw new RequestError(422, `${src.root} cannot be executed: ${compiled.message}. Nothing was written.`, { code: compiled.code })
   definition.effective = compiled.graph
@@ -551,7 +596,7 @@ export async function createRun(ws: Workspace, o: CreateRunOptions): Promise<Cre
   return writeRun(ws, ref, files, record)
 }
 
-function createRecord(project: string, ref: RunRef, input: RunInput, o: Pick<CreateRunOptions, 'predecessor' | 'by' | 'via' | 'now'> & { executor: Executor }, definition: DefinitionRef, context: { repositories: RepoContext[] }, graph: RunGraph, receipt?: string): RunRecord {
+function createRecord(project: string, ref: RunRef, input: RunInput, o: Pick<CreateRunOptions, 'predecessor' | 'by' | 'via' | 'now'> & { executor: Executor }, definition: DefinitionRef, context: RunState['context'], graph: RunGraph, receipt?: string): RunRecord {
   const executor: Executor = { name: o.executor.name.trim(), backend: o.executor.backend?.trim() || null, ...(o.executor.host ? { host: o.executor.host } : {}) }
   try {
     return operate(null, {

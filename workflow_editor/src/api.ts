@@ -5,6 +5,7 @@ import type {
 } from '../shared/api.ts'
 import type { ApprovalState } from '../shared/canonical.ts'
 import type { ApprovalKind, Project, Workflow } from '../shared/model.ts'
+import type { Catalog, NodeTemplate, TemplateContent } from '../shared/catalog.ts'
 
 // One run's execution on this host (server/exec.ts runView).
 export interface RunExecView {
@@ -29,6 +30,10 @@ export interface AdjustView {
   graph: { added: string[]; removed: string[]; changed: string[]; edgesAdded: [string, string][]; edgesRemoved: [string, string][] }
   problems: { code: string; message: string }[]
 }
+
+// The person's node catalog (p7/ex1, server/catalog.ts readCatalog).
+export type CatalogView = ({ state: 'ok'; file: string; catalog: Catalog; initializedNow?: boolean } | { state: 'unavailable'; file: string; problem: string }) & { examples: (TemplateContent & { id: string })[] }
+type TemplateBody = TemplateContent & { by: string }
 
 export class ApiError extends Error {
   status: number
@@ -95,6 +100,11 @@ export const api = {
   retryCheckpoint: (id: string, workflow: string, run: string, checkpoint: number) => call<unknown>('POST', `${ws(id)}/runs/${encodeURIComponent(workflow)}/${encodeURIComponent(run)}/checkpoints/${checkpoint}/publish`),
   requestRun: (id: string, input: { workflow: string; text: string; author: string; receipt: string }) =>
     call<{ ok: true; duplicate: boolean; ref: { workflow: string; run: string }; job: { id: number; state: string } }>('POST', `${ws(id)}/runs`, input),
+  catalog: () => call<CatalogView>('GET', 'api/nodes'),
+  createTemplate: (body: TemplateBody & { id: string }) => call<{ template: NodeTemplate }>('POST', 'api/nodes', body),
+  updateTemplate: (id: string, body: TemplateBody & { expectRevision: number }) => call<{ template: NodeTemplate; changed: boolean }>('PUT', `api/nodes/${encodeURIComponent(id)}`, body),
+  deleteTemplate: (id: string, revision: number, by: string) => call<{ ok: true }>('DELETE', `api/nodes/${encodeURIComponent(id)}?revision=${revision}&by=${encodeURIComponent(by)}`),
+  addExample: (example: string, by: string) => call<{ template: NodeTemplate }>('POST', `api/nodes/examples/${encodeURIComponent(example)}`, { by }),
   eventsUrl: (id?: string) => (id ? `${ws(id)}/events` : 'api/events'),
 }
 

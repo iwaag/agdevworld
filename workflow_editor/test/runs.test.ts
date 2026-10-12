@@ -234,7 +234,10 @@ test('creation in both modes: the new layout, project identity, authorship and c
     assert.equal(c.record.schema, 'ag.workflow-run.v2')
     assert.deepEqual(Object.keys(c.record.definition.workflows), ['ship'])
     assert.equal(await readFile(join(dir, c.dir, 'definition', 'ship.yaml'), 'utf8'), SHIP)
-    assert.deepEqual(c.record.input, { kind: 'braindump', file: 'braindump.md', author: 'Test Person', recordedBy: 'Omni Agent' })
+    // p7/ex1: the input's hash is what a request-sourced adjustment binds to.
+    const { sha256: inputHash, ...input } = c.record.input
+    assert.deepEqual(input, { kind: 'braindump', file: 'braindump.md', author: 'Test Person', recordedBy: 'Omni Agent' })
+    assert.match(inputHash!, /^[0-9a-f]{64}$/)
     assert.equal(await readFile(join(dir, c.dir, 'braindump.md'), 'utf8'), 'I want a small game.')
     assert.deepEqual(c.record.context.repositories.map(r => r.path).sort(), ['.', 'devdocs'])
     assert.ok(!JSON.stringify(c.record).includes(root), 'no machine paths in the record')
@@ -256,7 +259,7 @@ test('delegate execution is refused before anything is written; the definition s
 test('requests keep their requester and entrusting reference; collisions never overwrite', async () => {
   const { dir, ws } = await project('req', 'directory')
   const req = await createRun(ws, base({ name: 'run-derived', input: { kind: 'request', text: 'Build the game, focusing on bots.', requester: 'Omni Agent', entrustedBy: { kind: 'note', text: 'VS Code conversation 2026-10-10' }, onBehalfOf: 'Test Person', original: 'raw words of the person' } }))
-  assert.deepEqual(req.record.input, { kind: 'request', file: 'request.md', requester: 'Omni Agent', entrustedBy: { kind: 'note', text: 'VS Code conversation 2026-10-10' }, onBehalfOf: 'Test Person', original: 'original-input.md' })
+  assert.deepEqual({ ...req.record.input, sha256: undefined }, { sha256: undefined, kind: 'request', file: 'request.md', requester: 'Omni Agent', entrustedBy: { kind: 'note', text: 'VS Code conversation 2026-10-10' }, onBehalfOf: 'Test Person', original: 'original-input.md' })
   assert.equal(req.record.input.author, undefined, 'no human author is invented for a request')
   assert.equal(await readFile(join(dir, req.dir, 'original-input.md'), 'utf8'), 'raw words of the person')
   const before = await readFile(join(dir, req.dir, 'run.json'), 'utf8')

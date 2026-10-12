@@ -473,3 +473,18 @@ details.instructions pre { white-space: pre-wrap; background: #f6f7f9; border-ra
 .revision { border-left: 3px solid var(--line); padding-left: 8px; margin-bottom: 6px; }
 details.adjust textarea.yaml { width: 100%; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
 details.adjust input { width: 100%; margin: 6px 0; }
+
+/* User nodes (p7/ex1) */
+.nodes-view { padding: 16px 20px; max-width: 1280px; margin: 0 auto; }
+.nodes-grid { display: grid; grid-template-columns: minmax(320px, 1fr) minmax(360px, 1fr); gap: 16px; align-items: start; margin-top: 12px; }
+@media (max-width: 860px) { .nodes-grid { grid-template-columns: 1fr; } }
+.template-list { display: flex; flex-direction: column; gap: 10px; }
+.template-item { border: 1px solid var(--line); border-radius: 12px; padding: 10px; cursor: pointer; display: flex; flex-direction: column; gap: 6px; }
+.template-item.selected { box-shadow: 0 0 0 3px var(--accent); }
+.template-item.example { cursor: default; border-style: dashed; }
+.template-item .expectation { white-space: pre-wrap; }
+.node.preview { position: relative; width: 240px; cursor: default; }
+.node.preview .node-desc { white-space: pre-wrap; max-height: 7.5em; overflow: hidden; }
+.field.inline { flex-direction: row; align-items: center; gap: 8px; }
+.palette-templates { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.template-provenance { border-left: 3px solid var(--line); padding: 4px 8px; margin: 6px 0; font-size: 12px; white-space: pre-wrap; }

@@ -4,6 +4,7 @@
 // See docs/runs.md for the contract.
 import { canonicalJson } from './canonical.ts'
 import type { EffectiveGraph, StepSpec } from './compile.ts'
+import type { CatalogContext } from './catalog.ts'
 import { INSTRUCTION_RESPONSES, type SourceRef } from './intake.ts'
 import { ID_PATTERN, normalizeRepoPath, type Edge } from './model.ts'
 
@@ -44,6 +45,7 @@ export interface RunInput {
   entrustedBy?: EntrustRef
   original?: string // run-relative file keeping the input a request was derived from
   source?: SourceRef // where the person's words were posted (p6: the Zulip post that became the braindump)
+  sha256?: string // of the input file as written at creation (p7/ex1); what a request-sourced adjustment binds to
 }
 // `name` is the agent identity the run is performed as (p6: the workflow's
 // execution.agent); `host` the execution host that launches it, when that is
@@ -228,7 +230,7 @@ export interface RunState {
   executor: Executor
   predecessor: RunRef | null
   definition: DefinitionRef
-  context: { repositories: RepoContext[] }
+  context: { repositories: RepoContext[]; catalog?: CatalogContext } // catalog (p7/ex1): what the run was given of the person's node catalog
   nodes: Record<string, NodeRecord>
   questions: Record<string, Question>
   instructions?: Record<string, Instruction> // present once the first one arrives (p6)
@@ -247,7 +249,7 @@ export interface RunState {
 // ---- operations (history entries) ---------------------------------------------
 
 export type OpInput =
-  | { op: 'run.create'; project: string; workflow: string; run: string; input: RunInput; executor: Executor; predecessor: RunRef | null; definition: DefinitionRef; context: { repositories: RepoContext[] }; nodes: string[] }
+  | { op: 'run.create'; project: string; workflow: string; run: string; input: RunInput; executor: Executor; predecessor: RunRef | null; definition: DefinitionRef; context: RunState['context']; nodes: string[] }
   | { op: 'node.start'; node: string; reason?: string }
   | { op: 'node.progress'; node: string; text: string }
   | { op: 'node.wait'; node: string; reason: string; holder: string; external: string }

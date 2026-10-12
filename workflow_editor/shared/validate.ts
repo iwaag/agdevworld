@@ -111,6 +111,9 @@ export function validateWorkflow(w: Workflow, ctx: ValidationContext = {}): Issu
     // type's default and kept in the file.
     if (n.appearance?.icon && !(APPEARANCE_ICONS as readonly string[]).includes(n.appearance.icon)) issues.push(warn('appearance-icon', `Node "${id}" has icon "${n.appearance.icon}", which the editor does not draw (${APPEARANCE_ICONS.join(', ')}); the type's icon is shown.`, { node: id }))
     if (n.appearance?.color && !(APPEARANCE_COLORS as readonly string[]).includes(n.appearance.color)) issues.push(warn('appearance-color', `Node "${id}" has color "${n.appearance.color}", which is not a palette color (${APPEARANCE_COLORS.join(', ')}); the type's color is shown.`, { node: id }))
+    // Template provenance (p7/ex1) is a record of origin, not a reference
+    // the workflow depends on: only its own shape is checked.
+    if (n.template && !ID_PATTERN.test(n.template.id)) issues.push(warn('template-id', `Node "${id}" names template "${n.template.id}", which is not a valid template id; the provenance is kept as written.`, { node: id }))
     if (n.confirms) {
       if (!(CONFIRMS as readonly string[]).includes(n.confirms)) issues.push(err('confirms-kind', `Node "${id}" confirms "${n.confirms}"; expected ${CONFIRMS.join(' or ')}.`, { node: id }))
       else if (n.type !== 'talk') issues.push(err('confirms-type', `Node "${id}" confirms the result but is "${n.type}"; only a talk node asks the person.`, { node: id }))

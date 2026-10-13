@@ -175,6 +175,24 @@ incorporate them into upcoming work, clarify them with a question to the
 person, or explain why they need a new run. Starting a node, and the run's
 last completion, are refused while a received instruction is
 unacknowledged. Writes run.json.`,
+  integrate: `wfe run integrate <run> [--dry-run | --status] --by <name>
+
+Brings the run's accepted result into the project's shared branches (p9,
+docs/integration.md): for each repository the run owns — submodules first,
+then the root, which records their integrated commits — its run branch is
+fast-forwarded onto the target the run's storage names, or, when the target
+moved, combined with it in an integration working tree and checked. A
+conflict, or a combination that changes files the run changed, stops before
+anything is pushed: that is agent work (a repair run). Nothing is forced.
+Needs the latest decision to be an acceptance (recorded with its revision),
+the execution completed and no attempt open; the copy is saved first, and
+only the run's own records may have changed since the acceptance. Each
+repository's target, observed commit, candidate and result are journaled; a
+retry continues from the journal. --dry-run combines locally and shows the
+plan (nothing is pushed or recorded); --status shows the journal. An
+acceptance queues its integration by itself: the execution host carries it
+out once the run is completed and saved. Writes run.json (run.integrate)
+when every repository is integrated.`,
   events: `wfe run events <run> [--since <seq>]
 
 The coordination events selected from committed history entries — started,
@@ -311,13 +329,14 @@ export function runIndex(): string {
   complete <run> <node>    record completion with an outcome
   fail <run> <node>        record a failure
   cancel <run> [<node>]    discontinue a node or the run (final)
-  stop / resume <run>      stop execution (resumable), resume a held run
+  stop / resume <run>      hold (work kept; others go on), resume a held run
   events <run>             notification-worthy events (selection only)
   ask / answer / take-up / withdraw    questions
   instructions / instruct / ack       additional instructions: list, give, acknowledge
   access <run> [<path>]... what the run's definition declares for a path
   attach <run> <path>      record an artifact
   decide <run>             record acceptance or rejection of the result
+  integrate <run>          bring the accepted result into the shared branches (or --dry-run, --status)
   adjust <run>             change the run's future work (a recorded revision)
   revisions <run>          the original definition and each adjustment
   nodes <run>              the person's node catalog as this run was given it
@@ -770,6 +789,20 @@ export async function runCommand(c: RunCli): Promise<number> {
       for (const v of rec.definition.revisions ?? []) lines.push(`  ${v.revision}  from ${v.parent} by ${v.by} at ${v.at} (${v.source.kind}${'question' in v.source ? ` ${v.source.question}` : 'instruction' in v.source ? ` ${v.source.instruction}` : 'input' in v.source ? ` ${v.source.input} ${v.source.sha256.slice(0, 12)}…` : ''}): ${first(v.reason, 120)}`, `      added ${v.diff.added.join(', ') || '—'}; removed ${v.diff.removed.join(', ') || '—'}; ${v.file}`)
       c.out(lines.join('\n'), { active: rec.definition.active ?? 'r1', revisions: rec.definition.revisions ?? [] })
       return 0
+    }
+    case 'integrate': {
+      const r = await ref()
+      const x = c.exec()
+      const lines = (steps: { repo: string; target: string; state: string; method?: string; observed?: string; candidate?: string; result?: string; pushed?: boolean; files?: string[]; error?: string }[]) => steps.map(s => `  ${(s.repo === '.' ? 'root' : s.repo).padEnd(16)} → ${s.target.padEnd(10)} ${s.state}${s.method ? ` (${s.method})` : ''}${s.candidate ? ` candidate ${s.candidate.slice(0, 10)}` : ''}${s.observed ? ` onto ${s.observed.slice(0, 10)}` : ''}${s.result ? ` = ${s.result.slice(0, 10)}${s.pushed ? ' pushed' : s.state === 'planned' ? '' : ' not pushed'}` : ''}${s.error ? `\n      ${s.error}` : ''}`)
+      if (c.flag('status')) {
+        const rows = x.integrations(ws.reg.id, r)
+        c.out(rows.length ? rows.flatMap(i => [`Integration ${i.id} of decision ${i.decision}: ${i.state} (${i.updated}, requested by ${i.requested_by})${i.error ? ` — ${i.error}` : ''}`, ...lines(JSON.parse(i.steps))]).join('\n') : `Run ${runKey(r)} has no integration.`, { ref: runKey(r), integrations: rows.map(i => ({ ...i, steps: JSON.parse(i.steps) })) })
+        return 0
+      }
+      if (!c.flag('dry-run') && !by?.trim()) throw c.usage('--by is required: who integrates the result')
+      const res = await wrap(() => x.integrateRun(ws, r, { by: by?.trim() || 'dry run', via: 'cli', dryRun: c.flag('dry-run') }))
+      c.out([`${c.flag('dry-run') ? 'Plan' : 'Integration'} of ${runKey(r)}: ${res.state}${res.error ? ` — ${res.error}` : ''}`, ...lines(res.steps)].join('\n'), { ok: res.state === 'integrated' || res.state === 'planned', ref: runKey(r), ...res })
+      return res.state === 'integrated' || res.state === 'planned' ? 0 : 1
     }
     case 'decide': {
       const decision = need(c, 'decision', 'accepted or rejected')

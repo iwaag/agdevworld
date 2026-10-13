@@ -133,6 +133,7 @@ function lines(e: NotableEvent, c: RenderContext): { head: string; free: string;
       ? { head: `**Result ${e.decision}** — ${e.confirmation.from}'s answer to ${e.confirmation.question}, recorded by ${e.by}.`, free: '', tail: [...(subject ? [`Confirmed: ${subject}`] : []), ...(e.presentation ? [`Confirmed: presentation ${e.presentation}, the revision it showed.`] : []), ...(c.openPresentations?.length ? [`Cleanup pending: presentation ${c.openPresentations.join(', ')} still served; the run completes after it is stopped.`] : [])] }
       : { head: `**Result ${e.decision}** by ${e.by}.`, free: e.text ? `Evidence: ${e.text}` : '', tail: [] }
     case 'cancelled': return { head: `**Run cancelled** by ${e.by}:`, free: e.text, tail: [] }
+    case 'integrated': return { head: '**Integrated** — the accepted result is on the project\'s shared branches:', free: e.text, tail: [] }
   }
 }
 

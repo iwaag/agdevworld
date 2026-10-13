@@ -161,6 +161,15 @@ try {
   check((await gitOk(remote, ['show', 'wfe/chk/ship/run-001:devdocs/runs/ship/run-001/run.json'])).includes('"decision": "accepted"'), 'the accepted record is on the remote, on the run branch (p9)')
   await shot(page, 'p4-run-accepted', false)
 
+  console.log('integration of the accepted result (p9)')
+  check(await waitText('.focus', /Accepted — integration queued/), 'saved and accepted, not yet integrated: said apart')
+  check((await gitOk(remote, ['show', 'main:half.txt']).catch(() => null)) === null, 'accepting changed no shared branch')
+  const notes = await x.reconcile()
+  check(notes.some(n => /integration \d+ \(ship\/run-001\): integrated/.test(n)), `the execution host integrates it: ${notes.join(' | ')}`)
+  check(await waitText('.focus', /Integrated into main/), 'the run view says it is integrated')
+  check((await gitOk(remote, ['show', 'main:half.txt'])) === 'half\n', 'the accepted work is on main')
+  await shot(page, 'p9-run-integrated', false)
+
   const pageErrors = errors.filter(e => !/^Failed to load resource/.test(e))
   check(pageErrors.length === 0, `no page errors${pageErrors.length ? `: ${pageErrors.slice(0, 3).join(' | ')}` : ''}`)
   console.log(JSON.stringify(result))

@@ -193,8 +193,20 @@ export const isOpen = (p: Pick<Presentation, 'state'>) => p.state === 'available
 export const openPresentations = (s: Pick<RunState, 'presentations'>): Presentation[] => Object.values(s.presentations ?? {}).filter(isOpen)
 export const presentationFolder = (r: RunRef, id: string) => `${runFolder(r)}/presentations/${id}`
 const presentationNumber = (id: string) => Number(id.slice(1))
+// The exact revision an acceptance is of (p9): the tree of each repository
+// the run owns, as its copy held it when the decision was recorded.
+export interface RevisionEntry { path: string; tree: string }
+// A completed integration of an accepted result (p9, docs/integration.md):
+// per repository, the shared target, the target commit it found, the run
+// branch commit it integrated, how and the resulting commit.
+export interface IntegrationRecord {
+  decision: number // index into decisions
+  at: string; by: string
+  repositories: { path: string; target: string; observed: string; candidate: string; method: 'already' | 'fast-forward' | 'merge'; result: string }[]
+}
 export interface Decision {
   decision: 'accepted' | 'rejected'; by: string; at: string; evidence: string; note: string
+  revision?: RevisionEntry[] // p9: what an acceptance binds to (recorded by the file layer)
   // A decision the person gave by answering the result-confirmation
   // question (p6): which question and answer, whose words, and the
   // deliverables (by hash) it confirmed.
@@ -256,6 +268,7 @@ export interface RunState {
   questions: Record<string, Question>
   instructions?: Record<string, Instruction> // present once the first one arrives (p6)
   presentations?: Record<string, Presentation> // present once the first one is registered (p7)
+  integrations?: IntegrationRecord[] // present once the first one completed (p9)
   artifacts: Artifact[]
   decisions: Decision[]
   cancelled: { reason: string; at: string; by: string; because?: Because } | null
@@ -285,7 +298,8 @@ export type OpInput =
   | { op: 'question.withdraw'; question: string; reason: string }
   | { op: 'artifact.attach'; path: string; node?: string; title?: string }
   | { op: 'run.cancel'; reason: string; because?: BecauseRef }
-  | { op: 'run.decide'; decision: 'accepted' | 'rejected'; evidence?: string; note?: string; question?: string; answer?: number; subject?: DocumentEvidence[] }
+  | { op: 'run.decide'; decision: 'accepted' | 'rejected'; evidence?: string; note?: string; question?: string; answer?: number; subject?: DocumentEvidence[]; revision?: RevisionEntry[] }
+  | { op: 'run.integrate'; decision: number; repositories: IntegrationRecord['repositories']; integration?: string }
   | { op: 'attempt.begin'; attempt: string; reason: string; backend?: string; settings?: AttemptSettings }
   | { op: 'attempt.end'; attempt: string; outcome: AttemptOutcome; detail?: string }
   | { op: 'run.stop'; reason: string; because?: BecauseRef }
@@ -305,7 +319,7 @@ export const CONTROL_OPS: readonly string[] = ['run.stop', 'run.resume', 'run.ca
 
 export const OPS = ['run.create', 'node.start', 'node.progress', 'node.wait', 'node.complete', 'node.fail', 'node.cancel',
   'question.ask', 'question.answer', 'question.take-up', 'question.withdraw', 'instruction.receive', 'instruction.ack', 'artifact.attach', 'run.cancel', 'run.decide',
-  'attempt.begin', 'attempt.end', 'run.stop', 'run.resume', 'presentation.register', 'presentation.observe', 'run.adjust'] as const
+  'attempt.begin', 'attempt.end', 'run.stop', 'run.resume', 'presentation.register', 'presentation.observe', 'run.adjust', 'run.integrate'] as const
 // The executor's own reports. While an attempt is open they must carry its
 // id (`attempt`), so a stopped or superseded attempt cannot write into the
 // record of the one that replaced it.
@@ -438,6 +452,14 @@ export function validStorage(v: unknown): RunStorage {
   })
   if (!repositories.some(r => r.path === '.')) fail('shape', 'storage names the project root (".")')
   return { kind: 'run-copy', branch: s.branch, repositories }
+}
+
+// The revision evidence the file layer adds to an acceptance (p9).
+function revisionOf(e: { decision?: string; revision?: unknown }): { revision?: RevisionEntry[] } {
+  if (e.revision === undefined || e.revision === null) return {}
+  if (e.decision !== 'accepted') fail('shape', 'only an acceptance records a revision')
+  if (!Array.isArray(e.revision) || !e.revision.every(r => isObj(r) && typeof r.path === 'string' && typeof r.tree === 'string' && /^[0-9a-f]{40,64}$/.test(r.tree))) fail('shape', 'revision must list {path, tree} per repository')
+  return { revision: (e.revision as RevisionEntry[]).map(r => ({ path: r.path, tree: r.tree })) }
 }
 
 export function validArtifactPath(p: unknown): string {
@@ -904,7 +926,7 @@ export function apply(prev: RunState | null, e: HistoryEntry | (OpInput & EntryM
       if (e.question === undefined || e.question === null) {
         // The person's own decision (browser, CLI).
         if (e.decision === 'accepted' && prev.execution.state !== 'completed') fail('not-completed', `the execution is ${prev.execution.state}; only a completed execution can be accepted`)
-        s.decisions.push({ decision: e.decision, by, at, evidence: text(e.evidence, 'the evidence'), note: optText(e.note, 'note') })
+        s.decisions.push({ decision: e.decision, by, at, evidence: text(e.evidence, 'the evidence'), note: optText(e.note, 'note'), ...revisionOf(e) })
         break
       }
       // The decision the person's answer to the result-confirmation question
@@ -939,7 +961,23 @@ export function apply(prev: RunState | null, e: HistoryEntry | (OpInput & EntryM
         decision: e.decision, by, at, note: optText(e.note, 'note'),
         evidence: optText(e.evidence, 'evidence') || `${q.id} answer ${index} from ${a.from}${a.source ? ` (Zulip message ${a.source.message})` : ''}, confirming ${q.presentation ? `presentation ${q.presentation.id} (revision ${q.presentation.revision.slice(7, 19)}, ${asked.length} files)` : asked.map(x => `${x.path} (${x.sha256.slice(0, 12)})`).join(', ')}`,
         confirmation: { question: q.id, answer: index, from: a.from, ...(a.source ? { source: a.source } : {}), subject: asked, ...(q.presentation ? { presentation: q.presentation } : {}) },
+        ...revisionOf(e),
       })
+      break
+    }
+    case 'run.integrate': {
+      // Recorded once every repository's integration is done (p9); partial
+      // progress is the execution host's journal, not this record.
+      const d = s.decisions[e.decision as number]
+      if (!d || d.decision !== 'accepted') fail('not-accepted', `decision ${String(e.decision)} is not an acceptance; only an accepted result is integrated`)
+      if (s.decisions.slice((e.decision as number) + 1).length) fail('superseded', `decision ${e.decision} was followed by another decision; the latest one is integrated`)
+      if ((s.integrations ?? []).some(i => i.decision === e.decision)) fail('state', `decision ${e.decision} is already integrated`)
+      if (!Array.isArray(e.repositories) || !e.repositories.length) fail('shape', 'repositories must list each integrated repository')
+      const repositories = e.repositories.map((r, i) => {
+        if (!isObj(r) || !normalizeRepoPath(String(r.path)) || ![r.target, r.observed, r.candidate, r.result].every(v => typeof v === 'string' && v) || !['already', 'fast-forward', 'merge'].includes(r.method)) fail('shape', `repositories[${i}] needs path, target, observed, candidate, method and result`)
+        return { path: r.path, target: r.target, observed: r.observed, candidate: r.candidate, method: r.method, result: r.result }
+      })
+      s.integrations = [...(s.integrations ?? []), { decision: e.decision as number, at, by, repositories }]
       break
     }
     case 'presentation.register': {
@@ -1234,6 +1272,7 @@ export type NotableType = 'started' | 'question' | 'answered' | 'reported' | 'no
   | 'accepted' | 'notice' // p6, request topic only: the request became a run; a reply about a post (server/notify.ts)
   | 'presented' | 'cleanup-failed' // p7: a presentation became available for review; its shutdown could not be verified
   | 'adjusted' // p7: the run's future work was adjusted (a new revision)
+  | 'integrated' // p9: the accepted result reached the project's shared branches
 export interface NotableEvent {
   id: string
   seq: number
@@ -1313,6 +1352,7 @@ export function notableEvents(r: RunRecord, sinceSeq = 0): NotableEvent[] {
     if (e.op === 'instruction.receive') push('instructed', false, d.text, { instructions: [e.change.instruction?.[1] ?? ''], holder: r.executor.name })
     if (e.op === 'instruction.ack') push('acknowledged', false, d.note, { instructions: (e as unknown as { instructions: string[] }).instructions, response: d.response })
     if (e.op === 'run.cancel') push('cancelled', true, d.reason)
+    if (e.op === 'run.integrate') push('integrated', false, (d.repositories as unknown as IntegrationRecord['repositories']).filter(x => x.method !== 'already').map(x => `${x.path === '.' ? 'project root' : x.path} → ${x.target} (${x.method}, ${x.result.slice(0, 10)})`).join('; '))
     if (e.op === 'run.adjust') {
       const diff = (e as unknown as { diff?: AdjustDiff }).diff ?? r.definition.revisions?.find(x => x.revision === d.revision)?.diff
       push('adjusted', false, d.reason, { revision: d.revision, ...(diff ? { adjusted: { added: diff.added.filter(x => !x.startsWith('_')), removed: diff.removed.filter(x => !x.startsWith('_')) } } : {}) })

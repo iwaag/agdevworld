@@ -13,8 +13,12 @@ export interface RunExecView {
     activity?: { unit: 'turn' | null; count: number | null; last: string | null; bytes: number; problem?: string } | null }[] // p8/ex2: observed on the host that has the log
   jobs: { id: number; kind: string; state: string; reason: string; created: string; note: string | null }[]
   checkpoints: { id: number; kind: string; state: string; created: string; updated: string; error: string | null; steps: { repo: string; include: string[]; excluded: string[]; conflicts: string[]; commit?: string; pushed?: boolean; branch?: string; error?: string }[] }[]
+  // p9: the integration journal of the run's accepted results (server/integrate.ts)
+  integrations?: IntegrationView[]
   executor: { state: string; detail?: string; at?: string }
 }
+export interface IntegrationStepView { repo: string; target: string; branch: string; state: string; method?: string; observed?: string; candidate?: string; result?: string; pushed?: boolean; files?: string[]; error?: string }
+export interface IntegrationView { id: number; decision: number; state: string; created: string; updated: string; error: string | null; requested_by: string; steps: IntegrationStepView[] }
 
 // What each presentation's record says and what this host observes (p7,
 // server/present.ts view).
@@ -103,6 +107,7 @@ export const api = {
   runPresentations: (id: string, workflow: string, run: string, signal?: AbortSignal) => call<{ presentations: PresentationView[] }>('GET', `${ws(id)}/runs/${encodeURIComponent(workflow)}/${encodeURIComponent(run)}/presentations`, undefined, [], signal),
   presentation: (id: string, workflow: string, run: string, p: string, action: 'start' | 'stop', by: string) => call<{ ok: boolean }>('POST', `${ws(id)}/runs/${encodeURIComponent(workflow)}/${encodeURIComponent(run)}/presentations/${encodeURIComponent(p)}/${action}`, { by }),
   adjustRun: (id: string, workflow: string, run: string, body: { text: string; reason: string; by: string; dryRun: boolean; expectRevision?: string; expectSeq?: number }) => call<AdjustView>('POST', `${ws(id)}/runs/${encodeURIComponent(workflow)}/${encodeURIComponent(run)}/adjust`, body, [422]),
+  integrate: (id: string, workflow: string, run: string, by: string, dryRun: boolean) => call<{ ok: true; state: string; steps: IntegrationStepView[]; error?: string }>('POST', `${ws(id)}/runs/${encodeURIComponent(workflow)}/${encodeURIComponent(run)}/integration`, { by, dryRun }),
   retryCheckpoint: (id: string, workflow: string, run: string, checkpoint: number) => call<unknown>('POST', `${ws(id)}/runs/${encodeURIComponent(workflow)}/${encodeURIComponent(run)}/checkpoints/${checkpoint}/publish`),
   requestRun: (id: string, input: { workflow: string; text: string; author: string; receipt: string }) =>
     call<{ ok: true; duplicate: boolean; ref: { workflow: string; run: string }; job: { id: number; state: string } }>('POST', `${ws(id)}/runs`, input),

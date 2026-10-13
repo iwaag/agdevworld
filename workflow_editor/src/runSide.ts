@@ -25,6 +25,8 @@ import { h, when } from './dom.ts'
 import { icon } from './icons.ts'
 import { patchContent } from './patch.ts'
 import { activeWorkflow, ago, chip, descendants, fileLink, nodeLabel, nodeLink, runHash, topoOrder } from './runCommon.ts'
+import { integrationStatus } from './integrationState.ts'
+export { integrationStatus }
 
 // Who a hold or a stop acted for (p9): the person's words named by the recorder.
 const becauseText = (b: Because | undefined) => b ? ` (on ${b.from}'s ${b.kind === 'answer' ? `answer to ${b.question}` : `instruction ${b.instruction}`})` : ''
@@ -461,6 +463,10 @@ export class RunSide {
     // The one-click review, while it is served (p7); otherwise what became of it.
     if (!d.rev) blocks.push(this.reviewLink(rec, kind))
     if (kind === 'working' || kind === 'accepted') blocks.push(this.activeBlock(rec, name))
+    // Where the accepted result stands (p9): saved, accepted, integrated.
+    const integ = !d.rev && (kind === 'completed' || kind === 'accepted') ? integrationStatus(rec, d.execView, d.resp?.place) : null
+    if (integ) blocks.push(h(`p.small.integration-state.tone-${integ.tone}`, h(`span.chip.${integ.tone === 'ok' ? 'ok' : integ.tone === 'muted' ? 'muted' : 'warn'}`, integ.text), integ.detail ? h('span.d-only.muted', ` ${integ.detail}`) : null,
+      integ.tone !== 'ok' && integ.tone !== 'muted' && rec.decisions.at(-1)?.decision === 'accepted' ? h('span', ' ', h('a', { href: '#', dataset: { action: 'goto-section', section: 'execution' } }, 'Integration')) : null))
     if (kind === 'held') blocks.push(h('p.small.muted', 'Look at the run\'s files first (they are in its own copy of the project); the instruction tells the executor what to do now. ', h('a', { href: '#', dataset: { action: 'goto-section', section: 'execution' } }, 'Execution details')))
     if (kind === 'failed') blocks.push(
       h('ul.failures', ...ex.failed.map(n => { const f = rec.nodes[n].failure; return h('li', { dataset: { key: `fail:${n}` } }, nodeLink(n, name(n)), f ? `: ${f.reason}` : '', f ? h('span.d-only.muted', ` (${f.by}, ${when(f.at)})`) : null) })),
@@ -985,7 +991,29 @@ export class RunSide {
         h(`span.chip.${c.state === 'published' || c.state === 'nothing' ? 'ok' : c.state === 'pending' ? 'muted' : 'warn'}`, c.state === 'nothing' ? 'nothing to publish' : c.state), ` ${c.kind}`,
         ...c.steps.map(st => h('div.muted', `${st.repo === '.' ? 'root' : st.repo}: ${st.commit ? `${st.commit.slice(0, 7)} ${st.pushed ? `pushed to ${st.branch}` : 'not pushed'}` : 'no commit'}${st.excluded.length ? `; left out (already changed before): ${st.excluded.join(', ')}` : ''}${st.conflicts.length ? `; needs you: ${st.conflicts.join(', ')} changed before the run and again by it` : ''}${st.error ? `; ${st.error}` : ''}`)),
         c.error ? h('div.error', c.error) : null,
-        c.state === 'failed' || c.state === 'attention' ? h('button', { dataset: { action: 'retry-checkpoint', checkpoint: String(c.id) } }, 'Retry publication') : null)))
+        c.state === 'failed' || c.state === 'attention' ? h('button', { dataset: { action: 'retry-checkpoint', checkpoint: String(c.id) } }, 'Retry publication') : null)),
+      ...this.integrationBlock(rec))
+  }
+
+  // Integration of the accepted result into the project's branches (p9):
+  // where it stands, each repository's step, and the person's operations.
+  private integrationBlock(rec: RunRecord): (HTMLElement | null)[] {
+    const d = this.data
+    const st = integrationStatus(rec, d.execView, d.resp?.place)
+    if (!st) return []
+    const di = rec.decisions.length - 1
+    const row = d.execView?.integrations?.filter(i => i.decision === di).at(-1)
+    const accepted = rec.decisions[di]?.decision === 'accepted'
+    const done = (rec.integrations ?? []).some(i => i.decision === di)
+    const can = accepted && !done && rec.execution.state === 'completed' && !rec.control.attempt && !this.frozen
+    return [
+      h('h4', 'Integration'),
+      h('p.small', h(`span.chip.${st.tone === 'ok' ? 'ok' : st.tone === 'muted' ? 'muted' : 'warn'}`, st.text), st.detail ? h('span.muted', ` ${st.detail}`) : null),
+      h('p.small.muted', 'Saving puts the run\'s work on its own branch; integrating brings an accepted result into the project\'s shared branches. They are separate steps.'),
+      ...(row?.steps ?? []).map(x => h('div.small.muted', { dataset: { key: `int:${row!.id}:${x.repo}` } }, `${x.repo === '.' ? 'root' : x.repo} → ${x.target}: ${x.state}${x.method ? ` (${x.method})` : ''}${x.result ? ` ${x.result.slice(0, 7)}${x.pushed ? ' pushed' : ''}` : ''}${x.files?.length ? `; files: ${x.files.join(', ')}` : ''}${x.error ? `; ${x.error}` : ''}`)),
+      can ? h('div.row.tight', h('button', { dataset: { action: 'integrate-check' }, title: 'Combine locally and show what would happen; nothing is pushed' }, 'Check integration'),
+        h('button', { dataset: { action: 'integrate-run' }, title: 'Bring the accepted result into the shared branches now' }, row && row.state !== 'queued' ? 'Retry integration' : 'Integrate now')) : null,
+    ]
   }
 
   // Where this run's progress is announced, and what is still owed there.

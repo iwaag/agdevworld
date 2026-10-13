@@ -418,6 +418,14 @@ records a decision on the result, with actor and evidence. `accepted` is only
 recorded on a `completed` execution; `rejected` at any time. A completion
 record, an answer, or a definition approval never creates a decision.
 
+**Integration (p9, [integration.md](integration.md)).** For a run with its
+own copy, an acceptance records the exact revision it binds to (`revision`:
+the tree of each repository the run owns) and queues its integration into
+the project's shared branches. That is a separate operation (`wfe run
+integrate`), journaled per repository and recorded as `run.integrate` when
+complete. Saved, accepted, partially integrated and integrated are shown
+apart.
+
 ### Result confirmation (p6)
 
 A workflow may designate one talk node `confirms: result`. Its question
@@ -726,6 +734,7 @@ HTTP routes call them; neither needs the other running.
 | Answer | `answer <run> <q>` | same | run view → focus card → the question's form |
 | Attach an artifact | `attach <run> <path>` | same | — (reports listed and readable) |
 | Decide on the result | `decide <run> --decision …` | same | run view → Result and decision → Accept / Reject (a completed run without a decision: its focus card) |
+| Integrate the accepted result (p9) | `integrate <run> [--dry-run\|--status]` | `GET/POST runs/<wf>/<run>/integration` | run view → Execution and publication → Integration |
 | The node catalog the run was given (p7/ex1) | `nodes <run> [--show <template>]` | `GET runs/<wf>/<run>` (`catalog`) | run view → Node catalog |
 
 The browser offers the person's operations: answering, deciding on the

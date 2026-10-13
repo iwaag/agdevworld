@@ -327,6 +327,17 @@ export function createHandler(config: ServiceConfig) {
           try { return send(res, 200, n.runStatus((await ws.readProject()).project?.id ?? '', ref)) } finally { n.close() }
         }
         if (sub === 'checkpoints' && parts[7] && parts[8] === 'publish' && method === 'POST') return send(res, 200, await needExec().publishCheckpoint(Number(parts[7])))
+        // Integration of the accepted result (p9): its journal, a dry run, or now.
+        if (sub === 'integration') {
+          const x = needExec()
+          if (method === 'GET') return send(res, 200, { integrations: x.integrations(ws.reg.id, ref).map(i => ({ ...i, steps: JSON.parse(i.steps) })) })
+          if (method === 'POST') {
+            const input = await body(req) as Record<string, unknown>
+            const by = typeof input.by === 'string' ? input.by.trim() : ''
+            if (!by) throw new RequestError(400, 'by is required: the name of who integrates the result')
+            return send(res, 200, { ok: true, ...(await x.integrateRun(ws, ref, { by, via: 'browser', dryRun: input.dryRun === true })) })
+          }
+        }
         // Presentations (p7): what each record says and what this host
         // observes now; the person's start (recovery) and stop.
         if (sub === 'presentations') {
@@ -364,7 +375,7 @@ export function createHandler(config: ServiceConfig) {
         if (sub === 'ops' && method === 'POST') {
           const input = await body(req) as Record<string, unknown>
           // Attempts and presentation facts are the execution host's; adjustments have their own route.
-          const offered = OPS.filter(o => o !== 'run.create' && !o.startsWith('attempt.') && !o.startsWith('presentation.') && (o as string) !== 'run.adjust')
+          const offered = OPS.filter(o => o !== 'run.create' && !o.startsWith('attempt.') && !o.startsWith('presentation.') && (o as string) !== 'run.adjust' && (o as string) !== 'run.integrate')
           if (!(offered as readonly string[]).includes(input.op as string)) throw new RequestError(400, `op must be one of ${offered.join(', ')} (attempts and presentation facts are the execution host's)`)
           const by = typeof input.by === 'string' ? input.by : ''
           if (!by.trim()) throw new RequestError(400, 'by is required: the name of who records this')

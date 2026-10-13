@@ -28,7 +28,7 @@ import { live } from './live.ts'
 import { patchContent } from './patch.ts'
 import { activeWorkflow, ago, chip, fact, line, nodeLabel, nodeLink, runHash, runTitle, STATE_LABEL } from './runCommon.ts'
 import { outcome, RefreshCoordinator, type Outcome, type RefreshKind } from './runRefresh.ts'
-import { RunSide } from './runSide.ts'
+import { RunSide, integrationStatus } from './runSide.ts'
 import { ActivityView, describeActivity } from './runActivity.ts'
 import { displayToggle, isSimple, onDisplay, setDisplay } from './displayMode.ts'
 import type { ViewHandle } from './main.ts'
@@ -212,6 +212,18 @@ export function renderRunView(root: HTMLElement, wsId: string, workflow: string,
     await refresh.request('full')
   }
 
+  // Integration of the accepted result (p9): a check (dry run) or now.
+  async function integrateRun(dryRun: boolean) {
+    const name = actorName('who integrates the result')
+    if (!name) return
+    try {
+      const r = await api.integrate(wsId, workflow, run, name, dryRun)
+      const ok = r.state === 'integrated' || r.state === 'planned'
+      opNotice = { kind: ok ? 'ok' : 'warn', text: dryRun ? (ok ? `Check: it can be integrated (${r.steps.map(st => `${st.repo === '.' ? 'root' : st.repo}: ${st.method ?? st.state}`).join(', ')}).` : `Check: ${r.error ?? r.state}`) : ok ? 'Integrated into the project\'s branches.' : `Not integrated: ${r.error ?? r.state}` }
+    } catch (e) { opNotice = { kind: 'error', text: `${dryRun ? 'Check' : 'Integration'} failed: ${(e as Error).message}` } }
+    await refresh.request('full')
+  }
+
   async function retryCheckpoint(id: number) {
     try { await api.retryCheckpoint(wsId, workflow, run, id); opNotice = { kind: 'ok', text: 'Publication retried.' } } catch (e) { opNotice = { kind: 'error', text: `Retry failed: ${(e as Error).message}` } }
     await refresh.request('full')
@@ -269,6 +281,8 @@ export function renderRunView(root: HTMLElement, wsId: string, workflow: string,
       case 'present-start': void presentation(d.presentation!, 'start'); break
       case 'present-stop': void presentation(d.presentation!, 'stop'); break
       case 'retry-checkpoint': void retryCheckpoint(Number(d.checkpoint)); break
+      case 'integrate-check': void integrateRun(true); break
+      case 'integrate-run': void integrateRun(false); break
       case 'dismiss': opNotice = null; renderBanners(); break
       case 'details': toggleDetails(true); details.scrollIntoView({ block: 'nearest' }); break
       case 'stop-run': {
@@ -406,6 +420,7 @@ export function renderRunView(root: HTMLElement, wsId: string, workflow: string,
         ex.failed.length ? line('Failed', ex.failed.map(n => nodeLink(n)), 'error') : null,
         ex.blocked.length ? line('Blocked', ex.blocked.map(n => nodeLink(n)), 'warn') : null,
         rec.cancelled ? line('Cancelled', [`by ${rec.cancelled.by}: ${rec.cancelled.reason}`], 'error') : null,
+        ...(() => { const st = rev ? null : integrationStatus(rec, execView, r.place); return st ? [line('Saved and integrated', [st.text + (st.detail ? ` — ${st.detail}` : '')], st.tone === 'ok' ? 'ok' : st.tone === 'muted' ? undefined : 'warn')] : [] })(),
         last ? line('Decision', [`${last.decision} by ${last.by}`, ...(last.decision === 'accepted' && rec.execution.state !== 'completed' && !rec.cancelled ? [h('span.chip.warn.cleanup-pending', { title: 'The result is accepted; the run completes after what it serves is stopped and its last steps are done' }, 'accepted · cleanup pending')] : [])], last.decision === 'accepted' ? 'ok' : 'error') : null),
       h('p.run-note', '“Running” on a node means the executor recorded a start. Whether a process is executing now is the execution host\'s fact (the executor chip, and Execution at the side); the time since the last update says neither.'))
   }

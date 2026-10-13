@@ -25,6 +25,7 @@ import { docStepsOf } from '../shared/compile.ts'
 import { assertWorkspaceAllowed, loadBoundary } from './boundary.ts'
 import type { Gitea } from './gitea.ts'
 import { baseline, publish, publishRun, type Baseline, type RepoStep } from './publish.ts'
+import { integrate, type IntegrationState, type IntegrationStep } from './integrate.ts'
 import { loadRegistry, observe, type Registration } from './registry.ts'
 import { catalogOf, createRunInCopy, listRuns, readRun, RUN_FILE, runDir, runOp } from './runs.ts'
 import { readCopy, runSpace } from './runspace.ts'
@@ -101,6 +102,10 @@ export interface ExecContext { registryFile: string; area: string; gitea?: Gitea
 
 export interface JobRow { id: number; receipt: string; kind: 'start' | 'resume'; workspace: string; workflow: string; run: string; reason: string; state: 'queued' | 'claimed' | 'done' | 'dropped'; created: string; claimed: string | null; attempt: string | null; note: string | null }
 export interface AttemptRow { id: string; job: number; workspace: string; workflow: string; run: string; host: string; pid: number | null; state: 'launching' | 'running' | 'ended'; began: string; ended: string | null; exit_code: number | null; signal: string | null; outcome: string | null; log: string | null; stop_requested: string | null; backend: string | null; baseline: string | null }
+// One integration of an accepted result (p9, server/integrate.ts): queued
+// when the acceptance exists, carried out once the run is completed and
+// saved, its steps the per-repository journal.
+export interface IntegrationRow { id: number; workspace: string; workflow: string; run: string; decision: number; state: 'queued' | 'running' | IntegrationState; created: string; updated: string; steps: string; error: string | null; requested_by: string }
 export interface CheckpointRow { id: number; workspace: string; workflow: string; run: string; kind: string; attempt: string | null; state: 'pending' | 'published' | 'nothing' | 'attention' | 'failed'; created: string; updated: string; steps: string; error: string | null; baseline: string | null }
 
 export class ExecStore {
@@ -120,6 +125,13 @@ export class ExecStore {
         CREATE TABLE IF NOT EXISTS checkpoints (id INTEGER PRIMARY KEY, workspace TEXT NOT NULL, workflow TEXT NOT NULL, run TEXT NOT NULL, kind TEXT NOT NULL, attempt TEXT,
           state TEXT NOT NULL, created TEXT NOT NULL, updated TEXT NOT NULL, steps TEXT NOT NULL, error TEXT, baseline TEXT);
         CREATE TABLE IF NOT EXISTS heartbeat (name TEXT PRIMARY KEY, at TEXT NOT NULL, pid INTEGER, detail TEXT);
+      `),
+    }, {
+      version: 2, // p9: the integration journal, one row per accepted decision of a run
+      up: db => db.exec(`
+        CREATE TABLE integrations (id INTEGER PRIMARY KEY, workspace TEXT NOT NULL, workflow TEXT NOT NULL, run TEXT NOT NULL, decision INTEGER NOT NULL,
+          state TEXT NOT NULL, created TEXT NOT NULL, updated TEXT NOT NULL, steps TEXT NOT NULL, error TEXT, requested_by TEXT NOT NULL,
+          UNIQUE (workspace, workflow, run, decision));
       `),
     }])
   }
@@ -351,6 +363,9 @@ export class ExecStore {
     }
     const kind = situation(rec)
     const checkpoint = await this.checkpoint(ws, ref, `after attempt ${attempt}: ${kind}`, attempt, a.baseline)
+    // An acceptance recorded during the attempt (a confirmation) is
+    // integrated once the run is completed and saved (p9).
+    if (rec.execution.state === 'completed' && rec.decisions.at(-1)?.decision === 'accepted' && rec.storage) await this.queueIntegration(ws, ref, this.executor).catch(() => null)
     // An answer may have arrived while the attempt was still running.
     let resumeJob: JobRow | null = null
     if (kind === 'awaiting-person') {
@@ -449,7 +464,112 @@ export class ExecStore {
   // The result decision is a checkpoint of its own (only run.json changes).
   async afterDecision(ws: Workspace, ref: RunRef, decision: string): Promise<CheckpointRow> {
     const space = await runSpace(ws, ref)
-    return this.checkpoint(ws.shared, ref, `result ${decision}`, null, space.copyOf ? null : JSON.stringify(await baseline(ws.shared)))
+    const cp = await this.checkpoint(ws.shared, ref, `result ${decision}`, null, space.copyOf ? null : JSON.stringify(await baseline(ws.shared)))
+    // An acceptance queues its integration (p9); it is carried out once the
+    // run is completed and saved (integrateDue).
+    if (decision === 'accepted' && space.copyOf) await this.queueIntegration(ws, ref, this.executor).catch(() => null)
+    return cp
+  }
+
+  // ---- integration (p9, docs/integration.md) ------------------------------------------
+
+  integrations(workspace: string, ref: RunRef): IntegrationRow[] {
+    return this.all<IntegrationRow>('SELECT * FROM integrations WHERE workspace = ? AND workflow = ? AND run = ? ORDER BY id', workspace, ref.workflow, ref.run)
+  }
+
+  // Why the run's latest decision cannot be integrated now, or null: the
+  // acceptance, the run's own copy and storage, the revision it binds to,
+  // a completed execution and no open attempt.
+  private async integrable(ws: Workspace, ref: RunRef): Promise<{ space: Workspace; record: RunRecord; decision: number } | { refused: string; wait?: boolean }> {
+    const space = await runSpace(ws, ref)
+    const record = (await readRun(space, ref)).record
+    if (!record) return { refused: `run ${runKey(ref)} cannot be read` }
+    if (!space.copyOf || !record.storage) return { refused: `run ${runKey(ref)} has no working copy of its own; what it published is already on the project's branches` }
+    const decision = record.decisions.length - 1
+    const d = record.decisions[decision]
+    if (!d || d.decision !== 'accepted') return { refused: `run ${runKey(ref)} has no accepted result${d ? ` (its latest decision is ${d.decision})` : ''}; a completed run without acceptance stays saved on its branch, unintegrated` }
+    if (!d.revision) return { refused: `the acceptance of run ${runKey(ref)} was recorded before p9 and names no revision; accept the result again to integrate it` }
+    if ((record.integrations ?? []).some(i => i.decision === decision)) return { refused: `run ${runKey(ref)}'s accepted result is already integrated` }
+    if (record.control.attempt) return { refused: `attempt ${record.control.attempt.id} is executing run ${runKey(ref)}; integration waits until it has ended and its work is saved`, wait: true }
+    if (record.execution.state !== 'completed') return { refused: `run ${runKey(ref)} is ${record.execution.state}; its accepted result is integrated once the execution is completed`, wait: true }
+    return { space, record, decision }
+  }
+
+  // Queues the integration of the latest accepted decision (once per decision).
+  async queueIntegration(ws: Workspace, ref: RunRef, by: string): Promise<IntegrationRow> {
+    const space = await runSpace(ws, ref)
+    const record = (await readRun(space, ref)).record
+    const decision = (record?.decisions.length ?? 0) - 1
+    if (!record || decision < 0 || record.decisions[decision].decision !== 'accepted') throw new RequestError(409, `run ${runKey(ref)} has no accepted result to integrate`)
+    return this.tx(() => {
+      const have = this.one<IntegrationRow>('SELECT * FROM integrations WHERE workspace = ? AND workflow = ? AND run = ? AND decision = ?', ws.reg.id, ref.workflow, ref.run, decision)
+      if (have) return have
+      const id = Number(this.run('INSERT INTO integrations (workspace, workflow, run, decision, state, created, updated, steps, requested_by) VALUES (?, ?, ?, ?, \'queued\', ?, ?, \'[]\', ?)', ws.reg.id, ref.workflow, ref.run, decision, now(), now(), by).lastInsertRowid)
+      return this.one<IntegrationRow>('SELECT * FROM integrations WHERE id = ?', id)!
+    })
+  }
+
+  // Integrates the run's accepted result now, or shows the plan (dryRun:
+  // the combined commits are made locally and nothing is pushed or
+  // recorded). The copy is saved first when it holds unsaved records; the
+  // binding to the accepted revision decides whether anything else changed.
+  async integrateRun(ws: Workspace, ref: RunRef, o: { by: string; via: string; dryRun?: boolean }): Promise<{ state: IntegrationRow['state']; steps: IntegrationStep[]; error?: string; row: IntegrationRow | null }> {
+    const ok = await this.integrable(ws, ref)
+    if ('refused' in ok) throw new RequestError(409, ok.refused)
+    const { space, decision } = ok
+    const copy = await readCopy(ws, ref)
+    const env = this.ctx.gitea ? await this.ctx.gitea.gitEnv() : {}
+    const lockDir = join(this.ctx.area, '.local', 'exec', 'integration-locks')
+    if (o.dryRun) {
+      const r = await integrate({ space, ref, project: ok.record.project, storage: ok.record.storage!, accepted: ok.record.decisions[decision].revision!, previous: [], env, lockDir, dryRun: true, save: () => {} })
+      return { state: r.state, steps: r.steps, error: r.error, row: null }
+    }
+    // The final checkpoint: everything in the copy saved on its branches.
+    const cp = await this.checkpoint(ws.shared, ref, 'before integration', null, null)
+    if (cp.state !== 'published' && cp.state !== 'nothing') throw new RequestError(409, `the run's copy could not be saved before integration (checkpoint ${cp.id}: ${cp.state}${cp.error ? `, ${cp.error}` : ''}); retry the publication first`)
+    const row = await this.queueIntegration(ws, ref, o.by)
+    if (row.state === 'integrated') return { state: row.state, steps: JSON.parse(row.steps), row }
+    return withLock(join(copy!.dir, 'integration'), async () => {
+      this.run('UPDATE integrations SET state = \'running\', error = NULL, updated = ? WHERE id = ?', now(), row.id)
+      const save = (steps: IntegrationStep[]) => this.run('UPDATE integrations SET steps = ?, updated = ? WHERE id = ?', JSON.stringify(steps), now(), row.id)
+      let r
+      try {
+        r = await integrate({ space, ref, project: ok.record.project, storage: ok.record.storage!, accepted: ok.record.decisions[decision].revision!, previous: JSON.parse(row.steps) as IntegrationStep[], env, lockDir, save })
+      } catch (e) {
+        r = { state: 'failed' as const, steps: JSON.parse(this.one<IntegrationRow>('SELECT * FROM integrations WHERE id = ?', row.id)!.steps) as IntegrationStep[], error: (e as Error).message }
+      }
+      if (r.state === 'integrated') {
+        const repositories = r.steps.map(s => ({ path: s.repo, target: s.target, observed: s.observed!, candidate: s.candidate!, method: s.method!, result: s.result! }))
+        try {
+          await runOp(space, ref, { op: 'run.integrate', decision, repositories, integration: String(row.id), receipt: `integration:${row.id}` }, { by: o.by, via: o.via })
+        } catch (e) {
+          r = { ...r, state: 'attention' as const, error: `integrated, but the record could not say so: ${(e as Error).message}; retry to record it` }
+        }
+      }
+      this.run('UPDATE integrations SET state = ?, steps = ?, error = ?, updated = ? WHERE id = ?', r.state, JSON.stringify(r.steps), r.error ?? null, now(), row.id)
+      if (r.state === 'integrated') await this.checkpoint(ws.shared, ref, 'integrated', null, null).catch(() => null) // the record of it, on the run branch
+      return { state: r.state, steps: r.steps, error: r.error, row: this.one<IntegrationRow>('SELECT * FROM integrations WHERE id = ?', row.id)! }
+    }, { what: `integration of run ${runKey(ref)}`, timeoutMs: 600_000 })
+  }
+
+  // Queued integrations whose run is now completed and saved are carried out
+  // (by the executor's periodic reconcile). A failure or a refusal stays on
+  // its row for a person or agent; nothing is retried by itself.
+  async integrateDue(): Promise<string[]> {
+    const notes: string[] = []
+    for (const row of this.all<IntegrationRow>('SELECT * FROM integrations WHERE state = \'queued\' ORDER BY id')) {
+      const ref = { workflow: row.workflow, run: row.run }
+      let ws: Workspace
+      try { ws = await this.workspace(row.workspace) } catch (e) { notes.push(`integration ${row.id} (${runKey(ref)}): ${(e as Error).message}`); continue }
+      const ok = await this.integrable(ws, ref).catch(e => ({ refused: (e as Error).message, wait: false }))
+      if ('refused' in ok) {
+        if (!ok.wait) { this.run('UPDATE integrations SET state = \'refused\', error = ?, updated = ? WHERE id = ?', ok.refused, now(), row.id); notes.push(`integration ${row.id} (${runKey(ref)}): refused — ${ok.refused}`) }
+        continue
+      }
+      const r = await this.integrateRun(ws, ref, { by: this.executor, via: 'exec' }).catch(e => ({ state: 'failed', error: (e as Error).message }))
+      notes.push(`integration ${row.id} (${runKey(ref)}): ${r.state}${r.error ? ` — ${r.error}` : ''}`)
+    }
+    return notes
   }
 
   // ---- recovery -------------------------------------------------------------------------------
@@ -488,6 +608,7 @@ export class ExecStore {
         }
       }
     }
+    notes.push(...await this.integrateDue())
     return notes
   }
 
@@ -516,6 +637,7 @@ export class ExecStore {
     const jobs = this.all<JobRow>('SELECT * FROM jobs WHERE workspace = ? AND workflow = ? AND run = ? ORDER BY id', workspace, ref.workflow, ref.run)
     const checkpoints = this.all<CheckpointRow>('SELECT * FROM checkpoints WHERE workspace = ? AND workflow = ? AND run = ? ORDER BY id', workspace, ref.workflow, ref.run)
       .map(c => ({ ...c, baseline: undefined, steps: JSON.parse(c.steps) as RepoStep[] }))
-    return { attempts, jobs, checkpoints, executor: this.executorState() }
+    const integrations = this.integrations(workspace, ref).map(i => ({ ...i, steps: JSON.parse(i.steps) as IntegrationStep[] }))
+    return { attempts, jobs, checkpoints, integrations, executor: this.executorState() }
   }
 }

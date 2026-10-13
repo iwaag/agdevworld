@@ -772,6 +772,12 @@ async function prepareOp(ws: Workspace, ref: RunRef, record: RunRecord, graph: R
     delete op.subject
     const q = op.question ? record.questions[op.question] : undefined
     if (q?.subject) op.subject = (await Promise.all(q.subject.map(d => checkSubject(ws, d.path).catch(() => null)))).filter((d): d is DocumentEvidence => !!d)
+    // What an acceptance binds to (p9): the run's copy as it is now, by tree.
+    delete op.revision
+    if (op.decision === 'accepted' && ws.copyOf && record.storage) {
+      const { acceptedRevision } = await import('./integrate.ts')
+      op.revision = await acceptedRevision(ws, record.storage)
+    }
   }
   return { op, docProblem }
 }

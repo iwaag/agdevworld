@@ -20,7 +20,8 @@ browser UI while the same YAML files stay editable in any text editor or agent
 IDE. The file contract is in [docs/contract.md](docs/contract.md); workflow
 runs (execution records) are in [docs/runs.md](docs/runs.md); where a run's
 work is kept (its own working copy and branches, p9) is in
-[docs/storage.md](docs/storage.md).
+[docs/storage.md](docs/storage.md), and how an accepted result reaches the
+project's shared branches in [docs/integration.md](docs/integration.md).
 
 **Writers take turns.** UI edits and external edits are assumed not to overlap.
 

@@ -14,6 +14,7 @@
 // Runs (docs/runs.md) are observed with the definitions: each
 // devdocs/runs/<workflow>/<run>/run.json like a definition file, and each run
 // folder's top-level listing by stat only, so report bodies are never read.
+// A run with its own working copy (p9, docs/storage.md) is observed in it.
 //
 // The registry file is watched with the definitions (and alone by the
 // workspace-less stream of the home page). A new stream takes its first
@@ -26,7 +27,8 @@ import type { ChangeEvent } from '../shared/api.ts'
 import { inside, readTextOrNull, textHash } from './files.ts'
 import { git } from './git.ts'
 import { ID_PATTERN } from '../shared/model.ts'
-import { RUN_ID } from '../shared/run.ts'
+import { RUN_ID, runFolder } from '../shared/run.ts'
+import { listCopies } from './runspace.ts'
 import { WORKFLOW_FILE, WORKFLOWS_DIR, type Workspace } from './workspace.ts'
 
 const MAX_FILES = 200
@@ -103,21 +105,35 @@ export class Watcher {
     return next
   }
 
+  // A run with its own working copy (p9) is observed there, with its
+  // manifest (a copy being created, damaged or gone changes what is shown);
+  // the project tree's folder of the same run is a snapshot and not watched.
   private async runs(prev: Snapshot | null, next: Snapshot, ws: Workspace) {
+    const seen = new Set<string>()
+    let count = 0
+    for (const c of await listCopies(ws)) {
+      if (count++ >= MAX_RUNS) return
+      const key = `${c.ref.workflow}/${c.ref.run}`
+      seen.add(key)
+      await this.runFolder(prev, next, key, join(c.tree, runFolder(c.ref)), [`copy.json ${await sigOf(join(c.dir, 'copy.json'))}`])
+    }
     const runsDir = await inside(ws.root, 'devdocs/runs')
     const tops = (await readdir(runsDir, { withFileTypes: true }).catch(() => [])).filter(d => d.isDirectory() && ID_PATTERN.test(d.name)).map(d => d.name).sort()
-    let count = 0
     for (const wf of tops) {
       const runs = (await readdir(join(runsDir, wf), { withFileTypes: true }).catch(() => [])).filter(d => d.isDirectory() && RUN_ID.test(d.name)).map(d => d.name).sort()
       for (const run of runs) {
+        if (seen.has(`${wf}/${run}`)) continue
         if (count++ >= MAX_RUNS) return
-        const dir = join(runsDir, wf, run)
-        await this.file(prev, next, `${RUN}${wf}/${run}`, join(dir, 'run.json'))
-        const names = (await readdir(dir).catch(() => [] as string[])).sort().slice(0, MAX_FILES)
-        const sigs = await Promise.all(names.map(async n => `${n} ${await sigOf(join(dir, n))}`))
-        next.set(`${RUN_FILES}${wf}/${run}`, { sig: '', hash: textHash(sigs.join('\n')) })
+        await this.runFolder(prev, next, `${wf}/${run}`, join(runsDir, wf, run))
       }
     }
+  }
+
+  private async runFolder(prev: Snapshot | null, next: Snapshot, key: string, dir: string, extra: string[] = []) {
+    await this.file(prev, next, `${RUN}${key}`, join(dir, 'run.json'))
+    const names = (await readdir(dir).catch(() => [] as string[])).sort().slice(0, MAX_FILES)
+    const sigs = await Promise.all(names.map(async n => `${n} ${await sigOf(join(dir, n))}`))
+    next.set(`${RUN_FILES}${key}`, { sig: '', hash: textHash([...sigs, ...extra].join('\n')) })
   }
 
   diff(wsId: string, before: Snapshot, after: Snapshot): ChangeEvent[] {

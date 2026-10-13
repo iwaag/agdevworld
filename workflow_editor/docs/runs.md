@@ -23,6 +23,15 @@ writers taking turns per file).
 
 ## Where things live
 
+**A run the execution host performs lives in its own working copy (p9,
+[storage.md](storage.md)).** The tree below is inside that copy
+(`<project workspace>/.local/wfe/runs/<workflow>/<run>/tree/`), on the run's
+branch `wfe/<project>/<workflow>/<run>`. The project workspace holds runs
+recorded before p9 that were not migrated, and runs an IDE agent creates
+there with `wfe run create`. Every operation resolves the place first
+(`runSpace`). A run's folder that reaches the project's shared branch (an
+integration) is a snapshot; the copy's `run.json` stays the live record.
+
 ```text
 devdocs/runs/<workflow-id>/<run-id>/
   braindump.md          the person's own input (or request.md, see Input)
@@ -463,6 +472,12 @@ and age, or the state that replaces them: queued, starting, waiting for a
 person, held, stopping, a session whose process is gone, another host, not
 connected, finished, cancelled. A history view states none of them.
 
+**Where an attempt works (p9).** `wfe exec claim` hands the executor the
+logical workspace (`workspace`) and the directory the agent works in
+(`cwd`): the run's own copy. The run's guides are read from the copy, and
+the brief names the copy, its branch and the project workspace (the
+person's; local resources are read from there by name).
+
 **Settings (p6).** The run's workflow names the agent identity, the host
 profile and project guides (contract.md, *Execution, intake and result
 confirmation*). `wfe exec claim` takes what the host offers (`--profiles-json`,
@@ -507,12 +522,27 @@ completed, failed or rerun by itself.
 
 **Publication** happens at checkpoints after the process has ended (a human
 wait, a stop or interruption, completion) and after a result decision
-(`server/publish.ts`): the paths the attempt changed are committed and pushed,
-submodules (devdocs first) before the root that records their gitlinks.
-Changes present before the attempt began are left out; a pre-existing change
-the run changed again needs a person. A failed push is retried without
-repeating the work (the journaled commits are pushed). Work completion and
-publication are shown separately.
+(`server/publish.ts`). Work completion and publication are shown
+separately. A failed push is retried without repeating the work (the
+journaled commits are pushed).
+
+- *A run with its own copy (p9)* saves to its run branches only
+  (`publishRun`). Everything uncommitted in the copy is the run's work. Each
+  repository the copy owns commits on its run branch and pushes exactly
+  that branch, submodules before the root. The branch is recorded in the
+  checkpoint's step before anything is written, so a retry publishes to the
+  same place even if the agent checked out something else meanwhile. A
+  repository with another branch checked out is not committed there and
+  needs attention. The root is not pushed while a submodule's run branch is
+  not. Commits happen under the run's record lock, so no record operation
+  lands between staging and committing. Publications of one run take turns.
+  A checkpoint waits only for that run's own attempt. Nothing reaches a
+  shared branch: that is integration.
+- *A run kept in the project workspace* (before p9) publishes as before: the
+  paths the attempt changed are committed on the checked-out branch and
+  pushed, submodules (devdocs first) before the root. Changes present before
+  the attempt began are left out, and a pre-existing change the run changed
+  again needs a person.
 
 **Two conversations (p6).** A run requested in a Zulip request topic
 ([intake.md](intake.md)) talks with the person in that topic and reports
@@ -714,7 +744,8 @@ projects, the runs and any generated file whose stamp was removed.
 
 ## Observation
 
-The service watches `devdocs/runs/*/*/run.json` with the definition poll
+The service watches `devdocs/runs/*/*/run.json` (in each run's own copy for
+runs that have one, p9) with the definition poll
 (default 1 s, stat-based; a file is re-read only when its size, modification
 time or inode changed) and lists each run folder's top-level files by stat,
 without reading report bodies. It sends `run` change events with the run

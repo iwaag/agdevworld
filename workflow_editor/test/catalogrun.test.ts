@@ -14,6 +14,7 @@ import { ExecStore } from '../server/exec.ts'
 import { gitOk } from '../server/git.ts'
 import { loadRegistry } from '../server/registry.ts'
 import { createRun, readRun, runOp, runResponse } from '../server/runs.ts'
+import { runSpace } from '../server/runspace.ts'
 import { Workspace } from '../server/workspace.ts'
 import { CATALOG_MEANING } from '../shared/catalog.ts'
 import { main } from '../cli/wfe.ts'
@@ -61,7 +62,7 @@ test('a request freezes the catalog; new and resumed attempts receive the same s
   const s = await setup()
   await createTemplate(s.area, 'preliminary-research', RESEARCH, 'Pat')
   const req = await s.x.request({ workspace: 'p', workflow: 'improve', text: 'Research formations on the web first, then implement them.', author: 'Pat', receipt: 'browser-req-cat-0001', via: 'browser' })
-  const folder = join(s.dir, 'devdocs', 'runs', 'improve', req.ref.run)
+  const folder = join((await runSpace(s.ws, req.ref)).root, 'devdocs', 'runs', 'improve', req.ref.run) // the run's own copy (p9)
   let rec = (await readRun(s.ws, req.ref)).record!
   const cat = rec.context.catalog
   assert.equal(cat?.state, 'supplied')

@@ -965,6 +965,8 @@ export class RunSide {
       rec.control.hold ? h('p.small', `Held (${rec.control.hold.kind}) since ${when(rec.control.hold.since)} by ${rec.control.hold.by}: ${rec.control.hold.reason}. `, h('a', { href: '#', dataset: { action: 'goto-resume' } }, 'Resume with an instruction')) : null,
       d.execError ? h('div.banner.warn', `Execution facts of this host could not be read: ${d.execError}`) : null,
       ev ? h('p.small.muted', `Executor: ${ev.executor.state}${ev.executor.detail ? ` — ${ev.executor.detail}` : ''}`) : null,
+      // Where the run's work is kept (p9, docs/storage.md).
+      d.resp?.place?.kind === 'run-copy' ? h('p.small.muted.run-place', `Work: this run's own copy of the project, saved to branch ${d.resp.place.branch ?? '(unknown)'} — not on the project's shared branch until it is integrated.`) : null,
       h('div.row.tight', h('button', { disabled: frozen || !!rec.control.hold || !!rec.control.stop || sit === 'completed', title: 'Stop execution; the run stays resumable', dataset: { action: 'stop-run' } }, 'Stop')))
     const queued = ev?.jobs.filter(j => j.state === 'queued' || j.state === 'claimed') ?? []
     patchContent(this.execMore,

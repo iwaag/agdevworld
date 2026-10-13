@@ -147,13 +147,20 @@ export function copyWorkspace(ws: Workspace, c: RunCopy): Workspace {
 // Run numbers already taken for a workflow: recorded in the project tree,
 // held by a copy, or named by a run branch Git knows (local, or as last
 // fetched from the remote).
-async function usedRuns(ws: Workspace, project: string, workflow: string): Promise<Set<string>> {
+export async function usedRuns(ws: Workspace, project: string, workflow: string): Promise<Set<string>> {
   const used = new Set<string>()
   for (const d of await readdir(join(ws.root, RUNS_ROOT, workflow), { withFileTypes: true }).catch(() => [])) if (d.isDirectory() && RUN_ID.test(d.name)) used.add(d.name)
   for (const d of await readdir(join(copiesRoot(ws), workflow), { withFileTypes: true }).catch(() => [])) if (d.isDirectory() && RUN_ID.test(d.name)) used.add(d.name)
   const refs = await git(ws.root, ['for-each-ref', '--format=%(refname)', `refs/heads/wfe/${project}/${workflow}/`, `refs/remotes/origin/wfe/${project}/${workflow}/`])
   for (const line of refs.stdout.split('\n')) { const m = /\/(run-[a-z0-9][a-z0-9_.-]*)$/.exec(line.trim()); if (m) used.add(m[1]) }
   return used
+}
+
+// Runs `f` holding the workspace's allocation lock (run numbers).
+export async function allocating<T>(ws: Workspace, f: () => Promise<T>): Promise<T> {
+  const root = copiesRoot(ws.shared)
+  await mkdir(root, { recursive: true })
+  return withLock(join(root, '.allocation'), f, { what: `run allocation in workspace ${ws.shared.reg.id}` })
 }
 
 export interface ReserveOptions { project: string; workflow: string; name?: string; receipt?: string }
@@ -166,8 +173,7 @@ export async function reserve(ws: Workspace, o: ReserveOptions): Promise<{ ref: 
   if (!ID_PATTERN.test(o.workflow)) throw new RequestError(400, `workflow id "${o.workflow}" is invalid`)
   if (o.name !== undefined && !RUN_ID.test(o.name)) throw new RequestError(400, `run id "${o.name}" must match ${RUN_ID.source}`)
   const root = copiesRoot(ws)
-  await mkdir(root, { recursive: true })
-  return withLock(join(root, '.allocation'), async () => {
+  return allocating(ws, async () => {
     if (o.receipt) {
       for (const c of await listCopies(ws)) if (c.manifest?.receipt === o.receipt) return { ref: c.ref, manifest: c.manifest, existing: true }
     }
@@ -186,7 +192,7 @@ export async function reserve(ws: Workspace, o: ReserveOptions): Promise<{ ref: 
     await mkdir(dir) // exclusive: the reservation
     await atomicWrite(join(dir, MANIFEST), `${JSON.stringify(manifest, null, 2)}\n`)
     return { ref, manifest, existing: false }
-  }, { what: `run allocation in workspace ${ws.reg.id}` })
+  })
 }
 
 // What the copy is made from: the project workspace's committed HEAD (never

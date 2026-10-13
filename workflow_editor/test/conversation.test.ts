@@ -16,6 +16,7 @@ import { IntakeStore } from '../server/intake.ts'
 import { NotifyStore, type Delivery } from '../server/notify.ts'
 import { loadRegistry } from '../server/registry.ts'
 import { readRun, runOp } from '../server/runs.ts'
+import { runSpace } from '../server/runspace.ts'
 import { RequestError, Workspace } from '../server/workspace.ts'
 import type { OpInput, RunRef } from '../shared/run.ts'
 
@@ -101,13 +102,13 @@ const agent = (ws: Workspace, ref: RunRef, op: OpInput, attempt?: string) => run
 const code = (e: unknown) => ((e as RequestError).detail as { code?: string } | undefined)?.code
 
 test('request topic and run topic: what goes where, linked, with distinct identities; answers and the confirmation flow through Zulip', async () => {
-  const { x, n, i, ws, dir } = await setup()
+  const { x, n, i, ws } = await setup()
   const posted: Posted[] = []
   const origin = post(null, 'Make a three-slide deck about tea.')
   receive(i, origin)
   await i.process()
   const ref = { workflow: 'make', run: 'run-001' }
-  const folder = join(dir, 'devdocs/runs/make/run-001')
+  const folder = join((await runSpace(ws, ref)).root, 'devdocs/runs/make/run-001') // the run's own copy (p9)
   await deliver(n, posted)
   const inRequest = () => posted.filter(p => p.topic === 'request-deck')
   const inRun = () => posted.filter(p => p.topic === 'run-001')
@@ -229,13 +230,13 @@ test('request topic and run topic: what goes where, linked, with distinct identi
 })
 
 test('a confirmation is of the presented files: changed deliverables need presenting again; ambiguity is asked about', async () => {
-  const { x, n, i, ws, dir } = await setup()
+  const { x, n, i, ws } = await setup()
   const posted: Posted[] = []
   const origin = post(null, 'Make a deck.')
   receive(i, origin)
   await i.process()
   const ref = { workflow: 'make', run: 'run-001' }
-  const folder = join(dir, 'devdocs/runs/make/run-001')
+  const folder = join((await runSpace(ws, ref)).root, 'devdocs/runs/make/run-001') // the run's own copy (p9)
   const c = await x.claim('test', {})
   assert.ok('attempt' in c)
   const A = c.attempt.id
@@ -281,7 +282,7 @@ test('a confirmation is of the presented files: changed deliverables need presen
 })
 
 test('an answer arriving before the asking attempt exits resumes through the existing lifecycle', async () => {
-  const { x, n, i, ws, dir } = await setup()
+  const { x, n, i, ws } = await setup()
   const posted: Posted[] = []
   const origin = post(null, 'Make a deck.')
   receive(i, origin)
@@ -291,7 +292,7 @@ test('an answer arriving before the asking attempt exits resumes through the exi
   assert.ok('attempt' in c)
   const A = c.attempt.id
   await agent(ws, ref, { op: 'node.start', node: '_plan' }, A)
-  await writeFile(join(dir, 'devdocs/runs/make/run-001/plan.md'), '# Plan\n')
+  await writeFile(join((await runSpace(ws, ref)).root, 'devdocs/runs/make/run-001/plan.md'), '# Plan\n')
   await agent(ws, ref, { op: 'question.ask', question: 'q1', node: '_plan', text: 'Agree?', to: 'Pat' }, A)
   // Delivered while the attempt is still open (the plan link waits at most
   // briefly; make it due now), and answered before the process ends.

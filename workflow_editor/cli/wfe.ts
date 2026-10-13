@@ -747,7 +747,9 @@ async function cmdPresent(p: Parsed): Promise<number> {
         const r = await ref()
         if (!third) throw new UsageError('register <run> <node> --source <dir> --entry <file> --review <file.md> --title <text>')
         const attempt = opt(p, 'attempt') ?? process.env.WFE_ATTEMPT ?? undefined
-        const rel = (x: string) => { const a = resolve(x); const r2 = relative(ws.root, a); return !r2.startsWith('..') && !isAbsolute(r2) && (isAbsolute(x) || relative(ws.root, process.cwd()) !== '') ? (r2.split(sep).join('/') || '.') : x }
+        const { runSpace } = await import('../server/runspace.ts')
+        const root = (await runSpace(ws, r)).root // the run's own copy (p9)
+        const rel = (x: string) => { const a = resolve(x); const r2 = relative(root, a); return !r2.startsWith('..') && !isAbsolute(r2) && (isAbsolute(x) || relative(root, process.cwd()) !== '') ? (r2.split(sep).join('/') || '.') : x }
         const res = await registerPresentation(ws, r, { node: third, source: rel(need('source')), entry: need('entry'), review: rel(need('review')), title: need('title') }, { by: opt(p, 'by'), via: 'cli', attempt, receipt: opt(p, 'receipt') })
         const pz = res.presentation
         out(`${res.duplicate ? 'Already registered (same receipt): ' : 'Registered '}presentation ${pz.id} of ${r.workflow}/${r.run}: ${pz.files.length} files frozen in ${pz.folder}/ (revision ${pz.revision.slice(7, 19)}…).\nNext: wfe present start ${r.workflow}/${r.run} ${pz.id}`, { ok: true, presentation: pz, duplicate: !!res.duplicate })

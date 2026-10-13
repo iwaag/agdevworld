@@ -36,7 +36,7 @@ import { assertWorkspaceAllowed, loadBoundary } from './boundary.ts'
 import type { ExecStore } from './exec.ts'
 import { loadNotifyConfig, type NotifyStore } from './notify.ts'
 import { loadRegistry, observe } from './registry.ts'
-import { createRun, findRunByReceipt, readRun, runOp } from './runs.ts'
+import { createRunInCopy, findRunByReceipt, readRun, runOp } from './runs.ts'
 import { named, openStore, transaction, type Migration } from './sqlite.ts'
 import { RequestError, Workspace } from './workspace.ts'
 
@@ -341,10 +341,12 @@ export class IntakeStore {
         const held = this.exec ? await this.exec.holder(ws) : null
         if (held) return this.refuse(row, b, `workspace ${ws.reg.id} is held by run ${held}, which has not completed; one run works in a workspace at a time. Open a new request topic once it has finished.`)
         try {
-          ref = (await createRun(ws, {
+          // The run gets its own working copy (p9), found again by the post's receipt.
+          const env = this.exec?.ctx.gitea ? await this.exec.ctx.gitea.gitEnv() : {}
+          ref = (await createRunInCopy(ws, {
             workflow: b.workflow, receipt, executor: { host: this.exec?.executor ?? 'autolab' }, by: person, via: 'zulip', area: this.area,
             input: { kind: 'braindump', text: row.content, author: person, source: this.source(row) },
-          })).ref
+          }, env)).ref
         } catch (e) {
           if (e instanceof RequestError && e.status >= 400 && e.status < 500 && e.status !== 409) return this.refuse(row, b, e.message)
           if (e instanceof RequestError && e.status === 409 && !/already exists/.test(e.message)) return this.refuse(row, b, e.message)

@@ -23,9 +23,11 @@ import { describeSteps, effectiveOf, holderOf, hostOf, pendingInstructions, runK
 import { docStepsOf } from '../shared/compile.ts'
 import { assertWorkspaceAllowed, loadBoundary } from './boundary.ts'
 import type { Gitea } from './gitea.ts'
-import { baseline, publish, type Baseline, type RepoStep } from './publish.ts'
+import { baseline, publish, publishRun, type Baseline, type RepoStep } from './publish.ts'
 import { loadRegistry, observe, type Registration } from './registry.ts'
-import { catalogOf, createRun, listRuns, readRun, runDir, runOp } from './runs.ts'
+import { catalogOf, createRunInCopy, listRuns, readRun, RUN_FILE, runDir, runOp } from './runs.ts'
+import { readCopy, runSpace } from './runspace.ts'
+import { withLock } from './lock.ts'
 import { catalogBrief } from '../shared/catalog.ts'
 import { activityOf } from './activity.ts'
 import { named, openStore, transaction } from './sqlite.ts'
@@ -160,7 +162,9 @@ export class ExecStore {
     const ws = await this.workspace(o.workspace)
     const held = await this.holder(ws)
     if (held) throw new RequestError(409, `workspace ${ws.reg.id} is held by run ${held}, which has not completed (it may be awaiting a person). Finish or cancel it, or request the run in another workspace of the project.`)
-    const created = await createRun(ws, { workflow: o.workflow, input: { kind: 'braindump', text: o.text, author: o.author, recordedBy: o.by }, executor: { host: this.executor }, by: o.by ?? o.author, via: o.via, area: this.ctx.area })
+    // The run gets its own working copy (p9); the same receipt finds it again.
+    const env = this.ctx.gitea ? await this.ctx.gitea.gitEnv() : {}
+    const created = await createRunInCopy(ws, { workflow: o.workflow, input: { kind: 'braindump', text: o.text, author: o.author, recordedBy: o.by }, executor: { host: this.executor }, by: o.by ?? o.author, via: o.via, area: this.ctx.area, receipt: `request:${o.receipt}` }, env)
     const job = this.enqueue(ws.reg.id, created.ref, 'start', `request:${o.receipt}`, 'start: the person\'s request')
     return { job, ref: created.ref, duplicate: false }
   }
@@ -194,7 +198,9 @@ export class ExecStore {
   // Takes the oldest queued job when the slot is free and records the
   // attempt's beginning in run.json. Jobs whose run is cancelled, held or
   // already open are dropped with the reason.
-  async claim(backend: string | null, offer: HostOffer = {}): Promise<{ job: JobRow; attempt: AttemptRow; workspace: Registration; ref: RunRef; brief: string; execution: AttemptExecution } | { idle: string }> {
+  // `workspace` is the logical workspace; `cwd` is where the attempt works:
+  // the run's own copy (p9), or the project workspace for a run without one.
+  async claim(backend: string | null, offer: HostOffer = {}): Promise<{ job: JobRow; attempt: AttemptRow; workspace: Registration; cwd: string; ref: RunRef; brief: string; execution: AttemptExecution } | { idle: string }> {
     const busy = this.one<AttemptRow>('SELECT * FROM attempts WHERE state != \'ended\'')
     if (busy) return { idle: `the slot is held by attempt ${busy.id} (${busy.workspace} ${busy.workflow}/${busy.run})` }
     for (;;) {
@@ -202,15 +208,15 @@ export class ExecStore {
       if (!job) return { idle: 'no queued job' }
       const ref = { workflow: job.workflow, run: job.run }
       const drop = (note: string) => this.run('UPDATE jobs SET state = \'dropped\', note = ? WHERE id = ?', note, job.id)
-      let ws: Workspace
-      try { ws = await this.workspace(job.workspace) } catch (e) { drop((e as Error).message); continue }
-      const reading = await readRun(ws, ref)
+      let ws: Workspace, space: Workspace
+      try { ws = await this.workspace(job.workspace); space = await runSpace(ws, ref) } catch (e) { drop((e as Error).message); continue }
+      const reading = await readRun(space, ref)
       const rec = reading.record
       if (!rec) { drop('the run cannot be read'); continue }
       if (rec.cancelled) { drop('the run is cancelled'); continue }
       if (rec.control.hold) { drop(`the run is held (${rec.control.hold.kind}); a person resumes it`); continue }
       if (rec.control.attempt) { drop(`attempt ${rec.control.attempt.id} is still open in run.json`); continue }
-      const execution = await this.execution(ws, rec, reading.bundle.entries[rec.definition.root]?.workflow?.execution, backend, offer)
+      const execution = await this.execution(space, rec, reading.bundle.entries[rec.definition.root]?.workflow?.execution, backend, offer)
       if ('refused' in execution) { drop(execution.refused); continue }
       const id = `a${Date.now().toString(36)}-${randomBytes(3).toString('hex')}`
       const claimed = this.tx(() => {
@@ -221,20 +227,20 @@ export class ExecStore {
         return true
       })
       if (!claimed) return { idle: 'another executor claimed it first' }
-      const base: Baseline = await baseline(ws)
+      const base: Baseline = space.copyOf ? {} : await baseline(ws) // a copy holds only the run's own work
       try {
         // The run's catalog snapshot (p7/ex1): every attempt is given the same one.
         const cat = rec.context?.catalog
         const catalog = cat ? (cat.state === 'supplied' ? { state: 'supplied' as const, sha256: cat.sha256, templates: cat.templates } : { state: 'unavailable' as const }) : undefined
         const settings: AttemptSettings = { agent: execution.agent, profile: execution.profile, backend: execution.backend, contract: offer.contract ?? null, guides: execution.guides.map(g => ({ path: g.path, sha256: g.sha256 })), ...(catalog ? { catalog } : {}) }
-        await runOp(ws, ref, { op: 'attempt.begin', attempt: id, reason: job.kind, ...(execution.backend ? { backend: execution.backend } : {}), settings }, { by: this.executor, via: 'exec' })
+        await runOp(space, ref, { op: 'attempt.begin', attempt: id, reason: job.kind, ...(execution.backend ? { backend: execution.backend } : {}), settings }, { by: this.executor, via: 'exec' })
       } catch (e) {
         this.run('UPDATE attempts SET state = \'ended\', ended = ?, outcome = \'refused\' WHERE id = ?', now(), id)
         this.run('UPDATE jobs SET state = \'dropped\', note = ? WHERE id = ?', `attempt refused: ${(e as Error).message}`, job.id)
         continue
       }
       this.run('UPDATE attempts SET baseline = ?, log = ? WHERE id = ?', JSON.stringify(base), join(this.logsDir, `${id}.jsonl`), id)
-      return { job: this.one<JobRow>('SELECT * FROM jobs WHERE id = ?', job.id)!, attempt: this.attemptRow(id)!, workspace: ws.reg, ref, brief: await this.brief(ws, ref, job), execution }
+      return { job: this.one<JobRow>('SELECT * FROM jobs WHERE id = ?', job.id)!, attempt: this.attemptRow(id)!, workspace: ws.reg, cwd: space.root, ref, brief: await this.brief(space, ref, job), execution }
     }
   }
 
@@ -288,7 +294,12 @@ export class ExecStore {
   async brief(ws: Workspace, ref: RunRef, job: JobRow): Promise<string> {
     const reading = await readRun(ws, ref)
     const r = reading.record!
-    const lines = [`Run: ${r.project} / ${runKey(ref)} (record ${runDir(ref)}/run.json)`, `Agent: you perform this run as ${r.executor.name}${hostOf(r.executor) !== r.executor.name ? `; the execution host ${hostOf(r.executor)} launched you and publishes your work` : ''}.`, `Workspace: ${ws.root}`, `Why this attempt: ${job.reason}`]
+    const lines = [`Run: ${r.project} / ${runKey(ref)} (record ${runDir(ref)}/run.json)`, `Agent: you perform this run as ${r.executor.name}${hostOf(r.executor) !== r.executor.name ? `; the execution host ${hostOf(r.executor)} launched you and publishes your work` : ''}.`]
+    if (ws.copyOf && r.storage) {
+      const owned = r.storage.repositories.filter(x => x.branch).map(x => x.path === '.' ? 'the root' : x.path)
+      lines.push(`Working copy: ${ws.root} — this run's own copy of the project; it is saved to branch ${r.storage.branch} (${owned.join(', ')}), never to a shared branch.`, `Project workspace: ${ws.shared.root} — the person's; this run reads its .local/ resources from there by name and changes nothing in it.`)
+    } else lines.push(`Workspace: ${ws.root}`)
+    lines.push(`Why this attempt: ${job.reason}`)
     if (job.kind === 'start') lines.push(`The person's request is ${runDir(ref)}/${r.input.file} (author ${r.input.author ?? r.input.requester}).`)
     const resume = [...r.history].reverse().find(e => e.op === 'run.resume') as (RunRecord['history'][number] & { reason?: string }) | undefined
     if (job.kind === 'resume') {
@@ -380,32 +391,52 @@ export class ExecStore {
   }
 
   // Publishes (or retries) one checkpoint. Finished steps are not repeated.
+  // A run with its own copy (p9) publishes to its run branches and waits
+  // only for its own attempt; other runs work in other copies. A run kept in
+  // the project workspace waits for every attempt there, as before.
+  // Publications of one run take turns (another try, a decision's checkpoint).
   async publishCheckpoint(id: number): Promise<CheckpointRow> {
     const cp = this.one<CheckpointRow>('SELECT * FROM checkpoints WHERE id = ?', id)
     if (!cp) throw new RequestError(404, `no checkpoint ${id}`)
     if (cp.state === 'published' || cp.state === 'nothing') return cp
-    const live = this.one<AttemptRow>('SELECT * FROM attempts WHERE workspace = ? AND state != \'ended\'', cp.workspace)
-    if (live) throw new RequestError(409, `attempt ${live.id} is executing in ${cp.workspace}; publication waits until it has ended`)
     const ws = await this.workspace(cp.workspace)
     const ref = { workflow: cp.workflow, run: cp.run }
-    const env = this.ctx.gitea ? await this.ctx.gitea.gitEnv() : {}
-    const message = `${runKey(ref)}: ${cp.kind}`
-    let result
-    try {
-      const info = await ws.devdocs()
-      const dir = runDir(ref)
-      const own: Record<string, string> = info.owner === 'devdocs' ? { devdocs: dir.slice('devdocs/'.length) } : { '.': dir }
-      result = await publish(ws, cp.baseline ? JSON.parse(cp.baseline) as Baseline : {}, message, JSON.parse(cp.steps) as RepoStep[], env, own)
-    } catch (e) {
-      result = { state: 'failed' as const, steps: JSON.parse(cp.steps) as RepoStep[], error: (e as Error).message }
-    }
-    this.run('UPDATE checkpoints SET state = ?, steps = ?, error = ?, updated = ? WHERE id = ?', result.state, JSON.stringify(result.steps), result.error ?? null, now(), id)
-    return this.one<CheckpointRow>('SELECT * FROM checkpoints WHERE id = ?', id)!
+    const space = await runSpace(ws, ref)
+    const live = space.copyOf
+      ? this.one<AttemptRow>('SELECT * FROM attempts WHERE workspace = ? AND workflow = ? AND run = ? AND state != \'ended\'', cp.workspace, cp.workflow, cp.run)
+      : this.one<AttemptRow>('SELECT * FROM attempts WHERE workspace = ? AND state != \'ended\'', cp.workspace)
+    if (live) throw new RequestError(409, `attempt ${live.id} is executing ${space.copyOf ? `run ${runKey(ref)}` : `in ${cp.workspace}`}; publication waits until it has ended`)
+    return withLock(join(space.root, '.git', 'wfe-publication'), async () => {
+      const fresh = this.one<CheckpointRow>('SELECT * FROM checkpoints WHERE id = ?', id)!
+      if (fresh.state === 'published' || fresh.state === 'nothing') return fresh
+      const env = this.ctx.gitea ? await this.ctx.gitea.gitEnv() : {}
+      const message = `${runKey(ref)}: ${fresh.kind}`
+      const previous = JSON.parse(fresh.steps) as RepoStep[]
+      let result
+      try {
+        if (space.copyOf) {
+          const copy = await readCopy(ws, ref)
+          const targets = Object.fromEntries((copy?.manifest?.repositories ?? []).filter(r => r.initialized && r.branch).map(r => [r.path, r.branch!]))
+          const record = join(space.root, runDir(ref), RUN_FILE)
+          result = await publishRun(space, message, previous, env, targets, f => withLock(record, f, { what: `run ${runKey(ref)}` }))
+        } else {
+          const info = await ws.devdocs()
+          const dir = runDir(ref)
+          const own: Record<string, string> = info.owner === 'devdocs' ? { devdocs: dir.slice('devdocs/'.length) } : { '.': dir }
+          result = await publish(ws, fresh.baseline ? JSON.parse(fresh.baseline) as Baseline : {}, message, previous, env, own)
+        }
+      } catch (e) {
+        result = { state: 'failed' as const, steps: previous, error: (e as Error).message }
+      }
+      this.run('UPDATE checkpoints SET state = ?, steps = ?, error = ?, updated = ? WHERE id = ?', result.state, JSON.stringify(result.steps), result.error ?? null, now(), id)
+      return this.one<CheckpointRow>('SELECT * FROM checkpoints WHERE id = ?', id)!
+    }, { what: `publication of run ${runKey(ref)}`, timeoutMs: 600_000 })
   }
 
   // The result decision is a checkpoint of its own (only run.json changes).
   async afterDecision(ws: Workspace, ref: RunRef, decision: string): Promise<CheckpointRow> {
-    return this.checkpoint(ws, ref, `result ${decision}`, null, JSON.stringify(await baseline(ws)))
+    const space = await runSpace(ws, ref)
+    return this.checkpoint(ws.shared, ref, `result ${decision}`, null, space.copyOf ? null : JSON.stringify(await baseline(ws.shared)))
   }
 
   // ---- recovery -------------------------------------------------------------------------------

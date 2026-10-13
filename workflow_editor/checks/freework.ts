@@ -280,7 +280,8 @@ try {
   await bOp({ op: 'question.take-up', question: 'q1' })
   await bOp({ op: 'node.complete', node: 'talk', outcome: 'Agreed: count words and lines.' })
   const { adjustRun } = await import('../server/runs.ts')
-  const r1 = await readFile(join(root, 'pj-blank', 'devdocs', 'runs', 'freework', fwRun.run, 'definition', 'freework.yaml'), 'utf8')
+  const { runSpace } = await import('../server/runspace.ts')
+  const r1 = await readFile(join((await runSpace(blankWs, fwRef)).root, 'devdocs', 'runs', 'freework', fwRun.run, 'definition', 'freework.yaml'), 'utf8') // the run's own copy (p9)
   const grownText = r1.replace('nodes:\n', 'nodes:\n  count:\n    type: do\n    name: Count words and lines\n    description: Write the counter and run it.\n') + 'edges:\n  - {from: talk, to: count}\n'
   const adj = await adjustRun(blankWs, fwRef, { text: grownText, reason: 'q1 agreed the counter', source: { kind: 'answer', question: 'q1' } }, { via: 'cli', by: 'autolab', attempt: B })
   check(adj.ok, `the agreed work is added at the boundary: ${JSON.stringify(adj.problems)}`)

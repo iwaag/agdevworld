@@ -157,7 +157,7 @@ try {
   await page.getByLabel('Decision evidence').fill('half.txt looks right')
   await page.getByRole('button', { name: 'Accept result' }).click()
   check(await waitText('.run-side', /result accepted/), 'acceptance is its own publication checkpoint')
-  check((await gitOk(remote, ['show', 'main:devdocs/runs/ship/run-001/run.json'])).includes('"decision": "accepted"'), 'the accepted record is on the remote')
+  check((await gitOk(remote, ['show', 'wfe/chk/ship/run-001:devdocs/runs/ship/run-001/run.json'])).includes('"decision": "accepted"'), 'the accepted record is on the remote, on the run branch (p9)')
   await shot(page, 'p4-run-accepted', false)
 
   const pageErrors = errors.filter(e => !/^Failed to load resource/.test(e))

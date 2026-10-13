@@ -17,6 +17,7 @@ import { ExecStore } from '../server/exec.ts'
 import { gitOk } from '../server/git.ts'
 import { loadRegistry } from '../server/registry.ts'
 import { adjustRun, readRun, runOp, type AdjustOptions } from '../server/runs.ts'
+import { runSpace } from '../server/runspace.ts'
 import { RequestError, Workspace } from '../server/workspace.ts'
 import { compile } from '../shared/compile.ts'
 import { checkRecord, operate, type OpInput, type RunGraph, type RunRecord } from '../shared/run.ts'
@@ -72,7 +73,7 @@ async function setup() {
   const c = await x.claim('test-harness')
   assert.ok('attempt' in c)
   x.started(c.attempt.id, process.pid)
-  const folder = join(dir, 'devdocs', 'runs', 'improve', req.ref.run)
+  const folder = join((await runSpace(ws, req.ref)).root, 'devdocs', 'runs', 'improve', req.ref.run) // the run's own copy (p9)
   return { ws, x, area, registry, dir, folder, ref: req.ref, attempt: c.attempt.id, brief: c.brief }
 }
 type S = Awaited<ReturnType<typeof setup>>

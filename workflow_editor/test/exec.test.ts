@@ -16,9 +16,10 @@ import { createServer } from 'node:http'
 import { createHandler } from '../server/api.ts'
 import { createProject } from '../server/create.ts'
 import { ExecStore } from '../server/exec.ts'
-import { gitOk } from '../server/git.ts'
+import { git, gitOk } from '../server/git.ts'
 import { loadRegistry } from '../server/registry.ts'
 import { readRun, runOp } from '../server/runs.ts'
+import { runSpace } from '../server/runspace.ts'
 import { RequestError, Workspace } from '../server/workspace.ts'
 import { situation, type OpInput, type RunRef } from '../shared/run.ts'
 
@@ -89,6 +90,9 @@ const request = (x: ExecStore, workspace: string, receipt: string) => x.request(
 // The executor's report, carrying its attempt id.
 const report = (ws: Workspace, ref: RunRef, attempt: string | undefined, op: OpInput) => runOp(ws, ref, { ...op, ...(attempt ? { attempt } : {}) }, { by: 'autolab', via: 'cli' })
 const record = async (ws: Workspace, ref: RunRef) => (await readRun(ws, ref)).record!
+// Where a run works (p9): its own copy of the project.
+const copyOf = async (ws: Workspace, ref: RunRef) => (await runSpace(ws, ref)).root
+const branchOf = (project: string, ref: RunRef) => `wfe/${project}/${ref.workflow}/${ref.run}`
 const claimed = async (x: ExecStore) => { const c = await x.claim('test-harness'); assert.ok('attempt' in c, JSON.stringify(c)); return c as Exclude<typeof c, { idle: string }> }
 
 test('request → human wait (process exits) → answer → resume → completion → acceptance; one slot; duplicates queued once', async () => {
@@ -113,7 +117,10 @@ test('request → human wait (process exits) → answer → resume → completio
   assert.equal(situation(rec), 'awaiting-person', 'no process runs through the wait')
   assert.equal(rec.control.attempt, null)
   assert.equal(f1.checkpoint?.state, 'published', `checkpoint: ${JSON.stringify(f1.checkpoint)}`)
-  assert.match(await gitOk(remote, ['log', '-1', '--format=%s', 'main']), /ship\/run-001: after attempt .*awaiting-person/)
+  assert.match(await gitOk(remote, ['log', '-1', '--format=%s', branchOf(id, ref)]), /ship\/run-001: after attempt .*awaiting-person/, 'saved on the run branch')
+  assert.equal((await gitOk(remote, ['log', '-1', '--format=%s', 'main'])).trim(), 'workflow', 'the shared branch is untouched')
+  assert.equal(c1.cwd, await copyOf(ws, ref), 'the attempt works in the run\'s own copy')
+  assert.match(c1.brief, /Working copy: .*saved to branch wfe\/p\d+\/ship\/run-001/)
   // The answer: recorded first, then the resumption is queued; twice is once.
   const ans = { op: 'question.answer' as const, question: 'q1', text: 'Small.', receipt: 'browser-answer-q1-0001' }
   await runOp(ws, ref, ans, { by: 'Test Person', via: 'browser' })
@@ -133,18 +140,20 @@ test('request → human wait (process exits) → answer → resume → completio
   await report(ws, ref, c2.attempt.id, { op: 'question.take-up', question: 'q1' })
   await report(ws, ref, c2.attempt.id, { op: 'node.complete', node: 'scope', outcome: 'small' })
   await report(ws, ref, c2.attempt.id, { op: 'node.start', node: 'build' })
-  await writeFile(join(dir, 'thing.txt'), 'built\n')
+  await writeFile(join(c2.cwd, 'thing.txt'), 'built\n')
   await report(ws, ref, c2.attempt.id, { op: 'node.complete', node: 'build', outcome: 'built thing.txt', artifacts: ['thing.txt'] })
   const f2 = await x.finished(c2.attempt.id, { code: 0, signal: null })
   rec = await record(ws, ref)
   assert.equal(situation(rec), 'completed')
   assert.equal(rec.decisions.length, 0, 'completion is not acceptance')
   assert.equal(f2.checkpoint?.state, 'published')
-  assert.equal((await gitOk(remote, ['show', 'main:thing.txt'])), 'built\n', 'the work reached the remote')
+  assert.equal((await gitOk(remote, ['show', `${branchOf(id, ref)}:thing.txt`])), 'built\n', 'the work reached the remote, on the run branch')
+  assert.notEqual((await git(remote, ['cat-file', '-e', 'main:thing.txt'])).code, 0, 'and not the shared branch')
+  assert.equal(await import('node:fs/promises').then(f => f.stat(join(dir, 'thing.txt')).then(() => true, () => false)), false, 'nor the project workspace')
   await runOp(ws, ref, { op: 'run.decide', decision: 'accepted', evidence: 'looked at thing.txt' }, { by: 'Test Person', via: 'browser' })
   const cp = await x.afterDecision(ws, ref, 'accepted')
   assert.equal(cp.state, 'published')
-  assert.match(await gitOk(remote, ['show', `main:devdocs/runs/ship/${ref.run}/run.json`]), /"decision": "accepted"/)
+  assert.match(await gitOk(remote, ['show', `${branchOf(id, ref)}:devdocs/runs/ship/${ref.run}/run.json`]), /"decision": "accepted"/)
   // History keeps the distinct steps.
   const ops = (await record(ws, ref)).history.map(e => e.op)
   for (const o of ['question.answer', 'question.take-up', 'node.complete', 'run.decide']) assert.ok(ops.includes(o as never), o)
@@ -177,7 +186,7 @@ test('a workflow that names its agent: browser answers queue the resumption and 
     await x.finished(c2.attempt.id, { code: 0, signal: null })
     const decided = await post({ op: 'run.decide', decision: 'accepted', evidence: 'looked at it' })
     assert.equal(decided.checkpoint?.state, 'published', 'the decision is published')
-    assert.match(await gitOk(remote, ['show', `main:devdocs/runs/ship/${ref.run}/run.json`]), /"decision": "accepted"/)
+    assert.match(await gitOk(remote, ['show', `${branchOf(id, ref)}:devdocs/runs/ship/${ref.run}/run.json`]), /"decision": "accepted"/)
   } finally { srv.close() }
 })
 
@@ -197,13 +206,13 @@ test('one workspace, one run: another request is refused while a run awaits a pe
 })
 
 test('interruption after a side effect: held, never rerun or completed by itself; explicit resume continues from the working tree', async () => {
-  const { x, ws, id, dir } = await setup()
+  const { x, ws, id } = await setup()
   const { ref } = await request(x, id, 'req-intr-0001')
   const c = await claimed(x)
   await report(ws, ref, c.attempt.id, { op: 'node.start', node: 'scope' })
   await report(ws, ref, c.attempt.id, { op: 'node.complete', node: 'scope', outcome: 'agreed without asking' })
   await report(ws, ref, c.attempt.id, { op: 'node.start', node: 'build' })
-  await writeFile(join(dir, 'half.txt'), 'side effect before completion was recorded\n') // then the process dies
+  await writeFile(join(c.cwd, 'half.txt'), 'side effect before completion was recorded\n') // then the process dies
   const f = await x.finished(c.attempt.id, { code: 137, signal: 'SIGKILL' })
   assert.equal(f.outcome, 'interrupted')
   let rec = await record(ws, ref)
@@ -318,39 +327,56 @@ test('concurrent writers from several processes lose nothing', async () => {
   assert.equal((await readRun(ws, ref)).problem, undefined)
 })
 
-test('publication: pre-existing changes left out; a push failure is retried without new commits; submodules before the root', async () => {
-  const { x, ws, id, dir, area } = await setup('submodule')
+test('publication (p9): the copy is saved to its run branch only; the person\'s edits stay out; a push failure is retried without new commits; submodules before the root', async () => {
+  const { x, ws, id, dir, area, remote } = await setup('submodule')
   await writeFile(join(dir, 'notes-of-the-person.txt'), 'mine, before the run\n')
   await writeFile(join(dir, 'README.md'), 'edited by the person before the run\n')
+  const mainBefore = (await gitOk(remote, ['rev-parse', 'main'])).trim()
   const { ref } = await request(x, id, 'req-pub-0001')
   const c = await claimed(x)
+  const cwd = c.cwd
   await report(ws, ref, c.attempt.id, { op: 'node.start', node: 'scope' })
   await report(ws, ref, c.attempt.id, { op: 'node.complete', node: 'scope', outcome: 'ok' })
   await report(ws, ref, c.attempt.id, { op: 'node.start', node: 'build' })
-  await writeFile(join(dir, 'made-by-run.txt'), 'the run\n')
-  await writeFile(join(dir, 'README.md'), 'edited by the person, then by the run\n')
+  await writeFile(join(cwd, 'made-by-run.txt'), 'the run\n')
+  await writeFile(join(cwd, 'README.md'), 'edited by the run\n')
   await report(ws, ref, c.attempt.id, { op: 'node.complete', node: 'build', outcome: 'ok' })
   // The root's remote is unreachable during this checkpoint; devdocs' is not.
-  const rootRemote = (await gitOk(dir, ['remote', 'get-url', 'origin'])).trim()
-  await gitOk(dir, ['remote', 'set-url', 'origin', join(area, 'nowhere.git')])
+  const rootRemote = (await gitOk(cwd, ['remote', 'get-url', 'origin'])).trim()
+  assert.equal(rootRemote, remote, 'the copy publishes to the project\'s remote')
+  await gitOk(cwd, ['remote', 'set-url', 'origin', join(area, 'nowhere.git')])
   const f = await x.finished(c.attempt.id, { code: 0, signal: null })
   const cp = f.checkpoint!
   assert.equal(cp.state, 'failed')
   const steps1 = (await x.runView(id, ref)).checkpoints.at(-1)!.steps
   const docs = steps1.find(s => s.repo === 'devdocs')!, rootStep = steps1.find(s => s.repo === '.')!
+  const branch = branchOf(id, ref)
+  assert.deepEqual([docs.branch, rootStep.branch], [branch, branch], 'each step records its run branch before writing')
   assert.ok(docs.commit && docs.pushed, 'the child repository was published first')
   assert.ok(rootStep.commit && !rootStep.pushed, 'the root was committed, its push failed')
-  assert.ok(rootStep.include.includes('made-by-run.txt') && rootStep.include.includes('devdocs'))
-  assert.ok(rootStep.excluded.includes('notes-of-the-person.txt'), 'a pre-existing change is left out')
-  assert.ok(rootStep.conflicts.includes('README.md'), 'a pre-existing change the run changed again is not swept in')
-  assert.match(await gitOk(dir, ['status', '--porcelain']), /notes-of-the-person\.txt/)
-  await gitOk(dir, ['remote', 'set-url', 'origin', rootRemote])
+  assert.deepEqual(rootStep.include.sort(), ['README.md', 'devdocs', 'made-by-run.txt'], 'everything in the copy is the run\'s own work')
+  const docsRemote = (await gitOk(join(cwd, 'devdocs'), ['remote', 'get-url', 'origin'])).trim()
+  assert.equal((await gitOk(docsRemote, ['rev-parse', branch])).trim(), docs.commit)
+  // The agent checks out something else before the retry: the retry still
+  // publishes the recorded run branch, nothing else.
+  await gitOk(cwd, ['remote', 'set-url', 'origin', rootRemote])
+  await gitOk(cwd, ['checkout', '-q', '-b', 'scratch'])
   const retried = await x.publishCheckpoint(cp.id)
   const steps2 = (await x.runView(id, ref)).checkpoints.at(-1)!.steps
   assert.equal(steps2.find(s => s.repo === '.')!.commit, rootStep.commit, 'the retry pushes the same commit; the work is not repeated')
   assert.equal(steps2.find(s => s.repo === 'devdocs')!.commit, docs.commit)
-  assert.equal(retried.state, 'attention', 'the README conflict still needs a person')
-  assert.equal(await gitOk(rootRemote, ['rev-parse', 'main']).then(s => s.trim()), rootStep.commit)
+  assert.equal(retried.state, 'published')
+  assert.equal((await gitOk(remote, ['rev-parse', branch])).trim(), rootStep.commit)
+  assert.equal((await gitOk(remote, ['rev-parse', 'main'])).trim(), mainBefore, 'no shared branch changed')
+  assert.equal(await gitOk(remote, ['show', `${branch}:README.md`]), 'edited by the run\n')
+  assert.notEqual((await git(remote, ['cat-file', '-e', `${branch}:notes-of-the-person.txt`])).code, 0, 'the person\'s files are not the run\'s')
+  assert.match(await gitOk(dir, ['status', '--porcelain']), /notes-of-the-person\.txt/, 'and stay in their workspace')
+  // A later checkpoint while another branch is checked out commits nothing there.
+  await writeFile(join(cwd, 'on-scratch.txt'), 'x\n')
+  const cp2 = await x.checkpoint(ws, ref, 'a later save', null, null)
+  assert.equal(cp2.state, 'attention')
+  assert.match(cp2.steps, /has scratch checked out, not the run branch/)
+  assert.notEqual((await git(remote, ['rev-parse', '--verify', '-q', 'refs/heads/scratch'])).code, 0, 'the other branch is never pushed')
 })
 
 test('notification boundary: notable events from committed entries, with stable ids', async () => {

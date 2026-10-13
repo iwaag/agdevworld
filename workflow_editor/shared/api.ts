@@ -205,6 +205,9 @@ export interface RunResponse {
   predecessor?: RelatedRun
   artifacts: { path: string; exists: boolean }[]
   catalog?: RunCatalog // what the run was given of the person's node catalog (p7/ex1)
+  // Where the run's files are (p9, docs/storage.md): its own working copy
+  // (with its branch), or the project workspace.
+  place?: { kind: 'run-copy'; branch: string | null } | { kind: 'project' }
 }
 
 export interface RunOpResponse { ok: true; seq: number; record: RunRecord }

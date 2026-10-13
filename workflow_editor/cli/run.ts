@@ -12,6 +12,7 @@ import {
   adjustRun, checkRun, createRun, listRuns, resolveRef, runDir, runOp, runResponse, type AdjustResult, type CreateRunOptions,
 } from '../server/runs.ts'
 import { RequestError, type Workspace } from '../server/workspace.ts'
+import { runSpace } from '../server/runspace.ts'
 import type { ExecStore } from '../server/exec.ts'
 
 export interface RunCli {
@@ -336,23 +337,25 @@ function entrust(c: RunCli, text: string): EntrustRef {
 
 // An artifact path: relative to the current directory when it exists there,
 // a file of the run folder, or project-relative as given.
-function artifactPath(ws: Workspace, ref: RunRef, p: string): string {
+// p9: relative to the root the run's files are in (`root`): its own working
+// copy, or the project workspace for a run without one.
+function artifactPath(root: string, ref: RunRef, p: string): string {
   const abs = resolve(p)
   const exists = (f: string) => { try { readFileSync(f); return true } catch { return false } }
   if (isAbsolute(p) || exists(abs)) {
-    const rel = relative(ws.root, abs)
-    if (rel.startsWith('..') || isAbsolute(rel)) throw new RequestError(400, `${p} is outside the project`)
+    const rel = relative(root, abs)
+    if (rel.startsWith('..') || isAbsolute(rel)) throw new RequestError(400, `${p} is outside the project${root.includes('/.local/wfe/runs/') ? ' (this run\'s files are in its own working copy)' : ''}`)
     return rel.split(sep).join('/')
   }
-  if (!p.includes('/') && exists(resolve(ws.root, runDir(ref), p))) return `${runDir(ref)}/${p}`
+  if (!p.includes('/') && exists(resolve(root, runDir(ref), p))) return `${runDir(ref)}/${p}`
   return p
 }
 
 // A path given on the command line as project-relative: relative to the
 // current directory when that is inside the project, otherwise as written.
-function projectPath(ws: Workspace, p: string): string {
-  const rel = relative(ws.root, resolve(p))
-  return !rel.startsWith('..') && !isAbsolute(rel) && (isAbsolute(p) || relative(ws.root, process.cwd()) !== '') ? (rel.split(sep).join('/') || '.') : p
+function projectPath(root: string, p: string): string {
+  const rel = relative(root, resolve(p))
+  return !rel.startsWith('..') && !isAbsolute(rel) && (isAbsolute(p) || relative(root, process.cwd()) !== '') ? (rel.split(sep).join('/') || '.') : p
 }
 
 // One line of a longer text, marked when something was left out.
@@ -512,6 +515,7 @@ export async function runCommand(c: RunCli): Promise<number> {
     return report(target, res.record, `${res.duplicate ? 'Already recorded (same receipt); nothing changed.' : what(res.record)}${extra ? `\n${extra}` : ''}`)
   }
   const node = () => { if (!args[1]) throw c.usage('<node> is required'); return args[1] }
+  const rootOf = async (r: RunRef) => (await wrap(() => runSpace(ws, r))).root
 
   switch (sub) {
     case 'create': {
@@ -564,8 +568,8 @@ export async function runCommand(c: RunCli): Promise<number> {
     case 'wait': return op({ op: 'node.wait', node: node(), reason: need(c, 'reason', 'why the node waits'), holder: need(c, 'holder', 'who or what holds the next move'), external: need(c, 'external', 'a reference to the awaited result') }, () => `Recorded: ${args[1]} waits.`)
     case 'complete': {
       const r = await ref()
-      const ws2 = ws
-      const artifacts = c.opts('artifact').map(p => artifactPath(ws2, r, p))
+      const root = await rootOf(r)
+      const artifacts = c.opts('artifact').map(p => artifactPath(root, r, p))
       const agreement = c.opt('agreement')
       return op({ op: 'node.complete', node: node(), outcome: need(c, 'outcome', 'what the node produced or concluded'), artifacts, ...(agreement ? { agreement } : {}) }, rec => {
         const d = rec.nodes[args[1]]?.document
@@ -592,8 +596,12 @@ export async function runCommand(c: RunCli): Promise<number> {
       const res = await wrap(() => c.exec().resume(ws, r, by ?? 'person', need(c, 'reason', 'the resume instruction: what the executor should do now'), 'cli', receipt))
       return report(r, res.record, `Recorded: resumed.${res.job ? ` Queued job ${res.job.id} (${res.job.state}).` : ''}`)
     }
-    case 'ask': return op({ op: 'question.ask', question: c.opt('id') ?? '', node: args[1], text: need(c, 'question', 'the question'), to: need(c, 'to', 'to whom it is addressed'), ...(c.flag('about-plan') ? { plan: true } : {}), ...(c.opts('subject').length ? { subjects: c.opts('subject').map(p => projectPath(ws, p)) } : {}), ...(c.opt('presentation') ? { presentation: c.opt('presentation') } : {}), ...(c.opt('about-adjustment') ? { adjustment: c.opt('about-adjustment') } : {}) },
-      rec => { const q = Object.values(rec.questions).at(-1)!; return `Recorded question ${q.id} to ${q.to}${q.node ? `; ${q.node} waits on it` : ''}.` })
+    case 'ask': {
+      const r = await ref()
+      const root = await rootOf(r)
+      return op({ op: 'question.ask', question: c.opt('id') ?? '', node: args[1], text: need(c, 'question', 'the question'), to: need(c, 'to', 'to whom it is addressed'), ...(c.flag('about-plan') ? { plan: true } : {}), ...(c.opts('subject').length ? { subjects: c.opts('subject').map(p => projectPath(root, p)) } : {}), ...(c.opt('presentation') ? { presentation: c.opt('presentation') } : {}), ...(c.opt('about-adjustment') ? { adjustment: c.opt('about-adjustment') } : {}) },
+        rec => { const q = Object.values(rec.questions).at(-1)!; return `Recorded question ${q.id} to ${q.to}${q.node ? `; ${q.node} waits on it` : ''}.` }, r)
+    }
     case 'answer': {
       if (!args[1]) throw c.usage('<question> is required')
       return op({ op: 'question.answer', question: args[1], text: need(c, 'answer', 'the answer text'), from: c.opt('from') }, () => `Recorded an answer to ${args[1]}. A node waiting on it keeps waiting until the answer is taken up.`, undefined,
@@ -641,7 +649,8 @@ export async function runCommand(c: RunCli): Promise<number> {
       const def = resp.record ? resp.bundle[resp.record.definition.root]?.workflow : undefined
       if (!resp.record || !def) throw c.refused(`run ${runKey(r)} cannot be used: ${resp.problem?.message ?? 'its definition cannot be read'}`)
       const dir = runDir(r)
-      const answers = args.slice(1).map(p => accessAt(def.repositories, projectPath(ws, p), dir))
+      const root = await rootOf(r)
+      const answers = args.slice(1).map(p => accessAt(def.repositories, projectPath(root, p), dir))
       const scopes = Object.entries(def.repositories).map(([k, b]) => `  ${k.padEnd(16)} ${(normalizeRepoPath(b.path) ?? b.path).padEnd(28)} ${b.access}`)
       c.out(answers.length
         ? answers.map(a => `${a.path}: ${a.access} — ${a.reason}`).join('\n')
@@ -652,7 +661,7 @@ export async function runCommand(c: RunCli): Promise<number> {
     case 'attach': {
       const r = await ref()
       if (!args[1]) throw c.usage('<path> is required')
-      const path = artifactPath(ws, r, args[1])
+      const path = artifactPath(await rootOf(r), r, args[1])
       return op({ op: 'artifact.attach', path, node: c.opt('node'), title: c.opt('title') }, () => `Recorded artifact ${path}.`, r)
     }
     case 'adjust': {
@@ -663,7 +672,8 @@ export async function runCommand(c: RunCli): Promise<number> {
       const source = src === 'request' ? { kind: 'request' as const } : src === 'person' ? { kind: 'person' as const, ...(by ? { by } : {}) } : m?.[1] === 'answer' ? { kind: 'answer' as const, question: m[2], ...(m[3] ? { answer: Number(m[3]) } : {}) } : m?.[1] === 'instruction' ? { kind: 'instruction' as const, instruction: m[2] } : m?.[1] === 'agreement' ? { kind: 'agreement' as const, question: m[2] } : null
       if (!source) throw c.usage(`--source "${src}" must be request, answer:<q>[:<n>], instruction:<i>, agreement:<q> or person`)
       const completingNode = c.opt('completing')
-      const completing = completingNode ? { node: completingNode, outcome: need(c, 'outcome', `what ${completingNode} produced or concluded`), artifacts: c.opts('artifact').map(p => artifactPath(ws, r, p)) } : undefined
+      const root = await rootOf(r)
+      const completing = completingNode ? { node: completingNode, outcome: need(c, 'outcome', `what ${completingNode} produced or concluded`), artifacts: c.opts('artifact').map(p => artifactPath(root, r, p)) } : undefined
       if (!completing && c.opt('outcome')) throw c.usage('--outcome goes with --completing <node>')
       const res = await wrap(() => adjustRun(ws, r, { text, reason: need(c, 'reason', 'why the run changes'), source, dryRun: c.flag('dry-run'), propose: c.opt('propose'), expectRevision: c.opt('expect-revision'), completing }, { by, via: 'cli', expectSeq, attempt, receipt }))
       c.out(adjustText(res, runKey(r)), res)

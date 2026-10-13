@@ -50,6 +50,7 @@ import { loadRegistry, observe } from './registry.ts'
 import { listRuns, readRun, runDir } from './runs.ts'
 import { named, openStore, transaction, type Migration } from './sqlite.ts'
 import { RequestError, Workspace } from './workspace.ts'
+import { runSpace } from './runspace.ts'
 
 // <area>/zulip.json — system configuration, outside every repository. No
 // credentials: the transport holds those.
@@ -653,7 +654,9 @@ export class NotifyStore {
     const rec = reading?.record
     const authored = rec ? reading!.bundle.entries[rec.definition.root]?.workflow : undefined
     const label = runKey(ref)
-    const links = ws && runId ? await this.links(ws, ref) : new Map<string, DocLink>()
+    // The run's documents and commits are in its own copy (p9).
+    const space = ws && runId ? await runSpace(ws, ref).catch(() => null) : null
+    const links = space ? await this.links(space, ref) : new Map<string, DocLink>()
     const marker = `ref ${label} ${batch.map(o => markerToken(o.id)).join(' ')}`
     if (batch[0].type === 'notice') {
       const e = JSON.parse(batch[0].event) as { kind: NoticeKind; post: number; stream: number; topic: string; classification: null; text: string }
@@ -679,7 +682,7 @@ export class NotifyStore {
       ? `reply in this topic — quote this message, or start your reply with \`${q || 'q<n>'}:\`.`
       : req && requestTopic ? `in the request topic: ${requestTopic}`
         : runView ? `[agdevworld run view](${runView})` : `in agdevworld's run view on the execution host (no remote address is configured), or \`wfe run answer ${label} ${q || '<question>'} --answer … --by <name>\` there`
-    const request = rec && ws ? await readFile(join(ws.root, runDir(ref), rec.input.file), 'utf8').then(t => t.split('\n').map(l => l.replace(/^#+\s*/, '').trim()).find(Boolean) ?? '', () => '') : ''
+    const request = rec && space ? await readFile(join(space.root, runDir(ref), rec.input.file), 'utf8').then(t => t.split('\n').map(l => l.replace(/^#+\s*/, '').trim()).find(Boolean) ?? '', () => '') : ''
     const nextOf = (): string | undefined => {
       if (!rec) return undefined
       const ex = rec.execution

@@ -23,6 +23,7 @@ import { parseSnapshot, type CatalogContext, type CatalogSnapshot, type RunCatal
 import { withLock } from './lock.ts'
 import { blobSizeAt, listAt, resolveRev, RevError, showAt, type DevdocsInfo, type DevdocsRev } from './devdocs.ts'
 import { RequestError, WORKFLOWS_DIR, type Workspace } from './workspace.ts'
+import { allocating, listCopies, prepareCopy, runSpace, storageOf, usedRuns } from './runspace.ts'
 import { parseWorkflow } from './yamlDoc.ts'
 
 export const RUN_FILE = 'run.json'
@@ -246,7 +247,10 @@ export async function runCatalog(ws: Workspace, ref: RunRef): Promise<RunCatalog
   return catalogOf(record, bundle)
 }
 
+// Every entrance resolves the run's place first (p9, server/runspace.ts):
+// its own working copy, or the project workspace for a run without one.
 export async function readRun(ws: Workspace, ref: RunRef): Promise<Reading & { dir: string }> {
+  ws = await runSpace(ws, ref)
   const rel = runDir(ref)
   const dir = await inside(ws.root, rel)
   const project = await projectId(ws)
@@ -272,15 +276,20 @@ export async function usableRun(ws: Workspace, ref: RunRef): Promise<{ record: R
 
 // ---- listing ---------------------------------------------------------------------
 
+// The runs of a project: those recorded in the project tree and those with
+// their own working copy (p9), each once. A run with a copy is read there;
+// the project tree's folder of the same run, if any, is a snapshot.
 export async function runRefs(ws: Workspace, workflow?: string): Promise<RunRef[]> {
+  ws = ws.shared
   const runs = await inside(ws.root, RUNS_DIR)
-  const workflows = workflow ? [workflow] : (await readdir(runs, { withFileTypes: true }).catch(() => [])).filter(d => d.isDirectory() && ID_PATTERN.test(d.name)).map(d => d.name).sort()
-  const out: RunRef[] = []
+  const workflows = workflow ? [workflow] : (await readdir(runs, { withFileTypes: true }).catch(() => [])).filter(d => d.isDirectory() && ID_PATTERN.test(d.name)).map(d => d.name)
+  const keys = new Set<string>()
   for (const wf of workflows) {
-    const names = (await readdir(join(runs, wf), { withFileTypes: true }).catch(() => [])).filter(d => d.isDirectory() && RUN_ID.test(d.name)).map(d => d.name).sort()
-    for (const run of names) { out.push({ workflow: wf, run }); if (out.length >= MAX_RUNS) return out }
+    for (const d of await readdir(join(runs, wf), { withFileTypes: true }).catch(() => [])) if (d.isDirectory() && RUN_ID.test(d.name)) keys.add(`${wf}/${d.name}`)
   }
-  return out
+  for (const c of await listCopies(ws, workflow)) keys.add(runKey(c.ref))
+  const out = [...keys].sort().map(k => { const [wf, run] = k.split('/'); return { workflow: wf, run } })
+  return out.slice(0, MAX_RUNS)
 }
 
 export function summaryOf(ref: RunRef, reading: Pick<Reading, 'record' | 'problem' | 'bundle'>): RunSummary {
@@ -309,7 +318,13 @@ function holderText(r: RunRecord, node: string): string {
 
 export async function listRuns(ws: Workspace, workflow?: string): Promise<RunSummary[]> {
   const refs = await runRefs(ws, workflow)
-  return Promise.all(refs.map(async ref => summaryOf(ref, await readRun(ws, ref))))
+  return Promise.all(refs.map(async ref => {
+    try { return summaryOf(ref, await readRun(ws, ref)) } catch (e) {
+      // A run whose working copy cannot be used is listed with its problem.
+      if (e instanceof RequestError) return summaryOf(ref, { problem: { kind: 'unreadable', message: e.message, code: 'run-copy' }, bundle: { entries: {} } })
+      throw e
+    }
+  }))
 }
 
 // "<workflow>/<run>", or a run id that is unique in the project.
@@ -361,6 +376,8 @@ async function compareSources(ws: Workspace, bundle: Bundle, def: DefinitionRef 
 }
 
 export async function runResponse(ws: Workspace, ref: RunRef, opts: { rev?: string } = {}): Promise<RunResponse> {
+  const shared = ws.shared
+  ws = await runSpace(ws, ref)
   const rel = runDir(ref)
   let reading: Reading
   let revInfo: RunResponse['revInfo']
@@ -391,7 +408,9 @@ export async function runResponse(ws: Workspace, ref: RunRef, opts: { rev?: stri
     record, problem: reading.problem,
     bundle: Object.fromEntries(Object.entries(reading.bundle.entries).map(([id, e]) => [id, { file: e.file, workflow: e.workflow, problem: e.problem, text: e.text }])),
     ...(reading.bundle.revisions ? { revisions: reading.bundle.revisions.map(r => ({ revision: r.revision, file: r.file, workflow: r.workflow, text: r.text })) } : {}),
-    sources: opts.rev ? [] : await compareSources(ws, reading.bundle, record?.definition),
+    // The current definitions are the project workspace's (p9).
+    sources: opts.rev ? [] : await compareSources(shared, reading.bundle, record?.definition),
+    place: ws.copyOf ? { kind: 'run-copy', branch: record?.storage?.branch ?? null } : { kind: 'project' },
     files: reading.files ?? [], predecessor, artifacts,
     ...(record ? { catalog: catalogOf(record, reading.bundle) } : {}),
   }
@@ -410,6 +429,7 @@ export async function historyRev(ws: Workspace, ref: string): Promise<{ info: De
 
 // A top-level file of the run folder, or an artifact the run records. Text only.
 export async function readRunFile(ws: Workspace, ref: RunRef, path: string, opts: { rev?: string } = {}): Promise<{ path: string; text: string }> {
+  ws = await runSpace(ws, ref)
   const rel = runDir(ref)
   const r = opts.rev ? await runResponse(ws, ref, opts) : await readRun(ws, ref)
   const own = !path.includes('/') && path !== RUN_FILE && path !== '.' && path !== '..' ? `${rel}/${path}` : null
@@ -468,8 +488,12 @@ export interface CreateRunOptions {
 
 export interface CreatedRun { ref: RunRef; dir: string; record: RunRecord; files: string[] }
 
+// The next run-NNN: past every run recorded, held by a copy or named by a
+// run branch (p9). Called under the workspace's allocation lock.
 async function nextRunId(ws: Workspace, workflow: string): Promise<string> {
-  const used = (await runRefs(ws, workflow)).map(r => /^run-(\d+)$/.exec(r.run)?.[1]).filter((n): n is string => !!n).map(Number)
+  const project = await projectId(ws.shared)
+  const runs = project ? await usedRuns(ws.shared, project, workflow) : new Set((await runRefs(ws, workflow)).map(r => r.run))
+  const used = [...runs].map(r => /^run-(\d+)$/.exec(r)?.[1]).filter((n): n is string => !!n).map(Number)
   return `run-${String((used.length ? Math.max(...used) : 0) + 1).padStart(3, '0')}`
 }
 
@@ -567,7 +591,35 @@ function inputOf(o: CreateRunOptions['input']): { input: RunInput; files: Record
   return { input, files }
 }
 
+// A run created in the project workspace without a name (an IDE agent's
+// `wfe run create`) takes its number under the same allocation lock as
+// requests, so the two never take one number twice.
 export async function createRun(ws: Workspace, o: CreateRunOptions): Promise<CreatedRun> {
+  if (!o.into && !o.name) return allocating(ws, () => createRunUnlocked(ws, o))
+  return createRunUnlocked(ws, o)
+}
+
+// A run the execution host performs (p9, docs/storage.md): everything that
+// can refuse the request is checked first, then the run's own working copy
+// is reserved and made, and the run folder is written into it. The same
+// receipt finds the same run (and finishes a creation that was interrupted).
+export async function createRunInCopy(ws: Workspace, o: CreateRunOptions & { receipt: string }, env: Record<string, string> = {}): Promise<CreatedRun & { existing?: boolean }> {
+  ws = ws.shared
+  const project = await projectId(ws)
+  if (!project) throw new RequestError(409, 'project.yaml cannot be read, so the run cannot name its project; fix project.yaml first (wfe status)')
+  inputOf(o.input)
+  const info = await ws.devdocs()
+  if (info.problem) throw new RequestError(409, `${info.problem.message}; nothing was created. ${info.problem.fix ?? ''}`.trim())
+  const src = await sourceBundle(ws, o.workflow)
+  const compiled = compile(src.files[src.root].workflow)
+  if (!compiled.ok) throw new RequestError(422, `${src.root} cannot be executed: ${compiled.message}. Nothing was written.`, { code: compiled.code })
+  const { copy, workspace: into } = await prepareCopy(ws, { project, workflow: src.root, name: o.name, receipt: o.receipt }, env)
+  const have = await readRun(into, copy.ref)
+  if (have.record) return { ref: copy.ref, dir: runDir(copy.ref), record: have.record, files: [], existing: true }
+  return createRunUnlocked(ws, { ...o, workflow: src.root, name: copy.ref.run, into, storage: storageOf(copy.manifest!) })
+}
+
+async function createRunUnlocked(ws: Workspace, o: CreateRunOptions): Promise<CreatedRun> {
   const host = 'host' in o.executor ? o.executor.host : undefined
   if (!host && !(o.executor as Executor).name?.trim()) throw new RequestError(400, 'the executor is required (--executor <name>): who performs the run')
   const { input, files } = inputOf(o.input)
@@ -623,7 +675,9 @@ function createRecord(project: string, ref: RunRef, input: RunInput, o: Pick<Cre
 // created — finds its run instead of making a second one.
 export async function findRunByReceipt(ws: Workspace, workflow: string, receipt: string): Promise<RunRef | null> {
   for (const ref of await runRefs(ws, workflow)) {
-    const text = await readTextOrNull(join(await inside(ws.root, runDir(ref)), RUN_FILE))
+    const space = await runSpace(ws, ref).catch(() => null)
+    if (!space) continue
+    const text = await readTextOrNull(join(await inside(space.root, runDir(ref)), RUN_FILE))
     if (!text?.includes(receipt)) continue
     try {
       const first = (JSON.parse(text) as { history?: { op?: string; receipt?: string }[] }).history?.[0]
@@ -653,6 +707,7 @@ function nextQuestionId(record: RunRecord): string {
 // each other's records. A retransmission (same receipt) changes nothing.
 export async function runOp(ws: Workspace, ref: RunRef, input: OpInput & EntryMeta, ctx: OpContext): Promise<{ record: RunRecord; ref: RunRef; duplicate?: boolean }> {
   if (input.op === 'run.create') throw new RequestError(400, 'runs are created with create, not as an operation')
+  ws = await runSpace(ws, ref)
   const file = join(await inside(ws.root, runDir(ref)), RUN_FILE)
   try {
     return await withLock(file, () => runOpLocked(ws, ref, input, ctx), { what: `run ${runKey(ref)}` })
@@ -809,6 +864,7 @@ function activeDefinition(record: RunRecord, bundle: Bundle): { text: string; wo
 // state, authorization). The revision file is written before run.json; a
 // refusal removes it again.
 export async function adjustRun(ws: Workspace, ref: RunRef, o: AdjustOptions, ctx: OpContext & { attempt?: string; receipt?: string }): Promise<AdjustResult> {
+  ws = await runSpace(ws, ref)
   const file = join(await inside(ws.root, runDir(ref)), RUN_FILE)
   return withLock(file, async () => {
     const { record, graph, dir, bundle } = await usableRun(ws, ref)
@@ -971,6 +1027,7 @@ async function presentedFiles(dir: string): Promise<string[]> {
 // written, and the registration recorded — or, if the record refuses it,
 // the copy removed again. A retransmission (same receipt) changes nothing.
 export async function registerPresentation(ws: Workspace, ref: RunRef, o: RegisterOptions, ctx: OpContext & { attempt?: string; receipt?: string }): Promise<{ record: RunRecord; presentation: Presentation; duplicate?: boolean }> {
+  ws = await runSpace(ws, ref)
   const file = join(await inside(ws.root, runDir(ref)), RUN_FILE)
   return withLock(file, async () => {
     const { record } = await usableRun(ws, ref)

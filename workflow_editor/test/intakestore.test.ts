@@ -15,6 +15,7 @@ import { IntakeStore } from '../server/intake.ts'
 import { NotifyStore } from '../server/notify.ts'
 import { loadRegistry } from '../server/registry.ts'
 import { createRun, listRuns, readRun, runOp } from '../server/runs.ts'
+import { runSpace } from '../server/runspace.ts'
 import { Workspace } from '../server/workspace.ts'
 import type { RunRef } from '../shared/run.ts'
 
@@ -103,7 +104,7 @@ test('a request topic: bots, strangers and run topics change nothing; the first 
   const runs = await listRuns(ws)
   assert.equal(runs.length, 1, 'exactly one run')
   const rec = await record(ws, { workflow: 'make', run: 'run-001' })
-  assert.equal(await readFile(join(ws.root, 'devdocs/runs/make/run-001/braindump.md'), 'utf8'), 'Please make a **blue** thing.\n\nTwo lines.', 'the post\'s own words, unchanged')
+  assert.equal(await readFile(join((await runSpace(ws, { workflow: 'make', run: 'run-001' })).root, 'devdocs/runs/make/run-001/braindump.md'), 'utf8'), 'Please make a **blue** thing.\n\nTwo lines.', 'the post\'s own words, unchanged')
   assert.deepEqual(rec.input.source, { kind: 'zulip', realm: REALM, message: request.id, stream: STREAM, topic: 'request-thing', sender: PERSON, senderName: 'Pat Person', at: new Date(request.timestamp * 1000).toISOString() })
   assert.equal(rec.input.author, 'Pat')
   assert.equal(rec.history[0].receipt, sourceReceipt(REALM, request.id))

@@ -22,6 +22,7 @@ import { channelName, topicUrl } from '../shared/notify.ts'
 import { isOpen, runKey, type Observation, type Presentation, type RunRecord, type RunRef } from '../shared/run.ts'
 import { inside } from './files.ts'
 import { readRun, runOp } from './runs.ts'
+import { runSpace } from './runspace.ts'
 import type { ServeConfig } from './presentServer.ts'
 import { named, openStore, transaction } from './sqlite.ts'
 import { RequestError, type Workspace } from './workspace.ts'
@@ -196,7 +197,7 @@ export class Presenter {
     const id = `pi-${Date.now().toString(36)}-${randomBytes(3).toString('hex')}`
     const cfg = this.config()
     const port = await this.freePort()
-    const folder = await inside(ws.root, p.folder)
+    const folder = await inside((await runSpace(ws, ref)).root, p.folder) // the run's own copy (p9)
     const instDir = join(this.dir, id)
     mkdirSync(instDir, { recursive: true, mode: 0o700 })
     const tokenFile = join(instDir, 'token')

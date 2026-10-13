@@ -13,16 +13,19 @@ import { ago, runHash, STATE_LABEL } from './runCommon.ts'
 
 const GROUPS: { key: RepositoryStatus['category'][]; title: string }[] = [
   { key: ['root', 'devdocs'], title: 'Fixed repositories' },
-  { key: ['study'], title: 'Study repositories (study/)' },
-  { key: ['wedo'], title: 'Wedo repositories (wedo/)' },
+  { key: ['study'], title: 'Study (study/)' },
+  { key: ['wedo'], title: 'Wedo (wedo/)' },
   { key: ['other'], title: 'Other repositories' },
 ]
 
 export function statusChips(r: RepositoryStatus): HTMLElement[] {
   const chips: HTMLElement[] = []
   if (r.kind === 'directory') {
-    chips.push(h('span.chip', { title: 'devdocs is a folder of the project root repository (devdocs: directory)' }, 'folder of the root'))
-    if (r.dirty) chips.push(h('span.chip.warn', { title: 'Uncommitted changes under devdocs/' }, `${r.dirty} uncommitted`))
+    if (r.path === 'devdocs') chips.push(h('span.chip', { title: 'devdocs is a folder of the project root repository (devdocs: directory)' }, 'folder of the root'))
+    else chips.push(h('span.chip', { title: 'A local area: a folder of the project root repository, declared in project.yaml (areas). It is published with the root and is not shared with other projects.' }, 'local area'))
+    if (r.path !== 'devdocs' && !r.initialized && !r.error) chips.push(h('span.chip.warn', { title: 'Declared in project.yaml, but the folder is not in this workspace' }, 'folder missing'))
+    if (r.dirty) chips.push(h('span.chip.warn', { title: `Uncommitted changes under ${r.path}/` }, `${r.dirty} uncommitted`))
+    if (r.error) chips.push(h('span.chip.error', r.error))
     return chips
   }
   if (!r.initialized) chips.push(h('span.chip.warn', { title: 'The submodule is recorded but not checked out in this workspace' }, 'not initialized'))
@@ -205,7 +208,8 @@ export function renderProjectView(root: HTMLElement, wsId: string): ViewHandle {
         group.append(h('div.repo-row', { dataset: { path: r.path } },
           repoIcon(r),
           h('div.repo-main', h('strong', r.name), h('span.muted.small', r.path === '.' ? '.' : r.path),
-            r.url ? h('span.muted.small', { title: 'Source as written in .gitmodules / remote.origin.url' }, `source ${r.kind === 'root' ? '(origin)' : r.url}`) : null),
+            r.url ? h('span.muted.small', { title: 'Source as written in .gitmodules / remote.origin.url' }, `source ${r.kind === 'root' ? '(origin)' : r.url}`) : null,
+            r.description ? h('span.muted.small', r.description) : null),
           h('div.chips', statusChips(r)),
           h('div.access', accessWorkflow
             ? (access.length ? access.map(([key, b]) => h(`span.access-badge.${b.access === 'editable' ? 'editable' : 'readonly'}`, { title: `binding "${key}"` }, b.access === 'editable' ? 'Editable' : 'Read-only')) : h('span.muted.small', 'not bound'))

@@ -136,7 +136,7 @@ const diag = (d: Diagnostic) => `  ${d.severity === 'error' ? 'error  ' : 'warni
 const issueLine = (i: Issue) => `  ${i.severity === 'error' ? 'error  ' : 'warning'} ${i.code.padEnd(26)} ${i.message}`
 function repoLine(r: RepositoryStatus) {
   const parts = [r.path.padEnd(22), r.category.padEnd(8)]
-  if (r.kind === 'directory') return `  ${[...parts, 'folder of the project root', ...(r.dirty ? [`${r.dirty} uncommitted`] : [])].join('  ')}`
+  if (r.kind === 'directory') return `  ${[...parts, r.path === 'devdocs' ? 'folder of the project root' : 'local area (folder of the project root)', ...(r.path !== 'devdocs' && !r.initialized && !r.error ? ['folder missing'] : []), ...(r.dirty ? [`${r.dirty} uncommitted`] : []), ...(r.error ? [`error: ${r.error}`] : [])].join('  ')}`
   if (!r.initialized) parts.push('not initialized')
   else parts.push(`${r.branch ?? 'detached'} @ ${short(r.head)}`)
   if (r.kind === 'submodule' && r.recorded) parts.push(`recorded ${short(r.recorded)}${r.staged ? `, staged ${short(r.staged)}` : ''}${r.matchesRecorded === false ? ' (HEAD differs)' : ''}`)

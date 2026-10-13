@@ -65,6 +65,7 @@ export interface RepositoryStatus extends RepositoryInfo {
   name: string
   category: RepoCategory
   url?: string // as written in .gitmodules
+  description?: string // a local area's description from project.yaml
   recorded?: string // gitlink in HEAD
   staged?: string // gitlink in the index, when it differs from HEAD
   head?: string // checked-out commit

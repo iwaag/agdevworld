@@ -1,4 +1,4 @@
-# Workflow editor file contract (p1, p2/pre1, p4, p5)
+# Workflow editor file contract (p1, p2/pre1, p4, p5; project_migration p1)
 
 The definition files are the authority. The editor reads and writes them; it
 keeps no database. A person or an agent can edit the same files with any text
@@ -13,7 +13,7 @@ from being silently replaced.
 
 | Information | Authority |
 | --- | --- |
-| Project schema, stable ID, name, devdocs storage mode, intent, goals | `project.yaml` at the project root |
+| Project schema, stable ID, name, devdocs storage mode, intent, goals, local areas | `project.yaml` at the project root |
 | Submodule paths and source locations | `.gitmodules` at the project root |
 | Recorded submodule revisions | Gitlinks in the root repository |
 | Checkout, initialization, uncommitted changes | The workspace's Git state |
@@ -42,7 +42,37 @@ intent: |
   Why the project exists.
 goals:
   - One goal per item.
+areas:                   # optional local areas (project_migration p1)
+  study/study-notes: {description: Literature surveys kept in this repository}
+  lab: Experiments and tools   # text is the description
 ```
+
+### Local areas (project_migration p1)
+
+A **local area** is a folder of the project's root repository that the
+project keeps as a knowledge area of its own: a study or wedo kept locally
+instead of as a shared repository, or any other folder a workflow binds on
+its own (`lab`). `areas` maps each folder's project-relative path to its
+description (a mapping with `description`, or the text itself). The editor
+reads it and never rewrites it; edit the file.
+
+- A workflow binds an area like a submodule (`{path: study/study-notes,
+  access: editable}`). Access stays a path scope. An area is part of the
+  root: it is committed and published with the root, its history is the
+  root's, and it is not shared with other projects or listed on the
+  dashboard's shared repositories.
+- The category follows the path convention (`study/…` study, `wedo/…` wedo,
+  anything else other), so the Project Editor shows an area beside the
+  submodules of its category, marked *local area*.
+- Invalid declarations (`project-area-path-invalid`, `-duplicate`,
+  `-nested`, shown as project warnings): the root, `devdocs` or anything
+  under it, `.local`, `..`, a path declared twice, an area inside another.
+  A path that is a submodule is reported on the submodule; an area that
+  overlaps a submodule is reported on the area.
+- A binding to an area whose folder is absent from the workspace is the
+  error `area-missing`.
+- Turning an area into a repository of its own later is a separate
+  operation that does not exist yet.
 
 ## `ag.workflow.v2`
 
@@ -252,7 +282,8 @@ target's name or file name.
 ### Repository bindings
 
 `path` is project-relative POSIX: `.` is the project root, `devdocs` the devdocs
-area (either mode), anything else must be a submodule path in `.gitmodules`. Absolute
+area (either mode), anything else must be a submodule path in `.gitmodules` or a
+local area declared in `project.yaml` (above). Absolute
 paths and `..` are invalid. A binding to a path that is not in `.gitmodules`
 is reported as missing; a submodule that is not initialized in the current
 workspace is reported as such (a warning — it depends on the workspace, not
@@ -310,7 +341,8 @@ fulfils its intent.
 | `intent-missing` | error | empty intent |
 | `name-missing` | warning | empty display name |
 | `binding-id-invalid`, `binding-access`, `binding-path-invalid` | error | malformed binding |
-| `repository-missing` | error | binding path is not the root or a `.gitmodules` path |
+| `repository-missing` | error | binding path is not the root, devdocs, a `.gitmodules` path or a declared local area |
+| `area-missing` | error | binding to a declared local area whose folder is not in this workspace |
 | `repository-uninitialized` | warning | submodule exists but is not checked out here |
 | `node-id-invalid`, `node-type` | error | malformed node |
 | `node-binding-missing` | error | node refers to an undeclared binding key |

@@ -88,7 +88,13 @@ export interface Project {
   devdocs: string
   intent: string
   goals: string[]
+  // Local areas (project_migration p1): folders of the root repository that
+  // the project keeps as knowledge areas of its own (a study or wedo kept
+  // locally instead of as a shared repository). A workflow may bind them like
+  // a submodule. Read from the file only; the editor never rewrites them.
+  areas?: LocalArea[]
 }
+export interface LocalArea { path: string; description: string }
 
 export interface Issue {
   severity: 'error' | 'warning'
@@ -245,6 +251,13 @@ export function projectFromData(raw: unknown): { project: Project; issues: Shape
   p.devdocs = text(raw, 'devdocs', '$', issues)
   p.intent = text(raw, 'intent', '$', issues)
   p.goals = stringList(raw, 'goals', '$', issues)
+  p.areas = Object.entries(map(raw, 'areas', '$', issues)).flatMap(([path, v]) => {
+    if (v === null || v === undefined) return [{ path, description: '' }]
+    if (typeof v === 'string') return [{ path, description: v }]
+    if (isRecord(v)) return [{ path, description: text(v, 'description', `$.areas.${path}`, issues) }]
+    issues.push({ path: `$.areas.${path}`, message: 'expected a mapping with description, or text' })
+    return []
+  })
   return { project: p, issues }
 }
 

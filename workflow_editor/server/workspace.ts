@@ -99,6 +99,26 @@ export class Workspace {
         out.push({ path: 'devdocs', name: 'devdocs', kind: 'directory', category: 'devdocs', initialized: true, dirty: dirty.code === 0 ? dirty.stdout.split('\n').filter(Boolean).length : 0 })
       }
     }
+    // Local areas (project_migration p1): folders of the root repository the
+    // project declares as its own knowledge areas. They are part of the root,
+    // published with it; `initialized` says whether the folder is here.
+    const read = await this.readProject().catch(() => ({ project: undefined }))
+    const subPaths = subs.map(sm => normalizeRepoPath(sm.path) ?? sm.path)
+    for (const a of read.project?.areas ?? []) {
+      const path = normalizeRepoPath(a.path)
+      if (!path || path === '.' || path === 'devdocs' || out.some(r => r.path === path)) continue
+      const status: RepositoryStatus = { path, name: path.split('/').pop() ?? path, kind: 'directory', category: categoryOf(path), initialized: false, dirty: 0, description: a.description || undefined }
+      const sub = subPaths.find(sp => sp === path || path.startsWith(`${sp}/`) || sp.startsWith(`${path}/`))
+      if (sub === path) { const m = inspected.find(r => r.path === sub); if (m) m.error = [m.error, `also declared as a local area in project.yaml; a submodule is not a local area`].filter(Boolean).join('; '); continue }
+      if (sub) { status.error = `declared as a local area, but it overlaps the submodule ${sub}`; out.push(status); continue }
+      const dir = await inside(this.root, path).catch(() => null)
+      if (dir && await isDir(dir)) {
+        status.initialized = true
+        const dirty = await git(this.root, ['status', '--porcelain=v1', '--', path])
+        status.dirty = dirty.code === 0 ? dirty.stdout.split('\n').filter(Boolean).length : 0
+      }
+      out.push(status)
+    }
     return [...out, ...inspected]
   }
 

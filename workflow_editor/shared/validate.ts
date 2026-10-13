@@ -10,7 +10,7 @@ import {
 // service from .gitmodules, Git state and the workflow directory.
 export interface RepositoryInfo {
   path: string
-  kind: 'root' | 'submodule' | 'directory' // directory: devdocs kept in the root repository
+  kind: 'root' | 'submodule' | 'directory' // directory: a folder of the root repository (devdocs in directory mode, or a local area)
   initialized: boolean
 }
 export interface WorkflowRef {
@@ -84,7 +84,8 @@ export function validateWorkflow(w: Workflow, ctx: ValidationContext = {}): Issu
     if (path === null) { issues.push(err('binding-path-invalid', `Binding "${key}" path "${b.path}" must be project-relative without "..".`, { binding: key })); continue }
     if (!ctx.repositories || path === '.') continue
     const repo = byPath.get(path)
-    if (!repo) issues.push(err('repository-missing', `Binding "${key}" refers to "${path}", which is neither devdocs nor a submodule in .gitmodules.`, { binding: key }))
+    if (!repo) issues.push(err('repository-missing', `Binding "${key}" refers to "${path}", which is neither devdocs, a submodule in .gitmodules, nor a local area declared in project.yaml.`, { binding: key }))
+    else if (repo.kind === 'directory' && !repo.initialized) issues.push(err('area-missing', `Binding "${key}": local area "${path}" is declared in project.yaml but is not a folder of the project root here.`, { binding: key }))
     else if (!repo.initialized) issues.push(warn('repository-uninitialized', `Binding "${key}": submodule "${path}" is not initialized in this workspace.`, { binding: key }))
   }
 
@@ -160,6 +161,17 @@ export function validateProject(p: Project): Issue[] {
   else if (!ID_PATTERN.test(p.id)) issues.push(err('id-invalid', `Project id must match ${ID_PATTERN.source}.`, { field: 'id' }))
   if (!p.name.trim()) issues.push(warn('name-missing', 'Project name is empty.', { field: 'name' }))
   if (!p.intent.trim()) issues.push(warn('intent-missing', 'Project intent is empty.', { field: 'intent' }))
+  const seen = new Set<string>()
+  for (const a of p.areas ?? []) {
+    const path = normalizeRepoPath(a.path)
+    if (path === null || path === '.' || path === 'devdocs' || path.startsWith('devdocs/') || path.startsWith('.local')) {
+      issues.push(err('area-path-invalid', `Local area "${a.path}" must be a project-relative folder without "..", other than the root, devdocs and .local.`, { field: 'areas' }))
+      continue
+    }
+    if (seen.has(path)) issues.push(err('area-duplicate', `Local area "${path}" is declared twice.`, { field: 'areas' }))
+    else if ([...seen].some(o => path.startsWith(`${o}/`) || o.startsWith(`${path}/`))) issues.push(err('area-nested', `Local area "${path}" is inside, or contains, another local area.`, { field: 'areas' }))
+    seen.add(path)
+  }
   return issues
 }
 

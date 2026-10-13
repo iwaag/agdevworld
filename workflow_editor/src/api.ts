@@ -4,7 +4,7 @@ import type {
   WorkflowResponse, WorkspacesResponse,
 } from '../shared/api.ts'
 import type { ApprovalState } from '../shared/canonical.ts'
-import type { ApprovalKind, Project, Workflow } from '../shared/model.ts'
+import type { ApprovalKind, Documentation, Project, Workflow } from '../shared/model.ts'
 import type { Catalog, NodeTemplate, TemplateContent } from '../shared/catalog.ts'
 
 // One run's execution on this host (server/exec.ts runView).
@@ -81,8 +81,10 @@ export const api = {
   saveProject: (id: string, project: Project) => call<SaveResponse>('PUT', `${ws(id)}/project`, { project }),
   addSubmodule: (id: string, path: string, url: string) => call<AddSubmoduleResponse>('POST', `${ws(id)}/submodules`, { path, url }, [422]),
   addNewRepository: (id: string, path: string) => call<AddSubmoduleResponse>('POST', `${ws(id)}/submodules`, { path, create: true }, [422]),
-  createWorkflow: (id: string, wid: string, name: string, policy = 'default', template = 'empty') => call<{ file: string }>('POST', `${ws(id)}/workflows`, { id: wid, name, policy, template }),
-  workflowTemplates: (id: string) => call<{ id: string; name: string; description: string }[]>('GET', `${ws(id)}/workflow-templates`),
+  // documentation: a policy name or a whole declaration; absent, the template's (p8/ex2).
+  createWorkflow: (id: string, wid: string, name: string, documentation?: string | Documentation, template = 'empty') =>
+    call<{ file: string }>('POST', `${ws(id)}/workflows`, { id: wid, name, template, ...(typeof documentation === 'string' ? { policy: documentation } : documentation ? { documentation } : {}) }),
+  workflowTemplates: (id: string) => call<{ id: string; name: string; description: string; documentation: Documentation }[]>('GET', `${ws(id)}/workflow-templates`),
   workflow: (id: string, file: string, refresh = false) => call<WorkflowResponse>('GET', `${wf(id, file)}${refresh ? '?refresh=1' : ''}`),
   saveWorkflow: (id: string, file: string, workflow: Workflow) => call<SaveResponse>('PUT', wf(id, file), { workflow }),
   approve: (id: string, file: string, kind: ApprovalKind, approver: string) =>

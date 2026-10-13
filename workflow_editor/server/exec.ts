@@ -19,7 +19,8 @@ import { hostname } from 'node:os'
 import { join } from 'node:path'
 import type { DatabaseSync } from 'node:sqlite'
 import { normalizeRepoPath } from '../shared/model.ts'
-import { effectiveOf, holderOf, hostOf, pendingInstructions, runKey, situation, type AttemptSettings, type RunRecord, type RunRef } from '../shared/run.ts'
+import { describeSteps, effectiveOf, holderOf, hostOf, pendingInstructions, runKey, situation, type AttemptSettings, type RunRecord, type RunRef } from '../shared/run.ts'
+import { docStepsOf } from '../shared/compile.ts'
 import { assertWorkspaceAllowed, loadBoundary } from './boundary.ts'
 import type { Gitea } from './gitea.ts'
 import { baseline, publish, type Baseline, type RepoStep } from './publish.ts'
@@ -50,8 +51,12 @@ const sha256 = (b: string | Buffer) => createHash('sha256').update(b).digest('he
 export function documentationBrief(r: RunRecord): string[] {
   const eff = effectiveOf(r) // the revision in force (p7)
   if (!eff) return ['Documentation policy: none (this run was created before p5); write plans and reports only where a node or the person asks.']
-  if (eff.policy === 'manual') return ['Documentation policy: manual. No plan or report is a step of this run; write documents only where a node description or the person asks for them.']
-  const out = ['Documentation policy: default. _plan, _report.<node> and _final-report are steps of this run, recorded like any node (start, complete); each completes only when its document is a nonempty file of the run folder.']
+  const d = docStepsOf(eff)
+  if (!d.plan && !d.reports && !d.final) return [`Documentation policy: ${eff.policy}. No plan or report is a step of this run; write documents only where a node description or the person asks for them.`]
+  // The steps this run has (p8/ex2: any of the three), by name.
+  const named = [d.plan && '_plan', d.reports && '_report.<node>', d.final && '_final-report'].filter(Boolean).join(', ')
+  const absent = [!d.plan && 'no plan talk', !d.reports && 'no per-node reports', !d.final && 'no final report'].filter(Boolean)
+  const out = [`Documentation policy: ${eff.policy} (${describeSteps(d)}). ${named} ${named.includes(',') ? 'are steps' : 'is a step'} of this run, recorded like any node (start, complete); each completes only when its document is a nonempty file of the run folder.${absent.length ? ` This run has ${absent.join(' and ')}: write those documents only where a node description or the person asks for them.` : ''}`]
   const now = [...r.execution.active, ...r.execution.ready, ...r.execution.waiting.map(w => w.node)]
   for (const id of [...new Set(now)]) {
     const step = eff.nodes[id]?.step

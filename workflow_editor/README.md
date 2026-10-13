@@ -334,6 +334,16 @@ one of them is refused. Refusals carry the field they concern
 by re-renders, so a background reload or a switch keeps the text, the open
 state and the keyboard.
 
+**Documentation settings (p8/ex2).** Besides `default` (plan talk, a report
+per step, final report) and `manual` (none), a workflow can be `custom`:
+the three generated documents chosen one by one (docs/contract.md,
+*Documentation policy*). Workflow settings and the creation form use one
+control (`src/docPolicy.ts`): the policy, and under Custom three checkboxes
+that start from what the previous policy generated. The policy chip and the
+canvas preview follow each change; without node reports the final report is
+drawn after the last card itself. Views decide from the graph's generated
+steps, never from the policy's name.
+
 **The activity line (p8/ex2).** Under the run's progress, one line says that
 the run moves without showing the log: *Working on Implement · 24 turns this
 session · last activity 8 s ago*. The turns are the current session's, counted
@@ -480,7 +490,9 @@ background reload, the id moving past one that appeared); the activity line
 on a real claimed attempt with a live process and a growing log (queued,
 between steps, turns and age, a reload counting the same, the pulse, no live
 region, Detail's attempt turns, a lost process, a stopped service, waiting on
-the person, a history view).
+the person, a history view); custom documentation in Workflow settings and
+the creation form (the chip, the preview, the final report connected to the
+last card, Save, back to default).
 `npm run build && node checks/freework.ts [--keep] [--shots <dir>]`.
 
 `checks/appearance.ts` (p7) checks node appearance on its own temporary

@@ -6,8 +6,8 @@ import { isAbsolute, relative, resolve, sep } from 'node:path'
 import type { RunResponse } from '../shared/api.ts'
 import { accessAt } from '../shared/access.ts'
 import { normalizeRepoPath } from '../shared/model.ts'
-import { splitCounts } from '../shared/compile.ts'
-import { effectiveOf, EXECUTOR_OPS, holderOf, hostOf, notableEvents, questionState, runKey, type EntrustRef, type HistoryEntry, type Instruction, type OpInput, type RunRecord, type RunRef } from '../shared/run.ts'
+import { docStepsOf, hasDocSteps, splitCounts } from '../shared/compile.ts'
+import { describeSteps, effectiveOf, EXECUTOR_OPS, holderOf, hostOf, notableEvents, questionState, runKey, type EntrustRef, type HistoryEntry, type Instruction, type OpInput, type RunRecord, type RunRef } from '../shared/run.ts'
 import {
   adjustRun, checkRun, createRun, listRuns, resolveRef, runDir, runOp, runResponse, type AdjustResult, type CreateRunOptions,
 } from '../server/runs.ts'
@@ -103,7 +103,8 @@ ask. Writes run.json.`,
 Records the completion of a running node with its outcome and optional
 artifacts (project-relative, relative to the current directory, or a file name
 in the run folder). Writes run.json.
-Documentation steps (default policy: _plan, _report.<node>, _final-report)
+Documentation steps (_plan, _report.<node>, _final-report, as the run's policy
+generates them: default all three, custom those it chose)
 complete only when their document (plan.md, report-<node>.md, report.md) is
 a nonempty file of the run folder; its hash and size are recorded as
 evidence, and the document is listed with the outcome. _plan completes only
@@ -389,7 +390,7 @@ export function describeRun(r: RunResponse, opts: { history?: boolean; url?: str
   const count = (c: Record<string, number>) => Object.entries(c).filter(([, n]) => n).map(([k, n]) => `${n} ${k}`).join(', ') || 'none'
   if (eff) {
     const split = splitCounts(eff, rec.nodes)
-    lines.push(`Documentation policy: ${eff.policy} (frozen at creation, ${eff.compiler})${eff.policy === 'default' ? ` — work: ${count(split.work)}; documentation steps: ${count(split.docs)}` : ''}`)
+    lines.push(`Documentation policy: ${eff.policy}, ${describeSteps(docStepsOf(eff))} (frozen at creation, ${eff.compiler})${hasDocSteps(eff) ? ` — work: ${count(split.work)}; documentation steps: ${count(split.docs)}` : ''}`)
   } else lines.push('Documentation policy: none (created before p5; the authored graph)')
   lines.push(`Nodes (${count(ex.counts)}):`)
   for (const [id, n] of Object.entries(rec.nodes)) {

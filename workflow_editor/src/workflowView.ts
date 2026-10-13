@@ -7,8 +7,9 @@
 // never saves or discards anything: every panel edits the same draft.
 import type { FileProblem, WorkflowResponse } from '../shared/api.ts'
 import { approvalStates, canonicalJson, type ApprovalState } from '../shared/canonical.ts'
-import { compile } from '../shared/compile.ts'
-import { NODE_TYPES, cloneWorkflow, type ApprovalKind, type Issue, type NodeType, type Workflow } from '../shared/model.ts'
+import { compile, hasDocSteps } from '../shared/compile.ts'
+import { policySummary } from './docPolicy.ts'
+import { NODE_TYPES, cloneWorkflow, docSteps, type ApprovalKind, type Issue, type NodeType, type Workflow } from '../shared/model.ts'
 import { instantiate, type NodeTemplate } from '../shared/catalog.ts'
 import { hasErrors, validateWorkflow, type ValidationContext } from '../shared/validate.ts'
 import { api } from './api.ts'
@@ -499,14 +500,18 @@ export function renderWorkflowView(root: HTMLElement, wsId: string, file: string
       errors.length || warnings.length ? `${errors.length} error${errors.length === 1 ? '' : 's'}, ${warnings.length} warning${warnings.length === 1 ? '' : 's'}` : 'Valid')
     // The same compiler run creation uses: what a run of this draft adds.
     const compiled = compile(draft)
-    const effective = compiled.ok && compiled.graph.policy === 'default' ? compiled.graph : null
+    const effective = compiled.ok && hasDocSteps(compiled.graph) ? compiled.graph : null
     const reports = effective ? Object.values(effective.nodes).filter(n => n.step?.kind === 'report').length : 0
     const policy = draft.documentation.policy
+    const steps = docSteps(draft.documentation)
     policyChip.hidden = false
-    policyChip.dataset.policy = policy || 'none'
+    policyChip.dataset.policy = steps ? policy : 'none'
+    // What a run of this draft adds, in words (p8/ex2: any of the three).
+    const generated = steps ? [steps.plan && 'plan talk', steps.reports && `${reports} report${reports === 1 ? '' : 's'}`, steps.final && 'final report'].filter(Boolean).join(', ') : ''
     policyChip.replaceChildren(icon('doc', 'icon tiny'),
-      policy === 'default' ? (effective ? `Default documentation: plan talk, ${reports} report${reports === 1 ? '' : 's'}, final report` : `Default documentation — preview unavailable: ${!compiled.ok ? compiled.message : ''}`)
-        : policy === 'manual' ? 'Manual documentation: no plan or reports' : `Documentation policy ${policy ? `"${policy}" is not supported` : 'not declared'}`)
+      !steps ? `Documentation: ${policySummary(draft.documentation)}`
+        : !compiled.ok && generated ? `${policy === 'custom' ? 'Custom' : 'Default'} documentation — preview unavailable: ${compiled.message}`
+          : generated ? `${policy === 'custom' ? 'Custom' : 'Default'} documentation: ${generated}` : `${policy === 'custom' ? 'Custom' : 'Manual'} documentation: no plan or reports`)
     saveButton.disabled = readonly() || !dirty()
     saveStateEl.textContent = saveError ? 'Save failed' : problem ? 'Read-only' : dirty() ? 'Unsaved changes' : (saveState || 'Saved')
     saveStateEl.className = `save-state${saveError ? ' error' : dirty() ? ' dirty' : ''}`

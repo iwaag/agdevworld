@@ -98,7 +98,7 @@ const list = (item: Shape, block = false): Shape => ({ kind: 'list', item, block
 const approval = record({ digest: scalar, approver: scalar, at: scalar })
 export const WORKFLOW_SHAPE = record({
   schema: scalar, id: scalar, name: scalar, intent: scalar,
-  documentation: record({ policy: scalar }),
+  documentation: record({ policy: scalar, plan: scalar, reports: scalar, final: scalar }),
   execution: record({ agent: scalar, profile: scalar, guides: list(scalar) }),
   intake: record({ zulip: scalar }),
   repositories: dict(record({ path: scalar, access: scalar }, true)),

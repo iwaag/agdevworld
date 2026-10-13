@@ -4,7 +4,7 @@ import { readdir, realpath, stat } from 'node:fs/promises'
 import { join } from 'node:path'
 import { approvalStates, type ApprovalState } from '../shared/canonical.ts'
 import {
-  DOC_POLICIES, ID_PATTERN, normalizeRepoPath, PROJECT_SCHEMA,
+  DOC_POLICIES, docSteps, ID_PATTERN, normalizeRepoPath, PROJECT_SCHEMA, type Documentation,
   type ApprovalKind, type Project, type Workflow,
 } from '../shared/model.ts'
 import { delegateTargets, hasErrors, validateProject, validateWorkflow, type ValidationContext } from '../shared/validate.ts'
@@ -337,12 +337,15 @@ export class Workspace {
     }
   }
 
-  // Creates a workflow file from a template (server/templates.ts). Refusals
-  // name the field they are about (detail.field), so a form can show them
-  // beside the input.
-  async createWorkflow(id: string, name: string, policy: string = 'default', template = 'empty'): Promise<{ file: string }> {
+  // Creates a workflow file from a template (server/templates.ts). The
+  // documentation setting is a policy name or a whole declaration (p8/ex2:
+  // custom with its three steps); without one, the template's applies.
+  // Refusals name the field they are about (detail.field), so a form can
+  // show them beside the input.
+  async createWorkflow(id: string, name: string, documentation?: string | Documentation, template = 'empty'): Promise<{ file: string }> {
     if (!ID_PATTERN.test(id)) throw new RequestError(400, `workflow id must match ${ID_PATTERN.source} (lowercase letters, digits, - _ .)`, { field: 'id' })
-    if (!(DOC_POLICIES as readonly string[]).includes(policy)) throw new RequestError(400, `documentation policy must be ${DOC_POLICIES.join(' or ')}`, { field: 'policy' })
+    const doc: Documentation | undefined = typeof documentation === 'string' ? { policy: documentation } : documentation
+    if (doc && !docSteps(doc)) throw new RequestError(400, (DOC_POLICIES as readonly string[]).includes(doc.policy) ? `documentation policy ${doc.policy} ${doc.policy === 'custom' ? 'declares each of plan, reports and final (true or false)' : 'declares none of plan, reports and final'}` : `documentation policy must be ${DOC_POLICIES.join(', ')}`, { field: 'policy' })
     if (!templateIds().includes(template)) throw new RequestError(400, `workflow template must be ${templateIds().join(' or ')}`, { field: 'template' })
     const dir = await this.workflowsDir()
     if (!dir.exists) throw new RequestError(409, `cannot create a workflow: ${dir.reason}`)
@@ -352,8 +355,8 @@ export class Workspace {
     const file = `${id}.yaml`
     const target = await inside(this.root, `${WORKFLOWS_DIR}/${file}`)
     try {
-      const w = await workflowFromTemplate(template, id, name)
-      w.documentation.policy = policy
+      const w = await workflowFromTemplate(template, id, name, this)
+      if (doc) w.documentation = { ...doc }
       await createExclusive(target, newWorkflowText(w))
     } catch (e) {
       if ((e as NodeJS.ErrnoException).code === 'EEXIST') throw new RequestError(409, `${file} already exists`, { field: 'id' })

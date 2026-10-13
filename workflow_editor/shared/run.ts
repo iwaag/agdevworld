@@ -3,12 +3,15 @@
 // Shared by the service, the CLI and the browser; it touches no files.
 // See docs/runs.md for the contract.
 import { canonicalJson } from './canonical.ts'
-import type { EffectiveGraph, StepSpec } from './compile.ts'
+import { docStepsOf, type EffectiveGraph, type StepSpec } from './compile.ts'
+import type { DocSteps } from './model.ts'
 import type { AttemptCatalog, CatalogContext } from './catalog.ts'
 import { INSTRUCTION_RESPONSES, type SourceRef } from './intake.ts'
 import { ID_PATTERN, normalizeRepoPath, type Edge } from './model.ts'
 
 export const RUN_SCHEMA = 'ag.workflow-run.v2'
+// "plan, reports, final report" / "no generated documents", for messages.
+export const describeSteps = (d: DocSteps) => [d.plan && 'plan talk', d.reports && 'node reports', d.final && 'final report'].filter(Boolean).join(', ') || 'no generated documents'
 // Where run folders live in a project (docs/runs.md).
 export const RUNS_ROOT = 'devdocs/runs'
 export const runFolder = (r: RunRef) => `${RUNS_ROOT}/${r.workflow}/${r.run}`
@@ -916,7 +919,9 @@ export function apply(prev: RunState | null, e: HistoryEntry | (OpInput & EntryM
       const next = e.effective
       if (!isObj(next) || !isObj(next.nodes) || !Array.isArray(next.edges) || typeof next.compiler !== 'string') fail('shape', 'the adjustment carries its whole compiled graph')
       const cur = s.definition.effective
-      if (cur && next.policy !== cur.policy) fail('adjust-access', `the documentation policy is ${cur.policy}; an adjustment does not change it`)
+      // The policy and the steps it generates (p8/ex2), normalized, so a v2
+      // graph and a v3 graph of the same policy compare equal.
+      if (cur && (next.policy !== cur.policy || canonicalJson(docStepsOf(next as EffectiveGraph)) !== canonicalJson(docStepsOf(cur)))) fail('adjust-access', `the documentation policy is ${cur.policy} (${describeSteps(docStepsOf(cur))}); an adjustment does not change it`)
       const nodes = next.nodes as Record<string, RunGraph['nodes'][string]>
       const edges = next.edges as Edge[]
       for (const ed of edges) if (!(ed?.from in nodes) || !(ed?.to in nodes) || ed.from === ed.to) fail('adjust-graph', `edge ${String(ed?.from)} → ${String(ed?.to)} names an unknown node or loops`)
@@ -1192,7 +1197,9 @@ function holdReason(r: RunRecord, seq: number): string {
 export function notableEvents(r: RunRecord, sinceSeq = 0): NotableEvent[] {
   const out: NotableEvent[] = []
   const eff = r.definition.effective
-  const reporting = eff?.policy === 'default'
+  // Node completions are news when no report step tells of them (p8/ex2:
+  // the reports setting, not the policy's name).
+  const reporting = !!eff && docStepsOf(eff).reports
   const stepAt = (id: string) => anyRevisionNode(r, id)?.step
   let started = false
   for (const e of r.history) {

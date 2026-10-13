@@ -57,9 +57,12 @@ reason, when it:
 Appearance and layout of new or pending nodes may change with an
 adjustment; on their own they are not one.
 
-Under the `default` policy the new revision is compiled with the current
-compiler. New authored nodes get their report steps; the final report
-follows the new terminal nodes. Generated steps of nodes that are not
+The new revision is compiled with the current compiler under the run's
+documentation setting, which never changes: the policy's name and its
+normalized steps (p8/ex2) are compared, so a v2 graph and a v3 graph of the
+same policy are the same setting. New authored nodes get their report steps
+(when the run has reports); the final report (when it has one) follows the
+new terminal nodes. Generated steps of nodes that are not
 pending must come out identical, which they do when only future work
 changes.
 

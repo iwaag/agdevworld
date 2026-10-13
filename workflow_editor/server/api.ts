@@ -3,7 +3,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http'
 import { mkdir, readFile, stat } from 'node:fs/promises'
 import { dirname, extname, isAbsolute, join, normalize, sep } from 'node:path'
 import type { RepositoryStatus, WorkspaceSummary, WorkspacesResponse } from '../shared/api.ts'
-import { APPROVAL_KINDS, type ApprovalKind, type Project, type Workflow } from '../shared/model.ts'
+import { APPROVAL_KINDS, type ApprovalKind, type Documentation, type Project, type Workflow } from '../shared/model.ts'
 import { addNewRepository, createProject } from './create.ts'
 import { addSharedRepository, createSharedRepository, dashboard, obtainWorkspace, registerGiteaProject, registerSharedRepository, type AgdevContext } from './agdev.ts'
 import type { Gitea } from './gitea.ts'
@@ -408,7 +408,8 @@ export function createHandler(config: ServiceConfig) {
         if (method === 'POST') {
           const input = await body(req) as Record<string, unknown>
           if (typeof input.id !== 'string') throw new RequestError(400, 'id is required')
-          return send(res, 201, await ws.createWorkflow(input.id, typeof input.name === 'string' ? input.name : '', typeof input.policy === 'string' ? input.policy : 'default', typeof input.template === 'string' ? input.template : 'empty'))
+          const documentation = input.documentation && typeof input.documentation === 'object' ? input.documentation as Documentation : typeof input.policy === 'string' ? input.policy : undefined
+          return send(res, 201, await ws.createWorkflow(input.id, typeof input.name === 'string' ? input.name : '', documentation, typeof input.template === 'string' ? input.template : 'empty'))
         }
       }
       if (b === 'workflow-templates' && !file && method === 'GET') {

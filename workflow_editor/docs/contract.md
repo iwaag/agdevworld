@@ -83,7 +83,7 @@ name: Service Onboarding # display only
 intent: |
   The author's intent. Everything else is reviewed against it.
 documentation:
-  policy: default        # default | manual (p5); see "Documentation policy"
+  policy: default        # default | manual | custom (p5, p8/ex2); see "Documentation policy"
 repositories:            # binding key -> project-relative path and access
   tools: {path: study/tools, access: readonly}
   runtime: {path: wedo/runtime, access: editable}
@@ -118,36 +118,72 @@ change (set `schema: ag.workflow.v2` and declare `documentation.policy`).
 It still loads in the editor, so the change can be made there. Runs created
 before p5 keep their v1 snapshot and their meaning ([runs.md](runs.md)).
 
-### Documentation policy (p5)
+### Documentation policy (p5, p8/ex2)
 
-`documentation.policy` says who decides when plans and reports are written.
-It is required: a missing or unknown value is the error
+`documentation.policy` says which plans and reports a run generates around
+the authored graph. It is required: a missing or unknown value is the error
 `documentation-policy`, never a silent default. New workflows are created
-with `default`.
+with their template's setting (`default` for the empty one).
 
 | Policy | The run's effective graph |
 | --- | --- |
-| `default` | The authored graph plus generated documentation steps (below) |
+| `default` | The authored graph plus all three generated documents (below) |
 | `manual` | Exactly the authored graph. No plan or report is generated, required or prompted for; an explicit node description or the person can still ask for documents |
+| `custom` (p8/ex2) | The authored graph plus the documents chosen one by one |
+
+```yaml
+documentation:
+  policy: custom
+  plan: false      # the plan talk (_plan) before the entry nodes
+  reports: false   # a report step (_report.<node>) after every authored node
+  final: true      # the final report (_final-report) after the terminal nodes
+```
+
+- `custom` declares each of `plan`, `reports` and `final`, as `true` or
+  `false`. A missing one is the error `documentation-steps`.
+- `default` (all three) and `manual` (none) declare none of them; one that
+  is there contradicts the policy and is the same error. Nothing is
+  reconciled or assumed.
+- A value that is not a YAML boolean (`"true"`, `yes-please`, `1`) is a shape
+  problem: the file is shown read-only with it, as for other wrongly shaped
+  fields.
+- The views, the compiler, validation, the run's brief and the reducer use
+  the normalized setting `{plan, reports, final}` (`docSteps` in
+  `shared/model.ts`; a frozen graph's in `docStepsOf`), never the policy's
+  name.
 
 The file keeps only what the author wrote: generated steps are never
 inserted into the YAML. One compiler (`shared/compile.ts`, version
-`ag.wfe-compile.v1`) produces the effective graph for both the editor's
-preview and run creation. For `study → implement → check`:
+`ag.wfe-compile.v3` since p8/ex2) produces the effective graph for both the
+editor's preview and run creation. Under `default`, for
+`study → implement → check`:
 
 ```text
 _plan → study → _report.study → implement → _report.implement
       → check → _report.check → _final-report
 ```
 
-1. One plan talk (`_plan`) before every authored entry node.
-2. One report step (`_report.<node>`) after every authored node.
-3. Every authored dependency `A → B` becomes `A → _report.A → B`: a branch's
-   report gates its own successors, and a join waits for every predecessor's
-   report.
-4. One final report (`_final-report`) after the reports of all authored
-   terminal nodes.
-5. Generated steps get no reports of their own.
+1. With `plan`: one plan talk (`_plan`) before every authored entry node.
+2. With `reports`: one report step (`_report.<node>`) after every authored
+   node, and every authored dependency `A → B` becomes `A → _report.A → B`:
+   a branch's report gates its own successors, and a join waits for every
+   predecessor's report. Without `reports`, `A → B` stays as it is.
+3. With `final`: one final report (`_final-report`) after every authored
+   terminal node (after its report, when there are reports).
+4. Generated steps get no reports of their own.
+
+So `custom` with only `final` gives `study → implement → check →
+_final-report`, and with only `plan` gives `_plan → study → implement →
+check`. Without node reports the final report's instructions point at the
+nodes' recorded outcomes, artifacts, questions and answers instead of
+reports that do not exist.
+
+A graph compiled by v3 records its setting (`documentation: {plan, reports,
+final}` beside `policy`). A run frozen by v2 has none and is read by its
+policy (`default` all three, `manual` none). For `default` and `manual` v3
+produces node for node and edge for edge, instructions included, what v2
+produced, so an old run's completed documentation steps stay identical when
+an adjustment recompiles its future work.
 
 Generated ids start with `_`, which no authored id can (see Identifiers), so
 they never collide. Each generated step records its purpose, the authored
@@ -158,8 +194,8 @@ cannot be authored.
 
 The compiler refuses what is not an executable graph instead of letting
 generated steps make it look executable: no nodes (`nodes-empty`), an edge
-to an unknown node or to itself, a cycle, a malformed node id, or a missing
-or unsupported policy. A delegate node compiles for the preview; runs of it
+to an unknown node or to itself, a cycle, a malformed node id, or a missing,
+unsupported or contradictory policy. A delegate node compiles for the preview; runs of it
 are still refused at creation.
 
 ### Execution, intake and result confirmation (p6)
@@ -336,7 +372,8 @@ fulfils its intent.
 | Code | Severity | Meaning |
 | --- | --- | --- |
 | `schema` | error | `schema` is not `ag.workflow.v2` (a v1 file is told what to add) |
-| `documentation-policy` | error | `documentation.policy` missing or not `default` / `manual` |
+| `documentation-policy` | error | `documentation.policy` missing or not `default` / `manual` / `custom` |
+| `documentation-steps` | error | `custom` without all of `plan`, `reports`, `final`, or `default` / `manual` with any of them (p8/ex2) |
 | `id-missing`, `id-invalid`, `id-duplicate` | error | workflow ID absent, malformed, or used by another file |
 | `intent-missing` | error | empty intent |
 | `name-missing` | warning | empty display name |
@@ -410,7 +447,9 @@ Digest = `sha256:` + hex SHA-256 of the UTF-8 canonical JSON of a projection:
   de-duplicated and sorted by `from`, then `to`. When declared (p6), the
   projection also has `"execution": {"agent", "profile", "guides": [normalized
   paths]}`, `"intake": {"zulip"}` and a node's `"confirms"`; a workflow
-  without them keeps the digest it had.
+  without them keeps the digest it had. Under `custom` (p8/ex2)
+  `"documentation"` also has `"plan"`, `"reports"` and `"final"`; `default`
+  and `manual` keep the projection (and the digest) they had.
 - Canonical JSON: keys sorted by UTF-16 code unit, no insignificant
   whitespace, standard JSON string escaping.
 - `T(text)`: CRLF/CR become LF, trailing spaces/tabs on each line are removed,

@@ -18,10 +18,10 @@
 // persistent sections, the canvas only when its graph, states or selection change.
 import { backendFact } from '../shared/backend.ts'
 import type { RunResponse } from '../shared/api.ts'
-import { effectiveOf, holderOf, situation, type RunRecord } from '../shared/run.ts'
+import { describeSteps, effectiveOf, holderOf, situation, type RunRecord } from '../shared/run.ts'
 import { api, ApiError, type AdjustView, type PresentationView, type RunExecView, type RunNotifyView } from './api.ts'
 import { Canvas, STATE_GLYPH } from './canvas.ts'
-import { FINAL_STEP, splitCounts } from '../shared/compile.ts'
+import { docStepsOf, FINAL_STEP, hasDocSteps, splitCounts } from '../shared/compile.ts'
 import { h, when } from './dom.ts'
 import { icon } from './icons.ts'
 import { live } from './live.ts'
@@ -342,7 +342,7 @@ export function renderRunView(root: HTMLElement, wsId: string, workflow: string,
   // documentation steps and every other count are Detail's.
   function progress(rec: RunRecord): HTMLElement {
     const eff = effectiveOf(rec)
-    const c = eff?.policy === 'default' ? splitCounts(eff, rec.nodes).work : rec.execution.counts
+    const c = hasDocSteps(eff) ? splitCounts(eff!, rec.nodes).work : rec.execution.counts
     const total = Object.values(c).reduce((a, b) => a + b, 0), doneN = c.completed ?? 0
     const pct = total ? Math.round((doneN / total) * 100) : 0
     const bad = rec.execution.failed.length > 0
@@ -362,7 +362,7 @@ export function renderRunView(root: HTMLElement, wsId: string, workflow: string,
   function statusLine(rec: RunRecord): string {
     const ex = rec.execution
     const eff = effectiveOf(rec)
-    const split = eff?.policy === 'default' ? splitCounts(eff, rec.nodes) : null
+    const split = hasDocSteps(eff) ? splitCounts(eff!, rec.nodes) : null
     const tally = (c: Record<string, number>) => `${c.completed ?? 0} of ${Object.values(c).reduce((a, b) => a + b, 0)}`
     const counts = split ? `work ${tally(split.work)} completed · documentation ${tally(split.docs)}` : `${tally(ex.counts)} nodes completed`
     if (rec.cancelled) return `Cancelled by ${rec.cancelled.by}: ${rec.cancelled.reason}`
@@ -415,9 +415,9 @@ export function renderRunView(root: HTMLElement, wsId: string, workflow: string,
     const count = (c: Record<string, number>) => order.filter(k => c[k]).map(k => `${c[k]} ${k}`).join(' · ') || '—'
     const eff = effectiveOf(rec)
     if (!eff) return [fact('Nodes', count(rec.execution.counts)), fact('Documentation', 'none (created before p5)')]
-    if (eff.policy !== 'default') return [fact('Nodes', count(rec.execution.counts)), fact('Documentation', 'manual — no generated plan or reports')]
+    if (!hasDocSteps(eff)) return [fact('Nodes', count(rec.execution.counts)), fact('Documentation', `${eff.policy} — no generated plan or reports`)]
     const split = splitCounts(eff, rec.nodes)
-    return [fact('Work', count(split.work)), fact('Documentation steps', count(split.docs), 'doc-counts'), fact('Policy', 'default (frozen at creation)')]
+    return [fact('Work', count(split.work)), fact('Documentation steps', count(split.docs), 'doc-counts'), fact('Policy', `${eff.policy}: ${describeSteps(docStepsOf(eff))} (frozen at creation)`)]
   }
 
   function renderBanners() {
@@ -438,18 +438,18 @@ export function renderRunView(root: HTMLElement, wsId: string, workflow: string,
     const rec = shown?.record
     if (!rec) { patchContent(graphHead); patchContent(legend); return }
     const eff = effectiveOf(rec)
-    const split = eff?.policy === 'default' ? splitCounts(eff, rec.nodes) : null
+    const split = hasDocSteps(eff) ? splitCounts(eff!, rec.nodes) : null
     const tally = (c: Record<string, number>) => `${c.completed ?? 0}/${Object.values(c).reduce((a, b) => a + b, 0)}`
     patchContent(graphHead,
       h('h2', 'Run workflow'),
       h('span.chip.d-only', { title: 'The run follows this fixed copy; editing the reusable workflow does not change it' }, rec.definition.revisions?.length ? `Fixed snapshot · ${rec.definition.active ?? 'r1'} in force` : 'Fixed snapshot · r1'),
       h('span.chip.muted.d-only', icon('lock', 'icon tiny'), 'Read-only'),
-      h('span.graph-counts.small.d-only', split ? `Work ${tally(split.work)} completed · Documentation ${tally(split.docs)} completed` : `${tally(rec.execution.counts)} completed · manual documentation`),
+      h('span.graph-counts.small.d-only', split ? `Work ${tally(split.work)} completed · Documentation ${tally(split.docs)} completed` : `${tally(rec.execution.counts)} completed · no generated documents`),
       h('span.muted.small.graph-hint.d-only', 'Select a card to inspect its record'))
     const states = new Set(Object.keys(rec.nodes).map(id => nodeLabel(rec, id).state))
     const present = ['pending', 'ready', 'running', 'waiting', 'completed', 'failed', 'cancelled', 'blocked'].filter(s => states.has(s))
     patchContent(legend, ...present.map(s => chip(s, `${STATE_GLYPH[s]} ${STATE_LABEL[s]}`)),
-      eff?.policy === 'default' ? h('span.muted.small.legend-doc', 'The small icon in a card’s corner is its report; “Writing report” marks the one being written.') : null)
+      eff && docStepsOf(eff).reports ? h('span.muted.small.legend-doc', 'The small icon in a card’s corner is its report; “Writing report” marks the one being written.') : null)
   }
 
   // The canvas is drawn again only when what it shows changed.
@@ -468,7 +468,7 @@ export function renderRunView(root: HTMLElement, wsId: string, workflow: string,
     // Bindings resolve against the repositories recorded at creation.
     const repositories = rec.context.repositories.map(c => ({ path: c.path, name: c.path, kind: c.path === '.' ? 'root' as const : 'submodule' as const, category: 'other' as const, initialized: true, dirty: c.dirty ?? 0 }))
     canvas.render(wf, {
-      repositories, readonly: true, errorNodes: new Set(), run: status, effective: eff?.policy === 'default' ? eff : null, focus: focusOf(rec),
+      repositories, readonly: true, errorNodes: new Set(), run: status, effective: hasDocSteps(eff) ? eff : null, focus: focusOf(rec),
       workflows: Object.entries(r!.bundle).filter(([, b]) => b.workflow).map(([id, b]) => ({ file: b.file, id, name: b.workflow!.name, errors: 0, warnings: 0, delegates: [] })),
     }, sel)
   }

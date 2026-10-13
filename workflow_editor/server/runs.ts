@@ -9,7 +9,7 @@ import { join, sep } from 'node:path'
 import type { FileProblem, RelatedRun, RunFile, RunResponse, RunSummary, SourceComparison } from '../shared/api.ts'
 import { approvalStates, canonicalJson, semanticDigest } from '../shared/canonical.ts'
 import { authoredNode, COMPILER_VERSION, compile, isGenerated, type EffectiveGraph, type StepSpec } from '../shared/compile.ts'
-import { ID_PATTERN, normalizeRepoPath, type Workflow } from '../shared/model.ts'
+import { docSteps, ID_PATTERN, normalizeRepoPath, type Workflow } from '../shared/model.ts'
 import { validateWorkflow } from '../shared/validate.ts'
 import {
   activeRevision, checkRecord, delegateNodes, documentPath, graphOfState, hostOf, operate, presentationFolder, runDisplayTitle, type AdjustSource, type AdjustDiff, graphDiff, RUN_ID, RunError, runFolder, RUNS_ROOT, runKey, validRunRef, type Presentation,
@@ -172,6 +172,8 @@ function followedGraph(def: DefinitionRef, bundle: Bundle): RunGraph | string {
   if (!eff || typeof eff !== 'object' || typeof eff.compiler !== 'string' || typeof eff.nodes !== 'object' || eff.nodes === null || !Array.isArray(eff.edges)) return 'run.json definition.effective is malformed'
   const root = bundle.entries[def.root].workflow!
   if (eff.policy !== root.documentation.policy) return `the frozen graph says policy "${String(eff.policy)}", the bundled definition "${root.documentation.policy}"`
+  // The steps a v3 graph records (p8/ex2) are the bundled declaration's.
+  if (eff.documentation !== undefined && canonicalJson(eff.documentation) !== canonicalJson(docSteps(root.documentation))) return `the frozen graph's documentation steps differ from the bundled definition's`
   const authored = (g: RunGraph) => canonicalJson(Object.fromEntries(Object.entries(g.nodes).filter(([id]) => !isGenerated(id))))
   if (authored(eff) !== authored(bundle.graph!)) return 'the frozen graph\'s authored nodes differ from the bundled definition'
   for (const e of eff.edges) if (!(e?.from in eff.nodes) || !(e?.to in eff.nodes)) return `the frozen graph has an edge to an unknown node (${String(e?.from)} → ${String(e?.to)})`

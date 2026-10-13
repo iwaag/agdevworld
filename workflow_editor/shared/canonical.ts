@@ -62,7 +62,11 @@ export function definitionProjection(w: Workflow) {
   const execution = w.execution && (w.execution.agent || w.execution.profile || w.execution.guides.length)
     ? { execution: { agent: w.execution.agent, profile: w.execution.profile, guides: w.execution.guides.map(g => normalizeRepoPath(g) ?? g) } } : {}
   const intake = w.intake?.zulip ? { intake: { zulip: w.intake.zulip } } : {}
-  return { kind: 'ag.workflow.v2/definition', intent: normalizeText(w.intent), documentation: { policy: w.documentation.policy }, ...execution, ...intake, repositories, nodes, edges }
+  // The three steps (p8/ex2) are projected when declared, so a default or
+  // manual workflow keeps the digest it had.
+  const documentation: Record<string, unknown> = { policy: w.documentation.policy }
+  for (const k of ['plan', 'reports', 'final'] as const) if (w.documentation[k] !== undefined) documentation[k] = w.documentation[k]
+  return { kind: 'ag.workflow.v2/definition', intent: normalizeText(w.intent), documentation, ...execution, ...intake, repositories, nodes, edges }
 }
 
 export function projection(kind: ApprovalKind, w: Workflow) {

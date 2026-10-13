@@ -138,6 +138,15 @@ pre { white-space: pre-wrap; font-size: 12px; background: rgba(0,0,0,.05); paddi
 .field-error[hidden] { display: none; }
 .create-wf input[aria-invalid="true"] { border-color: var(--error); }
 .template-choice { display: flex; flex-direction: column; gap: 6px; }
+/* the documentation setting (p8/ex2): policy, and under custom the three documents */
+.doc-policy { display: flex; flex-direction: column; gap: 8px; }
+.doc-policy select { max-width: 520px; }
+.doc-steps { border: 1px solid var(--line); border-radius: 8px; padding: 8px 12px 10px; margin: 0; display: flex; flex-direction: column; gap: 8px; max-width: 520px; }
+.doc-steps[hidden] { display: none; }
+.doc-steps legend { color: var(--muted); padding: 0 4px; }
+.doc-step { display: flex; gap: 10px; align-items: flex-start; font-size: 13px; cursor: pointer; }
+.doc-step input { margin-top: 3px; }
+.doc-step > span { display: flex; flex-direction: column; gap: 1px; }
 .template-option { display: flex; gap: 10px; align-items: flex-start; border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; cursor: pointer; text-transform: none; letter-spacing: 0; color: inherit; font-size: 13px; }
 .template-option:has(input:checked) { border-color: var(--accent); background: #f3f6fb; }
 .template-text { display: flex; flex-direction: column; gap: 2px; }

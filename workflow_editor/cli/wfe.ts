@@ -8,7 +8,7 @@ import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import type { Diagnostic, RepositoryStatus, WorkflowSummary } from '../shared/api.ts'
 import { autoArrange } from '../shared/layout.ts'
-import { APPROVAL_KINDS, type ApprovalKind, type Issue } from '../shared/model.ts'
+import { APPROVAL_KINDS, DOC_STEPS, type ApprovalKind, type Documentation, type Issue } from '../shared/model.ts'
 import { addNewRepository, createProject } from '../server/create.ts'
 import { addSharedRepository, createSharedRepository, dashboard, obtainWorkspace, registerGiteaProject, registerSharedRepository, type AgdevContext } from '../server/agdev.ts'
 import { Gitea, GiteaError, loadGiteaSetting } from '../server/gitea.ts'
@@ -241,11 +241,13 @@ same operation as the project view's "Add submodule": git submodule add.
 Local file transport is enabled for this command only. The submodule is
 staged in the project root, not committed.
 Exit 0 added; 1 failed (what Git left behind is reported; nothing is reset).`,
-  workflow: `wfe workflow new <id> [--name <name>] [--policy default|manual] [--template <id>] [--workspace <id>]
+  workflow: `wfe workflow new <id> [--name <name>] [--policy default|manual|custom [--steps plan,reports,final]] [--template <id>] [--workspace <id>]
 
 Creates devdocs/workflows/<id>.yaml from a template (--template, default
 "empty": schema, id, name, empty intent, no nodes; documentation policy
---policy, default "default"), as the project view's "Create workflow" does.
+--policy, default the template's), as the project view's "Create workflow"
+does. --policy custom takes --steps: the generated documents to keep, any of
+plan, reports, final, comma-separated ("none" for none).
 \`wfe workflow templates\` lists the templates. Under the default
 policy a run plans, reports each node and reports the whole (docs/contract.md,
 "Documentation policy"); manual leaves documents to explicit instructions.
@@ -615,10 +617,20 @@ async function cmdWorkflow(p: Parsed): Promise<number> {
     out(WORKFLOW_TEMPLATES.map(t => `${t.id.padEnd(12)} ${t.name} — ${t.description}`).join('\n'), WORKFLOW_TEMPLATES)
     return 0
   }
-  if (sub !== 'new' || !id) throw new UsageError('usage: wfe workflow new <id> [--name <name>] [--policy default|manual] [--template <id>] | wfe workflow templates')
+  if (sub !== 'new' || !id) throw new UsageError('usage: wfe workflow new <id> [--name <name>] [--policy default|manual|custom [--steps plan,reports,final]] [--template <id>] | wfe workflow templates')
   const ws = await workspace(p)
+  const policy = opt(p, 'policy'), stepsOpt = opt(p, 'steps')
+  if (stepsOpt !== undefined && policy !== 'custom') throw new UsageError('--steps goes with --policy custom')
+  let documentation: string | Documentation | undefined = policy
+  if (policy === 'custom') {
+    if (stepsOpt === undefined) throw new UsageError('--policy custom needs --steps (any of plan, reports, final, comma-separated; or none)')
+    const chosen = stepsOpt === 'none' ? [] : stepsOpt.split(',').map(x => x.trim()).filter(Boolean)
+    const bad = chosen.filter(x => !(DOC_STEPS as readonly string[]).includes(x))
+    if (bad.length) throw new UsageError(`--steps takes plan, reports, final (not ${bad.join(', ')})`)
+    documentation = { policy: 'custom', plan: chosen.includes('plan'), reports: chosen.includes('reports'), final: chosen.includes('final') }
+  }
   try {
-    const r = await ws.createWorkflow(id, opt(p, 'name') ?? '', opt(p, 'policy') ?? 'default', opt(p, 'template') ?? 'empty')
+    const r = await ws.createWorkflow(id, opt(p, 'name') ?? '', documentation, opt(p, 'template') ?? 'empty')
     const path = join(ws.root, 'devdocs', 'workflows', r.file)
     out(`Created ${path}. Fill in intent, repositories, nodes and edges (docs/contract.md).`, { ok: true, file: r.file, path })
     return 0

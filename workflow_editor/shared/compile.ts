@@ -17,13 +17,21 @@
 // - nothing reports on a generated step.
 //
 // Manual policy: the effective graph is the authored graph.
-import { DOC_POLICIES, ID_PATTERN, type DocPolicy, type Edge, type Workflow } from './model.ts'
+//
+// Custom policy (p8/ex2): each of the three is chosen (plan, reports,
+// final); default is all three, manual none. Without reports an authored
+// dependency stays A → B and the final report follows the authored terminal
+// nodes themselves.
+import { DOC_POLICIES, docSteps, ID_PATTERN, type DocPolicy, type DocSteps, type Edge, type Workflow } from './model.ts'
 import { findCycle } from './validate.ts'
 
 // Changes whenever the expansion, the identities or the step instructions
 // change. A run records the version it was compiled with.
 // v2 (p6): authored nodes keep `confirms` (the result-confirmation talk).
-export const COMPILER_VERSION = 'ag.wfe-compile.v2'
+// v3 (p8/ex2): the custom policy; graphs carry their normalized
+// `documentation`. Default and manual graphs are node for node and edge for
+// edge what v2 made, step instructions included.
+export const COMPILER_VERSION = 'ag.wfe-compile.v3'
 
 // Generated identities start with "_", which an authored id never does
 // (ID_PATTERN), so the two can never collide.
@@ -50,7 +58,17 @@ export interface StepSpec {
   instructions: string // what the executing agent is asked to write
 }
 export interface EffectiveNode { type: string; workflow?: string; confirms?: string; step?: StepSpec }
-export interface EffectiveGraph { compiler: string; policy: DocPolicy; nodes: Record<string, EffectiveNode>; edges: Edge[] }
+// `documentation` (v3): the steps the policy generates; a v2 graph has none
+// and is read by its policy (docStepsOf).
+export interface EffectiveGraph { compiler: string; policy: DocPolicy; documentation?: DocSteps; nodes: Record<string, EffectiveNode>; edges: Edge[] }
+
+// The documentation steps a frozen graph was compiled with.
+export function docStepsOf(g: Pick<EffectiveGraph, 'policy' | 'documentation'>): DocSteps {
+  if (g.documentation) return g.documentation
+  return g.policy === 'manual' ? { plan: false, reports: false, final: false } : { plan: true, reports: true, final: true }
+}
+// Whether a graph has generated steps at all (views draw and count them apart).
+export const hasDocSteps = (g: Pick<EffectiveGraph, 'nodes'> | null | undefined): boolean => !!g && Object.values(g.nodes).some(n => n.step)
 
 export type CompileResult = { ok: true; graph: EffectiveGraph } | { ok: false; code: string; message: string }
 
@@ -75,12 +93,20 @@ const FINAL_INSTRUCTIONS = [
   'Completing this step completes the execution. It is not acceptance of the result: that stays the person\'s explicit decision.',
   'Complete it with a short outcome (the overall result, limitations, what remains for the person to review).',
 ].join('\n')
+// Without node reports (p8/ex2) there are none to link to: the record's
+// outcomes, artifacts, questions and answers are the run's evidence.
+const FINAL_INSTRUCTIONS_UNREPORTED = [
+  'All authored work is complete; write report.md in the run folder.',
+  'Summarize the request, the delivered result, its verification, the remaining work, and any human decisions already recorded. This run has no per-node reports: cite the nodes\' recorded outcomes and artifacts, and the questions and answers, rather than restating the work.',
+  'Completing this step completes the execution. It is not acceptance of the result: that stays the person\'s explicit decision.',
+  'Complete it with a short outcome (the overall result, limitations, what remains for the person to review).',
+].join('\n')
 
-function step(kind: StepKind, node: string | null): StepSpec {
+function step(kind: StepKind, node: string | null, reports = true): StepSpec {
   const output = DOCUMENT_OF[kind](node)
   if (kind === 'plan') return { kind, for: null, output, purpose: 'Plan the work and agree it with the person', instructions: PLAN_INSTRUCTIONS }
   if (kind === 'report') return { kind, for: node, output, purpose: `Report on ${node}`, instructions: REPORT_INSTRUCTIONS(node!) }
-  return { kind, for: null, output, purpose: 'Final report of the run', instructions: FINAL_INSTRUCTIONS }
+  return { kind, for: null, output, purpose: 'Final report of the run', instructions: reports ? FINAL_INSTRUCTIONS : FINAL_INSTRUCTIONS_UNREPORTED }
 }
 
 const byEdge = (a: Edge, b: Edge) => (a.from < b.from ? -1 : a.from > b.from ? 1 : a.to < b.to ? -1 : a.to > b.to ? 1 : 0)
@@ -97,6 +123,8 @@ export function authoredNode(n: Pick<Workflow['nodes'][string], 'type' | 'workfl
 export function compile(w: Pick<Workflow, 'nodes' | 'edges' | 'documentation'>): CompileResult {
   const policy = w.documentation.policy as DocPolicy
   if (!(DOC_POLICIES as readonly string[]).includes(policy)) return { ok: false, code: 'documentation-policy', message: policy ? `documentation policy "${policy}" is not supported` : 'no documentation policy is declared' }
+  const docs = docSteps(w.documentation)
+  if (!docs) return { ok: false, code: 'documentation-steps', message: policy === 'custom' ? 'the custom documentation policy declares each of plan, reports and final' : `the ${policy} documentation policy declares none of plan, reports and final` }
   const ids = Object.keys(w.nodes).sort()
   if (!ids.length) return { ok: false, code: 'nodes-empty', message: 'the workflow has no nodes; generated plan and report steps are not work of their own' }
   const bad = ids.find(id => !ID_PATTERN.test(id))
@@ -114,21 +142,24 @@ export function compile(w: Pick<Workflow, 'nodes' | 'edges' | 'documentation'>):
   const cycle = findCycle(ids, id => out.get(id) ?? [])
   if (cycle) return { ok: false, code: 'graph-cycle', message: `the graph has a cycle: ${cycle.join(' → ')}` }
 
-  const authored: Record<string, EffectiveNode> = Object.fromEntries(ids.map(id => [id, authoredNode(w.nodes[id])]))
-  if (policy === 'manual') return { ok: true, graph: { compiler: COMPILER_VERSION, policy, nodes: authored, edges: edges.sort(byEdge) } }
-
-  const nodes: Record<string, EffectiveNode> = { [PLAN_STEP]: { type: 'talk', step: step('plan', null) }, ...authored }
+  const nodes: Record<string, EffectiveNode> = {}
+  if (docs.plan) nodes[PLAN_STEP] = { type: 'talk', step: step('plan', null) }
+  for (const id of ids) nodes[id] = authoredNode(w.nodes[id])
   const expanded: Edge[] = []
   const hasIncoming = new Set(edges.map(e => e.to))
+  // What a successor (or the final report) waits for: the node's report, or the node itself.
+  const after = (id: string) => (docs.reports ? reportStep(id) : id)
   for (const id of ids) {
-    nodes[reportStep(id)] = { type: 'report', step: step('report', id) }
-    expanded.push({ from: id, to: reportStep(id) })
-    if (!hasIncoming.has(id)) expanded.push({ from: PLAN_STEP, to: id })
-    if (!out.has(id)) expanded.push({ from: reportStep(id), to: FINAL_STEP })
+    if (docs.reports) {
+      nodes[reportStep(id)] = { type: 'report', step: step('report', id) }
+      expanded.push({ from: id, to: reportStep(id) })
+    }
+    if (docs.plan && !hasIncoming.has(id)) expanded.push({ from: PLAN_STEP, to: id })
+    if (docs.final && !out.has(id)) expanded.push({ from: after(id), to: FINAL_STEP })
   }
-  for (const e of edges) expanded.push({ from: reportStep(e.from), to: e.to })
-  nodes[FINAL_STEP] = { type: 'report', step: step('final-report', null) }
-  return { ok: true, graph: { compiler: COMPILER_VERSION, policy, nodes, edges: expanded.sort(byEdge) } }
+  for (const e of edges) expanded.push({ from: after(e.from), to: e.to })
+  if (docs.final) nodes[FINAL_STEP] = { type: 'report', step: step('final-report', null, docs.reports) }
+  return { ok: true, graph: { compiler: COMPILER_VERSION, policy, documentation: docs, nodes, edges: expanded.sort(byEdge) } }
 }
 
 // The authored node a step belongs to, for views: a report belongs to its

@@ -94,12 +94,12 @@ test('definition approval covers the settings when declared; workflows without t
   assert.notEqual(await semanticDigest('definition', confirming), before)
 })
 
-test('compiler v2 freezes the result confirmation with the graph', () => {
+test('the compiler (since v2) freezes the result confirmation with the graph', () => {
   const r = parseWorkflow(WF)
   assert.ok(r.ok)
   const c = compile(r.model)
   assert.ok(c.ok)
-  assert.equal(COMPILER_VERSION, 'ag.wfe-compile.v2')
+  assert.equal(COMPILER_VERSION, 'ag.wfe-compile.v3') // v3 (p8/ex2): the custom documentation policy
   assert.equal(c.graph.compiler, COMPILER_VERSION)
   assert.deepEqual(c.graph.nodes.present, { type: 'talk', confirms: 'result' })
   assert.deepEqual(c.graph.nodes.make, { type: 'do' })

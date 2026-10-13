@@ -2,7 +2,7 @@
 // well-formed and that its references resolve; it never judges whether the
 // graph fulfils the intent. Errors block approval; drafts may still be saved.
 import {
-  ACCESS_LEVELS, APPEARANCE_COLORS, APPEARANCE_ICONS, CONFIRMS, DEVDOCS_MODES, DOC_POLICIES, ID_PATTERN, INTAKE_MODES, NODE_TYPES, PROFILE_PATTERN, PROJECT_SCHEMA, WORKFLOW_SCHEMA, normalizeRepoPath,
+  ACCESS_LEVELS, APPEARANCE_COLORS, APPEARANCE_ICONS, CONFIRMS, DEVDOCS_MODES, DOC_POLICIES, DOC_STEPS, ID_PATTERN, INTAKE_MODES, NODE_TYPES, PROFILE_PATTERN, PROJECT_SCHEMA, WORKFLOW_SCHEMA, normalizeRepoPath,
   type Issue, type Project, type Workflow,
 } from './model.ts'
 
@@ -51,10 +51,21 @@ export function findCycle(nodes: string[], next: (id: string) => string[]): stri
 
 export function validateWorkflow(w: Workflow, ctx: ValidationContext = {}): Issue[] {
   const issues: Issue[] = []
-  if (w.schema === 'ag.workflow.v1') issues.push(err('schema', `Schema ag.workflow.v1 is not read since p5: set schema to ${WORKFLOW_SCHEMA} and declare documentation: {policy: default | manual}.`, { field: 'schema' }))
+  if (w.schema === 'ag.workflow.v1') issues.push(err('schema', `Schema ag.workflow.v1 is not read since p5: set schema to ${WORKFLOW_SCHEMA} and declare documentation: {policy: default | manual | custom}.`, { field: 'schema' }))
   else if (w.schema !== WORKFLOW_SCHEMA) issues.push(err('schema', w.schema ? `Unsupported schema "${w.schema}"; expected ${WORKFLOW_SCHEMA}.` : `Missing schema; expected ${WORKFLOW_SCHEMA}.`, { field: 'schema' }))
-  if (!w.documentation.policy) issues.push(err('documentation-policy', `documentation.policy is not declared; expected ${DOC_POLICIES.join(' or ')}.`, { field: 'documentation' }))
-  else if (!(DOC_POLICIES as readonly string[]).includes(w.documentation.policy)) issues.push(err('documentation-policy', `documentation.policy "${w.documentation.policy}" is not supported; expected ${DOC_POLICIES.join(' or ')}.`, { field: 'documentation' }))
+  if (!w.documentation.policy) issues.push(err('documentation-policy', `documentation.policy is not declared; expected ${DOC_POLICIES.join(', ')}.`, { field: 'documentation' }))
+  else if (!(DOC_POLICIES as readonly string[]).includes(w.documentation.policy)) issues.push(err('documentation-policy', `documentation.policy "${w.documentation.policy}" is not supported; expected ${DOC_POLICIES.join(', ')}.`, { field: 'documentation' }))
+  else {
+    // The three steps (p8/ex2): custom declares each; default and manual
+    // declare none. A contradiction is reported, never reconciled.
+    const declared = DOC_STEPS.filter(k => w.documentation[k] !== undefined)
+    if (w.documentation.policy === 'custom' && declared.length !== DOC_STEPS.length) {
+      const missing = DOC_STEPS.filter(k => w.documentation[k] === undefined)
+      issues.push(err('documentation-steps', `documentation.policy custom declares each of plan, reports and final (true or false); ${missing.join(', ')} ${missing.length === 1 ? 'is' : 'are'} missing.`, { field: 'documentation' }))
+    } else if (w.documentation.policy !== 'custom' && declared.length) {
+      issues.push(err('documentation-steps', `documentation.policy ${w.documentation.policy} decides plan, reports and final itself; remove ${declared.join(', ')}, or use policy custom to choose each.`, { field: 'documentation' }))
+    }
+  }
   if (!w.id) issues.push(err('id-missing', 'Workflow id is missing.', { field: 'id' }))
   else if (!ID_PATTERN.test(w.id)) issues.push(err('id-invalid', `Workflow id "${w.id}" must match ${ID_PATTERN.source}.`, { field: 'id' }))
   if (!w.name.trim()) issues.push(warn('name-missing', 'Workflow name is empty.', { field: 'name' }))

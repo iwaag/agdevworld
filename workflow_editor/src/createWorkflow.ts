@@ -7,7 +7,8 @@
 // The form is built once and moved, never rebuilt, when the project view
 // renders again (a background reload, a Simple/Detail switch), so what was
 // typed, the open state and the keyboard stay where they were.
-import { ID_PATTERN } from '../shared/model.ts'
+import { ID_PATTERN, type Documentation } from '../shared/model.ts'
+import { docPolicyEditor } from './docPolicy.ts'
 import { api, ApiError } from './api.ts'
 import { h } from './dom.ts'
 import { icon } from './icons.ts'
@@ -42,9 +43,15 @@ export function workflowCreator(wsId: string, onCreated: (file: string) => void)
 
   const name = h('input', { 'aria-label': 'Name of the new workflow', placeholder: 'What this workflow does, e.g. Release check', autocomplete: 'off' })
   const id = h('input', { 'aria-label': 'Id of the new workflow', autocomplete: 'off', spellcheck: false })
-  const policy = h('select', { 'aria-label': 'Documentation policy of the new workflow' },
-    h('option', { value: 'default', selected: true }, 'Plan talk, a report per step and a final report'),
-    h('option', { value: 'manual' }, 'No generated documents (only when asked)'))
+  // The documentation setting starts as the chosen template's (p8/ex2).
+  // A template's setting applies until the person changes the documents;
+  // choosing a template again applies that template's.
+  let documentation: Documentation = { policy: 'default' }
+  let docTouched = false
+  const docField = h('div.doc-field')
+  const renderDoc = () => docField.replaceChildren(docPolicyEditor(documentation, { label: 'Documentation policy of the new workflow', onChange: () => { docTouched = true; clear('policy') } }))
+  renderDoc()
+  const policy = docField
   const template = h('div.template-choice', { role: 'radiogroup', 'aria-label': 'Start from' })
   const more = h('details.create-more', h('summary', 'More settings'))
   const fieldError = (key: string) => h('p.field-error', { id: `create-wf-${key}-error`, hidden: true, role: 'alert' })
@@ -56,7 +63,7 @@ export function workflowCreator(wsId: string, onCreated: (file: string) => void)
   const templateField = h('div.field.template-field', { hidden: true }, h('span', 'Start from'), template, templateError)
   more.append(
     h('label.field', h('span', 'Id'), id, h('span.field-hint', 'Stable name used in files and links. Derived from the name until you change it.'), idError),
-    h('label.field', h('span', 'Documents'), policy, policyError))
+    h('div.field', h('span', 'Documents'), policy, policyError))
   const form = h('form.create-wf', { hidden: true, 'aria-label': 'Create a workflow', novalidate: true },
     h('h3', 'New workflow'),
     h('label.field', h('span', 'Name'), name, nameError),
@@ -69,7 +76,6 @@ export function workflowCreator(wsId: string, onCreated: (file: string) => void)
   name.addEventListener('input', () => { syncId(); clear('name'); clear('id') })
   id.addEventListener('input', () => { idTouched = id.value.trim() !== ''; clear('id') })
   id.addEventListener('blur', () => { if (!id.value.trim()) { idTouched = false; syncId() } })
-  policy.addEventListener('change', () => clear('policy'))
 
   function show(key: string, el: HTMLElement, input?: HTMLElement) {
     const msg = errors[key] ?? ''
@@ -78,7 +84,7 @@ export function workflowCreator(wsId: string, onCreated: (file: string) => void)
     if (input) { if (msg) { input.setAttribute('aria-invalid', 'true'); input.setAttribute('aria-describedby', el.id) } else { input.removeAttribute('aria-invalid'); input.removeAttribute('aria-describedby') } }
   }
   function paint() {
-    show('name', nameError, name); show('id', idError, id); show('policy', policyError, policy); show('template', templateError)
+    show('name', nameError, name); show('id', idError, id); show('policy', policyError, policy.querySelector('select') ?? undefined); show('template', templateError)
     formError.textContent = errors.form ?? ''
     formError.hidden = !errors.form
     submit.disabled = busy || !enabled
@@ -92,8 +98,10 @@ export function workflowCreator(wsId: string, onCreated: (file: string) => void)
       const list = await api.workflowTemplates(wsId)
       templatesLoaded = true
       const current = (template.querySelector<HTMLInputElement>('input:checked'))?.value ?? 'empty'
+      const chosen = list.find(t => t.id === current)
+      if (chosen && !docTouched) { documentation = structuredClone(chosen.documentation); renderDoc() }
       template.replaceChildren(...list.map(t => h('label.template-option',
-        h('input', { type: 'radio', name: 'create-wf-template', value: t.id, checked: t.id === current, onchange: () => clear('template') }),
+        h('input', { type: 'radio', name: 'create-wf-template', value: t.id, checked: t.id === current, onchange: () => { clear('template'); documentation = structuredClone(t.documentation); docTouched = false; renderDoc() } }),
         h('span.template-text', h('strong', t.name), h('span.muted.small', t.description)))))
       templateField.hidden = list.length < 2 // one starting point needs no choice
     } catch { /* the default (empty) stays; the service names any problem on Create */ }
@@ -125,15 +133,15 @@ export function workflowCreator(wsId: string, onCreated: (file: string) => void)
     busy = true; paint()
     try {
       const t = template.querySelector<HTMLInputElement>('input:checked')?.value ?? 'empty'
-      const r = await api.createWorkflow(wsId, wid, name.value.trim(), policy.value, t)
-      name.value = ''; id.value = ''; idTouched = false
+      const r = await api.createWorkflow(wsId, wid, name.value.trim(), documentation, t)
+      name.value = ''; id.value = ''; idTouched = false; docTouched = false
       onCreated(r.file)
     } catch (e) {
       const field = (e instanceof ApiError ? (e.detail as { field?: string } | undefined)?.field : undefined) ?? 'form'
       errors[field] = (e as Error).message
       if (field === 'id' || field === 'policy') more.open = true
       paint()
-      ;({ id, policy, name } as Record<string, HTMLElement>)[field]?.focus()
+      ;({ id, policy: policy.querySelector('select') ?? policy, name } as Record<string, HTMLElement>)[field]?.focus()
     } finally {
       busy = false; paint()
     }

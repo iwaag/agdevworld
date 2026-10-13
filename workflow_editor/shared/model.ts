@@ -16,8 +16,25 @@ export type DevdocsMode = typeof DEVDOCS_MODES[number]
 // Who decides when plans and reports are written (p5): `default` makes the
 // run itself plan, report each node and report the whole (shared/compile.ts);
 // `manual` leaves documents to explicit instructions.
-export const DOC_POLICIES = ['default', 'manual'] as const
+export const DOC_POLICIES = ['default', 'manual', 'custom'] as const
 export type DocPolicy = typeof DOC_POLICIES[number]
+// The three generated documentation steps a policy decides (p8/ex2): the
+// plan talk, a report after every authored node, the final report. `default`
+// is all three, `manual` none, `custom` declares each (contract.md).
+export const DOC_STEPS = ['plan', 'reports', 'final'] as const
+export type DocStep = typeof DOC_STEPS[number]
+export type DocSteps = Record<DocStep, boolean>
+export interface Documentation { policy: string; plan?: boolean; reports?: boolean; final?: boolean }
+// The normalized setting of a declaration, or null when it is not a valid
+// one (an unknown policy, `custom` without all three, or `default`/`manual`
+// with any of them). Validation says which; nothing is reconciled.
+export function docSteps(d: Documentation): DocSteps | null {
+  const declared = DOC_STEPS.filter(k => d[k] !== undefined)
+  if (d.policy === 'default') return declared.length ? null : { plan: true, reports: true, final: true }
+  if (d.policy === 'manual') return declared.length ? null : { plan: false, reports: false, final: false }
+  if (d.policy === 'custom') return declared.length === DOC_STEPS.length ? { plan: d.plan!, reports: d.reports!, final: d.final! } : null
+  return null
+}
 // How runs of a workflow are executed and requested (p6). `execution` names
 // the agent identity, the host's execution profile and project-relative
 // guides added to the common workflow contract; credentials stay in host
@@ -70,9 +87,10 @@ export interface Workflow {
   repositories: Record<string, RepositoryBinding>
   nodes: Record<string, WorkflowNode>
   edges: Edge[]
-  // Plain text so that an unsupported or missing value is representable and
-  // reported by validation ('' = the file declares none).
-  documentation: { policy: string }
+  // The policy is plain text so that an unsupported or missing value is
+  // representable and reported by validation ('' = the file declares none);
+  // the three steps (p8/ex2) are booleans when the file has them.
+  documentation: Documentation
   execution: { agent: string; profile: string; guides: string[] }
   intake: { zulip: string }
   approvals: Partial<Record<ApprovalKind, ApprovalRecord>>
@@ -211,6 +229,12 @@ export function workflowFromData(raw: unknown): { workflow: Workflow; issues: Sh
   })
   const documentation = map(raw, 'documentation', '$', issues)
   w.documentation.policy = text(documentation, 'policy', '$.documentation', issues)
+  for (const k of DOC_STEPS) {
+    const v = documentation[k]
+    if (v === undefined || v === null) continue
+    if (typeof v === 'boolean') w.documentation[k] = v
+    else issues.push({ path: `$.documentation.${k}`, message: 'expected true or false' })
+  }
   const execution = map(raw, 'execution', '$', issues)
   w.execution = { agent: text(execution, 'agent', '$.execution', issues), profile: text(execution, 'profile', '$.execution', issues), guides: stringList(execution, 'guides', '$.execution', issues) }
   w.intake = { zulip: text(map(raw, 'intake', '$', issues), 'zulip', '$.intake', issues) }

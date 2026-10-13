@@ -15,7 +15,7 @@ const GROUPS: { key: RepositoryStatus['category'][]; title: string }[] = [
   { key: ['root', 'devdocs'], title: 'Fixed repositories' },
   { key: ['study'], title: 'Study (study/)' },
   { key: ['wedo'], title: 'Wedo (wedo/)' },
-  { key: ['other'], title: 'Other repositories' },
+  { key: ['other'], title: 'Other' },
 ]
 
 export function statusChips(r: RepositoryStatus): HTMLElement[] {
@@ -187,7 +187,7 @@ export function renderProjectView(root: HTMLElement, wsId: string): ViewHandle {
   function renderRepos(): HTMLElement {
     const card = h('section.card.repos')
     const workflows = data?.workflows.filter(w => w.id) ?? []
-    card.append(h('div.card-head', h('h2', 'Sub-repositories (Git submodules)'),
+    card.append(h('div.card-head', h('h2', 'Repositories and local areas'),
       h('label.inline', 'Access in workflow ', h('select', {
         'aria-label': 'Show access for workflow',
         onchange: async (e: Event) => {

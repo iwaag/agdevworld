@@ -57,6 +57,20 @@ export function loadBundle(folder: string): { manifest: ManifestFile; files: Map
   return { manifest, files }
 }
 
+// One byte range of a `Range: bytes=…` header (RFC 9110), or null when the
+// whole file is sent. Safari plays <video> only from 206 responses: it asks
+// for bytes=0-1 first and gives up on a 200 (project_migration p1).
+// Several ranges are answered with the whole file, which RFC 9110 allows.
+export function byteRange(header: string | undefined, size: number): { start: number; end: number } | 'unsatisfiable' | null {
+  const m = /^bytes=(\d*)-(\d*)$/.exec((header ?? '').trim())
+  if (!m || (m[1] === '' && m[2] === '')) return null
+  let start: number, end: number
+  if (m[1] === '') { const n = Number(m[2]); if (n === 0) return 'unsatisfiable'; start = Math.max(0, size - n); end = size - 1 }
+  else { start = Number(m[1]); end = m[2] === '' ? size - 1 : Math.min(Number(m[2]), size - 1) }
+  if (start >= size || start > end) return 'unsatisfiable'
+  return { start, end }
+}
+
 export function reviewPage(c: ServeConfig, manifest: ManifestFile, review: string): string {
   const answer = c.answer.url ? `<a class="answer" href="${escapeHtml(c.answer.url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(c.answer.text)}</a>` : `<span class="answer">${escapeHtml(c.answer.text)}</span>`
   return `<!doctype html>
@@ -122,7 +136,18 @@ function main() {
     if (path.startsWith('/content/')) {
       const rel = `content/${path.slice('/content/'.length) || ''}`
       const bytes = bundle.files.get(rel) ?? (rel.endsWith('/') ? bundle.files.get(`${rel}index.html`) : undefined)
-      if (bytes) return send(res, 200, TYPES[extname(rel).toLowerCase()] ?? 'application/octet-stream', bytes, "frame-ancestors 'self'")
+      if (bytes) {
+        const type = TYPES[extname(rel).toLowerCase()] ?? 'application/octet-stream'
+        const base = { 'content-type': type, 'cache-control': 'no-store', 'x-content-type-options': 'nosniff', 'content-security-policy': "frame-ancestors 'self'", 'referrer-policy': 'no-referrer', 'accept-ranges': 'bytes' }
+        const range = byteRange(req.headers.range, bytes.length)
+        if (range === 'unsatisfiable') { res.writeHead(416, { ...base, 'content-range': `bytes */${bytes.length}` }); return res.end() }
+        if (range) {
+          res.writeHead(206, { ...base, 'content-range': `bytes ${range.start}-${range.end}/${bytes.length}`, 'content-length': range.end - range.start + 1 })
+          return res.end(req.method === 'HEAD' ? undefined : bytes.subarray(range.start, range.end + 1))
+        }
+        res.writeHead(200, { ...base, 'content-length': bytes.length })
+        return res.end(req.method === 'HEAD' ? undefined : bytes)
+      }
     }
     send(res, 404, 'text/plain', 'not part of this presentation', "default-src 'none'")
   })

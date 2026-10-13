@@ -77,6 +77,12 @@ framable); `content/` keeps the result's own scripts and may only be framed
 by the review screen. At start the server checks every manifest hash and
 refuses to start on a mismatch.
 
+Files under `content/` are served with byte ranges (`Accept-Ranges: bytes`;
+one range is answered `206` with `Content-Range`, an unsatisfiable one `416`,
+several ranges with the whole file). Safari plays audio and video only from
+ranges; without them a review video showed a struck-out play button there
+while Chromium played it (project_migration p1).
+
 The explanation panel names where the answer belongs: the run's request
 topic when the run came from Zulip, otherwise the run view in agdevworld
 (`present.json` → `answerBase`). There is no other decision endpoint;

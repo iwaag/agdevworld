@@ -12,6 +12,8 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { promisify } from 'node:util'
 import { fileURLToPath } from 'node:url'
+import { createServer } from 'node:http'
+import { createHandler } from '../server/api.ts'
 import { createProject } from '../server/create.ts'
 import { ExecStore } from '../server/exec.ts'
 import { gitOk } from '../server/git.ts'
@@ -146,6 +148,37 @@ test('request → human wait (process exits) → answer → resume → completio
   // History keeps the distinct steps.
   const ops = (await record(ws, ref)).history.map(e => e.op)
   for (const o of ['question.answer', 'question.take-up', 'node.complete', 'run.decide']) assert.ok(ops.includes(o as never), o)
+})
+
+test('a workflow that names its agent: browser answers queue the resumption and browser decisions publish (project_migration p1)', async () => {
+  const { x, ws, id, dir, remote, registry, area } = await setup()
+  await writeFile(join(dir, 'devdocs', 'workflows', 'ship.yaml'), WF.replace('repositories:', 'execution: {agent: ship-agent}\nrepositories:'))
+  await gitOk(dir, ['commit', '-qam', 'agent']); await gitOk(dir, ['push', '-q', 'origin', 'main'])
+  const ref = (await request(x, id, 'browser-req-agent')).ref
+  assert.equal((await record(ws, ref)).executor.name, 'ship-agent', 'the agent identity differs from the execution host')
+  const c1 = await claimed(x)
+  x.started(c1.attempt.id, process.pid)
+  await report(ws, ref, c1.attempt.id, { op: 'node.start', node: 'scope' })
+  await report(ws, ref, c1.attempt.id, { op: 'question.ask', question: '', node: 'scope', text: 'Small or large?', to: 'Test Person' })
+  await x.finished(c1.attempt.id, { code: 0, signal: null })
+  const srv = createServer(createHandler({ registryFile: registry, area, allowedOrigins: [], allowedHosts: ['127.0.0.1'], exec: x }))
+  await new Promise<void>(r => srv.listen(0, '127.0.0.1', () => r()))
+  try {
+    const ops = `http://127.0.0.1:${(srv.address() as { port: number }).port}/api/workspaces/${id}/runs/${ref.workflow}/${ref.run}/ops`
+    const post = async (op: Record<string, unknown>) => { const res = await fetch(ops, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ ...op, by: 'Test Person' }) }); assert.equal(res.status, 200, await res.clone().text()); return await res.json() as { job?: { id: number } | null; checkpoint?: { state: string } } }
+    const answered = await post({ op: 'question.answer', question: 'q1', text: 'Small.', receipt: 'browser-answer-agent' })
+    assert.ok(answered.job?.id, 'the resumption is queued at once, not left to reconcile')
+    const c2 = await claimed(x)
+    x.started(c2.attempt.id, process.pid)
+    await report(ws, ref, c2.attempt.id, { op: 'question.take-up', question: 'q1' })
+    await report(ws, ref, c2.attempt.id, { op: 'node.complete', node: 'scope', outcome: 'small' })
+    await report(ws, ref, c2.attempt.id, { op: 'node.start', node: 'build' })
+    await report(ws, ref, c2.attempt.id, { op: 'node.complete', node: 'build', outcome: 'built' })
+    await x.finished(c2.attempt.id, { code: 0, signal: null })
+    const decided = await post({ op: 'run.decide', decision: 'accepted', evidence: 'looked at it' })
+    assert.equal(decided.checkpoint?.state, 'published', 'the decision is published')
+    assert.match(await gitOk(remote, ['show', `main:devdocs/runs/ship/${ref.run}/run.json`]), /"decision": "accepted"/)
+  } finally { srv.close() }
 })
 
 test('one workspace, one run: another request is refused while a run awaits a person; another workspace proceeds', async () => {

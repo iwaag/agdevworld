@@ -12,6 +12,7 @@ import { createProject } from '../server/create.ts'
 import { ExecStore } from '../server/exec.ts'
 import { gitOk } from '../server/git.ts'
 import { Presenter } from '../server/present.ts'
+import { byteRange } from '../server/presentServer.ts'
 import { loadRegistry } from '../server/registry.ts'
 import { createRun, readRun, registerPresentation, runOp } from '../server/runs.ts'
 import { RequestError, Workspace } from '../server/workspace.ts'
@@ -137,6 +138,15 @@ test('serving: one click shows the result and its explanation; nothing else is s
   assert.match(page.text, /#\/ws\/p\/run\/show\/run-001/, 'where to answer: the run view')
   assert.match(page.csp, /default-src 'none'/, 'the review screen runs no script')
   assert.equal((await get(`${s.url}content/main.js`)).text, 'document.title = "game v1"\n')
+  // Safari plays <video> only from byte ranges (project_migration p1).
+  const part = await fetch(`${s.url}content/main.js`, { headers: { range: 'bytes=0-7' } })
+  assert.equal(part.status, 206)
+  assert.equal(part.headers.get('content-range'), `bytes 0-7/${'document.title = "game v1"\n'.length}`)
+  assert.equal(part.headers.get('accept-ranges'), 'bytes')
+  assert.equal(await part.text(), 'document')
+  const tail = await fetch(`${s.url}content/main.js`, { headers: { range: 'bytes=-3' } })
+  assert.equal(await tail.text(), 'v1"\n'.slice(-3))
+  assert.equal((await fetch(`${s.url}content/main.js`, { headers: { range: 'bytes=9999-' } })).status, 416)
   for (const path of ['content/.secret', 'manifest.json', 'review.md', 'content/../manifest.json', '..%2f..%2frun.json', '.wfe-present/shutdown'])
     assert.equal((await get(`${s.url}${path}`)).status === 200, false, `${path} is not served`)
   const forged = await fetch(`${s.url}.wfe-present/shutdown`, { method: 'POST', headers: { 'x-wfe-present-token': 'guess' } })
@@ -316,4 +326,18 @@ test('cancellation stops the run\'s presentations through its own path and keeps
     await assert.rejects(pr.start(ws, ref, 'p1'), /cancelled/)
     await assert.rejects(op(ws, ref, { op: 'presentation.observe', presentation: 'p1', status: 'available', instance: s.instance.id }), (e: unknown) => code(e) === 'run-cancelled')
   } finally { x.close() }
+})
+
+test('byte ranges: one range, suffix, open end, clamped end, unsatisfiable, ignored forms', () => {
+  assert.deepEqual(byteRange('bytes=0-1', 10), { start: 0, end: 1 })
+  assert.deepEqual(byteRange('bytes=4-', 10), { start: 4, end: 9 })
+  assert.deepEqual(byteRange('bytes=-3', 10), { start: 7, end: 9 })
+  assert.deepEqual(byteRange('bytes=-30', 10), { start: 0, end: 9 })
+  assert.deepEqual(byteRange('bytes=5-99', 10), { start: 5, end: 9 })
+  assert.equal(byteRange('bytes=10-', 10), 'unsatisfiable')
+  assert.equal(byteRange('bytes=6-5', 10), 'unsatisfiable')
+  assert.equal(byteRange('bytes=-0', 10), 'unsatisfiable')
+  assert.equal(byteRange(undefined, 10), null)
+  assert.equal(byteRange('bytes=0-1,4-5', 10), null, 'several ranges: the whole file')
+  assert.equal(byteRange('items=0-1', 10), null)
 })

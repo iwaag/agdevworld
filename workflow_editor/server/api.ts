@@ -12,7 +12,7 @@ import { REPO_CATEGORIES, type RepoCategory } from './registry.ts'
 import { BoundaryError, inside } from './files.ts'
 import { loadRegistry, observe, registerWorkspace, RegistryError, type Registry } from './registry.ts'
 import { listRuns, readRunFile, runOp, runResponse } from './runs.ts'
-import { OPS, type OpInput, type RunRef } from '../shared/run.ts'
+import { OPS, hostOf, type OpInput, type RunRef } from '../shared/run.ts'
 import type { Watcher } from './watch.ts'
 import { codeVersion } from './version.ts'
 import { assertNotRetired, assertWorkspaceAllowed, loadBoundary, retiredByUrl } from './boundary.ts'
@@ -373,7 +373,11 @@ export function createHandler(config: ServiceConfig) {
           if (x && op.op === 'run.resume') { const r = await x.resume(ws, ref, by, reason, 'browser', typeof op.receipt === 'string' ? op.receipt : undefined); return send(res, 200, { ok: true, seq: r.record.seq, record: r.record, job: r.job }) }
           const r = await runOp(ws, ref, op as unknown as OpInput, { by, via: 'browser', expectSeq })
           const extra: Record<string, unknown> = { duplicate: r.duplicate ?? false }
-          if (x && r.record.executor.name === x.executor) {
+          // The host that executes the run (executor.host); executor.name is
+          // the agent identity since p6 and differs from it when a workflow
+          // names its agent (project_migration p1: browser answers waited for
+          // reconcile, browser decisions were never published).
+          if (x && hostOf(r.record.executor) === x.executor) {
             if (op.op === 'question.answer') extra.job = await x.afterAnswer(ws, ref, String(op.question)) // persisted first, then queued
             if (op.op === 'run.decide' && !r.duplicate) extra.checkpoint = await x.afterDecision(ws, ref, String(op.decision)).catch(e => ({ state: 'failed', error: (e as Error).message }))
           }

@@ -18,7 +18,9 @@ current. Deployment verifies that the service and launcher report that release.
 A standalone MVP that edits Git-backed project and workflow definitions from a
 browser UI while the same YAML files stay editable in any text editor or agent
 IDE. The file contract is in [docs/contract.md](docs/contract.md); workflow
-runs (execution records) are in [docs/runs.md](docs/runs.md).
+runs (execution records) are in [docs/runs.md](docs/runs.md); where a run's
+work is kept (its own working copy and branches, p9) is in
+[docs/storage.md](docs/storage.md).
 
 **Writers take turns.** UI edits and external edits are assumed not to overlap.
 
@@ -243,6 +245,7 @@ node cli/wfe.ts help          # from the checkout (or: npm run wfe -- help)
 | `workflow new`, `validate`, `approve`, `arrange` | workflows: template, validation, approvals, auto-arrange |
 | `run create`, `list`, `show`, `check`, `access`, `start`, `complete`, `ask`, `answer`, … | workflow runs (docs/runs.md) |
 | `present register|start|status|stop|reconcile` | presentations of a run's result (docs/presentations.md) |
+| `runs index [--rebuild]` | runs' own working copies on this host (docs/storage.md) |
 | `serve` | build the UI and start the service for this registry |
 
 `--registry` / `WFE_REGISTRY`, `--area` / `WFE_AREA` and `--port` /

@@ -14,7 +14,7 @@ import { validateWorkflow } from '../shared/validate.ts'
 import {
   activeRevision, checkRecord, delegateNodes, documentPath, graphOfState, hostOf, operate, presentationFolder, runDisplayTitle, type AdjustSource, type AdjustDiff, graphDiff, RUN_ID, RunError, runFolder, RUNS_ROOT, runKey, validRunRef, type Presentation,
   type BundleEntry, type DefinitionRef, type DocumentEvidence, type EntrustRef, type Executor, type OpInput, type RepoContext, type RunGraph,
-  type EntryMeta, type RunInput, type RunRecord, type RunRef, type RunState,
+  type EntryMeta, type RunInput, type RunRecord, type RunRef, type RunState, type RunStorage,
 } from '../shared/run.ts'
 import type { SourceRef } from '../shared/intake.ts'
 import { atomicWrite, inside, readTextOrNull } from './files.ts'
@@ -456,6 +456,11 @@ export interface CreateRunOptions {
   // The operating area whose node catalog the run is given (p7/ex1): every
   // entrance passes it; the snapshot is frozen into the run folder.
   area?: string
+  // p9: the run's own working copy (server/runspace.ts) the run folder is
+  // written into, and the storage it records. The definition is still read
+  // from the project workspace `ws`, as the person sees and edits it.
+  into?: Workspace
+  storage?: RunStorage
   by: string
   via: string
   now?: Date
@@ -566,8 +571,9 @@ export async function createRun(ws: Workspace, o: CreateRunOptions): Promise<Cre
   const host = 'host' in o.executor ? o.executor.host : undefined
   if (!host && !(o.executor as Executor).name?.trim()) throw new RequestError(400, 'the executor is required (--executor <name>): who performs the run')
   const { input, files } = inputOf(o.input)
+  const dest = o.into ?? ws
   // A named run that exists is refused first, whatever the definition's state.
-  if (o.name && ID_PATTERN.test(o.workflow) && await stat(await inside(ws.root, runDir({ workflow: o.workflow, run: o.name }))).then(() => true, () => false)) {
+  if (o.name && ID_PATTERN.test(o.workflow) && await stat(await inside(dest.root, runDir({ workflow: o.workflow, run: o.name }))).then(() => true, () => false)) {
     throw new RequestError(409, `run ${o.workflow}/${o.name} already exists (${runDir({ workflow: o.workflow, run: o.name })}); nothing was changed. Choose another --name or omit it for the next number.`)
   }
   const project = await projectId(ws)
@@ -578,7 +584,7 @@ export async function createRun(ws: Workspace, o: CreateRunOptions): Promise<Cre
   const ref = validRef({ workflow: src.root, run: o.name ?? await nextRunId(ws, src.root) })
   if (o.predecessor) validRunRef(o.predecessor, 'predecessor')
   const definition = await definitionRef(src.root, src.files, src.warnings)
-  const context: { repositories: RepoContext[]; catalog?: CatalogContext } = await repoContext(ws, src.files)
+  const context: { repositories: RepoContext[]; catalog?: CatalogContext } = await repoContext(dest, src.files)
   if (o.area) {
     const { snapshotForRun } = await import('./catalog.ts')
     const snap = await snapshotForRun(o.area)
@@ -593,18 +599,18 @@ export async function createRun(ws: Workspace, o: CreateRunOptions): Promise<Cre
   const graph: RunGraph = { nodes: compiled.graph.nodes, edges: compiled.graph.edges }
   const agent = src.files[src.root].workflow.execution.agent
   const executor: Executor = host ? { name: agent || host, backend: null, host } : o.executor as Executor
-  const record = createRecord(project, ref, input, { ...o, executor }, definition, context, graph, o.receipt)
+  const record = createRecord(project, ref, input, { ...o, executor }, definition, context, graph, o.receipt, o.storage)
   for (const [id, f] of Object.entries(src.files)) files[`${DEFINITION_DIR}/${id}.yaml`] = f.text
   if (o.plan !== undefined) files['plan.md'] = o.plan
-  return writeRun(ws, ref, files, record)
+  return writeRun(dest, ref, files, record)
 }
 
-function createRecord(project: string, ref: RunRef, input: RunInput, o: Pick<CreateRunOptions, 'predecessor' | 'by' | 'via' | 'now'> & { executor: Executor }, definition: DefinitionRef, context: RunState['context'], graph: RunGraph, receipt?: string): RunRecord {
+function createRecord(project: string, ref: RunRef, input: RunInput, o: Pick<CreateRunOptions, 'predecessor' | 'by' | 'via' | 'now'> & { executor: Executor }, definition: DefinitionRef, context: RunState['context'], graph: RunGraph, receipt?: string, storage?: RunStorage): RunRecord {
   const executor: Executor = { name: o.executor.name.trim(), backend: o.executor.backend?.trim() || null, ...(o.executor.host ? { host: o.executor.host } : {}) }
   try {
     return operate(null, {
       op: 'run.create', project, workflow: ref.workflow, run: ref.run, input, executor, predecessor: o.predecessor ?? null,
-      definition, context, nodes: Object.keys(graph.nodes).sort(), ...(receipt ? { receipt } : {}),
+      definition, context, nodes: Object.keys(graph.nodes).sort(), ...(receipt ? { receipt } : {}), ...(storage ? { storage } : {}),
     }, { at: (o.now ?? new Date()).toISOString(), by: o.by, via: o.via, graph })
   } catch (e) {
     if (e instanceof RunError) throw new RequestError(e.code === 'delegate-unsupported' ? 422 : 400, e.message, { code: e.code })

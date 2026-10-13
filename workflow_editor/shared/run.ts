@@ -225,6 +225,17 @@ export interface Control {
   stop: { at: string; by: string; reason: string } | null // stop requested; not yet confirmed by the attempt's end
 }
 
+// Where the run's work is kept (p9, docs/storage.md): its own branch in
+// each repository it owns, the commit each started from and the branch an
+// integration goes to. Portable: names and commits, never paths or URLs.
+// Absent for a run kept in the project workspace (created there by an IDE
+// agent, or recorded before p9 and not migrated).
+export interface RunStorage {
+  kind: 'run-copy'
+  branch: string
+  repositories: { path: string; base: string | null; branch: string | null; target: string | null }[]
+}
+
 export interface RunState {
   schema: string
   project: string
@@ -236,6 +247,7 @@ export interface RunState {
   predecessor: RunRef | null
   definition: DefinitionRef
   context: { repositories: RepoContext[]; catalog?: CatalogContext } // catalog (p7/ex1): what the run was given of the person's node catalog
+  storage?: RunStorage // p9: present when the run has its own working copy
   nodes: Record<string, NodeRecord>
   questions: Record<string, Question>
   instructions?: Record<string, Instruction> // present once the first one arrives (p6)
@@ -254,7 +266,7 @@ export interface RunState {
 // ---- operations (history entries) ---------------------------------------------
 
 export type OpInput =
-  | { op: 'run.create'; project: string; workflow: string; run: string; input: RunInput; executor: Executor; predecessor: RunRef | null; definition: DefinitionRef; context: RunState['context']; nodes: string[] }
+  | { op: 'run.create'; project: string; workflow: string; run: string; input: RunInput; executor: Executor; predecessor: RunRef | null; definition: DefinitionRef; context: RunState['context']; nodes: string[]; storage?: RunStorage }
   | { op: 'node.start'; node: string; reason?: string }
   | { op: 'node.progress'; node: string; text: string }
   | { op: 'node.wait'; node: string; reason: string; holder: string; external: string }
@@ -402,6 +414,21 @@ export function validRunRef(r: unknown, what: string): RunRef {
   return { workflow: (r as RunRef).workflow, run: (r as RunRef).run }
 }
 
+const SHA = /^[0-9a-f]{40,64}$/
+export function validStorage(v: unknown): RunStorage {
+  if (!isObj(v) || v.kind !== 'run-copy' || typeof v.branch !== 'string' || !/^wfe\/[a-z0-9][a-z0-9_.\/-]*$/.test(v.branch) || !Array.isArray(v.repositories) || !v.repositories.length) fail('shape', 'storage must be {kind: run-copy, branch: wfe/…, repositories: [...]}')
+  const s = v as unknown as RunStorage
+  const repositories = s.repositories.map((r, i) => {
+    const path = isObj(r) && typeof r.path === 'string' ? normalizeRepoPath(r.path) : null
+    if (!path) fail('shape', `storage.repositories[${i}] needs a project-relative path`)
+    for (const k of ['base', 'branch', 'target'] as const) if (r[k] !== null && typeof r[k] !== 'string') fail('shape', `storage.repositories[${i}].${k} must be text or null`)
+    if (r.base !== null && !SHA.test(r.base)) fail('shape', `storage.repositories[${i}].base must be a commit id`)
+    return { path: path!, base: r.base, branch: r.branch, target: r.target }
+  })
+  if (!repositories.some(r => r.path === '.')) fail('shape', 'storage names the project root (".")')
+  return { kind: 'run-copy', branch: s.branch, repositories }
+}
+
 export function validArtifactPath(p: unknown): string {
   const n = typeof p === 'string' ? normalizeRepoPath(p) : null
   if (!n || n === '.') fail('artifact-path', `artifact path "${String(p)}" must be project-relative, inside the project`)
@@ -538,7 +565,7 @@ export function apply(prev: RunState | null, e: HistoryEntry | (OpInput & EntryM
     const state: RunState = {
       schema: RUN_SCHEMA, project: e.project, workflow: e.workflow, run: e.run, created: at,
       input: e.input, executor: e.executor, predecessor: e.predecessor ?? null,
-      definition: e.definition, context: e.context,
+      definition: e.definition, context: e.context, ...(e.storage !== undefined ? { storage: validStorage(e.storage) } : {}),
       nodes, questions: {}, artifacts: [], decisions: [], cancelled: null, control: emptyControl(),
       execution: summarize({ nodes, cancelled: null }, graph), started: null, ended: null, updated: at, seq: e.seq,
     }

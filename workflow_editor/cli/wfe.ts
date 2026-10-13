@@ -190,6 +190,15 @@ registry, so the editor and the other commands can use it.
 Result: registered / already-registered / refused, plus diagnostics for what
 the project structure lacks (project.yaml, devdocs submodule, .gitignore …),
 each with its fix. Exit 0 registered or already registered; 1 refused.`,
+  runs: `wfe runs index [--rebuild] [--workspace <id>]
+
+The runs of this workspace that have their own working copy (p9): each one's
+state (ready, creating, damaged, rebuilt) and branch. Reads only, unless
+--rebuild: a copy whose manifest (copy.json) is missing is given one
+reconstructed from the copy itself — the run branch it has checked out and
+the storage its run.json records. Nothing is cloned, checked out, restarted or
+deleted; a copy whose repository is gone stays reported (its saved work is on
+its branch). Exit 0 when every copy is usable; 1 when one is damaged.`,
   list: `wfe list
 
 Lists the registered workspaces and what is observed now: available or not
@@ -458,6 +467,7 @@ Projects and workspaces
   request <workflow> …      a person's request to the executor (autolab): a run, queued
   intake <subcommand>       requests from Zulip: status, messages, receive, process … (autolab fetches)
   exec <subcommand>         the executor's interface: claim, started, finished, stops, reconcile …
+  runs index [--rebuild]    runs' own working copies on this host (p9)
   notify <subcommand>       Zulip coordination: status, deliveries, claim, resolve … (autolab delivers)
   present <subcommand>      presentations of a run's result: register, start, status, stop, reconcile
 
@@ -1076,8 +1086,20 @@ async function cmdDashboard(p: Parsed): Promise<number> {
   return 0
 }
 
+// Runs' own working copies (p9, docs/storage.md): the host-local index.
+async function cmdRuns(p: Parsed): Promise<number> {
+  const [sub] = p.positional
+  if (sub !== 'index') throw new UsageError('usage: wfe runs index [--rebuild] [--workspace <id>]')
+  const { inspectIndex } = await import('../server/runspace.ts')
+  const ws = await workspace(p)
+  const entries = await inspectIndex(ws, { rebuild: p.flags.has('rebuild') })
+  const lines = entries.length ? entries.map(e => `  ${e.ref.padEnd(28)} ${e.state.padEnd(9)} ${e.branch ?? ''}${e.problem ? `\n    ${e.problem}` : ''}`) : ['  (no run has a working copy in this workspace)']
+  out([`Run copies of workspace ${ws.reg.id}:`, ...lines].join('\n'), { workspace: ws.reg.id, entries })
+  return entries.some(e => e.state === 'damaged') ? 1 : 0
+}
+
 const COMMANDS: Record<string, (p: Parsed) => Promise<number>> = {
-  run: cmdRun, present: cmdPresent, project: cmdProject, repo: cmdRepo, dashboard: cmdDashboard, exec: cmdExec, request: cmdRequest, notify: cmdNotify, intake: cmdIntake,
+  runs: cmdRuns, run: cmdRun, present: cmdPresent, project: cmdProject, repo: cmdRepo, dashboard: cmdDashboard, exec: cmdExec, request: cmdRequest, notify: cmdNotify, intake: cmdIntake,
   create: cmdCreate, register: cmdRegister, list: cmdList, status: cmdStatus, validate: cmdValidate,
   approve: cmdApprove, arrange: cmdArrange, 'add-repo': cmdAddRepo, workflow: cmdWorkflow, serve: cmdServe, setup: cmdSetup,
   version: cmdVersion, nodes: cmdNodes,

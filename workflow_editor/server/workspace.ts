@@ -56,8 +56,14 @@ export class Workspace {
   // Set by the service when the watcher vouches that Git state has not
   // changed since these were inspected; repositories() then reuses them.
   knownRepositories?: RepositoryStatus[]
-  constructor(reg: Registration) { this.reg = reg }
+  // A run's own working copy (p9, server/runspace.ts): the same logical
+  // workspace (reg.id), rooted at the copy; `shared` is the project
+  // workspace it was made from.
+  readonly copyOf?: { shared: Workspace; ref: { workflow: string; run: string } }
+  constructor(reg: Registration, copyOf?: Workspace['copyOf']) { this.reg = reg; this.copyOf = copyOf }
   get root() { return this.reg.path }
+  // The project workspace: itself, or the one a run copy was made from.
+  get shared(): Workspace { return this.copyOf?.shared ?? this }
 
   // ---- Git inspection -------------------------------------------------
 

@@ -276,7 +276,9 @@ export type OpInput =
   | { op: 'run.resume'; reason: string }
   | { op: 'presentation.register'; presentation?: string; node: string; title: string; manifest?: PresentationManifest }
   | { op: 'presentation.observe'; presentation: string; status: Observation; instance?: string; detail?: string }
-  | { op: 'run.adjust'; revision: string; parent: string; file: string; sha256: string; definitionDigest: string; effective: EffectiveGraph; reason: string; source: AdjustSource; diff?: AdjustDiff }
+  // completing (p8/ex2): the adjustment is made at the completion of that
+  // running node; the next entry is its node.complete (one locked write).
+  | { op: 'run.adjust'; revision: string; parent: string; file: string; sha256: string; definitionDigest: string; effective: EffectiveGraph; reason: string; source: AdjustSource; diff?: AdjustDiff; completing?: string }
 
 export const OPS = ['run.create', 'node.start', 'node.progress', 'node.wait', 'node.complete', 'node.fail', 'node.cancel',
   'question.ask', 'question.answer', 'question.take-up', 'question.withdraw', 'instruction.receive', 'instruction.ack', 'artifact.attach', 'run.cancel', 'run.decide',
@@ -913,8 +915,15 @@ export function apply(prev: RunState | null, e: HistoryEntry | (OpInput & EntryM
       if (typeof e.file !== 'string' || e.file !== `definition/${id}/${s.workflow}.yaml`) fail('shape', `the revision file is definition/${id}/${s.workflow}.yaml`)
       if (typeof e.sha256 !== 'string' || !/^[0-9a-f]{64}$/.test(e.sha256)) fail('shape', 'sha256 must be 64 hex digits')
       if (typeof e.definitionDigest !== 'string' || !/^sha256:[0-9a-f]{64}$/.test(e.definitionDigest)) fail('shape', 'definitionDigest must be sha256:<hex>')
-      const running = Object.keys(s.nodes).filter(n => s.nodes[n].state === 'running')
-      if (running.length) fail('mid-node', `${running.join(', ')} ${running.length === 1 ? 'is' : 'are'} running; an adjustment applies at a node boundary, when no node runs`)
+      // At a node's completion (p8/ex2): that node may still be running —
+      // its completion is the next entry — and nothing else may.
+      const completing = e.completing
+      if (completing !== undefined) {
+        if (typeof completing !== 'string' || !(completing in s.nodes)) fail('node-unknown', `node "${String(completing)}" is not in this run's definition`)
+        if (s.nodes[completing].state !== 'running') fail('state', `${completing} is ${s.nodes[completing].state}; an adjustment at a completion names the running node it completes`)
+      }
+      const running = Object.keys(s.nodes).filter(n => s.nodes[n].state === 'running' && n !== completing)
+      if (running.length) fail('mid-node', `${running.join(', ')} ${running.length === 1 ? 'is' : 'are'} running; an adjustment applies at a node boundary, when no node runs${completing ? ` other than the one it completes (${completing})` : ''}`)
       boundary('adjusting the run')
       const next = e.effective
       if (!isObj(next) || !isObj(next.nodes) || !Array.isArray(next.edges) || typeof next.compiler !== 'string') fail('shape', 'the adjustment carries its whole compiled graph')
@@ -1048,11 +1057,16 @@ export function replay(history: unknown[], graph: RunGraph): { state: RunState; 
   // The graph in force: the original until an adjustment, then the one it carries (p7).
   let g = graph
   const changes: Change[] = []
+  // An adjustment made at a node's completion is followed by that
+  // completion (p8/ex2), so no record shows work changed in mid-node.
+  let owed: { node: string; seq: number } | null = null
   history.forEach((raw, i) => {
     if (!isObj(raw)) fail('shape', `history entry ${i + 1} is not an object`)
     const e = raw as HistoryEntry
     if (e.seq !== i + 1) fail('sequence', `history entry ${i + 1} has seq ${String(e.seq)}; expected ${i + 1}`)
     if (!(OPS as readonly string[]).includes(e.op)) fail('op-unknown', `history ${e.seq}: unknown operation "${String(e.op)}"`)
+    if (owed && !(e.op === 'node.complete' && (e as { node?: string }).node === owed.node)) fail('completion-owed', `history ${e.seq} (${e.op}): the adjustment at ${owed.seq} was made at the completion of ${owed.node}, so the next entry completes ${owed.node}`)
+    owed = e.op === 'run.adjust' && typeof (e as { completing?: unknown }).completing === 'string' ? { node: (e as { completing: string }).completing, seq: e.seq } : null
     try {
       const r = apply(state, e, g)
       state = r.state
@@ -1064,6 +1078,7 @@ export function replay(history: unknown[], graph: RunGraph): { state: RunState; 
     }
   })
   if (!state) fail('empty', 'the history is empty')
+  if (owed) fail('completion-owed', `the adjustment at ${(owed as { seq: number }).seq} was made at the completion of ${(owed as { node: string }).node}, which is not recorded`)
   return { state: state!, changes }
 }
 

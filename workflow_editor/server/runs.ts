@@ -658,6 +658,18 @@ export async function runOp(ws: Workspace, ref: RunRef, input: OpInput & EntryMe
 
 async function runOpLocked(ws: Workspace, ref: RunRef, input: OpInput & EntryMeta, ctx: OpContext): Promise<{ record: RunRecord; ref: RunRef; duplicate?: boolean }> {
   const { record, graph, dir } = await usableRun(ws, ref)
+  const prepared = await prepareOp(ws, ref, record, graph, input)
+  const next = applyOp(record, prepared, graph, ctx)
+  if (next === record) return { record, ref, duplicate: true }
+  await writeRecord(dir, next)
+  return { record: next, ref }
+}
+
+// The file layer of one operation: what the reducer is given is checked on
+// disk here (documents, presentations, deliverables) and recorded as
+// evidence; the reducer checks the evidence, never the files.
+interface PreparedOp { op: OpInput & EntryMeta; docProblem?: string }
+async function prepareOp(ws: Workspace, ref: RunRef, record: RunRecord, graph: RunGraph, input: OpInput & EntryMeta): Promise<PreparedOp> {
   const op = structuredClone(input) as OpInput & EntryMeta
   if (op.op === 'question.ask' && !op.question) op.question = nextQuestionId(record)
   if (op.op === 'artifact.attach' || (op.op === 'node.complete' && op.artifacts)) {
@@ -700,9 +712,13 @@ async function runOpLocked(ws: Workspace, ref: RunRef, input: OpInput & EntryMet
     const q = op.question ? record.questions[op.question] : undefined
     if (q?.subject) op.subject = (await Promise.all(q.subject.map(d => checkSubject(ws, d.path).catch(() => null)))).filter((d): d is DocumentEvidence => !!d)
   }
-  let next: RunRecord
+  return { op, docProblem }
+}
+
+// The reducer's verdict on a prepared operation, as a request error.
+function applyOp(record: RunRecord, { op, docProblem }: PreparedOp, graph: RunGraph, ctx: OpContext): RunRecord {
   try {
-    next = operate(record, op, { at: (ctx.now ?? new Date()).toISOString(), by: ctx.by?.trim() || record.executor.name, via: ctx.via, graph, expectSeq: ctx.expectSeq })
+    return operate(record, op, { at: (ctx.now ?? new Date()).toISOString(), by: ctx.by?.trim() || record.executor.name, via: ctx.via, graph, expectSeq: ctx.expectSeq })
   } catch (e) {
     if (e instanceof RunError) {
       const message = e.code === 'document-missing' && docProblem ? `${op.op === 'question.ask' ? 'asking from' : 'completing'} ${(op as { node: string }).node}: ${docProblem}` : e.message
@@ -710,9 +726,6 @@ async function runOpLocked(ws: Workspace, ref: RunRef, input: OpInput & EntryMet
     }
     throw e
   }
-  if (next === record) return { record, ref, duplicate: true }
-  await writeRecord(dir, next)
-  return { record: next, ref }
 }
 
 // ---- adjustments (p7, docs/adjustments.md) -----------------------------------------
@@ -726,6 +739,10 @@ export interface AdjustOptions {
   dryRun?: boolean // inspect only: the difference and every refusal, nothing written
   propose?: string // write it as definition/proposals/<name>.yaml to ask about (agreement)
   expectRevision?: string // refuse unless this revision is in force
+  // At the completion of a running node (p8/ex2): the adjustment and the
+  // node's completion are recorded together, in one locked write. Needed
+  // when that completion would otherwise complete the run.
+  completing?: { node: string; outcome: string; artifacts?: string[]; agreement?: string }
 }
 export interface AuthoredDiff { added: string[]; removed: string[]; changed: { id: string; fields: string[] }[]; restyled: string[] }
 export interface AdjustResult {
@@ -738,6 +755,7 @@ export interface AdjustResult {
   graph: AdjustDiff // the effective graph's difference, generated steps included
   problems: { code: string; message: string }[]
   record?: RunRecord
+  duplicate?: boolean // a retransmission (same receipt): already recorded, nothing written
 }
 
 const NODE_FIELDS = ['type', 'name', 'description', 'repositories', 'workflow', 'confirms'] as const
@@ -773,6 +791,14 @@ export async function adjustRun(ws: Workspace, ref: RunRef, o: AdjustOptions, ct
     const problems: AdjustResult['problems'] = []
     const problem = (code: string, message: string) => problems.push({ code, message })
     const empty: AuthoredDiff = { added: [], removed: [], changed: [], restyled: [] }
+    // A retransmission is answered before anything is written (no stray
+    // revision file); a receipt used for another operation is refused.
+    const seen = ctx.receipt ? record.history.find(h => h.receipt === ctx.receipt) : undefined
+    if (seen && !o.dryRun && !o.propose) {
+      if (seen.op !== 'run.adjust') throw new RequestError(409, `receipt ${ctx.receipt} already recorded ${seen.op} at seq ${seen.seq}`, { code: 'receipt-reused' })
+      const rev = record.definition.revisions?.find(x => x.revision === (seen as { revision?: string }).revision)
+      return { ok: true, dryRun: false, parent: rev?.parent ?? parent, revision: rev?.revision, authored: empty, graph: rev?.diff ?? graphDiff(graph, graph), problems: [], record, duplicate: true }
+    }
     // The original request (p7/ex1): the run's input file, by its hash on
     // disk now; the reducer compares it with the hash recorded at creation.
     let source = o.source as AdjustSource
@@ -818,13 +844,25 @@ export async function adjustRun(ws: Workspace, ref: RunRef, o: AdjustOptions, ct
     const revFile = `${DEFINITION_DIR}/${revision}/${record.definition.root}.yaml`
     const input = compiled.ok ? {
       op: 'run.adjust' as const, revision, parent, file: revFile, sha256: sha256(o.text), definitionDigest: await semanticDigest('definition', next), effective: compiled.graph,
-      reason: o.reason, source, ...(ctx.attempt ? { attempt: ctx.attempt } : {}), ...(ctx.receipt ? { receipt: ctx.receipt } : {}),
+      reason: o.reason, source, ...(o.completing ? { completing: o.completing.node } : {}), ...(ctx.attempt ? { attempt: ctx.attempt } : {}), ...(ctx.receipt ? { receipt: ctx.receipt } : {}),
+    } : null
+    // The completion that goes with it (p8/ex2), its own receipt derived.
+    const completion = o.completing ? {
+      op: 'node.complete' as const, node: o.completing.node, outcome: o.completing.outcome, artifacts: o.completing.artifacts ?? [], ...(o.completing.agreement ? { agreement: o.completing.agreement } : {}),
+      ...(ctx.attempt ? { attempt: ctx.attempt } : {}), ...(ctx.receipt ? { receipt: `${ctx.receipt}/complete` } : {}),
     } : null
     // The record's own rules, tried on a copy, so an inspection lists them too.
+    const both = async (): Promise<RunRecord> => {
+      const adjusted = applyOp(record, { op: structuredClone(input!) }, graph, ctx)
+      if (!completion) return adjusted
+      const g2 = graphOfState(adjusted) ?? graph
+      return applyOp(adjusted, await prepareOp(ws, ref, adjusted, g2, completion), g2, { ...ctx, expectSeq: undefined })
+    }
     if (input && !o.propose) {
-      try { operate(record, structuredClone(input), { at: (ctx.now ?? new Date()).toISOString(), by: ctx.by?.trim() || record.executor.name, via: ctx.via, graph, expectSeq: ctx.expectSeq }) } catch (e) {
-        if (!(e instanceof RunError)) throw e
-        if (!problems.some(p => p.code === e.code)) problem(e.code, e.message)
+      try { await both() } catch (e) {
+        if (!(e instanceof RequestError)) throw e
+        const code = (e.detail as { code?: string } | undefined)?.code ?? 'refused'
+        if (!problems.some(p => p.code === code)) problem(code, e.message)
       }
     }
     if (problems.length || o.dryRun) return { ok: !problems.length, ...base, problems }
@@ -843,8 +881,10 @@ export async function adjustRun(ws: Workspace, ref: RunRef, o: AdjustOptions, ct
     await mkdir(join(dir, DEFINITION_DIR, revision), { recursive: true })
     await atomicWrite(abs, o.text)
     try {
-      const r = await runOpLocked(ws, ref, input!, ctx)
-      return { ok: true, ...base, revision, problems, record: r.record }
+      // One write: the adjustment and, at a completion, the completion.
+      const r = await both()
+      await writeRecord(dir, r)
+      return { ok: true, ...base, revision, problems, record: r }
     } catch (e) {
       await rm(join(dir, DEFINITION_DIR, revision), { recursive: true, force: true })
       throw e

@@ -88,6 +88,57 @@ At a **node boundary**:
 - while an attempt is open, only that attempt applies adjustments (fenced
   like its reports); a person's adjustment waits until no attempt is open.
 
+### At a node's completion (p8/ex2)
+
+A run without a final report ends with the completion of its last node:
+once every node is completed the execution is completed, and a completed
+run is not adjusted (`run-completed`). Adjusting first is `mid-node` while
+that node runs. When the conversation in that last node added work, the
+adjustment is made **at its completion**:
+
+- `run.adjust` carries `completing: <node>`. That node may be running — it
+  must be, and it must be the only running node — and every other rule
+  applies (it keeps its identity and dependencies, the boundary's
+  instructions, authorization, revisions, attempt fencing).
+- The service records it with the node's `node.complete`, as the next
+  entry, in the same locked write: both or neither. A refusal of either
+  part (the completion's document, an unacknowledged instruction, an open
+  presentation when nothing is left) refuses both, and the revision file is
+  removed.
+- `replay` (and so every read and `wfe run check`) refuses a `completing`
+  adjustment that is not followed directly by that node's completion
+  (`completion-owed`), so no record shows work changed in mid-node.
+- The completion carries its own receipt (`<receipt>/complete`); a
+  retransmission of the pair is answered from the record and writes
+  nothing, not even a revision file.
+
+`wfe run adjust <run> … --completing <node> --outcome <text> [--artifact
+<path>]…`. A completed run is never revived; a run whose last node adds
+nothing ends with its plain completion as before. This is general: it does
+not depend on a workflow's id, and a run with a final report does not need
+it (the final report is the pending work the adjustment goes before).
+
+### Growing a run's work from its conversation (p8/ex2)
+
+A workflow may start with a talk alone (the basic `freework`,
+[contract.md](contract.md)). Its run grows like this, with the operations
+above and nothing particular to it:
+
+1. The talk reads the braindump, asks, and takes the answer up.
+2. The work the answer makes concrete is written as a draft of the
+   definition in force and checked (`--dry-run`).
+3. It is applied at the boundary — after the talk completes, before the
+   next node starts; at the talk's completion (`--completing`) when the
+   run has no final report — with the source that says why: `request`,
+   `answer:<q>`, `instruction:<i>`, or `agreement:<q>` for a change of the
+   agreed scope.
+4. The next node is chosen from the updated graph. A later consultation is
+   a new talk with its own id; a finished talk keeps its question and answer.
+5. With nothing more to add, the run goes on to the end it has.
+
+The grown definition is the run's revisions only. Nothing is written back
+into `devdocs/workflows/`.
+
 ## Who authorizes it
 
 An adjustment names its **source**, and the reducer checks it:

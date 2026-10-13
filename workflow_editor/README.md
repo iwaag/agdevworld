@@ -495,6 +495,13 @@ the creation form (the chip, the preview, the final report connected to the
 last card, Save, back to default).
 `npm run build && node checks/freework.ts [--keep] [--shots <dir>]`.
 
+`checks/growth.ts` (p8/ex2) rehearses a run grown from its conversation
+through the command line across three attempts (no browser): a talk asks,
+the session ends, the answer resumes it, the agreed work is added with the
+talk's completion (`--completing`), done, shown in a new talk, and the run
+ends; fencing, a refused plain adjustment, a retransmission and `wfe run
+check`. `node checks/growth.ts [--out <transcript.md>]`.
+
 `checks/appearance.ts` (p7) checks node appearance on its own temporary
 project and private service (port 8198): presets, the inspector's icon and
 color, saving, and that a custom color keeps the run state's words, glyph,

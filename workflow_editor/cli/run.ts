@@ -110,6 +110,9 @@ a nonempty file of the run folder; its hash and size are recorded as
 evidence, and the document is listed with the outcome. _plan completes only
 on agreement: a question asked from _plan about this same plan.md whose
 answer was taken up (--agreement names it; default the latest taken up).
+When this completion would complete the run but the conversation added
+work, complete it with the adjustment instead: wfe run adjust <run>
+--completing <node> --outcome … (wfe run help adjust).
 Keep the outcome short (result, main verification fact, next action): it is
 what coordination messages quote.`,
   fail: `wfe run fail <run> <node> --reason <text>
@@ -201,9 +204,10 @@ Records an artifact reference (a report, a result file). <path> is
 project-relative, relative to the current directory, or a file name in the
 run folder. A missing file is recorded and shown as missing. Writes run.json.`,
   adjust: `wfe run adjust <run> --definition <file|-> --reason <text> --source <source> [--dry-run] [--propose <name>] [--expect-revision r<n>]
+               [--completing <node> --outcome <text> [--artifact <path>]...]
 
 Changes the run's future work (docs/adjustments.md): <file> is the whole
-definition in force (wfe run revisions <run> --show > <draft>), edited by
+definition in force (wfe run revisions <run> --show r<n> > <draft>), edited by
 hand or with wfe nodes instantiate <template> --run <run> --file <draft>. Only pending
 work may change: nodes added, removed or rewired, a pending cleanup moved
 after a new confirmation. Started, waiting and finished work keeps its
@@ -227,7 +231,16 @@ running, no unacknowledged instruction), as a new immutable revision
   --propose <n>   write definition/proposals/<n>.yaml to ask about first:
                   wfe run ask <run> <node> --about-adjustment <n> …, then
                   apply the same file with --source agreement:<q>
-Writes the revision file and run.json (one history entry).`,
+  --completing <node> --outcome <text> [--artifact <path>]...
+                  adjust at the completion of <node>, which is running (it
+                  is the one node that may run): the adjustment and the
+                  node's completion are recorded together. Use it when the
+                  completion would otherwise complete the run (no final
+                  report and nothing pending after it), so the work the
+                  conversation agreed is added before the run ends. Both
+                  or neither are recorded.
+Writes the revision file and run.json (one history entry; two with
+--completing: the adjustment, then the completion).`,
   nodes: `wfe run nodes <run> [--show <template>]
 
 The person's node catalog as this run was given it at creation (docs/catalog.md):
@@ -432,7 +445,8 @@ export function describeRun(r: RunResponse, opts: { history?: boolean; url?: str
 
 function adjustText(r: AdjustResult, ref: string): string {
   const a = r.authored
-  const lines = [r.problems.length ? `Not ${r.dryRun ? 'applicable' : 'applied'} (from ${r.parent}):` : r.revision ? `Applied: ${ref} now follows ${r.revision} (from ${r.parent}).` : r.proposal ? `Proposal written: ${r.proposal} (nothing applied). Ask about it: wfe run ask ${ref} <node> --about-adjustment <name> …` : `Applicable to ${r.parent} (dry run; nothing written).`]
+  const done = r.record && r.revision ? Object.entries(r.record.nodes).filter(([, n]) => n.state === 'completed').length : 0
+  const lines = [r.problems.length ? `Not ${r.dryRun ? 'applicable' : 'applied'} (from ${r.parent}):` : r.duplicate ? `Already recorded: ${ref} follows ${r.revision ?? r.parent} (same receipt; nothing written again).` : r.revision ? `Applied: ${ref} now follows ${r.revision} (from ${r.parent}).${r.record?.history.at(-1)?.op === 'node.complete' ? ` ${(r.record.history.at(-1) as { node: string }).node} completed with it; ${done} node${done === 1 ? '' : 's'} completed, ready: ${r.record.execution.ready.join(', ') || 'none'}.` : ''}` : r.proposal ? `Proposal written: ${r.proposal} (nothing applied). Ask about it: wfe run ask ${ref} <node> --about-adjustment <name> …` : `Applicable to ${r.parent} (dry run; nothing written).`]
   for (const p of r.problems) lines.push(`  ${p.code}: ${p.message}`)
   lines.push(`  work added: ${a.added.join(', ') || '—'}; removed: ${a.removed.join(', ') || '—'}; changed: ${a.changed.map(c => `${c.id} (${c.fields.join(', ')})`).join(', ') || '—'}${a.restyled.length ? `; restyled: ${a.restyled.join(', ')}` : ''}`)
   lines.push(`  graph: +${r.graph.added.length} −${r.graph.removed.length} nodes, +${r.graph.edgesAdded.length} −${r.graph.edgesRemoved.length} edges${r.graph.edgesAdded.length ? ` (new: ${r.graph.edgesAdded.map(([f, t]) => `${f} → ${t}`).join('; ')})` : ''}`)
@@ -639,7 +653,10 @@ export async function runCommand(c: RunCli): Promise<number> {
       const m = /^(answer|instruction|agreement):([a-z0-9]+)(?::(\d+))?$/.exec(src)
       const source = src === 'request' ? { kind: 'request' as const } : src === 'person' ? { kind: 'person' as const, ...(by ? { by } : {}) } : m?.[1] === 'answer' ? { kind: 'answer' as const, question: m[2], ...(m[3] ? { answer: Number(m[3]) } : {}) } : m?.[1] === 'instruction' ? { kind: 'instruction' as const, instruction: m[2] } : m?.[1] === 'agreement' ? { kind: 'agreement' as const, question: m[2] } : null
       if (!source) throw c.usage(`--source "${src}" must be request, answer:<q>[:<n>], instruction:<i>, agreement:<q> or person`)
-      const res = await wrap(() => adjustRun(ws, r, { text, reason: need(c, 'reason', 'why the run changes'), source, dryRun: c.flag('dry-run'), propose: c.opt('propose'), expectRevision: c.opt('expect-revision') }, { by, via: 'cli', expectSeq, attempt, receipt }))
+      const completingNode = c.opt('completing')
+      const completing = completingNode ? { node: completingNode, outcome: need(c, 'outcome', `what ${completingNode} produced or concluded`), artifacts: c.opts('artifact').map(p => artifactPath(ws, r, p)) } : undefined
+      if (!completing && c.opt('outcome')) throw c.usage('--outcome goes with --completing <node>')
+      const res = await wrap(() => adjustRun(ws, r, { text, reason: need(c, 'reason', 'why the run changes'), source, dryRun: c.flag('dry-run'), propose: c.opt('propose'), expectRevision: c.opt('expect-revision'), completing }, { by, via: 'cli', expectSeq, attempt, receipt }))
       c.out(adjustText(res, runKey(r)), res)
       return res.ok ? 0 : 1
     }
@@ -670,8 +687,13 @@ export async function runCommand(c: RunCli): Promise<number> {
       if (!rec) throw c.refused(`run ${runKey(r)} cannot be used: ${resp.problem?.message}`)
       const texts: Record<string, string> = { r1: '' }
       const root = resp.bundle[rec.definition.root]
-      const original = await wrap(() => import('../server/runs.ts').then(m => m.readRunFile(ws, r, `definition/${rec.definition.root}.yaml`).catch(() => null)))
-      texts.r1 = original?.text ?? `(${root?.file})`
+      // The original is the frozen copy in the run folder (p8/ex2: it was
+      // read through readRunFile, which only serves top-level run files, so
+      // --show r1 printed its name instead of its text).
+      const { readFile } = await import('node:fs/promises')
+      const { join } = await import('node:path')
+      const original = await readFile(join(ws.root, runDir(r), 'definition', `${rec.definition.root}.yaml`), 'utf8').catch(() => null)
+      texts.r1 = original ?? `(${root?.file})`
       for (const v of resp.revisions ?? []) texts[v.revision] = v.text ?? ''
       const show = c.opt('show')
       if (show) { if (!(show in texts)) throw c.refused(`no revision ${show} (${Object.keys(texts).join(', ')})`); c.out(texts[show], { revision: show, text: texts[show] }); return 0 }

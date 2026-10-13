@@ -136,7 +136,7 @@ export interface BasicResult {
 // `commit` commits the added file in the repository that owns devdocs (a
 // path-limited commit, nothing else), and the root's gitlink in submodule
 // mode; `push` pushes those commits when the branch has an upstream.
-export async function placeBasics(ws: Workspace, opts: { dryRun?: boolean; commit?: boolean; push?: boolean } = {}): Promise<BasicResult[]> {
+export async function placeBasics(ws: Workspace, opts: { dryRun?: boolean; commit?: boolean; push?: boolean; gitEnv?: Record<string, string> } = {}): Promise<BasicResult[]> {
   const project = (await ws.readProject().catch(() => ({ project: undefined }))).project?.id ?? ws.reg.project ?? ws.reg.id
   const base = { workspace: ws.reg.id, project, workflow: FREEWORK }
   const dir = await ws.workflowsDir()
@@ -157,11 +157,13 @@ export async function placeBasics(ws: Workspace, opts: { dryRun?: boolean; commi
     throw e
   }
   const result: BasicResult = { ...base, status: 'added', file, reason: 'not defined in this project', notes: settings.notes }
-  if (opts.commit) Object.assign(result, await commitPlaced(ws, file, opts.push ?? false))
+  if (opts.commit) Object.assign(result, await commitPlaced(ws, file, opts.push ?? false, opts.gitEnv ?? {}))
   return [result]
 }
 
-async function commitPlaced(ws: Workspace, file: string, push: boolean): Promise<Pick<BasicResult, 'commit' | 'pushed' | 'publishError'>> {
+// `env`: the host's Git credentials for pushing (the Gitea token's askpass,
+// as run publication uses).
+async function commitPlaced(ws: Workspace, file: string, push: boolean, env: Record<string, string>): Promise<Pick<BasicResult, 'commit' | 'pushed' | 'publishError'>> {
   const info = await ws.devdocs()
   const message = 'Add the basic workflow freework (talk first; the run grows its work in conversation)'
   const run = async (cwd: string, args: string[]) => { const r = await git(cwd, args); if (r.code !== 0) throw new Error(`git ${args.join(' ')}: ${(r.stderr || r.stdout).trim()}`); return r.stdout.trim() }
@@ -182,7 +184,8 @@ async function commitPlaced(ws: Workspace, file: string, push: boolean): Promise
     for (const repo of pushes) {
       const up = await git(repo, ['rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{u}'])
       if (up.code !== 0) return { commit, pushed: false, publishError: `${relative(ws.root, repo) || '.'} has no upstream branch; push it by hand` }
-      const r = await git(repo, ['push'])
+      const r = await git(repo, ['push'], { env, timeoutMs: 120_000 })
+      await git(repo, ['fetch', '-q'], { env, timeoutMs: 60_000 }) // remote-tracking refs say it is published
       if (r.code !== 0) return { commit, pushed: false, publishError: `push of ${relative(ws.root, repo) || '.'} failed: ${(r.stderr || r.stdout).trim()}` }
     }
     return { commit, pushed: true }
@@ -194,7 +197,7 @@ async function commitPlaced(ws: Workspace, file: string, push: boolean): Promise
 // Every registered workspace, once per project (and once per devdocs
 // repository, when projects share one): the first workspace that can hold
 // it places it; the others are covered by it.
-export async function placeBasicsEverywhere(workspaces: Workspace[], opts: { dryRun?: boolean; commit?: boolean; push?: boolean } = {}): Promise<BasicResult[]> {
+export async function placeBasicsEverywhere(workspaces: Workspace[], opts: { dryRun?: boolean; commit?: boolean; push?: boolean; gitEnv?: Record<string, string> } = {}): Promise<BasicResult[]> {
   const out: BasicResult[] = []
   const done = new Map<string, string>() // project id or devdocs identity → workspace that placed it
   for (const ws of workspaces) {

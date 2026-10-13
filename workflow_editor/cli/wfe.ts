@@ -631,8 +631,10 @@ async function cmdWorkflow(p: Parsed): Promise<number> {
     // The basic workflows (p8/ex2, server/basics.ts): added where they are
     // missing, never over a file or an id that is there.
     const { placeBasics, placeBasicsEverywhere } = await import('../server/basics.ts')
-    const o = { dryRun: p.flags.has('dry-run'), commit: p.flags.has('commit'), push: p.flags.has('push') }
+    const o: { dryRun: boolean; commit: boolean; push: boolean; gitEnv?: Record<string, string> } = { dryRun: p.flags.has('dry-run'), commit: p.flags.has('commit'), push: p.flags.has('push') }
     if (o.push && !o.commit) throw new UsageError('--push goes with --commit')
+    // Pushed with the host's Gitea credentials, as run publication is.
+    if (o.push) { const g = await giteaOf(p); if (g) o.gitEnv = await g.gitEnv() }
     let results
     if (p.flags.has('all')) {
       const reg = await loadRegistry(registryFile(p))

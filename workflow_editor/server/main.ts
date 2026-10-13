@@ -2,7 +2,7 @@
 //
 //   node server/main.ts [--registry <file>] [--area <dir>] [--port 8095]
 //     [--poll-ms 1000] [--git-poll-ms 3000] [--serve-dist]
-//     [--gitea <setting.json>] [--origins <url,url>]
+//     [--gitea <setting.json>] [--origins <url,url>] [--bind 0.0.0.0]
 //
 // The registry is required (--registry or WFE_REGISTRY): a default relative to
 // the code would serve a different, empty catalog whenever the code moves.
@@ -10,9 +10,10 @@
 // The area (default: the registry's directory) is where browser-created
 // projects go.
 //
-// It binds to 127.0.0.1 only. Browser writes are accepted from the Vite dev
-// origin, from its own origin (when serving the built UI) and from the
-// origins given with --origins / WFE_ORIGINS (agdevworld's loopback route).
+// It binds to every interface (--bind / WFE_BIND, default 0.0.0.0) and
+// answers to any host name, so the LAN reaches it. Browser writes are
+// accepted from the page's own origin, the Vite dev origin and the origins
+// given with --origins / WFE_ORIGINS.
 // The Gitea setting defaults to gitea.json beside the registry, when present.
 import { createServer } from 'node:http'
 import { dirname, join, resolve } from 'node:path'
@@ -31,6 +32,7 @@ const option = (name: string, fallback: string) => { const i = args.indexOf(name
 export const DEFAULT_PORT = 8095
 export const DEV_PORT = 5175
 const port = Number(option('--port', String(DEFAULT_PORT)))
+const bind = option('--bind', '0.0.0.0')
 const registryOption = option('--registry', '')
 if (!registryOption) { console.error('No registry chosen: pass --registry <file> (or WFE_REGISTRY). The fixture: npm run service.'); process.exit(2) }
 const registryFile = resolve(registryOption)
@@ -50,7 +52,6 @@ const handler = createHandler({
   registryFile,
   area,
   allowedOrigins: origins,
-  allowedHosts: ['127.0.0.1', 'localhost'],
   distDir: serveDist ? join(pkg, 'dist') : undefined,
   watcher: new Watcher(pollMs, { gitIntervalMs: gitPollMs, registryFile }),
   gitea, giteaProblem,
@@ -59,12 +60,12 @@ const handler = createHandler({
 
 const server = createServer((req, res) => void handler(req, res))
 server.on('error', (e: NodeJS.ErrnoException) => {
-  if (e.code === 'EADDRINUSE') console.error(`Port ${port} is already in use on 127.0.0.1 — another editor service is probably running. Stop it, or pass --port.`)
+  if (e.code === 'EADDRINUSE') console.error(`Port ${port} is already in use on ${bind} — another editor service is probably running. Stop it, or pass --port.`)
   else console.error(e)
   process.exit(1)
 })
-server.listen(port, '127.0.0.1', () => {
-  console.log(`workflow editor service on http://127.0.0.1:${port}${serveDist ? ' (serving dist/)' : ''}`)
+server.listen(port, bind, () => {
+  console.log(`workflow editor service on http://${bind}:${port}${serveDist ? ' (serving dist/)' : ''}`)
   console.log(`registry: ${registryFile}`)
   console.log(`authoring area: ${area}`)
   console.log(gitea ? `gitea: ${gitea.url} (owner ${gitea.owner})` : `gitea: none — ${giteaProblem}`)

@@ -1,3 +1,4 @@
+import { AGENTROOM_URL } from './endpoints'
 // Context repositories (`give_context_easier` p1): what the room's context
 // panel reads and writes.
 //
@@ -13,7 +14,7 @@
 // (`&ctxfail=1` makes every call fail, `&ctxstale=1` shows a last-known
 // catalog).
 
-const BASE = (import.meta.env.VITE_AGENTROOM_URL as string | undefined) ?? 'http://localhost:8094'
+const BASE = AGENTROOM_URL
 
 export interface ContextHead {
   state: 'current' | 'last-known' | 'empty' | 'unavailable'

@@ -56,6 +56,7 @@ import {
 } from './projectState'
 import { ago, clock, submitToken } from './roomState'
 import { ProjectRoomScene } from './scenes/ProjectRoomScene'
+import { AGENTROOM_URL } from './endpoints'
 
 const CONVERSATION_MS = 4000
 const BOARD_MS = 15000
@@ -626,7 +627,7 @@ export function initProjectRoom(): void {
     const box = el('span', `pr-avatar${post.kind === 'human' ? ' human' : ''}`)
     if (post.kind === 'human') { box.textContent = '👤'; return box }
     const character = FrontDeskSettings.forSpeaker(scene.settings.activeManifest, post.agent, post.speaker)
-    if (character?.face) { const img = document.createElement('img'); img.src = `${(import.meta.env.VITE_AGENTROOM_URL as string | undefined) ?? 'http://localhost:8094'}${character.face}`; img.alt = character.name; box.append(img) }
+    if (character?.face) { const img = document.createElement('img'); img.src = `${AGENTROOM_URL}${character.face}`; img.alt = character.name; box.append(img) }
     else box.textContent = '?'
     return box
   }

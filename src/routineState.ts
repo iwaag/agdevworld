@@ -18,12 +18,13 @@
 // sentence of provenance is decided by the relay; a second copy of the rules in
 // the browser would drift from it.
 
-const BASE = (import.meta.env.VITE_AGENTROOM_URL as string | undefined) ?? 'http://localhost:8094'
+const BASE = AGENTROOM_URL
 
 // A run's own vocabulary (relay `routines.run_state`), plus the ops board's
 // words for a run somebody else posted into, plus the row-only `idle` and
 // `retired`.
 import type { PostMeaning, RoomRequests } from './roomState'
+import { AGENTROOM_URL } from './endpoints'
 export type RunState = 'unstarted' | 'acked' | 'waiting' | 'awaiting' | 'stalled' | 'finished' | 'unknown'
 export type RoutineState = RunState | 'idle' | 'retired'
 

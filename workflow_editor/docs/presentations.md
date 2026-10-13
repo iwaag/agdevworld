@@ -132,7 +132,7 @@ manage instances in `present.sqlite`:
   the existing instance when it is observed serving, reports `starting` while
   another start is in progress (recoverable: ask again), and replaces only an
   instance that is observed gone. A port is chosen from `present.json` →
-  `ports` (default 8300–8399) and bound on `bind` (default `127.0.0.1`).
+  `ports` (default 8300–8399) and bound on `bind` (default `0.0.0.0`).
   The presentation becomes `available` only after `/.wfe-present/identity`
   returned this instance and `/` and the entry returned 200.
 - **Stop.** Targets the owned instance only: the shutdown request with its
@@ -202,10 +202,11 @@ frozen with the delivery, like every message.
 ## Configuration: `<area>/present.json`
 
 ```json
-{ "bind": "127.0.0.1", "publicBase": null, "ports": [8300, 8399], "answerBase": "http://localhost:8093/wfe/" }
+{ "bind": "0.0.0.0", "publicBase": "http://<host name>", "ports": [8300, 8399], "answerBase": "http://<host name>:8093/wfe/" }
 ```
 
-- `bind`: the address instances listen on. `127.0.0.1` keeps them on this
+- `bind`: the address instances listen on (default `0.0.0.0`, every
+  interface, so the LAN reaches them). A loopback address keeps them on this
   host; then links are described as opening on this host, never as remote.
 - `publicBase`: when instances are bound to a reachable address, the base
   URL people use (the port is appended). `null` uses
@@ -213,4 +214,4 @@ frozen with the delivery, like every message.
 - `answerBase`: the agdevworld editor route, for the run view link in the
   explanation panel of runs without a request topic.
 
-A missing file means these defaults.
+A missing file means `bind` `0.0.0.0`, `publicBase` and `answerBase` null.

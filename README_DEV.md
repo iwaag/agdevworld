@@ -107,7 +107,8 @@ Three things it deliberately does not do, all of them from the episode plan:
 `[selfnote]` posts and lines never reach the browser: the relay strips them,
 so the view hides exactly what `agentchat read` hides.
 
-The relay's address defaults to `http://localhost:8094`; set
+The relay's address defaults to port 8094 on the host the page was opened
+from (`src/endpoints.ts`), so a browser elsewhere on the LAN reaches it; set
 `VITE_AGENTROOM_URL` at build time to point elsewhere. It is a separate
 process, supervised by the local launchd deployment. When unavailable, the
 relay-backed views say unknown; cluster snapshot views remain available.
@@ -440,8 +441,9 @@ the retired Gitea repository `developer/pj-workflow-editor` (`9c29117`, the
 imported commit).
 
 - **Separate process, shared ownership.** The editor service is a Node process
-  on the host (loopback `:8098`), because it works on host workspaces. nginx's
-  loopback-only `:8093` serves this site and routes `/wfe/` to it (`nginx.conf`);
+  on the host (`:8098`, every interface), because it works on host
+  workspaces. nginx's `:8093` (every interface) serves this site and routes
+  `/wfe/` to it with the request's own `Host` (`nginx.conf`);
   the operation room links "agdev dashboard ↗" there and the dashboard links
   "← agdevworld" back. The write API is never put on the LAN-facing `:8090`.
 - **Operating area** (`pj-agdev/.local/agdev/`, ignored): `registry.json` (the

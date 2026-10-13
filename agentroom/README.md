@@ -38,7 +38,7 @@ the Developer does. **Never commit one.** `AGENTROOM_ZULIP_ENV`, the former
 per-request read credential, is no longer read; a plist that still sets it
 is told so at startup.
 
-Other environment values: `AGENTROOM_HOST` (default `127.0.0.1`),
+Other environment values: `AGENTROOM_HOST` (default `0.0.0.0`, every interface),
 `AGENTROOM_PORT` (default `8094`), `AGENTROOM_MIRROR_DIR` (where the
 mirror's SQLite store lives; default `.local/mirror/` in this directory —
 ignored and disposable: delete it and the next start rebuilds it),
@@ -78,7 +78,7 @@ terminal proves nothing about the same code under launchd.
 
 ## Routes
 
-Unauthenticated, CORS open, loopback. This is cagent's *window* shape
+Unauthenticated, CORS open, on the LAN. This is cagent's *window* shape
 (`cagent_api/server.py`). Everything is a `GET` except one POST, and that one
 writes only to this process's memory (see `POST /ops/confirm`).
 

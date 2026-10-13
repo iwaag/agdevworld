@@ -1,3 +1,4 @@
+import { AGENTROOM_URL } from './endpoints'
 // Completing a request: the relay's shared operation, read and applied.
 //
 // One request is any conversation, `(channel, topic)` — a Front Desk
@@ -11,7 +12,7 @@
 // overlay the operation room and the agent room open. `planLines()` is the
 // one view model both render, so they cannot say different things.
 
-const BASE = (import.meta.env.VITE_AGENTROOM_URL as string | undefined) ?? 'http://localhost:8094'
+const BASE = AGENTROOM_URL
 
 export type CompletionKind = 'work' | 'topic' | 'channel' | 'conversation'
 

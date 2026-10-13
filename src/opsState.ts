@@ -1,3 +1,4 @@
+import { AGENTROOM_URL } from './endpoints'
 // The operation room's read: who owes a reply, and for how long.
 //
 // One fetch of `/ops` on the `agentroom` relay (`agentroom/README.md`). The
@@ -8,7 +9,7 @@
 // the rules here would drift from it, which is exactly how `operation_room` p1
 // produced 66 stalled rows for conversations that had been answered.
 
-const BASE = (import.meta.env.VITE_AGENTROOM_URL as string | undefined) ?? 'http://localhost:8094'
+const BASE = AGENTROOM_URL
 
 // `unknown` is a first-class state, not a fallback. p9's 26 silent minutes
 // looked exactly like an idle board, and a screen that paints unknown the

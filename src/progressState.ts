@@ -8,6 +8,7 @@
 // labels, tones, how a meter is segmented, how old a fact is.
 
 import { readRelay } from './roomState'
+import { AGENTROOM_URL } from './endpoints'
 
 export type DisplayState =
   | 'planning' | 'queued' | 'working' | 'waiting' | 'awaiting_you'
@@ -386,7 +387,7 @@ export function demoProgress(): ProgressSource & { at: (seconds: number) => void
 
   const source = {
     async board(current: string | null): Promise<ProgressBoard | { error: string }> {
-      if (failing) return { error: 'the agentroom relay is not answering on http://localhost:8094 (demo)' }
+      if (failing) return { error: `the agentroom relay is not answering on ${AGENTROOM_URL} (demo)` }
       const f = frame()
       let cards = [cardA(f), cardB(f)]
       if (current) {

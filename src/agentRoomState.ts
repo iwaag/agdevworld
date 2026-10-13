@@ -1,3 +1,4 @@
+import { AGENTROOM_URL } from './endpoints'
 // The agent room's reads: agents and their open work, straight from Zulip
 // through the `agentroom` relay (`agentroom/README.md`).
 //
@@ -10,7 +11,7 @@
 // The relay listens on loopback beside the browser: the same address whether
 // the page came from vite (:5173) or the nginx image (:8090). Override with
 // VITE_AGENTROOM_URL when it runs somewhere else.
-const BASE = (import.meta.env.VITE_AGENTROOM_URL as string | undefined) ?? 'http://localhost:8094'
+const BASE = AGENTROOM_URL
 
 export interface RoomPost {
   id: number

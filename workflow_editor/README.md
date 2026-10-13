@@ -92,9 +92,9 @@ repository entry from the registry, and nothing else (folders and Gitea
 stay); it is refused while a workspace of the project has a queued job or an
 open attempt.
 
-agdevworld reaches it same-origin at `http://localhost:8093/wfe/`: its nginx
-listens on 8093, published on 127.0.0.1 only, and proxies `/wfe/` to the
-service on the host's loopback with an `x-wfe-route` header. Through that
+agdevworld reaches it same-origin at `http://<host>:8093/wfe/`: its nginx
+listens on 8093, published on every interface, and proxies `/wfe/` to the
+service with the request's own `Host` and an `x-wfe-route` header. Through that
 route the service refuses every operation that takes a host path or a
 repository location (path registration, submodules by URL, local projects);
 those stay with `wfe` on this host. The operation room links "agdev dashboard
@@ -172,10 +172,12 @@ the fixture's `../.local/wfe-fixture/registry.json`; `--area`, `--port`,
 `--poll-ms` (definitions, default 1000), `--git-poll-ms` (Git state, default 3000)). `wfe serve` builds the UI and starts the service for the
 registry it is given.
 
-The service binds to 127.0.0.1 only and answers only to `127.0.0.1` /
-`localhost` host names. Browser writes are accepted from its own origin and
-the Vite dev origin; clients without an `Origin` header (curl, scripts) are
-local processes and may write too.
+The service binds to every interface (`--bind`, default `0.0.0.0`) and
+answers to any host name, so it is reached from the LAN under any of the
+host's names. Browser writes are accepted from the page's own origin (the
+origin matching the request's `Host`), the Vite dev origin and `--origins`;
+a page of another site cannot write. Clients without an `Origin` header
+(curl, scripts) may write too.
 
 ## Projects: create and register
 

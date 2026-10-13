@@ -54,7 +54,8 @@ RETIRED_READ_VARIABLE = "AGENTROOM_ZULIP_ENV"
 #: variable with no fallback in either direction: the mirror never posts, and
 #: a relay without this one is read-only for chat and says so.
 CHAT_VARIABLE = CHAT_ENV_VARIABLE
-DEFAULT_HOST = "127.0.0.1"
+#: Every interface, so browsers elsewhere on the LAN reach it.
+DEFAULT_HOST = "0.0.0.0"
 DEFAULT_PORT = 8094
 #: How long `check` waits for the mirror's first fill before giving up.
 CHECK_TIMEOUT_SECONDS = 180.0

@@ -1,3 +1,4 @@
+import { AGENTROOM_URL } from './endpoints'
 // The settings repository, as the relay serves it (`front_desk` p2).
 //
 // Characters (display names, lore, portraits, which agents speak as them)
@@ -9,7 +10,7 @@
 // the user asks for a refresh; a dialogue saved against a revision asks for
 // that revision by id, so it is drawn with the faces it was written for.
 
-const BASE = (import.meta.env.VITE_AGENTROOM_URL as string | undefined) ?? 'http://localhost:8094'
+const BASE = AGENTROOM_URL
 
 export interface SettingsCharacter {
   id: string

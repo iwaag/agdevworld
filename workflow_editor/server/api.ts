@@ -23,8 +23,12 @@ export interface ServiceConfig {
   // The authoring area: browser-created projects go beneath it and new
   // devdocs sources into its sources/. Defaults to the registry's directory.
   area?: string
+  // Browser writes are accepted from these origins and from the origin the
+  // request itself names (same origin, under whatever LAN name it was opened).
   allowedOrigins: string[]
-  allowedHosts: string[]
+  // Host names the service answers to; absent: any (the service is meant to
+  // be reached from the LAN under any of the host's names).
+  allowedHosts?: string[]
   distDir?: string // serve the built UI from the same origin
   watcher?: Watcher
   gitea?: Gitea
@@ -146,16 +150,18 @@ export function createHandler(config: ServiceConfig) {
 
   return async function handle(req: IncomingMessage, res: ServerResponse) {
     try {
-      // Only answer to local host names (DNS-rebinding guard).
+      // Only answer to the listed host names, when a list is given.
       const host = (req.headers.host ?? '').replace(/:\d+$/, '')
-      if (!config.allowedHosts.includes(host)) throw new RequestError(403, `host "${host}" is not allowed`)
+      if (config.allowedHosts && !config.allowedHosts.includes(host)) throw new RequestError(403, `host "${host}" is not allowed`)
       const url = new URL(req.url ?? '/', 'http://local')
       const method = req.method ?? 'GET'
-      // Browser writes only from the editor's configured origin. Clients that
-      // send no Origin (curl, tests) are local processes and are allowed.
+      // Browser writes only from the page's own origin or a configured one
+      // (a page of another site cannot write). Clients that send no Origin
+      // (curl, tests) are allowed.
       if (method !== 'GET' && method !== 'HEAD') {
         const origin = req.headers.origin
-        if (origin !== undefined && !config.allowedOrigins.includes(origin)) throw new RequestError(403, `origin "${origin}" may not write`)
+        const sameOrigin = origin !== undefined && req.headers.host !== undefined && origin.replace(/^https?:\/\//, '') === req.headers.host
+        if (origin !== undefined && !sameOrigin && !config.allowedOrigins.includes(origin)) throw new RequestError(403, `origin "${origin}" may not write`)
       }
       const parts = url.pathname.split('/').filter(Boolean).map(decodeURIComponent)
       if (parts[0] !== 'api') {

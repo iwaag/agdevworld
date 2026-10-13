@@ -1,7 +1,8 @@
+import { AGENTROOM_URL } from './endpoints'
 // The cost gauge's read of the relay's `/cost` (`gauge_panel`): host files
 // only on the relay side, so this may be polled without spending realm quota.
 
-const BASE = (import.meta.env.VITE_AGENTROOM_URL as string | undefined) ?? 'http://localhost:8094'
+const BASE = AGENTROOM_URL
 
 export type CostKind = 'reported' | 'estimated' | 'subscription' | 'local' | 'unknown'
 

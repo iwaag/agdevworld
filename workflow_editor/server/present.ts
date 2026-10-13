@@ -37,7 +37,7 @@ export const PRESENTER = 'presenter'
 // ---- configuration: <area>/present.json ------------------------------------------------------
 
 export interface PresentConfig { bind: string; publicBase: string | null; ports: [number, number]; answerBase: string | null }
-const DEFAULTS: PresentConfig = { bind: '127.0.0.1', publicBase: null, ports: [8300, 8399], answerBase: null }
+const DEFAULTS: PresentConfig = { bind: '0.0.0.0', publicBase: null, ports: [8300, 8399], answerBase: null }
 export function loadPresentConfig(area: string): PresentConfig {
   let raw: Record<string, unknown>
   try { raw = JSON.parse(readFileSync(join(area, 'present.json'), 'utf8')) } catch (e) {

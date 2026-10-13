@@ -1,9 +1,10 @@
+import { AGENTROOM_URL } from './endpoints'
 // The gauge's read of the relay's `/budget` (`gauge_panel` ex1): how much of
 // each harness's plan window is used. The relay reads it through the CLIs'
 // own routes and caches per provider, so the page polls it on the same 20 s
 // tick as `/cost` — the relay's cache is what limits vendor calls.
 
-const BASE = (import.meta.env.VITE_AGENTROOM_URL as string | undefined) ?? 'http://localhost:8094'
+const BASE = AGENTROOM_URL
 
 export interface BudgetWindow {
   kind: string

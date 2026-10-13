@@ -14,8 +14,9 @@
 // view is showing.
 
 import { relayCompletion, relayCompletionAt, type CompletionPlan } from './completionState'
+import { AGENTROOM_URL } from './endpoints'
 
-const BASE = (import.meta.env.VITE_AGENTROOM_URL as string | undefined) ?? 'http://localhost:8094'
+const BASE = AGENTROOM_URL
 
 // `project` is the Project Room (`project_room` p1): it stands in a room of
 // its own but is not one of the two adapter-driven dialogue rooms below.

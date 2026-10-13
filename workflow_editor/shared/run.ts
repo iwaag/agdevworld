@@ -300,6 +300,10 @@ export type OpInput =
   | { op: 'run.cancel'; reason: string; because?: BecauseRef }
   | { op: 'run.decide'; decision: 'accepted' | 'rejected'; evidence?: string; note?: string; question?: string; answer?: number; subject?: DocumentEvidence[]; revision?: RevisionEntry[] }
   | { op: 'run.integrate'; decision: number; repositories: IntegrationRecord['repositories']; integration?: string }
+  // p9 migration: a run recorded in the project workspace now lives in its
+  // own copy. Nothing else changes: nodes, questions, holds and decisions
+  // stay as they were; what it published before stays published.
+  | { op: 'run.relocate'; storage: RunStorage; note: string }
   | { op: 'attempt.begin'; attempt: string; reason: string; backend?: string; settings?: AttemptSettings }
   | { op: 'attempt.end'; attempt: string; outcome: AttemptOutcome; detail?: string }
   | { op: 'run.stop'; reason: string; because?: BecauseRef }
@@ -319,7 +323,7 @@ export const CONTROL_OPS: readonly string[] = ['run.stop', 'run.resume', 'run.ca
 
 export const OPS = ['run.create', 'node.start', 'node.progress', 'node.wait', 'node.complete', 'node.fail', 'node.cancel',
   'question.ask', 'question.answer', 'question.take-up', 'question.withdraw', 'instruction.receive', 'instruction.ack', 'artifact.attach', 'run.cancel', 'run.decide',
-  'attempt.begin', 'attempt.end', 'run.stop', 'run.resume', 'presentation.register', 'presentation.observe', 'run.adjust', 'run.integrate'] as const
+  'attempt.begin', 'attempt.end', 'run.stop', 'run.resume', 'presentation.register', 'presentation.observe', 'run.adjust', 'run.integrate', 'run.relocate'] as const
 // The executor's own reports. While an attempt is open they must carry its
 // id (`attempt`), so a stopped or superseded attempt cannot write into the
 // record of the one that replaced it.
@@ -963,6 +967,13 @@ export function apply(prev: RunState | null, e: HistoryEntry | (OpInput & EntryM
         confirmation: { question: q.id, answer: index, from: a.from, ...(a.source ? { source: a.source } : {}), subject: asked, ...(q.presentation ? { presentation: q.presentation } : {}) },
         ...revisionOf(e),
       })
+      break
+    }
+    case 'run.relocate': {
+      if (s.storage) fail('state', `the run already has its own working copy (${s.storage.branch})`)
+      if (ctl.attempt) fail('attempt-open', `attempt ${ctl.attempt.id} is still open; a run moves only while nothing executes it`)
+      text(e.note, 'a note on what moved')
+      s.storage = validStorage(e.storage)
       break
     }
     case 'run.integrate': {

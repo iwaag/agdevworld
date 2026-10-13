@@ -106,7 +106,7 @@ export interface AttemptRow { id: string; job: number; workspace: string; workfl
 // when the acceptance exists, carried out once the run is completed and
 // saved, its steps the per-repository journal.
 export interface IntegrationRow { id: number; workspace: string; workflow: string; run: string; decision: number; state: 'queued' | 'running' | IntegrationState; created: string; updated: string; steps: string; error: string | null; requested_by: string }
-export interface CheckpointRow { id: number; workspace: string; workflow: string; run: string; kind: string; attempt: string | null; state: 'pending' | 'published' | 'nothing' | 'attention' | 'failed'; created: string; updated: string; steps: string; error: string | null; baseline: string | null }
+export interface CheckpointRow { id: number; workspace: string; workflow: string; run: string; kind: string; attempt: string | null; state: 'pending' | 'published' | 'nothing' | 'attention' | 'failed'; created: string; updated: string; steps: string; error: string | null; baseline: string | null; mode: 'run-copy' | null }
 
 export class ExecStore {
   readonly db: DatabaseSync
@@ -132,6 +132,10 @@ export class ExecStore {
         CREATE TABLE integrations (id INTEGER PRIMARY KEY, workspace TEXT NOT NULL, workflow TEXT NOT NULL, run TEXT NOT NULL, decision INTEGER NOT NULL,
           state TEXT NOT NULL, created TEXT NOT NULL, updated TEXT NOT NULL, steps TEXT NOT NULL, error TEXT, requested_by TEXT NOT NULL,
           UNIQUE (workspace, workflow, run, decision));
+        -- How a checkpoint publishes, fixed when it is made: 'run-copy' (its
+        -- run branches) or NULL (the project workspace's branches, before p9).
+        -- A retry never reinterprets an old checkpoint after its run moved.
+        ALTER TABLE checkpoints ADD COLUMN mode TEXT;
       `),
     }])
   }
@@ -421,7 +425,8 @@ export class ExecStore {
   // ---- publication ------------------------------------------------------------------------
 
   async checkpoint(ws: Workspace, ref: RunRef, kind: string, attempt: string | null, base: string | null): Promise<CheckpointRow> {
-    const id = Number(this.run('INSERT INTO checkpoints (workspace, workflow, run, kind, attempt, state, created, updated, steps, baseline) VALUES (?, ?, ?, ?, ?, \'pending\', ?, ?, \'[]\', ?)', ws.reg.id, ref.workflow, ref.run, kind, attempt, now(), now(), base).lastInsertRowid)
+    const mode = (await runSpace(ws, ref)).copyOf ? 'run-copy' : null
+    const id = Number(this.run('INSERT INTO checkpoints (workspace, workflow, run, kind, attempt, state, created, updated, steps, baseline, mode) VALUES (?, ?, ?, ?, ?, \'pending\', ?, ?, \'[]\', ?, ?)', ws.reg.id, ref.workflow, ref.run, kind, attempt, now(), now(), base, mode).lastInsertRowid)
     return this.publishCheckpoint(id)
   }
 
@@ -436,7 +441,9 @@ export class ExecStore {
     if (cp.state === 'published' || cp.state === 'nothing') return cp
     const ws = await this.workspace(cp.workspace)
     const ref = { workflow: cp.workflow, run: cp.run }
-    const space = await runSpace(ws, ref)
+    // The checkpoint's own mode decides (p9): one made before the run moved
+    // to its copy still publishes the project workspace's branches.
+    const space = cp.mode === 'run-copy' ? await runSpace(ws, ref) : ws.shared
     const live = space.copyOf
       ? this.one<AttemptRow>('SELECT * FROM attempts WHERE workspace = ? AND workflow = ? AND run = ? AND state != \'ended\'', cp.workspace, cp.workflow, cp.run)
       : this.one<AttemptRow>('SELECT * FROM attempts WHERE workspace = ? AND state != \'ended\'', cp.workspace)

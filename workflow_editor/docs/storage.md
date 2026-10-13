@@ -153,6 +153,68 @@ deleting its branches and collecting garbage are not part of p9. A person
 who removes a copy by hand leaves the run reported as missing, with its
 branch.
 
+## Migration (`wfe runs migrate`)
+
+Runs recorded in a project workspace before p9 move into copies of their
+own, explicitly and only once (code: `server/migrate.ts`).
+
+- **`--dry-run`** prints an inventory and writes nothing. For every run it
+  lists the execution state, the hold, an open attempt, queued jobs,
+  unpublished checkpoints, open presentations and the action:
+
+  | Action | Meaning |
+  | --- | --- |
+  | `migrate` | It moves (or continues an interrupted move). |
+  | `migrated` | It already moved. |
+  | `keep-terminal` | It is completed or cancelled and stays in the project tree, read through the resolver as before. |
+  | `keep-ide` | An IDE agent performs it, so it stays in the project workspace. |
+  | `blocked` | An attempt is open, or the record cannot be read. |
+
+  It also lists each repository's head and branch, and the uncommitted files
+  of the project workspace outside run folders.
+- **Preconditions.** It is refused while the executor reports (heartbeat
+  younger than 45 s); intake and claims stay paused until the migration is
+  done. Before writing, it takes host-local recovery copies in
+  `<area>/.local/backups/p9-migrate-<time>/`:
+  - consistent copies of `exec`, `notify`, `intake` and `present` (`VACUUM
+    INTO`);
+  - the area's settings;
+  - each workspace's refs, heads and uncommitted files;
+  - the inventory.
+- **What it does, per run.** The run gets its copy under its own id
+  (`reserve` with `adopt`, receipt `migrate:<workspace>/<run>`). The copy is
+  made from the committed project. The run's folder **as it is in the project
+  workspace** is placed there, including records that were never published.
+  `run.relocate` then records its storage.
+- **What does not change:**
+  - nodes, questions, answers, holds, decisions, receipts and jobs;
+  - nothing is queued, resumed or announced (`run.relocate` is not a
+    coordination event);
+  - what the run published before stays on the shared branches, and those
+    commits stay intact;
+  - checkpoints keep the mode they were made with: an old one still
+    publishes the project workspace's branches when retried, never the run
+    branch.
+- **Not attributed by guess.** Uncommitted files of the project workspace
+  outside run folders are reported with their paths and left alone.
+- **Restartable.** The journal is `<area>/.local/migrations/p9.json`.
+  Running the migration again continues each unfinished run from its last
+  step, and a copy reserved before a crash is finished rather than made
+  twice. A finished run is not touched again.
+
+`test/migrate.test.ts` covers:
+
+- the dry run;
+- the migration of a held plan-only run (the incident) and a waiting one,
+  while a cancelled run and an IDE run stay put;
+- unchanged meaning, no queued job and no new outbox rows;
+- an old failed checkpoint that still publishes to `main`;
+- running the migration twice;
+- the held run afterwards: readable, a history link to an old commit, a new
+  request in the same project executed, then a resume in its copy;
+- a migration interrupted after reservation;
+- the refusal while the executor reports.
+
 ## Fixtures
 
 `test/runspace.test.ts`: separate roots, manifests and branches; uncommitted

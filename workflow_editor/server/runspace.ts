@@ -164,7 +164,10 @@ export async function allocating<T>(ws: Workspace, f: () => Promise<T>): Promise
   return withLock(join(root, '.allocation'), f, { what: `run allocation in workspace ${ws.shared.reg.id}` })
 }
 
-export interface ReserveOptions { project: string; workflow: string; name?: string; receipt?: string }
+// adopt (p9 migration): the named run is already recorded in the project
+// tree and moves into a copy under the same id; only a copy or a run branch
+// of that name refuses it.
+export interface ReserveOptions { project: string; workflow: string; name?: string; receipt?: string; adopt?: boolean }
 
 // Reserves a run identity and its copy folder. With a receipt, a second call
 // for the same request returns the run it reserved (finished or not).
@@ -185,7 +188,11 @@ export async function reserve(ws: Workspace, o: ReserveOptions, env: Record<stri
     }
     const used = await usedRuns(ws, o.project, o.workflow)
     let run = o.name
-    if (run) { if (used.has(run)) throw new RequestError(409, `run ${o.workflow}/${run} already exists (a record, a working copy or a run branch); nothing was changed. Choose another name or omit it for the next number.`) }
+    if (o.adopt) {
+      if (!run) throw new RequestError(400, 'adopting a run needs its name')
+      const branch = await git(ws.root, ['for-each-ref', '--format=%(refname)', `refs/heads/${runBranch(o.project, { workflow: o.workflow, run })}`, `refs/remotes/origin/${runBranch(o.project, { workflow: o.workflow, run })}`])
+      if (await isDir(copyDir(ws, { workflow: o.workflow, run })) || branch.stdout.trim()) throw new RequestError(409, `run ${o.workflow}/${run} already has a working copy or a run branch; nothing was changed`)
+    } else if (run) { if (used.has(run)) throw new RequestError(409, `run ${o.workflow}/${run} already exists (a record, a working copy or a run branch); nothing was changed. Choose another name or omit it for the next number.`) }
     else {
       const nums = [...used].map(r => /^run-(\d+)$/.exec(r)?.[1]).filter((x): x is string => !!x).map(Number)
       run = `run-${String((nums.length ? Math.max(...nums) : 0) + 1).padStart(3, '0')}`

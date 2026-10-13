@@ -191,6 +191,23 @@ Result: registered / already-registered / refused, plus diagnostics for what
 the project structure lacks (project.yaml, devdocs submodule, .gitignore …),
 each with its fix. Exit 0 registered or already registered; 1 refused.`,
   runs: `wfe runs index [--rebuild] [--workspace <id>]
+wfe runs migrate [--dry-run] [--workspace <id>] --by <name> [--allow-live-executor]
+
+migrate (p9): moves runs recorded in a project workspace before p9 into
+working copies of their own, without changing what they mean. --dry-run
+prints the inventory and changes nothing: each run's state, hold, open
+attempt, queued jobs, unpublished checkpoints and open presentations, the
+action, each repository's head and the uncommitted files. Otherwise the
+recovery copies are taken first (<area>/.local/backups/p9-migrate-…), then
+each non-terminal run the execution host performs gets its copy under its own
+id, its folder as it is now, and run.relocate. Nothing is queued, resumed or
+announced; checkpoints keep their mode; completed, cancelled and IDE runs
+stay where they are; uncommitted files outside run folders are reported, not
+moved. Refused while the executor reports (stop it first). Running it again
+continues an interrupted migration (journal <area>/.local/migrations/p9.json)
+and changes nothing that is done.
+
+index:
 
 The runs of this workspace that have their own working copy (p9): each one's
 state (ready, creating, damaged, rebuilt) and branch. Reads only, unless
@@ -1095,13 +1112,42 @@ async function cmdDashboard(p: Parsed): Promise<number> {
 // Runs' own working copies (p9, docs/storage.md): the host-local index.
 async function cmdRuns(p: Parsed): Promise<number> {
   const [sub] = p.positional
-  if (sub !== 'index') throw new UsageError('usage: wfe runs index [--rebuild] [--workspace <id>]')
+  if (sub === 'migrate') return cmdMigrate(p)
+  if (sub !== 'index') throw new UsageError('usage: wfe runs index [--rebuild] [--workspace <id>] | wfe runs migrate [--dry-run] [--workspace <id>] --by <name>')
   const { inspectIndex } = await import('../server/runspace.ts')
   const ws = await workspace(p)
   const entries = await inspectIndex(ws, { rebuild: p.flags.has('rebuild') })
   const lines = entries.length ? entries.map(e => `  ${e.ref.padEnd(28)} ${e.state.padEnd(9)} ${e.branch ?? ''}${e.problem ? `\n    ${e.problem}` : ''}`) : ['  (no run has a working copy in this workspace)']
   out([`Run copies of workspace ${ws.reg.id}:`, ...lines].join('\n'), { workspace: ws.reg.id, entries })
   return entries.some(e => e.state === 'damaged') ? 1 : 0
+}
+
+// The p9 migration (docs/storage.md *Migration*): an inventory first
+// (--dry-run changes nothing), then the move of non-terminal runs into
+// working copies of their own; resumable from its journal.
+async function cmdMigrate(p: Parsed): Promise<number> {
+  const { inventory, migrate } = await import('../server/migrate.ts')
+  const x = await openExec(p)
+  try {
+    const only = opt(p, 'workspace')
+    if (p.flags.has('dry-run')) {
+      const inv = await inventory(x, only)
+      const lines = ['Inventory (nothing was changed):', `Executor: ${inv.executor}`, ...inv.runs.map(r => `  ${`${r.workspace}/${r.ref}`.padEnd(36)} ${r.action.padEnd(13)} ${r.why}${r.jobs ? `; ${r.jobs} queued job(s)` : ''}${r.checkpoints.length ? `; checkpoints ${r.checkpoints.map(c => `${c.id} ${c.state}`).join(', ')} keep their mode` : ''}${r.presentations.length ? `; open presentations ${r.presentations.join(', ')}` : ''}`),
+        'Repositories:', ...inv.repositories.map(r => `  ${r.workspace} ${r.path.padEnd(20)} ${r.branch ?? '(detached)'} ${r.head?.slice(0, 10) ?? '?'}${r.dirty.length ? ` — ${r.dirty.length} uncommitted` : ''}`),
+        ...inv.unattributed.map(u => `Uncommitted in ${u.workspace}, outside run folders (not moved): ${u.paths.join(', ')}`)]
+      out(lines.join('\n'), inv)
+      return 0
+    }
+    const by = opt(p, 'by')
+    if (!by?.trim()) throw new UsageError('--by <name> is required: who migrates')
+    const env = (await giteaOf(p)) ? await (await giteaOf(p))!.gitEnv() : {}
+    const r = await migrate(x, { workspace: only, by: by.trim(), env, allowLive: p.flags.has('allow-live-executor') })
+    out([`Recovery copies: ${r.backup}`, `Migrated: ${r.migrated.join(', ') || '—'}`, `Already migrated: ${r.already.join(', ') || '—'}`, `Kept where they are:`, ...r.kept.map(k => `  ${k}`), ...(r.blocked.length ? ['Blocked:', ...r.blocked.map(b => `  ${b}`)] : []), ...(r.problems.length ? ['Problems:', ...r.problems.map(b => `  ${b}`)] : [])].join('\n'), { ...r, inventory: undefined })
+    return r.problems.some(x => !/uncommitted files outside run folders/.test(x)) || r.blocked.length ? 1 : 0
+  } catch (e) {
+    if (e instanceof Error && !(e instanceof UsageError) && !(e instanceof RequestError)) throw new Refused(e.message)
+    throw e
+  } finally { x.close(); execStore = undefined }
 }
 
 const COMMANDS: Record<string, (p: Parsed) => Promise<number>> = {

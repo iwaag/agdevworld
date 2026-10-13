@@ -9,6 +9,33 @@ small service sits beside it, `agentroom/`, serving agent discovery, operation
 state, routine history and the Developer chat door. The cluster views still
 read static snapshots or their existing sample fallbacks.
 
+## UI design policy: Simple and Detail
+
+**Recommended across agdevworld:** provide Simple and Detail as two
+complementary presentation modes. This is a design recommendation, not a
+requirement to retrofit every screen or force the same layout everywhere.
+
+- **Simple** presents only important information and frequently used
+  operations. Make the purpose, current situation, and next action easy to
+  recognize with prominent text, meaningful icons, and readable graphical
+  objects. Keep routine technical metadata and infrequently used controls
+  out of the default presentation. Important errors, unavailable information,
+  and requests for human attention still belong here.
+- **Detail** provides as much useful information and as many supported
+  operations as practical, including technical metadata, evidence, history,
+  settings, and precise inspection or adjustment controls. Organize this
+  richer content so people can find what they need.
+
+Prefer Simple as the initial view and an obvious one-click switch to Detail.
+Both modes use the same underlying facts and operations; switching should
+preserve drafts, selection, and reading context. Simple should visibly reduce
+the information competing for attention, rather than merely show a long list
+of collapsed detail sections.
+
+The workflow editor's Simple/Detail implementation is an example of this
+policy (see [its README](workflow_editor/README.md)); adapt the principle to
+each agdevworld screen's purpose and usage.
+
 ## Commands
 
 - `npm run dev` — vite with HMR on :5173.

@@ -3,7 +3,7 @@
 // listeners; links and buttons name their action in data-action and the
 // view handles them in one place (runView.ts), reading its state then.
 import type { RunResponse } from '../shared/api.ts'
-import { holderOf, type RunRecord } from '../shared/run.ts'
+import { holderOf, runDisplayTitle, type RunRecord } from '../shared/run.ts'
 import { h, when } from './dom.ts'
 
 export const STATE_LABEL: Record<string, string> = {
@@ -51,7 +51,7 @@ export function nodeLabel(rec: RunRecord, id: string): { state: string; label: s
 export function runTitle(rec: RunRecord, workflowName?: string): { title: string; sub: string } {
   const p = Object.values(rec.presentations ?? {}).at(-1)
   const name = workflowName || rec.workflow
-  return p ? { title: p.title, sub: `${name} · ${rec.workflow}/${rec.run}` } : { title: name, sub: `${rec.workflow}/${rec.run}` }
+  return { title: runDisplayTitle(rec, workflowName), sub: p ? `${name} · ${rec.workflow}/${rec.run}` : `${rec.workflow}/${rec.run}` }
 }
 
 // Authored nodes in dependency order (a stable topological order: file

@@ -303,6 +303,12 @@ export interface Change {
 export type HistoryEntry = OpInput & EntryMeta & { seq: number; at: string; by: string; via: string; change: Change }
 export interface RunRecord extends RunState { history: HistoryEntry[] }
 
+// One title rule for the run list and the opened run, including stopped
+// presentations: their title still names the result after serving ends.
+export function runDisplayTitle(rec: Pick<RunRecord, 'workflow' | 'presentations'>, workflowName?: string): string {
+  return Object.values(rec.presentations ?? {}).at(-1)?.title || workflowName || rec.workflow
+}
+
 // The graph the run follows: its frozen effective graph (p5), or, for a run
 // created before p5, the root workflow of its bundle. A node with `step` is a
 // generated documentation step.

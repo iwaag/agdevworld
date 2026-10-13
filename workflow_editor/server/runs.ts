@@ -12,7 +12,7 @@ import { authoredNode, COMPILER_VERSION, compile, isGenerated, type EffectiveGra
 import { ID_PATTERN, normalizeRepoPath, type Workflow } from '../shared/model.ts'
 import { validateWorkflow } from '../shared/validate.ts'
 import {
-  activeRevision, checkRecord, delegateNodes, documentPath, graphOfState, hostOf, operate, presentationFolder, type AdjustSource, type AdjustDiff, graphDiff, RUN_ID, RunError, runFolder, RUNS_ROOT, runKey, validRunRef, type Presentation,
+  activeRevision, checkRecord, delegateNodes, documentPath, graphOfState, hostOf, operate, presentationFolder, runDisplayTitle, type AdjustSource, type AdjustDiff, graphDiff, RUN_ID, RunError, runFolder, RUNS_ROOT, runKey, validRunRef, type Presentation,
   type BundleEntry, type DefinitionRef, type DocumentEvidence, type EntrustRef, type Executor, type OpInput, type RepoContext, type RunGraph,
   type EntryMeta, type RunInput, type RunRecord, type RunRef, type RunState,
 } from '../shared/run.ts'
@@ -281,11 +281,13 @@ export async function runRefs(ws: Workspace, workflow?: string): Promise<RunRef[
   return out
 }
 
-export function summaryOf(ref: RunRef, reading: Pick<Reading, 'record' | 'problem'>): RunSummary {
+export function summaryOf(ref: RunRef, reading: Pick<Reading, 'record' | 'problem' | 'bundle'>): RunSummary {
   const base: RunSummary = { ref: runKey(ref), workflow: ref.workflow, run: ref.run, dir: runDir(ref) }
   const r = reading.record
   if (!r) return { ...base, problem: reading.problem }
+  const workflowName = reading.bundle.revisions?.at(-1)?.workflow.name ?? reading.bundle.entries[r.definition.root]?.workflow?.name
   return {
+    title: runDisplayTitle(r, workflowName), workflowName,
     ...base, created: r.created, updated: r.updated, seq: r.seq, execution: r.execution.state, counts: r.execution.counts,
     waiting: r.execution.waiting.map(w => ({ node: w.node, holder: holderText(r, w.node) })), ready: r.execution.ready, failed: r.execution.failed,
     input: r.input.kind, executor: r.executor.name, executorHost: hostOf(r.executor), pendingInstructions: Object.values(r.instructions ?? {}).filter(i => !i.ack).length,

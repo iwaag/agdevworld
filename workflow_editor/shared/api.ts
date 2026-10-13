@@ -146,6 +146,8 @@ export interface RunSummary {
   workflow: string
   run: string
   dir: string // project-relative
+  title?: string // the same result title as the opened run
+  workflowName?: string // name from the run's definition in force
   problem?: FileProblem & { code?: string }
   created?: string
   updated?: string

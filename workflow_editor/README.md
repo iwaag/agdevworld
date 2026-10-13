@@ -30,7 +30,7 @@ project's shared branches in [docs/integration.md](docs/integration.md).
 | Path | Purpose |
 | --- | --- |
 | `shared/` | Models, validation, canonicalization and digests; `compile.ts`, the effective execution graph of a documentation policy (p5); `run.ts`, the run reducer (service, CLI and browser) |
-| `server/` | Local service: YAML round-trip, Git inspection, file persistence, watching, project creation and registration; `runs.ts`, run folders and operations |
+| `server/` | Local service: YAML round-trip, Git inspection, file persistence, watching, project creation and registration; `runs.ts`, run folders and operations; p9: `runspace.ts` (each run's own working copy, the resolver, allocation, the index), `integrate.ts` (accepted results into shared branches), `reversal.ts` (what undoing a run involves), `migrate.ts` (pre-p9 runs into copies) |
 | `cli/wfe.ts`, `cli/run.ts` | `wfe`, the command-line surface over the same modules (`wfe help`, `wfe run help`) |
 | `src/` | Browser UI (TypeScript, Vite, DOM cards and SVG edges) |
 | `examples/` | Synthetic project and workflow files; `invalid/` for validation tests |

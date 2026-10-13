@@ -972,7 +972,7 @@ export class RunSide {
     const frozen = this.frozen || !!rec.cancelled
     patchContent(this.execution.content.children[0] as HTMLElement,
       h('div.row.tight', h(`span.chip.sit-${sit}`, SIT[sit] ?? sit), process ? h('span.muted.small', process) : null),
-      rec.control.hold ? h('p.small', `Held (${rec.control.hold.kind}) since ${when(rec.control.hold.since)} by ${rec.control.hold.by}${becauseText(rec.control.hold.because)}: ${rec.control.hold.reason}. Its work is kept in its own copy; other requests can run meanwhile. `, h('a', { href: '#', dataset: { action: 'goto-resume' } }, 'Resume with an instruction')) : null,
+      rec.control.hold ? h('p.small', `Held (${rec.control.hold.kind}) since ${when(rec.control.hold.since)} by ${rec.control.hold.by}${becauseText(rec.control.hold.because)}: ${sentence(rec.control.hold.reason)} Its work is kept in its own copy; other requests can run meanwhile. `, h('a', { href: '#', dataset: { action: 'goto-resume' } }, 'Resume with an instruction')) : null,
       d.execError ? h('div.banner.warn', `Execution facts of this host could not be read: ${d.execError}`) : null,
       ev ? h('p.small.muted', `Executor: ${ev.executor.state}${ev.executor.detail ? ` — ${ev.executor.detail}` : ''}`) : null,
       // Where the run's work is kept (p9, docs/storage.md).

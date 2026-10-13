@@ -50,6 +50,7 @@ export function describeActivity(i: ActivityInput): ActivityLine | null {
     if (open.alive === false && open.pid) return { tone: 'warn', text: doing, note: 'the session\'s process is not running' }
     if (open.alive === false) return { tone: 'muted', text: 'Starting a session' }
     const act = open.activity
+    if (act?.problem) return { tone: 'muted', text: doing, note: 'its output cannot be read on this host' }
     const line: ActivityLine = { tone: 'working', text: doing }
     if (act?.unit === 'turn' && act.count !== null) line.count = { n: act.count, unit: 'turn', attempt: open.id }
     if (act?.last) line.last = act.last

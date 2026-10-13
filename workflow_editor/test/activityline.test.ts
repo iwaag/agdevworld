@@ -33,6 +33,8 @@ test('what is not observed is not stated as a number', () => {
   assert.equal(dead.tone, 'warn'); assert.equal(dead.count, undefined); assert.match(dead.note!, /not running/)
   const offline = describeActivity({ ...base, connected: false })!
   assert.equal(offline.tone, 'warn'); assert.equal(offline.count, undefined); assert.equal(offline.text, 'Not connected')
+  const locked = describeActivity({ ...base, exec: exec([attempt({ activity: { unit: null, count: null, last: null, bytes: 0, problem: 'EACCES' } })]) })!
+  assert.equal(locked.count, undefined); assert.match(locked.note!, /cannot be read on this host/); assert.doesNotMatch(locked.note!, /another host/)
   const unread = describeActivity({ ...base, execError: true })!
   assert.equal(unread.count, undefined); assert.match(unread.note!, /cannot be read/)
   assert.equal(describeActivity({ ...base, rev: true }), null, 'a history view shows no current activity')

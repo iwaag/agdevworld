@@ -504,7 +504,10 @@ the creation form (the chip, the preview, the final report connected to the
 last card, Save, back to default); freework added to a project without it,
 chosen and requested from Simple, its talk answered in Simple, the agreed
 work added and running (progress without a fraction, the activity line, the
-graph).
+graph); the project and a freework run at 1440 × 1000 and 1280 × 800 without
+horizontal scroll and with no path, run id, attempt id or log text in
+Simple. `WFE_BROWSER=webkit` runs a check in Safari's engine (after `node
+node_modules/playwright-core/cli.js install webkit`).
 `npm run build && node checks/freework.ts [--keep] [--shots <dir>]`.
 
 `checks/growth.ts` (p8/ex2) rehearses a run grown from its conversation

@@ -293,6 +293,31 @@ try {
   await capture(page, 'freework-grown-simple')
   s3.kill()
 
+  // ==== 5. Both sizes: no horizontal scroll; Simple shows no ids, paths or log ===========================
+  console.log('sizes: 1440 × 1000 and 1280 × 800')
+  const simpleText = () => page.evaluate(() => {
+    // Visible text only (Detail's elements are hidden in Simple).
+    const out: string[] = []
+    const walk = (el: Element) => { if ((el as HTMLElement).checkVisibility && !(el as HTMLElement).checkVisibility()) return; for (const n of el.childNodes) n.nodeType === 3 ? out.push(n.textContent ?? '') : n.nodeType === 1 && walk(n as Element) }
+    walk(document.body)
+    return out.join(' ')
+  })
+  for (const [w, h] of [[1440, 1000], [1280, 800]] as const) {
+    await page.setViewportSize({ width: w, height: h })
+    for (const [name, url] of [['project', `${BASE}/#/ws/blank`], ['freework-run', `${BASE}/#/ws/blank/run/freework/${fwRun.run}`]] as const) {
+      await page.goto(url)
+      await page.locator('.display-toggle button[data-display="simple"]').click()
+      await sleep(900)
+      if (name === 'project') await page.locator('.workflows .create-wf-open').click()
+      const over = await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth)
+      check(over <= 0, `${name} at ${w} × ${h}: no horizontal scroll (${over})`)
+      const t = await simpleText()
+      check(!/devdocs\/|\.jsonl|\.yaml|run-0\d\d|\ba[a-z0-9]{8}-[0-9a-f]{6}\b|"type":/.test(t), `${name} at ${w} × ${h}: Simple shows no paths, run ids, attempt ids or log text`)
+      await capture(page, `${name}-${w}x${h}-simple`)
+    }
+  }
+  await page.setViewportSize({ width: 1440, height: 1000 })
+
   x.close()
   check(errors.length === 0, `no console errors${errors.length ? `: ${errors.slice(0, 3).join(' | ')}` : ''}`)
 } finally {

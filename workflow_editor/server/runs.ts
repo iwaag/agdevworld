@@ -756,6 +756,26 @@ export interface AdjustResult {
   problems: { code: string; message: string }[]
   record?: RunRecord
   duplicate?: boolean // a retransmission (same receipt): already recorded, nothing written
+  // What the change means that is easy to miss, refused or not (p8/ex2): an
+  // added node nothing leads to, a node field the contract does not know.
+  notes?: string[]
+}
+
+// Node fields of the contract (docs/contract.md); anything else is kept in
+// the file and means nothing to a run.
+const KNOWN_NODE_FIELDS = new Set(['type', 'name', 'description', 'repositories', 'workflow', 'confirms', 'appearance', 'template'])
+function adjustNotes(raw: unknown, active: Workflow, next: Workflow): string[] {
+  const notes: string[] = []
+  const nodes = (raw && typeof raw === 'object' ? (raw as { nodes?: Record<string, unknown> }).nodes : undefined) ?? {}
+  for (const [id, n] of Object.entries(nodes)) {
+    if (!n || typeof n !== 'object') continue
+    const unknown = Object.keys(n).filter(k => !KNOWN_NODE_FIELDS.has(k))
+    if (unknown.length) notes.push(`node ${id}: ${unknown.join(', ')} ${unknown.length === 1 ? 'is not a node field' : 'are not node fields'}; it is kept in the file but means nothing to the run (dependencies are top-level edges: - {from: <node>, to: ${id}})`)
+  }
+  for (const id of Object.keys(next.nodes).filter(x => !(x in active.nodes))) {
+    if (!next.edges.some(e => e.to === id)) notes.push(`${id} is added with no edge to it: it waits for nothing and is ready at once${Object.keys(active.nodes).length ? ` (to follow a node, add - {from: <node>, to: ${id}} under edges)` : ''}`)
+  }
+  return notes
 }
 
 const NODE_FIELDS = ['type', 'name', 'description', 'repositories', 'workflow', 'confirms'] as const
@@ -837,9 +857,10 @@ export async function adjustRun(ws: Workspace, ref: RunRef, o: AdjustOptions, ct
     const compiled = compile(next)
     if (!compiled.ok) problem('adjust-graph', compiled.message)
     const authored = authoredDiff(active.workflow, next)
+    const notes = adjustNotes(parsed.doc.toJS(), active.workflow, next)
     const newGraph = compiled.ok ? { nodes: compiled.graph.nodes, edges: compiled.graph.edges } : graph
     const gdiff = graphDiff(graph, newGraph)
-    const base = { dryRun: !!o.dryRun, parent, authored, graph: gdiff }
+    const base = { dryRun: !!o.dryRun, parent, authored, graph: gdiff, ...(notes.length ? { notes } : {}) }
     const revision = `r${(record.definition.revisions?.length ?? 0) + 2}`
     const revFile = `${DEFINITION_DIR}/${revision}/${record.definition.root}.yaml`
     const input = compiled.ok ? {

@@ -59,6 +59,19 @@ test('another format is not counted; the last write is still told', async () => 
   assert.equal(a?.last, t.toISOString())
 })
 
+test('a log that cannot be read is said so, never counted', async () => {
+  resetActivity()
+  const f = join(dir, 'locked.jsonl')
+  await writeFile(f, init + say('m1'))
+  const { chmod } = await import('node:fs/promises')
+  await chmod(f, 0o000)
+  try {
+    const a = await activityOf(f)
+    assert.equal(a?.count, null)
+    assert.ok(a?.problem, 'the problem is told')
+  } finally { await chmod(f, 0o644) }
+})
+
 test('no log yet, no path, and a replaced or truncated log', async () => {
   resetActivity()
   assert.equal(await activityOf(null), null)

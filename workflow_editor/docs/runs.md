@@ -450,7 +450,9 @@ autolab, `agautolab.wfexec` — is queued. Two kinds of fact are kept apart:
 <run>`) gives each attempt an `activity` summary read from its own log on
 the host that has it (`server/activity.ts`; `null` on any other host):
 `unit` (`turn`, or `null` for a log whose format is not counted), `count`,
-`last` (the log's last write) and `bytes`. A turn is one distinct assistant
+`last` (the log's last write), `bytes`, and `problem` when the log is there
+but cannot be read (then nothing is counted and the view says so, never
+"another host"). A turn is one distinct assistant
 message id of a Claude Code stream-json log; the count belongs to that
 attempt (one session) and starts again with the next. Only the agent process
 writes its log, so heartbeats, reconnections and polling are never counted;

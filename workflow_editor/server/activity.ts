@@ -22,6 +22,7 @@ export interface ActivitySummary {
   count: number | null
   last: string | null // the log's last write (ISO); null when there is no log yet
   bytes: number
+  problem?: string // the log is there but cannot be read: nothing is counted or claimed
 }
 
 interface Cursor { ino: number; offset: number; ids: Set<string>; format: 'stream-json' | 'other' | null; mtimeMs: number; size: number; capped: boolean }
@@ -36,7 +37,7 @@ export async function activityOf(path: string | null): Promise<ActivitySummary |
   if (!path) return null
   const busy = reading.get(path)
   if (busy) return busy
-  const p = summarize(path).finally(() => reading.delete(path))
+  const p = summarize(path).catch((e: Error) => ({ unit: null, count: null, last: null, bytes: 0, problem: e.message } as ActivitySummary)).finally(() => reading.delete(path))
   reading.set(path, p)
   return p
 }

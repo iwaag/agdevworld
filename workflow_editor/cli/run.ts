@@ -239,6 +239,14 @@ running, no unacknowledged instruction), as a new immutable revision
                   report and nothing pending after it), so the work the
                   conversation agreed is added before the run ends. Both
                   or neither are recorded.
+A node is an entry under nodes (type, name, description, repositories);
+what it waits for is the top-level edges list, as in the workflow files:
+  nodes:
+    build: {type: do, name: Build, description: …, repositories: [project]}
+  edges:
+    - {from: talk, to: build}
+The result notes an added node nothing leads to, and node fields the
+contract does not know (they are kept and mean nothing).
 Writes the revision file and run.json (one history entry; two with
 --completing: the adjustment, then the completion).`,
   nodes: `wfe run nodes <run> [--show <template>]
@@ -448,6 +456,7 @@ function adjustText(r: AdjustResult, ref: string): string {
   const done = r.record && r.revision ? Object.entries(r.record.nodes).filter(([, n]) => n.state === 'completed').length : 0
   const lines = [r.problems.length ? `Not ${r.dryRun ? 'applicable' : 'applied'} (from ${r.parent}):` : r.duplicate ? `Already recorded: ${ref} follows ${r.revision ?? r.parent} (same receipt; nothing written again).` : r.revision ? `Applied: ${ref} now follows ${r.revision} (from ${r.parent}).${r.record?.history.at(-1)?.op === 'node.complete' ? ` ${(r.record.history.at(-1) as { node: string }).node} completed with it; ${done} node${done === 1 ? '' : 's'} completed, ready: ${r.record.execution.ready.join(', ') || 'none'}.` : ''}` : r.proposal ? `Proposal written: ${r.proposal} (nothing applied). Ask about it: wfe run ask ${ref} <node> --about-adjustment <name> …` : `Applicable to ${r.parent} (dry run; nothing written).`]
   for (const p of r.problems) lines.push(`  ${p.code}: ${p.message}`)
+  for (const n of r.notes ?? []) lines.push(`  note: ${n}`)
   lines.push(`  work added: ${a.added.join(', ') || '—'}; removed: ${a.removed.join(', ') || '—'}; changed: ${a.changed.map(c => `${c.id} (${c.fields.join(', ')})`).join(', ') || '—'}${a.restyled.length ? `; restyled: ${a.restyled.join(', ')}` : ''}`)
   lines.push(`  graph: +${r.graph.added.length} −${r.graph.removed.length} nodes, +${r.graph.edgesAdded.length} −${r.graph.edgesRemoved.length} edges${r.graph.edgesAdded.length ? ` (new: ${r.graph.edgesAdded.map(([f, t]) => `${f} → ${t}`).join('; ')})` : ''}`)
   return lines.join('\n')

@@ -10,7 +10,7 @@ import type { Catalog, NodeTemplate, TemplateContent } from '../shared/catalog.t
 // One run's execution on this host (server/exec.ts runView).
 export interface RunExecView {
   attempts: { id: string; state: string; began: string; ended: string | null; exit_code: number | null; signal: string | null; outcome: string | null; backend: string | null; pid: number | null; alive: boolean | null; stop_requested: string | null; log: string | null
-    activity?: { unit: 'turn' | null; count: number | null; last: string | null; bytes: number } | null }[] // p8/ex2: observed on the host that has the log
+    activity?: { unit: 'turn' | null; count: number | null; last: string | null; bytes: number; problem?: string } | null }[] // p8/ex2: observed on the host that has the log
   jobs: { id: number; kind: string; state: string; reason: string; created: string; note: string | null }[]
   checkpoints: { id: number; kind: string; state: string; created: string; updated: string; error: string | null; steps: { repo: string; include: string[]; excluded: string[]; conflicts: string[]; commit?: string; pushed?: boolean; branch?: string; error?: string }[] }[]
   executor: { state: string; detail?: string; at?: string }
@@ -30,6 +30,7 @@ export interface AdjustView {
   authored: { added: string[]; removed: string[]; changed: { id: string; fields: string[] }[]; restyled: string[] }
   graph: { added: string[]; removed: string[]; changed: string[]; edgesAdded: [string, string][]; edgesRemoved: [string, string][] }
   problems: { code: string; message: string }[]
+  notes?: string[] // p8/ex2: an added node nothing leads to, an unknown node field
 }
 
 // The person's node catalog (p7/ex1, server/catalog.ts readCatalog).

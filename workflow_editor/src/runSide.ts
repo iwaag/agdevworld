@@ -836,6 +836,7 @@ export class RunSide {
       v.ok ? `Applicable to ${v.parent}: ` : `Not applicable (${v.problems.map(x => x.code).join(', ')}): `,
       `work added ${list(v.authored.added)}; removed ${list(v.authored.removed)}; changed ${v.authored.changed.map(c => `${c.id} (${c.fields.join(', ')})`).join(', ') || '—'}; new edges ${v.graph.edgesAdded.filter(([x, y]) => !x.startsWith('_') || !y.startsWith('_')).map(([x, y]) => `${x} → ${y}`).join('; ') || '—'}`,
       ...v.problems.map(x => h('div', `${x.code}: ${x.message}`)),
+      ...(v.notes ?? []).map(x => h('div.muted', `Note: ${x}`)),
       current ? null : h('div.stale-note', edited ? 'Edited since this preview: preview again before applying.' : `The run moved on since this preview (${p!.revision}, seq ${p!.seq} → ${rec!.definition.active ?? 'r1'}, seq ${rec!.seq}): preview again before applying.`)) : null)
     const ok = current && !!v?.ok && !a.busy && !a.ta.el.readOnly
     setDisabled(a.apply, !ok)
@@ -972,7 +973,7 @@ export class RunSide {
       ev?.attempts.length ? h('ul.attempts', ...ev.attempts.slice().reverse().map(a => h('li.small', { dataset: { key: `at:${a.id}` } },
         h('code', a.id), ` ${a.state === 'ended' ? `${a.outcome}${a.exit_code !== null ? ` (exit ${a.exit_code})` : a.signal ? ` (${a.signal})` : ''}` : a.state}`,
         h('span.muted', ` · ${when(a.began)}${a.ended ? ` → ${when(a.ended)}` : ''}${a.backend ? ` · ${a.backend}` : ''}${a.stop_requested ? ' · stop requested' : ''}`),
-        h('span.muted.attempt-activity', a.activity === undefined ? '' : a.activity === null ? ' · activity observed on its host only' : a.activity.unit === 'turn' ? ` · ${a.activity.count} turn${a.activity.count === 1 ? '' : 's'}${a.activity.last ? `, last output ${when(a.activity.last)}` : ''}` : a.activity.last ? ` · output last written ${when(a.activity.last)} (not counted: not stream-json)` : ' · no output')))) : null,
+        h('span.muted.attempt-activity', a.activity === undefined ? '' : a.activity === null ? ' · activity observed on its host only' : a.activity.problem ? ` · output cannot be read (${a.activity.problem})` : a.activity.unit === 'turn' ? ` · ${a.activity.count} turn${a.activity.count === 1 ? '' : 's'}${a.activity.last ? `, last output ${when(a.activity.last)}` : ''}` : a.activity.last ? ` · output last written ${when(a.activity.last)} (not counted: not stream-json)` : ' · no output')))) : null,
       ev?.checkpoints.length ? h('h4', 'Publication') : null,
       ...(ev?.checkpoints ?? []).slice().reverse().slice(0, 6).map(c => h('div.checkpoint.small', { dataset: { key: `cp:${c.id}` } },
         h(`span.chip.${c.state === 'published' || c.state === 'nothing' ? 'ok' : c.state === 'pending' ? 'muted' : 'warn'}`, c.state === 'nothing' ? 'nothing to publish' : c.state), ` ${c.kind}`,

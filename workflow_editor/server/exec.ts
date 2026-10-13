@@ -468,7 +468,7 @@ export class ExecStore {
   async runView(workspace: string, ref: RunRef) {
     const rows = this.all<AttemptRow>('SELECT * FROM attempts WHERE workspace = ? AND workflow = ? AND run = ? ORDER BY began', workspace, ref.workflow, ref.run)
     const attempts = await Promise.all(rows.map(async a => ({ ...a, baseline: undefined, alive: a.state === 'ended' ? false : a.host === hostname() ? alive(a.pid) : null,
-      activity: a.host === hostname() ? await activityOf(a.log).catch(() => null) : null })))
+      activity: a.host === hostname() ? await activityOf(a.log) : null })))
     const jobs = this.all<JobRow>('SELECT * FROM jobs WHERE workspace = ? AND workflow = ? AND run = ? ORDER BY id', workspace, ref.workflow, ref.run)
     const checkpoints = this.all<CheckpointRow>('SELECT * FROM checkpoints WHERE workspace = ? AND workflow = ? AND run = ? ORDER BY id', workspace, ref.workflow, ref.run)
       .map(c => ({ ...c, baseline: undefined, steps: JSON.parse(c.steps) as RepoStep[] }))

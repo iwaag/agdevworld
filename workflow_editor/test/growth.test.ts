@@ -220,3 +220,76 @@ test('the same structure under another id behaves the same (no name-based branch
     assert.deepEqual(await ready(s), ['x'], id)
   }
 })
+
+test('a change of the agreed scope goes through the person\'s agreement to the exact proposal', async () => {
+  const s = await setup(DOC.finalOnly)
+  await s.op({ op: 'node.start', node: 'talk' })
+  await s.converse('talk', 'q1', 'A converter.')
+  await s.op({ op: 'node.complete', node: 'talk', outcome: 'Agreed: a converter.' })
+  assert.ok((await s.adjust(await s.grown({ build: { type: 'do', name: 'Build', description: 'Build it.' } }, [['talk', 'build']]))).ok)
+  await s.op({ op: 'node.start', node: 'build' })
+  // While building, the agent finds a web UI would serve better: a change
+  // of scope nobody asked for. It writes the exact proposal and asks.
+  const scope = await s.grown({ web: { type: 'do', name: 'Web UI', description: 'Add a web UI.' } }, [['build', 'web']])
+  const proposed = await s.adjust(scope, { propose: 'web-ui' })
+  assert.ok(proposed.ok && proposed.proposal, JSON.stringify(proposed.problems))
+  await s.op({ op: 'question.ask', question: 'q2', node: 'build', text: 'May I add a web UI?', to: 'Person', adjustment: 'web-ui' } as OpInput)
+  await s.op({ op: 'question.answer', question: 'q2', text: 'Yes, add it.' }, 'Person')
+  await s.op({ op: 'question.take-up', question: 'q2' })
+  await s.op({ op: 'node.complete', node: 'build', outcome: 'Built; the web UI was agreed.' })
+  // Not with the first answer: q1 did not ask about this proposal.
+  const borrowed = await s.adjust(scope, { source: { kind: 'agreement', question: 'q1' }, dryRun: true })
+  assert.ok(!borrowed.ok && borrowed.problems.some(p => p.code === 'adjust-unauthorized'), JSON.stringify(borrowed.problems))
+  const applied = await s.adjust(scope, { source: { kind: 'agreement', question: 'q2' } })
+  assert.ok(applied.ok, JSON.stringify(applied.problems))
+  assert.deepEqual(await ready(s), ['web'])
+  // A different text than the one asked about is not covered by that agreement.
+  const other = await s.grown({ extra: { type: 'do', name: 'Extra', description: 'More.' } }, [['web', 'extra']])
+  const unagreed = await s.adjust(other, { source: { kind: 'agreement', question: 'q2' }, dryRun: true })
+  assert.ok(!unagreed.ok && unagreed.problems.some(p => p.code === 'adjust-unauthorized'))
+})
+
+test('two adjustments from the same view: one applies, the other is refused as outdated', async () => {
+  const s = await setup(DOC.finalOnly)
+  await s.op({ op: 'node.start', node: 'talk' })
+  await s.converse('talk', 'q1', 'x')
+  await s.op({ op: 'node.complete', node: 'talk', outcome: 'x' })
+  const one = await s.grown({ one: { type: 'do', name: 'One', description: '1' } }, [['talk', 'one']])
+  const two = await s.grown({ two: { type: 'do', name: 'Two', description: '2' } }, [['talk', 'two']])
+  const results = await Promise.all([s.adjust(one, { expectRevision: 'r1' }), s.adjust(two, { expectRevision: 'r1' })])
+  assert.deepEqual(results.map(r => r.ok).sort(), [false, true])
+  const loser = results.find(r => !r.ok)!
+  assert.ok(loser.problems.some(p => p.code === 'revision-outdated'), JSON.stringify(loser.problems))
+  const rec = (await readRun(s.ws, s.ref)).record!
+  assert.deepEqual(rec.definition.revisions!.map(r => r.revision), ['r2'])
+  assert.deepEqual((await readdir(join(s.folder, 'definition'))).sort(), ['adhoc.yaml', 'r2'], 'no stray revision from the refused one')
+})
+
+test('after a refusal the same combined operation succeeds once the boundary is clear', async () => {
+  const s = await setup(DOC.none)
+  await s.op({ op: 'node.start', node: 'talk' })
+  await s.converse('talk', 'q1', 'x')
+  await s.op({ op: 'instruction.receive', text: 'Also log it.', from: 'Person' }, 'Person')
+  const text = await s.grown({ x: { type: 'do', name: 'X', description: 'x' } }, [['talk', 'x']])
+  const refused = await s.adjust(text, { completing: { node: 'talk', outcome: 'x' } }, { receipt: 'retry-0001' })
+  assert.ok(!refused.ok && refused.problems.some(p => p.code === 'instructions-pending'))
+  await s.op({ op: 'instruction.ack', instructions: ['i1'], response: 'incorporate', note: 'Logging goes into X.' })
+  const ok = await s.adjust(text, { completing: { node: 'talk', outcome: 'x' } }, { receipt: 'retry-0001' })
+  assert.ok(ok.ok && !ok.duplicate, JSON.stringify(ok.problems))
+  assert.deepEqual(await ready(s), ['x'])
+})
+
+test('the result notes an added node nothing leads to and a node field the contract does not know', async () => {
+  const s = await setup(DOC.finalOnly)
+  await s.op({ op: 'node.start', node: 'talk' })
+  await s.converse('talk', 'q1', 'x')
+  await s.op({ op: 'node.complete', node: 'talk', outcome: 'x' })
+  // As a real agent wrote it in the p8/ex2 rehearsal: "after" inside the node, no edges.
+  const text = (await s.active()) + '  build:\n    type: do\n    name: Build\n    description: b\n    after: [talk]\n'
+  const r = await s.adjust(text, { dryRun: true })
+  assert.ok(r.ok, 'it is not refused: the file is valid')
+  assert.ok(r.notes?.some(n => /node build: after is not a node field/.test(n)), JSON.stringify(r.notes))
+  assert.ok(r.notes?.some(n => /build is added with no edge to it/.test(n)))
+  const fine = await s.adjust(await s.grown({ build: { type: 'do', name: 'Build', description: 'b' } }, [['talk', 'build']]), { dryRun: true })
+  assert.equal(fine.notes, undefined)
+})

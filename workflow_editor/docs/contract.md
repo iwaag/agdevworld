@@ -198,6 +198,52 @@ to an unknown node or to itself, a cycle, a malformed node id, or a missing,
 unsupported or contradictory policy. A delegate node compiles for the preview; runs of it
 are still refused at creation.
 
+### Basic workflows (p8/ex2)
+
+Every project has the basic workflow **`freework`** from the start: an
+ordinary definition in `devdocs/workflows/freework.yaml` whose author nodes
+are one talk —
+
+```yaml
+id: freework
+name: Free work
+documentation: {policy: custom, plan: false, reports: false, final: true}
+nodes:
+  talk:
+    type: talk
+    name: Talk
+    description: Understand the request, hold the consultation it needs, and make the next work concrete.
+```
+
+— with the braindump as its input. Its run grows its work in that
+conversation through ordinary adjustments ([adjustments.md](adjustments.md),
+*Growing a run's work*); the final report marks the end and keeps the run
+from ending with the talk before any work is added. Nothing in the editor
+or the executor treats it by its id: a copy under another id (the template
+*Free work*) behaves the same, and the person may edit it like any other
+workflow.
+
+- **Settings are resolved when it is placed**, since an adjustment never
+  changes bindings or execution (`server/basics.ts`): the union of the
+  bindings of the project's valid workflows, each path with the most
+  permissive access one of them grants; the agent and profile all of them
+  agree on and the guides all of them list. A project without valid
+  workflows (a new one) binds its root editable and every submodule and
+  local area readonly. No intake.
+- **Placed by one mechanism**: project creation (`create.ts`, in the initial
+  commit; in the devdocs source in submodule mode) and `wfe workflow basics
+  [--dry-run] [--commit [--push]] [--workspace <id> | --all]` for existing
+  projects. Reading a project never writes it.
+- **Never over what is there**: a workflow with the id is `present` (the
+  person's, edited or not, is left as it is); a file with the name holding
+  another workflow or unreadable is a `conflict` with its reason; a
+  workspace without `devdocs/workflows` is `unplaceable`; with `--all` a
+  project (or a devdocs repository shared by projects) is placed once and
+  its other workspaces are `covered`. A second run of the command changes
+  nothing.
+- A grown run's definition lives in the run's revisions. Saving it as a
+  reusable workflow is not offered yet.
+
 ### Execution, intake and result confirmation (p6)
 
 Optional fields of a workflow, read by the execution host and the Zulip

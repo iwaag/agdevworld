@@ -126,7 +126,8 @@ test('without configuration nothing is owed; with it the folder comes before the
   assert.deepEqual(await claim(n), [])
   n.recordTarget('folder:demo', { zulipId: 7 })
   d = await n.due()
-  assert.deepEqual(d.provision.map(t => [t.kind, t.name, 'folderId' in t ? t.folderId : null]), [['channel', 'wf-demo.ship', 7]])
+  // Every workflow has its channel, the basic freework (p8/ex2) included.
+  assert.deepEqual(d.provision.map(t => [t.kind, t.name, 'folderId' in t ? t.folderId : null]), [['channel', 'wf-demo.freework', 7], ['channel', 'wf-demo.ship', 7]])
   n.recordTarget('channel:demo/ship', { zulipId: 41 })
   const rec = by(a.ws, ref)
   await rec({ op: 'node.start', node: '_plan' })

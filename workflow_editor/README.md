@@ -334,6 +334,15 @@ one of them is refused. Refusals carry the field they concern
 by re-renders, so a background reload or a switch keeps the text, the open
 state and the keyboard.
 
+**freework (p8/ex2).** Every project has the basic workflow *Free work*: a
+talk with the person, then the run adds the work agreed in the
+conversation as it goes, and ends with a final report (docs/contract.md,
+*Basic workflows*; docs/adjustments.md, *Growing a run's work*). New projects
+get it at creation; existing ones with `wfe workflow basics --all --dry-run`,
+then without `--dry-run` (`--commit --push` to publish the file). It is
+chosen in the request form like any workflow; the Create workflow form
+offers it as the template *Free work* under another id.
+
 **Documentation settings (p8/ex2).** Besides `default` (plan talk, a report
 per step, final report) and `manual` (none), a workflow can be `custom`:
 the three generated documents chosen one by one (docs/contract.md,
@@ -492,7 +501,10 @@ between steps, turns and age, a reload counting the same, the pulse, no live
 region, Detail's attempt turns, a lost process, a stopped service, waiting on
 the person, a history view); custom documentation in Workflow settings and
 the creation form (the chip, the preview, the final report connected to the
-last card, Save, back to default).
+last card, Save, back to default); freework added to a project without it,
+chosen and requested from Simple, its talk answered in Simple, the agreed
+work added and running (progress without a fraction, the activity line, the
+graph).
 `npm run build && node checks/freework.ts [--keep] [--shots <dir>]`.
 
 `checks/growth.ts` (p8/ex2) rehearses a run grown from its conversation

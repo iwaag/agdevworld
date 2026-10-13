@@ -37,7 +37,7 @@ class Refused extends Error { detail?: unknown; constructor(m: string, detail?: 
 // ---- arguments ---------------------------------------------------------------
 
 interface Parsed { positional: string[]; opts: Map<string, string[]>; flags: Set<string> }
-const FLAGS = new Set(['json', 'help', 'resume', 'h', 'new', 'history', 'no-gitea', 'reuse', 'lost', 'uncertain', 'found', 'complete', 'not-posted', 'ok', 'about-plan', 'all', 'dry-run']) // p7: present stop --all, run adjust --dry-run
+const FLAGS = new Set(['json', 'help', 'resume', 'h', 'new', 'history', 'no-gitea', 'reuse', 'lost', 'uncertain', 'found', 'complete', 'not-posted', 'ok', 'about-plan', 'all', 'dry-run', 'commit', 'push']) // p7: present stop --all, run adjust --dry-run
 function parse(argv: string[]): Parsed {
   const p: Parsed = { positional: [], opts: new Map(), flags: new Set() }
   for (let i = 0; i < argv.length; i++) {
@@ -242,6 +242,21 @@ Local file transport is enabled for this command only. The submodule is
 staged in the project root, not committed.
 Exit 0 added; 1 failed (what Git left behind is reported; nothing is reset).`,
   workflow: `wfe workflow new <id> [--name <name>] [--policy default|manual|custom [--steps plan,reports,final]] [--template <id>] [--workspace <id>]
+
+wfe workflow basics [--dry-run] [--commit [--push]] [--workspace <id> | --all]
+
+Adds the basic workflows (today: freework — one talk; the run adds the work
+agreed in the conversation) to a project that lacks them. Its bindings and
+execution are resolved from the project's valid workflows (the most
+permissive access one of them already grants each path; the agent, profile
+and guides all of them agree on); a project without any gets its root
+editable and the rest readonly. A workflow with the id, or a file with the
+name, is never replaced: present, conflict (exit 1), unplaceable. --all
+goes through every registered workspace, once per project (and per shared
+devdocs repository): the others are reported as covered. --dry-run lists
+what would be added with the resolved settings. --commit commits only the
+added file (and the root's gitlink in submodule mode); --push pushes it when
+the branch has an upstream.
 
 Creates devdocs/workflows/<id>.yaml from a template (--template, default
 "empty": schema, id, name, empty intent, no nodes; documentation policy
@@ -612,12 +627,35 @@ async function cmdAddRepo(p: Parsed): Promise<number> {
 
 async function cmdWorkflow(p: Parsed): Promise<number> {
   const [sub, id] = p.positional
+  if (sub === 'basics') {
+    // The basic workflows (p8/ex2, server/basics.ts): added where they are
+    // missing, never over a file or an id that is there.
+    const { placeBasics, placeBasicsEverywhere } = await import('../server/basics.ts')
+    const o = { dryRun: p.flags.has('dry-run'), commit: p.flags.has('commit'), push: p.flags.has('push') }
+    if (o.push && !o.commit) throw new UsageError('--push goes with --commit')
+    let results
+    if (p.flags.has('all')) {
+      const reg = await loadRegistry(registryFile(p))
+      const boundary = await loadBoundary(registryFile(p), areaDir(p))
+      const list: Workspace[] = []
+      const skipped: Awaited<ReturnType<typeof placeBasics>> = []
+      for (const w of reg.workspaces) {
+        const why = await assertWorkspaceAllowed(boundary, w, 'Adding basic workflows to').then(() => observe(w)).then(x => (x.available ? null : `not available: ${x.reason}`), (e: Error) => e.message)
+        if (why) skipped.push({ workspace: w.id, project: w.project ?? w.id, workflow: 'freework', status: 'unplaceable', reason: why })
+        else list.push(new Workspace(w))
+      }
+      results = [...await placeBasicsEverywhere(list, o), ...skipped]
+    } else results = await placeBasics(await workspace(p), o)
+    const lines = results.map(r => `${r.workspace.padEnd(14)} ${r.workflow.padEnd(10)} ${r.status.padEnd(11)} ${r.file ?? ''}${r.file ? ' — ' : ''}${r.reason}${r.commit ? `; committed ${r.commit}${r.pushed ? ', pushed' : ''}` : ''}${r.publishError ? `; NOT PUBLISHED: ${r.publishError}` : ''}${(r.notes ?? []).map(n => `\n${' '.repeat(16)}${n}`).join('')}`)
+    out([o.dryRun ? 'Dry run: nothing written.' : '', ...lines].filter(Boolean).join('\n'), results)
+    return results.some(r => r.status === 'conflict' || r.publishError) ? 1 : 0
+  }
   if (sub === 'templates') {
     const { WORKFLOW_TEMPLATES } = await import('../server/templates.ts')
     out(WORKFLOW_TEMPLATES.map(t => `${t.id.padEnd(12)} ${t.name} — ${t.description}`).join('\n'), WORKFLOW_TEMPLATES)
     return 0
   }
-  if (sub !== 'new' || !id) throw new UsageError('usage: wfe workflow new <id> [--name <name>] [--policy default|manual|custom [--steps plan,reports,final]] [--template <id>] | wfe workflow templates')
+  if (sub !== 'new' || !id) throw new UsageError('usage: wfe workflow new <id> [--name <name>] [--policy default|manual|custom [--steps plan,reports,final]] [--template <id>] | wfe workflow templates | wfe workflow basics [--dry-run] [--commit [--push]] [--workspace <id> | --all]')
   const ws = await workspace(p)
   const policy = opt(p, 'policy'), stepsOpt = opt(p, 'steps')
   if (stepsOpt !== undefined && policy !== 'custom') throw new UsageError('--steps goes with --policy custom')

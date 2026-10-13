@@ -107,7 +107,8 @@ test('create: a creation stopped partway is reported, refused without resume, an
   assert.equal(refused.resumable, true)
   const resumed = await createProject(opts('beta', { resume: true }))
   assert.ok(resumed.ok, resumed.message)
-  assert.deepEqual(resumed.steps.filter(s => s.status === 'kept').map(s => s.name), ['destination', 'devdocs source', 'root repository', 'project.yaml', '.gitignore'])
+  // The basic workflow came with the devdocs source made before the stop (p8/ex2): kept.
+  assert.deepEqual(resumed.steps.filter(s => s.status === 'kept').map(s => s.name), ['destination', 'devdocs source', 'root repository', 'project.yaml', '.gitignore', 'basic workflows'])
   assert.equal(await readFile(join(dir, 'NOTES.md'), 'utf8'), 'the person wrote this meanwhile\n', 'unrelated work is kept')
   assert.match(await gitOk(dir, ['status', '--porcelain']), /^\?\? NOTES\.md$/m, 'and not committed for them')
   assert.deepEqual((await loadRegistry(registry)).workspaces.map(w => w.id), ['alpha', 'beta'])

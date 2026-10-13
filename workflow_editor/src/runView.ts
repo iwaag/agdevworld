@@ -17,7 +17,7 @@
 // title band by patching, the focus card and the side pane by their
 // persistent sections, the canvas only when its graph, states or selection change.
 import { backendFact } from '../shared/backend.ts'
-import type { RunResponse } from '../shared/api.ts'
+import type { RunOpResponse, RunResponse } from '../shared/api.ts'
 import { describeSteps, effectiveOf, holderOf, situation, type RunRecord } from '../shared/run.ts'
 import { api, ApiError, type AdjustView, type PresentationView, type RunExecView, type RunNotifyView } from './api.ts'
 import { Canvas, STATE_GLYPH } from './canvas.ts'
@@ -171,15 +171,17 @@ export function renderRunView(root: HTMLElement, wsId: string, workflow: string,
     return name
   }
 
-  async function record(op: Record<string, unknown> & { op: string }, done: string): Promise<boolean> {
+  // `done` may read the service's reply (p8/ex2: whether an answer queued
+  // the executor's resumption).
+  async function record(op: Record<string, unknown> & { op: string }, done: string | ((r: RunOpResponse & { job?: { id: number; state: string } | null }) => string)): Promise<boolean> {
     const rec = shown?.record
     if (!rec) return false
     const name = actorName('who records this')
     if (!name) return false
     let ok = false
     try {
-      await api.runOp(wsId, workflow, run, { ...op, by: name, expectSeq: rec.seq })
-      opNotice = { kind: 'ok', text: done }
+      const r = await api.runOp(wsId, workflow, run, { ...op, by: name, expectSeq: rec.seq })
+      opNotice = { kind: 'ok', text: typeof done === 'string' ? done : done(r) }
       ok = true
     } catch (e) {
       const err = e as ApiError

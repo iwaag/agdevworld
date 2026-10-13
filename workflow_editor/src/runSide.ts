@@ -15,7 +15,7 @@
 //
 // runView.ts keeps the server snapshot and the operations; this module reads
 // the data it is given and asks the view to act.
-import type { RunResponse } from '../shared/api.ts'
+import type { RunOpResponse, RunResponse } from '../shared/api.ts'
 import { effectiveOf, holderOf, isOpen, questionState, runKey, situation, type Question, type RunRecord } from '../shared/run.ts'
 import { reportStep } from '../shared/compile.ts'
 import type { AdjustView, PresentationView, RunExecView, RunNotifyView } from './api.ts'
@@ -42,7 +42,7 @@ export interface RunData {
 
 export interface SideActions {
   // Records one run operation as the declared actor; true when recorded.
-  record(op: Record<string, unknown> & { op: string }, done: string): Promise<boolean>
+  record(op: Record<string, unknown> & { op: string }, done: string | ((r: RunOpResponse & { job?: { id: number; state: string } | null }) => string)): Promise<boolean>
   // Inspects (dryRun) or applies an adjustment; null when the request failed.
   adjust(body: { text: string; reason: string; dryRun: boolean; expectRevision: string; expectSeq: number }): Promise<AdjustView | null>
   notice(kind: 'ok' | 'error' | 'warn', text: string): void
@@ -432,7 +432,8 @@ export class RunSide {
       kind = review ? 'review' : 'question'
       head = review ? 'Ready for your review' : asking.length > 1 ? `${asking.length} questions wait for your answer` : 'A question waits for your answer'
       lead = review ? h('span', 'Open the review, then answer below.', h('span.d-only', ' Your answer is recorded; the executor records the decision when it takes the answer up.'))
-        : h('span', `${rec.executor.name} asked.`, h('span.s-only', ' Recording your answer does not wake it.'), h('span.d-only', ' Your answer is recorded in run.json and does not wake the executor — tell it where you work with it.'))
+        : this.hosted() ? h('span', `${rec.executor.name} asked.`, h('span.s-only', ' Your answer lets it continue.'), h('span.d-only', ' Your answer is recorded in run.json, and this host queues the executor to continue the run.'))
+          : h('span', `${rec.executor.name} asked.`, h('span.s-only', ' Recording your answer does not wake it.'), h('span.d-only', ' Your answer is recorded in run.json and does not wake the executor — tell it where you work with it.'))
     } else if (answerable.length) {
       kind = 'answered'; head = 'Your answer is recorded'
       lead = h('span', `${rec.executor.name} has not taken it up yet: the next move is theirs.`, h('span.d-only', ' Recording an answer does not wake the executor.'))
@@ -551,6 +552,10 @@ export class RunSide {
       h('div.row.tight.focus-actions', h('button', { title: 'Stop execution; the run stays resumable', dataset: { action: 'stop-run' }, disabled: this.frozen || !!rec.control.hold || !!rec.control.stop || sit === 'completed' }, icon('stop', 'icon tiny'), 'Stop'),
         rec.control.stop ? h('span.small.warn-text', `Stop requested by ${rec.control.stop.by}; waiting for the process to end.`) : null))
   }
+
+  // Whether this host executes the run (it has queued jobs for it): an answer
+  // recorded here then queues the executor's resumption (server/api.ts).
+  private hosted(): boolean { return !this.data.rev && (this.data.execView?.jobs.length ?? 0) > 0 }
 
   // Simple (p8/ex1): what this host observes of the executor, in a few words
   // with a tone. A missing or failed observation never reads as healthy.
@@ -735,12 +740,14 @@ export class RunSide {
       const rec = this.data.shown?.record
       const q = rec?.questions[id]
       if (!rec || !q || !this.answerable(rec, q)) { this.act.notice('error', `${id} can no longer be answered here.`); return }
-      void draft.submit(text => this.act.record({ op: 'question.answer', question: id, text }, `Answer to ${id} recorded in run.json. Continue the conversation with ${rec.executor.name} where you work with it; recording does not notify it.`)).then(ok => {
+      void draft.submit(text => this.act.record({ op: 'question.answer', question: id, text }, r => r.job
+        ? `Answer to ${id} recorded. ${rec.executor.name} continues the run (its resumption is queued on this host).`
+        : `Answer to ${id} recorded in run.json. Continue the conversation with ${rec.executor.name} where you work with it; recording does not notify it.`)).then(ok => {
         const item = this.qItems.get(id)
         if (ok && item && draft.el.value === '') { item.showForm = false; const r = this.data.shown?.record; if (r) this.updateQuestions(r) }
       })
     })
-    return { root: h('div.answer-form', draft.el, draft.note, h('div.row.tight', button), h('p.small.muted.d-only', 'Stored in run.json as your answer. It does not start or wake the executor; tell it where you work with it.')), draft, button }
+    return { root: h('div.answer-form', draft.el, draft.note, h('div.row.tight', button), h('p.small.muted.d-only', this.hosted() ? 'Stored in run.json as your answer; this host queues the executor to continue the run.' : 'Stored in run.json as your answer. It does not start or wake the executor; tell it where you work with it.')), draft, button }
   }
 
   // Additional instructions (p6): received from the person, acknowledged by

@@ -67,7 +67,7 @@ async function trackedText(dir: string): Promise<string> {
 test('directory mode: created on Gitea, pushed, registered; no credentials or host paths in tracked files', { skip }, async () => {
   const r = await create('alpha', 'directory')
   assert.ok(r.ok, r.message)
-  assert.deepEqual(r.steps.map(s => s.name), ['destination', 'gitea root', 'root repository', 'project.yaml', '.gitignore', 'devdocs directory', 'initial commit', 'push', 'project registration', 'registration'].filter(Boolean))
+  assert.deepEqual(r.steps.map(s => s.name), ['destination', 'gitea root', 'root repository', 'project.yaml', '.gitignore', 'devdocs directory', 'basic workflows', 'initial commit', 'push', 'project registration', 'registration'].filter(Boolean))
   const repo = await tg.gitea.repo(ownerOf(), 'pj-alpha')
   assert.ok(repo && await tg.gitea.hasContent(repo.owner, repo.name), 'the root is on Gitea with content')
   const reg = await loadRegistry(registry)

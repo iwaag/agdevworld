@@ -29,6 +29,7 @@ import { Gitea, type GiteaRepo } from './gitea.ts'
 import { registerProject, registerRepository, registerWorkspace, repoKey } from './registry.ts'
 import { assertNotProtected, loadBoundary } from './boundary.ts'
 import { Workspace } from './workspace.ts'
+import { FREEWORK, newProjectFreework, placeBasics } from './basics.ts'
 import { newProjectText, parseProject } from './yamlDoc.ts'
 
 export interface CreateProjectOptions {
@@ -220,6 +221,7 @@ export async function createProject(o: CreateProjectOptions): Promise<CreateProj
         await mkdir(join(work, 'workflows'), { recursive: true })
         await writeFile(join(work, 'README.md'), `# ${o.name.trim()} — devdocs\n\nRequests, plans, reports, workflow definitions (workflows/) and runs (runs/) of ${o.id}.\n`)
         await writeFile(join(work, 'workflows', '.gitkeep'), '')
+        await writeFile(join(work, 'workflows', `${FREEWORK}.yaml`), newProjectFreework()) // the basic workflow (p8/ex2)
         await run(work, ['add', '-A'])
         await run(work, ['commit', '-m', `Initialize devdocs for ${o.id}`])
         const sha = (await run(work, ['rev-parse', 'HEAD'])).trim()
@@ -241,7 +243,7 @@ export async function createProject(o: CreateProjectOptions): Promise<CreateProj
         if (head.code !== 0) throw new Error(`${bare} exists but has no main branch; inspect or remove it by hand, then resume`)
         step('devdocs source', 'kept', `${bare} already exists`)
       } else {
-        const made = await createLocalSource(bare, { 'README.md': `# ${o.name} — devdocs\n\nRequests, plans, reports and workflow definitions of ${o.id}.\nWorkflows are in workflows/*.yaml.\n`, 'workflows/.gitkeep': '' }, `Initialize devdocs for ${o.id}`, env)
+        const made = await createLocalSource(bare, { 'README.md': `# ${o.name} — devdocs\n\nRequests, plans, reports and workflow definitions of ${o.id}.\nWorkflows are in workflows/*.yaml.\n`, 'workflows/.gitkeep': '', [`workflows/${FREEWORK}.yaml`]: newProjectFreework() }, `Initialize devdocs for ${o.id}`, env)
         commits.push({ repository: bare, commit: made.commit, message: `Initialize devdocs for ${o.id}` })
         step('devdocs source', 'done', `created ${bare} with an initial commit (README.md, workflows/)`)
       }
@@ -301,6 +303,23 @@ export async function createProject(o: CreateProjectOptions): Promise<CreateProj
       step('devdocs/workflows', 'done', 'created (empty; the devdocs source had no workflows/)')
     }
     stop('devdocs submodule')
+
+    // ---- the basic workflows (p8/ex2, server/basics.ts) ----
+    // The same placement an existing project gets: never over a file or an
+    // id that is there. A devdocs source the person supplied is theirs: the
+    // placement is then left to wfe workflow basics.
+    if (mode === 'submodule' && o.devdocsSource) step('basic workflows', 'kept', `not placed in the supplied devdocs source; add them with wfe workflow basics --workspace ${o.id}`)
+    else {
+      const [placed] = await placeBasics(ws)
+      step('basic workflows', placed.status === 'added' ? 'done' : 'kept', `${FREEWORK}: ${placed.status === 'added' ? `added (${placed.file})` : `${placed.status} — ${placed.reason}`}`)
+      if (mode === 'submodule' && placed.status === 'added') {
+        // In submodule mode the file belongs to the devdocs repository.
+        await run(join(dir, 'devdocs'), ['add', '--', `workflows/${FREEWORK}.yaml`])
+        await run(join(dir, 'devdocs'), ['commit', '-m', `Add the basic workflow ${FREEWORK}`])
+        if (g && repos.devdocs) await remoteRun(join(dir, 'devdocs'), ['push', g.cloneUrl(repos.devdocs.owner, repos.devdocs.name), 'HEAD:main'])
+      }
+    }
+    stop('basic workflows')
 
     // ---- initial commit ----
     await run(dir, ['add', '--', 'project.yaml', '.gitignore', ...(mode === 'submodule' ? ['.gitmodules'] : []), 'devdocs'])

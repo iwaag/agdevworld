@@ -47,6 +47,8 @@ try {
   S = await buildStates(root, { answerBase: `http://127.0.0.1:${PORT}/`, ports: [18840, 18849] })
   const blank = await createProject({ dir: join(root, 'pj-blank'), id: 'blank', name: 'Blank project', intent: 'A project without workflows.', goals: [], sourcesDir: join(root, 'sources'), registryFile: join(root, 'registry.json') })
   if (!blank.ok) throw new Error(blank.message)
+  // A project from before p8/ex2: no workflow at all (new projects now start with freework).
+  await rm(join(root, 'pj-blank', 'devdocs', 'workflows', 'freework.yaml'))
   await service.start()
   const BASE = service.base
   const opened = await open(1440, 1000, { display: 'simple' })
@@ -176,7 +178,6 @@ try {
   await page.goto(`${runUrl}/at/HEAD`)
   await sleep(800)
   check(!(await visible('.run-activity')), 'a history view has no activity line')
-  x.close()
 
   // ==== 3. Documentation settings: custom ====================================================
   console.log('policy: custom in the workflow settings')
@@ -227,6 +228,72 @@ try {
   const created = await readFile(join(root, 'pj-blank', 'devdocs', 'workflows', 'final-only.yaml'), 'utf8')
   check(/policy: custom\n {2}plan: false\n {2}reports: false\n {2}final: true/.test(created), `the created file declares the chosen documents:\n${created}`)
 
+  // ==== 4. freework: placed, chosen and started from Simple ========================================
+  console.log('freework: added to an existing project, started from Simple')
+  const { placeBasics } = await import('../server/basics.ts')
+  const [placed] = await placeBasics(blankWs)
+  check(placed.status === 'added', `the supplement adds it to the project without it: ${placed.status} ${placed.reason}`)
+  await page.goto(`${BASE}/#/ws/blank`)
+  await page.locator('.display-toggle button[data-display="simple"]').click()
+  check(await waitFor(async () => /Free work/.test(await text('.workflows'))) !== null, 'the workflow list shows Free work')
+  check(await page.locator('select[aria-label="Request workflow"] option', { hasText: 'Free work' }).count() === 1, 'the request form offers it')
+  const before = (await import('node:fs/promises')).readdir(join(root, 'pj-blank', 'devdocs', 'workflows'))
+  await page.selectOption('select[aria-label="Request workflow"]', 'freework')
+  await page.getByLabel('Request author').fill('Sample Person')
+  await page.getByLabel('Request text').fill('I want a tiny word counter. Ask me what you need first.')
+  await capture(page, 'freework-request-simple')
+  // The run in the previous section holds this workspace until it is cancelled.
+  await (await import('../server/runs.ts')).runOp(blankWs, req.ref, { op: 'run.cancel', reason: 'the check moves on' }, { via: 'cli', by: 'Sample Person' })
+  await page.getByRole('button', { name: 'Request run' }).click()
+  check(await waitFor(async () => /Requested/.test(await text('.request-run'))) !== null, `the run is requested: ${await text('.request-run .banner')}`)
+  check(JSON.stringify((await before).sort()) === JSON.stringify((await (await import('node:fs/promises')).readdir(join(root, 'pj-blank', 'devdocs', 'workflows'))).sort()), 'starting a run copies no definition into devdocs/workflows')
+  const fwRun = (await (await import('../server/runs.ts')).listRuns(blankWs)).find(r => r.workflow === 'freework')!
+  const fwRef = { workflow: 'freework', run: fwRun.run }
+  await page.goto(`${BASE}/#/ws/blank/run/freework/${fwRun.run}`)
+  await page.waitForSelector('.run-summary[data-seq]')
+  check(/0 of 1 steps done/.test(await text('.run-progress')), `a fresh freework run: one step of work (${await text('.run-progress')})`)
+  check(await page.locator('.node[data-id="talk"]').count() === 1 && await page.locator('.final-step').count() === 1, 'its graph: the talk and the final report')
+  // The executor's session: the talk asks.
+  const fwClaim = await x.claim(null)
+  if ('idle' in fwClaim) throw new Error(fwClaim.idle)
+  const s2 = spawn('sleep', ['600'], { stdio: 'ignore' })
+  x.started(fwClaim.attempt.id, s2.pid!)
+  const A = fwClaim.attempt.id
+  const agentOp = (i: Record<string, unknown>) => runOp(blankWs, fwRef, { ...i, attempt: A } as never, { via: 'cli', by: 'autolab' })
+  await agentOp({ op: 'node.start', node: 'talk' })
+  await agentOp({ op: 'question.ask', node: 'talk', text: 'Which counts do you want: words, lines, characters?', to: 'Sample Person' })
+  s2.kill()
+  await x.finished(A, { code: 0, signal: null })
+  check(await waitFor(async () => /question waits for your answer/i.test(await text('section.focus'))) !== null, 'Simple shows the talk\'s question as the person\'s task')
+  check(/Your answer lets it continue/.test(await text('section.focus')), `and says the answer lets the run continue: "${(await text('section.focus')).split('\n').slice(0, 3).join(' / ')}"`)
+  await page.locator('section.focus .answer-form textarea').first().fill('Words and lines, please.')
+  await page.locator('section.focus .answer-form button.primary').first().click()
+  check(await waitFor(async () => /answer is recorded/i.test(await text('section.focus'))) !== null, 'the answer is recorded from Simple')
+  check(/continues the run \(its resumption is queued on this host\)/.test(await text('.banners')), `the confirmation says the run continues: "${await text('.banners')}"`)
+  // The next session: take up, complete the talk, add the work, start it.
+  const c2 = await x.claim(null)
+  if ('idle' in c2) throw new Error(c2.idle)
+  const s3 = spawn('sleep', ['600'], { stdio: 'ignore' })
+  x.started(c2.attempt.id, s3.pid!)
+  const B = c2.attempt.id
+  const bOp = (i: Record<string, unknown>) => runOp(blankWs, fwRef, { ...i, attempt: B } as never, { via: 'cli', by: 'autolab' })
+  await bOp({ op: 'question.take-up', question: 'q1' })
+  await bOp({ op: 'node.complete', node: 'talk', outcome: 'Agreed: count words and lines.' })
+  const { adjustRun } = await import('../server/runs.ts')
+  const r1 = await readFile(join(root, 'pj-blank', 'devdocs', 'runs', 'freework', fwRun.run, 'definition', 'freework.yaml'), 'utf8')
+  const grownText = r1.replace('nodes:\n', 'nodes:\n  count:\n    type: do\n    name: Count words and lines\n    description: Write the counter and run it.\n') + 'edges:\n  - {from: talk, to: count}\n'
+  const adj = await adjustRun(blankWs, fwRef, { text: grownText, reason: 'q1 agreed the counter', source: { kind: 'answer', question: 'q1' } }, { via: 'cli', by: 'autolab', attempt: B })
+  check(adj.ok, `the agreed work is added at the boundary: ${JSON.stringify(adj.problems)}`)
+  await bOp({ op: 'node.start', node: 'count' })
+  const fwLog = join(root, '.local', 'exec', 'logs', `${B}.jsonl`)
+  await writeFile(fwLog, evline({ type: 'system', subtype: 'init' }) + evline({ type: 'assistant', message: { id: 'b1', content: [] } }) + evline({ type: 'assistant', message: { id: 'b2', content: [] } }))
+  check(await waitFor(async () => /1 step done · the plan of this run has grown once/.test(await text('.run-progress'))) !== null, `the progress counts done steps without a fraction once the plan grew: "${await text('.run-progress')}"`)
+  check(await waitFor(async () => /^Working on Count words and lines · 2 turns this session/.test(await text('.run-activity'))) !== null, `the activity line names the added work: "${await text('.run-activity')}"`)
+  check(await waitFor(async () => await page.locator('.node[data-id="count"]').count() === 1) !== null, 'the graph shows the added work')
+  await capture(page, 'freework-grown-simple')
+  s3.kill()
+
+  x.close()
   check(errors.length === 0, `no console errors${errors.length ? `: ${errors.slice(0, 3).join(' | ')}` : ''}`)
 } finally {
   await browser?.close()

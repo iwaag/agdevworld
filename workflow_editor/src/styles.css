@@ -396,6 +396,23 @@ label.inline { display: flex; align-items: center; gap: 6px; }
 .state-chip.state-problem { color: var(--error); border-color: #e2a7a2; background: var(--error-bg); }
 
 /* run view (p8): title band, details, focus card, graph card, side pane */
+/* the activity line (p8/ex2): the run moves, without the log */
+.run-activity { display: block; margin: 6px 0 0; font-size: 13.5px; color: var(--muted); }
+.run-activity[hidden] { display: none; }
+.run-activity .act-text { color: var(--text); font-weight: 500; }
+.run-activity .act-dot { display: inline-block; vertical-align: middle; width: 8px; height: 8px; border-radius: 50%; background: #c3c8d0; margin: -2px 8px 0 0; }
+.run-activity[data-tone="working"] .act-dot { background: var(--ok); }
+.run-activity[data-tone="waiting"] .act-dot { background: var(--accent); }
+.run-activity[data-tone="warn"] .act-dot, .run-activity[data-tone="held"] .act-dot { background: var(--warn); }
+.run-activity[data-tone="done"] .act-dot { background: var(--ok); }
+.run-activity .act-count { font-variant-numeric: tabular-nums; }
+.run-activity .act-last { font-variant-numeric: tabular-nums; }
+.run-activity.bump .act-count { animation: act-bump 900ms ease-out; }
+.run-activity.bump .act-dot { animation: act-pulse 900ms ease-out; }
+@keyframes act-bump { 0% { color: var(--ok); } 100% { color: inherit; } }
+@keyframes act-pulse { 0% { box-shadow: 0 0 0 0 rgba(47, 138, 91, .55); } 100% { box-shadow: 0 0 0 7px rgba(47, 138, 91, 0); } }
+@media (prefers-reduced-motion: reduce) { .run-activity.bump .act-count, .run-activity.bump .act-dot { animation: none; } }
+.run-progress.growing .bar-text { font-size: 14px; }
 .pill .dot { width: 7px; height: 7px; border-radius: 50%; display: inline-block; }
 .pill .dot.on { background: #4fc483; }
 .pill .dot.off { background: #e0b35c; }

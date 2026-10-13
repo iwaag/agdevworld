@@ -336,7 +336,7 @@ test('publication: pre-existing changes left out; a push failure is retried with
   const f = await x.finished(c.attempt.id, { code: 0, signal: null })
   const cp = f.checkpoint!
   assert.equal(cp.state, 'failed')
-  const steps1 = x.runView(id, ref).checkpoints.at(-1)!.steps
+  const steps1 = (await x.runView(id, ref)).checkpoints.at(-1)!.steps
   const docs = steps1.find(s => s.repo === 'devdocs')!, rootStep = steps1.find(s => s.repo === '.')!
   assert.ok(docs.commit && docs.pushed, 'the child repository was published first')
   assert.ok(rootStep.commit && !rootStep.pushed, 'the root was committed, its push failed')
@@ -346,7 +346,7 @@ test('publication: pre-existing changes left out; a push failure is retried with
   assert.match(await gitOk(dir, ['status', '--porcelain']), /notes-of-the-person\.txt/)
   await gitOk(dir, ['remote', 'set-url', 'origin', rootRemote])
   const retried = await x.publishCheckpoint(cp.id)
-  const steps2 = x.runView(id, ref).checkpoints.at(-1)!.steps
+  const steps2 = (await x.runView(id, ref)).checkpoints.at(-1)!.steps
   assert.equal(steps2.find(s => s.repo === '.')!.commit, rootStep.commit, 'the retry pushes the same commit; the work is not repeated')
   assert.equal(steps2.find(s => s.repo === 'devdocs')!.commit, docs.commit)
   assert.equal(retried.state, 'attention', 'the README conflict still needs a person')

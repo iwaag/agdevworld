@@ -29,6 +29,7 @@ import { patchContent } from './patch.ts'
 import { activeWorkflow, ago, chip, fact, line, nodeLabel, nodeLink, runHash, runTitle, STATE_LABEL } from './runCommon.ts'
 import { outcome, RefreshCoordinator, type Outcome, type RefreshKind } from './runRefresh.ts'
 import { RunSide } from './runSide.ts'
+import { ActivityView, describeActivity } from './runActivity.ts'
 import { displayToggle, isSimple, onDisplay, setDisplay } from './displayMode.ts'
 import type { ViewHandle } from './main.ts'
 
@@ -67,6 +68,7 @@ export function renderRunView(root: HTMLElement, wsId: string, workflow: string,
   const banners = h('div.banners')
   // The title band; `.run-summary` carries the sequence and state this view shows (checks read them).
   const titleMain = h('div.title-main')
+  const activity = new ActivityView() // Simple's activity line (p8/ex2), kept across renders
   const titleFacts = h('div.run-facts-row')
   const detailsToggle = h('button.panel-toggle.d-only', { 'aria-expanded': 'false', 'aria-controls': 'run-details', onclick: () => toggleDetails() }, icon('list', 'icon small'), 'Run details')
   const openDefinition = h('a.button.panel-toggle.d-only', { hidden: true }, icon('doc', 'icon small'), 'Open current definition')
@@ -306,9 +308,14 @@ export function renderRunView(root: HTMLElement, wsId: string, workflow: string,
     const ex = rec.execution
     const wf = activeWorkflow(r, rec)
     const t = runTitle(rec, wf?.name)
+    activity.update(describeActivity({
+      rev: !!rev, connected, execError: !!execError, exec: execView, situation: situation(rec), state: ex.state,
+      active: ex.active.map(n => label(rec, n)), waitingFor: ex.waiting.length ? holderOf(rec, ex.waiting[0].node) : null,
+      failed: ex.failed.map(n => label(rec, n)), holdKind: rec.control.hold?.kind ?? null,
+    }))
     patchContent(titleMain,
       h('h1.run-name', { title: t.title }, t.title),
-      progress(rec),
+      progress(rec), activity.el,
       h('p.run-lead.d-only', statusLine(rec)),
       h('p.wf-file.d-only', `${t.sub} · ${rec.definition.revisions?.length ? `adjusted, ${rec.definition.active ?? 'r1'} in force` : 'fixed snapshot'}`))
     const last = rec.decisions.at(-1)
@@ -339,6 +346,13 @@ export function renderRunView(root: HTMLElement, wsId: string, workflow: string,
     const total = Object.values(c).reduce((a, b) => a + b, 0), doneN = c.completed ?? 0
     const pct = total ? Math.round((doneN / total) * 100) : 0
     const bad = rec.execution.failed.length > 0
+    // A run whose future work changed (p7 adjustments, p8/ex2 freework) can
+    // grow again: its count of done steps stays, a fraction would read as
+    // an estimate of the time left.
+    if (rec.definition.revisions?.length && rec.execution.state !== 'completed') {
+      return h('div.run-progress.s-only.growing', { role: 'img', 'aria-label': `${doneN} work step${doneN === 1 ? '' : 's'} completed; the run's plan grows as it goes` },
+        h('span.bar-text', `${doneN} step${doneN === 1 ? '' : 's'} done`, h('span.muted', ` · the plan of this run has grown ${rec.definition.revisions.length === 1 ? 'once' : `${rec.definition.revisions.length} times`}`)))
+    }
     return h('div.run-progress.s-only', { role: 'img', 'aria-label': `${doneN} of ${total} work steps completed` },
       h('span.bar', h(`span.fill${bad ? '.bad' : doneN === total && total ? '.full' : ''}`, { style: { width: `${pct}%` } })),
       h('span.bar-text', `${doneN} of ${total} steps done`))
@@ -505,7 +519,7 @@ export function renderRunView(root: HTMLElement, wsId: string, workflow: string,
     },
     flush: () => refresh.request('full'),
     // The side's executor observation says when the connection is lost (p8/ex1).
-    state: c => { connected = c; if (!disposed) { renderLive(); renderBanners(); if (shown?.record) side.updateHost(data()) } },
+    state: c => { connected = c; if (!disposed) { renderLive(); renderBanners(); if (shown?.record) { renderSummary(); side.updateHost(data()) } } },
   })
   // Relative times ("5 min ago") age while nothing is recorded.
   const clock = setInterval(() => { if (shown?.record && !disposed) { renderSummary(); renderSide() } }, 30_000)
@@ -517,7 +531,7 @@ export function renderRunView(root: HTMLElement, wsId: string, workflow: string,
   void refresh.request('full')
   void loadProjectName()
   return {
-    dispose: () => { disposed = true; offDisplay(); root.removeEventListener('click', onClick); fileRequest++; refresh.dispose(); stream?.close(); canvas.dispose(); clearInterval(clock); clearInterval(execTimer) },
+    dispose: () => { disposed = true; activity.dispose(); offDisplay(); root.removeEventListener('click', onClick); fileRequest++; refresh.dispose(); stream?.close(); canvas.dispose(); clearInterval(clock); clearInterval(execTimer) },
     isDirty: () => side.isDirty(),
   }
 }

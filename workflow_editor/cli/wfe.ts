@@ -758,7 +758,7 @@ async function cmdExec(p: Parsed): Promise<number> {
         const ws = await workspace(p)
         if (!arg) { out('', { executor: x.executorState() }); return 0 }
         const ref = await import('../server/runs.ts').then(m => m.resolveRef(ws, arg))
-        out('', x.runView(ws.reg.id, ref)); return 0
+        out('', await x.runView(ws.reg.id, ref)); return 0
       }
     }
   } catch (e) {

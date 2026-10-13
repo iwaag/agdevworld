@@ -137,7 +137,7 @@ test('request topic and run topic: what goes where, linked, with distinct identi
   await i.process()
   let rec = (await readRun(ws, ref)).record!
   assert.equal(rec.questions.q1.answers[0].source?.message, yes.id, 'bound to q1 through its post')
-  assert.equal(x.runView(ws.reg.id, ref).jobs.filter(j => j.kind === 'resume').length, 1, 'the existing resume')
+  assert.equal((await x.runView(ws.reg.id, ref)).jobs.filter(j => j.kind === 'resume').length, 1, 'the existing resume')
   await deliver(n, posted)
   assert.ok(inRequest().some(p => /\*\*Recorded\*\* as your answer to q1\. maker reads it when it resumes \(recorded, not yet read\)/.test(p.content)))
   // Attempt 2: work, then present the deliverables for confirmation.
@@ -312,11 +312,11 @@ test('an answer arriving before the asking attempt exits resumes through the exi
   receive(i, yes)
   await i.process()
   assert.equal((await readRun(ws, ref)).record!.questions.q1.answers.length, 1, 'recorded at once')
-  assert.equal(x.runView(ws.reg.id, ref).jobs.filter(j => j.kind === 'resume').length, 0, 'no resume while the asking attempt is open')
+  assert.equal((await x.runView(ws.reg.id, ref)).jobs.filter(j => j.kind === 'resume').length, 0, 'no resume while the asking attempt is open')
   const f = await x.finished(A, { code: 0, signal: null })
   assert.equal(f.outcome, 'exited')
   assert.ok(f.resumeJob, 'its end queues the resumption')
-  assert.equal(x.runView(ws.reg.id, ref).jobs.filter(j => j.kind === 'resume').length, 1)
+  assert.equal((await x.runView(ws.reg.id, ref)).jobs.filter(j => j.kind === 'resume').length, 1)
   const c2 = await x.claim('test', {})
   assert.ok('attempt' in c2)
   assert.match(c2.brief, /resume: answer 0 to q1 recorded/)

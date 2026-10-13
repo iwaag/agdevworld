@@ -334,6 +334,17 @@ one of them is refused. Refusals carry the field they concern
 by re-renders, so a background reload or a switch keeps the text, the open
 state and the keyboard.
 
+**The activity line (p8/ex2).** Under the run's progress, one line says that
+the run moves without showing the log: *Working on Implement · 24 turns this
+session · last activity 8 s ago*. The turns are the current session's, counted
+from its own output on this host (`server/activity.ts`); the age ticks every
+second without announcing anything, and a new turn makes the line pulse once
+(not under reduced motion). Waiting, queued, held, stopping, a lost process,
+another host, a lost connection, finished and cancelled each replace the count
+with what they are (docs/runs.md, *Activity*). Detail lists the turns with
+each attempt. A run whose plan has grown (adjustments) shows its done steps
+without a fraction, so the bar is never read as time left.
+
 **How the run view stays live (p7/ex2).** The view is built once and kept up
 to date in place, so whatever arrives never interrupts typing or reading:
 
@@ -465,7 +476,11 @@ Browser checks written for the full screens open in Detail (`checks/lib.ts`).
 `checks/freework.ts` (p8/ex2) checks this episode on a private project, an
 empty second project and a private service (port 8216): creating a workflow
 from Simple (errors beside their field, input kept across a switch and a
-background reload, the id moving past one that appeared).
+background reload, the id moving past one that appeared); the activity line
+on a real claimed attempt with a live process and a growing log (queued,
+between steps, turns and age, a reload counting the same, the pulse, no live
+region, Detail's attempt turns, a lost process, a stopped service, waiting on
+the person, a history view).
 `npm run build && node checks/freework.ts [--keep] [--shots <dir>]`.
 
 `checks/appearance.ts` (p7) checks node appearance on its own temporary

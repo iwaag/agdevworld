@@ -313,7 +313,7 @@ export function createHandler(config: ServiceConfig) {
         const sub = parts[6]
         if (!ref.workflow || !ref.run || (parts.length > 7 && sub !== 'checkpoints' && sub !== 'presentations')) throw new RequestError(404, 'not found')
         if (!sub && method === 'GET') return send(res, 200, await runResponse(ws, ref, { rev: url.searchParams.get('rev') || undefined }))
-        if (sub === 'exec' && method === 'GET') return send(res, 200, needExec().runView(ws.reg.id, ref))
+        if (sub === 'exec' && method === 'GET') return send(res, 200, await needExec().runView(ws.reg.id, ref))
         // Zulip coordination of this run: its topic, what is still owed, problems.
         if (sub === 'notify' && method === 'GET') {
           const { NotifyStore } = await import('./notify.ts')

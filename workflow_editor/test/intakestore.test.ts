@@ -108,7 +108,7 @@ test('a request topic: bots, strangers and run topics change nothing; the first 
   assert.equal(rec.input.author, 'Pat')
   assert.equal(rec.history[0].receipt, sourceReceipt(REALM, request.id))
   assert.deepEqual(rec.executor, { name: 'maker', backend: null, host: 'autolab' })
-  const jobs = x.runView(ws.reg.id, { workflow: 'make', run: 'run-001' }).jobs
+  const jobs = (await x.runView(ws.reg.id, { workflow: 'make', run: 'run-001' })).jobs
   assert.equal(jobs.length, 1)
   assert.equal(jobs[0].receipt, `request:${sourceReceipt(REALM, request.id)}`)
   const states = Object.fromEntries(i.messages().map(m => [m.id, [m.state, m.route ? JSON.parse(m.route).reason ?? JSON.parse(m.route).kind : null, m.classification ? JSON.parse(m.classification).kind : null]]))
@@ -142,7 +142,7 @@ test('restart after the run was created and before it was recorded: the run is f
   assert.equal((await listRuns(ws)).length, 1, 'no second run')
   assert.equal(again.message(REALM, request.id)!.state, 'done')
   assert.equal(again.status().requests[0].run, 'run-001')
-  assert.equal(x.runView(ws.reg.id, { workflow: 'make', run: 'run-001' }).jobs.length, 1, 'queued once')
+  assert.equal((await x.runView(ws.reg.id, { workflow: 'make', run: 'run-001' })).jobs.length, 1, 'queued once')
   again.close()
 })
 
@@ -184,7 +184,7 @@ test('an answer is recorded with its real sender and source, once, and the resum
   assert.equal(rec.questions.q1.answers[0].from, 'Pat')
   assert.equal(rec.questions.q1.answers[0].via, 'zulip')
   assert.equal(rec.nodes.scope.state, 'waiting', 'recorded, not taken up')
-  const jobs = s.x.runView(s.ws.reg.id, ref).jobs.filter(j => j.kind === 'resume')
+  const jobs = (await s.x.runView(s.ws.reg.id, ref)).jobs.filter(j => j.kind === 'resume')
   assert.equal(jobs.length, 1, 'the resumption is queued once')
   assert.match(jobs[0].receipt, /^answer:/)
   // The full source is on the answer that the intake applied (the hand-made one above has none).
@@ -194,7 +194,7 @@ test('an answer is recorded with its real sender and source, once, and the resum
   const rec2 = await record(s.ws, ref)
   assert.equal(rec2.questions.q1.answers.length, 2, 'a further answer before take-up is another answer to q1')
   assert.equal(rec2.questions.q1.answers[1].source?.message, again.id)
-  assert.equal(s.x.runView(s.ws.reg.id, ref).jobs.filter(j => j.kind === 'resume').length, 1, 'still one resumption queued')
+  assert.equal((await s.x.runView(s.ws.reg.id, ref)).jobs.filter(j => j.kind === 'resume').length, 1, 'still one resumption queued')
   s.i.close()
 })
 

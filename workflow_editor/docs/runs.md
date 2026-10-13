@@ -446,6 +446,21 @@ autolab, `agautolab.wfexec` — is queued. Two kinds of fact are kept apart:
 | `run.json` (durable work record) | `control`: the open attempt (id, reason, backend), how the last one ended, a hold, a requested stop; the history of `attempt.begin`, `attempt.end`, `run.stop`, `run.resume` |
 | `<area>/.local/exec/exec.sqlite` (this host) | the queue, the one execution slot, each attempt's process id, times and log, publication checkpoints, the executor's heartbeat (`server/exec.ts`) |
 
+**Activity (p8/ex2).** `GET runs/<wf>/<run>/exec` (and `wfe exec status
+<run>`) gives each attempt an `activity` summary read from its own log on
+the host that has it (`server/activity.ts`; `null` on any other host):
+`unit` (`turn`, or `null` for a log whose format is not counted), `count`,
+`last` (the log's last write) and `bytes`. A turn is one distinct assistant
+message id of a Claude Code stream-json log; the count belongs to that
+attempt (one session) and starts again with the next. Only the agent process
+writes its log, so heartbeats, reconnections and polling are never counted;
+the service reads only what was appended (up to the last complete line), so
+re-reading never counts twice. No log text leaves the service. The run view's
+activity line (`src/runActivity.ts`) states the current work with this count
+and age, or the state that replaces them: queued, starting, waiting for a
+person, held, stopping, a session whose process is gone, another host, not
+connected, finished, cancelled. A history view states none of them.
+
 **Settings (p6).** The run's workflow names the agent identity, the host
 profile and project guides (contract.md, *Execution, intake and result
 confirmation*). `wfe exec claim` takes what the host offers (`--profiles-json`,

@@ -42,8 +42,9 @@ async function capture(page: Page, name: string) {
 
 const service = new PrivateService({ registry: join(root, 'registry.json'), area: root, port: PORT })
 let browser: Browser | undefined
+let S: Awaited<ReturnType<typeof buildStates>> | undefined
 try {
-  const S = await buildStates(root, { answerBase: `http://127.0.0.1:${PORT}/`, ports: [18820, 18829] })
+  S = await buildStates(root, { answerBase: `http://127.0.0.1:${PORT}/`, ports: [18840, 18849] })
   const blank = await createProject({ dir: join(root, 'pj-blank'), id: 'blank', name: 'Blank project', intent: 'A project without workflows.', goals: [], sourcesDir: join(root, 'sources'), registryFile: join(root, 'registry.json') })
   if (!blank.ok) throw new Error(blank.message)
   await service.start()
@@ -103,11 +104,84 @@ try {
   await page.goto(`${BASE}/#/ws/sample`)
   await page.waitForSelector('.workflows .wf-row')
   check(await visible('.workflows .create-wf-open') && !(await visible('form.create-wf')), 'a list with workflows keeps the entry in its head, the form closed')
-  check(S.ws !== undefined, 'fixture ready')
+  check(S!.ws !== undefined, 'fixture ready')
+
+  // ==== 2. The run view's activity line =======================================================
+  console.log('activity: a working session')
+  const { ExecStore } = await import('../server/exec.ts')
+  const { runOp } = await import('../server/runs.ts')
+  const { Workspace } = await import('../server/workspace.ts')
+  const { loadRegistry } = await import('../server/registry.ts')
+  const { spawn } = await import('node:child_process')
+  const { appendFile } = await import('node:fs/promises')
+  await writeFile(join(root, 'pj-blank', 'devdocs', 'workflows', 'work.yaml'), 'schema: ag.workflow.v2\nid: work\nname: Work\nintent: Do the work.\ndocumentation: {policy: manual}\nnodes:\n  implement: {type: do, name: Implement, description: Implement it.}\n  verify: {type: do, name: Verify, description: Verify it.}\nedges:\n  - {from: implement, to: verify}\n')
+  const x = new ExecStore({ registryFile: join(root, 'registry.json'), area: root })
+  const blankWs = new Workspace((await loadRegistry(join(root, 'registry.json'))).workspaces.find(w => w.id === 'blank')!)
+  const req = await x.request({ workspace: 'blank', workflow: 'work', text: 'Make it work.', author: 'Sample Person', receipt: 'check-activity-0001', via: 'cli' })
+  const runUrl = `${BASE}/#/ws/blank/run/${req.ref.workflow}/${req.ref.run}`
+  await page.goto(runUrl)
+  await page.waitForSelector('.run-summary[data-seq]')
+  check(await waitFor(async () => /^Queued/.test(await text('.run-activity'))) !== null, `a queued run says so: "${await text('.run-activity')}"`)
+  const claimed = await x.claim(null)
+  if ('idle' in claimed) throw new Error(claimed.idle)
+  const sleeper = spawn('sleep', ['600'], { stdio: 'ignore' })
+  x.started(claimed.attempt.id, sleeper.pid!)
+  const log = join(root, '.local', 'exec', 'logs', `${claimed.attempt.id}.jsonl`)
+  const evline = (o: unknown) => `${JSON.stringify(o)}\n`
+  await writeFile(log, evline({ type: 'system', subtype: 'init' }))
+  check(await waitFor(async () => /Between steps/.test(await text('.run-activity')) && /0 turns this session/.test(await text('.run-activity'))) !== null, `a session that recorded no start yet: "${await text('.run-activity')}"`)
+  await runOp(blankWs, req.ref, { op: 'node.start', node: 'implement', attempt: claimed.attempt.id }, { via: 'cli', by: 'autolab' })
+  for (let i = 1; i <= 3; i++) await appendFile(log, evline({ type: 'assistant', message: { id: `m${i}`, content: [{ type: 'thinking' }] } }) + evline({ type: 'assistant', message: { id: `m${i}`, content: [{ type: 'tool_use' }] } }) + evline({ type: 'user', message: {} }))
+  check(await waitFor(async () => /^Working on Implement · 3 turns this session · last activity \d+ s ago/.test(await text('.run-activity'))) !== null, `the current work, its turns and the last activity: "${await text('.run-activity')}"`)
+  check(await page.locator('.run-activity').getAttribute('data-tone') === 'working', 'the line has the working tone')
+  await capture(page, 'activity-working-simple')
+  // The age moves on its own; the count does not move without output.
+  const age1 = await text('.run-activity .act-last')
+  await sleep(2200)
+  check(await text('.run-activity .act-last') !== age1 && /3 turns/.test(await text('.run-activity')), `the age updates by itself, the count stays (${age1} → ${await text('.run-activity .act-last')})`)
+  // A reload counts the same: nothing is counted twice.
+  await page.reload()
+  await page.waitForSelector('.run-summary[data-seq]')
+  check(await waitFor(async () => /3 turns this session/.test(await text('.run-activity'))) !== null, `a reload shows the same count: "${await text('.run-activity')}"`)
+  // New output: the count grows and the line pulses once.
+  await page.evaluate(() => { (window as unknown as { __bumps: number }).__bumps = 0; new MutationObserver(() => { if (document.querySelector('.run-activity')?.classList.contains('bump')) (window as unknown as { __bumps: number }).__bumps++ }).observe(document.querySelector('.run-activity')!, { attributes: true, attributeFilter: ['class'] }) })
+  await appendFile(log, evline({ type: 'assistant', message: { id: 'm4', content: [] } }))
+  check(await waitFor(async () => /4 turns this session/.test(await text('.run-activity'))) !== null, 'new output raises the count')
+  check(await page.evaluate(() => (window as unknown as { __bumps: number }).__bumps) > 0, 'the line pulses when the count grows')
+  check(await page.evaluate(() => getComputedStyle(document.querySelector('.run-activity')!).getPropertyValue('aria-live') === '' && !document.querySelector('.run-activity')!.hasAttribute('aria-live')), 'the line is not a live region (no per-second announcements)')
+  // Detail lists the session's turns with the attempt.
+  await page.locator('.display-toggle button[data-display="detail"]').click()
+  await page.evaluate(() => { for (const d of document.querySelectorAll('details')) (d as HTMLDetailsElement).open = true })
+  check(await waitFor(async () => /4 turns, last output/.test(await page.locator('.attempt-activity').first().innerText().catch(() => ''))) !== null, `Detail's attempt list has the turns: "${await page.locator('.attempt-activity').first().innerText().catch(() => '')}"`)
+  await page.locator('.display-toggle button[data-display="simple"]').click()
+  // The process ends without a record: the line says so instead of a count.
+  sleeper.kill()
+  await sleep(300)
+  check(await waitFor(async () => /process is not running/.test(await text('.run-activity'))) !== null && !/turns/.test(await text('.run-activity')), `a session whose process is gone shows no count: "${await text('.run-activity')}"`)
+  // Disconnected: nothing current is claimed. The outage is deliberate: the
+  // browser's errors about the cut stream and refused requests are expected.
+  const beforeOutage = errors.length
+  await service.stop()
+  check(await waitFor(async () => /^Not connected/.test(await text('.run-activity')), 15000) !== null, `while disconnected the line says so: "${await text('.run-activity')}"`)
+  await capture(page, 'activity-disconnected-simple')
+  await service.start()
+  check(await waitFor(async () => !/^Not connected/.test(await text('.run-activity')), 20000) !== null, `after reconnecting the line is current again: "${await text('.run-activity')}"`)
+  errors.splice(beforeOutage, errors.length - beforeOutage, ...errors.slice(beforeOutage).filter(e => !/ERR_INCOMPLETE_CHUNKED_ENCODING|ERR_CONNECTION_REFUSED/.test(e)))
+  // The session ends; the node waits on the person: waiting, no count.
+  await runOp(blankWs, req.ref, { op: 'question.ask', node: 'implement', text: 'Which option?', to: 'Sample Person', attempt: claimed.attempt.id } as never, { via: 'cli', by: 'autolab' })
+  await runOp(blankWs, req.ref, { op: 'node.wait', node: 'implement', reason: 'asked', holder: 'Sample Person', external: 'q1', attempt: claimed.attempt.id } as never, { via: 'cli', by: 'autolab' }).catch(() => null)
+  await x.finished(claimed.attempt.id, { code: 0, signal: null })
+  check(await waitFor(async () => /^Waiting for/.test(await text('.run-activity'))) !== null, `a run waiting on the person says so: "${await text('.run-activity')}"`)
+  // A history view shows no current activity.
+  await page.goto(`${runUrl}/at/HEAD`)
+  await sleep(800)
+  check(!(await visible('.run-activity')), 'a history view has no activity line')
+  x.close()
 
   check(errors.length === 0, `no console errors${errors.length ? `: ${errors.slice(0, 3).join(' | ')}` : ''}`)
 } finally {
   await browser?.close()
+  await S?.stop()
   await service.stop()
   if (!args.includes('--keep')) await rm(root, { recursive: true, force: true })
   else console.log(`kept ${root}`)

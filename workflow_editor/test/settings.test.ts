@@ -168,7 +168,7 @@ test('claim refuses what the host cannot launch as declared: an unknown profile,
     await x.request({ workspace: ws.reg.id, workflow: 'make', text: 'Make.', author: 'Test Person', receipt: 'settings-req-0004', via: 'browser' })
     const c = await x.claim('fallback', { profiles: { stub: 'fake / m' } })
     assert.deepEqual(c, { idle: 'no queued job' })
-    const job = x.runView(ws.reg.id, { workflow: 'make', run: 'run-001' }).jobs[0]
+    const job = (await x.runView(ws.reg.id, { workflow: 'make', run: 'run-001' })).jobs[0]
     assert.equal(job.state, 'dropped')
     assert.match(job.note ?? '', /asks for execution profile "sonnet", which this execution host does not offer \(stub\)/)
     const rec = (await readRun(ws, { workflow: 'make', run: 'run-001' })).record!
@@ -179,7 +179,7 @@ test('claim refuses what the host cannot launch as declared: an unknown profile,
     const { x, ws } = await setup(false)
     await x.request({ workspace: ws.reg.id, workflow: 'make', text: 'Make.', author: 'Test Person', receipt: 'settings-req-0005', via: 'browser' })
     assert.deepEqual(await x.claim('fallback', OFFER), { idle: 'no queued job' })
-    assert.match(x.runView(ws.reg.id, { workflow: 'make', run: 'run-001' }).jobs[0].note ?? '', /guide agent\/guide\.md cannot be read/)
+    assert.match((await x.runView(ws.reg.id, { workflow: 'make', run: 'run-001' })).jobs[0].note ?? '', /guide agent\/guide\.md cannot be read/)
     x.close()
   }
 })

@@ -26,6 +26,7 @@ import { baseline, publish, type Baseline, type RepoStep } from './publish.ts'
 import { loadRegistry, observe, type Registration } from './registry.ts'
 import { catalogOf, createRun, listRuns, readRun, runDir, runOp } from './runs.ts'
 import { catalogBrief } from '../shared/catalog.ts'
+import { activityOf } from './activity.ts'
 import { named, openStore, transaction } from './sqlite.ts'
 import { inside } from './files.ts'
 import { RequestError, Workspace } from './workspace.ts'
@@ -457,9 +458,12 @@ export class ExecStore {
     return age < 45 ? { state: 'available', detail: what, at: hb.at } : { state: 'unavailable', detail: `${hb.name} last reported ${Math.round(age)} s ago`, at: hb.at }
   }
 
-  runView(workspace: string, ref: RunRef) {
-    const attempts = this.all<AttemptRow>('SELECT * FROM attempts WHERE workspace = ? AND workflow = ? AND run = ? ORDER BY began', workspace, ref.workflow, ref.run)
-      .map(a => ({ ...a, baseline: undefined, alive: a.state === 'ended' ? false : a.host === hostname() ? alive(a.pid) : null }))
+  // `activity` (p8/ex2, server/activity.ts): what the attempt's own log says,
+  // observed only on the host that has the log (null elsewhere).
+  async runView(workspace: string, ref: RunRef) {
+    const rows = this.all<AttemptRow>('SELECT * FROM attempts WHERE workspace = ? AND workflow = ? AND run = ? ORDER BY began', workspace, ref.workflow, ref.run)
+    const attempts = await Promise.all(rows.map(async a => ({ ...a, baseline: undefined, alive: a.state === 'ended' ? false : a.host === hostname() ? alive(a.pid) : null,
+      activity: a.host === hostname() ? await activityOf(a.log).catch(() => null) : null })))
     const jobs = this.all<JobRow>('SELECT * FROM jobs WHERE workspace = ? AND workflow = ? AND run = ? ORDER BY id', workspace, ref.workflow, ref.run)
     const checkpoints = this.all<CheckpointRow>('SELECT * FROM checkpoints WHERE workspace = ? AND workflow = ? AND run = ? ORDER BY id', workspace, ref.workflow, ref.run)
       .map(c => ({ ...c, baseline: undefined, steps: JSON.parse(c.steps) as RepoStep[] }))

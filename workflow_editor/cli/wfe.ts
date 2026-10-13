@@ -966,7 +966,7 @@ async function cmdIntake(p: Parsed): Promise<number> {
         const cfg = loadIntakeConfig(areaDir(p))
         const due = await i.due(), st = i.status()
         out([
-          `Configuration: ${'disabled' in cfg ? `off — ${cfg.disabled}` : `on, realm ${cfg.realm}, posts since ${cfg.intake.since}, projects ${Object.keys(cfg.intake.projects).join(', ') || 'none'}, requesters ${cfg.intake.requesters.map(r => `${r.name} (${r.id})`).join(', ')}`}`,
+          `Configuration: ${'disabled' in cfg ? `off — ${cfg.disabled}` : `on, realm ${cfg.realm}, posts since ${cfg.intake.since}, projects all registered, workspace overrides ${Object.keys(cfg.intake.projects).join(', ') || 'none'}, requesters ${cfg.intake.requesters.map(r => `${r.name} (${r.id})`).join(', ')}`}`,
           'Channels:', ...due.channels.map(c => `  #${c.streamId} ${c.project}/${c.workflow}  cursor ${c.cursor}`),
           `Transport: ${st.transport ? `${st.transport.ok ? 'ok' : 'FAILED'} at ${st.transport.at}${st.transport.error ? ` — ${st.transport.error}` : ''}` : 'no pass recorded yet'}`,
           `Posts: ${Object.entries(st.counts).map(([k, v]) => `${v} ${k}`).join(', ') || 'none'}`,

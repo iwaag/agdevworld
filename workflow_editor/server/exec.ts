@@ -160,14 +160,14 @@ export class ExecStore {
   // request a no-op. No other run reserves the project (p9): a held, waiting
   // or working run keeps its own copy; the one execution slot is the only
   // thing requests share.
-  async request(o: { workspace: string; workflow: string; text: string; author: string; receipt: string; by?: string; via: string }): Promise<{ job: JobRow; ref: RunRef; duplicate: boolean }> {
+  async request(o: { workspace: string; workflow: string; text: string; author: string; receipt: string; by?: string; via: string; predecessor?: RunRef }): Promise<{ job: JobRow; ref: RunRef; duplicate: boolean }> {
     if (!/^[A-Za-z0-9:._/#-]{8,200}$/.test(o.receipt)) throw new RequestError(400, 'a request needs a receipt id (8–200 of A-Z a-z 0-9 : . _ / # -)')
     const seen = this.one<JobRow>('SELECT * FROM jobs WHERE receipt = ?', `request:${o.receipt}`)
     if (seen) return { job: seen, ref: { workflow: seen.workflow, run: seen.run }, duplicate: true }
     const ws = await this.workspace(o.workspace)
     // The run gets its own working copy (p9); the same receipt finds it again.
     const env = this.ctx.gitea ? await this.ctx.gitea.gitEnv() : {}
-    const created = await createRunInCopy(ws, { workflow: o.workflow, input: { kind: 'braindump', text: o.text, author: o.author, recordedBy: o.by }, executor: { host: this.executor }, by: o.by ?? o.author, via: o.via, area: this.ctx.area, receipt: `request:${o.receipt}` }, env)
+    const created = await createRunInCopy(ws, { workflow: o.workflow, input: { kind: 'braindump', text: o.text, author: o.author, recordedBy: o.by }, executor: { host: this.executor }, by: o.by ?? o.author, via: o.via, area: this.ctx.area, receipt: `request:${o.receipt}`, ...(o.predecessor ? { predecessor: o.predecessor } : {}) }, env)
     const job = this.enqueue(ws.reg.id, created.ref, 'start', `request:${o.receipt}`, 'start: the person\'s request')
     return { job, ref: created.ref, duplicate: false }
   }
@@ -307,6 +307,13 @@ export class ExecStore {
     } else lines.push(`Workspace: ${ws.root}`)
     lines.push(`Why this attempt: ${job.reason}`)
     if (job.kind === 'start') lines.push(`The person's request is ${runDir(ref)}/${r.input.file} (author ${r.input.author ?? r.input.requester}).`)
+    // The run this one follows (p9): its records and saved work, to reuse,
+    // repair or reverse; wfe run reversal <run> lists what its integration brought.
+    if (r.predecessor) {
+      const pred = await runSpace(ws.shared, r.predecessor).catch(() => null)
+      const pr = pred ? (await readRun(pred, r.predecessor)).record : undefined
+      lines.push(`This run follows ${runKey(r.predecessor)}: ${pr ? `its records are in ${join(pred!.root, runDir(r.predecessor))} (wfe run show ${runKey(r.predecessor)})${pr.storage ? `, its work saved on branch ${pr.storage.branch}` : ''}${pr.integrations?.length ? `; its result is integrated (wfe run reversal ${runKey(r.predecessor)})` : ''}.` : 'its record cannot be read on this host.'}`)
+    }
     const resume = [...r.history].reverse().find(e => e.op === 'run.resume') as (RunRecord['history'][number] & { reason?: string }) | undefined
     if (job.kind === 'resume') {
       if (r.control.last) lines.push(`The previous attempt ${r.control.last.id} ended: ${r.control.last.outcome}${r.control.last.detail ? ` — ${r.control.last.detail}` : ''}.`)

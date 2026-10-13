@@ -65,6 +65,7 @@ export interface CopyManifest {
   created: string
   ready: string | null
   receipt: string | null // the request that reserved it: the same request finds it again
+  baseFrom?: 'workspace' | 'upstream' // the workspace's HEAD, or its branch's upstream when the workspace was only behind it
   repositories: CopyRepo[]
   local: string[] // files of the project workspace's .local/ copied into the copy's .local/
   reconstructed?: string // when the manifest was rebuilt from the copy itself
@@ -167,8 +168,13 @@ export interface ReserveOptions { project: string; workflow: string; name?: stri
 
 // Reserves a run identity and its copy folder. With a receipt, a second call
 // for the same request returns the run it reserved (finished or not).
-export async function reserve(ws: Workspace, o: ReserveOptions): Promise<{ ref: RunRef; manifest: CopyManifest; existing: boolean }> {
+export async function reserve(ws: Workspace, o: ReserveOptions, env: Record<string, string> = {}): Promise<{ ref: RunRef; manifest: CopyManifest; existing: boolean }> {
   ws = ws.shared
+  // What other runs integrated reaches the remote, not the person's
+  // workspace: its branch's upstream is fetched first (best effort; offline,
+  // the workspace's own HEAD is used).
+  const branch = (await git(ws.root, ['symbolic-ref', '-q', '--short', 'HEAD'])).stdout.trim()
+  if (branch) await git(ws.root, ['fetch', '-q', 'origin', `+refs/heads/${branch}:refs/remotes/origin/${branch}`], { env, timeoutMs: 60_000 })
   if (!ID_PATTERN.test(o.project)) throw new RequestError(409, `project id "${o.project}" is invalid`)
   if (!ID_PATTERN.test(o.workflow)) throw new RequestError(400, `workflow id "${o.workflow}" is invalid`)
   if (o.name !== undefined && !RUN_ID.test(o.name)) throw new RequestError(400, `run id "${o.name}" must match ${RUN_ID.source}`)
@@ -185,8 +191,8 @@ export async function reserve(ws: Workspace, o: ReserveOptions): Promise<{ ref: 
       run = `run-${String((nums.length ? Math.max(...nums) : 0) + 1).padStart(3, '0')}`
     }
     const ref = { workflow: o.workflow, run }
-    const repositories = await planRepositories(ws)
-    const manifest: CopyManifest = { schema: COPY_SCHEMA, project: o.project, workspace: ws.reg.id, workflow: o.workflow, run, branch: runBranch(o.project, ref), state: 'creating', created: now(), ready: null, receipt: o.receipt ?? null, repositories, local: [] }
+    const { repositories, from } = await planRepositories(ws)
+    const manifest: CopyManifest = { schema: COPY_SCHEMA, project: o.project, workspace: ws.reg.id, workflow: o.workflow, run, branch: runBranch(o.project, ref), state: 'creating', created: now(), ready: null, receipt: o.receipt ?? null, baseFrom: from, repositories, local: [] }
     const dir = copyDir(ws, ref)
     await mkdir(join(root, o.workflow), { recursive: true })
     await mkdir(dir) // exclusive: the reservation
@@ -195,14 +201,22 @@ export async function reserve(ws: Workspace, o: ReserveOptions): Promise<{ ref: 
   })
 }
 
-// What the copy is made from: the project workspace's committed HEAD (never
-// its uncommitted edits), each initialized submodule at the gitlink that
-// commit records, and the branches they are integrated into later.
-async function planRepositories(ws: Workspace): Promise<CopyRepo[]> {
+// What the copy is made from: the project's committed state (never the
+// workspace's uncommitted edits) — the workspace's HEAD, or its branch's
+// upstream as last fetched when the workspace is only behind it (results
+// integrated from other runs' copies reach the remote, not the workspace);
+// each initialized submodule at the gitlink that commit records, and the
+// branches they are integrated into later.
+async function planRepositories(ws: Workspace): Promise<{ repositories: CopyRepo[]; from: 'workspace' | 'upstream' }> {
   const head = await git(ws.root, ['rev-parse', '--verify', 'HEAD^{commit}'])
   if (head.code !== 0) throw new RequestError(409, `workspace ${ws.reg.id} has no commit to start a run from; commit the project first`)
-  const base = head.stdout.trim()
+  let base = head.stdout.trim()
   const branch = (await git(ws.root, ['symbolic-ref', '-q', '--short', 'HEAD'])).stdout.trim() || null
+  let from: 'workspace' | 'upstream' = 'workspace'
+  if (branch) {
+    const up = (await git(ws.root, ['rev-parse', '-q', '--verify', `refs/remotes/origin/${branch}^{commit}`])).stdout.trim()
+    if (up && up !== base && (await git(ws.root, ['merge-base', '--is-ancestor', base, up])).code === 0) { base = up; from = 'upstream' }
+  }
   const url = await remoteUrl(ws.root)
   const out: CopyRepo[] = [{ path: '.', kind: 'root', initialized: true, base, branch: null, target: branch, url }]
   for (const sm of await ws.submodulePaths()) {
@@ -213,7 +227,7 @@ async function planRepositories(ws: Workspace): Promise<CopyRepo[]> {
     const initialized = await isRepoTop(dir)
     out.push({ path, kind: 'submodule', initialized: initialized && !!link, base: link, branch: null, target: initialized ? await targetOf(dir) : null, url: initialized ? await remoteUrl(dir) : null })
   }
-  return out
+  return { repositories: out, from }
 }
 
 async function remoteUrl(dir: string): Promise<string | null> {
@@ -361,7 +375,7 @@ async function localFiles(sharedRoot: string, tree: string): Promise<string[]> {
 // Reserve and create in one call (requests): the same receipt continues an
 // interrupted creation of the same run.
 export async function prepareCopy(ws: Workspace, o: ReserveOptions, env: Record<string, string> = {}): Promise<{ copy: RunCopy; workspace: Workspace; existing: boolean }> {
-  const r = await reserve(ws, o)
+  const r = await reserve(ws, o, env)
   const copy = await materialize(ws, r.ref, env)
   return { copy, workspace: copyWorkspace(ws, copy), existing: r.existing }
 }
@@ -398,7 +412,7 @@ async function reconstruct(ws: Workspace, c: RunCopy): Promise<CopyManifest> {
   if (rec.project !== m[1]) throw new Error(`run.json names project ${rec.project}, the branch ${m[1]}`)
   const recorded = rec.storage?.repositories ?? []
   const repositories: CopyRepo[] = []
-  for (const r of await planRepositories(ws)) {
+  for (const r of (await planRepositories(ws)).repositories) {
     const dir = r.path === '.' ? c.tree : join(c.tree, r.path)
     const had = recorded.find(x => x.path === r.path)
     const initialized = r.path === '.' || await isRepoTop(dir)

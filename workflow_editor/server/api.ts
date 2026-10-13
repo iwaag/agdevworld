@@ -11,7 +11,7 @@ import type { ExecStore } from './exec.ts'
 import { REPO_CATEGORIES, type RepoCategory } from './registry.ts'
 import { BoundaryError, inside } from './files.ts'
 import { loadRegistry, observe, registerWorkspace, RegistryError, type Registry } from './registry.ts'
-import { listRuns, readRunFile, runOp, runResponse } from './runs.ts'
+import { listRuns, readRunFile, runOp, runResponse, resolveRef } from './runs.ts'
 import { OPS, hostOf, type OpInput, type RunRef } from '../shared/run.ts'
 import type { Watcher } from './watch.ts'
 import { codeVersion } from './version.ts'
@@ -312,7 +312,8 @@ export function createHandler(config: ServiceConfig) {
         // A person's request: the run with their words, queued for the executor.
         if (!file && method === 'POST') {
           const input = await body(req) as Record<string, unknown>
-          const r = await needExec().request({ workspace: ws.reg.id, workflow: str(input.workflow, 'workflow'), text: str(input.text, 'the request text'), author: str(input.author, 'author'), receipt: str(input.receipt, 'receipt'), by: typeof input.by === 'string' ? input.by : undefined, via: 'browser' })
+          const predecessor = typeof input.predecessor === 'string' && input.predecessor ? await resolveRef(ws, input.predecessor) : undefined
+          const r = await needExec().request({ workspace: ws.reg.id, workflow: str(input.workflow, 'workflow'), text: str(input.text, 'the request text'), author: str(input.author, 'author'), receipt: str(input.receipt, 'receipt'), by: typeof input.by === 'string' ? input.by : undefined, via: 'browser', predecessor })
           return send(res, r.duplicate ? 200 : 201, { ok: true, ...r })
         }
         const ref: RunRef = { workflow: parts[4] ?? '', run: parts[5] ?? '' }
@@ -327,6 +328,11 @@ export function createHandler(config: ServiceConfig) {
           try { return send(res, 200, n.runStatus((await ws.readProject()).project?.id ?? '', ref)) } finally { n.close() }
         }
         if (sub === 'checkpoints' && parts[7] && parts[8] === 'publish' && method === 'POST') return send(res, 200, await needExec().publishCheckpoint(Number(parts[7])))
+        // What undoing the run involves (p9): facts, never an operation.
+        if (sub === 'reversal' && method === 'GET') {
+          const { reversalFacts } = await import('./reversal.ts')
+          return send(res, 200, await reversalFacts(ws, ref))
+        }
         // Integration of the accepted result (p9): its journal, a dry run, or now.
         if (sub === 'integration') {
           const x = needExec()

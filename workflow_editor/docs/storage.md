@@ -62,11 +62,19 @@ finds its run again, finished or not.
 
 ## What a copy is made from
 
-- **The committed project, never the person's uncommitted edits.** The root
-  starts at the project workspace's `HEAD`. Each initialized submodule
-  starts at the gitlink that commit records. A commit the workspace has and
-  its remote does not is taken from the workspace. A gitlink the workspace
-  lacks is fetched from the submodule's remote.
+- **The committed project, never the person's uncommitted edits.**
+  - The root starts at the project workspace's `HEAD`.
+  - Results integrated from other runs' copies reach the remote, not the
+    workspace. So the workspace's branch upstream is fetched first (best
+    effort). When the workspace is only behind it, the copy starts at the
+    upstream commit instead. The manifest's `baseFrom` says which.
+  - A workspace with commits of its own that are not pushed keeps its
+    `HEAD`.
+  - Each initialized submodule starts at the gitlink that commit records. A
+    commit the workspace has and its remote does not is taken from the
+    workspace. A gitlink the workspace lacks is fetched from the submodule's
+    remote.
+  - Nothing in the person's workspace is changed.
 - The **definition** the run follows is still read from the project
   workspace, as the person sees and edits it, and frozen into the run folder
   (runs.md, *Definition snapshot*). The rest of the tree is committed state.

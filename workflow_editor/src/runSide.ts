@@ -1010,6 +1010,10 @@ export class RunSide {
       h('h4', 'Integration'),
       h('p.small', h(`span.chip.${st.tone === 'ok' ? 'ok' : st.tone === 'muted' ? 'muted' : 'warn'}`, st.text), st.detail ? h('span.muted', ` ${st.detail}`) : null),
       h('p.small.muted', 'Saving puts the run\'s work on its own branch; integrating brings an accepted result into the project\'s shared branches. They are separate steps.'),
+      // Abandonment and reversal (p9): facts, not an operation.
+      h('p.small.muted.reversal-note', done
+        ? `Undoing it is new work: a run that names this one as its predecessor and reverts the integrated commits with new ones (wfe run reversal ${runKey(rec)} lists them); later changes stay, and effects outside Git need their own check.`
+        : 'Nothing of it is on the project\'s shared branches: cancelling or abandoning it needs no rollback, and its work stays on its own branch.'),
       ...(row?.steps ?? []).map(x => h('div.small.muted', { dataset: { key: `int:${row!.id}:${x.repo}` } }, `${x.repo === '.' ? 'root' : x.repo} → ${x.target}: ${x.state}${x.method ? ` (${x.method})` : ''}${x.result ? ` ${x.result.slice(0, 7)}${x.pushed ? ' pushed' : ''}` : ''}${x.files?.length ? `; files: ${x.files.join(', ')}` : ''}${x.error ? `; ${x.error}` : ''}`)),
       can ? h('div.row.tight', h('button', { dataset: { action: 'integrate-check' }, title: 'Combine locally and show what would happen; nothing is pushed' }, 'Check integration'),
         h('button', { dataset: { action: 'integrate-run' }, title: 'Bring the accepted result into the shared branches now' }, row && row.state !== 'queued' ? 'Retry integration' : 'Integrate now')) : null,

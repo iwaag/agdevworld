@@ -291,7 +291,7 @@ export function renderRunView(root: HTMLElement, wsId: string, workflow: string,
         break
       }
       case 'cancel-run': {
-        const why = prompt('Cancel this run? Every pending, running or waiting node is cancelled. Reason:')
+        const why = prompt('Cancel this run? Every pending, running or waiting node is cancelled, for good. Its records and saved work are kept (nothing is deleted or reverted). Reason:')
         if (why?.trim()) void record({ op: 'run.cancel', reason: why }, 'Recorded: the run is cancelled.')
         break
       }

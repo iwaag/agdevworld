@@ -193,6 +193,20 @@ plan (nothing is pushed or recorded); --status shows the journal. An
 acceptance queues its integration by itself: the execution host carries it
 out once the run is completed and saved. Writes run.json (run.integrate)
 when every repository is integrated.`,
+  reversal: `wfe run reversal <run>
+
+What undoing the run involves (p9, docs/integration.md). Reads only; it
+changes nothing. Cancelling keeps a run's work. Work that was never
+integrated is on the run's own branch and in its copy: discarding it needs no
+rollback on a shared branch. An integrated result is undone as new work — a
+new run that names this one as its predecessor and reverts, with new
+commits, exactly what each integration brought: per repository the target,
+the commits before and after, the commits and files in between, and the
+target's later commits (kept). A submodule is reverted in its own repository
+(possibly shared with other projects), and the root then records that new
+commit; moving the root's gitlink back alone does not undo the submodule.
+Effects outside Git (deployments, data elsewhere, served presentations) are
+named, never claimed undone.`,
   events: `wfe run events <run> [--since <seq>]
 
 The coordination events selected from committed history entries — started,
@@ -337,6 +351,7 @@ export function runIndex(): string {
   attach <run> <path>      record an artifact
   decide <run>             record acceptance or rejection of the result
   integrate <run>          bring the accepted result into the shared branches (or --dry-run, --status)
+  reversal <run>           what undoing the run involves (facts only)
   adjust <run>             change the run's future work (a recorded revision)
   revisions <run>          the original definition and each adjustment
   nodes <run>              the person's node catalog as this run was given it
@@ -788,6 +803,20 @@ export async function runCommand(c: RunCli): Promise<number> {
       const lines = [`Run ${runKey(r)}: revision ${rec.definition.active ?? 'r1'} in force.`, `  r1  the original snapshot (definition/${rec.definition.root}.yaml, created ${rec.created})`]
       for (const v of rec.definition.revisions ?? []) lines.push(`  ${v.revision}  from ${v.parent} by ${v.by} at ${v.at} (${v.source.kind}${'question' in v.source ? ` ${v.source.question}` : 'instruction' in v.source ? ` ${v.source.instruction}` : 'input' in v.source ? ` ${v.source.input} ${v.source.sha256.slice(0, 12)}…` : ''}): ${first(v.reason, 120)}`, `      added ${v.diff.added.join(', ') || '—'}; removed ${v.diff.removed.join(', ') || '—'}; ${v.file}`)
       c.out(lines.join('\n'), { active: rec.definition.active ?? 'r1', revisions: rec.definition.revisions ?? [] })
+      return 0
+    }
+    case 'reversal': {
+      const r = await ref()
+      const { reversalFacts } = await import('../server/reversal.ts')
+      const f = await wrap(() => reversalFacts(ws, r))
+      const lines = [f.summary]
+      if (f.saved) lines.push(`Saved: branch ${f.saved.branch} (${f.saved.repositories.map(x => `${x.path === '.' ? 'root' : x.path} ${x.head?.slice(0, 10) ?? '?'}`).join(', ')})${f.copy ? `; copy ${f.copy}` : ''}`)
+      for (const i of f.integrations) {
+        lines.push(`Integration of decision ${i.decision} (${i.at}, ${i.by}):`)
+        for (const x of i.repositories) lines.push(`  ${(x.path === '.' ? 'root' : x.path).padEnd(16)} ${x.target}: ${x.before.slice(0, 10)} → ${x.after.slice(0, 10)} (${x.method}; ${x.commits.length} commit${x.commits.length === 1 ? '' : 's'}; ${x.files.length} file${x.files.length === 1 ? '' : 's'}${x.later === null ? '' : `; ${x.later} later`})`)
+      }
+      lines.push('Steps:', ...f.steps.map(x => `  - ${x}`), 'Outside Git:', ...f.external.map(x => `  - ${x}`))
+      c.out(lines.join('\n'), f)
       return 0
     }
     case 'integrate': {

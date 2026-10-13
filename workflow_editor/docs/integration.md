@@ -140,11 +140,38 @@ result stands:
 Coordination announces `integrated` (Zulip), with each repository's target,
 method and resulting commit.
 
-## Reversal
+## Abandonment and reversal
 
-Integration never rewrites history. To undo an integrated result, prepare a
-reversal as new work (a new run) from the commits `integrations[]` names
-(see *Abandonment and reversal*).
+Stopping, cancelling and discarding are separate, and none of them rewrites
+history. `wfe run reversal <run>` (`GET …/reversal`) gives the facts. It
+reads only and is never an operation.
+
+- **Cancelling keeps the work.** A cancelled run's records, copy and saved
+  branch stay as they are. Nothing is deleted or reverted.
+- **Unintegrated work** never reached a shared branch, so discarding it needs
+  no rollback. The facts name its saved branch, its heads and its copy. A new
+  request can name the run as its predecessor (`wfe request …
+  --predecessor <run>`, `predecessor` in `POST runs`) to reuse its plan and
+  files. The new run's brief says where they are.
+- **An integrated result** is undone as **new work**: a linked run with new
+  commits that revert what each integration brought. Later changes on the
+  targets stay, and the run's records stay as evidence. For each repository
+  the facts give:
+  - the target;
+  - the commits before and after;
+  - the commits and files in between;
+  - the target's later commits, as last fetched on this host;
+  - the commands, e.g. `git revert --no-commit <before>..<after>` or `-m 1`
+    for a merge, followed by restoring the run's record folder and
+    committing.
+- **Submodules are repositories of their own**, possibly shared with other
+  projects. A submodule's revert is a commit on its own target, and the root
+  then records that commit. Moving the root's gitlink back alone does not
+  undo the submodule's branch.
+- **Effects outside Git** are named, never claimed undone: a deployed
+  service, data written elsewhere, a presentation still served.
+- **Not in p9:** automatic branch deletion, collecting copies, a
+  classification of rollbacks and a restart-from-plan screen.
 
 ## Fixtures
 
@@ -162,3 +189,11 @@ reversal as new work (a new run) from the commits `integrations[]` names
 - a remote that rejects the root's push: partial, then retried without
   integrating the study twice;
 - a crash after the push, found on the target and not pushed again.
+
+`test/reversal.test.ts` covers abandonment and reversal:
+
+- a cancelled run keeps its copy and branch, with nothing on `main`;
+- an integrated result is reverted by a linked run that follows the facts:
+  `app.txt` and the study are restored, later work on `main` stays, the
+  reverted run's snapshot stays, the root records the study's new commit, and
+  the history holds both the original and the reversal.

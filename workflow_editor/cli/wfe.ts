@@ -277,12 +277,14 @@ policy a run plans, reports each node and reports the whole (docs/contract.md,
 "Documentation policy"); manual leaves documents to explicit instructions.
 Refuses an id already used by another workflow file. Writing the file by hand
 is equally valid; see docs/contract.md.`,
-  request: `wfe request <workflow> --braindump <file|-> --author <person> [--receipt <id>] [--workspace <id>]
+  request: `wfe request <workflow> --braindump <file|-> --author <person> [--predecessor <run>] [--receipt <id>] [--workspace <id>]
 
-A person's request to the executor (autolab): creates the run with their
-words as braindump.md and queues its start. The same receipt twice queues
-once. Refused while another run of the executor holds the workspace (it has
-begun and has not completed or been cancelled); use another workspace.`,
+A person's request to the executor (autolab): creates the run, in its own
+working copy, with their words as braindump.md and queues its start. The same
+receipt twice queues once. Other runs of the project — held, waiting or
+working — never refuse it (p9). --predecessor names an earlier run this one
+follows (reusing its plan, repairing or reversing it): the record keeps the
+link and the agent is told where that run's records and saved branch are.`,
   present: `wfe present <subcommand> …   (presentations of a run's result; docs/presentations.md)
 
 register <run> <node> --source <dir> --entry <file> --review <file.md> --title <text>
@@ -1008,7 +1010,9 @@ async function cmdRequest(p: Parsed): Promise<number> {
   const x = await openExec(p)
   try {
     const text = readFileSync(file === '-' ? 0 : resolve(file), 'utf8')
-    const r = await x.request({ workspace: ws.reg.id, workflow, text, author, receipt, by: opt(p, 'by'), via: 'cli' })
+    const pred = opt(p, 'predecessor')
+    const predecessor = pred ? await (await import('../server/runs.ts')).resolveRef(ws, pred) : undefined
+    const r = await x.request({ workspace: ws.reg.id, workflow, text, author, receipt, by: opt(p, 'by'), via: 'cli', predecessor })
     out(`${r.duplicate ? 'Already requested (same receipt)' : 'Requested'}: run ${r.ref.workflow}/${r.ref.run} in ${ws.reg.id}; job ${r.job.id} is ${r.job.state}.`, r)
     return 0
   } catch (e) {

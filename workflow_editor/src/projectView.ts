@@ -6,6 +6,7 @@ import { api, ApiError } from './api.ts'
 import { live, serial } from './live.ts'
 import { h, short } from './dom.ts'
 import { diagnosticList } from './homeView.ts'
+import { keepingFocus, workflowCreator } from './createWorkflow.ts'
 import { displayToggle, onDisplay, showDetail } from './displayMode.ts'
 import { icon } from './icons.ts'
 import type { ViewHandle } from './main.ts'
@@ -58,7 +59,6 @@ export function renderProjectView(root: HTMLElement, wsId: string): ViewHandle {
   let sharedResult: HTMLElement | null = null
   let shared: DashboardResponse | null = null
   let sharedError = ''
-  let createError = ''
   let disposed = false
   let connected = true
   let runs: RunSummary[] | null = null
@@ -311,10 +311,10 @@ export function renderProjectView(root: HTMLElement, wsId: string): ViewHandle {
   }
 
   function renderWorkflows(): HTMLElement {
-    const card = h('section.card.workflows', h('h2', 'Workflows'), h('p.muted.small.d-only', 'devdocs/workflows/ in this workspace'))
+    const card = h('section.card.workflows', h('div.card-head', h('h2', 'Workflows'), creator.button), h('p.muted.small.d-only', 'devdocs/workflows/ in this workspace'))
     if (!data) return card
     if (!data.workflowsDir.exists) card.append(h('div.banner.warn', data.workflowsDir.reason ?? 'no workflow directory'))
-    if (!data.workflows.length) card.append(h('p.muted', 'No workflow yet.', h('span.s-only', ' Create one in Detail.')))
+    if (!data.workflows.length) card.append(h('p.muted.empty-workflows', 'No workflow yet. ', data.workflowsDir.exists ? h('button.link-btn', { type: 'button', onclick: () => creator.open() }, 'Create the first one') : null))
     for (const w of data.workflows) {
       const approved = w.approvals && w.approvals.intent === 'approved' && w.approvals.definition === 'approved'
       const simpleState = w.problem ? h('span.tile-state.error', icon('alert', 'icon'), 'Cannot be read')
@@ -335,30 +335,14 @@ export function renderProjectView(root: HTMLElement, wsId: string): ViewHandle {
             w.warnings ? h('span.chip.warn', `${w.warnings} warning${w.warnings > 1 ? 's' : ''}`) : null)),
         h('a.button', { href: `#/ws/${encodeURIComponent(wsId)}/wf/${encodeURIComponent(w.file)}` }, 'Open', h('span.d-only', ' Editor'))))
     }
-    const { id, name, policy } = newWorkflow
-    card.append(h('div.create-wf.d-only', h('h3', 'New workflow'),
-      h('div.row', h('label.field', h('span', 'Id'), id), h('label.field', h('span', 'Name'), name), h('label.field', h('span', 'Documentation'), policy),
-        h('button', {
-          disabled: !data.workflowsDir.exists,
-          onclick: async () => {
-            try {
-              const r = await api.createWorkflow(wsId, id.value.trim(), name.value.trim(), policy.value)
-              location.hash = `#/ws/${encodeURIComponent(wsId)}/wf/${encodeURIComponent(r.file)}`
-            } catch (e) { createError = (e as Error).message; render() }
-          },
-        }, 'Create')),
-      createError ? h('p.error', createError) : null))
+    creator.update({ existing: data.workflows.map(w => w.id).filter((x): x is string => !!x), enabled: data.workflowsDir.exists, reason: data.workflowsDir.reason })
+    card.append(creator.form)
     return card
   }
 
-  // The new-workflow form outlives renders, so text typed while the view
-  // reloads is kept (a render follows every load).
-  const newWorkflow = {
-    id: h('input', { placeholder: 'release-check', 'aria-label': 'New workflow id' }),
-    name: h('input', { placeholder: 'Release Check', 'aria-label': 'New workflow name' }),
-    policy: h('select', { 'aria-label': 'Documentation policy of the new workflow', title: 'default: each run plans with the person, reports every node and writes a final report. manual: documents only when asked.' },
-      h('option', { value: 'default', selected: true }, 'default — plan and reports'), h('option', { value: 'manual' }, 'manual — only when asked')),
-  }
+  // Creating a workflow (createWorkflow.ts): one entry in both modes; the
+  // form outlives renders, so text typed while the view reloads is kept.
+  const creator = workflowCreator(wsId, file => { location.hash = `#/ws/${encodeURIComponent(wsId)}/wf/${encodeURIComponent(file)}` })
 
   // Runs (docs/runs.md): every run of every workflow, newest first.
   const loadRuns = serial<object>(async () => {
@@ -482,11 +466,11 @@ export function renderProjectView(root: HTMLElement, wsId: string): ViewHandle {
     // Project reads supply the workflow choices independently of run reads.
     // Refresh the retained card too, even when the runs response arrived first.
     renderRuns()
-    main.replaceChildren(
+    keepingFocus(main, () => main.replaceChildren(
       hero = renderHero(),
       h('div.col.d-only', renderProjectCard(), renderRepos()),
       h('div.col.project-work', renderWorkspaces(), runsCard, renderWorkflows()),
-    )
+    ))
   }
 
   // External changes: reload what has no draft; guard the project draft.

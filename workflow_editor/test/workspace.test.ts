@@ -111,6 +111,14 @@ test('workflows are discovered by content and created with unique ids', async ()
   assert.match(text, /id: release-check\nname: Release Check\n/)
   await assert.rejects(a.createWorkflow('release-check', 'again'), /already used/)
   await assert.rejects(a.createWorkflow('Bad Id', 'x'), /must match/)
+  // Refusals name the field a form shows them beside (p8/ex2).
+  await assert.rejects(a.createWorkflow('release-check', 'again'), (e: unknown) => e instanceof RequestError && e.status === 409 && (e.detail as { field: string }).field === 'id')
+  await assert.rejects(a.createWorkflow('Bad Id', 'x'), (e: unknown) => e instanceof RequestError && (e.detail as { field: string }).field === 'id')
+  await assert.rejects(a.createWorkflow('fine', 'x', 'sometimes'), (e: unknown) => e instanceof RequestError && (e.detail as { field: string }).field === 'policy')
+  await assert.rejects(a.createWorkflow('fine', 'x', 'default', 'nonexistent'), (e: unknown) => e instanceof RequestError && (e.detail as { field: string }).field === 'template')
+  assert.equal((await a.createWorkflow('from-empty', 'From Empty', 'manual', 'empty')).file, 'from-empty.yaml')
+  assert.match(await readFile(join(a.root, 'devdocs/workflows/from-empty.yaml'), 'utf8'), /policy: manual/)
+  await rm(join(a.root, 'devdocs/workflows/from-empty.yaml'))
   // A file whose name differs from its id is still found by id.
   await writeFile(join(a.root, 'devdocs/workflows/renamed-file.yml'), text.replace('id: release-check', 'id: other-id'))
   const after = (await a.workflowSummaries()).list

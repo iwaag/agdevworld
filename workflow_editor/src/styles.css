@@ -126,6 +126,22 @@ pre { white-space: pre-wrap; font-size: 12px; background: rgba(0,0,0,.05); paddi
 .access-badge.readonly { background: #4a525e; }
 .access-badge.editable { background: #c99a2e; }
 .add-repo, .create-wf { border-top: 1px solid var(--line); margin-top: 14px; }
+/* creating a workflow (p8/ex2): one entry in both modes */
+.create-wf-open { display: inline-flex; align-items: center; gap: 6px; }
+.create-wf[hidden] { display: none; }
+.create-wf .field input, .create-wf .field select { max-width: 520px; }
+.create-more { margin: 4px 0 8px; font-size: 13px; }
+.create-more > summary { cursor: pointer; color: var(--accent); padding: 4px 0; }
+.field-hint { color: var(--muted); font-size: 12px; text-transform: none; letter-spacing: 0; }
+.field .field-hint { text-transform: none; letter-spacing: 0; }
+.field-error { color: var(--error); font-size: 12.5px; margin: 2px 0 0; }
+.field-error[hidden] { display: none; }
+.create-wf input[aria-invalid="true"] { border-color: var(--error); }
+.template-choice { display: flex; flex-direction: column; gap: 6px; }
+.template-option { display: flex; gap: 10px; align-items: flex-start; border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; cursor: pointer; text-transform: none; letter-spacing: 0; color: inherit; font-size: 13px; }
+.template-option:has(input:checked) { border-color: var(--accent); background: #f3f6fb; }
+.template-text { display: flex; flex-direction: column; gap: 2px; }
+.empty-workflows .link-btn { padding: 0; }
 .row { display: flex; gap: 10px; align-items: flex-end; flex-wrap: wrap; }
 .row .field { flex: 1; min-width: 140px; }
 .row button { margin-bottom: 8px; }

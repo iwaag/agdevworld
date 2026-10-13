@@ -323,6 +323,17 @@ scroll positions (per screen and mode) and file offsets survive a switch; a
 switch asked during an IME composition waits for it to end. The top bars stay
 in view, so the toggle is one click away anywhere.
 
+**Creating a workflow (p8/ex2).** The project's workflow list has
+**Create workflow** in its head in both modes; an empty list offers the same
+entry (`src/createWorkflow.ts`). The form asks for a name; the id (derived
+from the name until the person changes it, never an id already taken), the
+starting template (`server/templates.ts`, `wfe workflow templates`) and the
+documentation policy are behind **More settings**, which opens by itself when
+one of them is refused. Refusals carry the field they concern
+(`detail.field`) and are shown beside it. The form is built once and moved
+by re-renders, so a background reload or a switch keeps the text, the open
+state and the keyboard.
+
 **How the run view stays live (p7/ex2).** The view is built once and kept up
 to date in place, so whatever arrives never interrupts typing or reading:
 
@@ -450,6 +461,12 @@ switch (selection, place, Compact/Mini kept, alignment, editing in Simple).
 `npm run build && node checks/displayMode.ts`. `checks/displayShots.ts --out
 <dir>` captures every screen in both modes at 1440 × 1000 and 1280 × 800.
 Browser checks written for the full screens open in Detail (`checks/lib.ts`).
+
+`checks/freework.ts` (p8/ex2) checks this episode on a private project, an
+empty second project and a private service (port 8216): creating a workflow
+from Simple (errors beside their field, input kept across a switch and a
+background reload, the id moving past one that appeared).
+`npm run build && node checks/freework.ts [--keep] [--shots <dir>]`.
 
 `checks/appearance.ts` (p7) checks node appearance on its own temporary
 project and private service (port 8198): presets, the inspector's icon and

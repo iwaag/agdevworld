@@ -408,8 +408,12 @@ export function createHandler(config: ServiceConfig) {
         if (method === 'POST') {
           const input = await body(req) as Record<string, unknown>
           if (typeof input.id !== 'string') throw new RequestError(400, 'id is required')
-          return send(res, 201, await ws.createWorkflow(input.id, typeof input.name === 'string' ? input.name : '', typeof input.policy === 'string' ? input.policy : 'default'))
+          return send(res, 201, await ws.createWorkflow(input.id, typeof input.name === 'string' ? input.name : '', typeof input.policy === 'string' ? input.policy : 'default', typeof input.template === 'string' ? input.template : 'empty'))
         }
+      }
+      if (b === 'workflow-templates' && !file && method === 'GET') {
+        const { WORKFLOW_TEMPLATES } = await import('./templates.ts')
+        return send(res, 200, WORKFLOW_TEMPLATES)
       }
       if (b === 'workflows' && file && !action) {
         if (method === 'GET') return send(res, 200, await ws.workflowResponse(file))

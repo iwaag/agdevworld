@@ -4,7 +4,7 @@ import { readdir, realpath, stat } from 'node:fs/promises'
 import { join } from 'node:path'
 import { approvalStates, type ApprovalState } from '../shared/canonical.ts'
 import {
-  DOC_POLICIES, ID_PATTERN, emptyWorkflow, normalizeRepoPath, PROJECT_SCHEMA,
+  DOC_POLICIES, ID_PATTERN, normalizeRepoPath, PROJECT_SCHEMA,
   type ApprovalKind, type Project, type Workflow,
 } from '../shared/model.ts'
 import { delegateTargets, hasErrors, validateProject, validateWorkflow, type ValidationContext } from '../shared/validate.ts'
@@ -16,6 +16,7 @@ import { atomicWrite, createExclusive, inside, readTextOrNull, textHash } from '
 import { git, LOCAL_TRANSPORT } from './git.ts'
 import type { Registration } from './registry.ts'
 import { devdocsInfo, type DevdocsInfo } from './devdocs.ts'
+import { templateIds, workflowFromTemplate } from './templates.ts'
 import { newProjectText, newWorkflowText, parseProject, parseWorkflow, renderProject, renderWorkflow } from './yamlDoc.ts'
 
 export const WORKFLOWS_DIR = 'devdocs/workflows'
@@ -336,22 +337,26 @@ export class Workspace {
     }
   }
 
-  async createWorkflow(id: string, name: string, policy: string = 'default'): Promise<{ file: string }> {
-    if (!ID_PATTERN.test(id)) throw new RequestError(400, `workflow id must match ${ID_PATTERN.source}`)
-    if (!(DOC_POLICIES as readonly string[]).includes(policy)) throw new RequestError(400, `documentation policy must be ${DOC_POLICIES.join(' or ')}`)
+  // Creates a workflow file from a template (server/templates.ts). Refusals
+  // name the field they are about (detail.field), so a form can show them
+  // beside the input.
+  async createWorkflow(id: string, name: string, policy: string = 'default', template = 'empty'): Promise<{ file: string }> {
+    if (!ID_PATTERN.test(id)) throw new RequestError(400, `workflow id must match ${ID_PATTERN.source} (lowercase letters, digits, - _ .)`, { field: 'id' })
+    if (!(DOC_POLICIES as readonly string[]).includes(policy)) throw new RequestError(400, `documentation policy must be ${DOC_POLICIES.join(' or ')}`, { field: 'policy' })
+    if (!templateIds().includes(template)) throw new RequestError(400, `workflow template must be ${templateIds().join(' or ')}`, { field: 'template' })
     const dir = await this.workflowsDir()
     if (!dir.exists) throw new RequestError(409, `cannot create a workflow: ${dir.reason}`)
     const { list } = await this.workflowSummaries()
     const clash = list.find(s => s.id === id)
-    if (clash) throw new RequestError(409, `workflow id "${id}" is already used by ${clash.file}`)
+    if (clash) throw new RequestError(409, `workflow id "${id}" is already used by ${clash.file}`, { field: 'id' })
     const file = `${id}.yaml`
     const target = await inside(this.root, `${WORKFLOWS_DIR}/${file}`)
     try {
-      const w = emptyWorkflow(id, name)
+      const w = await workflowFromTemplate(template, id, name)
       w.documentation.policy = policy
       await createExclusive(target, newWorkflowText(w))
     } catch (e) {
-      if ((e as NodeJS.ErrnoException).code === 'EEXIST') throw new RequestError(409, `${file} already exists`)
+      if ((e as NodeJS.ErrnoException).code === 'EEXIST') throw new RequestError(409, `${file} already exists`, { field: 'id' })
       throw e
     }
     return { file }

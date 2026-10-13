@@ -233,9 +233,21 @@ successful run — and are never rewritten automatically: operations refuse a
 record that does not read cleanly. `wfe run check` names the difference. The
 CLI and the service use the same module, so they cannot disagree on rules.
 
-`via` is `cli` or `browser`. `by` is the declared actor: the CLI defaults to
-the run's executor and takes `--by <name>`; the browser asks for a name. Both
-are declarations, as approvers are.
+`via` is `cli` or `browser`. `by` is the declared actor; the browser asks for
+a name. Both are declarations, as approvers are. **Who records (p9):**
+
+- An executing attempt (`WFE_ATTEMPT` in its environment) records as the
+  run's agent, and refuses `--by` naming anyone else.
+- When the agent stops, resumes or cancels because of a person's answer or
+  instruction, it names those words with `because` (`--because
+  answer:<q>[:<n>]` or `instruction:<i>`). The reducer checks they exist and
+  records whose words they were, in the hold or cancellation too.
+- A control operation that carries an attempt id must be the open attempt's.
+- Outside an attempt, a run the execution host performs is recorded only
+  under a name given with `--by`. No default puts the agent's name on someone
+  else's act.
+- Runs an IDE agent performs itself keep the default, which is the run's
+  executor.
 
 ### Node states
 
@@ -498,22 +510,41 @@ recorded as `interrupted`, never as success.
 
 **Holds.** `stopped`, `interrupted` and `unknown` hold the run: nothing
 begins until a person records `run.resume` with an instruction (after looking
-at the working tree — side effects may have happened after the last record).
-`run.stop` while an attempt is open is a request (`control.stop`, shown as
-"stopping"); the hold is recorded only when the attempt's end confirms that
-the process is gone. Cancellation (`run.cancel`) is final: after it, reports,
-resumption and further attempts are refused.
+at the run's files — side effects may have happened after the last record).
+
+- `run.stop` while an attempt is open is a request (`control.stop`, shown
+  as "stopping"). The hold is recorded only when the attempt's end confirms
+  that the process is gone. Its reports are fenced from then on.
+- The checkpoint that follows saves the copy to the run branch. A save that
+  fails stays visible on that run, and `wfe exec publish` retries it.
+- **A hold keeps the run's plan, records and work in its own copy (p9) and
+  reserves nothing else:** other requests in the project are created and
+  executed meanwhile.
+- Resuming continues in the same copy, from the run's own base. The project's
+  newer commits are not merged in; the brief names how many there are and
+  where, and the agent asks again when they change an agreed plan or a
+  reviewed result.
+- Cancellation (`run.cancel`) is final: after it, reports, resumption and
+  further attempts are refused. The run's copy, records and saved branch
+  stay as they are.
 
 **Human waits.** A talk node asks and the agent ends its session; no process
-runs during the wait. An answer is persisted first, then the resumption is
+runs during the wait, and the wait reserves nothing (p9). An answer is persisted first, then the resumption is
 queued (once per answer, by receipt). A stopped run is not resumed by an
 answer. Recording an answer, taking it up, completing the node and accepting
 the result remain separate records.
 
-**One slot, one workspace.** One attempt executes at a time on this host;
-other requests wait in the queue. A run of the executor that has begun and is
-neither completed nor cancelled holds its workspace: another request there is
-refused (another workspace of the project can be used).
+**One slot (p9).** One attempt executes at a time on this host; other jobs
+wait in the queue. Nothing else is shared:
+
+- Every run works in its own copy, so no run reserves its project. A held, a
+  waiting or a working run never refuses another request (until p9, a begun
+  run held its workspace).
+- A run has at most one queued or claimed job.
+- Stopping a run drops only that run's queued job, and terminates only its
+  own attempt.
+- A run without a copy of its own (recorded before p9) is not executed; it
+  is migrated first (`wfe runs migrate`).
 
 **Recovery.** After a restart, an attempt whose process is gone is ended as
 `unknown`; one whose process lives keeps the slot. Requests and answers whose

@@ -19,7 +19,8 @@ import { hostname } from 'node:os'
 import { join } from 'node:path'
 import type { DatabaseSync } from 'node:sqlite'
 import { normalizeRepoPath } from '../shared/model.ts'
-import { describeSteps, effectiveOf, holderOf, hostOf, pendingInstructions, runKey, situation, type AttemptSettings, type RunRecord, type RunRef } from '../shared/run.ts'
+import { describeSteps, effectiveOf, holderOf, hostOf, pendingInstructions, runKey, situation, type AttemptSettings, type BecauseRef, type RunRecord, type RunRef } from '../shared/run.ts'
+import { git } from './git.ts'
 import { docStepsOf } from '../shared/compile.ts'
 import { assertWorkspaceAllowed, loadBoundary } from './boundary.ts'
 import type { Gitea } from './gitea.ts'
@@ -91,6 +92,8 @@ export function presentationBrief(r: RunRecord): string[] {
   return ['', 'Presentations of this run (wfe present status <run> says what is served now):',
     ...all.map(p => `- ${p.id} "${p.title}" from ${p.node}: ${p.state}${p.last ? ` (${p.last.detail})` : ''}; revision ${p.revision.slice(7, 19)}…${Object.values(r.questions).filter(q => q.presentation?.id === p.id).map(q => `; asked in ${q.id}`).join('')}`)]
 }
+export interface ControlMeta { because?: BecauseRef; attempt?: string }
+const controlMeta = (m: ControlMeta) => ({ ...(m.because ? { because: m.because } : {}), ...(m.attempt ? { attempt: m.attempt } : {}) })
 const now = () => new Date().toISOString()
 const alive = (pid: number | null) => { if (!pid) return false; try { process.kill(pid, 0); return true } catch (e) { return (e as NodeJS.ErrnoException).code === 'EPERM' } }
 
@@ -140,28 +143,16 @@ export class ExecStore {
 
   // ---- requests and the queue ------------------------------------------------------
 
-  // The run that holds a workspace: a run of this executor there that has
-  // begun and is neither completed nor cancelled. Another run does not start
-  // there meanwhile (one workspace, one run's working tree).
-  async holder(ws: Workspace, except?: RunRef): Promise<string | null> {
-    for (const r of await listRuns(ws)) {
-      if (r.problem || r.executorHost !== this.executor || (except && r.workflow === except.workflow && r.run === except.run)) continue
-      if (r.execution === 'completed' || r.execution === 'cancelled') continue
-      const begun = this.one<{ n: number }>('SELECT count(*) AS n FROM attempts WHERE workspace = ? AND workflow = ? AND run = ?', ws.reg.id, r.workflow, r.run)!.n > 0
-      if (begun || this.one('SELECT 1 FROM jobs WHERE workspace = ? AND workflow = ? AND run = ? AND state IN (\'queued\', \'claimed\')', ws.reg.id, r.workflow, r.run)) return r.ref
-    }
-    return null
-  }
-
-  // A person's request: create the run (their words as braindump.md) and
-  // queue its start. The receipt makes a retransmitted request a no-op.
+  // A person's request: create the run (their words as braindump.md) in its
+  // own working copy and queue its start. The receipt makes a retransmitted
+  // request a no-op. No other run reserves the project (p9): a held, waiting
+  // or working run keeps its own copy; the one execution slot is the only
+  // thing requests share.
   async request(o: { workspace: string; workflow: string; text: string; author: string; receipt: string; by?: string; via: string }): Promise<{ job: JobRow; ref: RunRef; duplicate: boolean }> {
     if (!/^[A-Za-z0-9:._/#-]{8,200}$/.test(o.receipt)) throw new RequestError(400, 'a request needs a receipt id (8–200 of A-Z a-z 0-9 : . _ / # -)')
     const seen = this.one<JobRow>('SELECT * FROM jobs WHERE receipt = ?', `request:${o.receipt}`)
     if (seen) return { job: seen, ref: { workflow: seen.workflow, run: seen.run }, duplicate: true }
     const ws = await this.workspace(o.workspace)
-    const held = await this.holder(ws)
-    if (held) throw new RequestError(409, `workspace ${ws.reg.id} is held by run ${held}, which has not completed (it may be awaiting a person). Finish or cancel it, or request the run in another workspace of the project.`)
     // The run gets its own working copy (p9); the same receipt finds it again.
     const env = this.ctx.gitea ? await this.ctx.gitea.gitEnv() : {}
     const created = await createRunInCopy(ws, { workflow: o.workflow, input: { kind: 'braindump', text: o.text, author: o.author, recordedBy: o.by }, executor: { host: this.executor }, by: o.by ?? o.author, via: o.via, area: this.ctx.area, receipt: `request:${o.receipt}` }, env)
@@ -213,6 +204,9 @@ export class ExecStore {
       const reading = await readRun(space, ref)
       const rec = reading.record
       if (!rec) { drop('the run cannot be read'); continue }
+      // One execution mode (p9): a run works in its own copy. A run recorded
+      // in the project workspace before p9 is migrated first.
+      if (!space.copyOf) { drop(`the run has no working copy of its own (recorded before p9); migrate it first (wfe runs migrate --workspace ${job.workspace})`); continue }
       if (rec.cancelled) { drop('the run is cancelled'); continue }
       if (rec.control.hold) { drop(`the run is held (${rec.control.hold.kind}); a person resumes it`); continue }
       if (rec.control.attempt) { drop(`attempt ${rec.control.attempt.id} is still open in run.json`); continue }
@@ -305,6 +299,7 @@ export class ExecStore {
     if (job.kind === 'resume') {
       if (r.control.last) lines.push(`The previous attempt ${r.control.last.id} ended: ${r.control.last.outcome}${r.control.last.detail ? ` — ${r.control.last.detail}` : ''}.`)
       if (resume && (!r.control.last || resume.at > r.control.last.ended)) lines.push(`The person resumed the run: "${resume.reason}" (${resume.by}).`)
+      lines.push(...await this.sinceBase(ws, r))
       for (const w of r.execution.waiting) lines.push(`Node ${w.node} waits; next move: ${holderOf(r, w.node)}.`)
     }
     lines.push(`Ready: ${r.execution.ready.join(', ') || '(none)'}; running: ${r.execution.active.join(', ') || '(none)'}.`)
@@ -314,6 +309,22 @@ export class ExecStore {
     if (r.definition.revisions?.length) lines.push('', `Definition: revision ${r.definition.active} is in force (adjusted ${r.definition.revisions.length} time${r.definition.revisions.length === 1 ? '' : 's'}; wfe run revisions <run>); the original is definition/${r.definition.root}.yaml.`)
     lines.push(...documentationBrief(r))
     return lines.join('\n')
+  }
+
+  // What happened in the project while this run was held or waiting (p9):
+  // the commits its shared targets gained since its base. Nothing of them is
+  // in the copy; the agent looks and, when they change the plan or the
+  // reviewed result, asks again.
+  async sinceBase(ws: Workspace, r: RunRecord): Promise<string[]> {
+    if (!ws.copyOf || !r.storage) return []
+    const out: string[] = []
+    for (const repo of r.storage.repositories) {
+      if (!repo.base || !repo.target) continue
+      const dir = join(ws.shared.root, repo.path)
+      const n = Number((await git(dir, ['rev-list', '--count', `${repo.base}..refs/heads/${repo.target}`])).stdout.trim())
+      if (n > 0) out.push(`Since this run's copy was made, ${repo.path === '.' ? 'the project' : repo.path} gained ${n} commit${n === 1 ? '' : 's'} on ${repo.target} in the project workspace (git -C ${dir} log ${repo.base.slice(0, 12)}..${repo.target}); none of them is in this copy. Look before relying on files they may change; when they change the agreed plan or a reviewed result, ask again.`)
+    }
+    return out
   }
 
   // ---- the end of an attempt ------------------------------------------------------------
@@ -350,15 +361,17 @@ export class ExecStore {
 
   // ---- stop, resume, cancel ---------------------------------------------------------
 
-  async stop(ws: Workspace, ref: RunRef, by: string, reason: string, via: string) {
-    const r = await runOp(ws, ref, { op: 'run.stop', reason }, { by, via })
+  // `meta` (p9): the person's words an agent acted on (`because`) and the
+  // attempt that records it; a browser stop is the person's own.
+  async stop(ws: Workspace, ref: RunRef, by: string, reason: string, via: string, meta: ControlMeta = {}) {
+    const r = await runOp(ws, ref, { op: 'run.stop', reason, ...controlMeta(meta) }, { by, via })
     this.run('UPDATE attempts SET stop_requested = ? WHERE workspace = ? AND workflow = ? AND run = ? AND state != \'ended\'', now(), ws.reg.id, ref.workflow, ref.run)
     this.run('UPDATE jobs SET state = \'dropped\', note = \'stopped\' WHERE workspace = ? AND workflow = ? AND run = ? AND state = \'queued\'', ws.reg.id, ref.workflow, ref.run)
     return r.record
   }
 
-  async resume(ws: Workspace, ref: RunRef, by: string, reason: string, via: string, receipt?: string) {
-    const r = await runOp(ws, ref, { op: 'run.resume', reason, ...(receipt ? { receipt: `resume:${receipt}` } : {}) }, { by, via })
+  async resume(ws: Workspace, ref: RunRef, by: string, reason: string, via: string, receipt?: string, meta: ControlMeta = {}) {
+    const r = await runOp(ws, ref, { op: 'run.resume', reason, ...controlMeta(meta), ...(receipt ? { receipt: `resume:${receipt}` } : {}) }, { by, via })
     const job = hostOf(r.record.executor) === this.executor ? this.enqueue(ws.reg.id, ref, 'resume', `resume:${ws.reg.id}/${runKey(ref)}/${r.record.seq}`, `resume: ${reason}`) : null
     return { record: r.record, job }
   }
@@ -367,8 +380,8 @@ export class ExecStore {
   // of its own (p7), whatever successors the graph has. A failed stop is
   // recorded (stop-failed) beside the cancellation and retried with
   // `wfe present stop <run> --all`.
-  async cancel(ws: Workspace, ref: RunRef, by: string, reason: string, via: string): Promise<{ record: RunRecord; cleanup: { presentation: string; ok: boolean; detail: string }[] }> {
-    const r = await runOp(ws, ref, { op: 'run.cancel', reason }, { by, via })
+  async cancel(ws: Workspace, ref: RunRef, by: string, reason: string, via: string, meta: ControlMeta = {}): Promise<{ record: RunRecord; cleanup: { presentation: string; ok: boolean; detail: string }[] }> {
+    const r = await runOp(ws, ref, { op: 'run.cancel', reason, ...controlMeta(meta) }, { by, via })
     this.run('UPDATE attempts SET stop_requested = ? WHERE workspace = ? AND workflow = ? AND run = ? AND state != \'ended\'', now(), ws.reg.id, ref.workflow, ref.run)
     this.run('UPDATE jobs SET state = \'dropped\', note = \'cancelled\' WHERE workspace = ? AND workflow = ? AND run = ? AND state = \'queued\'', ws.reg.id, ref.workflow, ref.run)
     let cleanup: { presentation: string; ok: boolean; detail: string }[] = []

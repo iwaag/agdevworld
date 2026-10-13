@@ -272,7 +272,7 @@ export function renderRunView(root: HTMLElement, wsId: string, workflow: string,
       case 'dismiss': opNotice = null; renderBanners(); break
       case 'details': toggleDetails(true); details.scrollIntoView({ block: 'nearest' }); break
       case 'stop-run': {
-        const reason = prompt('Stop this run? It stays resumable. Reason:')
+        const reason = prompt('Hold this run? Execution stops; its plan and work are kept and it can be resumed later. Other requests in this project can run meanwhile. Reason:')
         if (reason?.trim()) void record({ op: 'run.stop', reason }, 'Stop recorded.')
         break
       }

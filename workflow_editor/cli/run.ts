@@ -7,9 +7,9 @@ import type { RunResponse } from '../shared/api.ts'
 import { accessAt } from '../shared/access.ts'
 import { normalizeRepoPath } from '../shared/model.ts'
 import { docStepsOf, hasDocSteps, splitCounts } from '../shared/compile.ts'
-import { describeSteps, effectiveOf, EXECUTOR_OPS, holderOf, hostOf, notableEvents, questionState, runKey, type EntrustRef, type HistoryEntry, type Instruction, type OpInput, type RunRecord, type RunRef } from '../shared/run.ts'
+import { describeSteps, effectiveOf, EXECUTOR_OPS, holderOf, hostOf, notableEvents, questionState, runKey, type BecauseRef, type EntrustRef, type HistoryEntry, type Instruction, type OpInput, type RunRecord, type RunRef } from '../shared/run.ts'
 import {
-  adjustRun, checkRun, createRun, listRuns, resolveRef, runDir, runOp, runResponse, type AdjustResult, type CreateRunOptions,
+  adjustRun, checkRun, createRun, listRuns, readRun, resolveRef, runDir, runOp, runResponse, type AdjustResult, type CreateRunOptions,
 } from '../server/runs.ts'
 import { RequestError, type Workspace } from '../server/workspace.ts'
 import { runSpace } from '../server/runspace.ts'
@@ -29,7 +29,10 @@ export interface RunCli {
   area: () => string // the operating area (its node catalog is frozen into new runs, p7/ex1)
 }
 
-const COMMON = `Common options: --by <name> (who records; default the run's executor),
+const COMMON = `Common options: --by <name> (who records: your own name. An executing
+  attempt (WFE_ATTEMPT) records as the run's agent and refuses another name;
+  outside one, a run the execution host performs needs --by; otherwise the
+  default is the run's executor),
   --expect-seq <n> (refuse if the run moved past sequence n), --json,
   --receipt <id> (a retransmission with the same receipt is not recorded twice),
   --attempt <id> (default WFE_ATTEMPT: the executor's launch; while an attempt
@@ -120,10 +123,13 @@ what coordination messages quote.`,
 
 Records that a problem prevents the running or waiting node from continuing.
 Dependent nodes stay blocked. Writes run.json.`,
-  cancel: `wfe run cancel <run> [<node>] --reason <text>
+  cancel: `wfe run cancel <run> [<node>] --reason <text> [--because answer:<q>[:<n>]|instruction:<i>]
 
 Discontinues one node, or (without <node>) the whole run: every pending,
-running or waiting node is cancelled in the same entry. Final. Writes run.json.`,
+running or waiting node is cancelled in the same entry. Final. The run's
+working copy, records and saved branch stay as they are (nothing is
+reverted). --because names the person's answer or instruction you acted on
+(the record shows whose words they were). Writes run.json.`,
   ask: `wfe run ask <run> [<node>] --question <text> --to <who> [--id q<n>] [--about-plan] [--about-adjustment <name>] [--subject <path>]... [--presentation <p>]
 
 Records a question (ids q1, q2, … unless --id). With <node>, the running node
@@ -177,19 +183,24 @@ policy), failed, held (stopped, interrupted, unknown), resumed, completed,
 decided, cancelled — each with a stable id
 (<project>/<workflow>/<run>#<seq>:<type>) and a pointer to the record. The
 same selection feeds Zulip delivery (wfe notify). Reads only.`,
-  stop: `wfe run stop <run> --reason <text> --by <person>
+  stop: `wfe run stop <run> --reason <text> [--because answer:<q>[:<n>]|instruction:<i>]
 
-Stops execution; resumable. While an attempt executes, the stop is a request
-until the executor confirms the process is gone (the record shows "stopping");
-then the run is held as stopped. Without an attempt, it is held at once (for
+Holds the run: execution stops and nothing begins until wfe run resume. Its
+plan, records and unfinished work stay in its own working copy (saved to its
+run branch at the stop's checkpoint); other requests in the project go on
+meanwhile. While an attempt executes, the stop is a request until the
+executor confirms the process is gone (the record shows "stopping"); then
+the run is held as stopped. Without an attempt, it is held at once (for
 example while it waits for a person: an answer then does not resume it).
-Nothing resumes a stopped run but wfe run resume. Writes run.json.`,
-  resume: `wfe run resume <run> --reason <instruction> --by <person>
+An executing agent records it as itself; --because names the person's answer
+or instruction it acted on. Writes run.json.`,
+  resume: `wfe run resume <run> --reason <instruction> [--because answer:<q>[:<n>]|instruction:<i>]
 
-Resumes a run held as stopped, interrupted or unknown: the person's explicit
-instruction after looking at the working tree and records. It queues the
-executor; the instruction reaches the next attempt. Refused after
-cancellation. Writes run.json.`,
+Resumes a run held as stopped, interrupted or unknown: the instruction, after
+looking at the run's copy and records. It queues the executor; the next
+attempt works in the same copy, from the run's own base (the project's newer
+commits are not merged in; the brief names them). Refused after cancellation.
+--because names the person's words it follows. Writes run.json.`,
   access: `wfe run access <run> [<path>]...
 
 Says what this run's fixed definition declares for each path (relative to
@@ -507,10 +518,34 @@ export async function runCommand(c: RunCli): Promise<number> {
   }
   const attempt = c.opt('attempt') ?? process.env.WFE_ATTEMPT ?? undefined
   const receipt = c.opt('receipt')
+  // Who records (p9). An executing attempt (WFE_ATTEMPT) records as the
+  // run's agent, never in a person's name; the person's words it acted on
+  // are named with --because (stop, resume, cancel) or --from (answer,
+  // instruct). Outside an attempt, a run the execution host performs is
+  // recorded only under a name given with --by: no default puts the agent's
+  // name on someone else's act.
+  const recorder = async (r: RunRef): Promise<string | undefined> => {
+    const rec = (await wrap(() => readRun(ws, r))).record
+    if (!rec) return by
+    if (attempt) {
+      if (by?.trim() && by.trim() !== rec.executor.name) throw c.refused(`this process is attempt ${attempt} of ${rec.executor.name}; it records as ${rec.executor.name}, not as ${by.trim()}. Name the person's words instead: --because answer:<q>[:<n>] or instruction:<i> (stop, resume, cancel), --from <person> (answer, instruct).`)
+      return rec.executor.name
+    }
+    if (!by?.trim() && rec.executor.host) throw c.refused(`who records this? Pass --by <your name>: run ${runKey(r)} is performed by ${rec.executor.name} on the execution host ${rec.executor.host}, and only its executing attempt records under that name.`)
+    return by?.trim() || undefined
+  }
+  const because = (): BecauseRef | undefined => {
+    const v = c.opt('because')
+    if (!v) return undefined
+    const m = /^(answer|instruction):([a-z0-9]+)(?::(\d+))?$/.exec(v)
+    if (!m) throw c.usage('--because is answer:<question>[:<answer index>] or instruction:<instruction id>')
+    return m[1] === 'answer' ? { kind: 'answer', question: m[2], ...(m[3] ? { answer: Number(m[3]) } : {}) } : { kind: 'instruction', instruction: m[2] }
+  }
   const op = async (input: OpInput, what: (rec: RunRecord) => string, r?: RunRef, after?: (target: RunRef, rec: RunRecord) => Promise<string | null>) => {
     const target = r ?? await ref()
     const meta = { ...(attempt && EXECUTOR_OPS.includes(input.op) ? { attempt } : {}), ...(receipt ? { receipt } : {}) }
-    const res = await wrap(() => runOp(ws, target, { ...input, ...meta }, { by, via: 'cli', expectSeq }))
+    const who = await recorder(target)
+    const res = await wrap(() => runOp(ws, target, { ...input, ...meta }, { by: who, via: 'cli', expectSeq }))
     const extra = after ? await wrap(() => after(target, res.record)) : null
     return report(target, res.record, `${res.duplicate ? 'Already recorded (same receipt); nothing changed.' : what(res.record)}${extra ? `\n${extra}` : ''}`)
   }
@@ -582,18 +617,21 @@ export async function runCommand(c: RunCli): Promise<number> {
         ? op({ op: 'node.cancel', node: args[1], reason: need(c, 'reason', 'why it is discontinued') }, () => `Recorded: ${args[1]} cancelled.`)
         : (async () => {
           const r = await ref()
-          const { record: rec, cleanup } = await wrap(() => c.exec().cancel(ws, r, by ?? 'person', need(c, 'reason', 'why the run is discontinued'), 'cli'))
+          const who = await recorder(r) ?? (await wrap(() => readRun(ws, r))).record?.executor.name ?? ''
+          const { record: rec, cleanup } = await wrap(() => c.exec().cancel(ws, r, who, need(c, 'reason', 'why the run is discontinued'), 'cli', { because: because(), attempt }))
           const bad = cleanup.filter(x => !x.ok)
           return report(r, rec, `Recorded: the run is cancelled. An executing attempt is terminated by the executor; nothing it reports afterwards is recorded.${cleanup.length ? `\nPresentations: ${cleanup.map(x => `${x.presentation} ${x.ok ? 'stopped' : `NOT STOPPED (${x.detail}); retry: wfe present stop ${runKey(r)} --all`}`).join('; ')}` : ''}${bad.length ? '' : ''}`)
         })()
     case 'stop': {
       const r = await ref()
-      const rec = await wrap(() => c.exec().stop(ws, r, by ?? 'person', need(c, 'reason', 'why it stops'), 'cli'))
+      const who = await recorder(r) ?? (await wrap(() => readRun(ws, r))).record?.executor.name ?? ''
+      const rec = await wrap(() => c.exec().stop(ws, r, who, need(c, 'reason', 'why it stops'), 'cli', { because: because(), attempt }))
       return report(r, rec, rec.control.stop ? `Stop requested; attempt ${rec.control.attempt?.id} ends when the executor confirms its process is gone. The run then waits for a resume.` : 'Recorded: the run is stopped. Nothing resumes it until a person does (wfe run resume).')
     }
     case 'resume': {
       const r = await ref()
-      const res = await wrap(() => c.exec().resume(ws, r, by ?? 'person', need(c, 'reason', 'the resume instruction: what the executor should do now'), 'cli', receipt))
+      const who = await recorder(r) ?? (await wrap(() => readRun(ws, r))).record?.executor.name ?? ''
+      const res = await wrap(() => c.exec().resume(ws, r, who, need(c, 'reason', 'the resume instruction: what the executor should do now'), 'cli', receipt, { because: because() }))
       return report(r, res.record, `Recorded: resumed.${res.job ? ` Queued job ${res.job.id} (${res.job.state}).` : ''}`)
     }
     case 'ask': {
@@ -742,7 +780,7 @@ export async function runCommand(c: RunCli): Promise<number> {
         const index = c.opt('index') !== undefined ? Number(c.opt('index')) : undefined
         const target = await ref()
         const meta = { ...(attempt ? { attempt } : {}), ...(receipt ? { receipt } : {}) }
-        const res = await wrap(() => runOp(ws, target, { op: 'run.decide', decision, question, answer: index, note: c.opt('note'), ...meta }, { by, via: 'cli', expectSeq }))
+        const res = await wrap(async () => runOp(ws, target, { op: 'run.decide', decision, question, answer: index, note: c.opt('note'), ...meta }, { by: await recorder(target), via: 'cli', expectSeq }))
         const d = res.record.decisions.at(-1)!
         return report(target, res.record, res.duplicate ? 'Already recorded (same receipt); nothing changed.' : `Recorded: result ${decision}, from ${d.confirmation?.from}'s answer to ${question} (${d.evidence}). Execution is ${res.record.execution.state}; the two are separate records.`)
       }

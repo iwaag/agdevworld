@@ -190,7 +190,7 @@ test('a workflow that names its agent: browser answers queue the resumption and 
   } finally { srv.close() }
 })
 
-test('one workspace, one run: another request is refused while a run awaits a person; another workspace proceeds', async () => {
+test('a run awaiting a person reserves nothing (p9): another request in the same workspace runs; other workspaces too', async () => {
   const { x, id, extra } = await setup('directory', 2)
   const a = await request(x, id, 'req-hold-0001')
   const c = await claimed(x)
@@ -198,11 +198,16 @@ test('one workspace, one run: another request is refused while a run awaits a pe
   await report(ws, a.ref, c.attempt.id, { op: 'node.start', node: 'scope' })
   await report(ws, a.ref, c.attempt.id, { op: 'question.ask', question: '', node: 'scope', text: '?', to: 'Test Person' })
   await x.finished(c.attempt.id, { code: 0, signal: null })
-  await assert.rejects(request(x, id, 'req-hold-0002'), /held by run ship\/run-001/)
-  const b = await request(x, extra[0], 'req-other-0001')
+  const b = await request(x, id, 'req-hold-0002')
+  assert.equal(b.ref.run, 'run-002')
   const c2 = await claimed(x)
-  assert.equal(c2.workspace.id, extra[0], 'eligible work in another workspace runs while the first waits')
-  assert.equal(c2.ref.run, b.ref.run)
+  assert.deepEqual([c2.workspace.id, c2.ref.run], [id, 'run-002'], 'the second run of the same workspace is executed while the first waits')
+  assert.notEqual(c2.cwd, c.cwd)
+  await x.finished(c2.attempt.id, { code: 0, signal: null })
+  const o = await request(x, extra[0], 'req-other-0001')
+  const c3 = await claimed(x)
+  assert.equal(c3.workspace.id, extra[0], 'eligible work in another workspace runs as well')
+  assert.equal(c3.ref.run, o.ref.run)
 })
 
 test('interruption after a side effect: held, never rerun or completed by itself; explicit resume continues from the working tree', async () => {

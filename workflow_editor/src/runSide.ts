@@ -16,7 +16,7 @@
 // runView.ts keeps the server snapshot and the operations; this module reads
 // the data it is given and asks the view to act.
 import type { RunOpResponse, RunResponse } from '../shared/api.ts'
-import { effectiveOf, holderOf, isOpen, questionState, runKey, situation, type Question, type RunRecord } from '../shared/run.ts'
+import { effectiveOf, holderOf, isOpen, questionState, runKey, situation, type Because, type Question, type RunRecord } from '../shared/run.ts'
 import { reportStep } from '../shared/compile.ts'
 import type { AdjustView, PresentationView, RunExecView, RunNotifyView } from './api.ts'
 import { STATE_GLYPH, TYPE_LABEL } from './canvas.ts'
@@ -25,6 +25,10 @@ import { h, when } from './dom.ts'
 import { icon } from './icons.ts'
 import { patchContent } from './patch.ts'
 import { activeWorkflow, ago, chip, descendants, fileLink, nodeLabel, nodeLink, runHash, topoOrder } from './runCommon.ts'
+
+// Who a hold or a stop acted for (p9): the person's words named by the recorder.
+const becauseText = (b: Because | undefined) => b ? ` (on ${b.from}'s ${b.kind === 'answer' ? `answer to ${b.question}` : `instruction ${b.instruction}`})` : ''
+const STOP_TITLE = 'Hold the run: execution stops; its plan and work are kept and it can be resumed. Other requests in this project can run meanwhile.'
 
 export interface RunData {
   wsId: string
@@ -437,7 +441,7 @@ export class RunSide {
     } else if (answerable.length) {
       kind = 'answered'; head = 'Your answer is recorded'
       lead = h('span', `${rec.executor.name} has not taken it up yet: the next move is theirs.`, h('span.d-only', ' Recording an answer does not wake the executor.'))
-    } else if (hold) { kind = 'held'; head = `Held (${hold.kind})`; lead = h('span', `${hold.by}`, h('span.d-only', `, ${when(hold.since)}`), `: ${sentence(hold.reason)} Nothing runs until it is resumed with an instruction.`) }
+    } else if (hold) { kind = 'held'; head = `Held (${hold.kind})`; lead = h('span', `${hold.by}${becauseText(hold.because)}`, h('span.d-only', `, ${when(hold.since)}`), `: ${sentence(hold.reason)} Its plan and work are kept, and nothing of it runs until it is resumed with an instruction. Other requests in this project can run meanwhile.`) }
     else if (ex.failed.length) {
       kind = 'failed'; head = `${ex.failed.map(name).join(', ')} failed`
       const work = ex.blocked.filter(n => !effectiveOf(rec)?.nodes[n]?.step), docs = ex.blocked.length - work.length
@@ -457,7 +461,7 @@ export class RunSide {
     // The one-click review, while it is served (p7); otherwise what became of it.
     if (!d.rev) blocks.push(this.reviewLink(rec, kind))
     if (kind === 'working' || kind === 'accepted') blocks.push(this.activeBlock(rec, name))
-    if (kind === 'held') blocks.push(h('p.small.muted', 'Look at the working tree first; the instruction tells the executor what to do now. ', h('a', { href: '#', dataset: { action: 'goto-section', section: 'execution' } }, 'Execution details')))
+    if (kind === 'held') blocks.push(h('p.small.muted', 'Look at the run\'s files first (they are in its own copy of the project); the instruction tells the executor what to do now. ', h('a', { href: '#', dataset: { action: 'goto-section', section: 'execution' } }, 'Execution details')))
     if (kind === 'failed') blocks.push(
       h('ul.failures', ...ex.failed.map(n => { const f = rec.nodes[n].failure; return h('li', { dataset: { key: `fail:${n}` } }, nodeLink(n, name(n)), f ? `: ${f.reason}` : '', f ? h('span.d-only.muted', ` (${f.by}, ${when(f.at)})`) : null) })),
       h('p.small', `${rec.executor.name} can start a failed node again. You can change the work that is still pending, or end the run.`),
@@ -549,8 +553,8 @@ export class RunSide {
       steps.length ? h('ul.active-list', ...steps) : h('p.small.muted', 'No node is recorded as running.'),
       seen ? h(`p.s-only.observation.${tone}`, icon(tone === 'ok' ? 'play' : tone === 'warn' ? 'alert' : 'history', 'icon small'), seen) : null,
       h('p.small.executor-line.d-only', `Executor: ${host}${d.execView ? ` · executor ${d.execView.executor.state}` : ''}`),
-      h('div.row.tight.focus-actions', h('button', { title: 'Stop execution; the run stays resumable', dataset: { action: 'stop-run' }, disabled: this.frozen || !!rec.control.hold || !!rec.control.stop || sit === 'completed' }, icon('stop', 'icon tiny'), 'Stop'),
-        rec.control.stop ? h('span.small.warn-text', `Stop requested by ${rec.control.stop.by}; waiting for the process to end.`) : null))
+      h('div.row.tight.focus-actions', h('button', { title: STOP_TITLE, dataset: { action: 'stop-run' }, disabled: this.frozen || !!rec.control.hold || !!rec.control.stop || sit === 'completed' }, icon('stop', 'icon tiny'), 'Stop'),
+        rec.control.stop ? h('span.small.warn-text', `Stop requested by ${rec.control.stop.by}${becauseText(rec.control.stop.because)}; waiting for the process to end, then its work is saved.`) : null))
   }
 
   // Whether this host executes the run (it has queued jobs for it): an answer
@@ -955,19 +959,19 @@ export class RunSide {
     const open = ev?.attempts.find(a => a.state !== 'ended')
     const SIT: Record<string, string> = {
       executing: 'Executing', stopping: 'Stop requested — waiting for the process to end', 'awaiting-person': 'Awaiting a person — no process runs meanwhile',
-      stopped: 'Stopped — resumes only when you resume it', interrupted: 'Interrupted — look at the working tree, then resume', unknown: 'Unknown — the process was lost; look, then resume',
+      stopped: 'Stopped (held) — its work is kept; resumes only when you resume it', interrupted: 'Interrupted — look at the working tree, then resume', unknown: 'Unknown — the process was lost; look, then resume',
       completed: 'Completed', cancelled: 'Cancelled', 'not-started': 'Not started', idle: 'Idle',
     }
     const process = open ? (open.alive === true ? `process ${open.pid} alive` : open.alive === false ? (open.pid ? `process ${open.pid} not seen alive` : 'launching') : 'process on another host') : ''
     const frozen = this.frozen || !!rec.cancelled
     patchContent(this.execution.content.children[0] as HTMLElement,
       h('div.row.tight', h(`span.chip.sit-${sit}`, SIT[sit] ?? sit), process ? h('span.muted.small', process) : null),
-      rec.control.hold ? h('p.small', `Held (${rec.control.hold.kind}) since ${when(rec.control.hold.since)} by ${rec.control.hold.by}: ${rec.control.hold.reason}. `, h('a', { href: '#', dataset: { action: 'goto-resume' } }, 'Resume with an instruction')) : null,
+      rec.control.hold ? h('p.small', `Held (${rec.control.hold.kind}) since ${when(rec.control.hold.since)} by ${rec.control.hold.by}${becauseText(rec.control.hold.because)}: ${rec.control.hold.reason}. Its work is kept in its own copy; other requests can run meanwhile. `, h('a', { href: '#', dataset: { action: 'goto-resume' } }, 'Resume with an instruction')) : null,
       d.execError ? h('div.banner.warn', `Execution facts of this host could not be read: ${d.execError}`) : null,
       ev ? h('p.small.muted', `Executor: ${ev.executor.state}${ev.executor.detail ? ` — ${ev.executor.detail}` : ''}`) : null,
       // Where the run's work is kept (p9, docs/storage.md).
       d.resp?.place?.kind === 'run-copy' ? h('p.small.muted.run-place', `Work: this run's own copy of the project, saved to branch ${d.resp.place.branch ?? '(unknown)'} — not on the project's shared branch until it is integrated.`) : null,
-      h('div.row.tight', h('button', { disabled: frozen || !!rec.control.hold || !!rec.control.stop || sit === 'completed', title: 'Stop execution; the run stays resumable', dataset: { action: 'stop-run' } }, 'Stop')))
+      h('div.row.tight', h('button', { disabled: frozen || !!rec.control.hold || !!rec.control.stop || sit === 'completed', title: STOP_TITLE, dataset: { action: 'stop-run' } }, 'Stop')))
     const queued = ev?.jobs.filter(j => j.state === 'queued' || j.state === 'claimed') ?? []
     patchContent(this.execMore,
       queued.length ? h('p.small', 'Queued: ', ...queued.map(j => `${j.kind} (${j.state}) — ${j.reason}`)) : null,

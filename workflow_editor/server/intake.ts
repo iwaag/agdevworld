@@ -338,8 +338,6 @@ export class IntakeStore {
     if (c.kind === 'request') {
       let ref = await findRunByReceipt(ws, b.workflow, receipt)
       if (!ref) {
-        const held = this.exec ? await this.exec.holder(ws) : null
-        if (held) return this.refuse(row, b, `workspace ${ws.reg.id} is held by run ${held}, which has not completed; one run works in a workspace at a time. Open a new request topic once it has finished.`)
         try {
           // The run gets its own working copy (p9), found again by the post's receipt.
           const env = this.exec?.ctx.gitea ? await this.exec.ctx.gitea.gitEnv() : {}

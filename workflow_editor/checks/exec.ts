@@ -137,9 +137,10 @@ try {
   page.removeAllListeners('dialog'); page.on('dialog', d => void d.accept('wrong direction'))
   await page.getByRole('button', { name: 'Stop', exact: true }).click()
   check(await waitText('.run-side', /Stop requested — waiting for the process to end/), 'a stop request is shown as a request, not as termination')
-  await writeFile(join(dir, 'half.txt'), 'half\n')
+  await writeFile(join(c2.cwd, 'half.txt'), 'half\n') // in the run's own copy (p9)
   await x.finished(c2.attempt.id, { code: null, signal: 'SIGTERM' })
-  check(await waitText('.run-side', /Stopped — resumes only when you resume it/), 'stopped once the process ended')
+  check(await waitText('.run-side', /Stopped \(held\) — its work is kept; resumes only when you resume it/), 'stopped once the process ended')
+  check(await waitText('.focus', /Its plan and work are kept[\s\S]*Other requests in this project can run meanwhile/), 'the hold says what it keeps and that it reserves nothing (p9)')
   check(await report(c2.attempt.id, { op: 'node.progress', node: 'build', text: 'late' }).then(() => false, () => true), 'a late report of the stopped attempt is refused')
   await shot(page, 'p4-run-stopped', false)
 

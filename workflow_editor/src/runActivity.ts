@@ -41,7 +41,7 @@ export function describeActivity(i: ActivityInput): ActivityLine | null {
   const doing = i.active.length ? `Working on ${i.active[0]}${i.active.length > 1 ? ` and ${i.active.length - 1} more` : ''}` : 'Between steps'
   if (i.state === 'cancelled' || i.situation === 'cancelled') return { tone: 'muted', text: 'Cancelled' }
   if (i.state === 'completed') return { tone: 'done', text: 'Finished' }
-  if (i.holdKind) return { tone: 'held', text: 'Held', note: 'nothing runs until it is resumed' }
+  if (i.holdKind) return { tone: 'held', text: 'Held', note: 'its work is kept; nothing runs until it is resumed' }
   if (i.situation === 'stopping') return { tone: 'warn', text: 'Stopping', note: 'waiting for the session to end' }
   if (i.execError) return { tone: 'warn', text: i.active.length ? doing : 'Activity unknown', note: 'this host\'s execution facts cannot be read' }
   const open = i.exec?.attempts.find(a => a.state !== 'ended')

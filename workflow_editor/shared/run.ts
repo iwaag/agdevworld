@@ -217,12 +217,16 @@ export interface Execution {
 export const ATTEMPT_OUTCOMES = ['exited', 'stopped', 'interrupted', 'unknown'] as const
 export type AttemptOutcome = typeof ATTEMPT_OUTCOMES[number]
 export type HoldKind = 'stopped' | 'interrupted' | 'unknown'
+// The person's words a recorder acted on (p9): when an agent stops, resumes
+// or cancels a run because of an answer or an instruction, it records the
+// operation as itself and names them here.
+export type Because = { kind: 'answer'; question: string; answer: number; from: string } | { kind: 'instruction'; instruction: string; from: string }
 export interface Control {
   attempt: { id: string; reason: string; began: string; backend: string | null; settings?: AttemptSettings } | null // the open attempt; backend: what served it (Agent ≠ Model)
   attempts: number
   last: { id: string; outcome: AttemptOutcome; ended: string; detail: string; backend: string | null } | null
-  hold: { kind: HoldKind; since: string; by: string; reason: string } | null // nothing resumes it but run.resume
-  stop: { at: string; by: string; reason: string } | null // stop requested; not yet confirmed by the attempt's end
+  hold: { kind: HoldKind; since: string; by: string; reason: string; because?: Because } | null // nothing resumes it but run.resume
+  stop: { at: string; by: string; reason: string; because?: Because } | null // stop requested; not yet confirmed by the attempt's end
 }
 
 // Where the run's work is kept (p9, docs/storage.md): its own branch in
@@ -254,7 +258,7 @@ export interface RunState {
   presentations?: Record<string, Presentation> // present once the first one is registered (p7)
   artifacts: Artifact[]
   decisions: Decision[]
-  cancelled: { reason: string; at: string; by: string } | null
+  cancelled: { reason: string; at: string; by: string; because?: Because } | null
   control: Control
   execution: Execution
   started: string | null
@@ -280,17 +284,24 @@ export type OpInput =
   | { op: 'question.take-up'; question: string; answer?: number }
   | { op: 'question.withdraw'; question: string; reason: string }
   | { op: 'artifact.attach'; path: string; node?: string; title?: string }
-  | { op: 'run.cancel'; reason: string }
+  | { op: 'run.cancel'; reason: string; because?: BecauseRef }
   | { op: 'run.decide'; decision: 'accepted' | 'rejected'; evidence?: string; note?: string; question?: string; answer?: number; subject?: DocumentEvidence[] }
   | { op: 'attempt.begin'; attempt: string; reason: string; backend?: string; settings?: AttemptSettings }
   | { op: 'attempt.end'; attempt: string; outcome: AttemptOutcome; detail?: string }
-  | { op: 'run.stop'; reason: string }
-  | { op: 'run.resume'; reason: string }
+  | { op: 'run.stop'; reason: string; because?: BecauseRef }
+  | { op: 'run.resume'; reason: string; because?: BecauseRef }
   | { op: 'presentation.register'; presentation?: string; node: string; title: string; manifest?: PresentationManifest }
   | { op: 'presentation.observe'; presentation: string; status: Observation; instance?: string; detail?: string }
   // completing (p8/ex2): the adjustment is made at the completion of that
   // running node; the next entry is its node.complete (one locked write).
   | { op: 'run.adjust'; revision: string; parent: string; file: string; sha256: string; definitionDigest: string; effective: EffectiveGraph; reason: string; source: AdjustSource; diff?: AdjustDiff; completing?: string }
+
+// What a recorder gives: the answer (by question and index, default the
+// latest) or the instruction; the reducer resolves and records whose words.
+export type BecauseRef = { kind: 'answer'; question: string; answer?: number } | { kind: 'instruction'; instruction: string }
+// Control operations (p9): an executing agent records them as itself; when
+// it carries its attempt id, that attempt must be the open one.
+export const CONTROL_OPS: readonly string[] = ['run.stop', 'run.resume', 'run.cancel']
 
 export const OPS = ['run.create', 'node.start', 'node.progress', 'node.wait', 'node.complete', 'node.fail', 'node.cancel',
   'question.ask', 'question.answer', 'question.take-up', 'question.withdraw', 'instruction.receive', 'instruction.ack', 'artifact.attach', 'run.cancel', 'run.decide',
@@ -600,6 +611,25 @@ export function apply(prev: RunState | null, e: HistoryEntry | (OpInput & EntryM
       if (!ctl.attempt || ctl.attempt.id !== e.attempt) fail('attempt-stale', `attempt ${e.attempt} is not the current attempt of this run (${ctl.attempt ? `${ctl.attempt.id} is` : 'none is open'}); a stopped or superseded attempt records nothing`)
     } else if (ctl.attempt) fail('attempt-required', `attempt ${ctl.attempt.id} is executing this run; its reports carry its id (WFE_ATTEMPT), and nobody else records execution meanwhile`)
   }
+  if (CONTROL_OPS.includes(e.op) && e.attempt !== undefined && e.attempt !== null && (!ctl.attempt || ctl.attempt.id !== e.attempt)) fail('attempt-stale', `attempt ${e.attempt} is not the current attempt of this run (${ctl.attempt ? `${ctl.attempt.id} is` : 'none is open'}); a stopped or superseded attempt records nothing`)
+  // The person's words a control operation names must exist in this run.
+  const because = (v: unknown): Because | undefined => {
+    if (v === undefined || v === null) return undefined
+    if (!isObj(v)) return fail('shape', 'because must be {kind: answer, question, answer?} or {kind: instruction, instruction}')
+    if (v.kind === 'answer') {
+      const q = question(v.question)
+      if (!q.answers.length) fail('because', `question ${q.id} has no answer to act on`)
+      const i = v.answer === undefined || v.answer === null ? q.answers.length - 1 : v.answer
+      if (typeof i !== 'number' || !Number.isInteger(i) || !q.answers[i]) fail('because', `question ${q.id} has no answer ${String(v.answer)}`)
+      return { kind: 'answer', question: q.id, answer: i as number, from: q.answers[i as number].from }
+    }
+    if (v.kind === 'instruction') {
+      const ins = typeof v.instruction === 'string' ? s.instructions?.[v.instruction] : undefined
+      if (!ins) fail('because', `instruction ${String(v.instruction)} does not exist in this run`)
+      return { kind: 'instruction', instruction: ins!.id, from: ins!.from }
+    }
+    return fail('shape', 'because.kind must be answer or instruction')
+  }
   const ready = () => readiness(s.nodes, graph).ready
 
   switch (e.op) {
@@ -807,7 +837,8 @@ export function apply(prev: RunState | null, e: HistoryEntry | (OpInput & EntryM
     case 'run.cancel': {
       live()
       const reason = text(e.reason, 'the reason')
-      s.cancelled = { reason, at, by }
+      const why = because(e.because)
+      s.cancelled = { reason, at, by, ...(why ? { because: why } : {}) }
       for (const [id, n] of Object.entries(s.nodes)) {
         if (n.state === 'pending' || n.state === 'running' || n.state === 'waiting') {
           n.cancellation = { reason: `run cancelled: ${reason}`, at, by }
@@ -846,7 +877,7 @@ export function apply(prev: RunState | null, e: HistoryEntry | (OpInput & EntryM
       ctl.last = { id: ctl.attempt!.id, outcome, ended: at, detail: why, backend: ctl.attempt!.backend }
       ctl.attempt = null
       // A stop is the person's: the hold names who stopped and why.
-      if (!s.cancelled && outcome !== 'exited') ctl.hold = outcome === 'stopped' && ctl.stop ? { kind: 'stopped', since: at, by: ctl.stop.by, reason: ctl.stop.reason } : { kind: outcome as HoldKind, since: at, by, reason: why || outcome }
+      if (!s.cancelled && outcome !== 'exited') ctl.hold = outcome === 'stopped' && ctl.stop ? { kind: 'stopped', since: at, by: ctl.stop.by, reason: ctl.stop.reason, ...(ctl.stop.because ? { because: ctl.stop.because } : {}) } : { kind: outcome as HoldKind, since: at, by, reason: why || outcome }
       ctl.stop = null
       break
     }
@@ -854,8 +885,9 @@ export function apply(prev: RunState | null, e: HistoryEntry | (OpInput & EntryM
       live()
       const reason = text(e.reason, 'the reason')
       if (ctl.hold?.kind === 'stopped' || ctl.stop) fail('state', 'the run is already stopped or stopping')
-      if (ctl.attempt) ctl.stop = { at, by, reason } // confirmed by the attempt's end
-      else ctl.hold = { kind: 'stopped', since: at, by, reason }
+      const why = because(e.because)
+      if (ctl.attempt) ctl.stop = { at, by, reason, ...(why ? { because: why } : {}) } // confirmed by the attempt's end
+      else ctl.hold = { kind: 'stopped', since: at, by, reason, ...(why ? { because: why } : {}) }
       break
     }
     case 'run.resume': {
@@ -863,6 +895,7 @@ export function apply(prev: RunState | null, e: HistoryEntry | (OpInput & EntryM
       if (!ctl.hold) fail('state', 'the run is not held; there is nothing to resume')
       if (ctl.attempt) fail('attempt-open', `attempt ${ctl.attempt.id} is still open`)
       text(e.reason, 'the resume instruction')
+      because(e.because)
       ctl.hold = null
       break
     }
@@ -1215,6 +1248,8 @@ export interface NotableEvent {
   text: string // the event's own words: a question, an outcome, a reason
   document?: string // project-relative document the event refers to
   hold?: HoldKind
+  heldBy?: string // held: who stopped it (p9), and the person's words they acted on
+  because?: Because
   decision?: 'accepted' | 'rejected'
   subject?: string[] // the deliverables a result-confirmation question presents (p6)
   confirmation?: { question: string; from: string } // a decision from the person's confirmation (p6)
@@ -1228,12 +1263,12 @@ export interface NotableEvent {
 }
 // The hold an entry recorded, as the reducer worded it at that point (the
 // state keeps only the current hold): replayed from the frozen graph.
-function holdReason(r: RunRecord, seq: number): string {
+function holdAt(r: RunRecord, seq: number): Control['hold'] {
   const lastHold = [...r.history].reverse().find(h => h.change.hold?.[1])
-  if (lastHold?.seq === seq && r.control.hold) return r.control.hold.reason
+  if (lastHold?.seq === seq && r.control.hold) return r.control.hold
   const eff = r.definition.effective
-  if (!eff) return ''
-  try { return replay(r.history.slice(0, seq), { nodes: eff.nodes, edges: eff.edges }).state.control.hold?.reason ?? '' } catch { return '' }
+  if (!eff) return null
+  try { return replay(r.history.slice(0, seq), { nodes: eff.nodes, edges: eff.edges }).state.control.hold } catch { return null }
 }
 
 export function notableEvents(r: RunRecord, sinceSeq = 0): NotableEvent[] {
@@ -1265,7 +1300,10 @@ export function notableEvents(r: RunRecord, sinceSeq = 0): NotableEvent[] {
     else if (e.op === 'node.fail') push('failed', true, d.reason, { node: step ? step.for ?? undefined : d.node, step: step ? d.node : undefined })
     // The hold's reason is derived by the reducer (an exit with work left
     // running is an interruption); the latest hold carries it in the state.
-    if (e.change.hold?.[1]) push('held', true, holdReason(r, e.seq) || d.detail || d.reason || e.change.hold[1], { hold: e.change.hold[1] })
+    if (e.change.hold?.[1]) {
+      const h = holdAt(r, e.seq)
+      push('held', true, h?.reason || d.detail || d.reason || e.change.hold[1], { hold: e.change.hold[1], ...(h?.kind === 'stopped' ? { heldBy: h.by, ...(h.because ? { because: h.because } : {}) } : {}) })
+    }
     if (e.op === 'run.resume') push('resumed', false, d.reason)
     if (e.change.execution?.[1] === 'completed' && !(step?.kind === 'final-report')) push('completed', true, d.outcome ?? 'every node completed', e.op === 'node.complete' && !step ? { node: d.node } : {})
     if (e.op === 'run.decide') {

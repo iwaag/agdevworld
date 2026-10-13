@@ -116,7 +116,9 @@ function lines(e: NotableEvent, c: RenderContext): { head: string; free: string;
     case 'failed': return { head: `**Failed — ${node || e.step}:**`, free: e.text, tail: [`Next: ${c.person ?? 'the person'} looks at the run, then resumes or cancels it.`] }
     case 'held': {
       const what = e.hold === 'stopped' ? 'Stopped' : e.hold === 'interrupted' ? 'Interrupted' : 'Execution lost (unknown)'
-      return { head: `**${what}** — nothing runs until it is resumed.`, free: e.text, tail: [`Next: ${c.person ?? 'the person'} looks at the working tree and resumes in agdevworld${e.hold === 'stopped' ? ' when ready' : ''}.`] }
+      // Who stopped it and on whose words (p9); a hold keeps the run's work and reserves nothing.
+      const who = e.heldBy ? ` by ${e.heldBy}${e.because ? `, on ${e.because.from}'s ${e.because.kind === 'answer' ? `answer to ${e.because.question}` : `instruction ${e.because.instruction}`}` : ''}` : ''
+      return { head: `**${what}**${who} — its plan and work are kept; nothing of it runs until it is resumed. Other requests in the project can run meanwhile.`, free: e.text, tail: [`Next: ${c.person ?? 'the person'} looks at the run and resumes it in agdevworld${e.hold === 'stopped' ? ' when ready' : ''}.`] }
     }
     case 'resumed': return { head: `**Resumed** by ${e.by}:`, free: e.text, tail: [] }
     case 'completed': return {

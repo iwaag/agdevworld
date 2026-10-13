@@ -136,9 +136,12 @@ test('a run is performed as the definition\'s agent; the host is recorded beside
   const [s] = await listRuns(ws)
   assert.equal(s.executor, 'ppt-agent')
   assert.equal(s.executorHost, 'autolab')
-  assert.equal(await x.holder(ws), 'make/run-001', 'the host owns it although the agent has another name')
-  // So a second request waits while this one is queued.
-  await assert.rejects(x.request({ workspace: ws.reg.id, workflow: 'make', text: 'Another.', author: 'Test Person', receipt: 'settings-req-0002', via: 'browser' }), /held by run make\/run-001/)
+  // The host owns it although the agent has another name: the host claims it.
+  // A second request is a run of its own (p9: no run reserves the project).
+  const r2 = await x.request({ workspace: ws.reg.id, workflow: 'make', text: 'Another.', author: 'Test Person', receipt: 'settings-req-0002', via: 'browser' })
+  assert.equal(r2.ref.run, 'make/run-002'.split('/')[1])
+  const c = await x.claim('test', OFFER)
+  assert.ok('attempt' in c && c.ref.run === 'run-001', 'the first request is claimed first; the second waits for the slot')
   x.close()
 })
 

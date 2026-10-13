@@ -233,22 +233,21 @@ test('instructions do not touch nodes; ambiguity, late replies and completed run
   s.i.close()
 })
 
-test('posts of a request settle in order; a held workspace refuses a second request with the reason', async () => {
+test('posts of a request settle in order; a second request in the same workspace is a run of its own (p9: no run reserves the project)', async () => {
   const s = await setup()
   const a = post({ id: 4000, topicFirst: 4000, topic: 'request-a' })
   const b = post({ id: 4001, topicFirst: 4001, topic: 'request-b', content: 'another thing' })
   receive(s.i, [a, b])
   await s.i.process()
   const reqs = s.i.status().requests
-  assert.deepEqual(reqs.map(r => [r.key, r.state]), [['r4000', 'bound'], ['r4001', 'refused']])
-  assert.match(reqs[1].refused ?? '', /held by run make\/run-001/)
-  assert.equal(s.i.message(REALM, b.id)!.notice, 'refused')
-  // A later post in the refused topic is told so; it does not create a run.
+  assert.deepEqual(reqs.map(r => [r.key, r.state]), [['r4000', 'bound'], ['r4001', 'bound']])
+  assert.deepEqual((await listRuns(s.ws)).map(r => r.ref), ['make/run-001', 'make/run-002'], 'each request its own run, in arrival order')
+  // A later post in the second topic belongs to the second run.
   const c = post({ id: 4002, topicFirst: 4001, topic: 'request-b', content: 'hello?' })
   receive(s.i, [c])
   await s.i.process()
-  assert.deepEqual(JSON.parse(s.i.message(REALM, c.id)!.classification!), { kind: 'closed', reason: 'refused' })
-  assert.equal((await listRuns(s.ws)).length, 1)
+  assert.notEqual(JSON.parse(s.i.message(REALM, c.id)!.classification!).kind, 'closed')
+  assert.equal((await listRuns(s.ws)).length, 2)
   s.i.close()
 })
 

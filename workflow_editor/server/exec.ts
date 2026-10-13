@@ -341,11 +341,18 @@ export class ExecStore {
   async sinceBase(ws: Workspace, r: RunRecord): Promise<string[]> {
     if (!ws.copyOf || !r.storage) return []
     const out: string[] = []
+    const env = this.ctx.gitea ? await this.ctx.gitea.gitEnv() : {}
     for (const repo of r.storage.repositories) {
       if (!repo.base || !repo.target) continue
       const dir = join(ws.shared.root, repo.path)
-      const n = Number((await git(dir, ['rev-list', '--count', `${repo.base}..refs/heads/${repo.target}`])).stdout.trim())
-      if (n > 0) out.push(`Since this run's copy was made, ${repo.path === '.' ? 'the project' : repo.path} gained ${n} commit${n === 1 ? '' : 's'} on ${repo.target} in the project workspace (git -C ${dir} log ${repo.base.slice(0, 12)}..${repo.target}); none of them is in this copy. Look before relying on files they may change; when they change the agreed plan or a reviewed result, ask again.`)
+      // Other runs' integrations reach the remote, the person's commits the
+      // workspace: both are counted (the remote fetched first, best effort).
+      await git(dir, ['fetch', '-q', 'origin', `+refs/heads/${repo.target}:refs/remotes/origin/${repo.target}`], { env, timeoutMs: 30_000 })
+      const count = async (ref: string) => Number((await git(dir, ['rev-list', '--count', `${repo.base}..${ref}`])).stdout.trim()) || 0
+      const [local, remote] = [await count(`refs/heads/${repo.target}`), await count(`refs/remotes/origin/${repo.target}`)]
+      const n = Math.max(local, remote)
+      const ref = remote > local ? `origin/${repo.target}` : repo.target
+      if (n > 0) out.push(`Since this run's copy was made, ${repo.path === '.' ? 'the project' : repo.path} gained ${n} commit${n === 1 ? '' : 's'} on ${repo.target} (git -C ${dir} log ${repo.base.slice(0, 12)}..${ref}); none of them is in this copy. Look before relying on files they may change; when they change the agreed plan or a reviewed result, ask again.`)
     }
     return out
   }

@@ -156,19 +156,26 @@ test('the incident: the agent holds the run on the person\'s answer, as itself; 
   assert.equal(res.record.history.at(-1)!.by, 'Test Person')
   const c3 = await assertResumedInPlace(s, a)
   assert.equal(await exists(join(c3.cwd, 'NEWS.md')), false, 'the shared branch is not merged in')
-  assert.match(c3.brief, /the project gained 1 commit on main in the project workspace .* none of them is in this copy/)
+  assert.match(c3.brief, /the project gained 1 commit on main \(git -C .* none of them is in this copy/)
   rec = await record(s, a.ref)
   assert.equal(rec.nodes._plan.state, 'running', 'the plan step is where it was; agreement is not reset or assumed')
   assert.equal(rec.questions.q1.takenUp?.answer, 0)
 })
 
-test('an answer wait reserves nothing: B runs; the answer resumes A in its copy', async () => {
+test('an answer wait reserves nothing: B runs; the answer resumes A in its copy; the brief names what reached the remote meanwhile', async () => {
   const s = await setup()
   const a = await planned(s)
   await runB(s, 'req-b-wait')
+  // Something reaches the remote's main only (another run's integration, another clone).
+  const other = join(s.area, 'other-clone')
+  await gitOk(s.area, ['clone', '-q', s.remote, other])
+  await writeFile(join(other, 'INTEGRATED.md'), 'from elsewhere\n')
+  await gitOk(other, ['add', '-A']); await gitOk(other, ['commit', '-q', '-m', 'elsewhere']); await gitOk(other, ['push', '-q', 'origin', 'HEAD:main'])
   await runOp(s.ws, a.ref, { op: 'question.answer', question: 'q1', text: 'Agreed.', receipt: 'wait-answer-0001' }, { by: 'Test Person', via: 'browser' })
   assert.ok(await s.x.afterAnswer(s.ws, a.ref, 'q1'))
-  await assertResumedInPlace(s, a)
+  const c = await assertResumedInPlace(s, a)
+  assert.match(c.brief, /the project gained 1 commit on main \(git -C .*\.\.origin\/main\); none of them is in this copy/)
+  assert.equal(await exists(join(c.cwd, 'INTEGRATED.md')), false)
 })
 
 test('a running process: a stop waits for it to end (B waits for the slot, not for A); stopping A drops only A\'s queue', async () => {

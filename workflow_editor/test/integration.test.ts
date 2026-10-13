@@ -132,6 +132,17 @@ test('unchanged target: the acceptance queues the integration; the execution hos
   assert.notEqual((await git(s.remote, ['cat-file', '-e', 'main:other.txt'])).code, 0, 'the unaccepted run is not integrated')
   assert.deepEqual(s.x.integrations(s.id, b.ref), [])
   assert.equal(await status(a.ref), 'Integrated into main')
+  // The CLI's own forms (p9 deployment: --status was parsed as an option needing a value).
+  const { main } = await import('../cli/wfe.ts')
+  const out: string[] = []
+  const log = console.log
+  console.log = (...m: unknown[]) => { out.push(m.join(' ')) }
+  try {
+    assert.equal(await main(['run', 'integrate', 'ship/run-001', '--status', '--workspace', s.id, '--registry', s.registry, '--area', s.area]), 0)
+    assert.equal(await main(['runs', 'index', '--rebuild', '--workspace', s.id, '--registry', s.registry, '--area', s.area]), 0)
+  } finally { console.log = log }
+  assert.match(out.join('\n'), /Integration 1 of decision 0: integrated[\s\S]*root\s+→ main\s+done \(fast-forward\)/)
+  assert.match(out.join('\n'), /ship\/run-001\s+ready/)
   assert.equal(await status(b.ref), 'Saved on its branch — not integrated (no accepted result)')
   await assert.rejects(s.x.integrateRun(s.ws, b.ref, { by: 'Test Person', via: 'cli' }), /no accepted result.*stays saved on its branch, unintegrated/)
   // The live record stays in the copy and goes on: the snapshot on main is not it.

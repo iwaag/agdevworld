@@ -783,7 +783,7 @@ export async function runCommand(c: RunCli): Promise<number> {
       // --show r1 printed its name instead of its text).
       const { readFile } = await import('node:fs/promises')
       const { join } = await import('node:path')
-      const original = await readFile(join(ws.root, runDir(r), 'definition', `${rec.definition.root}.yaml`), 'utf8').catch(() => null)
+      const original = await readFile(join(await rootOf(r), runDir(r), 'definition', `${rec.definition.root}.yaml`), 'utf8').catch(() => null) // in the run's own copy (p9)
       texts.r1 = original ?? `(${root?.file})`
       for (const v of resp.revisions ?? []) texts[v.revision] = v.text ?? ''
       const show = c.opt('show')

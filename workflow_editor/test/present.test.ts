@@ -341,3 +341,22 @@ test('byte ranges: one range, suffix, open end, clamped end, unsatisfiable, igno
   assert.equal(byteRange('bytes=0-1,4-5', 10), null, 'several ranges: the whole file')
   assert.equal(byteRange('items=0-1', 10), null)
 })
+
+test('p9: a run in its own copy presents its copy — the project tree\'s files are not served', async () => {
+  const { ws, dir, pr } = await setup()
+  const { createRunInCopy } = await import('../server/runs.ts')
+  const { runSpace } = await import('../server/runspace.ts')
+  const created = await createRunInCopy(ws, { workflow: 'show', executor: { host: 'autolab' }, by: 'Pat', via: 'cli', input: { kind: 'braindump', text: 'make it so', author: 'Pat' }, receipt: 'present-copy-0001' })
+  const ref = created.ref
+  const copy = (await runSpace(ws, ref)).root
+  await writeFile(join(copy, 'game', 'main.js'), 'document.title = "the run\'s own"\n')
+  await writeFile(join(dir, 'game', 'main.js'), 'document.title = "the person\'s edit"\n')
+  await toPresent(ws, ref)
+  await register(ws, ref)
+  const s = await pr.start(ws, ref, 'p1')
+  assert.equal(s.state, 'serving')
+  assert.equal((await get(`${s.url}content/main.js`)).text, 'document.title = "the run\'s own"\n', 'served from the run\'s copy')
+  assert.ok((await rec(ws, ref)).presentations!.p1.folder.startsWith(`devdocs/runs/show/${ref.run}/presentations/`))
+  const stop = await pr.stop(ws, ref, 'p1')
+  assert.deepEqual(stop.map(x => x.ok), [true])
+})

@@ -71,7 +71,7 @@ nodes:
   wfe('executor', ['exec', 'finished', a, '--exit-code', '0'])
 
   // ---- the person answers; the run resumes in a new session
-  const ans = wfe('Person', ['run', 'answer', R, 'q1', '--answer', 'Plain text only. Yes, lines too — then show me the counts for README.md.'])
+  const ans = wfe('Person', ['run', 'answer', R, 'q1', '--answer', 'Plain text only. Yes, lines too — then show me the counts for README.md.', '--by', 'Sample Person']) // p9: a person names themself
   check(ans.code === 0 && /resumes the run/.test(ans.out), 'the answer queues the resumption')
   const b = (wfe('executor', ['exec', 'claim']).json as { attempt?: { id: string } }).attempt!.id
   wfe('executor', ['exec', 'started', b, '--pid', String(process.pid)])
@@ -95,7 +95,7 @@ nodes:
   wfe('session B', ['run', 'start', R, 'show'], b)
   wfe('session B', ['run', 'ask', R, 'show', '--question', 'README.md has 12 words and 3 lines. Anything else?', '--to', 'Sample Person'], b)
   wfe('executor', ['exec', 'finished', b, '--exit-code', '0'])
-  wfe('Person', ['run', 'answer', R, 'q2', '--answer', 'That is all, thanks.'])
+  wfe('Person', ['run', 'answer', R, 'q2', '--answer', 'That is all, thanks.', '--by', 'Sample Person'])
   const c = (wfe('executor', ['exec', 'claim']).json as { attempt?: { id: string } }).attempt!.id
   wfe('executor', ['exec', 'started', c, '--pid', String(process.pid)])
   wfe('session C', ['run', 'take-up', R, 'q2'], c)
@@ -105,7 +105,7 @@ nodes:
   wfe('executor', ['exec', 'finished', c, '--exit-code', '0'])
   const fin = wfe('Person', ['run', 'show', R, '--history'])
   check(/completed/i.test(fin.out.split('\n').slice(0, 6).join(' ')), 'the run is completed')
-  const rec = JSON.parse(await readFile(join(root, 'pj-demo', 'devdocs', 'runs', run!.workflow, run!.run, 'run.json'), 'utf8'))
+  const rec = JSON.parse(await readFile(join(root, 'pj-demo', '.local', 'wfe', 'runs', run!.workflow, run!.run, 'tree', 'devdocs', 'runs', run!.workflow, run!.run, 'run.json'), 'utf8')) // the run's own copy (p9)
   check(rec.execution.state === 'completed' && rec.definition.active === 'r2', 'run.json: completed, r2 in force')
   check(JSON.stringify(rec.history.map((h: { op: string }) => h.op).slice(-12)).includes('"run.adjust","node.complete"'), 'the history has the adjustment directly followed by the talk\'s completion')
   check(wfe('Person', ['run', 'check', R]).out.includes('usable'), 'wfe run check: usable')

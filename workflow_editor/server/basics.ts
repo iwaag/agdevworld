@@ -15,8 +15,8 @@
 //   editable); a project with no valid workflow (a new one) binds its root
 //   editable and every submodule and local area readonly;
 // - execution: the agent and profile every valid workflow agrees on, and
-//   the guides all of them list; otherwise left to the execution host;
-// - intake: none (Zulip intake stays the person's explicit choice).
+//   a project guide at agent/guide.md when present; otherwise left to the execution host;
+// - intake: requests, as for every newly created workflow.
 //
 // Placing never overwrites: a workflow with the id, or a file with the
 // name, is reported (present, conflict) and left as it is, so the person's
@@ -77,6 +77,12 @@ function keyFor(path: string, taken: Record<string, unknown>, wanted?: string): 
   for (let n = 2; ; n++) if (!(`${base}-${n}` in taken)) return `${base}-${n}`
 }
 
+// Use the conventional project-wide guide, never infer one from a workflow.
+async function projectGuides(ws: Workspace): Promise<string[]> {
+  try { return (await stat(join(ws.root, 'agent', 'guide.md'))).isFile() ? ['agent/guide.md'] : [] }
+  catch (e) { if ((e as NodeJS.ErrnoException).code === 'ENOENT') return []; throw e }
+}
+
 // Resolves the settings from the project's valid workflows (see the head).
 export async function resolveSettings(ws: Workspace): Promise<BasicSettings> {
   const repos = await ws.repositories()
@@ -92,6 +98,8 @@ export async function resolveSettings(ws: Workspace): Promise<BasicSettings> {
   }
   if (!valid.length) {
     const s = newProjectSettings(repos.filter(r => r.kind === 'submodule' || (r.kind === 'directory' && r.path !== 'devdocs')).map(r => r.path))
+    s.execution.guides = await projectGuides(ws)
+    if (s.execution.guides.length) s.notes.push('project guide: agent/guide.md')
     if (skipped.length) s.notes.push(`not learned from: ${skipped.join(', ')}`)
     return s
   }
@@ -113,8 +121,8 @@ export async function resolveSettings(ws: Workspace): Promise<BasicSettings> {
   // Execution: what every workflow agrees on.
   const same = (f: (w: Workflow) => string) => { const v = valid.map(f); return v.every(x => x === v[0]) ? v[0] : '' }
   const agent = same(w => w.execution.agent), profile = same(w => w.execution.profile)
-  const guides = valid[0].execution.guides.filter(g => valid.every(w => w.execution.guides.includes(g)))
-  notes.push(`execution: ${agent ? `agent ${agent}` : 'the host\'s agent'}${profile ? `, profile ${profile}` : ''}${guides.length ? `, guides ${guides.join(', ')}` : ', no common guide'}`)
+  const guides = await projectGuides(ws)
+  notes.push(`execution: ${agent ? `agent ${agent}` : 'the host\'s agent'}${profile ? `, profile ${profile}` : ''}${guides.length ? `, guides ${guides.join(', ')}` : ', no project guide'}`)
   return { repositories, execution: { agent, profile, guides }, notes }
 }
 

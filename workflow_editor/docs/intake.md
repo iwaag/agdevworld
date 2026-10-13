@@ -24,10 +24,16 @@ A channel is a workflow channel only when all three hold:
 
 1. the notifier recorded its stream id as `channel:<project>/<workflow>`;
 2. the workflow declares `intake: {zulip: requests}`;
-3. the host enables intake for the project (`<area>/zulip.json`
-   `intake.projects`), naming the requester identities (`intake.requesters`,
-   Zulip user ids) and, when the project has several workspaces here, the one
-   to use.
+3. the host enables intake (`<area>/zulip.json`, `intake.enabled`) and names
+   the requester identities (`intake.requesters`, Zulip user ids). All registered
+   projects are eligible automatically. `intake.projects` is an optional map
+   of workspace selections when a project has several workspaces; it is not
+   a project allowlist. With one workspace, no per-project configuration is needed.
+
+New workflows, whether empty or created from a template or placed as a basic
+workflow, declare `intake: {zulip: requests}` by default. A workflow may explicitly
+opt out with `intake: {zulip: ""}`. Older definitions without intake retain their
+original meaning until updated; existing run snapshots are never rewritten.
 
 Routing uses the realm (the configured Zulip URL's host and port) and the
 stream id. Channel and topic **names never select a project, workflow or

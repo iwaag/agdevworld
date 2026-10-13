@@ -227,9 +227,11 @@ workflow.
   changes bindings or execution (`server/basics.ts`): the union of the
   bindings of the project's valid workflows, each path with the most
   permissive access one of them grants; the agent and profile all of them
-  agree on and the guides all of them list. A project without valid
+  agree on, and the project-wide `agent/guide.md` when that file exists.
+  Workflow-specific guides are not inferred or copied. A project without valid
   workflows (a new one) binds its root editable and every submodule and
-  local area readonly. No intake.
+  local area readonly. Newly created workflows, including freework, declare
+  `intake: {zulip: requests}` by default.
 - **Placed by one mechanism**: project creation (`create.ts`, in the initial
   commit; in the devdocs source in submodule mode) and `wfe workflow basics
   [--dry-run] [--commit [--push]] [--workspace <id> | --all]` for existing

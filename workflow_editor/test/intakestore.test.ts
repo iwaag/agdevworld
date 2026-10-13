@@ -310,3 +310,40 @@ test('the cursor moves only with stored posts; a transport failure stays visible
   assert.doesNotMatch(s.i.problems().join('\n'), /transport/)
   s.i.close()
 })
+
+
+test('all registered projects route without an intake project allowlist; renamed basic template accepts a request', async () => {
+  const { i, ws, area, n } = await setup()
+  const path = join(area, 'zulip.json')
+  const cfg = JSON.parse(await readFile(path, 'utf8'))
+  delete cfg.intake.projects
+  await writeFile(path, JSON.stringify(cfg))
+  await ws.createWorkflow('conversation', 'Conversation', undefined, 'freework')
+  await n.due()
+  const stream = STREAM + 1
+  n.recordTarget('channel:p/conversation', { zulipId: stream })
+  const due = await i.due()
+  assert.deepEqual(due.channels.map(c => c.workflow).sort(), ['conversation', 'make'])
+  assert.ok(due.channels.some(c => c.workflow === 'conversation' && c.streamId === stream))
+  const request = post({ streamId: stream })
+  i.receive({ realm: REALM, streamId: stream, through: request.id, messages: [request] })
+  await i.process()
+  const rec = await record(ws, { workflow: 'conversation', run: 'run-001' })
+  assert.equal(rec.input.author, 'Pat')
+  assert.deepEqual(Object.keys(rec.nodes).sort(), ['_final-report', 'talk'])
+  i.close()
+})
+
+test('an empty template declares intake too, while an explicit workflow opt-out is respected', async () => {
+  const { i, ws, n } = await setup()
+  await ws.createWorkflow('blank', 'Blank')
+  const path = join(ws.root, 'devdocs', 'workflows', 'blank.yaml')
+  const text = await readFile(path, 'utf8')
+  assert.match(text, /zulip: requests/)
+  await n.due()
+  n.recordTarget('channel:p/blank', { zulipId: STREAM + 1 })
+  assert.ok((await i.due()).channels.some(c => c.workflow === 'blank'))
+  await writeFile(path, text.replace('zulip: requests', 'zulip: ""'))
+  assert.ok(!(await i.due()).channels.some(c => c.workflow === 'blank'))
+  i.close()
+})

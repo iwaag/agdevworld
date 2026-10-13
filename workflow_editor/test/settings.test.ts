@@ -54,7 +54,7 @@ nodes:
 edges:
   - {from: make, to: present}
 `
-const base = (): Workflow => ({ ...emptyWorkflow('w', 'W'), intent: 'x', nodes: { a: { type: 'talk', name: '', description: 'd', repositories: [] } } })
+const base = (): Workflow => ({ ...emptyWorkflow('w', 'W'), intake: { zulip: '' }, intent: 'x', nodes: { a: { type: 'talk', name: '', description: 'd', repositories: [] } } })
 
 test('model: execution, intake and confirms are read, written back and validated', () => {
   const r = parseWorkflow(WF)
@@ -68,8 +68,11 @@ test('model: execution, intake and confirms are read, written back and validated
   assert.ok(again.ok)
   assert.deepEqual(again.model.execution, w.execution)
   assert.equal(again.model.nodes.present.confirms, 'result')
-  // A workflow that declares none writes none.
-  assert.doesNotMatch(newWorkflowText(base()), /execution|intake|confirms/)
+  // Legacy definitions with no intake retain their original settings and digest.
+  const legacy = parseWorkflow(newWorkflowText(base()))
+  assert.ok(legacy.ok)
+  assert.equal(legacy.model.intake.zulip, '')
+  assert.doesNotMatch(newWorkflowText(legacy.model), /execution|intake|confirms/)
   const codes = (w: Workflow) => validateWorkflow(w).filter(i => i.severity === 'error').map(i => i.code).sort()
   assert.deepEqual(codes({ ...base(), execution: { agent: 'Bad Agent', profile: 'x y', guides: ['../out.md', '/abs.md'] } }), ['execution-agent', 'execution-guide-path', 'execution-guide-path', 'execution-profile'])
   assert.deepEqual(codes({ ...base(), intake: { zulip: 'everything' } }), ['intake-mode'])

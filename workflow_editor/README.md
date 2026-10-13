@@ -13,7 +13,7 @@ and the retired Gitea repository `developer/pj-workflow-editor`
 
 **The service in use is an installed release, never a source tree.** A
 release is built from one agdevworld commit, checked, and only then made
-current; the previous release stays for rollback.
+current. Deployment verifies that the service and launcher report that release.
 
 A standalone MVP that edits Git-backed project and workflow definitions from a
 browser UI while the same YAML files stay editable in any text editor or agent

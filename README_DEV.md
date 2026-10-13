@@ -68,7 +68,7 @@ each agdevworld screen's purpose and usage.
 - `src/detailPopup.ts` — the detail overlay for a clicked card.
 - `src/clusterState.ts` — snapshot reads for the cluster panels.
 - `workflow_editor/` — the workflow editor (agdev dashboard, Project Editor, runs, `wfe`): a system component with its own package (see "The workflow editor").
-- `scripts/wfe-release.sh` — builds, installs and recovers the workflow editor's service and launcher.
+- `scripts/wfe-release.sh` — builds and installs the workflow editor's service and launcher.
 - `scripts/fetch-cluster-state.mjs` — snapshot refresh through cagent. The one piece of JavaScript outside `src/`; it is a developer command, not part of the service.
 - `public/cluster/*.json` — live snapshots, git-ignored; `public/*.sample.json` is the fallback. The Docker build copies whatever is in `public/` at build time, so move a live snapshot out first if a sample-only image is wanted.
 
@@ -448,7 +448,7 @@ imported commit).
   catalog: projects, repositories, workspaces), `gitea.json`, `system.json`
   (the boundary below), the workspaces `pj-<id>/`, `.local/exec/` (autolab's
   queue and attempts), and the installed system code: `service/releases/<agdevworld
-  commit>/`, `service/current`, `service/previous`, `bin/wfe`.
+  commit>/`, `service/current`, `bin/wfe`.
 - **Releases.** `scripts/wfe-release.sh build <area> [<commit>]` archives
   `workflow_editor/` at that agdevworld commit into `service/releases/<commit>/`,
   runs `npm ci && npm run check` there and writes `RELEASE.json`. `activate`
@@ -456,8 +456,9 @@ imported commit).
   (which both the launchd service and `bin/wfe` run, so they move together),
   rewrites `bin/wfe`, restarts `com.agdev.wfe-service` and requires the service
   (`GET /wfe/api/version`) and the launcher (`wfe version`) to report the
-  commit; otherwise it restores the previous release. `deploy` = build +
-  activate; `rollback` returns to `service/previous`; `status` reads all of it.
+  commit. A failed health check reports the selected release and exits with
+  an error; it does not restore an older version. `deploy` = build + activate;
+  `status` reports the current release, service, launcher and open attempts.
 - **Operating boundary.** The editor never registers, creates, requests,
   claims or opens a workspace on system code, releases or control data, and
   never takes up a retired repository (`workflow_editor/server/boundary.ts`,

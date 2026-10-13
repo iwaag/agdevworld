@@ -42,13 +42,13 @@ import { RequestError, Workspace } from './workspace.ts'
 
 export const INTAKE_PROTOCOL = 1
 
-// <area>/zulip.json → "intake": which projects accept requests from Zulip,
+// <area>/zulip.json → "intake": all registered projects accept requests from Zulip,
 // who may request and answer (Zulip user ids, with the name their words are
 // recorded under), and from when posts are read.
 export interface IntakeConfig {
   enabled: boolean
   since: string
-  projects: Record<string, { workspace?: string }>
+  projects: Record<string, { workspace?: string }> // optional workspace overrides, not an allowlist
   requesters: { id: number; name: string }[]
 }
 
@@ -58,12 +58,12 @@ export function loadIntakeConfig(area: string): { realm: string; zulipUrl: strin
   if ('problem' in cfg) return { disabled: cfg.problem }
   const raw = cfg.intake as Partial<IntakeConfig> | undefined
   if (!raw) return { disabled: 'zulip.json has no "intake": requests from Zulip are not enabled' }
-  if (typeof raw.enabled !== 'boolean' || typeof raw.since !== 'string' || Number.isNaN(Date.parse(raw.since)) || typeof raw.projects !== 'object' || raw.projects === null || !Array.isArray(raw.requesters)) {
-    return { disabled: 'zulip.json "intake" needs {"enabled": bool, "since": ISO time, "projects": {<id>: {"workspace"?: id}}, "requesters": [{"id": n, "name": text}]}' }
+  if (typeof raw.enabled !== 'boolean' || typeof raw.since !== 'string' || Number.isNaN(Date.parse(raw.since)) || (raw.projects !== undefined && (typeof raw.projects !== 'object' || raw.projects === null || Array.isArray(raw.projects))) || !Array.isArray(raw.requesters)) {
+    return { disabled: 'zulip.json "intake" needs {"enabled": bool, "since": ISO time, "projects"?: {<id>: {"workspace"?: id}}, "requesters": [{"id": n, "name": text}]}' }
   }
   for (const r of raw.requesters) if (!Number.isInteger(r?.id) || typeof r?.name !== 'string' || !r.name.trim()) return { disabled: 'zulip.json "intake.requesters" entries are {"id": Zulip user id, "name": text}' }
   if (!raw.enabled) return { disabled: 'zulip.json "intake.enabled" is false' }
-  return { realm: realmId(cfg.zulipUrl), zulipUrl: cfg.zulipUrl, intake: raw as IntakeConfig }
+  return { realm: realmId(cfg.zulipUrl), zulipUrl: cfg.zulipUrl, intake: { ...raw, projects: raw.projects ?? {} } as IntakeConfig }
 }
 
 export interface MessageRow {
@@ -125,7 +125,7 @@ export class IntakeStore {
 
   // A channel routes to a workflow when the notifier recorded its stream id,
   // the workflow (as it is now in its workspace) declares intake.zulip:
-  // requests, and the host enables its project here. Nothing is routed by name.
+  // requests, and the project has an available workspace here. Nothing is routed by name.
   async routes(): Promise<{ realm: string; routes: Route[]; problems: string[] } | { disabled: string }> {
     const c = loadIntakeConfig(this.area)
     if ('disabled' in c) return c
@@ -133,7 +133,9 @@ export class IntakeStore {
     const routes: Route[] = []
     const reg = await loadRegistry(this.registryFile)
     const boundary = await loadBoundary(this.registryFile, this.area)
-    for (const [project, opt] of Object.entries(c.intake.projects).sort()) {
+    const projects = [...new Set([...reg.workspaces.map(w => w.project).filter((p): p is string => !!p), ...Object.keys(c.intake.projects)])].sort()
+    for (const project of projects) {
+      const opt = c.intake.projects[project] ?? {}
       const candidates = reg.workspaces.filter(w => w.project === project)
       const reg1 = opt.workspace ? candidates.find(w => w.id === opt.workspace) : candidates.length === 1 ? candidates[0] : undefined
       if (!reg1) { problems.push(`intake: project ${project}: ${opt.workspace ? `workspace ${opt.workspace} is not registered for it` : candidates.length ? `it has ${candidates.length} workspaces here; name one in zulip.json intake.projects.${project}.workspace` : 'no workspace of it is registered here'}`); continue }

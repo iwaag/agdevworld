@@ -46,7 +46,7 @@ test('a new project has freework: one talk, final report only, its root editable
   assert.deepEqual(w.documentation, { policy: 'custom', plan: false, reports: false, final: true })
   assert.deepEqual(w.repositories, { project: { path: '.', access: 'editable' } })
   assert.deepEqual(w.execution, { agent: '', profile: '', guides: [] })
-  assert.equal(w.intake.zulip, '', 'no Zulip intake')
+  assert.equal(w.intake.zulip, 'requests', 'Zulip requests enabled by default')
   assert.deepEqual(validateWorkflow(w, { repositories: await p.ws.repositories() }).filter(i => i.severity === 'error'), [])
   const g = compile(w)
   assert.ok(g.ok && Object.keys(g.graph.nodes).sort().join() === '_final-report,talk')
@@ -69,6 +69,8 @@ test('a new project with devdocs as a submodule has it in the devdocs repository
 async function existing() {
   const p = await project()
   await rm(file(p.dir))
+  await mkdir(join(p.dir, 'agent'), { recursive: true })
+  await writeFile(join(p.dir, 'agent', 'guide.md'), 'Project-wide guidance.\n')
   await mkdir(join(p.dir, 'lab'), { recursive: true })
   await writeFile(join(p.dir, 'lab', 'README.md'), 'lab\n')
   await writeFile(join(p.dir, 'project.yaml'), (await readFile(join(p.dir, 'project.yaml'), 'utf8')) + 'areas:\n  lab: Experiments\n  study/notes: Notes kept here\n')
@@ -112,12 +114,14 @@ test('an existing project: dry run, then added once with settings learned from i
   assert.equal(await readFile(file(p.dir), 'utf8'), edited)
 })
 
-test('settings: disagreeing agents are left to the host; no common guide is none', async () => {
+test('settings: disagreeing agents use the host; project guidance does not depend on workflow guide lists', async () => {
   const p = await existing()
   const t = await readFile(join(p.dir, 'devdocs', 'workflows', 'learn.yaml'), 'utf8')
   await writeFile(join(p.dir, 'devdocs', 'workflows', 'learn.yaml'), t.replace('agent: proj-agent', 'agent: other-agent').replace('agent/guide.md, ', ''))
   const s = await resolveSettings(p.ws)
-  assert.deepEqual(s.execution, { agent: '', profile: 'sonnet', guides: [] })
+  assert.deepEqual(s.execution, { agent: '', profile: 'sonnet', guides: ['agent/guide.md'] })
+  await rm(join(p.dir, 'agent', 'guide.md'))
+  assert.deepEqual((await resolveSettings(p.ws)).execution.guides, [])
 })
 
 test('conflicts and what cannot be placed are reported with their reason, nothing replaced', async () => {
@@ -180,4 +184,15 @@ test('the Free work template makes the same definition under another id', async 
   assert.deepEqual(Object.keys(w.nodes), ['talk'])
   assert.deepEqual(w.documentation, { policy: 'custom', plan: false, reports: false, final: true })
   assert.deepEqual(w.execution.agent, 'proj-agent')
+})
+
+
+test('a single workflow-specific guide is not inherited; the project guide works even without valid workflows', async () => {
+  const p = await existing()
+  await rm(join(p.dir, 'devdocs', 'workflows', 'learn.yaml'))
+  await rm(join(p.dir, 'agent', 'guide.md'))
+  assert.deepEqual((await resolveSettings(p.ws)).execution.guides, [], 'neither make.md nor its missing guide.md is project guidance')
+  await rm(join(p.dir, 'devdocs', 'workflows', 'make.yaml'))
+  await writeFile(join(p.dir, 'agent', 'guide.md'), 'Common project guidance.\n')
+  assert.deepEqual((await resolveSettings(p.ws)).execution.guides, ['agent/guide.md'])
 })

@@ -133,7 +133,7 @@ export function emptyWorkflow(id: string, name: string): Workflow {
   return {
     schema: WORKFLOW_SCHEMA, id, name, intent: '',
     repositories: {}, nodes: {}, edges: [], documentation: { policy: 'default' },
-    execution: { agent: '', profile: '', guides: [] }, intake: { zulip: '' }, approvals: {}, layout: { nodes: {} },
+    execution: { agent: '', profile: '', guides: [] }, intake: { zulip: 'requests' }, approvals: {}, layout: { nodes: {} },
   }
 }
 

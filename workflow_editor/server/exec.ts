@@ -19,7 +19,7 @@ import { hostname } from 'node:os'
 import { join } from 'node:path'
 import type { DatabaseSync } from 'node:sqlite'
 import { normalizeRepoPath, sessionPolicyOf } from '../shared/model.ts'
-import { configChanges, currentSession, describeSteps, effectiveOf, holderOf, hostOf, pendingInstructions, RECOVERY_BUDGET, runKey, sameConfig, sessionConfig, situation, type AttemptSession, type AttemptSettings, type BecauseRef, type RecoveryAgent, type RunRecord, type RunRef } from '../shared/run.ts'
+import { configChanges, currentSession, unverifiedReason, unverifiedSession, describeSteps, effectiveOf, holderOf, hostOf, pendingInstructions, RECOVERY_BUDGET, runKey, sameConfig, sessionConfig, situation, type AttemptSession, type AttemptSettings, type BecauseRef, type RecoveryAgent, type RunRecord, type RunRef } from '../shared/run.ts'
 import { git } from './git.ts'
 import { docStepsOf } from '../shared/compile.ts'
 import { assertWorkspaceAllowed, loadBoundary } from './boundary.ts'
@@ -309,6 +309,9 @@ export class ExecStore {
     const mint = () => (capability === 'explicit' ? randomUUID() : null)
     const cur = currentSession(rec)
     if (policy === 'fresh') return { policy, mode: 'new', id: mint() }
+    // A session whose harness reported another id is never reused by itself.
+    const unverified = unverifiedSession(rec)
+    if (unverified) return { refused: unverifiedReason(unverified, runKey({ workflow: rec.workflow, run: rec.run })) }
     const now = sessionConfig({ ...ex, contract: offer.contract ?? null })
     if (cur && cur.id && sameConfig(cur.config, now)) return { policy, mode: 'resume', id: cur.id }
     const last = rec.sessions?.at(-1)
@@ -439,12 +442,20 @@ export class ExecStore {
   // Records how the process ended and publishes the checkpoint. The record
   // derives the hold (shared/run.ts attempt.end); this only says how the
   // process ended.
-  async finished(attempt: string, exit: { code: number | null; signal: string | null; lost?: boolean }): Promise<{ outcome: string; checkpoint: CheckpointRow | null; resumeJob: JobRow | null }> {
+  // agent_session p1 ex1: `interrupted` — the execution host ended the
+  // attempt itself for this reason (a failed launch, a session mismatch), so
+  // it holds the run whatever the exit code; `attached` — a session id the
+  // harness reported that is not recorded yet, recorded before the end (or
+  // named in the end's detail when that fails).
+  async finished(attempt: string, exit: { code: number | null; signal: string | null; lost?: boolean; interrupted?: string; attached?: string }): Promise<{ outcome: string; checkpoint: CheckpointRow | null; resumeJob: JobRow | null }> {
     const a = this.attemptRow(attempt)
     if (!a) throw new RequestError(404, `no attempt ${attempt}`)
     if (a.state === 'ended') return { outcome: a.outcome ?? 'ended', checkpoint: null, resumeJob: null }
-    const outcome = exit.lost ? 'unknown' : a.stop_requested ? 'stopped' : exit.code === 0 ? 'exited' : 'interrupted'
-    const detail = exit.lost ? 'the process was gone when the execution host looked; whether its work finished is not known' : exit.code === 0 ? '' : `process ended with ${exit.signal ? `signal ${exit.signal}` : `exit code ${exit.code}`}`
+    let unrecorded = ''
+    if (exit.attached) await this.session(attempt, { attached: exit.attached }).catch(e => { unrecorded = `the harness reported session ${exit.attached}, which could not be recorded: ${(e as Error).message}` })
+    const how = `process ended with ${exit.signal ? `signal ${exit.signal}` : `exit code ${exit.code}`}`
+    const outcome = exit.lost ? 'unknown' : a.stop_requested ? 'stopped' : exit.code === 0 && !exit.interrupted ? 'exited' : 'interrupted'
+    const detail = [exit.lost ? 'the process was gone when the execution host looked; whether its work finished is not known' : exit.interrupted ? `${exit.interrupted} (${how})` : exit.code === 0 ? '' : how, unrecorded].filter(Boolean).join('; ')
     this.run('UPDATE attempts SET state = \'ended\', ended = ?, exit_code = ?, signal = ?, outcome = ? WHERE id = ?', now(), exit.code, exit.signal, outcome, attempt)
     this.run('UPDATE jobs SET state = \'done\' WHERE attempt = ?', attempt)
     const ws = await this.workspace(a.workspace)

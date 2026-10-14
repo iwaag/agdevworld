@@ -64,6 +64,32 @@ the run's current session.
 `wfe run session <run> [--retire --reason … [--because …]]` are the CLI
 forms. A repeated `--missing` report returns the same replacement.
 
+## A reported id that differs (agent_session p1 ex1)
+
+If the harness reports another session id than the one the attempt was
+launched with, the conversation is unverified. Nobody chose it, and it may
+not hold the run's context. The execution host:
+
+1. records both ids (`attached`, `mismatch: true`);
+2. stops the attempt and confirms that its process group is gone;
+3. ends the attempt with `wfe exec finished … --interrupted "session
+   mismatch: …"`, which holds the run as `interrupted` whatever the exit code.
+
+Under `run`, that session is never continued automatically. `run.resume` and
+`run.recover` are refused with `session-mismatch`, and so is claim's choice.
+The refusal names the next step: look at the run and at what the attempt
+did, then `wfe run session <run> --retire --reason "<what you found>"`.
+After that, a resume or a recovery is permitted, and the next attempt starts
+a new session whose `replaces` names the retirement. Retiring lifts no hold,
+needs no live process, and resets no recovery budget. The retired entry keeps
+`mismatch`. Under `fresh`, nothing reuses the session, so only the hold
+applies.
+
+A failed `attempt.session` record stays pending in the executor and is
+retried on every tick. The end report carries `--attached <id>`, which
+records it before `attempt.end`; if that fails as well, the id is named in
+the end's detail.
+
 ## Continuation
 
 A new session gets the whole bootstrap (common contract, project guides,

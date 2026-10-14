@@ -367,9 +367,13 @@ session <attempt> --missing [--detail <text>]
                                   nothing was launched in it: records the
                                   replacement and prints the new session id
 finished <attempt> --exit-code <n> [--signal <name>] [--lost]
+         [--interrupted <reason>] [--attached <id>]
                                   how it ended; records attempt.end, publishes
                                   the checkpoint, queues a resume if an answer
-                                  already waits
+                                  already waits. --interrupted: the host ended
+                                  it (a failed launch, a session mismatch),
+                                  which holds the run; --attached: a session id
+                                  the harness reported and not yet recorded
 stops                             attempts to terminate (stop or cancel requested)
 heartbeat --pid <pid> [--name …] [--detail …]
 reconcile [--holding <attempt>]   after a restart: gone processes become
@@ -863,7 +867,7 @@ async function cmdExec(p: Parsed): Promise<number> {
       case 'finished': {
         if (!arg) throw new UsageError('finished <attempt> --exit-code <n> [--signal <name>]')
         const code = opt(p, 'exit-code') !== undefined ? num('exit-code') : null
-        const r = await x.finished(arg, { code, signal: opt(p, 'signal') ?? null, lost: p.flags.has('lost') })
+        const r = await x.finished(arg, { code, signal: opt(p, 'signal') ?? null, lost: p.flags.has('lost'), interrupted: opt(p, 'interrupted'), attached: opt(p, 'attached') })
         out('', { ok: true, ...r }); return 0
       }
       case 'session': {

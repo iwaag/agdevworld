@@ -259,3 +259,53 @@ test('reducer: a resume must name the current session; a new session never reuse
     (e: unknown) => e instanceof RequestError && /already belongs to this run/.test(e.message))
   x.close()
 })
+
+test('mismatch (p1 ex1): the attempt ends interrupted with both ids kept; claim, resume and recover refuse the session until it is retired', async () => {
+  const { x, ws } = await setup('run')
+  const req = await x.request({ workspace: ws.reg.id, workflow: 'keep', text: 'Build.', author: 'Test Person', receipt: 'sess-req-0007', via: 'browser' })
+  const space = await runSpace(ws, req.ref)
+  const c1 = await claim(x)
+  const intended = c1.execution.session!.id!
+  x.started(c1.attempt.id, process.pid)
+  // The host stops the attempt and reports the harness's id with its end.
+  await x.finished(c1.attempt.id, { code: null, signal: 'SIGTERM', interrupted: `session mismatch: launched in session ${intended}, the harness reported other-1`, attached: 'other-1' })
+  let rec = await record(space, req.ref)
+  assert.deepEqual([rec.sessions![0].id, rec.sessions![0].attached, rec.sessions![0].mismatch, rec.sessions![0].state], [intended, 'other-1', true, 'open'])
+  assert.equal(rec.control.hold?.kind, 'interrupted')
+  assert.match(rec.control.hold!.reason, /session mismatch.*signal SIGTERM/)
+  const refusal = (e: unknown) => e instanceof RequestError && /unverified.*--retire/.test(e.message)
+  x.db.prepare('UPDATE attempts SET pid = NULL').run() // this test process stood in for the attempt's pid
+  await assert.rejects(x.resume(space, req.ref, 'Test Person', 'go on', 'cli'), refusal)
+  await assert.rejects(x.recover(space, req.ref, { incident: 'i-1', attempt: c1.attempt.id, reason: 'looked', by: 'Observer', via: 'cli' }), refusal)
+  // Claim's own choice refuses it too (a held run's job is dropped earlier, for the hold).
+  const choice = x.sessionFor(rec, { agent: 'autolab', profile: null, backend: 'claude_code / anthropic/claude-sonnet-5', guides: [] }, 'run', OFFER)
+  assert.ok('refused' in choice)
+  assert.match(choice.refused, /unverified.*wfe run session keep\/run-001 --retire/)
+  // Retired after a look: a recovery is permitted and starts a new session.
+  await x.retireSession(space, req.ref, 'Observer', 'looked: nothing ran', 'cli')
+  assert.equal((await record(space, req.ref)).control.hold?.kind, 'interrupted', 'retiring lifts no hold')
+  await x.recover(space, req.ref, { incident: 'i-1', attempt: c1.attempt.id, reason: 'session retired', by: 'Observer', via: 'cli' })
+  const c2 = await claim(x)
+  assert.equal(c2.execution.session?.mode, 'new')
+  assert.notEqual(c2.execution.session?.id, intended)
+  assert.match(c2.execution.session?.replaces?.reason ?? '', /^retired: looked: nothing ran/)
+  rec = await record(space, req.ref)
+  assert.deepEqual(rec.sessions!.map(s => [s.state, !!s.mismatch]), [['retired', true], ['open', false]], 'the mismatch stays on the retired session')
+  x.close()
+})
+
+test('mismatch under fresh: the attempt is held, but nothing resumes that session, so resuming is not refused', async () => {
+  const { x, ws } = await setup('fresh')
+  const req = await x.request({ workspace: ws.reg.id, workflow: 'keep', text: 'Build.', author: 'Test Person', receipt: 'sess-req-0008', via: 'browser' })
+  const space = await runSpace(ws, req.ref)
+  const c1 = await claim(x)
+  x.started(c1.attempt.id, process.pid)
+  await x.session(c1.attempt.id, { attached: 'other-2' })
+  await x.finished(c1.attempt.id, { code: 0, signal: null, interrupted: 'session mismatch: test' })
+  assert.equal((await record(space, req.ref)).control.hold?.kind, 'interrupted', 'an exit 0 the host interrupted still holds')
+  await x.resume(space, req.ref, 'Test Person', 'looked', 'cli')
+  x.db.prepare('UPDATE attempts SET pid = NULL').run()
+  const c2 = await claim(x)
+  assert.equal(c2.execution.session?.mode, 'new')
+  x.close()
+})

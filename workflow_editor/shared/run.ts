@@ -116,6 +116,17 @@ export function configChanges(was: SessionConfig | undefined, now: Pick<AttemptS
   return out
 }
 export const currentSession = (s: Pick<RunState, 'sessions'>): SessionRecord | null => { const l = s.sessions?.at(-1); return l && l.state === 'open' ? l : null }
+// The run's current session when it must not be continued automatically
+// (agent_session p1 ex1): under `run`, a session whose harness reported
+// another id than the one it was launched with. Nothing resumes it; a person
+// or a recovering agent looks at the run and what that attempt did, then
+// retires it (session.retire), and the next attempt starts a new session.
+export function unverifiedSession(s: Pick<RunState, 'sessions'>): SessionRecord | null {
+  const cur = currentSession(s)
+  return cur && cur.policy === 'run' && cur.mismatch ? cur : null
+}
+export const unverifiedReason = (cur: SessionRecord, run = '<run>') =>
+  `session ${cur.id} is unverified: the harness reported ${cur.attached ?? '(another id)'} instead${cur.attachedIn ? ` in attempt ${cur.attachedIn}` : ''}, so that attempt was stopped. The run does not continue in that conversation: look at the run and what the attempt did, then retire the session (wfe run session ${run} --retire --reason "<what you found>"); the next attempt starts a new session from the records`
 export interface BundleEntry {
   file: string // run-relative, definition/<id>.yaml
   source: string // project-relative file it was copied from
@@ -1074,6 +1085,8 @@ export function apply(prev: RunState | null, e: HistoryEntry | (OpInput & EntryM
       if (typeof e.incident !== 'string' || !INCIDENT_ID.test(e.incident)) fail('shape', `incident "${String(e.incident)}" must match ${INCIDENT_ID.source}`)
       const lastAttempt = ctl.last?.id ?? 'none'
       if (lastAttempt !== e.attempt) fail('recover-stale', `the run's last attempt is ${lastAttempt}, not ${String(e.attempt)}; the recovery was decided on another episode`)
+      const unverified = unverifiedSession(s)
+      if (unverified) fail('session-mismatch', unverifiedReason(unverified, runKey({ workflow: s.workflow, run: s.run })))
       if (!held) {
         // An unowned continuation: no hold, and work that only the executor
         // can take up — ready work, a node recorded as running, an answer
@@ -1097,6 +1110,8 @@ export function apply(prev: RunState | null, e: HistoryEntry | (OpInput & EntryM
       live()
       if (!ctl.hold) fail('state', 'the run is not held; there is nothing to resume')
       if (ctl.attempt) fail('attempt-open', `attempt ${ctl.attempt.id} is still open`)
+      const unverified = unverifiedSession(s)
+      if (unverified) fail('session-mismatch', unverifiedReason(unverified, runKey({ workflow: s.workflow, run: s.run })))
       text(e.reason, 'the resume instruction')
       because(e.because)
       ctl.hold = null

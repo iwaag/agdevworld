@@ -5,7 +5,7 @@ import { readFileSync } from 'node:fs'
 import { isAbsolute, relative, resolve, sep } from 'node:path'
 import type { RunResponse } from '../shared/api.ts'
 import { accessAt } from '../shared/access.ts'
-import { normalizeRepoPath } from '../shared/model.ts'
+import { normalizeRepoPath, sessionPolicyOf } from '../shared/model.ts'
 import { docStepsOf, hasDocSteps, splitCounts } from '../shared/compile.ts'
 import { describeSteps, effectiveOf, EXECUTOR_OPS, holderOf, hostOf, notableEvents, questionState, runKey, type BecauseRef, type EntrustRef, type HistoryEntry, type Instruction, type OpInput, type RunRecord, type RunRef } from '../shared/run.ts'
 import {
@@ -249,6 +249,20 @@ The same incident and attempt are recorded once. On success the resumption is
 queued; the next attempt's brief says it was continued by recovery and why.
 It grants no replay of side effects, no acceptance, no plan change and no
 answer. Writes run.json.`,
+  session: `wfe run session <run> [--retire --reason <text> [--because answer:<q>[:<n>]|instruction:<i>]]
+
+The run's harness sessions (agent_session p1, docs/sessions.md): its frozen
+session policy (fresh: a new conversation every attempt; run: later
+attempts resume the run's retained conversation), each session's id, the
+attempts it served, the configuration it was created under, and why each
+earlier one was replaced or retired. Transcripts stay on the execution host;
+the record keeps identities only.
+--retire ends the current session between attempts: the next attempt starts
+a new one from the run's records. For a session that is unusable (corrupt,
+or a conversation that keeps failing on resume) or when its context should
+not be carried on. Refused while an attempt is open or a process of the run
+lives. It changes no hold: a held run still needs a resume or a recovery.
+Writes run.json.`,
   resume: `wfe run resume <run> --reason <instruction> [--because answer:<q>[:<n>]|instruction:<i>]
 
 Resumes a run held as stopped, interrupted or unknown: the instruction, after
@@ -368,6 +382,7 @@ export function runIndex(): string {
   cancel <run> [<node>]    discontinue a node or the run (final)
   stop / resume <run>      hold (work kept; others go on), resume a held run
   recover <run>            a recovering agent continues an interrupted/unknown hold (incident, attempt)
+  session <run>            the run's harness sessions; --retire ends the current one
   events <run>             notification-worthy events (selection only)
   ask / answer / take-up / withdraw    questions
   instructions / instruct / ack       additional instructions: list, give, acknowledge
@@ -697,6 +712,27 @@ export async function runCommand(c: RunCli): Promise<number> {
       const who = await recorder(r) ?? (await wrap(() => readRun(ws, r))).record?.executor.name ?? ''
       const res = await wrap(() => c.exec().resume(ws, r, who, need(c, 'reason', 'the resume instruction: what the executor should do now'), 'cli', receipt, { because: because() }))
       return report(r, res.record, `Recorded: resumed.${res.job ? ` Queued job ${res.job.id} (${res.job.state}).` : ''}`)
+    }
+    case 'session': {
+      const r = await ref()
+      if (c.flag('retire')) {
+        const who = await recorder(r) ?? ''
+        if (!who) throw c.refused('who retires the session? Pass --by <your name>')
+        const rec = await wrap(() => c.exec().retireSession(ws, r, who, need(c, 'reason', 'why the current session ends'), 'cli', { because: because() }))
+        return report(r, rec, 'Recorded: the current session is retired; the next attempt starts a new one.')
+      }
+      const space = await wrap(() => runSpace(ws, r))
+      const rec = (await wrap(() => readRun(space, r))).record
+      if (!rec) throw c.refused(`run ${runKey(r)} cannot be read`)
+      const reading = await wrap(() => readRun(space, r))
+      const policy = sessionPolicyOf(reading.bundle.entries[rec.definition.root]?.workflow?.execution)
+      const lines = [`Session policy: ${policy} (frozen with the run's definition)`]
+      for (const x of rec.sessions ?? []) {
+        lines.push(`- ${x.id ?? '(id not reported)'} [${x.state}] since ${x.began} (attempt ${x.attempt}); attempts ${x.attempts.join(', ') || '(none)'}; ${x.config.profile ?? 'host default profile'} / ${x.config.backend ?? 'unknown backend'}${x.attached ? `; harness reported ${x.attached}${x.mismatch ? ' (DIFFERS from the intended id)' : ''}` : ''}${x.ended ? `; ended ${x.ended.at} by ${x.ended.by}: ${x.ended.reason}` : ''}`)
+      }
+      if (!rec.sessions?.length) lines.push('No session recorded yet.')
+      c.out(lines.join('\n'), { policy, sessions: rec.sessions ?? [] })
+      return 0
     }
     case 'recover': {
       const r = await ref()

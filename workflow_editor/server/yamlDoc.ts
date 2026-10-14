@@ -99,7 +99,7 @@ const approval = record({ digest: scalar, approver: scalar, at: scalar })
 export const WORKFLOW_SHAPE = record({
   schema: scalar, id: scalar, name: scalar, intent: scalar,
   documentation: record({ policy: scalar, plan: scalar, reports: scalar, final: scalar }),
-  execution: record({ agent: scalar, profile: scalar, guides: list(scalar) }),
+  execution: record({ agent: scalar, profile: scalar, guides: list(scalar), session: scalar }),
   intake: record({ zulip: scalar }),
   repositories: dict(record({ path: scalar, access: scalar }, true)),
   nodes: dict(record({ type: scalar, name: scalar, confirms: scalar, appearance: record({ icon: scalar, color: scalar }, true), description: scalar, repositories: list(scalar), workflow: scalar, template: record({ id: scalar, revision: scalar, expectation: scalar }) })),
@@ -262,7 +262,7 @@ export function workflowForWrite(w: Workflow): Record<string, unknown> {
   for (const [k, a] of Object.entries(w.approvals)) if (a) approvals[k] = a
   return {
     schema: w.schema, id: w.id, name: w.name, intent: w.intent,
-    documentation: w.documentation, execution: w.execution, intake: w.intake, repositories: w.repositories, nodes, edges: w.edges,
+    documentation: w.documentation, execution: { agent: w.execution.agent, profile: w.execution.profile, guides: w.execution.guides, session: w.execution.session || undefined }, intake: w.intake, repositories: w.repositories, nodes, edges: w.edges,
     approvals, layout: w.layout,
   }
 }

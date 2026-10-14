@@ -1,13 +1,13 @@
 // The inspector edits the selected node or edge, explains a generated step,
-// or holds the workflow's settings (documentation policy, repository
-// bindings, validation) when they are opened explicitly. It mutates the
+// or holds the workflow's settings (documentation policy, execution and its
+// session policy, repository bindings, validation) when they are opened explicitly. It mutates the
 // draft and tells the view whether the inspector itself must be rebuilt
 // (structure) or not (typing). Its groups keep their open state across
 // rebuilds (p8): a rebuild after a checkbox never folds what the person opened.
 import type { RepositoryStatus, WorkflowSummary } from '../shared/api.ts'
 import type { EffectiveGraph } from '../shared/compile.ts'
 import type { NodeTemplate } from '../shared/catalog.ts'
-import { ACCESS_LEVELS, APPEARANCE_COLORS, APPEARANCE_ICONS, ID_PATTERN, NODE_TYPES, normalizeRepoPath, type Issue, type Workflow } from '../shared/model.ts'
+import { ACCESS_LEVELS, APPEARANCE_COLORS, APPEARANCE_ICONS, ID_PATTERN, NODE_TYPES, normalizeRepoPath, SESSION_POLICIES, type Issue, type Workflow } from '../shared/model.ts'
 import { bindingCategory, iconOf, TYPE_LABEL, type Selection } from './canvas.ts'
 import { h } from './dom.ts'
 import { icon } from './icons.ts'
@@ -246,6 +246,34 @@ function stepPanel(ctx: InspectorContext, id: string, actions: InspectorActions)
   ]
 }
 
+// How runs execute (agent_session p1): who performs them and with which
+// profile and guides (as the file declares them), and the session policy —
+// the one execution setting edited here. A run freezes it with its
+// definition; a change reaches future runs only.
+const SESSION_TEXT: Record<string, string> = {
+  fresh: 'Fresh — every attempt starts a new agent session from the run\'s records and files.',
+  run: 'Run — later attempts resume the run\'s own session, so the agent keeps its conversation across waits. Records stay authoritative; a profile that cannot resume sessions refuses the run.',
+}
+function executionSection(w: Workflow, ro: boolean, actions: InspectorActions, sectionHead: (key: string, title: string) => HTMLElement): HTMLElement[] {
+  const value = w.execution.session ?? ''
+  const known = value === '' || (SESSION_POLICIES as readonly string[]).includes(value)
+  const select = h('select.session-policy', {
+    disabled: ro, 'aria-label': 'Session policy',
+    onchange: (e: Event) => { const v = (e.target as HTMLSelectElement).value; if (v === '') delete w.execution.session; else w.execution.session = v; actions.changed(true) },
+  },
+  h('option', { value: '', selected: value === '' }, 'fresh (not declared)'),
+  SESSION_POLICIES.map(p => h('option', { value: p, selected: p === value }, p)),
+  known ? null : h('option', { value, selected: true }, `${value} — invalid`))
+  const effective = value === 'run' ? 'run' : 'fresh'
+  return [
+    sectionHead('execution', 'Execution'),
+    h('dl.kv.small', h('dt', 'Agent'), h('dd', w.execution.agent || 'the execution host\'s'), h('dt', 'Profile'), h('dd', w.execution.profile || 'the execution host\'s default'),
+      h('dt', 'Guides'), h('dd', w.execution.guides.join(', ') || 'none')),
+    h('label.field.session-field', h('span', 'Session policy'), select),
+    h('p.muted.small.session-explain', known ? SESSION_TEXT[effective] : `"${value}" is not a session policy; runs are refused until it is fresh or run.`, ' Runs keep the policy they were created with.'),
+  ]
+}
+
 function workflowPanel(ctx: InspectorContext, actions: InspectorActions): HTMLElement[] {
   const w = ctx.draft
   const ro = ctx.readonly
@@ -259,6 +287,7 @@ function workflowPanel(ctx: InspectorContext, actions: InspectorActions): HTMLEl
       ? 'Runs follow the graph as drawn. No plan or report is generated or required; a node description or the person can still ask for documents.'
       : w.documentation.policy === 'custom' ? 'Runs get the documents chosen here, generated around the graph as drawn. Changing them changes the definition approval, never an existing run.'
         : 'Runs plan with the person first (plan.md), report every node (report-<node>.md) and end with report.md. Changing the policy changes the definition approval, never an existing run.'),
+    ...executionSection(w, ro, actions, sectionHead),
     sectionHead('bindings', 'Repository bindings'),
     h('p.muted.small', 'Bindings name the project repositories this workflow uses and declare its access. Each node chooses among them in its inspector.'),
   ]

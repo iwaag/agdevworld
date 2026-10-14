@@ -12,14 +12,14 @@
 // recorded end becomes `unknown`, a non-zero exit `interrupted`; both hold the
 // run until a person resumes it. A request or answer sent twice (same
 // receipt) is queued once.
-import { createHash, randomBytes } from 'node:crypto'
+import { createHash, randomBytes, randomUUID } from 'node:crypto'
 import { mkdirSync } from 'node:fs'
 import { lstat, readFile, realpath } from 'node:fs/promises'
 import { hostname } from 'node:os'
 import { join } from 'node:path'
 import type { DatabaseSync } from 'node:sqlite'
-import { normalizeRepoPath } from '../shared/model.ts'
-import { describeSteps, effectiveOf, holderOf, hostOf, pendingInstructions, RECOVERY_BUDGET, runKey, situation, type AttemptSettings, type BecauseRef, type RecoveryAgent, type RunRecord, type RunRef } from '../shared/run.ts'
+import { normalizeRepoPath, sessionPolicyOf } from '../shared/model.ts'
+import { configChanges, currentSession, describeSteps, effectiveOf, holderOf, hostOf, pendingInstructions, RECOVERY_BUDGET, runKey, sameConfig, sessionConfig, situation, type AttemptSession, type AttemptSettings, type BecauseRef, type RecoveryAgent, type RunRecord, type RunRef } from '../shared/run.ts'
 import { git } from './git.ts'
 import { docStepsOf } from '../shared/compile.ts'
 import { assertWorkspaceAllowed, loadBoundary } from './boundary.ts'
@@ -42,11 +42,19 @@ export const EXECUTOR = 'autolab'
 // profiles it can launch (name → backend label) and the common workflow
 // contract it composes every prompt from. A run's workflow chooses among the
 // profiles; the host never launches one it does not have.
-export interface HostOffer { profiles?: Record<string, string>; contract?: { name: string; sha256: string } }
+//
+// sessions (agent_session p1): per profile name ('' = the host's default
+// profile), how its harness keeps conversations — `explicit`: a session is
+// created under a caller-chosen id and resumed by that id. A profile absent
+// here keeps no conversation the host can resume: the `run` policy is
+// refused for it, and `fresh` attempts carry no session id.
+export interface HostOffer { profiles?: Record<string, string>; contract?: { name: string; sha256: string }; sessions?: Record<string, 'explicit'> }
 // What one attempt is launched with: the recorded settings plus the guide
 // texts the host composes into the prompt (the texts are not recorded; their
 // hashes are).
-export interface AttemptExecution { agent: string; profile: string | null; backend: string | null; guides: { path: string; sha256: string; text: string }[] }
+// session: the conversation this attempt is launched in (agent_session p1);
+// a resumed session gets a continuation prompt, a new one the whole bootstrap.
+export interface AttemptExecution { agent: string; profile: string | null; backend: string | null; guides: { path: string; sha256: string; text: string }[]; session?: AttemptSession }
 const sha256 = (b: string | Buffer) => createHash('sha256').update(b).digest('hex')
 
 // What the run's frozen documentation policy asks of this attempt (p5): the
@@ -228,6 +236,9 @@ export class ExecStore {
       if (rec.control.attempt) { drop(`attempt ${rec.control.attempt.id} is still open in run.json`); continue }
       const execution = await this.execution(space, rec, reading.bundle.entries[rec.definition.root]?.workflow?.execution, backend, offer)
       if ('refused' in execution) { drop(execution.refused); continue }
+      const session = this.sessionFor(rec, execution, sessionPolicyOf(reading.bundle.entries[rec.definition.root]?.workflow?.execution), offer)
+      if ('refused' in session) { drop(session.refused); continue }
+      execution.session = session
       const id = `a${Date.now().toString(36)}-${randomBytes(3).toString('hex')}`
       const claimed = this.tx(() => {
         if (this.one('SELECT 1 FROM attempts WHERE state != \'ended\'')) return false
@@ -242,7 +253,7 @@ export class ExecStore {
         // The run's catalog snapshot (p7/ex1): every attempt is given the same one.
         const cat = rec.context?.catalog
         const catalog = cat ? (cat.state === 'supplied' ? { state: 'supplied' as const, sha256: cat.sha256, templates: cat.templates } : { state: 'unavailable' as const }) : undefined
-        const settings: AttemptSettings = { agent: execution.agent, profile: execution.profile, backend: execution.backend, contract: offer.contract ?? null, guides: execution.guides.map(g => ({ path: g.path, sha256: g.sha256 })), ...(catalog ? { catalog } : {}) }
+        const settings: AttemptSettings = { agent: execution.agent, profile: execution.profile, backend: execution.backend, contract: offer.contract ?? null, guides: execution.guides.map(g => ({ path: g.path, sha256: g.sha256 })), ...(catalog ? { catalog } : {}), ...(execution.session ? { session: execution.session } : {}) }
         await runOp(space, ref, { op: 'attempt.begin', attempt: id, reason: job.kind, ...(execution.backend ? { backend: execution.backend } : {}), settings }, { by: this.executor, via: 'exec' })
       } catch (e) {
         this.run('UPDATE attempts SET state = \'ended\', ended = ?, outcome = \'refused\' WHERE id = ?', now(), id)
@@ -282,6 +293,69 @@ export class ExecStore {
       }
     }
     return { agent: rec.executor.name, profile, backend: chosen, guides }
+  }
+
+  // The session an attempt is launched in (agent_session p1), from the run's
+  // frozen policy, its recorded sessions and what the host's harness can do.
+  // `run` resumes the current session when it was created under the same
+  // configuration (agent, profile, backend, contract, guides); otherwise a
+  // new one replaces it, and the reason is recorded. `run` on a profile
+  // whose harness keeps no resumable conversation is refused: it never
+  // silently becomes fresh. Ids are minted here (UUIDs) for harnesses that
+  // take a caller-chosen id, so the record names the session before launch.
+  sessionFor(rec: RunRecord, ex: AttemptExecution, policy: 'fresh' | 'run', offer: HostOffer): AttemptSession | { refused: string } {
+    const capability = offer.sessions?.[ex.profile ?? ''] ?? null
+    if (policy === 'run' && capability !== 'explicit') return { refused: `the workflow's session policy is "run", but ${ex.profile ? `profile "${ex.profile}"` : 'the host\'s default profile'} (${ex.backend ?? 'unknown backend'}) keeps no conversation this host can resume; choose fresh, or a profile that supports sessions` }
+    const mint = () => (capability === 'explicit' ? randomUUID() : null)
+    const cur = currentSession(rec)
+    if (policy === 'fresh') return { policy, mode: 'new', id: mint() }
+    const now = sessionConfig({ ...ex, contract: offer.contract ?? null })
+    if (cur && cur.id && sameConfig(cur.config, now)) return { policy, mode: 'resume', id: cur.id }
+    const last = rec.sessions?.at(-1)
+    const replaces = cur
+      ? { id: cur.id, reason: cur.id ? `configuration changed: ${configChanges(cur.config, now).join('; ') || 'not comparable'}` : 'the previous session\'s id was never reported by the harness' }
+      : last?.state === 'retired' ? { id: last.id, reason: `retired: ${last.ended?.reason ?? ''}`.trim() }
+        : last ? { id: last.id, reason: `the previous session ended: ${last.ended?.reason ?? last.state}` } : undefined
+    return { policy, mode: 'new', id: mint(), ...(replaces ? { replaces } : {}) }
+  }
+
+  // The harness's report of the open attempt's session (agent_session p1):
+  // `attached` with the id it reported; `missing` when the session to resume
+  // is not on this host — nothing was launched in it yet, so a new session
+  // replaces it now (a new id when the harness takes one) and the reason is
+  // recorded. Fenced like every executor report: only the open attempt.
+  async session(attempt: string, report: { attached?: string; missing?: string }): Promise<{ id: string | null; event: 'attached' | 'replaced' }> {
+    const a = this.attemptRow(attempt)
+    if (!a || a.state === 'ended') throw new RequestError(409, `attempt ${attempt} is not open on this host`, { code: 'attempt-stale' })
+    const ws = await this.workspace(a.workspace)
+    const ref = { workflow: a.workflow, run: a.run }
+    const space = await runSpace(ws, ref)
+    if (report.attached) {
+      await runOp(space, ref, { op: 'attempt.session', attempt, event: 'attached', id: report.attached, receipt: `session:${attempt}:attached:${report.attached}` } as never, { by: this.executor, via: 'exec' })
+      return { id: report.attached, event: 'attached' }
+    }
+    const rec = (await readRun(space, ref)).record
+    // A repeated report (same attempt) is the replacement already recorded.
+    const done = rec?.history.find(h => h.receipt === `session:${attempt}:replaced`) as { id?: string | null } | undefined
+    if (done) return { id: done.id ?? null, event: 'replaced' }
+    const cur = rec ? currentSession(rec) : null
+    // Only a resumed session can be missing, and only explicit-id harnesses
+    // resume: the replacement gets a new caller-chosen id.
+    const id = randomUUID()
+    await runOp(space, ref, { op: 'attempt.session', attempt, event: 'replaced', id, reason: `session ${cur?.id ?? '(unknown)'} is missing on ${hostname()}${report.missing ? `: ${report.missing}` : ''}; nothing ran in it in this attempt, so a new session starts from the run's records`, receipt: `session:${attempt}:replaced` } as never, { by: this.executor, via: 'exec' })
+    return { id, event: 'replaced' }
+  }
+
+  // A person or a recovering agent ends the run's current session; the next
+  // attempt starts a new one (agent_session p1). Refused while any process
+  // of the run lives here: a conversation has one writer at a time.
+  async retireSession(ws: Workspace, ref: RunRef, by: string, reason: string, via: string, meta: ControlMeta = {}) {
+    for (const a of this.all<AttemptRow>('SELECT * FROM attempts WHERE workspace = ? AND workflow = ? AND run = ?', ws.reg.id, ref.workflow, ref.run)) {
+      if (a.state !== 'ended') throw new RequestError(409, `attempt ${a.id} of run ${runKey(ref)} is ${a.state}; a session is retired between attempts`, { code: 'attempt-open' })
+      if (a.host === hostname() && a.pid && alive(a.pid)) throw new RequestError(409, `process ${a.pid} of attempt ${a.id} still lives`, { code: 'attempt-open' })
+    }
+    const space = await runSpace(ws, ref)
+    return (await runOp(space, ref, { op: 'session.retire', reason, ...controlMeta(meta) } as never, { by, via })).record
   }
 
   // Work of these workspaces that is not finished here: queued or claimed

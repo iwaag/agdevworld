@@ -37,7 +37,7 @@ class Refused extends Error { detail?: unknown; constructor(m: string, detail?: 
 // ---- arguments ---------------------------------------------------------------
 
 interface Parsed { positional: string[]; opts: Map<string, string[]>; flags: Set<string> }
-const FLAGS = new Set(['json', 'help', 'resume', 'h', 'new', 'history', 'no-gitea', 'reuse', 'lost', 'uncertain', 'found', 'complete', 'not-posted', 'ok', 'about-plan', 'all', 'dry-run', 'commit', 'push', 'status', 'rebuild', 'allow-live-executor', 'terminal']) // p7: present stop --all, run adjust --dry-run
+const FLAGS = new Set(['json', 'help', 'resume', 'h', 'new', 'history', 'no-gitea', 'reuse', 'lost', 'uncertain', 'found', 'complete', 'not-posted', 'ok', 'about-plan', 'all', 'dry-run', 'commit', 'push', 'status', 'rebuild', 'allow-live-executor', 'terminal', 'missing', 'retire']) // p7: present stop --all, run adjust --dry-run
 function parse(argv: string[]): Parsed {
   const p: Parsed = { positional: [], opts: new Map(), flags: new Set() }
   for (let i = 0; i < argv.length; i++) {
@@ -348,15 +348,24 @@ result-confirmation question; the answer binds that revision). Host settings:
   exec: `wfe exec <subcommand> …   (the executor's interface; JSON output)
 
 claim [--backend <text>] [--profiles-json <{name: backend}>] [--contract <name>=<sha256>]
+      [--sessions-json <{profile: "explicit"}>]
                                   take the next queued job if the slot is free:
                                   records attempt.begin with the settings it is
                                   launched with (agent, profile → backend, the
-                                  contract and the project guides by hash);
+                                  contract and the project guides by hash, and
+                                  the session: new or resumed, by id);
                                   prints the attempt, workspace, run, a brief
                                   and the guides for its prompt. A profile the
-                                  host does not offer, or a missing guide,
+                                  host does not offer, a missing guide, or the
+                                  "run" session policy on a profile not in
+                                  --sessions-json ('' = the host default)
                                   drops the job with the reason
 started <attempt> --pid <pid>     the attempt's process is running
+session <attempt> --attached <id> the harness reported this session id
+session <attempt> --missing [--detail <text>]
+                                  the session to resume is not on this host and
+                                  nothing was launched in it: records the
+                                  replacement and prints the new session id
 finished <attempt> --exit-code <n> [--signal <name>] [--lost]
                                   how it ended; records attempt.end, publishes
                                   the checkpoint, queues a resume if an answer
@@ -841,10 +850,11 @@ async function cmdExec(p: Parsed): Promise<number> {
     switch (sub) {
       case 'claim': {
         const profiles = opt(p, 'profiles-json')
+        const sessions = opt(p, 'sessions-json')
         const contract = opt(p, 'contract')
         const m = contract ? /^([^=]+)=([0-9a-f]{64})$/.exec(contract) : null
         if (contract && !m) throw new UsageError('--contract <name>=<sha256 of the contract text>')
-        out('', await x.claim(opt(p, 'backend') ?? null, { ...(profiles ? { profiles: JSON.parse(profiles) as Record<string, string> } : {}), ...(m ? { contract: { name: m[1], sha256: m[2] } } : {}) })); return 0
+        out('', await x.claim(opt(p, 'backend') ?? null, { ...(profiles ? { profiles: JSON.parse(profiles) as Record<string, string> } : {}), ...(sessions ? { sessions: JSON.parse(sessions) as Record<string, 'explicit'> } : {}), ...(m ? { contract: { name: m[1], sha256: m[2] } } : {}) })); return 0
       }
       case 'started': if (!arg) throw new UsageError('started <attempt> --pid <pid>'); x.started(arg, num('pid')); out('', { ok: true }); return 0
       case 'finished': {
@@ -852,6 +862,10 @@ async function cmdExec(p: Parsed): Promise<number> {
         const code = opt(p, 'exit-code') !== undefined ? num('exit-code') : null
         const r = await x.finished(arg, { code, signal: opt(p, 'signal') ?? null, lost: p.flags.has('lost') })
         out('', { ok: true, ...r }); return 0
+      }
+      case 'session': {
+        if (!arg || (!opt(p, 'attached') && !p.flags.has('missing'))) throw new UsageError('session <attempt> --attached <id> | --missing [--detail <text>]')
+        out('', { ok: true, ...await x.session(arg, opt(p, 'attached') ? { attached: opt(p, 'attached') } : { missing: opt(p, 'detail') ?? '' }) }); return 0
       }
       case 'stops': out('', x.stopsDue().map(a => ({ id: a.id, pid: a.pid, run: `${a.workflow}/${a.run}`, workspace: a.workspace, requested: a.stop_requested }))); return 0
       case 'heartbeat': x.heartbeat(opt(p, 'name') ?? 'autolab', num('pid'), opt(p, 'detail') ?? ''); out('', { ok: true }); return 0
@@ -868,7 +882,7 @@ async function cmdExec(p: Parsed): Promise<number> {
     if (e instanceof RequestError) throw new Refused(e.message, e.detail)
     throw e
   } finally { x.close(); execStore = undefined }
-  throw new UsageError('wfe exec claim|started|finished|stops|heartbeat|reconcile|publish|status')
+  throw new UsageError('wfe exec claim|started|session|finished|stops|heartbeat|reconcile|publish|status')
 }
 
 // Zulip coordination: the outbox and bindings of this host, for the

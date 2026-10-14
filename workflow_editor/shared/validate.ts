@@ -2,7 +2,7 @@
 // well-formed and that its references resolve; it never judges whether the
 // graph fulfils the intent. Errors block approval; drafts may still be saved.
 import {
-  ACCESS_LEVELS, APPEARANCE_COLORS, APPEARANCE_ICONS, CONFIRMS, DEVDOCS_MODES, DOC_POLICIES, DOC_STEPS, ID_PATTERN, INTAKE_MODES, NODE_TYPES, PROFILE_PATTERN, PROJECT_SCHEMA, WORKFLOW_SCHEMA, normalizeRepoPath,
+  ACCESS_LEVELS, APPEARANCE_COLORS, APPEARANCE_ICONS, CONFIRMS, DEVDOCS_MODES, DOC_POLICIES, DOC_STEPS, ID_PATTERN, INTAKE_MODES, NODE_TYPES, PROFILE_PATTERN, SESSION_POLICIES, PROJECT_SCHEMA, WORKFLOW_SCHEMA, normalizeRepoPath,
   type Issue, type Project, type Workflow,
 } from './model.ts'
 
@@ -79,6 +79,7 @@ export function validateWorkflow(w: Workflow, ctx: ValidationContext = {}): Issu
   // Execution and intake (p6)
   if (w.execution.agent && !ID_PATTERN.test(w.execution.agent)) issues.push(err('execution-agent', `execution.agent "${w.execution.agent}" must match ${ID_PATTERN.source}.`, { field: 'execution' }))
   if (w.execution.profile && !PROFILE_PATTERN.test(w.execution.profile)) issues.push(err('execution-profile', `execution.profile "${w.execution.profile}" must be a profile name (${PROFILE_PATTERN.source}).`, { field: 'execution' }))
+  if (w.execution.session && !(SESSION_POLICIES as readonly string[]).includes(w.execution.session)) issues.push(err('execution-session', `execution.session "${w.execution.session}" is not a session policy; expected ${SESSION_POLICIES.join(' or ')} (or leave it out for fresh).`, { field: 'execution' }))
   w.execution.guides.forEach((g, i) => {
     const p = normalizeRepoPath(g)
     if (p === null || p === '.') issues.push(err('execution-guide-path', `execution.guides[${i}] "${g}" must be a project-relative file path without "..".`, { field: 'execution' }))

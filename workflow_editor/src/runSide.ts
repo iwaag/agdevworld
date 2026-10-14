@@ -18,6 +18,7 @@
 import type { RunOpResponse, RunResponse } from '../shared/api.ts'
 import { effectiveOf, holderOf, isOpen, questionState, runKey, situation, type Because, type Question, type RunRecord } from '../shared/run.ts'
 import { reportStep } from '../shared/compile.ts'
+import { sessionPolicyOf } from '../shared/model.ts'
 import type { AdjustView, PresentationView, RunExecView, RunNotifyView } from './api.ts'
 import { STATE_GLYPH, TYPE_LABEL } from './canvas.ts'
 import { stepFacts, stepLabel } from './inspector.ts'
@@ -982,6 +983,7 @@ export class RunSide {
       ...(rec.recoveries ?? []).slice(-3).map(r => h('p.small.muted', `Continued by recovery: ${r.by}${r.agent ? ` (${r.agent.workflow}/${r.agent.run})` : ''}, ${when(r.at)}, incident ${r.incident}, after attempt ${r.attempt} (${r.lifted ?? 'continuation nothing had queued'}): ${sentence(r.reason)}`)),
       d.execError ? h('div.banner.warn', `Execution facts of this host could not be read: ${d.execError}`) : null,
       ev ? h('p.small.muted', `Executor: ${ev.executor.state}${ev.executor.detail ? ` — ${ev.executor.detail}` : ''}`) : null,
+      this.sessionLine(rec),
       // Where the run's work is kept (p9, docs/storage.md).
       d.resp?.place?.kind === 'run-copy' ? h('p.small.muted.run-place', `Work: this run's own copy of the project, saved to branch ${d.resp.place.branch ?? '(unknown)'} — not on the project's shared branch until it is integrated.`) : null,
       h('div.row.tight', h('button', { disabled: frozen || !!rec.control.hold || !!rec.control.stop || sit === 'completed', title: STOP_TITLE, dataset: { action: 'stop-run' } }, 'Stop')))
@@ -992,6 +994,7 @@ export class RunSide {
       ev?.attempts.length ? h('ul.attempts', ...ev.attempts.slice().reverse().map(a => h('li.small', { dataset: { key: `at:${a.id}` } },
         h('code', a.id), ` ${a.state === 'ended' ? `${a.outcome}${a.exit_code !== null ? ` (exit ${a.exit_code})` : a.signal ? ` (${a.signal})` : ''}` : a.state}`,
         h('span.muted', ` · ${when(a.began)}${a.ended ? ` → ${when(a.ended)}` : ''}${a.backend ? ` · ${a.backend}` : ''}${a.stop_requested ? ' · stop requested' : ''}`),
+        h('span.muted.attempt-session', sessionOfAttempt(rec, a.id)),
         h('span.muted.attempt-activity', a.activity === undefined ? '' : a.activity === null ? ' · activity observed on its host only' : a.activity.problem ? ` · output cannot be read (${a.activity.problem})` : a.activity.unit === 'turn' ? ` · ${a.activity.count} turn${a.activity.count === 1 ? '' : 's'}${a.activity.last ? `, last output ${when(a.activity.last)}` : ''}` : a.activity.last ? ` · output last written ${when(a.activity.last)} (not counted: not stream-json)` : ' · no output')))) : null,
       ev?.checkpoints.length ? h('h4', 'Publication') : null,
       ...(ev?.checkpoints ?? []).slice().reverse().slice(0, 6).map(c => h('div.checkpoint.small', { dataset: { key: `cp:${c.id}` } },
@@ -1000,6 +1003,22 @@ export class RunSide {
         c.error ? h('div.error', c.error) : null,
         c.state === 'failed' || c.state === 'attention' ? h('button', { dataset: { action: 'retry-checkpoint', checkpoint: String(c.id) } }, 'Retry publication') : null)),
       ...this.integrationBlock(rec))
+  }
+
+  // The run's frozen session policy and its sessions (agent_session p1):
+  // which conversation is current, how many attempts it served, and why an
+  // earlier one was replaced or retired. Transcripts stay on the host.
+  private sessionLine(rec: RunRecord): HTMLElement | null {
+    const wf = this.data.resp?.bundle?.[rec.definition.root]?.workflow
+    const policy = sessionPolicyOf(wf?.execution)
+    const all = rec.sessions ?? []
+    const cur = all.at(-1)
+    const ended = all.filter(x => x.state !== 'open').slice(-3)
+    return h('div.small.muted.run-session', { dataset: { policy } },
+      h('div', `Session policy: ${policy === 'run' ? 'run — later attempts resume the run\'s session' : 'fresh — a new session every attempt'}${wf?.execution?.session ? '' : ' (not declared)'}.`,
+        cur ? ` Current: ${cur.state === 'open' ? '' : `none (last ${cur.state}) — `}${shortSession(cur.id)}, ${cur.attempts.length} attempt${cur.attempts.length === 1 ? '' : 's'}.` : ' No session recorded yet.'),
+      ...ended.map(x => h('div.session-ended', `${x.state === 'retired' ? 'Retired' : 'Replaced'}: ${shortSession(x.id)} (${x.attempts.length} attempt${x.attempts.length === 1 ? '' : 's'}) — ${x.ended?.reason ?? ''}`)),
+      cur?.mismatch ? h('div.warn', `The harness reported session ${cur.attached}, not the intended ${cur.id}.`) : null)
   }
 
   // Integration of the accepted result into the project's branches (p9):
@@ -1091,3 +1110,12 @@ export class RunSide {
 
 const docLink = (path: string, label: string) => { const a = fileLink(path, label); a.classList.add('focus-link'); a.prepend(icon('doc', 'icon small')); return a }
 const questionChip = (st: string) => (st === 'open' ? 'waiting' : st === 'answered' ? 'running' : st === 'taken-up' ? 'completed' : 'cancelled')
+
+// agent_session p1: a session id, shortened for display (the full id is in
+// wfe run session <run>).
+function shortSession(id: string | null): string { return id ? `session ${id.slice(0, 8)}` : 'session (id not reported)' }
+function sessionOfAttempt(rec: RunRecord, attempt: string): string {
+  const x = (rec.sessions ?? []).find(s => s.attempts.includes(attempt))
+  if (!x) return ''
+  return ` · ${shortSession(x.id)}${x.attempt === attempt ? ' (new)' : ' (resumed)'}`
+}

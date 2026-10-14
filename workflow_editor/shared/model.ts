@@ -46,6 +46,13 @@ export const INTAKE_MODES = ['requests'] as const
 // person's confirmation there maps to the result decision (docs/runs.md).
 export const CONFIRMS = ['result'] as const
 export const PROFILE_PATTERN = /^[a-z0-9][a-z0-9_.-]{0,63}$/
+// How a run's attempts use harness conversations (agent_session p1):
+// `fresh` starts a new session for every attempt from the run's records and
+// files; `run` resumes the run's own retained session in each later attempt.
+// '' (not declared) is `fresh`. Records stay authoritative either way.
+export const SESSION_POLICIES = ['fresh', 'run'] as const
+export type SessionPolicy = typeof SESSION_POLICIES[number]
+export const sessionPolicyOf = (ex: { session?: string } | undefined): SessionPolicy => (ex?.session === 'run' ? 'run' : 'fresh')
 // How a node looks (p7), independent of what it does: an icon and a color
 // token of the editor's palette. Display only — never part of a digest, the
 // compiled graph or an execution rule (docs/contract.md, "Appearance").
@@ -91,7 +98,7 @@ export interface Workflow {
   // representable and reported by validation ('' = the file declares none);
   // the three steps (p8/ex2) are booleans when the file has them.
   documentation: Documentation
-  execution: { agent: string; profile: string; guides: string[] }
+  execution: { agent: string; profile: string; guides: string[]; session?: string } // session: '' or absent = fresh (SESSION_POLICIES)
   intake: { zulip: string }
   approvals: Partial<Record<ApprovalKind, ApprovalRecord>>
   layout: { nodes: Record<string, Point> }
@@ -237,6 +244,7 @@ export function workflowFromData(raw: unknown): { workflow: Workflow; issues: Sh
   }
   const execution = map(raw, 'execution', '$', issues)
   w.execution = { agent: text(execution, 'agent', '$.execution', issues), profile: text(execution, 'profile', '$.execution', issues), guides: stringList(execution, 'guides', '$.execution', issues) }
+  if (execution.session !== undefined && execution.session !== null) w.execution.session = text(execution, 'session', '$.execution', issues)
   w.intake = { zulip: text(map(raw, 'intake', '$', issues), 'zulip', '$.intake', issues) }
   const approvals = map(raw, 'approvals', '$', issues)
   for (const [key, value] of Object.entries(approvals)) {

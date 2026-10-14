@@ -61,7 +61,61 @@ export const hostOf = (e: Executor) => e.host ?? e.name
 // instructions — the host's common contract and the project's guides — by
 // content hash.
 // catalog (p7/ex1): the run's node-catalog snapshot this attempt was given.
-export interface AttemptSettings { agent: string; profile: string | null; backend: string | null; contract: { name: string; sha256: string } | null; guides: { path: string; sha256: string }[]; catalog?: AttemptCatalog }
+// session (agent_session p1): the run's session policy and the harness
+// conversation this attempt was launched in.
+export interface AttemptSettings { agent: string; profile: string | null; backend: string | null; contract: { name: string; sha256: string } | null; guides: { path: string; sha256: string }[]; catalog?: AttemptCatalog; session?: AttemptSession }
+// How an attempt uses a harness conversation (agent_session p1,
+// docs/sessions.md). `mode` new: a session created for this attempt, under
+// `id` when the host's harness takes a caller-chosen id (null otherwise:
+// the id becomes known only from the harness, attempt.session). `resume`:
+// the run's current session, by its id — never "the latest conversation".
+// `replaces`: the session this one supersedes and why.
+export interface AttemptSession { policy: 'fresh' | 'run'; mode: 'new' | 'resume'; id: string | null; replaces?: { id: string | null; reason: string } }
+export const SESSION_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/
+// One harness conversation of this run. Portable identity only: the id, the
+// configuration it was created under (by hash) and the attempts it served;
+// transcripts stay on the execution host. `state`: open (the run's current
+// session), replaced (a later session superseded it: `reason`) or retired
+// (a person or a recovering agent ended it: `reason`; the next attempt
+// starts a new one). `attached`: the id the harness itself reported, when
+// it reported one; `mismatch` when that differs from the intended id.
+export interface SessionRecord {
+  id: string | null
+  policy: 'fresh' | 'run'
+  began: string
+  attempt: string // the attempt that created it
+  attempts: string[] // every attempt it served, in order
+  config: SessionConfig // what it was created under (sessionConfig)
+  state: 'open' | 'replaced' | 'retired'
+  attached?: string
+  attachedIn?: string // the attempt whose harness last reported it
+  mismatch?: boolean
+  ended?: { at: string; by: string; reason: string }
+}
+// The configuration a retained session is bound to: what the conversation
+// was instructed with and runs as. A later attempt with another
+// configuration starts a new session (an old conversation does not learn
+// new instructions by itself).
+export interface SessionConfig { agent: string; profile: string | null; backend: string | null; contract: { name: string; sha256: string } | null; guides: { path: string; sha256: string }[] }
+export function sessionConfig(st: Pick<AttemptSettings, 'agent' | 'profile' | 'backend' | 'contract' | 'guides'>): SessionConfig {
+  return { agent: st.agent, profile: st.profile ?? null, backend: st.backend ?? null, contract: st.contract ? { name: st.contract.name, sha256: st.contract.sha256 } : null, guides: [...st.guides].map(g => ({ path: g.path, sha256: g.sha256 })).sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0)) }
+}
+export const sameConfig = (a: SessionConfig, b: SessionConfig) => canonicalJson(sessionConfig(a)) === canonicalJson(sessionConfig(b))
+// What differs between a session's configuration and an attempt's, in words.
+export function configChanges(was: SessionConfig | undefined, now: Pick<AttemptSettings, 'agent' | 'profile' | 'backend' | 'contract' | 'guides'>): string[] {
+  if (!was) return ['the configuration it was created under is not recorded']
+  const out: string[] = []
+  if (was.agent !== now.agent) out.push(`agent ${was.agent} → ${now.agent}`)
+  if ((was.profile ?? null) !== (now.profile ?? null)) out.push(`profile ${was.profile ?? '(host default)'} → ${now.profile ?? '(host default)'}`)
+  if ((was.backend ?? null) !== (now.backend ?? null)) out.push(`backend ${was.backend ?? '(unknown)'} → ${now.backend ?? '(unknown)'}`)
+  if ((was.contract?.sha256 ?? null) !== (now.contract?.sha256 ?? null)) out.push(`common contract ${was.contract?.name ?? ''} changed`)
+  const g = (l: { path: string; sha256: string }[]) => new Map(l.map(x => [x.path, x.sha256]))
+  const a = g(was.guides), b = g(now.guides)
+  for (const [path, h] of b) if (!a.has(path)) out.push(`guide ${path} added`); else if (a.get(path) !== h) out.push(`guide ${path} changed`)
+  for (const path of a.keys()) if (!b.has(path)) out.push(`guide ${path} removed`)
+  return out
+}
+export const currentSession = (s: Pick<RunState, 'sessions'>): SessionRecord | null => { const l = s.sessions?.at(-1); return l && l.state === 'open' ? l : null }
 export interface BundleEntry {
   file: string // run-relative, definition/<id>.yaml
   source: string // project-relative file it was copied from
@@ -283,6 +337,7 @@ export interface RunState {
   presentations?: Record<string, Presentation> // present once the first one is registered (p7)
   integrations?: IntegrationRecord[] // present once the first one completed (p9)
   recoveries?: Recovery[] // present once the first run.recover is recorded (observer p3)
+  sessions?: SessionRecord[] // present once an attempt recorded its session (agent_session p1); the last open one is current
   artifacts: Artifact[]
   decisions: Decision[]
   cancelled: { reason: string; at: string; by: string; because?: Because } | null
@@ -320,6 +375,14 @@ export type OpInput =
   | { op: 'run.relocate'; storage: RunStorage; note: string }
   | { op: 'attempt.begin'; attempt: string; reason: string; backend?: string; settings?: AttemptSettings }
   | { op: 'attempt.end'; attempt: string; outcome: AttemptOutcome; detail?: string }
+  // agent_session p1: what the harness reported of the open attempt's
+  // session (`attached`: its id), or a replacement before anything was
+  // launched in it (`replaced`: the resumed session is missing on the host;
+  // `id` is the new one).
+  | { op: 'attempt.session'; attempt: string; event: 'attached' | 'replaced'; id: string | null; reason?: string }
+  // A person or a recovering agent ends the run's current session; the next
+  // attempt starts a new one from the records.
+  | { op: 'session.retire'; reason: string; because?: BecauseRef }
   | { op: 'run.stop'; reason: string; because?: BecauseRef }
   | { op: 'run.resume'; reason: string; because?: BecauseRef }
   // observer p3: a recovering agent continues an interrupted/unknown hold for an incident.
@@ -339,7 +402,7 @@ export const CONTROL_OPS: readonly string[] = ['run.stop', 'run.resume', 'run.ca
 
 export const OPS = ['run.create', 'node.start', 'node.progress', 'node.wait', 'node.complete', 'node.fail', 'node.cancel',
   'question.ask', 'question.answer', 'question.take-up', 'question.withdraw', 'instruction.receive', 'instruction.ack', 'artifact.attach', 'run.cancel', 'run.decide',
-  'attempt.begin', 'attempt.end', 'run.stop', 'run.resume', 'presentation.register', 'presentation.observe', 'run.adjust', 'run.integrate', 'run.relocate', 'run.recover'] as const
+  'attempt.begin', 'attempt.end', 'run.stop', 'run.resume', 'presentation.register', 'presentation.observe', 'run.adjust', 'run.integrate', 'run.relocate', 'run.recover', 'attempt.session', 'session.retire'] as const
 // The executor's own reports. While an attempt is open they must carry its
 // id (`attempt`), so a stopped or superseded attempt cannot write into the
 // record of the one that replaced it.
@@ -585,7 +648,21 @@ function attemptSettings(v: unknown): AttemptSettings {
     else if (isObj(c) && c.state === 'supplied' && typeof c.templates === 'number' && Number.isInteger(c.templates) && c.templates >= 0) catalog = { state: 'supplied', sha256: hash(c.sha256, 'settings.catalog'), templates: c.templates }
     else fail('shape', 'settings.catalog must be {state: supplied, sha256, templates} or {state: unavailable}')
   }
-  return { agent: text(o.agent, 'settings.agent'), profile: optText(o.profile, 'settings.profile') || null, backend: optText(o.backend, 'settings.backend') || null, contract, guides, ...(catalog ? { catalog } : {}) }
+  let session: AttemptSession | undefined
+  if (o.session !== undefined) {
+    const x = o.session as Record<string, unknown>
+    if (!isObj(x) || (x.policy !== 'fresh' && x.policy !== 'run') || (x.mode !== 'new' && x.mode !== 'resume')) fail('shape', 'settings.session must be {policy: fresh|run, mode: new|resume, id}')
+    const id = x.id === null || x.id === undefined ? null : typeof x.id === 'string' && SESSION_ID.test(x.id) ? x.id : fail('shape', `settings.session.id must match ${SESSION_ID.source}`)
+    if (x.mode === 'resume' && !id) fail('shape', 'a resumed session names its id')
+    let replaces: AttemptSession['replaces']
+    if (x.replaces !== undefined && x.replaces !== null) {
+      const r = x.replaces as Record<string, unknown>
+      if (!isObj(r)) fail('shape', 'settings.session.replaces must be {id, reason}')
+      replaces = { id: typeof r.id === 'string' ? r.id : null, reason: text(r.reason, 'settings.session.replaces.reason') }
+    }
+    session = { policy: x.policy as 'fresh' | 'run', mode: x.mode as 'new' | 'resume', id, ...(replaces ? { replaces } : {}) }
+  }
+  return { agent: text(o.agent, 'settings.agent'), profile: optText(o.profile, 'settings.profile') || null, backend: optText(o.backend, 'settings.backend') || null, contract, guides, ...(catalog ? { catalog } : {}), ...(session ? { session } : {}) }
 }
 
 function emptyNode(): NodeRecord {
@@ -903,6 +980,57 @@ export function apply(prev: RunState | null, e: HistoryEntry | (OpInput & EntryM
       ctl.attempt = { id: e.attempt, reason: text(e.reason, 'the reason'), began: at, backend: optText(e.backend, 'backend') || null }
       if (e.settings !== undefined) ctl.attempt.settings = attemptSettings(e.settings)
       ctl.attempts++
+      // The attempt's session (agent_session p1): a resumed one must be the
+      // run's current session; a new one supersedes it.
+      const ss = ctl.attempt.settings?.session
+      if (ss) {
+        const cur = currentSession(s)
+        if (ss.mode === 'resume') {
+          if (!cur || cur.id !== ss.id) fail('session-mismatch', `attempt ${e.attempt} resumes session ${ss.id}, but the run's current session is ${cur ? cur.id ?? '(id not known)' : 'none'}`)
+          cur!.attempts.push(e.attempt)
+        } else {
+          if (ss.id && s.sessions?.some(x => x.id === ss.id)) fail('session-mismatch', `session ${ss.id} already belongs to this run; a new session has a new id`)
+          if (cur) { cur.state = 'replaced'; cur.ended = { at, by, reason: ss.replaces?.reason ?? (ss.policy === 'fresh' ? 'fresh policy: every attempt starts a new session' : 'replaced by a new session') } }
+          const st = ctl.attempt.settings!
+          s.sessions = [...(s.sessions ?? []), { id: ss.id, policy: ss.policy, began: at, attempt: e.attempt, attempts: [e.attempt], config: sessionConfig(st), state: 'open' }]
+        }
+      }
+      break
+    }
+    case 'attempt.session': {
+      live()
+      if (!ctl.attempt || ctl.attempt.id !== e.attempt) fail('attempt-stale', `attempt ${String(e.attempt)} is not open (${ctl.attempt ? `${ctl.attempt.id} is` : 'none is'}); its session is recorded only while it is open`)
+      const cur = currentSession(s)
+      if (!cur || !cur.attempts.includes(e.attempt)) fail('session-mismatch', `attempt ${e.attempt} has no session recorded with it`)
+      const id = e.id === null || e.id === undefined ? null : typeof e.id === 'string' && SESSION_ID.test(e.id) ? e.id : fail('shape', `session id must match ${SESSION_ID.source}`)
+      if (e.event === 'attached') {
+        if (!id) fail('shape', 'an attached session names the id the harness reported')
+        cur!.attached = id!
+        cur!.attachedIn = e.attempt
+        if (!cur!.id) cur!.id = id // a harness that chooses its own ids
+        else if (cur!.id !== id) cur!.mismatch = true
+      } else if (e.event === 'replaced') {
+        // Only before anything ran in it: the resumed session is missing on
+        // the host, so this attempt starts a new one instead.
+        if (cur!.attempts.at(-1) !== e.attempt || cur!.attachedIn === e.attempt) fail('state', `session ${cur!.id} is attached to attempt ${e.attempt}; it is not replaced now`)
+        if (id && s.sessions?.some(x => x.id === id)) fail('session-mismatch', `session ${id} already belongs to this run`)
+        const reason = text(e.reason, 'the reason for the replacement')
+        cur!.attempts.pop()
+        cur!.state = 'replaced'; cur!.ended = { at, by, reason }
+        const st = ctl.attempt!.settings!
+        s.sessions!.push({ id, policy: cur!.policy, began: at, attempt: e.attempt, attempts: [e.attempt], config: sessionConfig(st), state: 'open' })
+        if (st.session) st.session = { ...st.session, mode: 'new', id, replaces: { id: cur!.id, reason } }
+      } else fail('shape', 'event must be attached or replaced')
+      break
+    }
+    case 'session.retire': {
+      live()
+      if (ctl.attempt) fail('attempt-open', `attempt ${ctl.attempt.id} is still open; a session is retired between attempts`)
+      const cur = currentSession(s)
+      if (!cur) fail('state', 'the run has no current session')
+      const reason = text(e.reason, 'the reason')
+      const why = because(e.because)
+      cur!.state = 'retired'; cur!.ended = { at, by, reason: why ? `${reason} (${why.kind === 'answer' ? `answer ${why.answer} to ${why.question}` : `instruction ${why.instruction}`} from ${why.from})` : reason }
       break
     }
     case 'attempt.end': {

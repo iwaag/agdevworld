@@ -42,9 +42,11 @@ workspace: a monitor never merges them and never guesses which is live.
 ## `wfe observe [--json] [--workspace <id>] [--run <wf>/<run>] [--terminal]`
 
 Without `--terminal`, completed or cancelled runs are listed only when they
-have outstanding publication or integration work or a recorded recovery
-since their last attempt (so a monitor can verify a recovery that ended in
-completion). The document:
+have outstanding publication or integration work, a problem, or a recovery
+not yet followed by an attempt. A monitor that tracks a run asks for it by
+name (`--run <workspace>:<workflow>/<run>`, repeatable), which lists it
+whatever its state. The same document is served at `GET /api/observe`
+(`?workspace=`, `?run=` repeatable, `?terminal=1`). The document:
 
 ```json
 {
@@ -72,19 +74,21 @@ One run:
 | `source` | `{state: ok \| unreadable \| copy-missing \| copy-damaged \| copy-creating, problem, location: copy \| workspace, readAt, reads, consistent}` — `reads` is how many times the record was read to get a consistent snapshot; `consistent: false` means it kept changing and the facts may straddle a transition |
 | `seq`, `updated` | the record's last sequence and its time |
 | `situation` | `shared/run.ts` `situation()` (`executing`, `stopping`, `awaiting-person`, `stopped`, `interrupted`, `unknown`, `completed`, `cancelled`, `not-started`, `idle`) |
-| `execution` | `state`, `ready`, `active`, `failed`, `blocked`, `waiting: [{node, on, holder, since}]` |
+| `execution` | `state`, `ready`, `active`, `failed`, `blocked`, `waiting: [{node, on, holder, since, deadline}]` (`deadline`: an external wait's declared latest time, `wfe run wait --deadline`) |
 | `hold` | `{kind, since, by, reason, because, human}` — `human` is true for `stopped` (a person's or a person's words) and false for the executor-derived `interrupted`/`unknown` |
 | `stop`, `cancelled` | as recorded |
-| `attempts` | `{count, open: {id, began, reason, backend, agent} \| null, last: {id, outcome, ended, detail} \| null}` |
-| `process` | the open (or last) attempt's host facts: `{attempt, state: launching \| running \| ended, host, local, pid, alive, began, ended, exit, signal, outcome, stopRequested, group: {members, cpuSeconds} \| null, log: {last, bytes, turns, session, problem, openTool: {name, since, timeoutSeconds, summary} \| null}}`; `alive`/`group`/`log` are `null` with a reason in `unavailable` when not observable here |
+| `attempts` | `{count, beganSeq, open: {id, began, reason, backend, agent} \| null, last: {id, outcome, ended, detail} \| null}` — `beganSeq` is the sequence of the latest `attempt.begin` |
+| `process` | the open (or last) attempt's host facts: `{attempt, state: launching \| running \| ended, host, local, pid, alive, began, ended, exit, signal, outcome, stopRequested, group: {members, cpuSeconds} \| null, log: {last, bytes, turns, session, problem, openTool: {name, since, timeoutSeconds, summary} \| null, ended: {subtype, stopReason} \| null, backgroundStopped, partial}}`; `alive`/`group`/`log` are `null` with a reason in `unavailable` when not observable here. `log.ended` is the harness's own end of the session; `backgroundStopped` counts background tasks the harness reported stopped (they die with the session); `partial` says the tail did not reach the log's start |
 | `queue` | `{job: {id, kind, state, created, reason, receipt} \| null, position, ahead: [{uid, kind, state}]}` |
 | `inputs` | `{questions: [{id, node, to, asked, state}], answeredNotTakenUp: [q…], instructionsPending: n}` |
 | `waiting` | `{reason, responsible, since}` — what the run waits for and whose move it is: `person:<name>`, `executor` (an answer recorded, ready work, a queued job), `external:<ref>`, `recovery` (an interrupted/unknown hold) or `none` |
-| `progress` | `{seq, at, op, by, attempt}` of the last report the run's agent made (an executor operation), and `attemptSeq`, the sequence of the open/last `attempt.begin` |
+| `progress` | `{seq, at, op, by, attempt}` of the last report the run's agent made itself (an executor operation in its name); null when it never reported |
 | `recoveries` | `run.recover` entries: `{seq, at, by, incident, attempt, agent: {run, attempt}}` |
 | `publication` | `{failed: [{id, kind, error}], attention: […], pending: […]}` checkpoints that are not published |
 | `integration` | `{queued, running, failed, refused, attention}` rows of the integration journal |
-| `input` | `{kind, requester, source: {message, topic, channel} \| null}` — how the run was requested (a recovery run carries its incident through its request post) |
+| `input` | `{kind, requester, source}` — how the run was requested (`source` is run.json's `input.source`: a Zulip post's realm, message, channel, topic; a recovery run carries its incident through its request post) |
+| `executor` | `{name, host}` — the agent the run is performed as and its execution host |
+| `problems` | `[{code, message}]` — `ambiguous` (the same display identity in another registration), `changing` (not consistent after three reads) |
 | `unavailable` | `{<field>: <why>}` for every fact that could not be read |
 
 ### Consistency

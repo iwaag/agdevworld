@@ -110,7 +110,10 @@ export function anyRevisionNode(r: { definition: DefinitionRef }, id: string): E
 export interface RepoContext { path: string; head: string | null; branch: string | null; dirty: number | null }
 
 export type WaitOn = { question: string } | { external: string }
-export interface Wait { reason: string; holder: string; on: WaitOn }
+// `deadline` (observer p3): when the awaited result is expected at the latest,
+// as the waiter declared it; a monitor treats a wait past it as uncertain. A
+// statement, not a timer: nothing changes state because of it.
+export interface Wait { reason: string; holder: string; on: WaitOn; deadline?: string }
 export interface Note { at: string; by: string; text: string }
 // A document a step was checked to have written (p5): project-relative path,
 // content hash and size at the moment of the check. File presence, not a
@@ -286,7 +289,7 @@ export type OpInput =
   | { op: 'run.create'; project: string; workflow: string; run: string; input: RunInput; executor: Executor; predecessor: RunRef | null; definition: DefinitionRef; context: RunState['context']; nodes: string[]; storage?: RunStorage }
   | { op: 'node.start'; node: string; reason?: string }
   | { op: 'node.progress'; node: string; text: string }
-  | { op: 'node.wait'; node: string; reason: string; holder: string; external: string }
+  | { op: 'node.wait'; node: string; reason: string; holder: string; external: string; deadline?: string }
   | { op: 'node.complete'; node: string; outcome: string; artifacts?: string[]; document?: DocumentEvidence; agreement?: string }
   | { op: 'node.fail'; node: string; reason: string }
   | { op: 'node.cancel'; node: string; reason: string }
@@ -693,6 +696,10 @@ export function apply(prev: RunState | null, e: HistoryEntry | (OpInput & EntryM
       const n = node(e.node)
       if (n.state !== 'running') fail('state', `node "${e.node}" is ${n.state}; only a running node can start waiting`)
       n.wait = { reason: text(e.reason, 'the reason'), holder: text(e.holder, 'the holder of the next move'), on: { external: text(e.external, 'the external result reference') } }
+      if (e.deadline !== undefined && e.deadline !== null) {
+        if (typeof e.deadline !== 'string' || Number.isNaN(Date.parse(e.deadline))) fail('shape', 'deadline must be an ISO 8601 time')
+        n.wait.deadline = new Date(e.deadline).toISOString()
+      }
       move(e.node, 'waiting')
       break
     }

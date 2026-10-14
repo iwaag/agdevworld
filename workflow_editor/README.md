@@ -30,7 +30,7 @@ project's shared branches in [docs/integration.md](docs/integration.md).
 | Path | Purpose |
 | --- | --- |
 | `shared/` | Models, validation, canonicalization and digests; `compile.ts`, the effective execution graph of a documentation policy (p5); `run.ts`, the run reducer (service, CLI and browser) |
-| `server/` | Local service: YAML round-trip, Git inspection, file persistence, watching, project creation and registration; `runs.ts`, run folders and operations; p9: `runspace.ts` (each run's own working copy, the resolver, allocation, the index), `integrate.ts` (accepted results into shared branches), `reversal.ts` (what undoing a run involves), `migrate.ts` (pre-p9 runs into copies) |
+| `server/` | Local service: YAML round-trip, Git inspection, file persistence, watching, project creation and registration; `runs.ts`, run folders and operations; p9: `runspace.ts` (each run's own working copy, the resolver, allocation, the index), `integrate.ts` (accepted results into shared branches), `reversal.ts` (what undoing a run involves), `migrate.ts` (pre-p9 runs into copies); observer p3: `observe.ts` (the read-only observation for monitors) |
 | `cli/wfe.ts`, `cli/run.ts` | `wfe`, the command-line surface over the same modules (`wfe help`, `wfe run help`) |
 | `src/` | Browser UI (TypeScript, Vite, DOM cards and SVG edges) |
 | `examples/` | Synthetic project and workflow files; `invalid/` for validation tests |
@@ -247,6 +247,7 @@ node cli/wfe.ts help          # from the checkout (or: npm run wfe -- help)
 | `run create`, `list`, `show`, `check`, `access`, `start`, `complete`, `ask`, `answer`, … | workflow runs (docs/runs.md) |
 | `present register|start|status|stop|reconcile` | presentations of a run's result (docs/presentations.md) |
 | `runs index [--rebuild]` | runs' own working copies on this host (docs/storage.md) |
+| `observe` | a read-only snapshot of every run for monitors (docs/observation.md) |
 | `serve` | build the UI and start the service for this registry |
 
 `--registry` / `WFE_REGISTRY`, `--area` / `WFE_AREA` and `--port` /

@@ -649,6 +649,36 @@ export class ExecStore {
     return age < 45 ? { state: 'available', detail: what, at: hb.at } : { state: 'unavailable', detail: `${hb.name} last reported ${Math.round(age)} s ago`, at: hb.at }
   }
 
+  // ---- observation (observer p3, docs/observation.md) -----------------------------------
+
+  // Reads in one SQLite read transaction, so the rows of one look agree
+  // with each other (WAL: a snapshot, no write lock).
+  readSnapshot<T>(f: () => T): T {
+    named('exec store', 'a read transaction', () => this.db.exec('BEGIN'))
+    try { return f() } finally { try { this.db.exec('COMMIT') } catch { /* nothing to commit */ } }
+  }
+
+  // The host facts of the whole queue: the attempt holding the slot, the
+  // queued and claimed jobs in claim order, and the heartbeat.
+  queueView(): { busy: AttemptRow | null; jobs: JobRow[]; heartbeat: { name: string; at: string; pid: number | null; detail: string } | null } {
+    return this.readSnapshot(() => ({
+      busy: this.one<AttemptRow>('SELECT * FROM attempts WHERE state != \'ended\' ORDER BY began LIMIT 1') ?? null,
+      jobs: this.all<JobRow>('SELECT * FROM jobs WHERE state IN (\'queued\', \'claimed\') ORDER BY id'),
+      heartbeat: this.one<{ name: string; at: string; pid: number | null; detail: string }>('SELECT * FROM heartbeat ORDER BY at DESC LIMIT 1') ?? null,
+    }))
+  }
+
+  // One run's rows, read together.
+  runRows(workspace: string, ref: RunRef): { attempts: AttemptRow[]; jobs: JobRow[]; checkpoints: CheckpointRow[]; integrations: IntegrationRow[] } {
+    const w = [workspace, ref.workflow, ref.run] as const
+    return this.readSnapshot(() => ({
+      attempts: this.all<AttemptRow>('SELECT * FROM attempts WHERE workspace = ? AND workflow = ? AND run = ? ORDER BY began', ...w),
+      jobs: this.all<JobRow>('SELECT * FROM jobs WHERE workspace = ? AND workflow = ? AND run = ? ORDER BY id', ...w),
+      checkpoints: this.all<CheckpointRow>('SELECT * FROM checkpoints WHERE workspace = ? AND workflow = ? AND run = ? ORDER BY id', ...w),
+      integrations: this.all<IntegrationRow>('SELECT * FROM integrations WHERE workspace = ? AND workflow = ? AND run = ? ORDER BY id', ...w),
+    }))
+  }
+
   // `activity` (p8/ex2, server/activity.ts): what the attempt's own log says,
   // observed only on the host that has the log (null elsewhere).
   async runView(workspace: string, ref: RunRef) {

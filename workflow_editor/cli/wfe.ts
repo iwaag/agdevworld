@@ -37,7 +37,7 @@ class Refused extends Error { detail?: unknown; constructor(m: string, detail?: 
 // ---- arguments ---------------------------------------------------------------
 
 interface Parsed { positional: string[]; opts: Map<string, string[]>; flags: Set<string> }
-const FLAGS = new Set(['json', 'help', 'resume', 'h', 'new', 'history', 'no-gitea', 'reuse', 'lost', 'uncertain', 'found', 'complete', 'not-posted', 'ok', 'about-plan', 'all', 'dry-run', 'commit', 'push', 'status', 'rebuild', 'allow-live-executor']) // p7: present stop --all, run adjust --dry-run
+const FLAGS = new Set(['json', 'help', 'resume', 'h', 'new', 'history', 'no-gitea', 'reuse', 'lost', 'uncertain', 'found', 'complete', 'not-posted', 'ok', 'about-plan', 'all', 'dry-run', 'commit', 'push', 'status', 'rebuild', 'allow-live-executor', 'terminal']) // p7: present stop --all, run adjust --dry-run
 function parse(argv: string[]): Parsed {
   const p: Parsed = { positional: [], opts: new Map(), flags: new Set() }
   for (let i = 0; i < argv.length; i++) {
@@ -190,6 +190,25 @@ registry, so the editor and the other commands can use it.
 Result: registered / already-registered / refused, plus diagnostics for what
 the project structure lacks (project.yaml, devdocs submodule, .gitignore …),
 each with its fix. Exit 0 registered or already registered; 1 refused.`,
+  observe: `wfe observe [--json] [--workspace <id>] [--run [<workspace>:]<workflow>/<run>]... [--terminal]
+
+A read-only snapshot of every run this host knows (observer p3,
+docs/observation.md, schema ag.wfe-observation.v1): each run's identity
+(uid = <project>/<workflow>/<run>#<creation>), where its live record is and
+whether it read consistently, its situation, hold (human or not), attempts,
+the attempt's process (alive, process group CPU, log: last write, turns,
+session, an open tool call with its declared timeout, background tasks the
+harness stopped), its queue position and the work ahead of it, open questions
+and answers not taken up, what it waits for and whose move it is, the agent's
+last report, recoveries, and publication or integration problems; and the
+executor (heartbeat age, the slot, queued jobs).
+  Reads   the registry, each run through its own copy, the executor store
+          (one read transaction per run), attempt logs and one ps call.
+  Changes nothing: no reconcile, no queueing, no copy, no record, no post.
+  --run         only these runs (repeatable); listed even when settled
+  --terminal    also completed or cancelled runs with nothing outstanding
+                (by default they are left out; absence never means finished)
+Exit 0 with the document; 1 when the registry cannot be read.`,
   runs: `wfe runs index [--rebuild] [--workspace <id>]
 wfe runs migrate [--dry-run] [--workspace <id>] --by <name> [--allow-live-executor]
 
@@ -487,6 +506,7 @@ Projects and workspaces
   intake <subcommand>       requests from Zulip: status, messages, receive, process … (autolab fetches)
   exec <subcommand>         the executor's interface: claim, started, finished, stops, reconcile …
   runs index [--rebuild]    runs' own working copies on this host (p9)
+  observe                   a read-only snapshot of every run for monitors (observer p3)
   notify <subcommand>       Zulip coordination: status, deliveries, claim, resolve … (autolab delivers)
   present <subcommand>      presentations of a run's result: register, start, status, stop, reconcile
 
@@ -1110,6 +1130,20 @@ async function cmdDashboard(p: Parsed): Promise<number> {
 }
 
 // Runs' own working copies (p9, docs/storage.md): the host-local index.
+// The workflow observation (observer p3, server/observe.ts): read-only.
+async function cmdObserve(p: Parsed): Promise<number> {
+  const { Observer } = await import('../server/observe.ts')
+  const x = await openExec(p)
+  try {
+    const o = await new Observer(x, registryFile(p)).observe({ workspace: opt(p, 'workspace'), runs: p.opts.get('run') ?? [], terminal: p.flags.has('terminal') })
+    const lines = [`Observed ${o.observedAt} on ${o.host}: executor ${o.executor.state}${o.executor.ageSeconds !== null ? ` (heartbeat ${o.executor.ageSeconds} s ago)` : ''}${o.executor.slot ? `, executing ${o.executor.slot.workspace} ${o.executor.slot.run}` : ''}${o.executor.queued ? `, ${o.executor.queued} queued` : ''}`,
+      ...o.runs.map(r => `  ${`${r.identity.workspace} ${r.identity.workflow}/${r.identity.run}`.padEnd(36)} ${(r.situation ?? r.source.state).padEnd(16)} ${r.waiting ? `${r.waiting.responsible}: ${r.waiting.reason}` : ''}${r.problems.length ? `\n    ${r.problems.map(x => x.message).join('\n    ')}` : ''}`),
+      ...o.problems.map(x => `  problem: ${x.message}`)]
+    out(lines.join('\n'), o)
+    return 0
+  } finally { x.close(); execStore = undefined }
+}
+
 async function cmdRuns(p: Parsed): Promise<number> {
   const [sub] = p.positional
   if (sub === 'migrate') return cmdMigrate(p)
@@ -1151,7 +1185,7 @@ async function cmdMigrate(p: Parsed): Promise<number> {
 }
 
 const COMMANDS: Record<string, (p: Parsed) => Promise<number>> = {
-  runs: cmdRuns, run: cmdRun, present: cmdPresent, project: cmdProject, repo: cmdRepo, dashboard: cmdDashboard, exec: cmdExec, request: cmdRequest, notify: cmdNotify, intake: cmdIntake,
+  runs: cmdRuns, observe: cmdObserve, run: cmdRun, present: cmdPresent, project: cmdProject, repo: cmdRepo, dashboard: cmdDashboard, exec: cmdExec, request: cmdRequest, notify: cmdNotify, intake: cmdIntake,
   create: cmdCreate, register: cmdRegister, list: cmdList, status: cmdStatus, validate: cmdValidate,
   approve: cmdApprove, arrange: cmdArrange, 'add-repo': cmdAddRepo, workflow: cmdWorkflow, serve: cmdServe, setup: cmdSetup,
   version: cmdVersion, nodes: cmdNodes,

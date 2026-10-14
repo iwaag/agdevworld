@@ -97,11 +97,14 @@ Writes run.json (one history entry).`,
   progress: `wfe run progress <run> <node> --note <text>
 
 Adds a progress note to a running or waiting node; its state stays. Writes run.json.`,
-  wait: `wfe run wait <run> <node> --reason <text> --holder <who> --external <ref>
+  wait: `wfe run wait <run> <node> --reason <text> --holder <who> --external <ref> [--deadline <time|90s|20m|2h>]
 
 Records that a running node waits for an external result: why, who or what
 holds the next move, and a reference to what is awaited. For a question use
-ask. Writes run.json.`,
+ask. --deadline says when the result is expected at the latest (an ISO time
+or a duration from now); a monitor treats the wait as uncertain after it and
+looks into it, while a wait inside it is left alone. Nothing changes state
+because of a deadline. Writes run.json.`,
   complete: `wfe run complete <run> <node> --outcome <text> [--artifact <path>]... [--agreement <question>]
 
 Records the completion of a running node with its outcome and optional
@@ -634,7 +637,13 @@ export async function runCommand(c: RunCli): Promise<number> {
       return from === 'pending' ? `Recorded: ${args[1]} started.` : from === 'waiting' ? `Recorded: ${args[1]} resumed (it was waiting).` : `Recorded: ${args[1]} restarted after its failure.`
     })
     case 'progress': return op({ op: 'node.progress', node: node(), text: need(c, 'note', 'the progress note') }, () => `Recorded a note on ${args[1]}.`)
-    case 'wait': return op({ op: 'node.wait', node: node(), reason: need(c, 'reason', 'why the node waits'), holder: need(c, 'holder', 'who or what holds the next move'), external: need(c, 'external', 'a reference to the awaited result') }, () => `Recorded: ${args[1]} waits.`)
+    case 'wait': {
+      // --deadline (observer p3): an ISO time, or a duration from now (90s, 20m, 2h).
+      const d = c.opt('deadline')
+      const rel = d ? /^(\d+)(s|m|h)$/.exec(d) : null
+      const deadline = d ? (rel ? new Date(Date.now() + Number(rel[1]) * { s: 1000, m: 60_000, h: 3_600_000 }[rel[2] as 's' | 'm' | 'h']).toISOString() : d) : undefined
+      return op({ op: 'node.wait', node: node(), reason: need(c, 'reason', 'why the node waits'), holder: need(c, 'holder', 'who or what holds the next move'), external: need(c, 'external', 'a reference to the awaited result'), ...(deadline ? { deadline } : {}) }, () => `Recorded: ${args[1]} waits${deadline ? ` (until ${deadline} at the latest)` : ''}.`)
+    }
     case 'complete': {
       const r = await ref()
       const root = await rootOf(r)

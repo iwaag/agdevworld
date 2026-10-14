@@ -180,6 +180,14 @@ export function createHandler(config: ServiceConfig) {
       // The code this service runs (an installed release names its agdevworld commit).
       if (a === 'version' && !wsId && method === 'GET') return send(res, 200, { ...codeVersion(), registry: config.registryFile })
 
+      // The workflow observation (observer p3, docs/observation.md): read-only.
+      if (a === 'observe' && !wsId && method === 'GET') {
+        const { Observer } = await import('./observe.ts')
+        return send(res, 200, await new Observer(config.exec ?? null, config.registryFile).observe({
+          workspace: url.searchParams.get('workspace') || undefined, runs: url.searchParams.getAll('run'), terminal: url.searchParams.get('terminal') === '1',
+        }))
+      }
+
       // ---- the agdev dashboard and resources (p4) ----
       if (a === 'agdev') {
         if (!wsId && method === 'GET') return send(res, 200, await dashboard(agdev))

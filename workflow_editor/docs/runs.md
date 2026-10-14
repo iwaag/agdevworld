@@ -327,7 +327,9 @@ and the run is `completed` only when `_final-report` is.
 A waiting node records `wait: {reason, holder, on}` where `on` is
 `{question: "q1"}` or `{external: "<reference>"}`, and `holder` names who or
 what holds the next move: the person a question is addressed to or the named
-external party. The view derives the
+external party. An external wait may declare a `deadline` (observer p3,
+`wfe run wait … --deadline`): when the result is expected at the latest. It
+is a statement for monitors ([observation.md](observation.md)), not a timer. The view derives the
 current holder: once a question has an answer that is not yet taken up, the
 holder is the executor.
 
@@ -783,6 +785,10 @@ CLI (`wfe run help`) and the browser link. It keeps the registry, the
 projects, the runs and any generated file whose stamp was removed.
 
 ## Observation
+
+Monitors read [observation.md](observation.md) (`wfe observe`, `GET
+/api/observe`): a read-only snapshot of every run with its process,
+queue and wait facts. The rest of this section is about the browser views.
 
 The service watches `devdocs/runs/*/*/run.json` (in each run's own copy for
 runs that have one, p9) with the definition poll

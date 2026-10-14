@@ -571,6 +571,15 @@ wait in the queue. Nothing else is shared:
 queue entry was lost are queued again under their receipts. Nothing is
 completed, failed or rerun by itself.
 
+**Launch ownership (agent_session p1 ex1).** An attempt's process may work
+only after `wfe exec started` registered it: the executor spawns it behind a
+launch gate that opens after that record, and an executor that dies before
+then leaves a process that exits without doing work. So a `launching` row
+(no process registered) is ended as `unknown` after two minutes. A launch
+that fails after the spawn ends the attempt only once the process group is
+confirmed gone; until then the executor keeps it and passes `reconcile
+--holding <attempt>`, and the slot stays held.
+
 **Publication** happens at checkpoints after the process has ended (a human
 wait, a stop or interruption, completion) and after a result decision
 (`server/publish.ts`). Work completion and publication are shown

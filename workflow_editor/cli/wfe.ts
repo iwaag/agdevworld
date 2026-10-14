@@ -372,9 +372,12 @@ finished <attempt> --exit-code <n> [--signal <name>] [--lost]
                                   already waits
 stops                             attempts to terminate (stop or cancel requested)
 heartbeat --pid <pid> [--name …] [--detail …]
-reconcile                         after a restart: gone processes become
+reconcile [--holding <attempt>]   after a restart: gone processes become
                                   "unknown"; requests and answers that were not
-                                  queued are queued again under their receipts
+                                  queued are queued again under their receipts.
+                                  --holding: an attempt whose process the caller
+                                  still owns keeps the slot (a launch it could
+                                  not register or confirm stopped)
 publish <checkpoint id>           retry a publication; finished steps are kept
 status [<run>]                    the executor, or one run's attempts, jobs and
                                   checkpoints
@@ -869,7 +872,7 @@ async function cmdExec(p: Parsed): Promise<number> {
       }
       case 'stops': out('', x.stopsDue().map(a => ({ id: a.id, pid: a.pid, run: `${a.workflow}/${a.run}`, workspace: a.workspace, requested: a.stop_requested }))); return 0
       case 'heartbeat': x.heartbeat(opt(p, 'name') ?? 'autolab', num('pid'), opt(p, 'detail') ?? ''); out('', { ok: true }); return 0
-      case 'reconcile': out('', { ok: true, notes: await x.reconcile() }); return 0
+      case 'reconcile': out('', { ok: true, notes: await x.reconcile(p.opts.get('holding') ?? []) }); return 0
       case 'publish': { if (!arg) throw new UsageError('publish <checkpoint id>'); out('', await x.publishCheckpoint(Number(arg))); return 0 }
       case 'status': {
         const ws = await workspace(p)

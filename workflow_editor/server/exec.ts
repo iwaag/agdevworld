@@ -723,10 +723,16 @@ export class ExecStore {
   // is gone end as `unknown` (never completed, failed or rerun by
   // themselves); runs a request created but never queued, and answers
   // recorded but never queued, are queued again under their receipts.
-  async reconcile(): Promise<string[]> {
+  // `holding` (agent_session p1 ex1): attempts whose process the calling
+  // executor still owns — e.g. one it spawned but could not register or
+  // confirm stopped. They keep the slot whatever their row says. A
+  // `launching` row the caller does not hold is stale after two minutes:
+  // the executor's launch gate lets a process start work only after
+  // `started` registered it, so an unregistered process never worked.
+  async reconcile(holding: string[] = []): Promise<string[]> {
     const notes: string[] = []
     for (const a of this.all<AttemptRow>('SELECT * FROM attempts WHERE state != \'ended\'')) {
-      if (a.host !== hostname()) continue
+      if (a.host !== hostname() || holding.includes(a.id)) continue
       const stale = a.state === 'launching' ? Date.now() - Date.parse(a.began) > 120_000 : !alive(a.pid)
       if (!stale) continue
       const r = await this.finished(a.id, { code: null, signal: null, lost: true }).catch(e => ({ outcome: `not recorded: ${(e as Error).message}` }))

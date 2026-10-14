@@ -979,7 +979,7 @@ export class RunSide {
       h('div.row.tight', h(`span.chip.sit-${sit}`, SIT[sit] ?? sit), process ? h('span.muted.small', process) : null),
       rec.control.hold ? h('p.small', `Held (${rec.control.hold.kind}) since ${when(rec.control.hold.since)} by ${rec.control.hold.by}${becauseText(rec.control.hold.because)}: ${sentence(rec.control.hold.reason)} Its work is kept in its own copy; other requests can run meanwhile.${rec.control.hold.kind === 'stopped' ? '' : ' Observer takes an interrupted run to a recovery agent, which may continue it (wfe run recover).'} `, h('a', { href: '#', dataset: { action: 'goto-resume' } }, 'Resume with an instruction')) : null,
       // Recoveries (observer p3): who continued the run, for which incident.
-      ...(rec.recoveries ?? []).slice(-3).map(r => h('p.small.muted', `Continued by recovery: ${r.by}${r.agent ? ` (${r.agent.workflow}/${r.agent.run})` : ''}, ${when(r.at)}, incident ${r.incident}, after attempt ${r.attempt} (${r.lifted}): ${sentence(r.reason)}`)),
+      ...(rec.recoveries ?? []).slice(-3).map(r => h('p.small.muted', `Continued by recovery: ${r.by}${r.agent ? ` (${r.agent.workflow}/${r.agent.run})` : ''}, ${when(r.at)}, incident ${r.incident}, after attempt ${r.attempt} (${r.lifted ?? 'continuation nothing had queued'}): ${sentence(r.reason)}`)),
       d.execError ? h('div.banner.warn', `Execution facts of this host could not be read: ${d.execError}`) : null,
       ev ? h('p.small.muted', `Executor: ${ev.executor.state}${ev.executor.detail ? ` — ${ev.executor.detail}` : ''}`) : null,
       // Where the run's work is kept (p9, docs/storage.md).

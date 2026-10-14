@@ -208,3 +208,28 @@ test('the HTTP ops route does not offer run.recover; the CLI records it and refu
   assert.equal(refused.code, 1)
   assert.match(refused.out.error, /never lifts a person's hold/)
 })
+
+test('an unowned continuation (an answer recorded, its job lost) is queued by recovery; an owned one is refused', async () => {
+  const { x, ws, id } = await setup()
+  const TALK = WF('ask', 'ask-agent').replace('type: do\n    description: Do the work.', 'type: talk\n    description: Ask.')
+  await writeFile(join(ws.root, 'devdocs', 'workflows', 'ask.yaml'), TALK)
+  await gitOk(ws.root, ['add', '-A']); await gitOk(ws.root, ['commit', '-q', '-m', 'ask']); await gitOk(ws.root, ['push', '-q', 'origin', 'main'])
+  const a = (await x.request({ workspace: id, workflow: 'ask', text: 'ask me', author: 'Pat', receipt: 'req-recover-7', via: 'browser' })).ref
+  const c = await claimed(x)
+  x.started(c.attempt.id, await deadPid())
+  await report(ws, a, c.attempt.id, { op: 'node.start', node: 'work' })
+  await report(ws, a, c.attempt.id, { op: 'question.ask', question: '', node: 'work', text: 'Which?', to: 'Pat' })
+  await x.finished(c.attempt.id, { code: 0, signal: null })
+  await runOp(ws, a, { op: 'question.answer', question: 'q1', text: 'that one' }, { by: 'Pat', via: 'browser' })
+  const job = await x.afterAnswer(ws, a, 'q1')
+  await assert.rejects(x.recover(ws, a, { incident: 'iq1', attempt: c.attempt.id, reason: 'r', by: 'R', via: 'cli' }), code(/recover-owned/))
+  // The queue entry is lost in a way reconcile cannot repair (dropped under the same receipt).
+  x.db.prepare('UPDATE jobs SET state = \'dropped\', note = \'lost\' WHERE id = ?').run(job!.id)
+  assert.equal((await x.afterAnswer(ws, a, 'q1'))?.state, 'dropped', 'the answer\'s receipt finds the dropped job: nothing re-queues it')
+  await assert.rejects(x.recover(ws, a, { incident: 'iq1', attempt: 'a-other', reason: 'r', by: 'R', via: 'cli' }), code(/recover-stale/))
+  const res = await x.recover(ws, a, { incident: 'iq1', attempt: c.attempt.id, reason: 'the answer is recorded and nothing is queued', by: 'R', via: 'cli' })
+  assert.equal(res.record.recoveries?.at(-1)?.lifted, null)
+  assert.equal(res.job?.state, 'queued')
+  const next = await claimed(x)
+  assert.match(next.brief, /queued its continuation, which nothing had queued/)
+})

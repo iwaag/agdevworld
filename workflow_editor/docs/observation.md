@@ -133,7 +133,11 @@ wfe run recover <run> --incident <id> --attempt <the ended attempt> --reason <te
 ```
 
 - **Holds it may lift:** `interrupted` and `unknown` only — holds the
-  executor derived from how a process ended. A `stopped` hold (a person, or
+  executor derived from how a process ended. Without a hold it may queue a
+  continuation nothing owns: ready work, a node recorded as running, an
+  answer recorded and not taken up, or a run never started, with no job
+  queued or claimed (`recover-owned` otherwise); `--attempt` is then the
+  run's last attempt, or `none`. A `stopped` hold (a person, or
   an agent acting on a person's words), a pending stop and a cancellation
   stay binding (`recover-human-hold`, `held`, `run-cancelled`).
 - **Guards:** the hold's attempt must be the one named (`--attempt`, the

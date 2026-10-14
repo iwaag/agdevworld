@@ -248,7 +248,9 @@ export interface Control {
 // hold lifted by a recovering agent for an incident, naming the attempt
 // whose end held the run and the recovering agent's own run and attempt.
 export interface RecoveryAgent { workspace: string; workflow: string; run: string; attempt: string }
-export interface Recovery { seq: number; at: string; by: string; incident: string; attempt: string; lifted: HoldKind; reason: string; agent?: RecoveryAgent }
+// `lifted`: the hold the recovery lifted, or null for an unowned continuation
+// (work left ready or an answer recorded, nothing queued, no hold).
+export interface Recovery { seq: number; at: string; by: string; incident: string; attempt: string; lifted: HoldKind | null; reason: string; agent?: RecoveryAgent }
 export const INCIDENT_ID = /^[A-Za-z0-9][A-Za-z0-9:._#-]{0,79}$/
 export const RECOVERY_BUDGET = 2 // recoveries since the last person-originated control, or the run's creation
 
@@ -939,11 +941,19 @@ export function apply(prev: RunState | null, e: HistoryEntry | (OpInput & EntryM
       // person's stop, a pending stop and a cancellation stay binding.
       live()
       const held = ctl.hold
-      if (!held) return fail('state', 'the run is not held; there is nothing to recover')
       if (ctl.attempt) fail('attempt-open', `attempt ${ctl.attempt.id} is still open`)
-      if (held.kind === 'stopped') fail('recover-human-hold', `the run is held by ${held.by} (stopped: ${held.reason}); a recovery never lifts a person's hold`)
+      if (held?.kind === 'stopped') fail('recover-human-hold', `the run is held by ${held.by} (stopped: ${held.reason}); a recovery never lifts a person's hold`)
       if (typeof e.incident !== 'string' || !INCIDENT_ID.test(e.incident)) fail('shape', `incident "${String(e.incident)}" must match ${INCIDENT_ID.source}`)
-      if (!ctl.last || ctl.last.id !== e.attempt) fail('recover-stale', `the hold follows attempt ${ctl.last?.id ?? '(none)'}, not ${String(e.attempt)}; the recovery was decided on another episode`)
+      const lastAttempt = ctl.last?.id ?? 'none'
+      if (lastAttempt !== e.attempt) fail('recover-stale', `the run's last attempt is ${lastAttempt}, not ${String(e.attempt)}; the recovery was decided on another episode`)
+      if (!held) {
+        // An unowned continuation: no hold, and work that only the executor
+        // can take up — ready work, a node recorded as running, an answer
+        // recorded and not taken up, or a run never started. (Whether a job
+        // is queued is the execution host's fact: ExecStore.recover checks it.)
+        const answered = s.execution.waiting.some(w => 'question' in w.on && (() => { const q = s.questions[w.on.question]; return !!q && q.answers.length > 0 && !q.takenUp && !q.withdrawn })())
+        if (!s.execution.ready.length && !s.execution.active.length && !answered && s.execution.state !== 'not-started') fail('state', 'the run is not held and nothing in it waits for the executor; there is nothing to recover')
+      }
       const reason = text(e.reason, 'the reason for the recovery')
       let agent: RecoveryAgent | undefined
       if (e.agent !== undefined && e.agent !== null) {
@@ -951,7 +961,7 @@ export function apply(prev: RunState | null, e: HistoryEntry | (OpInput & EntryM
         if (!isObj(a) || ![a.workspace, a.workflow, a.run, a.attempt].every(v => typeof v === 'string' && v)) fail('shape', 'agent is {workspace, workflow, run, attempt}: the recovering agent\'s own run and attempt')
         agent = { workspace: a.workspace as string, workflow: a.workflow as string, run: a.run as string, attempt: a.attempt as string }
       }
-      s.recoveries = [...(s.recoveries ?? []), { seq: e.seq, at, by, incident: e.incident, attempt: e.attempt, lifted: held.kind, reason, ...(agent ? { agent } : {}) }]
+      s.recoveries = [...(s.recoveries ?? []), { seq: e.seq, at, by, incident: e.incident, attempt: e.attempt, lifted: held?.kind ?? null, reason, ...(agent ? { agent } : {}) }]
       ctl.hold = null
       break
     }

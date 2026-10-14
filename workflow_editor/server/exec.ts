@@ -323,7 +323,7 @@ export class ExecStore {
       if (r.control.last) lines.push(`The previous attempt ${r.control.last.id} ended: ${r.control.last.outcome}${r.control.last.detail ? ` — ${r.control.last.detail}` : ''}.`)
       // Continued by a recovery (observer p3): who decided it, for which incident, and why.
       const rc = r.recoveries?.at(-1)
-      if (rc && (!r.control.last || rc.at >= r.control.last.ended)) lines.push(`This run was continued by recovery: ${rc.by}${rc.agent ? ` (run ${rc.agent.workflow}/${rc.agent.run} in ${rc.agent.workspace})` : ''} lifted the ${rc.lifted} hold after attempt ${rc.attempt} for incident ${rc.incident}: "${rc.reason}". That is the recovering agent's finding, not a fact about side effects: look at your copy and the record before repeating anything that may already have happened.`)
+      if (rc && (!r.control.last || rc.at >= r.control.last.ended)) lines.push(`This run was continued by recovery: ${rc.by}${rc.agent ? ` (run ${rc.agent.workflow}/${rc.agent.run} in ${rc.agent.workspace})` : ''} ${rc.lifted ? `lifted the ${rc.lifted} hold after attempt ${rc.attempt}` : `queued its continuation, which nothing had queued (after attempt ${rc.attempt})`} for incident ${rc.incident}: "${rc.reason}". That is the recovering agent's finding, not a fact about side effects: look at your copy and the record before repeating anything that may already have happened.`)
       if (resume && (!r.control.last || resume.at > r.control.last.ended)) lines.push(`The person resumed the run: "${resume.reason}" (${resume.by}).`)
       lines.push(...await this.sinceBase(ws, r))
       for (const w of r.execution.waiting) lines.push(`Node ${w.node} waits; next move: ${holderOf(r, w.node)}.`)
@@ -443,6 +443,11 @@ export class ExecStore {
     for (const a of this.all<AttemptRow>('SELECT * FROM attempts WHERE workspace = ? AND workflow = ? AND run = ?', ws.reg.id, ref.workflow, ref.run)) {
       if (a.state !== 'ended') throw new RequestError(409, `attempt ${a.id} of run ${runKey(ref)} is ${a.state}; a recovery waits until it has ended`, { code: 'recover-process-alive' })
       if (a.host === hostname() && a.pid && alive(a.pid)) throw new RequestError(409, `process ${a.pid} of attempt ${a.id} still lives; the run's copy has one writer at a time`, { code: 'recover-process-alive' })
+    }
+    // An unowned continuation (no hold): only when nothing is queued for it.
+    if (!rec.control.hold) {
+      const job = this.one<JobRow>('SELECT * FROM jobs WHERE workspace = ? AND workflow = ? AND run = ? AND state IN (\'queued\', \'claimed\')', ws.reg.id, ref.workflow, ref.run)
+      if (job) throw new RequestError(409, `run ${runKey(ref)} is not held and job ${job.id} (${job.kind}) is ${job.state}: its continuation is owned`, { code: 'recover-owned' })
     }
     // The budget: recoveries since the last control that came from a person.
     const PERSON = ['run.create', 'run.resume', 'question.answer', 'instruction.receive']

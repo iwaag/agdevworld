@@ -231,14 +231,17 @@ An executing agent records it as itself; --because names the person's answer
 or instruction it acted on. Writes run.json.`,
   recover: `wfe run recover <run> --incident <id> --attempt <ended attempt> --reason <text> [--expect-seq <n>] [--by <name>]
 
-A recovering agent continues a run held as interrupted or unknown (observer
-p3, docs/observation.md). Not a person's resume: the record names the
+A recovering agent continues a run held as interrupted or unknown, or whose
+continuation nothing queued — ready work or a recorded answer, no hold, no
+job (observer p3, docs/observation.md). --attempt is the run's last attempt
+(none when it never had one). Not a person's resume: the record names the
 incident, the attempt whose end held the run (--attempt, wfe run show says
 it: the hold follows control.last) and who recovered it. Run from a recovery
 run's attempt (WFE_ATTEMPT), it records as that run's agent and names its run
 and attempt; outside an attempt --by names the recorder.
-Refused (exit 1) when: the hold is a person's (stopped), the run is cancelled
-or not held (recover-human-hold, run-cancelled, state); the hold follows
+Refused (exit 1) when: the hold is a person's (stopped), the run is cancelled,
+or it is not held and nothing in it waits for the executor or a job is queued
+(recover-human-hold, run-cancelled, state, recover-owned); the hold follows
 another attempt (recover-stale); --expect-seq is outdated (outdated); a
 process of the run still lives on this host (recover-process-alive); the run
 was already recovered 2 times since the last person's instruction (recover-budget).

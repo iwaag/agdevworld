@@ -256,6 +256,7 @@ execution:
   agent: ppt-agent            # the identity runs are performed as (default: the execution host's name)
   profile: sonnet             # one of the execution host's profiles (default: the host's)
   guides: [agent/guide.md, agent/create.md]   # project-relative; added after the common contract
+  session: run                # fresh (default) | run: later attempts resume the run's session (docs/sessions.md)
 intake:
   zulip: requests             # the workflow's Zulip channel accepts request topics (docs/intake.md)
 nodes:
@@ -272,6 +273,10 @@ nodes:
   and the host's common contract. A profile the host does not offer, or a
   guide that cannot be read, drops the job with the reason; nothing else is
   launched instead.
+- `session` (agent_session p1, [sessions.md](sessions.md)) is the run's
+  session policy, frozen with it like the rest of the definition. Any value
+  other than `fresh` or `run` is an error; `run` on a profile whose harness
+  keeps no resumable conversation is refused at claim, never run fresh.
 - `confirms: result` is valid on one talk node per workflow. The compiler
   (`ag.wfe-compile.v2`) keeps it in the frozen graph.
 

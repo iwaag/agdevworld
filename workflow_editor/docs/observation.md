@@ -78,7 +78,8 @@ One run:
 | `hold` | `{kind, since, by, reason, because, human}` — `human` is true for `stopped` (a person's or a person's words) and false for the executor-derived `interrupted`/`unknown` |
 | `stop`, `cancelled` | as recorded |
 | `attempts` | `{count, beganSeq, open: {id, began, reason, backend, agent} \| null, last: {id, outcome, ended, detail} \| null}` — `beganSeq` is the sequence of the latest `attempt.begin` |
-| `process` | the open (or last) attempt's host facts: `{attempt, state: launching \| running \| ended, host, local, pid, alive, began, ended, exit, signal, outcome, stopRequested, group: {members, cpuSeconds} \| null, log: {last, bytes, turns, session, problem, openTool: {name, since, timeoutSeconds, summary} \| null, ended: {subtype, stopReason} \| null, backgroundStopped, partial}}`; `alive`/`group`/`log` are `null` with a reason in `unavailable` when not observable here. `log.ended` is the harness's own end of the session; `backgroundStopped` counts background tasks the harness reported stopped (they die with the session); `partial` says the tail did not reach the log's start |
+| `session` | agent_session p1, from the record ([sessions.md](sessions.md)): `{policy: fresh \| run, current: {id, began, attempts, attached, mismatch} \| null, count, ended: [{id, state, at, by, reason}]}` (the last three replaced or retired). A session is a conversation, not a process: it proves no liveness and its age is no stall timer |
+| `process` | the open (or last) attempt's host facts: `{attempt, state: launching \| running \| ended, host, local, pid, alive, began, ended, exit, signal, outcome, stopRequested, session: {id, resumed} \| null (from the record), group: {members, cpuSeconds} \| null, log: {last, bytes, turns, session, problem, openTool: {name, since, timeoutSeconds, summary} \| null, ended: {subtype, stopReason} \| null, backgroundStopped, partial}}`; `alive`/`group`/`log` are `null` with a reason in `unavailable` when not observable here. `log.ended` is the harness's own end of the session; `backgroundStopped` counts background tasks the harness reported stopped (they die with the session); `partial` says the tail did not reach the log's start |
 | `queue` | `{job: {id, kind, state, created, reason, receipt} \| null, position, ahead: [{uid, kind, state}]}` |
 | `inputs` | `{questions: [{id, node, to, asked, state}], answeredNotTakenUp: [q…], instructionsPending: n}` |
 | `waiting` | `{reason, responsible, since}` — what the run waits for and whose move it is: `person:<name>`, `executor` (an answer recorded, ready work, a queued job), `external:<ref>`, `recovery` (an interrupted/unknown hold) or `none` |
@@ -118,7 +119,8 @@ activity and workflow progress are separate facts:
 | executor heartbeat | `heartbeat` row | that any attempt is healthy |
 | process alive | `kill(pid, 0)` on the attempt's host | that it is doing anything |
 | process group CPU | `ps` over the attempt's process group | that the work is useful |
-| harness activity | the attempt log's last write, turns, session id | that the run moves |
+| harness activity | the attempt log's last write, turns, session id (supporting evidence; the record's `process.session` is authoritative) | that the run moves |
+| retained session | the record's `session` | that any process exists |
 | open tool call | the last `tool_use` without its `tool_result` in the stream-json log, with its declared timeout | that the command will finish |
 | workflow progress | the run's agent's last report (`progress`) | that the process still lives |
 

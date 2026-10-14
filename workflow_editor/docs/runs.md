@@ -508,6 +508,12 @@ definition and records them with `attempt.begin` (`settings`: agent, profile,
 backend, contract and guides by hash); the host composes the prompt from the
 common contract, the guides it was handed and the brief.
 
+**Sessions (agent_session p1).** Which harness conversation an attempt
+runs in is the run's frozen session policy (`fresh` or `run`), resolved at
+claim and recorded in `attempt.begin` before launch; `run.json` keeps the
+run's `sessions[]` (ids, attempts, configuration, replacement reasons) and
+`wfe run session <run>` shows them. See [sessions.md](sessions.md).
+
 **Attempts.** One run can take several launches of the agent. `attempt.begin`
 (by the execution host when it claims a job) opens one; while it is open the
 executor's own reports (`start`, `progress`, `wait`, `complete`, `fail`,

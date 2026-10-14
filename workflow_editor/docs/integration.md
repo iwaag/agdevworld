@@ -31,7 +31,7 @@ checkpoint is made first when the copy holds unsaved records, and the run
 branch must be published as it is locally. The integration compares those
 commits with the revision. Two kinds of change are allowed:
 
-- the run's own record folder (administrative records: `run.json`, reports);
+- the run's own `run.json` (administrative state);
 - the gitlinks of submodules the run owns, which are checked in those
   submodules.
 
@@ -39,6 +39,10 @@ Any other difference means the result changed after it was accepted. The
 integration stops (`needs-agreement`), and the result is presented again.
 An edit made during the final attempt after the acceptance is therefore not
 approved by accident.
+
+The rest of the run folder is reviewed content, including plans, reports and
+presentation files. Changes there require agreement again, whether devdocs
+is a directory in the root repository or a separate submodule.
 
 ## Preconditions and queueing
 

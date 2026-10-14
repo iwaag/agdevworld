@@ -8,7 +8,7 @@
 //   the copy held it at that moment (`acceptedRevision`), uncommitted files
 //   included. Integration takes the commits saved after every attempt
 //   ended and refuses them when they differ from that revision anywhere but
-//   in the run's own record folder (administrative records) or the gitlinks
+//   in the run's own run.json (administrative state) or the gitlinks
 //   of submodules the run owns (checked in those submodules).
 // - Each repository is one step of a durable journal: target, observed
 //   target commit, candidate (the run branch), method, resulting commit,
@@ -84,15 +84,17 @@ export async function acceptedRevision(space: Workspace, storage: RunStorage): P
   return out
 }
 
-// Paths in a repository that are administrative: the run's own record
-// folder (in whichever repository owns devdocs), and in the root the
+// Paths in a repository that are administrative: the run's own run.json
+// (in whichever repository owns devdocs), and in the root the
 // gitlinks of submodules the run owns.
+// Plans, reports and presentation files in the same folder are reviewed
+// content: changing them after acceptance requires agreement again.
 async function administrative(space: Workspace, ref: RunRef, storage: RunStorage): Promise<(repo: string, path: string) => boolean> {
   const info = await space.devdocs()
   const owner = info.owner === 'devdocs' ? 'devdocs' : '.'
   const folder = info.owner === 'devdocs' ? runFolder(ref).slice('devdocs/'.length) : runFolder(ref)
   const subs = storage.repositories.filter(r => r.path !== '.' && r.branch).map(r => r.path)
-  return (repo, path) => (repo === owner && (path === folder || path.startsWith(`${folder}/`))) || (repo === '.' && subs.includes(path))
+  return (repo, path) => (repo === owner && path === `${folder}/run.json`) || (repo === '.' && subs.includes(path))
 }
 
 // Orders the repositories as they are published: submodules (devdocs

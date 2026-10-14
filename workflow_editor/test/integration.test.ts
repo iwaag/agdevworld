@@ -6,7 +6,7 @@
 // rejects the push (partial, then retried), and a crash after the push.
 import { after, before, test } from 'node:test'
 import assert from 'node:assert/strict'
-import { chmod, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createProject } from '../server/create.ts'
@@ -229,6 +229,42 @@ test('the acceptance binds to the reviewed revision: a deliverable changed after
   assert.match(row.error ?? '', /the result changed after it was accepted: app\.txt/)
   assert.equal(await head(s.remote), main, 'later edits are not published to the shared branch')
 })
+
+for (const mode of ['directory', 'submodule'] as const) {
+  test(`${mode} devdocs: reports, plans and presentation content remain bound to acceptance; run.json updates still integrate`, async () => {
+    const s = await setup({ mode })
+    try {
+      const a = await completed(s, `int-run-content-${mode}`, { 'app.txt': 'reviewed work\n' })
+      const folder = `devdocs/runs/${a.ref.workflow}/${a.ref.run}`
+      const files = ['report.md', 'report-build.md', 'plan.md', 'presentations/p1/result.txt']
+      await mkdir(join(a.cwd, folder, 'presentations/p1'), { recursive: true })
+      for (const path of files) await writeFile(join(a.cwd, folder, path), `Reviewed ${path}\n`)
+      await accept(s, a.ref)
+      const main = await head(s.remote)
+      const studyMain = await head(s.study)
+      const docsRemote = mode === 'submodule' ? (await gitOk(join(a.cwd, 'devdocs'), ['remote', 'get-url', 'origin'])).trim() : null
+      const docsMain = docsRemote ? await head(docsRemote) : null
+      for (const path of files) {
+        await writeFile(join(a.cwd, folder, path), `Changed after acceptance: ${path}\n`)
+        const r = await s.x.integrateRun(s.ws, a.ref, { by: 'Test Person', via: 'cli' })
+        assert.equal(r.state, 'needs-agreement', `${path}: ${r.error}`)
+        assert.ok(r.steps.some(step => step.files?.some(file => file.endsWith(`/${path}`))), `${path} is named as requiring agreement`)
+        assert.equal(await head(s.remote), main, 'the shared root stays unchanged')
+        assert.equal(await head(s.study), studyMain, 'the shared study stays unchanged')
+        if (docsRemote) assert.equal(await head(docsRemote), docsMain, 'the shared devdocs stays unchanged')
+        await writeFile(join(a.cwd, folder, path), `Reviewed ${path}\n`)
+      }
+      // Checkpoints and the acceptance itself update run.json after its
+      // accepted tree was captured. Those administrative updates are allowed.
+      const integrated = await s.x.integrateRun(s.ws, a.ref, { by: 'Test Person', via: 'cli' })
+      assert.equal(integrated.state, 'integrated', integrated.error)
+      const owner = docsRemote ?? s.remote
+      const prefix = mode === 'submodule' ? folder.slice('devdocs/'.length) : folder
+      assert.equal(await show(owner, `main:${prefix}/report.md`), 'Reviewed report.md\n')
+      assert.match(await show(owner, `main:${prefix}/run.json`), /"decision": "accepted"/)
+    } finally { s.x.close() }
+  })
+}
 
 test('a remote that rejects the push: partial (the study done, the root not), then a retry finishes; a crash after the push is found, not pushed twice', async () => {
   const s = await setup()

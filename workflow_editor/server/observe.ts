@@ -14,6 +14,7 @@ import { hostname } from 'node:os'
 import { promisify } from 'node:util'
 import { canonicalJson } from '../shared/canonical.ts'
 import { EXECUTOR_OPS, hostOf, questionState, runKey, situation, type RunRecord, type RunRef } from '../shared/run.ts'
+import { sessionPolicyOf } from '../shared/model.ts'
 import { activityOf, logFacts } from './activity.ts'
 import type { AttemptRow, ExecStore, JobRow } from './exec.ts'
 import { loadRegistry, observe as observeRegistration } from './registry.ts'
@@ -47,6 +48,10 @@ export interface ObservedRun {
   stop: unknown
   cancelled: unknown
   attempts: { count: number; beganSeq: number | null; open: { id: string; began: string; reason: string; backend: string | null; agent: string | null } | null; last: { id: string; outcome: string; ended: string; detail: string } | null }
+  // agent_session p1: the run's frozen session policy and its sessions, from
+  // the record (a session is a conversation, not a process: it says nothing
+  // about liveness and its age is no stall timer).
+  session: SessionFacts | null
   process: ProcessFacts | null
   queue: { job: Pick<JobRow, 'id' | 'kind' | 'state' | 'created' | 'reason' | 'receipt'> | null; position: number | null; ahead: { uid: string | null; ref: string; workspace: string; kind: 'attempt' | 'job'; state: string }[] }
   inputs: { questions: { id: string; node: string | null; to: string; asked: string; state: string }[]; answeredNotTakenUp: string[]; instructionsPending: number }
@@ -60,12 +65,22 @@ export interface ObservedRun {
   problems: { code: string; message: string }[]
   unavailable: Record<string, string>
 }
+export interface SessionFacts {
+  policy: 'fresh' | 'run'
+  current: { id: string | null; began: string; attempts: string[]; attached: string | null; mismatch: boolean } | null
+  count: number
+  ended: { id: string | null; state: string; at: string; by: string; reason: string }[] // the last three replaced or retired sessions
+}
 interface CheckpointFact { id: number; kind: string; state: string; error: string | null; updated: string }
 export interface ProcessFacts {
   attempt: string; state: string; host: string; local: boolean; pid: number | null; alive: boolean | null
   began: string; ended: string | null; exit: number | null; signal: string | null; outcome: string | null; stopRequested: string | null
   group: { members: number; cpuSeconds: number } | null
   log: { last: string | null; bytes: number; turns: number | null; session: string | null; problem: string | null; openTool: unknown; ended: unknown; backgroundStopped: number; partial: boolean } | null
+  // agent_session p1: the session the record says this attempt ran in, and
+  // whether it was resumed (an earlier attempt served it) — read from the
+  // record, the log's session id being supporting evidence.
+  session: { id: string | null; resumed: boolean } | null
 }
 export interface Observation {
   schema: string
@@ -240,7 +255,7 @@ export class Observer {
       identity: { project: '', workspace: ws.reg.id, workflow: ref.workflow, run: ref.run, creation: '', uid: '', created: '', receipt: null, branch: null },
       source: { state, problem, location, readAt: now().toISOString(), reads: 1, consistent: true },
       seq: null, updated: null, situation: null, execution: null, hold: null, stop: null, cancelled: null,
-      attempts: { count: 0, beganSeq: null, open: null, last: null }, process: null, queue: { job: null, position: null, ahead: [] },
+      attempts: { count: 0, beganSeq: null, open: null, last: null }, session: null, process: null, queue: { job: null, position: null, ahead: [] },
       inputs: { questions: [], answeredNotTakenUp: [], instructionsPending: 0 }, waiting: null, progress: null, recoveries: [],
       publication: { failed: [], attention: [], pending: [] }, integration: { queued: [], running: [], failed: [], refused: [], attention: [] },
       input: { kind: 'unknown', requester: null, source: null }, executor: null, problems, unavailable: { record: problem ?? state },
@@ -252,10 +267,12 @@ export class Observer {
     let rows: ReturnType<ExecStore['runRows']> | null = null
     let consistent = false
     let readProblem: string | null = null
+    let policy: 'fresh' | 'run' = 'fresh'
     for (; reads < MAX_READS && !consistent;) {
       reads++
-      const first = await readRun(ws, ref).catch(e => ({ record: undefined, problem: { message: (e as Error).message } }))
+      const first = await readRun(ws, ref).catch(e => ({ record: undefined, problem: { message: (e as Error).message }, bundle: undefined }))
       if (!first.record) { readProblem = first.problem?.message ?? 'the record cannot be read'; break }
+      policy = sessionPolicyOf(first.bundle?.entries[first.record.definition.root]?.workflow?.execution)
       rows = this.exec ? this.exec.runRows(ws.reg.id, ref) : null
       if (between) await between(ref)
       const second = await readRun(ws, ref).catch(() => ({ record: undefined }))
@@ -286,6 +303,7 @@ export class Observer {
         open: r.control.attempt ? { id: r.control.attempt.id, began: r.control.attempt.began, reason: r.control.attempt.reason, backend: r.control.attempt.backend, agent: r.control.attempt.settings?.agent ?? r.executor.name } : null,
         last: r.control.last ? { id: r.control.last.id, outcome: r.control.last.outcome, ended: r.control.last.ended, detail: r.control.last.detail } : null,
       },
+      session: sessionFacts(r, policy),
       process: null,
       queue: { job: openJob ? { id: openJob.id, kind: openJob.kind, state: openJob.state, created: openJob.created, reason: openJob.reason, receipt: openJob.receipt } : null, position: null, ahead: [] },
       inputs: {
@@ -304,12 +322,12 @@ export class Observer {
     }
     if (!consistent) problems.push({ code: 'changing', message: `the record changed while it was read ${reads} times; its facts may straddle a transition` })
     if (!rows) unavailable.executor = 'execution is not configured on this host'
-    return this.withRows(out, ws, ref, groups, rows ?? undefined)
+    return this.withRows(out, ws, ref, groups, rows ?? undefined, r)
   }
 
   // The executor's facts of one run: its process (the open or last
   // attempt), publication and integration problems.
-  private async withRows(out: ObservedRun, ws: Workspace, ref: RunRef, groups: Map<number, { members: number; cpuSeconds: number }> | string, given?: ReturnType<ExecStore['runRows']>): Promise<ObservedRun> {
+  private async withRows(out: ObservedRun, ws: Workspace, ref: RunRef, groups: Map<number, { members: number; cpuSeconds: number }> | string, given?: ReturnType<ExecStore['runRows']>, rec?: RunRecord): Promise<ObservedRun> {
     const rows = given ?? (this.exec ? this.exec.runRows(ws.reg.id, ref) : null)
     if (!rows) return out
     if (!out.queue.job) { const j = rows.jobs.find(x => x.state === 'queued' || x.state === 'claimed'); if (j) out.queue.job = { id: j.id, kind: j.kind, state: j.state, created: j.created, reason: j.reason, receipt: j.receipt } }
@@ -325,10 +343,11 @@ export class Observer {
         const [act, facts] = await Promise.all([activityOf(a.log).catch(e => ({ problem: (e as Error).message, last: null, bytes: 0, count: null, unit: null })), logFacts(a.log).catch(() => null)])
         log = { last: act?.last ?? null, bytes: act?.bytes ?? 0, turns: act?.count ?? null, session: facts?.session ?? null, problem: act?.problem ?? null, openTool: facts?.openTool ?? null, ended: facts?.ended ?? null, backgroundStopped: facts?.backgroundStopped ?? 0, partial: facts?.partial ?? false }
       }
+      const ses = rec?.sessions?.find(x => x.attempts.includes(a.id))
       out.process = {
         attempt: a.id, state: a.state, host: a.host, local, pid: a.pid, alive: !isOpen ? false : local ? alive(a.pid) : null,
         began: a.began, ended: a.ended, exit: a.exit_code, signal: a.signal, outcome: a.outcome, stopRequested: a.stop_requested,
-        group, log,
+        group, log, session: ses ? { id: ses.id, resumed: ses.attempt !== a.id } : null,
       }
     }
     // A checkpoint superseded by a later published one of the same run is history, not a problem.
@@ -349,3 +368,16 @@ export class Observer {
 }
 
 export const runKeyOf = (r: ObservedRun) => runKey({ workflow: r.identity.workflow, run: r.identity.run })
+
+// agent_session p1: what the record says of the run's sessions.
+function sessionFacts(r: RunRecord, policy: 'fresh' | 'run'): SessionFacts {
+  const all = r.sessions ?? []
+  const last = all.at(-1)
+  const cur = last && last.state === 'open' ? last : null
+  return {
+    policy,
+    current: cur ? { id: cur.id, began: cur.began, attempts: cur.attempts, attached: cur.attached ?? null, mismatch: !!cur.mismatch } : null,
+    count: all.length,
+    ended: all.filter(x => x.state !== 'open').slice(-3).map(x => ({ id: x.id, state: x.state, at: x.ended?.at ?? '', by: x.ended?.by ?? '', reason: x.ended?.reason ?? '' })),
+  }
+}

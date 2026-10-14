@@ -13,6 +13,7 @@ import { emptyWorkflow, type Workflow } from '../shared/model.ts'
 import { validateWorkflow } from '../shared/validate.ts'
 import { createProject } from '../server/create.ts'
 import { ExecStore, type HostOffer } from '../server/exec.ts'
+import { Observer } from '../server/observe.ts'
 import { gitOk } from '../server/git.ts'
 import { loadRegistry } from '../server/registry.ts'
 import { readRun, runOp } from '../server/runs.ts'
@@ -132,8 +133,18 @@ test('run policy: a new session under a minted id, resumed by that id after the 
   assert.equal(rec.sessions?.[0].attached, sid)
   await runOp(space, req.ref, { op: 'question.answer', question: 'q1', text: 'Small.', from: 'Test Person' }, { by: 'Test Person', via: 'cli' })
   assert.ok(await x.afterAnswer(space, req.ref, 'q1'))
+  // Observation (Observer's read): during the wait no process runs; the
+  // record still names the run's retained session.
+  const observer = new Observer(x, x.ctx.registryFile)
+  const waiting = (await observer.observe()).runs.find(o => o.identity.run === req.ref.run)!
+  assert.equal(waiting.situation, 'awaiting-person')
+  assert.deepEqual(waiting.session && { policy: waiting.session.policy, id: waiting.session.current?.id, attempts: waiting.session.current?.attempts.length }, { policy: 'run', id: sid, attempts: 1 })
+  assert.equal(waiting.process?.alive, false, 'a retained session is not a live process')
   const c2 = await claim(x)
   assert.deepEqual(c2.execution.session, { policy: 'run', mode: 'resume', id: sid })
+  const running = (await observer.observe()).runs.find(o => o.identity.run === req.ref.run)!
+  assert.deepEqual(running.process?.session, { id: sid, resumed: true }, 'the attempt\'s session comes from the record')
+  assert.equal(running.process?.attempt, c2.attempt.id, 'activity stays scoped to the current attempt')
   rec = await record(space, req.ref)
   assert.deepEqual(rec.sessions?.map(s => [s.id, s.state, s.attempts]), [[sid, 'open', [c1.attempt.id, c2.attempt.id]]])
   // Stale attempt references cannot write session facts either.

@@ -244,6 +244,14 @@ export interface Control {
   stop: { at: string; by: string; reason: string; because?: Because } | null // stop requested; not yet confirmed by the attempt's end
 }
 
+// A recovery (observer p3, docs/observation.md): an interrupted or unknown
+// hold lifted by a recovering agent for an incident, naming the attempt
+// whose end held the run and the recovering agent's own run and attempt.
+export interface RecoveryAgent { workspace: string; workflow: string; run: string; attempt: string }
+export interface Recovery { seq: number; at: string; by: string; incident: string; attempt: string; lifted: HoldKind; reason: string; agent?: RecoveryAgent }
+export const INCIDENT_ID = /^[A-Za-z0-9][A-Za-z0-9:._#-]{0,79}$/
+export const RECOVERY_BUDGET = 2 // recoveries since the last person-originated control, or the run's creation
+
 // Where the run's work is kept (p9, docs/storage.md): its own branch in
 // each repository it owns, the commit each started from and the branch an
 // integration goes to. Portable: names and commits, never paths or URLs.
@@ -272,6 +280,7 @@ export interface RunState {
   instructions?: Record<string, Instruction> // present once the first one arrives (p6)
   presentations?: Record<string, Presentation> // present once the first one is registered (p7)
   integrations?: IntegrationRecord[] // present once the first one completed (p9)
+  recoveries?: Recovery[] // present once the first run.recover is recorded (observer p3)
   artifacts: Artifact[]
   decisions: Decision[]
   cancelled: { reason: string; at: string; by: string; because?: Because } | null
@@ -311,6 +320,8 @@ export type OpInput =
   | { op: 'attempt.end'; attempt: string; outcome: AttemptOutcome; detail?: string }
   | { op: 'run.stop'; reason: string; because?: BecauseRef }
   | { op: 'run.resume'; reason: string; because?: BecauseRef }
+  // observer p3: a recovering agent continues an interrupted/unknown hold for an incident.
+  | { op: 'run.recover'; incident: string; attempt: string; reason: string; agent?: RecoveryAgent }
   | { op: 'presentation.register'; presentation?: string; node: string; title: string; manifest?: PresentationManifest }
   | { op: 'presentation.observe'; presentation: string; status: Observation; instance?: string; detail?: string }
   // completing (p8/ex2): the adjustment is made at the completion of that
@@ -326,7 +337,7 @@ export const CONTROL_OPS: readonly string[] = ['run.stop', 'run.resume', 'run.ca
 
 export const OPS = ['run.create', 'node.start', 'node.progress', 'node.wait', 'node.complete', 'node.fail', 'node.cancel',
   'question.ask', 'question.answer', 'question.take-up', 'question.withdraw', 'instruction.receive', 'instruction.ack', 'artifact.attach', 'run.cancel', 'run.decide',
-  'attempt.begin', 'attempt.end', 'run.stop', 'run.resume', 'presentation.register', 'presentation.observe', 'run.adjust', 'run.integrate', 'run.relocate'] as const
+  'attempt.begin', 'attempt.end', 'run.stop', 'run.resume', 'presentation.register', 'presentation.observe', 'run.adjust', 'run.integrate', 'run.relocate', 'run.recover'] as const
 // The executor's own reports. While an attempt is open they must carry its
 // id (`attempt`), so a stopped or superseded attempt cannot write into the
 // record of the one that replaced it.
@@ -923,6 +934,27 @@ export function apply(prev: RunState | null, e: HistoryEntry | (OpInput & EntryM
       else ctl.hold = { kind: 'stopped', since: at, by, reason, ...(why ? { because: why } : {}) }
       break
     }
+    case 'run.recover': {
+      // Only the holds the executor derived from how a process ended. A
+      // person's stop, a pending stop and a cancellation stay binding.
+      live()
+      const held = ctl.hold
+      if (!held) return fail('state', 'the run is not held; there is nothing to recover')
+      if (ctl.attempt) fail('attempt-open', `attempt ${ctl.attempt.id} is still open`)
+      if (held.kind === 'stopped') fail('recover-human-hold', `the run is held by ${held.by} (stopped: ${held.reason}); a recovery never lifts a person's hold`)
+      if (typeof e.incident !== 'string' || !INCIDENT_ID.test(e.incident)) fail('shape', `incident "${String(e.incident)}" must match ${INCIDENT_ID.source}`)
+      if (!ctl.last || ctl.last.id !== e.attempt) fail('recover-stale', `the hold follows attempt ${ctl.last?.id ?? '(none)'}, not ${String(e.attempt)}; the recovery was decided on another episode`)
+      const reason = text(e.reason, 'the reason for the recovery')
+      let agent: RecoveryAgent | undefined
+      if (e.agent !== undefined && e.agent !== null) {
+        const a = e.agent as unknown as Record<string, unknown>
+        if (!isObj(a) || ![a.workspace, a.workflow, a.run, a.attempt].every(v => typeof v === 'string' && v)) fail('shape', 'agent is {workspace, workflow, run, attempt}: the recovering agent\'s own run and attempt')
+        agent = { workspace: a.workspace as string, workflow: a.workflow as string, run: a.run as string, attempt: a.attempt as string }
+      }
+      s.recoveries = [...(s.recoveries ?? []), { seq: e.seq, at, by, incident: e.incident, attempt: e.attempt, lifted: held.kind, reason, ...(agent ? { agent } : {}) }]
+      ctl.hold = null
+      break
+    }
     case 'run.resume': {
       live()
       if (!ctl.hold) fail('state', 'the run is not held; there is nothing to resume')
@@ -1362,6 +1394,8 @@ export function notableEvents(r: RunRecord, sinceSeq = 0): NotableEvent[] {
       push('held', true, h?.reason || d.detail || d.reason || e.change.hold[1], { hold: e.change.hold[1], ...(h?.kind === 'stopped' ? { heldBy: h.by, ...(h.because ? { because: h.because } : {}) } : {}) })
     }
     if (e.op === 'run.resume') push('resumed', false, d.reason)
+    // observer p3: continued by a recovering agent, said as such.
+    if ((e.op as string) === 'run.recover') push('resumed', false, `continued by recovery (${e.by}, incident ${String(d.incident)}): ${String(d.reason)}`)
     if (e.change.execution?.[1] === 'completed' && !(step?.kind === 'final-report')) push('completed', true, d.outcome ?? 'every node completed', e.op === 'node.complete' && !step ? { node: d.node } : {})
     if (e.op === 'run.decide') {
       const dec = r.decisions.find(x => x.at === e.at && x.by === e.by && x.decision === d.decision)

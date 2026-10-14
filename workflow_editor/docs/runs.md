@@ -521,6 +521,10 @@ recorded as `interrupted`, never as success.
 **Holds.** `stopped`, `interrupted` and `unknown` hold the run: nothing
 begins until a person records `run.resume` with an instruction (after looking
 at the run's files — side effects may have happened after the last record).
+An `interrupted` or `unknown` hold may instead be lifted by a recovering agent
+with `run.recover` (observer p3, [observation.md](observation.md)): Observer
+asks a recovery run to investigate, and the record names the incident, the
+ended attempt and the recovering run; a `stopped` hold is only a person's.
 
 - `run.stop` while an attempt is open is a request (`control.stop`, shown
   as "stopping"). The hold is recorded only when the attempt's end confirms

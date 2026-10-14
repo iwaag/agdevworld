@@ -347,3 +347,38 @@ test('an empty template declares intake too, while an explicit workflow opt-out 
   assert.ok(!(await i.due()).channels.some(c => c.workflow === 'blank'))
   i.close()
 })
+
+// observer p3: an agent named in intake.agents may open a request in the
+// workflows it is named for — the post becomes a `request` input in the
+// agent's own name; its other posts, and its posts elsewhere, are ignored.
+test('an agent requester opens a request only in its named workflows; its words are a request, not a braindump', async () => {
+  const { area, i, ws, x } = await setup()
+  const OBSERVER = 23
+  const cfg = JSON.parse(await readFile(join(area, 'zulip.json'), 'utf8'))
+  cfg.intake.agents = [{ id: OBSERVER, name: 'Observer', workflows: ['p/make'] }]
+  await writeFile(join(area, 'zulip.json'), JSON.stringify(cfg))
+  const req = post({ topic: 'request-incident-i1', sender: { id: OBSERVER, name: 'agobserver', email: 'o@x', bot: true }, content: 'Investigate incident i1.' })
+  const again = post({ topic: 'request-incident-i1', topicFirst: req.id, sender: { id: OBSERVER, name: 'agobserver', email: 'o@x', bot: true }, content: 'still there?' })
+  receive(i, [req, again])
+  await i.process(); await i.process()
+  const ref = { workflow: 'make', run: 'run-001' }
+  const rec = await record(ws, ref)
+  assert.equal(rec.input.kind, 'request')
+  assert.equal(rec.input.requester, 'Observer')
+  assert.deepEqual(rec.input.entrustedBy, { kind: 'note', text: `Zulip post ${req.id} in request-incident-i1` })
+  assert.equal(rec.input.source?.message, req.id)
+  assert.equal(rec.history[0].by, 'Observer')
+  assert.equal(await readFile(join((await runSpace(ws, ref)).root, 'devdocs/runs/make/run-001/request.md'), 'utf8'), 'Investigate incident i1.')
+  assert.equal((await x.runView(ws.reg.id, ref)).jobs.length, 1, 'queued like any request')
+  const states = Object.fromEntries(i.messages().map(m => [m.id, m.classification ? JSON.parse(m.classification) : null]))
+  assert.deepEqual(states[again.id], { kind: 'ignored', reason: 'bot' }, 'an agent\'s later posts are not input')
+  // The same agent in a workflow it is not named for: ignored.
+  cfg.intake.agents = [{ id: OBSERVER, name: 'Observer', workflows: ['p/other'] }]
+  await writeFile(join(area, 'zulip.json'), JSON.stringify(cfg))
+  const elsewhere = post({ topic: 'request-incident-i2', sender: { id: OBSERVER, name: 'agobserver', email: 'o@x', bot: true }, content: 'Investigate incident i2.' })
+  receive(i, [elsewhere])
+  await i.process()
+  assert.equal((await listRuns(ws)).length, 1)
+  assert.deepEqual(JSON.parse(i.messages().find(m => m.id === elsewhere.id)!.classification!), { kind: 'ignored', reason: 'bot' })
+  i.close()
+})

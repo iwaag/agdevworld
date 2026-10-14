@@ -443,7 +443,12 @@ export class RunSide {
     } else if (answerable.length) {
       kind = 'answered'; head = 'Your answer is recorded'
       lead = h('span', `${rec.executor.name} has not taken it up yet: the next move is theirs.`, h('span.d-only', ' Recording an answer does not wake the executor.'))
-    } else if (hold) { kind = 'held'; head = `Held (${hold.kind})`; lead = h('span', `${hold.by}${becauseText(hold.because)}`, h('span.d-only', `, ${when(hold.since)}`), `: ${sentence(hold.reason)} Its plan and work are kept, and nothing of it runs until it is resumed with an instruction. Other requests in this project can run meanwhile.`) }
+    } else if (hold) {
+      kind = 'held'; head = `Held (${hold.kind})`
+      // observer p3: an interrupted or unknown hold is also Observer's to take to a recovery agent; a stop is only the person's.
+      const recovery = hold.kind === 'stopped' ? 'nothing of it runs until it is resumed with an instruction' : 'Observer asks a recovery agent to look and continue it (or you resume it with an instruction)'
+      lead = h('span', `${hold.by}${becauseText(hold.because)}`, h('span.d-only', `, ${when(hold.since)}`), `: ${sentence(hold.reason)} Its plan and work are kept, and ${recovery}. Other requests in this project can run meanwhile.`)
+    }
     else if (ex.failed.length) {
       kind = 'failed'; head = `${ex.failed.map(name).join(', ')} failed`
       const work = ex.blocked.filter(n => !effectiveOf(rec)?.nodes[n]?.step), docs = ex.blocked.length - work.length
@@ -965,14 +970,16 @@ export class RunSide {
     const open = ev?.attempts.find(a => a.state !== 'ended')
     const SIT: Record<string, string> = {
       executing: 'Executing', stopping: 'Stop requested — waiting for the process to end', 'awaiting-person': 'Awaiting a person — no process runs meanwhile',
-      stopped: 'Stopped (held) — its work is kept; resumes only when you resume it', interrupted: 'Interrupted — look at the working tree, then resume', unknown: 'Unknown — the process was lost; look, then resume',
+      stopped: 'Stopped (held) — its work is kept; resumes only when you resume it', interrupted: 'Interrupted — a recovery agent or you look at the working tree, then continue it', unknown: 'Unknown — the process was lost; a recovery agent or you look, then continue it',
       completed: 'Completed', cancelled: 'Cancelled', 'not-started': 'Not started', idle: 'Idle',
     }
     const process = open ? (open.alive === true ? `process ${open.pid} alive` : open.alive === false ? (open.pid ? `process ${open.pid} not seen alive` : 'launching') : 'process on another host') : ''
     const frozen = this.frozen || !!rec.cancelled
     patchContent(this.execution.content.children[0] as HTMLElement,
       h('div.row.tight', h(`span.chip.sit-${sit}`, SIT[sit] ?? sit), process ? h('span.muted.small', process) : null),
-      rec.control.hold ? h('p.small', `Held (${rec.control.hold.kind}) since ${when(rec.control.hold.since)} by ${rec.control.hold.by}${becauseText(rec.control.hold.because)}: ${sentence(rec.control.hold.reason)} Its work is kept in its own copy; other requests can run meanwhile. `, h('a', { href: '#', dataset: { action: 'goto-resume' } }, 'Resume with an instruction')) : null,
+      rec.control.hold ? h('p.small', `Held (${rec.control.hold.kind}) since ${when(rec.control.hold.since)} by ${rec.control.hold.by}${becauseText(rec.control.hold.because)}: ${sentence(rec.control.hold.reason)} Its work is kept in its own copy; other requests can run meanwhile.${rec.control.hold.kind === 'stopped' ? '' : ' Observer takes an interrupted run to a recovery agent, which may continue it (wfe run recover).'} `, h('a', { href: '#', dataset: { action: 'goto-resume' } }, 'Resume with an instruction')) : null,
+      // Recoveries (observer p3): who continued the run, for which incident.
+      ...(rec.recoveries ?? []).slice(-3).map(r => h('p.small.muted', `Continued by recovery: ${r.by}${r.agent ? ` (${r.agent.workflow}/${r.agent.run})` : ''}, ${when(r.at)}, incident ${r.incident}, after attempt ${r.attempt} (${r.lifted}): ${sentence(r.reason)}`)),
       d.execError ? h('div.banner.warn', `Execution facts of this host could not be read: ${d.execError}`) : null,
       ev ? h('p.small.muted', `Executor: ${ev.executor.state}${ev.executor.detail ? ` — ${ev.executor.detail}` : ''}`) : null,
       // Where the run's work is kept (p9, docs/storage.md).

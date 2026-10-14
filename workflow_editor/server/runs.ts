@@ -463,7 +463,7 @@ export interface CreateRunOptions {
   name?: string // run id; default the next run-NNN
   input:
     | { kind: 'braindump'; text: string; author: string; recordedBy?: string; source?: SourceRef }
-    | { kind: 'request'; text: string; requester: string; entrustedBy: EntrustRef; onBehalfOf?: string; original?: string }
+    | { kind: 'request'; text: string; requester: string; entrustedBy: EntrustRef; onBehalfOf?: string; original?: string; source?: SourceRef }
   // The agent identity. With `host`, the run is performed as the
   // definition's execution.agent (or as the host itself when none is
   // declared) and the host is recorded beside it (p6).
@@ -586,6 +586,7 @@ function inputOf(o: CreateRunOptions['input']): { input: RunInput; files: Record
   if (!o.requester?.trim()) throw new RequestError(400, 'a request needs its requester: the agent that wrote it (--requester)')
   const input: RunInput = { kind: 'request', file: 'request.md', requester: o.requester.trim(), entrustedBy: validEntrust(o.entrustedBy), sha256: sha256(o.text) }
   if (o.onBehalfOf?.trim()) input.onBehalfOf = o.onBehalfOf.trim()
+  if (o.source) input.source = o.source // observer p3: an agent's request posted in a Zulip request topic
   const files: Record<string, string> = { 'request.md': o.text }
   if (o.original !== undefined) { input.original = 'original-input.md'; files['original-input.md'] = o.original }
   return { input, files }

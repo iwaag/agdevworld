@@ -229,6 +229,23 @@ the run is held as stopped. Without an attempt, it is held at once (for
 example while it waits for a person: an answer then does not resume it).
 An executing agent records it as itself; --because names the person's answer
 or instruction it acted on. Writes run.json.`,
+  recover: `wfe run recover <run> --incident <id> --attempt <ended attempt> --reason <text> [--expect-seq <n>] [--by <name>]
+
+A recovering agent continues a run held as interrupted or unknown (observer
+p3, docs/observation.md). Not a person's resume: the record names the
+incident, the attempt whose end held the run (--attempt, wfe run show says
+it: the hold follows control.last) and who recovered it. Run from a recovery
+run's attempt (WFE_ATTEMPT), it records as that run's agent and names its run
+and attempt; outside an attempt --by names the recorder.
+Refused (exit 1) when: the hold is a person's (stopped), the run is cancelled
+or not held (recover-human-hold, run-cancelled, state); the hold follows
+another attempt (recover-stale); --expect-seq is outdated (outdated); a
+process of the run still lives on this host (recover-process-alive); the run
+was already recovered 2 times since the last person's instruction (recover-budget).
+The same incident and attempt are recorded once. On success the resumption is
+queued; the next attempt's brief says it was continued by recovery and why.
+It grants no replay of side effects, no acceptance, no plan change and no
+answer. Writes run.json.`,
   resume: `wfe run resume <run> --reason <instruction> [--because answer:<q>[:<n>]|instruction:<i>]
 
 Resumes a run held as stopped, interrupted or unknown: the instruction, after
@@ -347,6 +364,7 @@ export function runIndex(): string {
   fail <run> <node>        record a failure
   cancel <run> [<node>]    discontinue a node or the run (final)
   stop / resume <run>      hold (work kept; others go on), resume a held run
+  recover <run>            a recovering agent continues an interrupted/unknown hold (incident, attempt)
   events <run>             notification-worthy events (selection only)
   ask / answer / take-up / withdraw    questions
   instructions / instruct / ack       additional instructions: list, give, acknowledge
@@ -676,6 +694,16 @@ export async function runCommand(c: RunCli): Promise<number> {
       const who = await recorder(r) ?? (await wrap(() => readRun(ws, r))).record?.executor.name ?? ''
       const res = await wrap(() => c.exec().resume(ws, r, who, need(c, 'reason', 'the resume instruction: what the executor should do now'), 'cli', receipt, { because: because() }))
       return report(r, res.record, `Recorded: resumed.${res.job ? ` Queued job ${res.job.id} (${res.job.state}).` : ''}`)
+    }
+    case 'recover': {
+      const r = await ref()
+      const expect = c.opt('expect-seq')
+      const res = await wrap(() => c.exec().recover(ws, r, {
+        incident: need(c, 'incident', 'the incident this recovery answers'), attempt: need(c, 'attempt', 'the ended attempt whose hold is lifted'),
+        reason: need(c, 'reason', 'why continuing is right (what was investigated)'), by: by ?? undefined, recoveryAttempt: c.opt('recovery-attempt') ?? process.env.WFE_ATTEMPT ?? undefined,
+        expectSeq: expect !== undefined ? Number(expect) : undefined, via: 'cli',
+      }))
+      return report(r, res.record, res.duplicate ? 'Already recorded (same incident and attempt); nothing changed.' : `Recorded: continued by recovery (${res.record.recoveries?.at(-1)?.by}).${res.job ? ` Queued job ${res.job.id} (${res.job.state}).` : ''}`)
     }
     case 'ask': {
       const r = await ref()

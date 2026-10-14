@@ -179,6 +179,10 @@ const OPEN = (q: QuestionView) => q.state === 'open' || q.state === 'answered'
 
 export interface ClassifyContext {
   requesters: ReadonlySet<number> // Zulip user ids allowed to request and answer
+  // observer p3: agents (often bots) allowed to open a request in named
+  // workflows only (`<project>/<workflow>`); nothing else they post is input.
+  agents?: ReadonlyMap<number, ReadonlySet<string>>
+  workflow?: string // the routed `<project>/<workflow>` of this post
   binding: RequestBinding | null // the request this topic is bound to; null for a new request topic
   run: RunView | null // the bound run as it is now
   earlierUnsettled?: number | null // an earlier post of the same request still being processed
@@ -188,6 +192,8 @@ export interface ClassifyContext {
 // persisted with the post (server/intake.ts): a post is never classified
 // again later, so an old message never becomes the answer to a newer question.
 export function classify(m: InboundMessage, c: ClassifyContext): Classification {
+  const agent = c.agents?.get(m.sender.id)
+  if (agent) return !c.binding && c.workflow && agent.has(c.workflow) ? { kind: 'request' } : { kind: 'ignored', reason: m.sender.bot ? 'bot' : 'unauthorized' }
   if (m.sender.bot) return { kind: 'ignored', reason: 'bot' }
   if (!c.requesters.has(m.sender.id)) return { kind: 'ignored', reason: 'unauthorized' }
   if (!c.binding) return { kind: 'request' }

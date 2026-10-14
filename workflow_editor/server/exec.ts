@@ -19,7 +19,7 @@ import { hostname } from 'node:os'
 import { join } from 'node:path'
 import type { DatabaseSync } from 'node:sqlite'
 import { normalizeRepoPath } from '../shared/model.ts'
-import { describeSteps, effectiveOf, holderOf, hostOf, pendingInstructions, runKey, situation, type AttemptSettings, type BecauseRef, type RunRecord, type RunRef } from '../shared/run.ts'
+import { describeSteps, effectiveOf, holderOf, hostOf, pendingInstructions, RECOVERY_BUDGET, runKey, situation, type AttemptSettings, type BecauseRef, type RecoveryAgent, type RunRecord, type RunRef } from '../shared/run.ts'
 import { git } from './git.ts'
 import { docStepsOf } from '../shared/compile.ts'
 import { assertWorkspaceAllowed, loadBoundary } from './boundary.ts'
@@ -321,6 +321,9 @@ export class ExecStore {
     const resume = [...r.history].reverse().find(e => e.op === 'run.resume') as (RunRecord['history'][number] & { reason?: string }) | undefined
     if (job.kind === 'resume') {
       if (r.control.last) lines.push(`The previous attempt ${r.control.last.id} ended: ${r.control.last.outcome}${r.control.last.detail ? ` — ${r.control.last.detail}` : ''}.`)
+      // Continued by a recovery (observer p3): who decided it, for which incident, and why.
+      const rc = r.recoveries?.at(-1)
+      if (rc && (!r.control.last || rc.at >= r.control.last.ended)) lines.push(`This run was continued by recovery: ${rc.by}${rc.agent ? ` (run ${rc.agent.workflow}/${rc.agent.run} in ${rc.agent.workspace})` : ''} lifted the ${rc.lifted} hold after attempt ${rc.attempt} for incident ${rc.incident}: "${rc.reason}". That is the recovering agent's finding, not a fact about side effects: look at your copy and the record before repeating anything that may already have happened.`)
       if (resume && (!r.control.last || resume.at > r.control.last.ended)) lines.push(`The person resumed the run: "${resume.reason}" (${resume.by}).`)
       lines.push(...await this.sinceBase(ws, r))
       for (const w of r.execution.waiting) lines.push(`Node ${w.node} waits; next move: ${holderOf(r, w.node)}.`)
@@ -407,6 +410,48 @@ export class ExecStore {
     const r = await runOp(ws, ref, { op: 'run.resume', reason, ...controlMeta(meta), ...(receipt ? { receipt: `resume:${receipt}` } : {}) }, { by, via })
     const job = hostOf(r.record.executor) === this.executor ? this.enqueue(ws.reg.id, ref, 'resume', `resume:${ws.reg.id}/${runKey(ref)}/${r.record.seq}`, `resume: ${reason}`) : null
     return { record: r.record, job }
+  }
+
+  // A recovering agent continues an interrupted or unknown hold (observer
+  // p3, docs/observation.md *wfe run recover*). Not a person's resume: the
+  // record names the incident, the attempt whose end held the run and the
+  // recovering agent's own run and attempt. Refused while any process of the
+  // run lives here (one writer per copy), beyond the budget since the last
+  // person-originated control, and on a person's hold (the reducer).
+  async recover(ws: Workspace, ref: RunRef, o: { incident: string; attempt: string; reason: string; by?: string; recoveryAttempt?: string; expectSeq?: number; via: string }): Promise<{ record: RunRecord; job: JobRow | null; duplicate: boolean }> {
+    const space = await runSpace(ws, ref)
+    const rec = (await readRun(space, ref)).record
+    if (!rec) throw new RequestError(409, `run ${runKey(ref)} cannot be read`)
+    // Who recovers: inside an attempt of another run, that run's agent.
+    let by = o.by?.trim() || ''
+    let agent: RecoveryAgent | undefined
+    if (o.recoveryAttempt) {
+      const own = this.attemptRow(o.recoveryAttempt)
+      if (!own || own.state === 'ended') throw new RequestError(409, `attempt ${o.recoveryAttempt} is not an open attempt on this host; a recovery is recorded by the recovering run's open attempt, or with --by outside one`, { code: 'recover-actor' })
+      if (own.workspace === ws.reg.id && own.workflow === ref.workflow && own.run === ref.run) throw new RequestError(409, `attempt ${own.id} belongs to run ${runKey(ref)} itself; a run does not recover its own hold`, { code: 'recover-actor' })
+      const ownWs = await this.workspace(own.workspace)
+      const ownRec = (await readRun(ownWs, { workflow: own.workflow, run: own.run })).record
+      if (!ownRec) throw new RequestError(409, `the recovering run ${own.workflow}/${own.run} cannot be read`, { code: 'recover-actor' })
+      if (by && by !== ownRec.executor.name) throw new RequestError(409, `this process is attempt ${own.id} of ${ownRec.executor.name}; it records as ${ownRec.executor.name}, not as ${by}`, { code: 'recover-actor' })
+      by = ownRec.executor.name
+      agent = { workspace: own.workspace, workflow: own.workflow, run: own.run, attempt: own.id }
+    }
+    if (!by) throw new RequestError(400, 'who recovers? Pass --by <name>, or run it from the recovering run\'s attempt (WFE_ATTEMPT)', { code: 'recover-actor' })
+    const receipt = `recover:${o.incident}:${o.attempt}`
+    if (rec.history.some(h => h.receipt === receipt)) return { record: rec, job: this.one<JobRow>('SELECT * FROM jobs WHERE receipt = ?', `recover:${ws.reg.id}/${runKey(ref)}/${o.incident}/${o.attempt}`) ?? null, duplicate: true }
+    // One writer per copy: no attempt of this run may be open or alive here.
+    for (const a of this.all<AttemptRow>('SELECT * FROM attempts WHERE workspace = ? AND workflow = ? AND run = ?', ws.reg.id, ref.workflow, ref.run)) {
+      if (a.state !== 'ended') throw new RequestError(409, `attempt ${a.id} of run ${runKey(ref)} is ${a.state}; a recovery waits until it has ended`, { code: 'recover-process-alive' })
+      if (a.host === hostname() && a.pid && alive(a.pid)) throw new RequestError(409, `process ${a.pid} of attempt ${a.id} still lives; the run's copy has one writer at a time`, { code: 'recover-process-alive' })
+    }
+    // The budget: recoveries since the last control that came from a person.
+    const PERSON = ['run.create', 'run.resume', 'question.answer', 'instruction.receive']
+    const lastPerson = Math.max(0, ...rec.history.filter(h => PERSON.includes(h.op)).map(h => h.seq))
+    const spent = rec.history.filter(h => (h.op as string) === 'run.recover' && h.seq > lastPerson).length
+    if (spent >= RECOVERY_BUDGET) throw new RequestError(409, `run ${runKey(ref)} was recovered ${spent} times since the last person's instruction (seq ${lastPerson}); a person decides now (wfe run resume)`, { code: 'recover-budget' })
+    const r = await runOp(space, ref, { op: 'run.recover', incident: o.incident, attempt: o.attempt, reason: o.reason, ...(agent ? { agent } : {}), receipt } as never, { by, via: o.via, expectSeq: o.expectSeq })
+    const job = hostOf(r.record.executor) === this.executor ? this.enqueue(ws.reg.id, ref, 'resume', `recover:${ws.reg.id}/${runKey(ref)}/${o.incident}/${o.attempt}`, `recover: incident ${o.incident} (${o.reason})`) : null
+    return { record: r.record, job, duplicate: !!r.duplicate }
   }
 
   // Cancellation is final; what the run serves is stopped through this path

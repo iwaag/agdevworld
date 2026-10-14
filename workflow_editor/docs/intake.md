@@ -20,6 +20,14 @@ The rules are pure functions in `shared/intake.ts`, tested by
 | topic `run-…` | the run's progress (written by the notifier) | never |
 | any other topic | not part of the workflow interface | never |
 
+**Agent requesters (observer p3).** `intake.agents: [{id, name, workflows:
+["<project>/<workflow>", …]}]` lets an agent's account (usually a bot) open a
+request topic in the workflows named for it, and nothing else: its post
+becomes a run whose input is a `request` in the agent's name (`request.md`,
+`requester`, `entrustedBy: {kind: note}`, the post as `source`), and its later
+posts and its posts in other workflows are ignored. Observer requests
+recovery runs (`agops/recover`) this way.
+
 A channel is a workflow channel only when all three hold:
 
 1. the notifier recorded its stream id as `channel:<project>/<workflow>`;
@@ -68,6 +76,7 @@ answer to a question asked after it.
 
 | Order | Condition | Classification |
 | --- | --- | --- |
+| 0 | the sender is a configured agent: a new request topic in a workflow named for it | `request` (input kind `request`); anything else it posts → `ignored` |
 | 1 | the sender is a bot (including this system's own posts) | `ignored: bot` |
 | 2 | the sender is not a configured requester | `ignored: unauthorized` |
 | 3 | the topic is a new request topic | `request` — the post becomes the **original braindump** |

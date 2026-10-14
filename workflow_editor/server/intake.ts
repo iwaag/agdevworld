@@ -50,6 +50,9 @@ export interface IntakeConfig {
   since: string
   projects: Record<string, { workspace?: string }> // optional workspace overrides, not an allowlist
   requesters: { id: number; name: string }[]
+  // observer p3: agents that may open requests in named workflows
+  // (`<project>/<workflow>`); their posts become `request` inputs.
+  agents?: { id: number; name: string; workflows: string[] }[]
 }
 
 export function loadIntakeConfig(area: string): { realm: string; zulipUrl: string; intake: IntakeConfig } | { disabled: string } {
@@ -62,6 +65,7 @@ export function loadIntakeConfig(area: string): { realm: string; zulipUrl: strin
     return { disabled: 'zulip.json "intake" needs {"enabled": bool, "since": ISO time, "projects"?: {<id>: {"workspace"?: id}}, "requesters": [{"id": n, "name": text}]}' }
   }
   for (const r of raw.requesters) if (!Number.isInteger(r?.id) || typeof r?.name !== 'string' || !r.name.trim()) return { disabled: 'zulip.json "intake.requesters" entries are {"id": Zulip user id, "name": text}' }
+  if (raw.agents !== undefined && (!Array.isArray(raw.agents) || raw.agents.some(a => !Number.isInteger(a?.id) || typeof a?.name !== 'string' || !a.name.trim() || !Array.isArray(a.workflows) || !a.workflows.every(w => typeof w === 'string' && /^[a-z0-9][a-z0-9_.-]*\/[a-z0-9][a-z0-9_.-]*$/.test(w))))) return { disabled: 'zulip.json "intake.agents" entries are {"id": Zulip user id, "name": text, "workflows": ["<project>/<workflow>", …]}' }
   if (!raw.enabled) return { disabled: 'zulip.json "intake.enabled" is false' }
   return { realm: realmId(cfg.zulipUrl), zulipUrl: cfg.zulipUrl, intake: { ...raw, projects: raw.projects ?? {} } as IntakeConfig }
 }
@@ -279,8 +283,9 @@ export class IntakeStore {
     // Posts of one request settle in id order.
     const earlier = this.one<{ id: number }>('SELECT id FROM messages WHERE realm = ? AND topic_first = ? AND id < ? AND state != \'done\' ORDER BY id LIMIT 1', m.realm, m.topicFirst, m.id)?.id ?? null
     const requesters = new Set(cfg.intake.requesters.map(r => r.id))
+    const agents = new Map((cfg.intake.agents ?? []).map(a => [a.id, new Set(a.workflows)]))
     const runView = binding?.run ? await this.runView(binding) : null
-    const c = classify(m, { requesters, binding, run: runView, earlierUnsettled: earlier })
+    const c = classify(m, { requesters, agents, workflow: `${route.route.project}/${route.route.workflow}`, binding, run: runView, earlierUnsettled: earlier })
     if (c.kind === 'wait') return 'waiting'
     const key = c.kind === 'request' ? requestKey(m.id) : binding?.key ?? null
     this.tx(() => {
@@ -318,6 +323,11 @@ export class IntakeStore {
     return new Workspace(reg)
   }
 
+  private agentOf(senderId: number): string | undefined {
+    const cfg = loadIntakeConfig(this.area)
+    return 'intake' in cfg ? cfg.intake.agents?.find(a => a.id === senderId)?.name : undefined
+  }
+
   private personOf(senderId: number): string {
     const cfg = loadIntakeConfig(this.area)
     return ('intake' in cfg ? cfg.intake.requesters.find(r => r.id === senderId)?.name : undefined) ?? `zulip user ${senderId}`
@@ -335,6 +345,7 @@ export class IntakeStore {
     if (!b) throw new Error(`post ${row.id}: request ${row.request_key} is not recorded`)
     const ws = await this.workspace(b.workspace)
     const person = this.personOf(row.sender_id)
+    const agent = this.agentOf(row.sender_id)
     if (c.kind === 'request') {
       let ref = await findRunByReceipt(ws, b.workflow, receipt)
       if (!ref) {
@@ -342,8 +353,11 @@ export class IntakeStore {
           // The run gets its own working copy (p9), found again by the post's receipt.
           const env = this.exec?.ctx.gitea ? await this.exec.ctx.gitea.gitEnv() : {}
           ref = (await createRunInCopy(ws, {
-            workflow: b.workflow, receipt, executor: { host: this.exec?.executor ?? 'autolab' }, by: person, via: 'zulip', area: this.area,
-            input: { kind: 'braindump', text: row.content, author: person, source: this.source(row) },
+            workflow: b.workflow, receipt, executor: { host: this.exec?.executor ?? 'autolab' }, by: agent ?? person, via: 'zulip', area: this.area,
+            // An agent's request (observer p3) is its own words, not a person's braindump.
+            input: agent
+              ? { kind: 'request', text: row.content, requester: agent, entrustedBy: { kind: 'note', text: `Zulip post ${row.id} in ${row.topic}` }, source: this.source(row) }
+              : { kind: 'braindump', text: row.content, author: person, source: this.source(row) },
           }, env)).ref
         } catch (e) {
           if (e instanceof RequestError && e.status >= 400 && e.status < 500 && e.status !== 409) return this.refuse(row, b, e.message)

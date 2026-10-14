@@ -26,7 +26,7 @@ import { h, when } from './dom.ts'
 import { icon } from './icons.ts'
 import { patchContent } from './patch.ts'
 import { activeWorkflow, ago, chip, descendants, fileLink, nodeLabel, nodeLink, runHash, topoOrder } from './runCommon.ts'
-import { integrationStatus } from './integrationState.ts'
+import { approvalOf, integrationStatus, type Approval } from './integrationState.ts'
 export { integrationStatus }
 
 // Who a hold or a stop acted for (p9): the person's words named by the recorder.
@@ -47,9 +47,12 @@ export interface RunData {
   connected?: boolean
 }
 
+// What became of one submission, said beside the control that sent it.
+export interface OpResult { ok: boolean; kind: 'ok' | 'warn' | 'error'; text: string }
+
 export interface SideActions {
-  // Records one run operation as the declared actor; true when recorded.
-  record(op: Record<string, unknown> & { op: string }, done: string | ((r: RunOpResponse & { job?: { id: number; state: string } | null }) => string)): Promise<boolean>
+  // Records one run operation as the declared actor.
+  record(op: Record<string, unknown> & { op: string }, done: string | ((r: RunOpResponse & { job?: { id: number; state: string } | null }) => string)): Promise<OpResult>
   // Inspects (dryRun) or applies an adjustment; null when the request failed.
   adjust(body: { text: string; reason: string; dryRun: boolean; expectRevision: string; expectSeq: number }): Promise<AdjustView | null>
   notice(kind: 'ok' | 'error' | 'warn', text: string): void
@@ -102,6 +105,10 @@ function place(el: HTMLElement, parent: HTMLElement, before: ChildNode | null = 
 class Owned<E extends HTMLTextAreaElement | HTMLInputElement = HTMLTextAreaElement> {
   readonly el: E
   readonly note = h('p.small.warn-text.closed-note')
+  // The submission's own feedback (project_migration p3/ex1): sending, then
+  // what was recorded or why nothing was — beside the button, not only in
+  // the page's banner. A failure keeps the text.
+  readonly status = h('p.small.submit-state', { role: 'status', 'aria-live': 'polite', hidden: true })
   private composing = false
   private busy = false
   private version = 0
@@ -128,15 +135,27 @@ class Owned<E extends HTMLTextAreaElement | HTMLInputElement = HTMLTextAreaEleme
     if (this.el.readOnly !== ro) this.el.readOnly = ro
     for (const b of this.buttons) setDisabled(b, !this.allowed || this.closed !== null || this.busy)
   }
-  // Sends the text as it is now; true when the operation recorded it.
-  async submit(send: (text: string) => Promise<boolean>): Promise<boolean> {
+  say(kind: 'pending' | OpResult['kind'] | null, text = '') {
+    setText(this.status, text)
+    const cls = `small submit-state${kind ? ` s-${kind}` : ''}`
+    if (this.status.className !== cls) this.status.className = cls
+    show(this.status, !!kind)
+  }
+  get sending() { return this.busy }
+  // Sends the text as it is now; a second submission waits for the first.
+  async submit(send: (text: string) => Promise<OpResult>, pending = 'Recording…'): Promise<boolean> {
     if (this.busy) return false
     const text = this.el.value, version = this.version
     this.busy = true; this.sync()
+    this.say('pending', pending)
     try {
-      const ok = await send(text)
-      if (ok && this.version === version && this.el.value === text) this.el.value = ''
-      return ok
+      const r = await send(text)
+      if (r.ok && this.version === version && this.el.value === text) this.el.value = ''
+      this.say(r.kind, r.text)
+      return r.ok
+    } catch (e) {
+      this.say('error', `Not recorded: ${(e as Error).message} Your text is kept.`)
+      return false
     } finally { this.busy = false; this.sync() }
   }
 }
@@ -190,6 +209,7 @@ export class RunSide {
   private readonly decide: { root: HTMLElement; evidence: Owned<HTMLInputElement>; accept: HTMLButtonElement; reject: HTMLButtonElement; cancel: HTMLButtonElement; busy: boolean }
   private readonly history = section('history', h('ol.history', { reversed: true }))
   private historyShown = ''
+  private approval: Approval | null = null // the result's standing with the person, as last read
   private readonly opened = storedOpen() // the person's open sections (per viewer)
   private readonly disclosures: Section[]
 
@@ -224,18 +244,27 @@ export class RunSide {
       if (!this.data.shown?.record?.control.hold) { this.act.notice('error', 'The run is not held: there is nothing to resume.'); return }
       void instruction.submit(text => this.act.record({ op: 'run.resume', reason: text }, 'Resumed: the executor is queued.'))
     })
-    this.resume = { root: h('div.resume-form', h('label.small', { htmlFor: 'resume-instruction' }, 'Your instruction for the executor'), instruction.el, instruction.note, h('div.row.tight', resumeButton)), draft: instruction, button: resumeButton }
+    this.resume = { root: h('div.resume-form', h('label.small', { htmlFor: 'resume-instruction' }, 'Your instruction for the executor'), instruction.el, instruction.note, h('div.row.tight', resumeButton), instruction.status), draft: instruction, button: resumeButton }
     instruction.el.id = 'resume-instruction'
     this.execution.content.append(this.execMore)
 
     const evidence = new Owned(h('input', { placeholder: 'evidence: what you checked (report, commit, demo…)', 'aria-label': 'Decision evidence' }))
     const decide = (decision: 'accepted' | 'rejected') => {
-      if (!evidence.el.value.trim()) { this.act.notice('error', 'A decision needs its evidence.'); return }
       const rec = this.data.shown?.record
-      if (decision === 'accepted' && rec?.execution.state !== 'completed') { this.act.notice('error', 'A result can be accepted once every node is completed.'); return }
+      const appr = this.approval
+      // A renewed acceptance (the result changed after the last one) says
+      // what it accepts by itself; the person's words are added when given.
+      const renewed = decision === 'accepted' && appr?.kind === 'reaccept'
+      if (!evidence.el.value.trim() && !renewed) { evidence.say('error', 'A decision needs its evidence: what you checked.'); evidence.el.focus(); return }
+      if (decision === 'accepted' && rec?.execution.state !== 'completed') { evidence.say('error', 'A result can be accepted once every node is completed.'); return }
+      if (decision === 'accepted' && appr && !appr.canAccept) { evidence.say('warn', 'This result is already accepted: there is nothing more to accept.'); return }
       this.decide.busy = true
       this.updateDecideButtons()
-      void evidence.submit(text => this.act.record({ op: 'run.decide', decision, evidence: text }, `Recorded: result ${decision}.`))
+      const changed = appr?.integration?.changed ?? []
+      const evidenceOf = (text: string) => renewed ? `${text.trim() ? `${text.trim()} — ` : ''}accepted again after decision ${appr!.integration!.decision}${changed.length ? `; changed since then: ${changed.slice(0, 8).join(', ')}${changed.length > 8 ? ' …' : ''}` : ''}` : text
+      void evidence.submit(text => this.act.record({ op: 'run.decide', decision, evidence: evidenceOf(text) }, decision === 'accepted'
+        ? `Recorded: result accepted. Its integration is queued; this host carries it out within about a minute (the status above follows).`
+        : 'Recorded: result rejected.'))
         .finally(() => { this.decide.busy = false; this.updateDecideButtons() })
     }
     const accept = h('button.primary', { onclick: () => decide('accepted') }, 'Accept result')
@@ -247,7 +276,7 @@ export class RunSide {
         if (why?.trim()) void this.act.record({ op: 'run.cancel', reason: why }, 'Recorded: the run is cancelled.')
       },
     }, 'Cancel run')
-    this.decide = { root: h('div.decide', evidence.el, h('div.row.tight', accept, reject, cancel)), evidence, accept, reject, cancel, busy: false }
+    this.decide = { root: h('div.decide', evidence.el, h('div.row.tight', accept, reject, cancel), evidence.status), evidence, accept, reject, cancel, busy: false }
 
     this.disclosures = [this.questions, this.instructions, this.presentations, this.definition, this.catalog, this.related, this.files, this.execution, this.coordination, this.result, this.history]
     for (const sec of this.disclosures) {
@@ -369,7 +398,9 @@ export class RunSide {
     if (!rec) return
     const anchor = this.captureAnchor()
     this.data = d
+    this.approval = this.approvalOf(d.shown!, rec)
     this.updateQuestions(rec) // presentation links in questions
+    this.updateResult(rec)
     this.updatePresentations(rec)
     this.updateExecution(rec)
     this.updateCoordination()
@@ -392,6 +423,7 @@ export class RunSide {
       patchContent(this.focusDisplay, h('h2.focus-head', d.resp?.problem ? 'No usable record' : 'Loading…'), d.resp?.problem ? h('p.focus-lead', 'run.json cannot be read; the banner above says why. Nothing can be recorded until the files are fixed.') : null)
       return
     }
+    this.approval = this.approvalOf(r, rec)
     show(this.placeholder, false)
     show(this.actorRow, !d.rev)
     show(this.sideHint, !(d.selection && rec.nodes[d.selection]) && !d.viewing)
@@ -412,6 +444,13 @@ export class RunSide {
   }
 
   private get frozen() { return !!(this.data.resp && !this.data.resp.record) }
+
+  // One reading for the header, the focus card and the decision control.
+  private approvalOf(r: RunResponse, rec: RunRecord): Approval | null {
+    if (this.data.rev) return null
+    const wf = activeWorkflow(r, rec)
+    return approvalOf(rec, this.data.execView, this.data.resp?.place, q => !!q.presentation || (!!q.node && wf?.nodes[q.node]?.confirms === 'result'))
+  }
 
   // ---- the focus card ---------------------------------------------------------
 
@@ -455,24 +494,38 @@ export class RunSide {
       const work = ex.blocked.filter(n => !effectiveOf(rec)?.nodes[n]?.step), docs = ex.blocked.length - work.length
       lead = ex.blocked.length ? `Blocked by it: ${work.map(name).join(', ') || 'no work'}${docs ? ` (and ${docs} documentation step${docs === 1 ? '' : 's'})` : ''}.` : 'Nothing depends on it.'
     }
+    else if (this.approval?.kind === 'reaccept') {
+      // The renewed acceptance, with what changed, beside its control (project_migration p3/ex1).
+      kind = 'reaccept'
+      const unbound = this.approval.integration?.state === 'unbound'
+      head = unbound ? 'Accept the result again to integrate it' : 'The result changed after it was accepted'
+      lead = unbound ? 'Its acceptance was recorded before integration existed and names no revision. Look at the result, then accept it again below.'
+        : h('span', 'Integration stopped: what is in the run now is not what was accepted, so nothing of it is on the shared branch yet. Look at what changed, then accept it again below — or reject it.')
+    }
+    else if (this.approval?.kind === 'integration-problem') { kind = 'integration'; head = 'Accepted — not integrated'; lead = 'The accepted result could not be brought into the shared branch. The integration record below says why.' }
     else if (accepted && ex.state !== 'completed') { kind = 'accepted'; head = 'Accepted — cleanup is still running'; lead = h('span', 'The result was accepted', last!.confirmation ? h('span.d-only', ` from ${last!.confirmation.question}`) : null, '; the run completes after its remaining steps.') }
-    else if (ex.state === 'completed') { kind = 'completed'; head = !last ? 'Completed — no decision recorded' : accepted ? 'Completed and accepted' : 'Completed — result rejected'; lead = !last ? 'Every node recorded completion. Accepting the result is your separate decision.' : h('span', `${last.decision === 'accepted' ? 'Accepted' : 'Rejected'}${last.confirmation ? ` from ${last.confirmation.from}'s answer` : ` by ${last.by}`}`, h('span.d-only', `${last.confirmation ? ` (${last.confirmation.question}, recorded by ${last.by})` : ''}, ${when(last.at)}`), '.') }
+    else if (ex.state === 'completed') { kind = 'completed'; head = !last ? 'Completed — your decision is needed' : accepted ? (this.approval?.kind === 'integrated' ? 'Completed, accepted and integrated' : this.approval?.kind === 'integrating' ? 'Accepted — integrating' : 'Completed and accepted') : 'Completed — result rejected'; lead = !last ? 'Every node recorded completion. Accepting the result is your separate decision.' : h('span', `${last.decision === 'accepted' ? 'Accepted' : 'Rejected'}${last.confirmation ? ` from ${last.confirmation.from}'s answer` : ` by ${last.by}`}`, h('span.d-only', `${last.confirmation ? ` (${last.confirmation.question}, recorded by ${last.by})` : ''}, ${when(last.at)}`), '.') }
     else if (ex.active.length || rec.control.attempt) { kind = 'working'; head = 'Work in progress'; lead = this.observation(rec)[0] === 'warn' ? 'Recorded as in progress, but this host does not see the work running: look below.' : 'Nothing is needed from you now.' }
     else if (ex.state === 'not-started') { kind = 'not-started'; head = 'Not started'; lead = `Waiting for ${rec.executor.name} to start.` }
     else { kind = 'idle'; head = 'Waiting for the executor'; lead = ex.ready.length ? `Ready to start: ${ex.ready.map(name).join(', ')}.` : 'Nothing is running and nothing is ready.' }
     if (this.focus.dataset.kind !== kind) this.focus.dataset.kind = kind
 
     // The situation's icon, large: what kind of task this is before any word is read (p8/ex1).
-    const FOCUS_ICON: Record<string, string> = { review: 'present', question: 'question', answered: 'history', held: 'stop', failed: 'alert', accepted: 'check', completed: 'check', cancelled: 'stop', working: 'play', history: 'history', 'not-started': 'play', idle: 'play' }
+    const FOCUS_ICON: Record<string, string> = { reaccept: 'alert', integration: 'alert', review: 'present', question: 'question', answered: 'history', held: 'stop', failed: 'alert', accepted: 'check', completed: 'check', cancelled: 'stop', working: 'play', history: 'history', 'not-started': 'play', idle: 'play' }
     const done = kind === 'completed' && last?.decision === 'rejected' ? 'failed' : kind === 'completed' && !last ? 'pending' : kind
     const blocks: (Node | null)[] = [h('div.focus-top', h(`span.focus-icon.tone-${done}`, icon(FOCUS_ICON[kind] ?? 'flag', 'icon')), h('div.focus-words', h('h2.focus-head', head), h('p.focus-lead', lead)))]
     // The one-click review, while it is served (p7); otherwise what became of it.
     if (!d.rev) blocks.push(this.reviewLink(rec, kind))
     if (kind === 'working' || kind === 'accepted') blocks.push(this.activeBlock(rec, name))
     // Where the accepted result stands (p9): saved, accepted, integrated.
-    const integ = !d.rev && (kind === 'completed' || kind === 'accepted') ? integrationStatus(rec, d.execView, d.resp?.place) : null
+    const integ = !d.rev && (kind === 'completed' || kind === 'accepted' || kind === 'reaccept' || kind === 'integration') ? integrationStatus(rec, d.execView, d.resp?.place) : null
     if (integ) blocks.push(h(`p.small.integration-state.tone-${integ.tone}`, h(`span.chip.${integ.tone === 'ok' ? 'ok' : integ.tone === 'muted' ? 'muted' : 'warn'}`, integ.text), integ.detail ? h('span.d-only.muted', ` ${integ.detail}`) : null,
       integ.tone !== 'ok' && integ.tone !== 'muted' && rec.decisions.at(-1)?.decision === 'accepted' ? h('span', ' ', h('a', { href: '#', dataset: { action: 'goto-section', section: 'execution' } }, 'Integration')) : null))
+    // What a renewed acceptance accepts: the files changed since the last one, readable here.
+    if (kind === 'reaccept' && integ?.changed?.length) blocks.push(h('div.changed-since',
+      h('p.small', h('strong', 'Changed since the acceptance'), ` (${integ.changed.length})`),
+      h('ul.files.small', ...integ.changed.slice(0, 12).map(f => h('li', { dataset: { key: `chg:${f}` } }, fileLink(f)))),
+      integ.changed.length > 12 ? h('p.small.muted', `and ${integ.changed.length - 12} more (Execution and publication → Integration).`) : null))
     if (kind === 'held') blocks.push(h('p.small.muted', 'Look at the run\'s files first (they are in its own copy of the project); the instruction tells the executor what to do now. ', h('a', { href: '#', dataset: { action: 'goto-section', section: 'execution' } }, 'Execution details')))
     if (kind === 'failed') blocks.push(
       h('ul.failures', ...ex.failed.map(n => { const f = rec.nodes[n].failure; return h('li', { dataset: { key: `fail:${n}` } }, nodeLink(n, name(n)), f ? `: ${f.reason}` : '', f ? h('span.d-only.muted', ` (${f.by}, ${when(f.at)})`) : null) })),
@@ -481,7 +534,7 @@ export class RunSide {
         h('button', { dataset: { action: 'goto-section', section: 'definition', focus: 'adjust' } }, 'Adjust future work'),
         h('button.danger', { dataset: { action: 'cancel-run' }, disabled: this.frozen }, 'Cancel run')))
     // The full list of recorded outcomes is Detail's (p8/ex1).
-    if (kind === 'completed' || kind === 'accepted' || kind === 'cancelled' || kind === 'history') blocks.push(this.outcomes(rec, wf, name))
+    if (kind === 'completed' || kind === 'accepted' || kind === 'reaccept' || kind === 'integration' || kind === 'cancelled' || kind === 'history') blocks.push(this.outcomes(rec, wf, name))
     if (kind === 'cancelled') {
       const still = Object.values(rec.presentations ?? {}).filter(isOpen)
       if (still.length) blocks.push(h('div.banner.warn.small', `${still.map(p => p.id).join(', ')} still recorded as ${still[0].state}: `, ...still.map(p => h('button', { dataset: { action: 'present-stop', presentation: p.id } }, `Stop ${p.id}`))))
@@ -511,7 +564,7 @@ export class RunSide {
     else if (r2.kept && this.resume.root.isConnected) r2.set('The run is no longer held: there is nothing to resume. Your text is kept, not sent.')
     else if (!inUse(this.resume.root)) this.resume.root.remove()
     // The decision: here when a completed run has none; otherwise at the side (Result).
-    const decideHere = !d.rev && ex.state === 'completed' && !last && !rec.cancelled
+    const decideHere = !d.rev && !rec.cancelled && (this.approval?.kind === 'decide' || this.approval?.kind === 'reaccept')
     if (!d.rev) {
       if (!this.decide.evidence.kept) place(this.decide.root, decideHere ? this.decideSlot : this.result.content)
       else if (!this.decide.root.isConnected) place(this.decide.root, this.result.content)
@@ -521,7 +574,7 @@ export class RunSide {
     // Simple (p8/ex1): the pane is shown for a selection, an open file, or a
     // form that records under the person's name; otherwise the main column
     // takes its width. Detail always shows it.
-    const forms = !d.rev && (this.focusQuestions.childElementCount > 0 || this.holdSlot.childElementCount > 0 || this.decideSlot.childElementCount > 0 || kind === 'working' || kind === 'accepted' || kind === 'failed')
+    const forms = !d.rev && (this.focusQuestions.childElementCount > 0 || this.holdSlot.childElementCount > 0 || this.decideSlot.childElementCount > 0 || kind === 'working' || kind === 'accepted' || kind === 'failed' || kind === 'integration')
     const quiet = !forms && !(d.selection && rec.nodes[d.selection]) && !d.viewing
     this.el.classList.toggle('quiet', quiet)
 
@@ -729,7 +782,9 @@ export class RunSide {
       ...q.answers.map((a, i) => h('div.answer', { dataset: { key: `a:${i}` } }, h('span.muted.small.d-only', `Answer ${i}${q.takenUp?.answer === i ? ' — taken up' : ''} · from ${a.from}${a.by !== a.from ? `, recorded by ${a.by}` : ''} via ${a.via} · ${when(a.at)}`), h('div', a.text))),
       q.takenUp ? h('p.small.ok-text', `Taken up by ${q.takenUp.by} ${ago(q.takenUp.at)}.`) : null,
       q.withdrawn ? h('p.small', `Withdrawn by ${q.withdrawn.by}: ${q.withdrawn.reason}`) : null,
-      st === 'answered' ? h('p.small.muted.receipt', `The answer is recorded; ${rec.executor.name} has not recorded taking it up yet. Next move: ${rec.executor.name}.`) : null)
+      // Recorded and waiting for the executor: said apart from a failed
+      // submission (which stays in the form, with its text and the reason).
+      st === 'answered' ? h('p.small.receipt.recorded', icon('check', 'icon tiny'), h('span', h('strong', 'Recorded'), ` ${ago(q.answers.at(-1)!.at)}. Waiting for ${rec.executor.name} to take it up${this.hosted() ? ' — its continuation is queued on this host' : ' — tell it where you work with it'}. Nothing more is needed from you here.`)) : null)
     const open = this.answerable(rec, q)
     if (open && !item.form) item.form = this.answerForm(q.id)
     const f = item.form
@@ -763,7 +818,7 @@ export class RunSide {
         if (ok && item && draft.el.value === '') { item.showForm = false; const r = this.data.shown?.record; if (r) this.updateQuestions(r) }
       })
     })
-    return { root: h('div.answer-form', draft.el, draft.note, h('div.row.tight', button), h('p.small.muted.d-only', this.hosted() ? 'Stored in run.json as your answer; this host queues the executor to continue the run.' : 'Stored in run.json as your answer. It does not start or wake the executor; tell it where you work with it.')), draft, button }
+    return { root: h('div.answer-form', draft.el, draft.note, h('div.row.tight', button), draft.status, h('p.small.muted.d-only', this.hosted() ? 'Stored in run.json as your answer; this host queues the executor to continue the run.' : 'Stored in run.json as your answer. It does not start or wake the executor; tell it where you work with it.')), draft, button }
   }
 
   // Additional instructions (p6): received from the person, acknowledged by
@@ -1031,7 +1086,8 @@ export class RunSide {
     const row = d.execView?.integrations?.filter(i => i.decision === di).at(-1)
     const accepted = rec.decisions[di]?.decision === 'accepted'
     const done = (rec.integrations ?? []).some(i => i.decision === di)
-    const can = accepted && !done && rec.execution.state === 'completed' && !rec.control.attempt && !this.frozen
+    // A result changed since its acceptance is accepted again, not retried (project_migration p3/ex1).
+    const can = accepted && !done && st.state !== 'integrated' && st.state !== 'needs-agreement' && st.state !== 'unbound' && rec.execution.state === 'completed' && !rec.control.attempt && !this.frozen
     return [
       h('h4', 'Integration'),
       h('p.small', h(`span.chip.${st.tone === 'ok' ? 'ok' : st.tone === 'muted' ? 'muted' : 'warn'}`, st.text), st.detail ? h('span.muted', ` ${st.detail}`) : null),
@@ -1041,6 +1097,7 @@ export class RunSide {
         ? `Undoing it is new work: a run that names this one as its predecessor and reverts the integrated commits with new ones (wfe run reversal ${runKey(rec)} lists them); later changes stay, and effects outside Git need their own check.`
         : 'Nothing of it is on the project\'s shared branches: cancelling or abandoning it needs no rollback, and its work stays on its own branch.'),
       ...(row?.steps ?? []).map(x => h('div.small.muted', { dataset: { key: `int:${row!.id}:${x.repo}` } }, `${x.repo === '.' ? 'root' : x.repo} → ${x.target}: ${x.state}${x.method ? ` (${x.method})` : ''}${x.result ? ` ${x.result.slice(0, 7)}${x.pushed ? ' pushed' : ''}` : ''}${x.files?.length ? `; files: ${x.files.join(', ')}` : ''}${x.error ? `; ${x.error}` : ''}`)),
+      st.state === 'needs-agreement' || st.state === 'unbound' ? h('p.small.warn-text', 'Accept the result again in the card at the top of the run; its integration is queued then.') : null,
       can ? h('div.row.tight', h('button', { dataset: { action: 'integrate-check' }, title: 'Combine locally and show what would happen; nothing is pushed' }, 'Check integration'),
         h('button', { dataset: { action: 'integrate-run' }, title: 'Bring the accepted result into the shared branches now' }, row && row.state !== 'queued' ? 'Retry integration' : 'Integrate now')) : null,
     ]
@@ -1077,15 +1134,26 @@ export class RunSide {
     patchContent(this.result.content.children[0] as HTMLElement,
       ...rec.decisions.map((d, i) => h(`div.banner.${d.decision === 'accepted' ? 'ok' : 'error'}`, { dataset: { key: `d:${i}` } }, `${d.decision} by ${d.by} (${when(d.at)}) — evidence: ${d.evidence}${d.note ? ` — ${d.note}` : ''}`)),
       h('p.small.muted', completed
-        ? (this.decide.root.parentElement === this.decideSlot ? 'Execution completed: every node recorded completion. Accepting the result is your separate decision (offered above).' : 'Execution completed: every node recorded completion. Accepting the result is your separate decision.')
+        ? (this.decide.root.parentElement === this.decideSlot ? 'Execution completed: every node recorded completion. Accepting the result is your separate decision (offered above).'
+          : this.approval && !this.approval.canAccept && rec.decisions.at(-1)?.decision === 'accepted' ? 'Execution completed and the result is accepted: nothing more to accept unless the result changes.'
+            : 'Execution completed: every node recorded completion. Accepting the result is your separate decision.')
         : `Execution is ${rec.execution.state}. A result can be accepted once every node is completed; it can be rejected, or the run cancelled, at any time.`))
     this.updateDecideButtons()
   }
 
+  // Acceptance is offered only when it would record something new: no
+  // decision yet, a rejection, or a result changed since the last acceptance
+  // (project_migration p3/ex1: an accepted result offered Accept again).
   private updateDecideButtons() {
     const rec = this.data.shown?.record
-    const off = this.frozen || this.decide.busy || !rec
-    setDisabled(this.decide.accept, off || rec!.execution.state !== 'completed')
+    const off = this.frozen || this.decide.busy || this.decide.evidence.sending || !rec
+    const appr = this.approval
+    const can = !appr || appr.canAccept
+    show(this.decide.accept, can)
+    setText(this.decide.accept, appr?.kind === 'reaccept' ? 'Accept the changed result' : 'Accept result')
+    const ph = appr?.kind === 'reaccept' ? 'what you checked (optional for a renewed acceptance)' : 'evidence: what you checked (report, commit, demo…)'
+    if (this.decide.evidence.el.placeholder !== ph) this.decide.evidence.el.placeholder = ph
+    setDisabled(this.decide.accept, off || rec!.execution.state !== 'completed' || !can)
     setDisabled(this.decide.reject, off)
     setDisabled(this.decide.cancel, off || !!rec!.cancelled)
   }

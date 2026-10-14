@@ -183,7 +183,7 @@ try {
   await gotoRun('accepted')
   check(await kind() === 'accepted' && /Accepted · cleanup pending/.test(await page.locator('.run-facts-row').innerText()) && /In progress/.test(await page.locator('.run-facts-row').innerText()) && await page.getByRole('button', { name: 'Stop' }).isVisible(), 'accepted while cleaning up: acceptance and unfinished cleanup apart; Stop reachable')
   await gotoRun('nodecision')
-  check(await kind() === 'completed' && /No decision/.test(await page.locator('.run-facts-row').innerText()) && await page.getByRole('button', { name: 'Accept result' }).isVisible() && await page.getByLabel('Decision evidence').isVisible(), 'completed without a decision: completion apart from the decision, which is offered')
+  check(await kind() === 'completed' && /Decision needed/.test(await page.locator('.run-facts-row').innerText()) && await page.getByRole('button', { name: 'Accept result' }).isVisible() && await page.getByLabel('Decision evidence').isVisible(), 'completed without a decision: completion apart from the decision, which is offered')
   await gotoRun('cancelled')
   check(await kind() === 'cancelled' && /Cancelled/.test(await page.locator('.run-facts-row').innerText()) && await page.getByRole('button', { name: 'Stop p1' }).isVisible(), 'cancelled: explicit, with the still-recorded presentation\'s stop')
   await gotoRun('branch')

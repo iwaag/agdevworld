@@ -44,6 +44,25 @@ The rest of the run folder is reviewed content, including plans, reports and
 presentation files. Changes there require agreement again, whether devdocs
 is a directory in the root repository or a separate submodule.
 
+## One acceptance per result (project_migration p3/ex1)
+
+An acceptance of a result the latest acceptance already binds is refused
+(`already-accepted`, HTTP 409), whether it comes from the person (browser,
+`wfe run decide --evidence`) or from a confirmation answer (`decide
+--question`). "The same result" is the comparison integration makes: the
+revisions differ in nothing but the run's own `run.json` and the gitlinks of
+submodules it owns. Nothing is recorded and no integration is queued. A
+retransmission of the recorded operation (same receipt) is still a
+duplicate, not a refusal. A result changed since the latest acceptance —
+the `needs-agreement` case — is accepted again; so is any result after a
+rejection, or after an acceptance recorded before p9 (no revision).
+Historical decisions are never rewritten.
+
+The executor's queue reads each row again before acting on it. A queued row
+whose decision is no longer the latest becomes `superseded`; so does the
+row of an acceptance whose result an earlier, integrated acceptance already
+brought in (records from before the refusal above). Neither is integrated.
+
 ## Preconditions and queueing
 
 | Precondition | Why |
@@ -132,14 +151,31 @@ shared branch is never read as the run's state.
 | Dry run (combines locally, pushes and records nothing) | `wfe run integrate <run> --dry-run` | `POST …/integration {dryRun: true, by}` | Check integration |
 | Integrate now, or retry | `wfe run integrate <run> --by <name>` | `POST …/integration {by}` | Integrate now / Retry integration |
 
-In Simple, the focus card of a completed or accepted run states where the
-result stands:
+The status is always the **latest decision's** (`shared/approval.ts`,
+read alike by the run view and the CLI). A row of an earlier decision never
+speaks for it, and `run.json`'s `run.integrate` outranks a journal row that
+says otherwise. `wfe run integrate --status` prints that standing first
+(`Now: …`, with the decision and, for a changed result, the files), then the
+journal newest first, marking rows of earlier decisions and rows that
+`run.json` contradicts.
+
+The focus card of a completed or accepted run states where the result
+stands:
 
 - "Saved on its branch — not integrated (no accepted result)";
 - "Accepted — integration queued";
 - "Partially integrated (… done)";
-- "Accepted — not integrated: conflict / needs agreement / …";
+- "The result changed after it was accepted — accept it again to integrate"
+  (the header: "Changed since acceptance — accept again"; the focus card
+  lists the changed files and offers *Accept the changed result* beside
+  them; the evidence is optional there and the record names what changed);
+- "Accepted — not integrated: conflict / failed / …";
 - "Integrated into main".
+
+The header's decision chip reads the same standing: "Review needed", "Answer
+recorded · waiting for <agent>", "Decision needed", "Accepted · integrating",
+"Accepted · integrated", "Accepted · not integrated", "Rejected". Accept is
+offered only while it would record something new.
 
 Coordination announces `integrated` (Zulip), with each repository's target,
 method and resulting commit.

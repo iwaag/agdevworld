@@ -28,7 +28,8 @@ import { live } from './live.ts'
 import { patchContent } from './patch.ts'
 import { activeWorkflow, ago, chip, fact, line, nodeLabel, nodeLink, runHash, runTitle, STATE_LABEL } from './runCommon.ts'
 import { outcome, RefreshCoordinator, type Outcome, type RefreshKind } from './runRefresh.ts'
-import { RunSide, integrationStatus } from './runSide.ts'
+import { RunSide, integrationStatus, type OpResult } from './runSide.ts'
+import { approvalOf } from './integrationState.ts'
 import { ActivityView, describeActivity } from './runActivity.ts'
 import { displayToggle, isSimple, onDisplay, setDisplay } from './displayMode.ts'
 import type { ViewHandle } from './main.ts'
@@ -172,25 +173,29 @@ export function renderRunView(root: HTMLElement, wsId: string, workflow: string,
   }
 
   // `done` may read the service's reply (p8/ex2: whether an answer queued
-  // the executor's resumption).
-  async function record(op: Record<string, unknown> & { op: string }, done: string | ((r: RunOpResponse & { job?: { id: number; state: string } | null }) => string)): Promise<boolean> {
+  // the executor's resumption). The outcome is returned to the form that
+  // asked, which says it beside its button (project_migration p3/ex1: a
+  // banner at the top of the page was not seen from the form).
+  async function record(op: Record<string, unknown> & { op: string }, done: string | ((r: RunOpResponse & { job?: { id: number; state: string } | null }) => string)): Promise<OpResult> {
     const rec = shown?.record
-    if (!rec) return false
+    if (!rec) return { ok: false, kind: 'error', text: 'The run has not been read yet: nothing was recorded.' }
     const name = actorName('who records this')
-    if (!name) return false
-    let ok = false
+    if (!name) return { ok: false, kind: 'error', text: 'Enter your name in “Recording as” first: nothing was recorded. Your text is kept.' }
+    let out: OpResult
     try {
       const r = await api.runOp(wsId, workflow, run, { ...op, by: name, expectSeq: rec.seq })
-      opNotice = { kind: 'ok', text: typeof done === 'string' ? done : done(r) }
-      ok = true
+      out = { ok: true, kind: 'ok', text: typeof done === 'string' ? done : done(r) }
     } catch (e) {
       const err = e as ApiError
-      opNotice = err.status === 409 && /changed since/.test(err.message)
-        ? { kind: 'warn', text: 'The run changed since this view was read, so nothing was recorded. The view is reloaded; check it and submit again (your text is kept).' }
-        : { kind: 'error', text: `Not recorded: ${err.message}` }
+      const code = (err.detail as { code?: string } | undefined)?.code
+      out = err.status === 409 && /changed since/.test(err.message)
+        ? { ok: false, kind: 'warn', text: 'The run changed since this view was read, so nothing was recorded. The view is reloaded; check it and submit again (your text is kept).' }
+        : code === 'already-accepted' ? { ok: false, kind: 'warn', text: `Nothing recorded: ${err.message}` }
+          : { ok: false, kind: 'error', text: `Not recorded: ${/[.!?。]\s*$/.test(err.message) ? err.message.trim() : `${err.message.trim()}.`} Your text is kept.` }
     }
+    opNotice = out
     await refresh.request('full')
-    return ok
+    return out
   }
 
   async function adjust(body: { text: string; reason: string; dryRun: boolean; expectRevision: string; expectSeq: number }): Promise<AdjustView | null> {
@@ -335,14 +340,16 @@ export function renderRunView(root: HTMLElement, wsId: string, workflow: string,
       h('p.run-lead.d-only', statusLine(rec)),
       h('p.wf-file.d-only', `${t.sub} · ${rec.definition.revisions?.length ? `adjusted, ${rec.definition.active ?? 'r1'} in force` : 'fixed snapshot'}`))
     const last = rec.decisions.at(-1)
-    const accepted = last?.decision === 'accepted'
+    // The header and the focus card read the same standing (project_migration
+    // p3/ex1: "Accepted" stood here while the result waited for renewed acceptance).
+    const appr = rev ? null : approvalOf(rec, execView, r?.place, q => !!q.presentation || (!!q.node && wf?.nodes[q.node]?.confirms === 'result'))
     const sit = situation(rec)
     const open = execView?.attempts.find(a => a.state !== 'ended')
     const process = rev ? '' : open ? (open.alive === true ? ' · process alive' : open.alive === false ? (open.pid ? ' · process not seen alive' : ' · launching') : ' · on another host') : ''
     patchContent(titleFacts,
       chip(ex.state, ex.state === 'completed' ? '✓ Completed' : ex.state === 'stopped' ? 'Nothing can proceed' : STATE_LABEL[ex.state] ?? ex.state),
-      last ? h(`span.decision-chip.${accepted ? 'ok' : 'error'}`, { title: `${last.decision} by ${last.by}, ${when(last.at)}${last.confirmation ? ` (from ${last.confirmation.question})` : ''}` },
-        accepted ? (ex.state !== 'completed' && !rec.cancelled ? 'Accepted · cleanup pending' : 'Accepted') : 'Rejected') : ex.state === 'completed' ? h('span.decision-chip.none', 'No decision') : null,
+      appr?.chip ? h(`span.decision-chip.${appr.tone === 'ok' ? 'ok' : appr.tone === 'error' ? 'error' : appr.tone === 'warn' ? 'warn' : 'none'}`, { dataset: { approval: appr.kind }, title: last ? `latest decision: ${last.decision} by ${last.by}, ${when(last.at)}${last.confirmation ? ` (from ${last.confirmation.question})` : ''}${appr.integration ? ` · ${appr.integration.text}` : ''}` : appr.chip }, appr.chip)
+        : rev && last ? h(`span.decision-chip.${last.decision === 'accepted' ? 'ok' : 'error'}`, last.decision === 'accepted' ? 'Accepted' : 'Rejected') : null,
       rev ? null : h(`span.chip.d-only.sit-${sit}`, { title: 'What runs now: this host\'s execution facts, separate from the recorded node states' }, `${SITUATION[sit] ?? sit}${process}`))
     const src = r!.sources.find(s => s.workflow === rec.definition.root)
     openDefinition.hidden = !src?.file

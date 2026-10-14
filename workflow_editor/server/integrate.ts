@@ -97,6 +97,25 @@ async function administrative(space: Workspace, ref: RunRef, storage: RunStorage
   return (repo, path) => (repo === owner && path === `${folder}/run.json`) || (repo === '.' && subs.includes(path))
 }
 
+// What differs between two revisions of the run's result, apart from the
+// administrative records (project_migration p3/ex1): `repo:path` per
+// reviewed file. Null when the two do not name the same repositories (no
+// comparison is possible). An empty list is the same result.
+export async function resultChanges(space: Workspace, ref: RunRef, storage: RunStorage, from: RevisionEntry[], to: RevisionEntry[]): Promise<string[] | null> {
+  const admin = await administrative(space, ref, storage)
+  const out: string[] = []
+  for (const r of storage.repositories.filter(x => x.branch)) {
+    const a = from.find(x => x.path === r.path), b = to.find(x => x.path === r.path)
+    if (!a || !b) return null
+    if (a.tree === b.tree) continue
+    const dir = r.path === '.' ? space.root : join(space.root, r.path)
+    const diff = await git(dir, ['diff', '--name-only', a.tree, b.tree])
+    if (diff.code !== 0) return null
+    out.push(...names(diff.stdout).filter(p => !admin(r.path, p)).map(p => `${r.path}:${p}`))
+  }
+  return out
+}
+
 // Orders the repositories as they are published: submodules (devdocs
 // first), then the root.
 function ordered(storage: RunStorage) {

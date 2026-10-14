@@ -426,7 +426,16 @@ the tree of each repository the run owns) and queues its integration into
 the project's shared branches. That is a separate operation (`wfe run
 integrate`), journaled per repository and recorded as `run.integrate` when
 complete. Saved, accepted, partially integrated and integrated are shown
-apart.
+apart. One acceptance per result (project_migration p3/ex1): accepting what
+the latest acceptance already binds is refused (`already-accepted`); a
+changed result is accepted again ([integration.md](integration.md)).
+
+**Feedback (project_migration p3/ex1).** Each form in the run view says what
+became of its submission beside its button: *Recording…* while in flight
+(the button disabled, a second click sends nothing), then what was recorded,
+or why nothing was, with the text kept. A recorded answer the executor has
+not taken up is shown on its question as *Recorded … Waiting for <agent>*,
+apart from any failure.
 
 ### Result confirmation (p6)
 

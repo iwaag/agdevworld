@@ -776,8 +776,21 @@ async function prepareOp(ws: Workspace, ref: RunRef, record: RunRecord, graph: R
     // What an acceptance binds to (p9): the run's copy as it is now, by tree.
     delete op.revision
     if (op.decision === 'accepted' && ws.copyOf && record.storage) {
-      const { acceptedRevision } = await import('./integrate.ts')
+      const { acceptedRevision, resultChanges } = await import('./integrate.ts')
       op.revision = await acceptedRevision(ws, record.storage)
+      // One acceptance per result (project_migration p3/ex1): accepting what
+      // the latest acceptance already binds — directly or from a confirmation
+      // answer — records nothing and queues no integration. A changed result
+      // (anything but the run's own records) is accepted again. A
+      // retransmission of the recorded operation stays a duplicate.
+      const di = record.decisions.length - 1
+      const last = record.decisions[di]
+      const retransmitted = !!op.receipt && record.history.some(h => h.receipt === op.receipt)
+      const sameQuestion = !!op.question && record.decisions.some(d => d.confirmation?.question === op.question) // the reducer's decision-exists says it
+      if (!retransmitted && !sameQuestion && last?.decision === 'accepted' && last.revision) {
+        const changed = await resultChanges(ws, ref, record.storage, last.revision, op.revision)
+        if (changed && !changed.length) throw new RequestError(409, `the result is already accepted (decision ${di}, by ${last.by} at ${last.at}${last.confirmation ? ` from ${last.confirmation.question}` : ''}) and has not changed since; nothing was recorded. Only a changed result is accepted again.`, { code: 'already-accepted' })
+      }
     }
   }
   return { op, docProblem }

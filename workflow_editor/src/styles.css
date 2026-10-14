@@ -432,6 +432,7 @@ label.inline { display: flex; align-items: center; gap: 6px; }
 .decision-chip { display: inline-flex; align-items: center; border-radius: 999px; padding: 3px 12px; font-size: 13px; font-weight: 600; border: 1px solid; }
 .decision-chip.ok { color: var(--ok); border-color: #8dc9a7; background: var(--ok-bg); }
 .decision-chip.error { color: var(--error); border-color: #e2a7a2; background: var(--error-bg); }
+.decision-chip.warn { color: var(--warn); border-color: #e3c37a; background: var(--warn-bg); }
 .decision-chip.none { color: var(--muted); border-color: var(--line); background: #f3f4f6; font-weight: 500; }
 a.button.panel-toggle[hidden] { display: none; }
 .run-details { background: #fbfbfa; border-bottom: 1px solid var(--line); padding: 12px 24px 14px; display: flex; flex-direction: column; gap: 8px; }
@@ -453,9 +454,9 @@ a.button.panel-toggle[hidden] { display: none; }
 @media (max-width: 1000px) { .run-body { grid-template-columns: 1fr; } }
 .run-col { display: flex; flex-direction: column; gap: 16px; padding: 16px 20px 24px; min-width: 0; }
 .focus { background: var(--card); border: 1px solid var(--line); border-left: 4px solid #b9c0ca; border-radius: 14px; padding: 16px 20px; display: flex; flex-direction: column; gap: 10px; box-shadow: 0 1px 2px rgba(0,0,0,.04); }
-.focus[data-kind="review"], .focus[data-kind="question"] { border-left-color: #e0b35c; }
+.focus[data-kind="review"], .focus[data-kind="question"], .focus[data-kind="reaccept"] { border-left-color: #e0b35c; }
 .focus[data-kind="answered"], .focus[data-kind="working"], .focus[data-kind="idle"], .focus[data-kind="not-started"] { border-left-color: #6fb3d6; }
-.focus[data-kind="held"], .focus[data-kind="failed"] { border-left-color: #e2a7a2; }
+.focus[data-kind="held"], .focus[data-kind="failed"], .focus[data-kind="integration"] { border-left-color: #e2a7a2; }
 .focus[data-kind="accepted"], .focus[data-kind="completed"] { border-left-color: #8dc9a7; }
 .focus-display { display: flex; flex-direction: column; gap: 8px; }
 .focus-head { margin: 0; font-size: 19px; font-weight: 650; }
@@ -477,6 +478,16 @@ a.button.panel-toggle[hidden] { display: none; }
 .outcome-list.after { color: #4a525e; }
 .outcome-list strong .node-link { color: var(--text); text-decoration: none; }
 .receipt { margin: 4px 0 0; }
+/* project_migration p3/ex1: a recorded answer waiting for the executor, and a submission's own feedback */
+.receipt.recorded { display: flex; gap: 6px; align-items: flex-start; padding: 6px 10px; border-radius: 8px; background: var(--ok-bg); color: var(--ok); }
+.receipt.recorded span { color: var(--text); }
+.submit-state { margin: 4px 0 0; padding: 4px 8px; border-radius: 6px; }
+.submit-state.s-pending { color: var(--muted); background: #f3f4f6; }
+.submit-state.s-ok { color: var(--ok); background: var(--ok-bg); }
+.submit-state.s-warn { color: var(--warn); background: var(--warn-bg); }
+.submit-state.s-error { color: var(--error); background: var(--error-bg); font-weight: 600; }
+.changed-since p { margin: 6px 0 2px; }
+.changed-since ul.files { margin: 0; }
 .another { margin-top: 4px; }
 .resume-form { display: flex; flex-direction: column; gap: 6px; }
 .graph-card { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 12px 14px 10px; display: flex; flex-direction: column; }
@@ -734,8 +745,8 @@ html[data-display="simple"] .run-facts-row .state-chip, html[data-display="simpl
 .focus-icon { flex: none; display: inline-grid; place-items: center; width: 48px; height: 48px; border-radius: 50%; background: #e9edf3; color: #3d4450; }
 .focus-icon .icon { width: 26px; height: 26px; }
 .focus-icon.tone-completed, .focus-icon.tone-accepted { background: var(--ok-bg); color: var(--ok); }
-.focus-icon.tone-review, .focus-icon.tone-question, .focus-icon.tone-pending { background: #fdf1d8; color: #8a5a00; }
-.focus-icon.tone-held, .focus-icon.tone-failed { background: var(--error-bg); color: var(--error); }
+.focus-icon.tone-review, .focus-icon.tone-question, .focus-icon.tone-pending, .focus-icon.tone-reaccept { background: #fdf1d8; color: #8a5a00; }
+.focus-icon.tone-held, .focus-icon.tone-failed, .focus-icon.tone-integration { background: var(--error-bg); color: var(--error); }
 .focus-icon.tone-working, .focus-icon.tone-answered, .focus-icon.tone-idle, .focus-icon.tone-not-started { background: #e3f2fa; color: #0d5f8a; }
 html[data-display="simple"] .focus { padding: 22px 26px; gap: 14px; }
 html[data-display="simple"] .focus-head { font-size: 22px; }

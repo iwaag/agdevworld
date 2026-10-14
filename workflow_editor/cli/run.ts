@@ -13,6 +13,7 @@ import {
 } from '../server/runs.ts'
 import { RequestError, type Workspace } from '../server/workspace.ts'
 import { runSpace } from '../server/runspace.ts'
+import { integrationStatus } from '../shared/approval.ts'
 import type { ExecStore } from '../server/exec.ts'
 
 export interface RunCli {
@@ -900,8 +901,22 @@ export async function runCommand(c: RunCli): Promise<number> {
       const x = c.exec()
       const lines = (steps: { repo: string; target: string; state: string; method?: string; observed?: string; candidate?: string; result?: string; pushed?: boolean; files?: string[]; error?: string }[]) => steps.map(s => `  ${(s.repo === '.' ? 'root' : s.repo).padEnd(16)} → ${s.target.padEnd(10)} ${s.state}${s.method ? ` (${s.method})` : ''}${s.candidate ? ` candidate ${s.candidate.slice(0, 10)}` : ''}${s.observed ? ` onto ${s.observed.slice(0, 10)}` : ''}${s.result ? ` = ${s.result.slice(0, 10)}${s.pushed ? ' pushed' : s.state === 'planned' ? '' : ' not pushed'}` : ''}${s.error ? `\n      ${s.error}` : ''}`)
       if (c.flag('status')) {
-        const rows = x.integrations(ws.reg.id, r)
-        c.out(rows.length ? rows.flatMap(i => [`Integration ${i.id} of decision ${i.decision}: ${i.state} (${i.updated}, requested by ${i.requested_by})${i.error ? ` — ${i.error}` : ''}`, ...lines(JSON.parse(i.steps))]).join('\n') : `Run ${runKey(r)} has no integration.`, { ref: runKey(r), integrations: rows.map(i => ({ ...i, steps: JSON.parse(i.steps) })) })
+        // The current standing first, from the latest decision and run.json
+        // (project_migration p3/ex1: the oldest row was read as the status);
+        // then the journal, newest first, each row said for its own decision.
+        const rows = x.integrations(ws.reg.id, r).map(i => ({ ...i, steps: JSON.parse(i.steps) as Parameters<typeof lines>[0] }))
+        const space = await wrap(() => runSpace(ws, r))
+        const rec = (await wrap(() => readRun(space, r))).record
+        const st = rec ? integrationStatus(rec, { integrations: rows }, space.copyOf ? { kind: 'run-copy', branch: rec.storage?.branch ?? null } : { kind: 'project' }) : null
+        const latest = (rec?.decisions.length ?? 0) - 1
+        const head = !rec ? `Run ${runKey(r)} cannot be read; the journal follows.` : st ? `Now: ${st.text}${latest >= 0 ? ` (decision ${latest}, ${rec.decisions[latest].decision} by ${rec.decisions[latest].by})` : ''}${st.detail ? ` — ${st.detail}` : ''}${st.changed?.length ? `\n  changed since the acceptance: ${st.changed.join(', ')}` : ''}` : `Run ${runKey(r)} has no working copy of its own: what it published is already on the project's branches.`
+        const note = (i: typeof rows[number]) => {
+          const recorded = rec?.integrations?.find(x => x.decision === i.decision)
+          if (recorded && i.state !== 'integrated') return ` [run.json records decision ${i.decision} integrated at ${recorded.at}]`
+          return i.decision < latest ? ` [earlier decision; decision ${latest} is the latest]` : ''
+        }
+        const journal = rows.slice().reverse().flatMap(i => [`Integration ${i.id} of decision ${i.decision}: ${i.state} (${i.updated}, requested by ${i.requested_by})${i.error ? ` — ${i.error}` : ''}${note(i)}`, ...lines(i.steps)])
+        c.out([head, ...(journal.length ? ['', 'Journal (newest first):', ...journal] : [`Run ${runKey(r)} has no integration.`])].join('\n'), { ref: runKey(r), status: st, latestDecision: latest, integrations: rows })
         return 0
       }
       if (!c.flag('dry-run') && !by?.trim()) throw c.usage('--by is required: who integrates the result')

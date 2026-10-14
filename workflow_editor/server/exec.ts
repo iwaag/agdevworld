@@ -25,7 +25,7 @@ import { docStepsOf } from '../shared/compile.ts'
 import { assertWorkspaceAllowed, loadBoundary } from './boundary.ts'
 import type { Gitea } from './gitea.ts'
 import { baseline, publish, publishRun, type Baseline, type RepoStep } from './publish.ts'
-import { integrate, type IntegrationState, type IntegrationStep } from './integrate.ts'
+import { integrate, resultChanges, type IntegrationState, type IntegrationStep } from './integrate.ts'
 import { loadRegistry, observe, type Registration } from './registry.ts'
 import { catalogOf, createRunInCopy, listRuns, readRun, RUN_FILE, runDir, runOp } from './runs.ts'
 import { readCopy, runSpace } from './runspace.ts'
@@ -113,7 +113,7 @@ export interface AttemptRow { id: string; job: number; workspace: string; workfl
 // One integration of an accepted result (p9, server/integrate.ts): queued
 // when the acceptance exists, carried out once the run is completed and
 // saved, its steps the per-repository journal.
-export interface IntegrationRow { id: number; workspace: string; workflow: string; run: string; decision: number; state: 'queued' | 'running' | IntegrationState; created: string; updated: string; steps: string; error: string | null; requested_by: string }
+export interface IntegrationRow { id: number; workspace: string; workflow: string; run: string; decision: number; state: 'queued' | 'running' | 'superseded' | IntegrationState; created: string; updated: string; steps: string; error: string | null; requested_by: string }
 export interface CheckpointRow { id: number; workspace: string; workflow: string; run: string; kind: string; attempt: string | null; state: 'pending' | 'published' | 'nothing' | 'attention' | 'failed'; created: string; updated: string; steps: string; error: string | null; baseline: string | null; mode: 'run-copy' | null }
 
 export class ExecStore {
@@ -636,7 +636,7 @@ export class ExecStore {
   // Why the run's latest decision cannot be integrated now, or null: the
   // acceptance, the run's own copy and storage, the revision it binds to,
   // a completed execution and no open attempt.
-  private async integrable(ws: Workspace, ref: RunRef): Promise<{ space: Workspace; record: RunRecord; decision: number } | { refused: string; wait?: boolean }> {
+  private async integrable(ws: Workspace, ref: RunRef): Promise<{ space: Workspace; record: RunRecord; decision: number } | { refused: string; wait?: boolean; superseded?: boolean }> {
     const space = await runSpace(ws, ref)
     const record = (await readRun(space, ref)).record
     if (!record) return { refused: `run ${runKey(ref)} cannot be read` }
@@ -646,6 +646,13 @@ export class ExecStore {
     if (!d || d.decision !== 'accepted') return { refused: `run ${runKey(ref)} has no accepted result${d ? ` (its latest decision is ${d.decision})` : ''}; a completed run without acceptance stays saved on its branch, unintegrated` }
     if (!d.revision) return { refused: `the acceptance of run ${runKey(ref)} was recorded before p9 and names no revision; accept the result again to integrate it` }
     if ((record.integrations ?? []).some(i => i.decision === decision)) return { refused: `run ${runKey(ref)}'s accepted result is already integrated` }
+    // The same result integrated under an earlier acceptance (project_migration
+    // p3/ex1): nothing is integrated again.
+    for (const i of (record.integrations ?? []).slice().reverse()) {
+      const earlier = record.decisions[i.decision]?.revision
+      const changed = earlier ? await resultChanges(space, ref, record.storage, earlier, d.revision).catch(() => null) : null
+      if (changed && !changed.length) return { refused: `decision ${decision} accepts the same result as decision ${i.decision}, already integrated (${i.at}); nothing is integrated again`, superseded: true }
+    }
     if (record.control.attempt) return { refused: `attempt ${record.control.attempt.id} is executing run ${runKey(ref)}; integration waits until it has ended and its work is saved`, wait: true }
     if (record.execution.state !== 'completed') return { refused: `run ${runKey(ref)} is ${record.execution.state}; its accepted result is integrated once the execution is completed`, wait: true }
     return { space, record, decision }
@@ -713,13 +720,24 @@ export class ExecStore {
   // its row for a person or agent; nothing is retried by itself.
   async integrateDue(): Promise<string[]> {
     const notes: string[] = []
-    for (const row of this.all<IntegrationRow>('SELECT * FROM integrations WHERE state = \'queued\' ORDER BY id')) {
+    for (const { id } of this.all<{ id: number }>('SELECT id FROM integrations WHERE state = \'queued\' ORDER BY id')) {
+      // Each row as it is now: an earlier row's integration may have settled it
+      // (project_migration p3/ex1 found a stale list overwrite an integrated row).
+      const row = this.one<IntegrationRow>('SELECT * FROM integrations WHERE id = ?', id)
+      if (!row || row.state !== 'queued') continue
       const ref = { workflow: row.workflow, run: row.run }
       let ws: Workspace
       try { ws = await this.workspace(row.workspace) } catch (e) { notes.push(`integration ${row.id} (${runKey(ref)}): ${(e as Error).message}`); continue }
-      const ok = await this.integrable(ws, ref).catch(e => ({ refused: (e as Error).message, wait: false }))
+      // A row speaks for its own decision only: a later decision supersedes it.
+      const latest = ((await readRun(await runSpace(ws, ref), ref).catch(() => null))?.record?.decisions.length ?? 0) - 1
+      if (latest > row.decision) {
+        this.run('UPDATE integrations SET state = \'superseded\', error = ?, updated = ? WHERE id = ? AND state = \'queued\'', `decision ${latest} followed decision ${row.decision}; only the latest decision is integrated`, now(), row.id)
+        notes.push(`integration ${row.id} (${runKey(ref)}): superseded by decision ${latest}`)
+        continue
+      }
+      const ok = await this.integrable(ws, ref).catch(e => ({ refused: (e as Error).message, wait: false, superseded: false }))
       if ('refused' in ok) {
-        if (!ok.wait) { this.run('UPDATE integrations SET state = \'refused\', error = ?, updated = ? WHERE id = ?', ok.refused, now(), row.id); notes.push(`integration ${row.id} (${runKey(ref)}): refused — ${ok.refused}`) }
+        if (!ok.wait) { this.run('UPDATE integrations SET state = ?, error = ?, updated = ? WHERE id = ? AND state = \'queued\'', ok.superseded ? 'superseded' : 'refused', ok.refused, now(), row.id); notes.push(`integration ${row.id} (${runKey(ref)}): ${ok.superseded ? 'superseded' : 'refused'} — ${ok.refused}`) }
         continue
       }
       const r = await this.integrateRun(ws, ref, { by: this.executor, via: 'exec' }).catch(e => ({ state: 'failed', error: (e as Error).message }))

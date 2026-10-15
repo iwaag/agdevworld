@@ -88,6 +88,13 @@ Judges the delegation, and closes it:
              delivery that never became a child); no result is needed.
 This is your receipt of the result, not the child's acceptance (that is its
 own decision, from its confirmation) and not your run's result decision.`,
+  cancel: `wfe delegate cancel <run> <d> --reason <text> [--because answer:<q>[:<n>]|instruction:<i>]
+
+Cancels the delegation's child run, as its requester: its queued work is
+dropped and a running attempt of it is stopped; its records, copy and
+branch stay. This is the explicit act: holding or cancelling your own run
+never cancels the child. The cancellation comes back as a relayed fact;
+then judge the delegation (dispose --disposition abandoned).`,
   file: `wfe delegate file <run> <d> <path> [--out <file>]
 
 Prints a file of the child's working copy (a path of the child's project,
@@ -109,6 +116,7 @@ export const DELEGATE_INDEX = `wfe delegate <subcommand> … (p10: entrusting a 
   answer <run> <d> <q> --answer <text>    answer the child's question
   instruct <run> <d> --instruction <text> send the child a further instruction
   dispose <run> <d> --disposition …       judge the result (satisfied / rejected / abandoned)
+  cancel <run> <d> --reason <text>        cancel the child run (an explicit act of its own)
   file <run> <d> <path>                   read a file the child presents
   sync                                    relay children's facts now
 
@@ -265,6 +273,23 @@ export async function delegateCommand(c: RunCli): Promise<number> {
       const ev = c.opt('event') !== undefined ? Number(c.opt('event')) : undefined
       const res = await wrap(async () => runOp(await runSpace(ws, r), r, { op: 'delegation.dispose', delegation: d.id, disposition: kind, note: need('note', 'what you found'), ...(ev !== undefined ? { event: ev } : {}), ...meta() } as never, { by: recorder(rec), via: 'cli' }))
       return after(res.record, res.record.delegations![d.id], res.duplicate ? 'Already recorded (same receipt); nothing changed.' : `Delegation ${d.id} judged ${kind}.${kind === 'satisfied' ? ` Node ${d.node} may complete now (wfe run complete).` : ''}`)
+    }
+    case 'cancel': {
+      const r = await ref()
+      const rec = await record(r)
+      const d = delegation(rec, args[1])
+      if (!d.child) throw c.refused(`delegation ${d.id} has no child yet; nothing to cancel (abandon it instead: dispose --disposition abandoned)`)
+      const who = recorder(rec) ?? rec.executor.name
+      const why = because()
+      const reason = need('reason', 'why the child is cancelled')
+      const cws = await wrap(() => store.workspace(d.child!.workspace))
+      const cref = { workflow: d.child.workflow, run: d.child.run }
+      const child = await wrap(async () => (await readRun(await runSpace(cws, cref), cref)).record)
+      if (child?.cancelled) throw c.refused(`the child ${cref.workflow}/${cref.run} is already cancelled (${child.cancelled.reason})`)
+      const res = await wrap(() => c.exec().cancel(cws, cref, who, `cancelled by its requester ${who} (delegation ${d.uid}): ${reason}${why ? ` (on ${why.kind === 'answer' ? `answer ${why.question}` : `instruction ${why.instruction}`} of ${rec.workflow}/${rec.run})` : ''}`, 'delegation'))
+      const notes = await wrap(() => store.relay())
+      c.out([`Cancelled the child ${d.child.project} ${cref.workflow}/${cref.run}.`, ...notes, 'Judge the delegation next: wfe delegate dispose … --disposition abandoned.'].join('\n'), { ok: true, child: { ...cref, cancelled: res.record.cancelled }, notes })
+      return 0
     }
     case 'file': {
       const rec = await record(await ref())

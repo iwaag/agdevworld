@@ -99,6 +99,8 @@ nodes:                   # node id -> node
     type: delegate
     description: Run repository setup and wait for it.
     workflow: repo-setup # target workflow id (delegate only)
+    project: tooling     # target project id (delegate only; absent = this project, p10)
+    accepts: person      # who may accept the child's result: person (default) | parent (p10)
 edges:
   - {from: survey, to: setup}
 approvals:               # written by the editor's approval actions
@@ -398,7 +400,7 @@ described as OS-enforced.
 | `study` | Research: reading the web or files a person points to, and recording what was learned |
 | `do` | General work: coding, running and testing, file operations |
 | `talk` | Consulting a person, or an agent they entrusted, to agree on something or get permission |
-| `delegate` | Running another workflow of the project (`workflow: <id>`). Definition and display only since p4: runs of a workflow with a delegate node are refused |
+| `delegate` | Entrusting work to another managed workflow (`workflow: <id>`, `project: <id>` across projects, `accepts`): the contract is [delegation.md](delegation.md) (p10). Definition and display only until its execution is released: runs of a workflow with a delegate node are refused |
 
 Submodules under `study/` conventionally accumulate the results of study
 steps (repository names prefixed `study-`). Submodules under `wedo/`
@@ -437,9 +439,11 @@ fulfils its intent.
 | `node-id-invalid`, `node-type` | error | malformed node |
 | `node-binding-missing` | error | node refers to an undeclared binding key |
 | `node-description-missing`, `node-binding-duplicate`, `nodes-empty` | warning | incomplete draft |
-| `delegate-target-missing`, `delegate-target-unknown`, `delegate-self`, `delegate-recursive` | error | delegate target absent, not in the project, itself, or reaching back to itself |
+| `delegate-target-missing`, `delegate-target-unknown`, `delegate-self`, `delegate-recursive` | error | delegate target absent, not in its project, itself, or reaching back to itself (across the registry's projects when the registry is known, p10) |
+| `delegate-project-unknown`, `delegate-accepts` | error | a target project that is not a valid id or has no registered workspace; `accepts` other than `person` / `parent` (p10) |
+| `delegate-no-intake` | warning | the target workflow does not accept requests; a dispatch to it is refused (p10) |
 | `delegate-not-executable` | warning | a delegate node: the workflow can be edited and shown, but no run of it is created |
-| `workflow-on-non-delegate` | warning | `workflow` on a non-delegate node |
+| `workflow-on-non-delegate` | warning | `workflow`, `project` or `accepts` on a non-delegate node |
 | `edge-from-missing`, `edge-to-missing`, `edge-self`, `graph-cycle` | error | broken or cyclic edges |
 | `edge-duplicate`, `layout-orphan` | warning | redundant entries |
 | `execution-agent`, `execution-profile`, `execution-guide-path` | error | malformed agent id, profile name or guide path (p6) |

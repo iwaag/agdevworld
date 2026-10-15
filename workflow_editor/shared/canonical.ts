@@ -49,6 +49,10 @@ export function definitionProjection(w: Workflow) {
       description: normalizeText(n.description),
       repositories: [...new Set(n.repositories)].sort(),
       workflow: n.workflow ? n.workflow : null,
+      // p10: a delegate's target project and acceptance scope, when declared
+      // (a workflow without them keeps the digest it had).
+      ...(n.project ? { project: n.project } : {}),
+      ...(n.accepts ? { accepts: n.accepts } : {}),
       ...(n.confirms ? { confirms: n.confirms } : {}),
     }
   }

@@ -298,19 +298,20 @@ export class Workspace {
     const dir = await this.workflowsDir()
     const files = await this.workflowFiles()
     const reads = await Promise.all(files.map(async f => ({ file: f, ...(await this.readWorkflowFile(f)) })))
-    const refs = reads.filter(r => r.workflow).map(r => ({ id: r.workflow!.id, file: r.file, delegates: delegateTargets(r.workflow!) }))
+    const refs = reads.filter(r => r.workflow).map(r => ({ id: r.workflow!.id, file: r.file, delegates: delegateTargets(r.workflow!, this.reg.project), intake: r.workflow!.intake.zulip === 'requests' }))
     const repositories = repos ?? await this.repositories()
     const list: WorkflowSummary[] = []
     for (const r of reads) {
       if (!r.workflow) { list.push({ file: r.file, problem: r.problem, errors: 1, warnings: 0, delegates: [] }); continue }
-      const issues = validateWorkflow(r.workflow, { repositories, workflows: refs, file: r.file })
+      const issues = validateWorkflow(r.workflow, { repositories, workflows: refs, file: r.file, project: this.reg.project })
       const states = await approvalStates(r.workflow)
       list.push({
         file: r.file, id: r.workflow.id, name: r.workflow.name,
         errors: issues.filter(i => i.severity === 'error').length,
         warnings: issues.filter(i => i.severity === 'warning').length,
         approvals: { intent: states.intent.status, definition: states.definition.status },
-        delegates: delegateTargets(r.workflow),
+        delegates: delegateTargets(r.workflow, this.reg.project),
+        intake: r.workflow.intake.zulip === 'requests',
       })
     }
     return { list, dir: { exists: dir.exists, reason: dir.reason } }
@@ -320,8 +321,8 @@ export class Workspace {
     const { list } = await this.workflowSummaries(repositories)
     return {
       repositories,
-      workflows: list.filter(s => s.id).map(s => ({ id: s.id!, file: s.file, delegates: s.delegates })),
-      file,
+      workflows: list.filter(s => s.id).map(s => ({ id: s.id!, file: s.file, delegates: s.delegates, intake: s.intake })),
+      file, project: this.reg.project,
     }
   }
 
@@ -330,8 +331,8 @@ export class Workspace {
     const [read, summaries] = await Promise.all([this.readWorkflowFile(file), this.workflowSummaries(repositories)])
     const ctx: ValidationContext = {
       repositories,
-      workflows: summaries.list.filter(s => s.id).map(s => ({ id: s.id!, file: s.file, delegates: s.delegates })),
-      file,
+      workflows: summaries.list.filter(s => s.id).map(s => ({ id: s.id!, file: s.file, delegates: s.delegates, intake: s.intake })),
+      file, project: this.reg.project,
     }
     return {
       workspace: this.reg.id, file,

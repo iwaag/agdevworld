@@ -448,7 +448,7 @@ export function runDisplayTitle(rec: Pick<RunRecord, 'workflow' | 'presentations
 // The graph the run follows: its frozen effective graph (p5), or, for a run
 // created before p5, the root workflow of its bundle. A node with `step` is a
 // generated documentation step.
-export interface RunGraph { nodes: Record<string, { type: string; workflow?: string; confirms?: string; step?: StepSpec }>; edges: Edge[] }
+export interface RunGraph { nodes: Record<string, { type: string; workflow?: string; project?: string; accepts?: string; confirms?: string; step?: StepSpec }>; edges: Edge[] }
 export const stepOf = (graph: RunGraph, node: string): StepSpec | undefined => graph.nodes[node]?.step
 // The document a step writes, project-relative.
 export const documentPath = (r: RunRef, step: StepSpec) => `${runFolder(r)}/${step.output}`

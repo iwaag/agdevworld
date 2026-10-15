@@ -45,6 +45,9 @@ export const INTAKE_MODES = ['requests'] as const
 // A talk node may be the run's designated result confirmation (p6): the
 // person's confirmation there maps to the result decision (docs/runs.md).
 export const CONFIRMS = ['result'] as const
+// Who may accept the result of a delegated child run (p10): the parent's
+// person (default), or the parent run's agent when the author grants it.
+export const DELEGATE_ACCEPTS = ['person', 'parent'] as const
 export const PROFILE_PATTERN = /^[a-z0-9][a-z0-9_.-]{0,63}$/
 // How a run's attempts use harness conversations (agent_session p1):
 // `fresh` starts a new session for every attempt from the run's records and
@@ -75,6 +78,11 @@ export interface WorkflowNode {
   description: string
   repositories: string[]
   workflow?: string
+  // Delegate targets (p10, docs/delegation.md): `project` is the target
+  // project id (absent = this project), `accepts` who may accept the
+  // child's result: 'person' (default) or 'parent' (the parent run's agent).
+  project?: string
+  accepts?: string
   confirms?: string // 'result' on the result-confirmation talk (p6)
   appearance?: Appearance // display only (p7)
   template?: TemplateRef // provenance (p7/ex1): the catalog template it was made from; outside digests and the compiled graph
@@ -216,6 +224,8 @@ export function workflowFromData(raw: unknown): { workflow: Workflow; issues: Sh
       repositories: stringList(value, 'repositories', path, issues),
     }
     if (value.workflow !== undefined && value.workflow !== null) node.workflow = text(value, 'workflow', path, issues)
+    if (value.project !== undefined && value.project !== null) node.project = text(value, 'project', path, issues)
+    if (value.accepts !== undefined && value.accepts !== null) node.accepts = text(value, 'accepts', path, issues)
     if (value.confirms !== undefined && value.confirms !== null) node.confirms = text(value, 'confirms', path, issues)
     if (value.appearance !== undefined && value.appearance !== null) {
       const a = map(value, 'appearance', path, issues)

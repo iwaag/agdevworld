@@ -57,7 +57,7 @@ export interface StepSpec {
   purpose: string // one line, for views and notifications
   instructions: string // what the executing agent is asked to write
 }
-export interface EffectiveNode { type: string; workflow?: string; confirms?: string; step?: StepSpec }
+export interface EffectiveNode { type: string; workflow?: string; project?: string; accepts?: string; confirms?: string; step?: StepSpec }
 // `documentation` (v3): the steps the policy generates; a v2 graph has none
 // and is read by its policy (docStepsOf).
 export interface EffectiveGraph { compiler: string; policy: DocPolicy; documentation?: DocSteps; nodes: Record<string, EffectiveNode>; edges: Edge[] }
@@ -113,8 +113,8 @@ const byEdge = (a: Edge, b: Edge) => (a.from < b.from ? -1 : a.from > b.from ? 1
 
 // An authored node as runs follow it: its type, a delegate's target, and
 // whether it is the result confirmation.
-export function authoredNode(n: Pick<Workflow['nodes'][string], 'type' | 'workflow' | 'confirms'>): EffectiveNode {
-  return { type: n.type, ...(n.workflow ? { workflow: n.workflow } : {}), ...(n.confirms ? { confirms: n.confirms } : {}) }
+export function authoredNode(n: Pick<Workflow['nodes'][string], 'type' | 'workflow' | 'project' | 'accepts' | 'confirms'>): EffectiveNode {
+  return { type: n.type, ...(n.workflow ? { workflow: n.workflow } : {}), ...(n.project ? { project: n.project } : {}), ...(n.accepts ? { accepts: n.accepts } : {}), ...(n.confirms ? { confirms: n.confirms } : {}) }
 }
 
 // Compiles an authored definition. Refuses what is not an executable graph

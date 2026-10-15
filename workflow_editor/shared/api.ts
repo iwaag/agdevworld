@@ -87,6 +87,7 @@ export interface WorkflowSummary {
   warnings: number
   approvals?: Record<ApprovalKind, ApprovalState['status']>
   delegates: string[]
+  intake?: boolean // declares Zulip requests (p10: delegations are delivered through intake)
 }
 
 export interface ProjectResponse {

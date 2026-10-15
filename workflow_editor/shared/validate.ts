@@ -2,7 +2,7 @@
 // well-formed and that its references resolve; it never judges whether the
 // graph fulfils the intent. Errors block approval; drafts may still be saved.
 import {
-  ACCESS_LEVELS, APPEARANCE_COLORS, APPEARANCE_ICONS, CONFIRMS, DEVDOCS_MODES, DOC_POLICIES, DOC_STEPS, ID_PATTERN, INTAKE_MODES, NODE_TYPES, PROFILE_PATTERN, SESSION_POLICIES, PROJECT_SCHEMA, WORKFLOW_SCHEMA, normalizeRepoPath,
+  ACCESS_LEVELS, APPEARANCE_COLORS, APPEARANCE_ICONS, CONFIRMS, DELEGATE_ACCEPTS, DEVDOCS_MODES, DOC_POLICIES, DOC_STEPS, ID_PATTERN, INTAKE_MODES, NODE_TYPES, PROFILE_PATTERN, SESSION_POLICIES, PROJECT_SCHEMA, WORKFLOW_SCHEMA, normalizeRepoPath,
   type Issue, type Project, type Workflow,
 } from './model.ts'
 
@@ -16,19 +16,31 @@ export interface RepositoryInfo {
 export interface WorkflowRef {
   id: string
   file: string
-  delegates: string[] // delegate targets in that file's saved content
+  // Delegate targets in that file's saved content (delegateTargets): a
+  // workflow id of the same project, or `<project>/<workflow>` of another.
+  delegates: string[]
+  intake?: boolean // declares intake: {zulip: requests} (p10: a delegation is delivered through it)
 }
 export interface ValidationContext {
   repositories?: RepositoryInfo[]
   workflows?: WorkflowRef[]
   file?: string // the file this workflow is stored in, excluded from duplicate checks
+  // p10: this workflow's project, and the other registered projects'
+  // workflows (from the registry), for cross-project delegate targets.
+  project?: string
+  projects?: Record<string, WorkflowRef[]>
 }
 
 const err = (code: string, message: string, extra: Partial<Issue> = {}): Issue => ({ severity: 'error', code, message, ...extra })
 const warn = (code: string, message: string, extra: Partial<Issue> = {}): Issue => ({ severity: 'warning', code, message, ...extra })
 
-export function delegateTargets(w: Workflow): string[] {
-  return [...new Set(Object.values(w.nodes).filter(n => n.type === 'delegate' && n.workflow).map(n => n.workflow!))]
+// A delegate target as a key: the workflow id within the same project, or
+// `<project>/<workflow>` across projects (p10). `project` is the defining
+// workflow's own project, when known.
+export const targetKey = (n: { project?: string; workflow?: string }, project?: string) =>
+  n.project && n.project !== project ? `${n.project}/${n.workflow}` : n.workflow!
+export function delegateTargets(w: Workflow, project?: string): string[] {
+  return [...new Set(Object.values(w.nodes).filter(n => n.type === 'delegate' && n.workflow).map(n => targetKey(n, project)))]
 }
 
 // Returns one cycle (as a node list) in a directed graph, or null.
@@ -114,11 +126,17 @@ export function validateWorkflow(w: Workflow, ctx: ValidationContext = {}): Issu
     if (new Set(n.repositories).size !== n.repositories.length) issues.push(warn('node-binding-duplicate', `Node "${id}" lists a repository binding twice.`, { node: id }))
     if (n.type === 'delegate') {
       issues.push(warn('delegate-not-executable', `Delegate node "${id}" is definition and display only: runs of a workflow with a delegate node are refused.`, { node: id }))
+      const own = !n.project || n.project === ctx.project
+      const peers = own ? ctx.workflows : ctx.projects?.[n.project!]
+      if (n.project && !ID_PATTERN.test(n.project)) issues.push(err('delegate-project-unknown', `Delegate node "${id}" names project "${n.project}", which is not a valid project id.`, { node: id }))
+      else if (!own && ctx.projects && !ctx.projects[n.project!]) issues.push(err('delegate-project-unknown', `Delegate node "${id}" targets project "${n.project}", which has no workspace registered here.`, { node: id }))
       if (!n.workflow) issues.push(err('delegate-target-missing', `Delegate node "${id}" has no target workflow.`, { node: id }))
-      else if (n.workflow === w.id) issues.push(err('delegate-self', `Delegate node "${id}" targets its own workflow.`, { node: id }))
-      else if (ctx.workflows && !ctx.workflows.some(r => r.id === n.workflow)) issues.push(err('delegate-target-unknown', `Delegate node "${id}" targets workflow "${n.workflow}", which does not exist in this project.`, { node: id }))
-    } else if (n.workflow) {
-      issues.push(warn('workflow-on-non-delegate', `Node "${id}" is "${n.type}" but names a target workflow; only delegate nodes use it.`, { node: id }))
+      else if (own && n.workflow === w.id) issues.push(err('delegate-self', `Delegate node "${id}" targets its own workflow.`, { node: id }))
+      else if (peers && !peers.some(r => r.id === n.workflow)) issues.push(err('delegate-target-unknown', `Delegate node "${id}" targets workflow "${n.workflow}", which does not exist in ${own ? 'this project' : `project ${n.project}`}.`, { node: id }))
+      else if (peers && peers.find(r => r.id === n.workflow)?.intake === false) issues.push(warn('delegate-no-intake', `Delegate node "${id}" targets ${n.project ? `${n.project}/` : ''}${n.workflow}, which does not accept requests (intake: {zulip: requests}); a dispatch to it is refused.`, { node: id }))
+      if (n.accepts && !(DELEGATE_ACCEPTS as readonly string[]).includes(n.accepts)) issues.push(err('delegate-accepts', `Delegate node "${id}" has accepts "${n.accepts}"; expected ${DELEGATE_ACCEPTS.join(' or ')}.`, { node: id }))
+    } else if (n.workflow || n.project || n.accepts) {
+      issues.push(warn('workflow-on-non-delegate', `Node "${id}" is "${n.type}" but names a delegate target (${['workflow', 'project', 'accepts'].filter(k => n[k as 'workflow']).join(', ')}); only delegate nodes use it.`, { node: id }))
     }
     // Appearance (p7) is display only: an unknown value is drawn with the
     // type's default and kept in the file.
@@ -150,13 +168,20 @@ export function validateWorkflow(w: Workflow, ctx: ValidationContext = {}): Issu
   const cycle = findCycle(nodeIds, id => out.get(id) ?? [])
   if (cycle) issues.push(err('graph-cycle', `The graph has a cycle: ${cycle.join(' → ')}. p1 workflows are acyclic.`))
 
-  // Recursive delegation across workflows, with this draft replacing its saved entry.
+  // Recursive delegation across workflows (and, with a registry, across
+  // projects: p10), with this draft replacing its saved entry.
   if (ctx.workflows && w.id) {
+    const here = ctx.project ?? ''
+    const q = (project: string, key: string) => (key.includes('/') ? key : `${project}/${key}`)
     const graph = new Map<string, string[]>()
-    for (const r of ctx.workflows) if (r.file !== ctx.file) graph.set(r.id, [...(graph.get(r.id) ?? []), ...r.delegates])
-    graph.set(w.id, delegateTargets(w))
-    const reach = findCycle([w.id], id => graph.get(id) ?? [])
-    if (reach && reach.length > 2) issues.push(err('delegate-recursive', `Delegation is recursive: ${reach.join(' → ')}.`))
+    const add = (project: string, refs: WorkflowRef[], skipFile?: string) => {
+      for (const r of refs) if (r.file !== skipFile) graph.set(q(project, r.id), [...(graph.get(q(project, r.id)) ?? []), ...r.delegates.map(d => q(project, d))])
+    }
+    for (const [p, refs] of Object.entries(ctx.projects ?? {})) if (p !== here) add(p, refs)
+    add(here, ctx.workflows, ctx.file)
+    graph.set(q(here, w.id), delegateTargets(w, ctx.project).map(d => q(here, d)))
+    const reach = findCycle([q(here, w.id)], id => graph.get(id) ?? [])
+    if (reach && reach.length > 2) issues.push(err('delegate-recursive', `Delegation is recursive: ${reach.map(k => (k.startsWith(`${here}/`) ? k.slice(here.length + 1) : k)).join(' → ')}.`))
   }
 
   for (const id of Object.keys(w.layout.nodes)) {

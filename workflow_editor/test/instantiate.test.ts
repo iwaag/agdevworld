@@ -81,9 +81,13 @@ test('a template becomes an ordinary node: unique id, copied content, declared b
   // Ids are made unique; an explicit one that is taken is refused.
   assert.equal(instantiate(r.workflow, RESEARCH).node, 'preliminary-research-2')
   assert.throws(() => instantiate(w, RESEARCH, { id: 'implement' }), (e: unknown) => code(e) === 'node-id-taken')
-  // Instantiation never adds access, a delegate target or a result confirmation.
+  // Instantiation never adds access or a result confirmation; a delegate
+  // template (p10) brings only the target it states.
   assert.throws(() => instantiate(w, RESEARCH, { repositories: ['secrets'] }), (e: unknown) => code(e) === 'template-binding')
-  assert.throws(() => instantiate(w, { ...RESEARCH, type: 'delegate' }), (e: unknown) => code(e) === 'template-invalid')
+  const dl = instantiate(w, { ...RESEARCH, id: 'ask-forge', type: 'delegate', target: { project: 'forge', workflow: 'provide', accepts: 'parent' } })
+  assert.deepEqual([dl.workflow.nodes[dl.node].type, dl.workflow.nodes[dl.node].project, dl.workflow.nodes[dl.node].workflow, dl.workflow.nodes[dl.node].accepts], ['delegate', 'forge', 'provide', 'parent'])
+  const open = instantiate(w, { ...RESEARCH, id: 'ask-someone', type: 'delegate' })
+  assert.ok(!('workflow' in open.workflow.nodes[open.node]), 'without a target the author chooses one')
   const node = r.workflow.nodes[r.node]
   assert.ok(!('workflow' in node) && !('confirms' in node))
   // Inserted between two connected nodes, the direct edge goes.

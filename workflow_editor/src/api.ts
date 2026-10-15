@@ -104,6 +104,7 @@ export const api = {
     call<RunOpResponse>('POST', `${ws(id)}/runs/${encodeURIComponent(workflow)}/${encodeURIComponent(run)}/ops`, op),
   runExec: (id: string, workflow: string, run: string, signal?: AbortSignal) => call<RunExecView>('GET', `${ws(id)}/runs/${encodeURIComponent(workflow)}/${encodeURIComponent(run)}/exec`, undefined, [], signal),
   runNotify: (id: string, workflow: string, run: string, signal?: AbortSignal) => call<RunNotifyView>('GET', `${ws(id)}/runs/${encodeURIComponent(workflow)}/${encodeURIComponent(run)}/notify`, undefined, [], signal),
+  runDelegations: (id: string, workflow: string, run: string, signal?: AbortSignal) => call<DelegationsView>('GET', `${ws(id)}/runs/${encodeURIComponent(workflow)}/${encodeURIComponent(run)}/delegations`, undefined, [], signal),
   runIo: (id: string, workflow: string, run: string, attempt: string, line: number) => call<IoEntryView>('GET', `${ws(id)}/runs/${encodeURIComponent(workflow)}/${encodeURIComponent(run)}/io?attempt=${encodeURIComponent(attempt)}&line=${line}`),
   runPresentations: (id: string, workflow: string, run: string, signal?: AbortSignal) => call<{ presentations: PresentationView[] }>('GET', `${ws(id)}/runs/${encodeURIComponent(workflow)}/${encodeURIComponent(run)}/presentations`, undefined, [], signal),
   presentation: (id: string, workflow: string, run: string, p: string, action: 'start' | 'stop', by: string) => call<{ ok: boolean }>('POST', `${ws(id)}/runs/${encodeURIComponent(workflow)}/${encodeURIComponent(run)}/presentations/${encodeURIComponent(p)}/${action}`, { by }),
@@ -129,4 +130,19 @@ export interface RunNotifyView {
   // p10: the run's detailed IO channel
   io?: { state: 'disabled' | 'pending' | 'provisioned' | 'problem'; url: string | null; problem?: string; attempts: { attempt: string; line: number; gap: string | null; ended: boolean }[] }
 }
+// A run's delegations (p10, server/delegate.ts delegationsView).
+export interface DelegationView {
+  id: string; uid: string; node: string; state: string; target: { project: string; workflow: string; workspace: string }
+  requester: string; onBehalfOf: string | null; accepts: string; dispatched: { at: string; by: string }; predecessor?: string
+  request: { path: string; sha256: string }; original?: { path: string; sha256: string }
+  child: { uid: string; workspace: string; project: string; workflow: string; run: string } | null
+  events: { n: number; type: string; at: string; wakes: boolean; text: string; question?: string; confirms?: boolean; plan?: boolean; document?: { path: string; sha256: string }; subject?: { path: string; sha256: string; bytes: number }[]; manifest?: { digest: string; execution: string; outcome: string; report: { path: string; sha256: string; bytes: number } | null; artifacts: { path: string; sha256: string; bytes: number; commit: string | null }[]; decision: { decision: string; by: string } | null }; takenUp: { at: string; by: string } | null }[]
+  answers: { n: number; question: string; text: string; from: string; by: string; at: string }[]
+  instructions: { n: number; text: string; from: string; at: string }[]
+  disposition: { kind: string; note: string; manifest: string | null; at: string; by: string } | null
+  closed: { reason: string; at: string } | null
+  pending: number[]
+  childNow: { situation: string; execution: string; seq: number; waiting: { node: string; holder: string }[]; decisions: number; links: { conversation: string | null; progress: string | null; io: string | null } | null } | null
+}
+export interface DelegationsView { ref: string; delegations: DelegationView[]; parent: null | { delegation: string; parent: { project: string; workflow: string; run: string; node: string }; accepts: string; workspace: string | null } }
 export interface IoEntryView { attempt: string; line: number; entries: { line: number; kind: string; head: string; body?: string }[]; io?: RunNotifyView['io'] }

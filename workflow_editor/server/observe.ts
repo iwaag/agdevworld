@@ -9,6 +9,9 @@
 // nothing. Unavailable evidence is said (`unavailable`, `source.state`),
 // never filled in, so absence is never read as completion.
 import { createHash } from 'node:crypto'
+import { existsSync } from 'node:fs'
+import { dirname, join } from 'node:path'
+import { DatabaseSync } from 'node:sqlite'
 import { execFile } from 'node:child_process'
 import { hostname } from 'node:os'
 import { promisify } from 'node:util'
@@ -64,6 +67,20 @@ export interface ObservedRun {
   executor: { name: string; host: string } | null
   problems: { code: string; message: string }[]
   unavailable: Record<string, string>
+  // p10 (docs/delegation.md): the run's delegations — present when it has any.
+  delegations?: DelegationFacts[]
+}
+// One delegation as a monitor needs it: whose move it is, the child's
+// situation now, the parent's facts not yet taken up, the child's facts not
+// yet relayed (a stalled relay), and how the request's delivery stands (an
+// unbound dispatch).
+export interface DelegationFacts {
+  id: string; uid: string; node: string; state: string; target: string; dispatchedAt: string; closed: boolean
+  child: { uid: string; workspace: string; ref: string; situation: string | null; execution: string | null; waitingFor: string[]; hold: string | null; failed: string[] } | null
+  pending: { n: number; type: string; at: string }[]
+  unrelayed: { type: string; childSeq: number; at: string; wakes: boolean }[]
+  delivery: { state: string; error: string | null; message: number | null; since: string } | null
+  problem: string | null
 }
 export interface SessionFacts {
   policy: 'fresh' | 'run'
@@ -155,7 +172,9 @@ function waitingOf(r: RunRecord, job: JobRow | null): ObservedRun['waiting'] {
       const d = r.delegations?.[w.on.delegation]
       const pending = d ? d.events.filter(e => e.wakes && !e.takenUp) : []
       if (d && pending.length) return { reason: `delegation ${d.id}: ${pending.map(e => `${e.type} #${e.n}`).join(', ')} relayed, not yet taken up, no job queued`, responsible: 'executor', since: pending[0].at }
-      if (d) return { reason: `delegation ${d.id} to ${d.target.project}/${d.target.workflow}${d.child ? ` (child ${d.child.run})` : ' (no child yet)'}`, responsible: `delegation:${d.child?.uid ?? d.uid}`, since: r.nodes[w.node]?.updated ?? null }
+      // The child's move (its own record says whose), or a dispatch that has no child yet.
+      if (d?.child) return { reason: `delegation ${d.id} to ${d.target.project}/${d.target.workflow}: child ${d.child.run}`, responsible: `delegation:${d.child.uid}`, since: r.nodes[w.node]?.updated ?? null }
+      if (d) return { reason: `delegation ${d.id} to ${d.target.project}/${d.target.workflow}: dispatched ${d.dispatched.at}, no child yet`, responsible: `delegation-unbound:${d.uid}`, since: d.dispatched.at }
     } else {
       const deadline = r.nodes[w.node]?.wait?.deadline
       return { reason: `external: ${w.on.external}${deadline ? ` (expected by ${deadline})` : ''}`, responsible: `external:${w.on.external}`, since: r.nodes[w.node]?.updated ?? null }
@@ -329,7 +348,51 @@ export class Observer {
     }
     if (!consistent) problems.push({ code: 'changing', message: `the record changed while it was read ${reads} times; its facts may straddle a transition` })
     if (!rows) unavailable.executor = 'execution is not configured on this host'
+    if (r.delegations) out.delegations = await this.delegationFacts(r).catch(e => { unavailable.delegations = (e as Error).message; return [] })
     return this.withRows(out, ws, ref, groups, rows ?? undefined, r)
+  }
+
+  // A run's delegations (p10): each child read from its own record, the
+  // parent's untaken facts, the child's facts the relay has not recorded on
+  // the parent yet, and the request's delivery from the notifier's journal.
+  // Reads only.
+  private async delegationFacts(r: RunRecord): Promise<DelegationFacts[]> {
+    const { childFacts, delegationState, isOpenDelegation, WAKING } = await import('../shared/delegation.ts')
+    const regs = (await loadRegistry(this.registryFile)).workspaces
+    const notifyFile = join(this.exec?.ctx.area ?? dirname(this.registryFile), '.local', 'notify', 'notify.sqlite')
+    let db: DatabaseSync | null = null
+    try { if (existsSync(notifyFile)) db = new DatabaseSync(notifyFile, { readOnly: true }) } catch { db = null }
+    try {
+      const out: DelegationFacts[] = []
+      for (const d of Object.values(r.delegations ?? {})) {
+        let child: DelegationFacts['child'] = null
+        let unrelayed: DelegationFacts['unrelayed'] = []
+        let problem: string | null = null
+        if (d.child) {
+          const reg = regs.find(w => w.id === d.child!.workspace)
+          const cref = { workflow: d.child.workflow, run: d.child.run }
+          const c = reg ? (await readRun(new Workspace(reg), cref).catch(() => null))?.record : undefined
+          if (!c) problem = `the child ${d.child.project} ${cref.workflow}/${cref.run} cannot be read here`
+          else if (`${c.project}/${c.workflow}/${c.run}#${creationOf(c)}` !== d.child.uid) problem = `the child's record is another run now (bound ${d.child.uid})`
+          else {
+            child = { uid: d.child.uid, workspace: d.child.workspace, ref: `${cref.workflow}/${cref.run}`, situation: situation(c), execution: c.execution.state, waitingFor: c.execution.waiting.map(w => w.holder), hold: c.control.hold?.kind ?? null, failed: c.execution.failed }
+            const recorded = new Set(r.history.map(h => h.receipt).filter(Boolean))
+            if (isOpenDelegation(d) && !r.cancelled) unrelayed = childFacts(d.uid, c, 0).filter(f => !recorded.has(f.receipt)).map(f => ({ type: f.event.type, childSeq: f.event.child.seq, at: f.event.child.at, wakes: WAKING.has(f.event.type) }))
+          }
+        }
+        let delivery: DelegationFacts['delivery'] = null
+        if (db && !d.child) {
+          const id = `${r.project}/${r.workflow}/${r.run}#${d.dispatched.seq}:delegation-request@${d.id}`
+          const row = db.prepare('SELECT o.state AS ostate, o.created AS created, d.state AS dstate, d.last_error AS error, d.message_id AS message, d.uncertain AS uncertain FROM outbox o LEFT JOIN delivery_events e ON e.event = o.id LEFT JOIN deliveries d ON d.id = e.delivery WHERE o.id = ?').get(id) as { ostate: string; created: string; dstate: string | null; error: string | null; message: number | null; uncertain: number | null } | undefined
+          delivery = row ? { state: row.dstate ? `${row.dstate}${row.uncertain ? ' (may have been posted)' : ''}` : row.ostate === 'sent' ? 'sent' : 'queued', error: row.error, message: row.message, since: row.created } : { state: 'not-queued', error: null, message: null, since: d.dispatched.at }
+        }
+        out.push({
+          id: d.id, uid: d.uid, node: d.node, state: delegationState(d), target: `${d.target.project}/${d.target.workflow}`, dispatchedAt: d.dispatched.at, closed: !isOpenDelegation(d),
+          child, pending: d.events.filter(e => e.wakes && !e.takenUp).map(e => ({ n: e.n, type: e.type, at: e.at })), unrelayed, delivery, problem,
+        })
+      }
+      return out
+    } finally { db?.close() }
   }
 
   // The executor's facts of one run: its process (the open or last

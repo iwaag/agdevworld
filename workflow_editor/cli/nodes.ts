@@ -31,8 +31,8 @@ decides whether and where an activity becomes a node.
 
   list                       the templates (id, revision, type, name, expectation)
   show <id>                  one template in full
-  create <id> --name <text> --type study|do|talk --description <text> --expectation <text>
-             [--icon <token>] [--color <token>] [--by <name>]
+  create <id> --name <text> --type study|do|talk|delegate --description <text> --expectation <text>
+             [--icon <token>] [--color <token>] [--target-project <id>] [--target-workflow <id>] [--accepts person|parent] [--by <name>]
   update <id> --expect-revision <n> [--name …] [--type …] [--description …]
              [--expectation …] [--icon …] [--color …] [--by <name>]
                              fields not given stay; --icon '' / --color '' clear
@@ -45,7 +45,10 @@ decides whether and where an activity becomes a node.
 
 Fields of a template:
   name         the card label of nodes made from it
-  type         ${TEMPLATE_TYPES.join(', ')} (delegate nodes are not executed, so no template is one)
+  type         ${TEMPLATE_TYPES.join(', ')}
+  target       delegate templates only (p10): --target-project, --target-workflow
+               and --accepts, copied into the node; any of them may be left to
+               the workflow's author (wfe delegate help)
   description  for the agent PERFORMING the activity: what to do and record.
                It is copied into the node's description; the node then runs
                like any node of its type
@@ -99,6 +102,12 @@ export async function nodesCommand(c: NodesCli): Promise<number> {
     const icon = c.opt('icon') ?? base?.icon ?? '', color = c.opt('color') ?? base?.color ?? ''
     return icon || color ? { appearance: { icon, color } } : {}
   }
+  // A delegate template's target (p10): given fields replace, '' clears one.
+  const target = (base?: TemplateContent['target']) => {
+    const g = { project: c.opt('target-project') ?? base?.project ?? '', workflow: c.opt('target-workflow') ?? base?.workflow ?? '', accepts: c.opt('accepts') ?? base?.accepts ?? '' }
+    const kept = Object.fromEntries(Object.entries(g).filter(([, v]) => v))
+    return Object.keys(kept).length ? { target: kept } : {}
+  }
   const live = async () => {
     const r = await readCatalog(c.area())
     if (r.state !== 'ok') throw c.refused(`the node catalog is unavailable: ${r.problem}`)
@@ -120,14 +129,14 @@ export async function nodesCommand(c: NodesCli): Promise<number> {
     }
     case 'create': {
       if (!arg) throw c.usage('create <id> --name … --type … --description … --expectation …')
-      const r = await createTemplate(c.area(), arg, { name: c.opt('name') ?? '', type: c.opt('type') ?? '', description: text('description') ?? '', expectation: text('expectation') ?? '', ...appearance() }, by())
+      const r = await createTemplate(c.area(), arg, { name: c.opt('name') ?? '', type: c.opt('type') ?? '', description: text('description') ?? '', expectation: text('expectation') ?? '', ...appearance(), ...target() }, by())
       c.out(`Created template ${r.template.id} (revision 1).`, { ok: true, template: r.template })
       return 0
     }
     case 'update': {
       if (!arg) throw c.usage('update <id> --expect-revision <n> …')
       const cur = templateIn((await live()).catalog, arg)
-      const r = await updateTemplate(c.area(), arg, { name: c.opt('name') ?? cur.name, type: c.opt('type') ?? cur.type, description: text('description') ?? cur.description, expectation: text('expectation') ?? cur.expectation, ...appearance(cur.appearance) }, rev(), by())
+      const r = await updateTemplate(c.area(), arg, { name: c.opt('name') ?? cur.name, type: c.opt('type') ?? cur.type, description: text('description') ?? cur.description, expectation: text('expectation') ?? cur.expectation, ...appearance(cur.appearance), ...target(cur.target) }, rev(), by())
       c.out(r.changed ? `Template ${arg} is now revision ${r.template.revision}.` : `Nothing changed; template ${arg} stays at revision ${r.template.revision}.`, { ok: true, changed: r.changed, template: r.template })
       return 0
     }

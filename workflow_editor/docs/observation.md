@@ -39,6 +39,25 @@ When two registrations yield the same `<project>/<workflow>/<run>`, both
 are listed and each carries the problem `ambiguous` naming the other
 workspace: a monitor never merges them and never guesses which is live.
 
+## Delegations (p10)
+
+A run with delegations ([delegation.md](delegation.md)) carries
+`delegations: [{id, uid, node, state, target, dispatchedAt, closed, child,
+pending, unrelayed, delivery, problem}]`:
+
+| Field | Content |
+| --- | --- |
+| `child` | `{uid, workspace, ref, situation, execution, waitingFor, hold, failed}` read from the child's own record, or null before it exists |
+| `pending` | facts relayed to this run that wake it and are not taken up (`{n, type, at}`) |
+| `unrelayed` | facts of the child's history not yet recorded on this run (`{type, childSeq, at, wakes}`): a growing list means the relay is not running |
+| `delivery` | before a child exists: the request delivery's state in the notifier's journal (`ready`, `sending`, `failed`, `unresolved`, "may have been posted", `sent`, `queued`, `not-queued`) |
+
+A delegate node's wait names its responsible party: `delegation:<child
+uid>` (the child's move — the child is observed as a run of its own),
+`delegation-unbound:<delegation uid>` (no child yet), or `executor` when a
+relayed fact waits for this run's agent and no job is queued (an unowned
+continuation, recoverable like any other).
+
 ## `wfe observe [--json] [--workspace <id>] [--run <wf>/<run>] [--terminal]`
 
 Without `--terminal`, completed or cancelled runs are listed only when they

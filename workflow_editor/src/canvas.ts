@@ -1,7 +1,7 @@
 // The graph canvas: DOM cards on a pannable, zoomable surface with SVG edges.
 // It renders a workflow draft and reports user intents (select, move,
 // connect) through callbacks; the view owns the draft.
-import type { RepositoryStatus, WorkflowSummary } from '../shared/api.ts'
+import type { PeerProject, RepositoryStatus, WorkflowSummary } from '../shared/api.ts'
 import { APPEARANCE_COLORS, APPEARANCE_ICONS, NODE_TYPES, normalizeRepoPath, type Appearance, type Point, type Workflow } from '../shared/model.ts'
 import { h } from './dom.ts'
 import { icon } from './icons.ts'
@@ -36,6 +36,8 @@ const SIMPLE_READABLE = 0.9
 export interface CanvasContext {
   repositories: RepositoryStatus[]
   workflows: WorkflowSummary[]
+  project?: string // p10: this workflow's project, and the other registered projects (delegate targets)
+  peers?: PeerProject[]
   errorNodes: Set<string>
   readonly: boolean
   // Run view: each node's recorded state, shown as text and color.
@@ -275,7 +277,13 @@ export class Canvas {
     const t = typeKey(node.type)
     const selected = this.selection?.kind === 'node' && this.selection.id === id
     const title = node.name || TYPE_LABEL[t] || node.type || id
-    const target = node.type === 'delegate' && node.workflow ? this.ctx.workflows.find(w => w.id === node.workflow) : undefined
+    // A delegate's target (p10): a workflow of this project, or project/workflow of another.
+    const cross = !!node.project && node.project !== this.ctx.project
+    const found = node.type === 'delegate' && node.workflow ? (cross ? this.ctx.peers?.find(p => p.project === node.project)?.workflows.find(w => w.id === node.workflow) : this.ctx.workflows.find(w => w.id === node.workflow)) : undefined
+    // Another project's workflow cannot be looked up where other projects are
+    // not known (the run view): it is shown as written, not as missing.
+    const target = found ? { id: cross ? `${node.project}/${found.id}` : found.id, name: found.name ? (cross ? `${node.project} · ${found.name}` : found.name) : undefined }
+      : cross && node.workflow && !this.ctx.peers ? { id: `${node.project}/${node.workflow}`, name: undefined } : undefined
     const color = colorOf(node.appearance)
     const card = h(`div.node.type-${t}${color ? `.color-${color}` : ''}${selected ? '.selected' : ''}${this.ctx.errorNodes.has(id) ? '.has-error' : ''}`, {
       dataset: { id },

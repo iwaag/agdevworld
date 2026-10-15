@@ -59,7 +59,10 @@ test('revisions follow content; stale edits, retired ids and invalid content are
   // Someone else's edit based on revision 1 is stale now.
   await rejects(updateTemplate(a.dir, 'research', content({ name: 'Research' }), 1, 'Sam'), 'template-stale')
   await rejects(deleteTemplate(a.dir, 'research', 1, 'Sam'), 'template-stale')
-  await rejects(createTemplate(a.dir, 'delegate-it', content({ type: 'delegate' }), 'Pat'), 'template-invalid')
+  // p10: a delegation task can be a template; a target belongs to delegate templates only.
+  assert.equal((await createTemplate(a.dir, 'delegate-it', content({ type: 'delegate', target: { project: 'forge', workflow: 'provide', accepts: 'parent' } }), 'Pat')).template.target?.workflow, 'provide')
+  await rejects(createTemplate(a.dir, 'odd-target', content({ target: { workflow: 'provide' } }), 'Pat'), 'template-invalid')
+  await rejects(createTemplate(a.dir, 'bad-accepts', content({ type: 'delegate', target: { accepts: 'anyone' } }), 'Pat'), 'template-invalid')
   await rejects(createTemplate(a.dir, 'no-expectation', content({ expectation: ' ' }), 'Pat'), 'template-invalid')
   await rejects(createTemplate(a.dir, 'odd', content({ appearance: { icon: 'rocket', color: '' } }), 'Pat'), 'template-invalid')
   await rejects(createTemplate(a.dir, 'Bad Id', content(), 'Pat'), 'template-id')
@@ -67,11 +70,11 @@ test('revisions follow content; stale edits, retired ids and invalid content are
   await rejects(createTemplate(a.dir, 'research', content(), 'Pat'), 'template-retired')
   const r = await readCatalog(a.dir)
   assert.ok(r.state === 'ok')
-  if (r.state === 'ok') assert.equal(r.catalog.generation, 4) // initialization, creation, the edit, the deletion: refusals and no-op saves write nothing
+  if (r.state === 'ok') assert.equal(r.catalog.generation, 5) // initialization, creation, the edit, the delegate template (p10), the deletion: refusals and no-op saves write nothing
 })
 
 test('an unreadable catalog is reported, refuses writes and is never replaced', async () => {
-  for (const text of ['{ not json', JSON.stringify({ schema: 'ag.node-catalog.v0', generation: 1, templates: [] }), JSON.stringify({ schema: 'ag.node-catalog.v1', generation: 1, templates: [{ id: 'x', revision: 1, name: 'X', type: 'delegate', description: 'd', expectation: 'e', updated: '', by: '' }] })]) {
+  for (const text of ['{ not json', JSON.stringify({ schema: 'ag.node-catalog.v0', generation: 1, templates: [] }), JSON.stringify({ schema: 'ag.node-catalog.v1', generation: 1, templates: [{ id: 'x', revision: 1, name: 'X', type: 'review', description: 'd', expectation: 'e', updated: '', by: '' }] })]) {
     const a = await area()
     const file = join(a.dir, 'node-catalog.json')
     await writeFile(file, text)

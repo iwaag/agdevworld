@@ -11,8 +11,9 @@ export const CATALOG_SCHEMA = 'ag.node-catalog.v1'
 export const SNAPSHOT_SCHEMA = 'ag.node-catalog-snapshot.v1'
 export const CATALOG_FILE = 'node-catalog.json'
 // The types a template may have: the execution types a run performs.
-// Delegate nodes are not executed, so no template suggests otherwise.
-export const TEMPLATE_TYPES = ['study', 'do', 'talk'] as const
+// p10: a delegate template describes a delegation task — optionally with its
+// target and acceptance scope; it is a description, not an executor.
+export const TEMPLATE_TYPES = ['study', 'do', 'talk', 'delegate'] as const
 export type TemplateType = typeof TEMPLATE_TYPES[number]
 
 // What a template says. Everything here is its content: a change of any of
@@ -23,6 +24,9 @@ export interface TemplateContent {
   description: string // for the agent performing the activity
   expectation: string // for the designer of the workflow: how the person expects it to appear
   appearance?: Appearance
+  // p10, delegate templates only: the target and who accepts the child's
+  // result, copied into the node it becomes (each may be left to the author).
+  target?: { project?: string; workflow?: string; accepts?: string }
 }
 export interface NodeTemplate extends TemplateContent {
   id: string
@@ -85,7 +89,16 @@ export function contentProblems(t: Partial<TemplateContent>): string[] {
   const out: string[] = []
   const txt = (v: unknown) => typeof v === 'string' && v.trim() !== ''
   if (!txt(t.name)) out.push('name is required')
-  if (!(TEMPLATE_TYPES as readonly string[]).includes(t.type as string)) out.push(t.type === 'delegate' ? 'type delegate is not offered: delegate nodes are not executed, and a template names no target workflow' : `type must be one of ${TEMPLATE_TYPES.join(', ')}`)
+  if (!(TEMPLATE_TYPES as readonly string[]).includes(t.type as string)) out.push(`type must be one of ${TEMPLATE_TYPES.join(', ')}`)
+  if (t.target !== undefined) {
+    const g = t.target as Record<string, unknown>
+    if (t.type !== 'delegate') out.push('target belongs to delegate templates only')
+    else if (!isObj(g)) out.push('target must be {project?, workflow?, accepts?}')
+    else {
+      for (const k of ['project', 'workflow'] as const) if (g[k] !== undefined && (typeof g[k] !== 'string' || !ID_PATTERN.test(g[k] as string))) out.push(`target.${k} must be a valid id`)
+      if (g.accepts !== undefined && !['person', 'parent'].includes(g.accepts as string)) out.push('target.accepts is person or parent')
+    }
+  }
   if (!txt(t.description)) out.push('description is required: what the agent performing this activity does and records')
   if (!txt(t.expectation)) out.push('expectation is required: how you expect this activity to appear in a workflow')
   if (t.appearance !== undefined) {
@@ -101,9 +114,10 @@ export function contentProblems(t: Partial<TemplateContent>): string[] {
 // The content of a template as stored: trimmed name, no empty appearance.
 export function normalizeContent(t: TemplateContent): TemplateContent {
   const a = t.appearance && (t.appearance.icon || t.appearance.color) ? { appearance: { icon: t.appearance.icon ?? '', color: t.appearance.color ?? '' } } : {}
-  return { name: t.name.trim(), type: t.type, description: t.description, expectation: t.expectation, ...a }
+  const g = t.type === 'delegate' && t.target ? Object.fromEntries((['project', 'workflow', 'accepts'] as const).filter(k => t.target![k]).map(k => [k, t.target![k]])) : {}
+  return { name: t.name.trim(), type: t.type, description: t.description, expectation: t.expectation, ...a, ...(Object.keys(g).length ? { target: g } : {}) }
 }
-export const contentOf = (t: TemplateContent): TemplateContent => normalizeContent({ name: t.name, type: t.type, description: t.description, expectation: t.expectation, ...(t.appearance ? { appearance: t.appearance } : {}) })
+export const contentOf = (t: TemplateContent): TemplateContent => normalizeContent({ name: t.name, type: t.type, description: t.description, expectation: t.expectation, ...(t.appearance ? { appearance: t.appearance } : {}), ...(t.target ? { target: t.target } : {}) })
 export const sameContent = (a: TemplateContent, b: TemplateContent) => canonicalJson(contentOf(a)) === canonicalJson(contentOf(b))
 
 // Reads parsed JSON as a catalog; throws CatalogError('catalog-invalid')
@@ -207,8 +221,9 @@ export function uniqueNodeId(w: Pick<Workflow, 'nodes'>, base: string): string {
 }
 
 // A template copied into an ordinary node of `w` (a new workflow model; `w`
-// is not changed). Never declares a binding, a delegate target or a result
-// confirmation: the target workflow decides those.
+// is not changed). Never declares a binding or a result confirmation: the
+// target workflow decides those. A delegate template's own target (p10) is
+// copied as the template states it.
 export function instantiate(w: Workflow, t: Pick<NodeTemplate, 'id' | 'revision'> & TemplateContent, o: InstantiateOptions = {}): { workflow: Workflow; node: string } {
   const problems = contentProblems(t)
   if (problems.length) fail('template-invalid', `template ${t.id}: ${problems.join('; ')}`)
@@ -222,6 +237,10 @@ export function instantiate(w: Workflow, t: Pick<NodeTemplate, 'id' | 'revision'
   const node: WorkflowNode = {
     type: t.type, name: t.name, description: t.description, repositories,
     ...(t.appearance && (t.appearance.icon || t.appearance.color) ? { appearance: { ...t.appearance } } : {}),
+    // A delegate template's target (p10), as the template states it.
+    ...(t.type === 'delegate' && t.target?.workflow ? { workflow: t.target.workflow } : {}),
+    ...(t.type === 'delegate' && t.target?.project ? { project: t.target.project } : {}),
+    ...(t.type === 'delegate' && t.target?.accepts ? { accepts: t.target.accepts } : {}),
     template: { id: t.id, revision: t.revision, expectation: t.expectation },
   }
   const next = structuredClone(w)

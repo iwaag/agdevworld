@@ -117,6 +117,7 @@ export async function updateTemplate(area: string, id: string, content: Template
       if (t.revision !== expectRevision) cfail('template-stale', `template "${id}" is at revision ${t.revision}, not ${expectRevision}: it changed since it was read. Read it again and redo the edit.`)
       Object.assign(t, contentOf(content), { revision: t.revision + 1, updated: now(), by: who })
       if (!content.appearance || !(content.appearance.icon || content.appearance.color)) delete t.appearance
+      if (!contentOf(content).target) delete t.target
       return t
     })
     return { catalog: r.catalog, template: r.result, changed: true }

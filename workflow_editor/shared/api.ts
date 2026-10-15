@@ -102,8 +102,13 @@ export interface ProjectResponse {
   structure: Diagnostic[]
 }
 
+// Another registered project and its workflows (p10): delegate targets.
+export interface PeerProject { project: string; workspace: string; label?: string; workflows: { id: string; name?: string; file: string; delegates: string[]; intake: boolean }[] }
+
 export interface WorkflowResponse {
   workspace: string
+  project?: string // this workspace's project id (p10)
+  peers?: PeerProject[] // the other registered projects' workflows, when the registry is known (p10)
   file: string
   rev: string | null
   text: string | null

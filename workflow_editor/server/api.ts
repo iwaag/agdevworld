@@ -115,7 +115,10 @@ export function createHandler(config: ServiceConfig) {
     await assertWorkspaceAllowed(await loadBoundary(config.registryFile, area), reg, 'Opening')
     const obs = await observe(reg)
     if (!obs.available) throw new RequestError(409, `workspace "${id}" is registered but not available: ${obs.reason}`)
-    return new Workspace(reg)
+    const ws = new Workspace(reg)
+    // Delegate targets in the other registered projects (p10).
+    ws.peers = async () => (await import('./peers.ts')).registryPeers(config.registryFile, area, reg.project)
+    return ws
   }
 
   // Repository inspection costs several Git commands per submodule. While a

@@ -19,7 +19,7 @@
 import { backendFact } from '../shared/backend.ts'
 import type { RunOpResponse, RunResponse } from '../shared/api.ts'
 import { describeSteps, effectiveOf, holderOf, situation, type RunRecord } from '../shared/run.ts'
-import { api, ApiError, type AdjustView, type PresentationView, type RunExecView, type RunNotifyView } from './api.ts'
+import { api, ApiError, type AdjustView, type DelegationsView, type PresentationView, type RunExecView, type RunNotifyView } from './api.ts'
 import { Canvas, STATE_GLYPH } from './canvas.ts'
 import { docStepsOf, FINAL_STEP, hasDocSteps, splitCounts } from '../shared/compile.ts'
 import { h, when } from './dom.ts'
@@ -58,6 +58,7 @@ export function renderRunView(root: HTMLElement, wsId: string, workflow: string,
   let fileRequest = 0 // the identity of the latest file read; older responses are dropped
   let execView: RunExecView | null = null
   let notifyView: RunNotifyView | null = null
+  let delegView: DelegationsView | null = null // p10
   let execError = ''
   let presentViews: PresentationView[] = [] // what this host observes of the run's presentations (p7)
   let canvasShown = '' // what the canvas was last drawn from
@@ -110,7 +111,7 @@ export function renderRunView(root: HTMLElement, wsId: string, workflow: string,
   // host's facts; presentation facts follow the run just read, or the last
   // usable one when the new reading is malformed. A host batch re-reads only
   // the facts that change without a run.json change.
-  interface Batch { run?: Outcome<RunResponse>; exec?: Outcome<RunExecView>; notify?: Outcome<RunNotifyView>; presentations?: Outcome<PresentationView[]> }
+  interface Batch { run?: Outcome<RunResponse>; exec?: Outcome<RunExecView>; notify?: Outcome<RunNotifyView>; presentations?: Outcome<PresentationView[]>; delegations?: Outcome<DelegationsView> }
   async function readBatch(kind: RefreshKind, signal: AbortSignal): Promise<Batch> {
     const [runOut, exec, notify] = await Promise.all([
       kind === 'full' ? outcome(api.run(wsId, workflow, run, rev, signal)) : undefined,
@@ -119,12 +120,14 @@ export function renderRunView(root: HTMLElement, wsId: string, workflow: string,
     ])
     const rec = runOut?.ok && runOut.value.record ? runOut.value.record : shown?.record
     const presentations = rev ? undefined : rec?.presentations ? await outcome(api.runPresentations(wsId, workflow, run, signal).then(x => x.presentations)) : { ok: true as const, value: [] }
-    return { run: runOut, exec, notify, presentations }
+    // Delegations (p10): a child's situation changes without this record changing, so host batches read them too.
+    const delegations = rev || !(rec?.delegations || rec?.input.entrustedBy?.kind === 'delegation') ? undefined : await outcome(api.runDelegations(wsId, workflow, run, signal))
+    return { run: runOut, exec, notify, presentations, delegations }
   }
   // A host batch whose facts differ only in the executor's heartbeat time
   // displays nothing new and touches nothing; otherwise only the parts that
   // show host facts are brought up to date. A full batch updates the view.
-  const hostFacts = () => JSON.stringify([execView && { ...execView, executor: { ...execView.executor, at: undefined } }, execError, notifyView, presentViews])
+  const hostFacts = () => JSON.stringify([execView && { ...execView, executor: { ...execView.executor, at: undefined } }, execError, notifyView, presentViews, delegView])
   function applyBatch(b: Batch, kind: RefreshKind) {
     const before = resp
     if (b.run?.ok) { resp = b.run.value; loadError = ''; if (b.run.value.record) shown = b.run.value } else if (b.run) loadError = b.run.error
@@ -132,6 +135,7 @@ export function renderRunView(root: HTMLElement, wsId: string, workflow: string,
     if (b.exec?.ok) { execView = b.exec.value; execError = '' } else if (b.exec) execError = b.exec.error
     if (b.notify?.ok) notifyView = b.notify.value
     if (b.presentations?.ok) presentViews = b.presentations.value
+    if (b.delegations?.ok) delegView = b.delegations.value
     const facts = hostFacts()
     const hostChanged = facts !== hostShown
     hostShown = facts
@@ -149,7 +153,7 @@ export function renderRunView(root: HTMLElement, wsId: string, workflow: string,
     return f ? `${f.size}:${f.modified}` : `unlisted:${Math.random()}`
   }
   const refresh = new RefreshCoordinator<Batch>(readBatch, applyBatch)
-  const data = () => ({ wsId, rev, shown, resp, execView, execError, notifyView, presentViews, selection, viewing, connected })
+  const data = () => ({ wsId, rev, shown, resp, execView, execError, notifyView, presentViews, selection, viewing, connected, delegView })
 
   async function loadProjectName() {
     const p = await api.project(wsId).catch(() => null)
@@ -350,7 +354,7 @@ export function renderRunView(root: HTMLElement, wsId: string, workflow: string,
       chip(ex.state, ex.state === 'completed' ? '✓ Completed' : ex.state === 'stopped' ? 'Nothing can proceed' : STATE_LABEL[ex.state] ?? ex.state),
       appr?.chip ? h(`span.decision-chip.${appr.tone === 'ok' ? 'ok' : appr.tone === 'error' ? 'error' : appr.tone === 'warn' ? 'warn' : 'none'}`, { dataset: { approval: appr.kind }, title: last ? `latest decision: ${last.decision} by ${last.by}, ${when(last.at)}${last.confirmation ? ` (from ${last.confirmation.question})` : ''}${appr.integration ? ` · ${appr.integration.text}` : ''}` : appr.chip }, appr.chip)
         : rev && last ? h(`span.decision-chip.${last.decision === 'accepted' ? 'ok' : 'error'}`, last.decision === 'accepted' ? 'Accepted' : 'Rejected') : null,
-      rev ? null : h(`span.chip.d-only.sit-${sit}`, { title: 'What runs now: this host\'s execution facts, separate from the recorded node states' }, `${SITUATION[sit] ?? sit}${process}`))
+      rev ? null : h(`span.chip.d-only.sit-${sit}`, { title: 'What runs now: this host\'s execution facts, separate from the recorded node states' }, `${sit === 'awaiting-person' && !ex.waiting.some(w => !('delegation' in w.on)) ? 'Executor: idle, waiting for a delegated run' : SITUATION[sit] ?? sit}${process}`))
     const src = r!.sources.find(s => s.workflow === rec.definition.root)
     openDefinition.hidden = !src?.file
     if (src?.file) {
@@ -497,6 +501,15 @@ export function renderRunView(root: HTMLElement, wsId: string, workflow: string,
     graphCard.hidden = !wf
     if (!rec || !wf) return
     const status = Object.fromEntries(Object.keys(rec.nodes).map(id => [id, nodeLabel(rec, id)]))
+    // A delegate node's card says where its child stands (p10).
+    for (const d of delegView?.delegations ?? []) {
+      const st = status[d.node]
+      if (!st) continue
+      const CHILD: Record<string, string> = { executing: 'child working', stopping: 'child stopping', 'awaiting-person': 'child waiting', stopped: 'child stopped', interrupted: 'child interrupted', unknown: 'child interrupted', completed: 'child done', cancelled: 'child cancelled', 'not-started': 'child queued', idle: 'child queued' }
+      const child = d.childNow ? CHILD[d.childNow.situation] ?? `child ${d.childNow.situation}` : d.child ? 'child' : 'request on its way'
+      const base = rec.nodes[d.node]?.state === 'waiting' ? 'Waiting' : st.label
+      status[d.node] = { ...st, label: `${base} · ${d.pending.length ? 'news to take up' : d.disposition ? d.disposition.kind : child}`, title: `${st.title}\nDelegation ${d.id} to ${d.target.project}/${d.target.workflow}: ${d.state}${d.child ? `; child ${d.child.workflow}/${d.child.run}` : ''}` }
+    }
     const eff = effectiveOf(rec)
     const sel = selection && eff?.nodes[selection]?.step ? { kind: 'step' as const, id: selection } : selection && rec.nodes[selection] ? { kind: 'node' as const, id: selection } : null
     const key = JSON.stringify([rec.definition.active ?? 'r1', Object.keys(r!.bundle), status, sel, rec.context.repositories])

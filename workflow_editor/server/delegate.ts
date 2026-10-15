@@ -452,14 +452,24 @@ export class DelegateStore {
 // child's situation now; for a child, the delegation it came from.
 export async function delegationsView(store: DelegateStore, ws: Workspace, ref: RunRef) {
   const { delegationState } = await import('../shared/delegation.ts')
-  const { situation } = await import('../shared/run.ts')
+  const { holderOf, situation } = await import('../shared/run.ts')
+  const { NotifyStore } = await import('./notify.ts')
   const rec = (await readRun(await runSpace(ws, ref), ref)).record
   if (!rec) throw new RequestError(409, `run ${runKey(ref)} cannot be read`)
-  const delegations = []
-  for (const d of Object.values(rec.delegations ?? {})) {
-    const c = await store.child(d).catch(() => null)
-    delegations.push({ ...d, state: delegationState(d), pending: pendingEvents(d).map(e => e.n), childNow: c ? { situation: situation(c.record), execution: c.record.execution.state, seq: c.record.seq, waiting: c.record.execution.waiting, decisions: c.record.decisions.length } : null })
-  }
-  const ent = rec.input.entrustedBy
-  return { ref: runKey(ref), delegations, parent: ent?.kind === 'delegation' ? ent : null }
+  const n = new NotifyStore({ area: store.ctx.area, registryFile: store.ctx.registryFile, exec: store.ctx.exec })
+  try {
+    const delegations = []
+    for (const d of Object.values(rec.delegations ?? {})) {
+      const c = await store.child(d).catch(() => null)
+      const links = c ? await n.runStatusOf(d.child!.project, c.space.shared, { workflow: d.child!.workflow, run: d.child!.run }).then(st => ({ conversation: st.request?.url ?? null, progress: st.topic?.url ?? null, io: st.io?.url ?? null }), () => null) : null
+      delegations.push({
+        ...d, state: delegationState(d), pending: pendingEvents(d).map(e => e.n),
+        childNow: c ? { situation: situation(c.record), execution: c.record.execution.state, seq: c.record.seq, waiting: c.record.execution.waiting.map(w => ({ node: w.node, holder: holderOf(c.record, w.node) })), decisions: c.record.decisions.length, links } : null,
+      })
+    }
+    const ent = rec.input.entrustedBy
+    // A child names its parent; the parent's workspace here, for a link.
+    const parentWs = ent?.kind === 'delegation' ? (await loadRegistry(store.ctx.registryFile)).workspaces.find(w => w.project === ent.parent.project)?.id ?? null : null
+    return { ref: runKey(ref), delegations, parent: ent?.kind === 'delegation' ? { ...ent, workspace: parentWs } : null }
+  } finally { n.close() }
 }

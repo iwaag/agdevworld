@@ -7,10 +7,10 @@ import {
   DOC_POLICIES, docSteps, ID_PATTERN, normalizeRepoPath, PROJECT_SCHEMA, type Documentation,
   type ApprovalKind, type Project, type Workflow,
 } from '../shared/model.ts'
-import { delegateTargets, hasErrors, validateProject, validateWorkflow, type ValidationContext } from '../shared/validate.ts'
+import { delegateTargets, hasErrors, validateProject, validateWorkflow, type ValidationContext, type WorkflowRef } from '../shared/validate.ts'
 import type {
   AddSubmoduleResponse, Diagnostic, FileProblem, ProjectResponse, RepoCategory, RepositoryStatus,
-  WorkflowResponse, WorkflowSummary,
+  PeerProject, WorkflowResponse, WorkflowSummary,
 } from '../shared/api.ts'
 import { atomicWrite, createExclusive, inside, readTextOrNull, textHash } from './files.ts'
 import { git, LOCAL_TRANSPORT } from './git.ts'
@@ -61,6 +61,14 @@ export class Workspace {
   // workspace it was made from.
   readonly copyOf?: { shared: Workspace; ref: { workflow: string; run: string } }
   constructor(reg: Registration, copyOf?: Workspace['copyOf']) { this.reg = reg; this.copyOf = copyOf }
+  // The other registered projects' workflows (p10: delegate targets), when
+  // the caller knows the registry (the service, the CLI).
+  peers?: () => Promise<PeerProject[]>
+  private async peerContext(): Promise<{ peers?: PeerProject[]; projects?: Record<string, WorkflowRef[]> }> {
+    if (!this.peers) return {}
+    const peers = await this.peers().catch(() => undefined)
+    return peers ? { peers, projects: Object.fromEntries(peers.map(p => [p.project, p.workflows.map(w => ({ id: w.id, file: w.file, delegates: w.delegates, intake: w.intake }))])) } : {}
+  }
   get root() { return this.reg.path }
   // The project workspace: itself, or the one a run copy was made from.
   get shared(): Workspace { return this.copyOf?.shared ?? this }
@@ -300,10 +308,11 @@ export class Workspace {
     const reads = await Promise.all(files.map(async f => ({ file: f, ...(await this.readWorkflowFile(f)) })))
     const refs = reads.filter(r => r.workflow).map(r => ({ id: r.workflow!.id, file: r.file, delegates: delegateTargets(r.workflow!, this.reg.project), intake: r.workflow!.intake.zulip === 'requests' }))
     const repositories = repos ?? await this.repositories()
+    const { projects } = await this.peerContext()
     const list: WorkflowSummary[] = []
     for (const r of reads) {
       if (!r.workflow) { list.push({ file: r.file, problem: r.problem, errors: 1, warnings: 0, delegates: [] }); continue }
-      const issues = validateWorkflow(r.workflow, { repositories, workflows: refs, file: r.file, project: this.reg.project })
+      const issues = validateWorkflow(r.workflow, { repositories, workflows: refs, file: r.file, project: this.reg.project, ...(projects ? { projects } : {}) })
       const states = await approvalStates(r.workflow)
       list.push({
         file: r.file, id: r.workflow.id, name: r.workflow.name,
@@ -322,20 +331,20 @@ export class Workspace {
     return {
       repositories,
       workflows: list.filter(s => s.id).map(s => ({ id: s.id!, file: s.file, delegates: s.delegates, intake: s.intake })),
-      file, project: this.reg.project,
+      file, project: this.reg.project, ...((await this.peerContext()).projects ? { projects: (await this.peerContext()).projects } : {}),
     }
   }
 
   async workflowResponse(file: string): Promise<WorkflowResponse> {
     const repositories = await this.repositories()
-    const [read, summaries] = await Promise.all([this.readWorkflowFile(file), this.workflowSummaries(repositories)])
+    const [read, summaries, peerCtx] = await Promise.all([this.readWorkflowFile(file), this.workflowSummaries(repositories), this.peerContext()])
     const ctx: ValidationContext = {
       repositories,
       workflows: summaries.list.filter(s => s.id).map(s => ({ id: s.id!, file: s.file, delegates: s.delegates, intake: s.intake })),
-      file, project: this.reg.project,
+      file, project: this.reg.project, ...(peerCtx.projects ? { projects: peerCtx.projects } : {}),
     }
     return {
-      workspace: this.reg.id, file,
+      workspace: this.reg.id, file, ...(this.reg.project ? { project: this.reg.project } : {}), ...(peerCtx.peers ? { peers: peerCtx.peers } : {}),
       rev: read.text === null ? null : textHash(read.text), text: read.text,
       workflow: read.workflow, problem: read.problem,
       issues: read.workflow ? validateWorkflow(read.workflow, ctx) : [],

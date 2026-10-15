@@ -108,7 +108,10 @@ async function workspace(p: Parsed): Promise<Workspace> {
   await assertWorkspaceAllowed(await loadBoundary(registryFile(p), areaDir(p)), w, 'Opening')
   const o = await observe(w)
   if (!o.available) throw new Refused(`workspace "${w.id}" is registered but not available: ${o.reason}`)
-  return new Workspace(w)
+  const ws = new Workspace(w)
+  // Delegate targets in the other registered projects (p10).
+  ws.peers = async () => (await import('../server/peers.ts')).registryPeers(registryFile(p), areaDir(p), w!.project)
+  return ws
 }
 
 async function workflowFile(ws: Workspace, name: string): Promise<string> {

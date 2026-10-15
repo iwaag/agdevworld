@@ -4,7 +4,7 @@
 // draft and tells the view whether the inspector itself must be rebuilt
 // (structure) or not (typing). Its groups keep their open state across
 // rebuilds (p8): a rebuild after a checkbox never folds what the person opened.
-import type { RepositoryStatus, WorkflowSummary } from '../shared/api.ts'
+import type { PeerProject, RepositoryStatus, WorkflowSummary } from '../shared/api.ts'
 import type { EffectiveGraph } from '../shared/compile.ts'
 import type { NodeTemplate } from '../shared/catalog.ts'
 import { ACCESS_LEVELS, APPEARANCE_COLORS, APPEARANCE_ICONS, ID_PATTERN, NODE_TYPES, normalizeRepoPath, SESSION_POLICIES, type Issue, type Workflow } from '../shared/model.ts'
@@ -24,6 +24,8 @@ export interface InspectorContext {
   file: string
   effective?: EffectiveGraph | null // the compiled draft when it has generated steps, for step details
   templates?: Pick<NodeTemplate, 'id' | 'revision'>[] // the person's catalog now (p7/ex1), to say how a node's template has moved on
+  project?: string // this workflow's project (p10)
+  peers?: PeerProject[] // the other registered projects' workflows: delegate targets (p10)
 }
 
 export interface InspectorActions {
@@ -76,6 +78,41 @@ function resolveRepo(ctx: InspectorContext, path: string) {
   return p ? ctx.repositories.find(r => r.path === p) : undefined
 }
 
+// A delegate node's target and scope (p10, docs/delegation.md): the project
+// (this one or another registered one), its workflow, and who may accept
+// the child's result. The workflows offered are the ones registered here;
+// a target that does not accept requests is said so.
+function delegateFields(ctx: InspectorContext, n: Workflow['nodes'][string], ro: boolean, actions: InspectorActions): HTMLElement[] {
+  const own = ctx.project ?? ''
+  const project = n.project && n.project !== own ? n.project : own
+  const peers = ctx.peers ?? []
+  const projectOptions = [h('option', { value: own, selected: project === own }, `${own || 'this project'} (this project)`), ...peers.map(p => h('option', { value: p.project, selected: p.project === project }, `${p.project}${p.label && p.label !== p.project ? ` — ${p.label}` : ''}`))]
+  if (project !== own && !peers.some(p => p.project === project)) projectOptions.push(h('option', { value: project, selected: true }, `${project} (not registered here)`))
+  const workflows: { id: string; name?: string; intake?: boolean; self?: boolean }[] = project === own
+    ? ctx.workflows.filter(s => s.id).map(s => ({ id: s.id!, name: s.name, intake: s.intake, self: s.file === ctx.file }))
+    : peers.find(p => p.project === project)?.workflows ?? []
+  const wfOptions = [h('option', { value: '' }, '— choose a workflow —'), ...workflows.map(s => h('option', { value: s.id, selected: s.id === n.workflow, disabled: !!s.self }, `${s.name || s.id} (${s.id})${s.self ? ' — this workflow' : s.intake === false ? ' — does not accept requests' : ''}`))]
+  if (n.workflow && !workflows.some(s => s.id === n.workflow)) wfOptions.push(h('option', { value: n.workflow, selected: true }, `${n.workflow} (missing)`))
+  const chosen = workflows.find(s => s.id === n.workflow)
+  const out: (HTMLElement | null)[] = [
+    h('label.field', h('span', 'Delegate to project'), h('select', {
+      disabled: ro, 'aria-label': 'Delegate target project',
+      onchange: (e: Event) => { const v = (e.target as HTMLSelectElement).value; if (v && v !== own) n.project = v; else delete n.project; delete n.workflow; actions.changed(true) },
+    }, projectOptions)),
+    h('label.field', h('span', 'Delegate to workflow'), h('select', {
+      disabled: ro, 'aria-label': 'Delegate target',
+      onchange: (e: Event) => { const v = (e.target as HTMLSelectElement).value; if (v) n.workflow = v; else delete n.workflow; actions.changed(true) },
+    }, wfOptions)),
+    chosen && chosen.intake === false ? h('p.banner.warn.small', `${project}/${chosen.id} does not accept requests (intake: zulip requests); a dispatch to it is refused.`) : null,
+    h('label.field', h('span', 'Who accepts the child\'s result'), h('select', {
+      disabled: ro, 'aria-label': 'Delegate acceptance',
+      onchange: (e: Event) => { const v = (e.target as HTMLSelectElement).value; if (v === 'parent') n.accepts = 'parent'; else delete n.accepts; actions.changed(true) },
+    }, h('option', { value: 'person', selected: n.accepts !== 'parent' }, 'The person (this run\'s agent relays their answer)'), h('option', { value: 'parent', selected: n.accepts === 'parent' }, 'This run\'s agent'))),
+    h('p.small.muted', 'The child is an ordinary run of the target workflow, requested through its intake; this run\'s agent answers its questions and judges its result.'),
+  ]
+  return out.filter((x): x is HTMLElement => !!x)
+}
+
 export function renderInspector(panel: HTMLElement, ctx: InspectorContext, actions: InspectorActions) {
   // The panel's own scroll position survives a rebuild of its content.
   const top = panel.scrollTop
@@ -105,15 +142,7 @@ function nodePanel(ctx: InspectorContext, id: string, actions: InspectorActions)
       onchange: (e: Event) => { n.type = (e.target as HTMLSelectElement).value; actions.changed(true) },
     }, typeOptions.map(t => h('option', { value: t, selected: t === n.type }, TYPE_LABEL[t] ?? `${t || '(none)'} — unknown`)))),
   ]
-  if (n.type === 'delegate' || n.workflow) {
-    const known = ctx.workflows.filter(s => s.id)
-    const options = [h('option', { value: '' }, '— choose a workflow —'), ...known.map(s => h('option', { value: s.id!, selected: s.id === n.workflow }, `${s.name || s.id} (${s.id})${s.file === ctx.file ? ' — this workflow' : ''}`))]
-    if (n.workflow && !known.some(s => s.id === n.workflow)) options.push(h('option', { value: n.workflow, selected: true }, `${n.workflow} (missing)`))
-    out.push(h('label.field.d-only', h('span', n.type === 'delegate' ? 'Delegate to workflow' : 'Target workflow (only used by delegate nodes)'), h('select', {
-      disabled: ro, 'aria-label': 'Delegate target',
-      onchange: (e: Event) => { const v = (e.target as HTMLSelectElement).value; if (v) n.workflow = v; else delete n.workflow; actions.changed(true) },
-    }, options)))
-  }
+  if (n.type === 'delegate' || n.workflow || n.project || n.accepts) out.push(...delegateFields(ctx, n, ro, actions))
   out.push(moreDetails('type, appearance, repositories, connections'))
   out.push(appearanceField(n, ro, actions))
   // Repository bindings of this node

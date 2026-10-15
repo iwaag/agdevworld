@@ -820,3 +820,8 @@ html[data-display="simple"] .q-text { font-size: 15px; line-height: 1.5; }
 .conv-links .conv-link { font-weight: 600; }
 .io-main { max-width: 1100px; margin: 16px auto; padding: 0 16px; }
 .io-body { white-space: pre-wrap; word-break: break-word; background: var(--panel, #f6f7f9); border: 1px solid var(--border, #d9dde3); padding: 10px; border-radius: 6px; font-size: 12.5px; max-height: none; }
+/* p10: a run's delegations (side pane and the delegate node's card) */
+.delegation { border: 1px solid var(--border, #d9dde3); border-radius: 6px; padding: 8px 10px; margin: 6px 0; background: #faf8fd; }
+.delegation .dl-links a { font-weight: 600; }
+.delegation ul { margin: 4px 0 4px 18px; padding: 0; }
+.ok-text { color: #2d7a3e; }

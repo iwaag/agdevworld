@@ -66,7 +66,8 @@ resource system are not part of p7/ex1.
 | `id` | Stable identity (`^[a-z0-9][a-z0-9_.-]{0,63}$`). It never changes. An id that was deleted is not reused (`deleted`), so provenance in old workflows never points at a different template |
 | `revision` | 1 at creation, +1 whenever the template's content (name, type, description, expectation, appearance) changes. A save that changes nothing keeps the revision |
 | `name` | The card label of nodes made from it. Required |
-| `type` | `study`, `do` or `talk`, the existing execution types. `delegate` is refused (`template-type`): a delegate needs a target workflow of one project, and a template must not suggest that delegate execution exists |
+| `type` | `study`, `do`, `talk` or (p10) `delegate`, the execution types |
+| `target` | delegate templates only (p10): `{project?, workflow?, accepts?}`, copied into the node made from it; any of them may be left to the workflow's author ([delegation.md](delegation.md)) |
 | `description` | For the agent **performing** the activity: what to do and what to record. Copied into the node's `description`. Required |
 | `expectation` | For the agent or person **designing** the workflow: how the person expects this activity to appear. Required. It is not copied into the executed description |
 | `appearance` | Optional p7 tokens (`icon`, `color`; contract.md, *Appearance*). In the catalog an unknown token is an error, not a warning, because the catalog is written only through validated operations |
@@ -83,7 +84,7 @@ its type-specific fields come from the target workflow:
 - `repositories`: chosen at instantiation from the target workflow's
   declared binding keys. An unknown key is refused (`template-binding`).
   Instantiation never declares a binding, so it never grants access.
-- `workflow` (delegate target): never set. Templates are not delegates.
+- `workflow`, `project`, `accepts` (a delegate's target): only what a delegate template's own `target` states (p10).
 - `confirms: result`: never set. A workflow has one result confirmation,
   and the designer marks it on the node.
 

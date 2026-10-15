@@ -19,7 +19,7 @@ import type { RunOpResponse, RunResponse } from '../shared/api.ts'
 import { effectiveOf, holderOf, isOpen, questionState, runKey, situation, type Because, type Question, type RunRecord } from '../shared/run.ts'
 import { reportStep } from '../shared/compile.ts'
 import { sessionPolicyOf } from '../shared/model.ts'
-import type { AdjustView, PresentationView, RunExecView, RunNotifyView } from './api.ts'
+import type { AdjustView, DelegationsView, DelegationView, PresentationView, RunExecView, RunNotifyView } from './api.ts'
 import { STATE_GLYPH, TYPE_LABEL } from './canvas.ts'
 import { stepFacts, stepLabel } from './inspector.ts'
 import { h, when } from './dom.ts'
@@ -45,6 +45,7 @@ export interface RunData {
   selection: string | null
   viewing: { path: string; text?: string; error?: string } | null
   connected?: boolean
+  delegView?: DelegationsView | null // p10: the run's delegations with each child now; for a child, its parent
 }
 
 // What became of one submission, said beside the control that sent it.
@@ -83,6 +84,9 @@ function storeOpen(v: Record<string, boolean>) { try { localStorage.setItem(OPEN
 const setText = (el: HTMLElement, text: string) => { if (el.textContent !== text) el.textContent = text }
 const show = (el: HTMLElement, on: boolean) => { if (el.hidden === on) el.hidden = !on }
 const setDisabled = (el: HTMLButtonElement, off: boolean) => { if (el.disabled !== off) el.disabled = off }
+// A delegated child's situation in plain words (p10).
+const CHILD_WORDS: Record<string, string> = { executing: 'working', stopping: 'stopping', 'awaiting-person': 'waiting for an answer', stopped: 'stopped by a person', interrupted: 'interrupted', unknown: 'interrupted (execution lost)', completed: 'done', cancelled: 'cancelled', 'not-started': 'queued to start', idle: 'between steps' }
+const childWords = (s?: string) => (s ? CHILD_WORDS[s] ?? s : 'not readable here')
 const list = (xs: string[]) => xs.filter(x => !x.startsWith('_')).join(', ') || '—'
 // Recorded text as one sentence: its own final stop, or one added.
 const sentence = (t: string) => (/[.!?。！？]\s*$/.test(t) ? t.trim() : `${t.trim()}.`)
@@ -206,6 +210,7 @@ export class RunSide {
   private readonly execMore = h('div.sec-body')
   private readonly coordination = section('coordination', h('div.sec-body'))
   private readonly result = section('result', h('div.sec-body'))
+  private readonly delegations = section('delegations', h('div.sec-body')) // p10
   private readonly decide: { root: HTMLElement; evidence: Owned<HTMLInputElement>; accept: HTMLButtonElement; reject: HTMLButtonElement; cancel: HTMLButtonElement; busy: boolean }
   private readonly history = section('history', h('ol.history', { reversed: true }))
   private historyShown = ''
@@ -278,7 +283,7 @@ export class RunSide {
     }, 'Cancel run')
     this.decide = { root: h('div.decide', evidence.el, h('div.row.tight', accept, reject, cancel), evidence.status), evidence, accept, reject, cancel, busy: false }
 
-    this.disclosures = [this.questions, this.instructions, this.presentations, this.definition, this.catalog, this.related, this.files, this.execution, this.coordination, this.result, this.history]
+    this.disclosures = [this.questions, this.instructions, this.delegations, this.presentations, this.definition, this.catalog, this.related, this.files, this.execution, this.coordination, this.result, this.history]
     for (const sec of this.disclosures) {
       sec.root.classList.add('d-only')
       this.setOpen(sec, this.opened[sec.key] ?? false)
@@ -287,7 +292,7 @@ export class RunSide {
     this.focus.append(this.focusDisplay, this.focusQuestions, this.holdSlot, this.decideSlot, this.focusLinks)
     this.el.dataset.keepScroll = 'run-side'
     this.el.append(this.placeholder, this.actorRow, this.sideHint, this.fileCard,
-      ...[this.selected, this.questions, this.instructions, this.presentations, this.definition, this.catalog, this.related, this.files, this.execution, this.coordination, this.result, this.history].map(s => s.root))
+      ...[this.selected, this.questions, this.instructions, this.delegations, this.presentations, this.definition, this.catalog, this.related, this.files, this.execution, this.coordination, this.result, this.history].map(s => s.root))
   }
 
   // ---- what the view reads --------------------------------------------------
@@ -404,6 +409,8 @@ export class RunSide {
     this.updatePresentations(rec)
     this.updateExecution(rec)
     this.updateCoordination()
+    this.updateDelegations(rec)
+    this.updateSelected(rec)
     this.updateFocus(d.shown!, rec)
     if (anchor) this.restoreAnchor(anchor)
   }
@@ -412,7 +419,7 @@ export class RunSide {
     this.data = d
     const r = d.shown
     const rec = r?.record
-    const sections = [this.selected, this.questions, this.instructions, this.presentations, this.definition, this.catalog, this.related, this.files, this.execution, this.coordination, this.result, this.history]
+    const sections = [this.selected, this.questions, this.instructions, this.delegations, this.presentations, this.definition, this.catalog, this.related, this.files, this.execution, this.coordination, this.result, this.history]
     if (!r || !rec) {
       setText(this.placeholder, d.resp?.problem ? 'No usable record.' : 'Loading…')
       show(this.placeholder, true)
@@ -438,6 +445,7 @@ export class RunSide {
     this.updateFiles(r)
     this.updateExecution(rec)
     this.updateCoordination()
+    this.updateDelegations(rec)
     this.updateResult(rec)
     this.updateHistory(rec)
     this.updateFocus(r, rec)
@@ -507,11 +515,19 @@ export class RunSide {
     else if (ex.state === 'completed') { kind = 'completed'; head = !last ? 'Completed — your decision is needed' : accepted ? (this.approval?.kind === 'integrated' ? 'Completed, accepted and integrated' : this.approval?.kind === 'integrating' ? 'Accepted — integrating' : 'Completed and accepted') : 'Completed — result rejected'; lead = !last ? 'Every node recorded completion. Accepting the result is your separate decision.' : h('span', `${last.decision === 'accepted' ? 'Accepted' : 'Rejected'}${last.confirmation ? ` from ${last.confirmation.from}'s answer` : ` by ${last.by}`}`, h('span.d-only', `${last.confirmation ? ` (${last.confirmation.question}, recorded by ${last.by})` : ''}, ${when(last.at)}`), '.') }
     else if (ex.active.length || rec.control.attempt) { kind = 'working'; head = 'Work in progress'; lead = this.observation(rec)[0] === 'warn' ? 'Recorded as in progress, but this host does not see the work running: look below.' : 'Nothing is needed from you now.' }
     else if (ex.state === 'not-started') { kind = 'not-started'; head = 'Not started'; lead = `Waiting for ${rec.executor.name} to start.` }
+    // A delegate node waits on its child (p10): the next move is the child's, or this run's agent's when a fact came back.
+    else if (ex.waiting.some(w => 'delegation' in w.on)) {
+      const w = ex.waiting.find(x => 'delegation' in x.on)!
+      const dl = d.delegView?.delegations.find(x => x.id === (w.on as { delegation: string }).delegation)
+      kind = 'delegated'
+      head = dl?.pending.length ? `${rec.executor.name} has news from ${dl.target.project}/${dl.target.workflow}` : `Waiting for ${dl ? `${dl.target.project}/${dl.target.workflow}` : w.holder}`
+      lead = dl?.pending.length ? 'The delegated run asked or delivered something; this run continues when the executor takes it up.' : dl?.child ? h('span', `Its child ${dl.child.workflow}/${dl.child.run} is ${childWords(dl.childNow?.situation)}. `, h('a', { href: `#/ws/${encodeURIComponent(dl.child.workspace)}/run/${encodeURIComponent(dl.child.workflow)}/${encodeURIComponent(dl.child.run)}` }, 'Open the child run'), '.') : 'The request is on its way to that workflow\'s channel; its intake creates the child.'
+    }
     else { kind = 'idle'; head = 'Waiting for the executor'; lead = ex.ready.length ? `Ready to start: ${ex.ready.map(name).join(', ')}.` : 'Nothing is running and nothing is ready.' }
     if (this.focus.dataset.kind !== kind) this.focus.dataset.kind = kind
 
     // The situation's icon, large: what kind of task this is before any word is read (p8/ex1).
-    const FOCUS_ICON: Record<string, string> = { reaccept: 'alert', integration: 'alert', review: 'present', question: 'question', answered: 'history', held: 'stop', failed: 'alert', accepted: 'check', completed: 'check', cancelled: 'stop', working: 'play', history: 'history', 'not-started': 'play', idle: 'play' }
+    const FOCUS_ICON: Record<string, string> = { delegated: 'delegate', reaccept: 'alert', integration: 'alert', review: 'present', question: 'question', answered: 'history', held: 'stop', failed: 'alert', accepted: 'check', completed: 'check', cancelled: 'stop', working: 'play', history: 'history', 'not-started': 'play', idle: 'play' }
     const done = kind === 'completed' && last?.decision === 'rejected' ? 'failed' : kind === 'completed' && !last ? 'pending' : kind
     const blocks: (Node | null)[] = [h('div.focus-top', h(`span.focus-icon.tone-${done}`, icon(FOCUS_ICON[kind] ?? 'flag', 'icon')), h('div.focus-words', h('h2.focus-head', head), h('p.focus-lead', lead)))]
     // The one-click review, while it is served (p7); otherwise what became of it.
@@ -682,6 +698,9 @@ export class RunSide {
     box.append(h('div.insp-head', icon(step ? 'doc' : def?.type ?? 'unknown', 'icon'), h('h3', step ? label2(id) : def?.name || id), h('code.d-only', id), h('button.icon-btn', { title: 'Close', 'aria-label': 'Close the selected node', dataset: { action: 'close-node' } }, '×')))
     box.append(h('div.chips', chip(state, `${STATE_GLYPH[state] ?? ''} ${label}`), h('span.chip.d-only', step ? 'Documentation step' : TYPE_LABEL[def?.type ?? ''] ?? def?.type ?? '?'), h('span.chip.muted.d-only', icon('lock', 'icon tiny'), 'Read-only')))
     if (def?.description) box.append(h('p.small', def.description))
+    // A delegate node (p10): its delegation and child, in both modes.
+    const dl = this.data.delegView?.delegations.filter(x => x.node === id).at(-1)
+    if (def?.type === 'delegate') box.append(dl ? this.delegationCard(dl, true) : h('p.small.muted', `Delegates to ${def.project ? `${def.project}/` : ''}${def.workflow ?? '?'}; nothing dispatched yet.`))
     // Made from one of the person's templates (p7/ex1): its provenance as written in this revision.
     if (def?.template) box.append(h('div.template-field.small.d-only', h('span.muted', 'From template '), h('code', def.template.id), ` revision ${def.template.revision}. `,
       h('div.template-provenance', h('span.muted', 'Expected: '), def.template.expectation)))
@@ -958,11 +977,49 @@ export class RunSide {
         : h('p.muted.small', 'Your catalog was empty: the agent was told you named no activity you expect as its own node.'))
   }
 
+  // A run's delegations (p10): each child where it lives, whose move it is,
+  // what it asked, what it delivered and how this run judged it. A child's
+  // own work is read in the child's run view, never copied here.
+  private updateDelegations(rec: RunRecord) {
+    const v = this.data.delegView
+    const all = v?.delegations ?? []
+    show(this.delegations.root, !this.data.rev && all.length > 0)
+    if (this.data.rev || !all.length) return
+    const attention = all.some(d => d.pending.length)
+    setText(this.delegations.title, `Delegations (${all.length})${attention ? ' — the agent has facts to take up' : ''}`)
+    this.attend(this.delegations, attention ? 'warn' : null)
+    patchContent(this.delegations.content.children[0] as HTMLElement, ...all.map(d => this.delegationCard(d, false)))
+    void rec
+  }
+
+  private delegationCard(d: DelegationView, compact: boolean): HTMLElement {
+    const childHref = d.child ? `#/ws/${encodeURIComponent(d.child.workspace)}/run/${encodeURIComponent(d.child.workflow)}/${encodeURIComponent(d.child.run)}` : null
+    const links = d.childNow?.links
+    const a = (label: string, url: string | null | undefined) => (url ? h('a', { href: url, target: '_blank', rel: 'noopener' }, label) : null)
+    const linkRow = [childHref ? h('a', { href: childHref }, 'child run view') : null, a('conversation', links?.conversation), a('progress', links?.progress), a('detailed IO', links?.io)].filter(Boolean)
+    const next = d.closed ? 'nobody (closed)' : d.disposition ? 'nobody (judged)' : d.pending.length ? `${d.requester}: take up ${d.pending.map(n => `#${n}`).join(', ')}` : d.childNow?.waiting.length ? `the child: ${d.childNow.waiting.map(w => `${w.node} waits for ${w.holder}`).join('; ')}` : d.child ? `the child (${d.childNow?.situation ?? 'its record cannot be read here'})` : 'the delivery of the request'
+    const result = [...d.events].reverse().find(e => e.type === 'completed')?.manifest
+    const questions = d.events.filter(e => e.type === 'question')
+    return h('div.delegation', { dataset: { key: `dl:${d.id}`, delegation: d.id, state: d.state } },
+      h('div.row.tight', h('strong', `${d.id} · ${d.node} → ${d.target.project}/${d.target.workflow}`), chip(d.state, d.state)),
+      h('p.small', d.child ? `Child: ${d.child.project} ${d.child.workflow}/${d.child.run}${d.childNow ? ` — ${childWords(d.childNow.situation)}` : ''}` : 'No child yet: the request is being delivered to that workflow\'s channel.'),
+      linkRow.length ? h('p.small.dl-links', ...linkRow.flatMap((l, i) => (i ? [' · ', l!] : [l!]))) : null,
+      h('p.small', h('span.muted', 'Next move: '), next),
+      compact ? null : h('p.small.muted', `Requested by ${d.requester}${d.onBehalfOf ? ` for ${d.onBehalfOf}` : ''}; the child's result is accepted by ${d.accepts === 'parent' ? 'this run\'s agent' : 'the person'}.${d.predecessor ? ` Replaces ${d.predecessor}.` : ''}`),
+      questions.length ? h('ul.small.dl-questions', ...questions.map(q => h('li', `${q.question}${q.confirms ? ' (confirm the result)' : q.plan ? ' (agree the plan)' : ''}: ${q.text}`, q.takenUp ? h('span.muted', ` — taken up; ${d.answers.filter(x => x.question === q.question).map(x => `answered “${x.text.slice(0, 80)}” (${x.from})`).join('; ') || 'not answered yet'}`) : h('span.warn-text', ' — not taken up yet')))) : null,
+      result ? h('div.small.dl-result', h('span.muted', `Result (${result.digest.slice(7, 19)}): `), result.outcome || result.execution, result.decision ? h('span.muted', ` · the child's decision: ${result.decision.decision} by ${result.decision.by}`) : null,
+        h('ul', ...[...(result.report ? [result.report] : []), ...result.artifacts].map(f => h('li', h('code', f.path), h('span.muted', ` ${f.bytes} B · ${f.sha256.slice(0, 12)}`))))) : null,
+      d.disposition ? h(`p.small.${d.disposition.kind === 'satisfied' ? 'ok-text' : 'warn-text'}`, `Judged ${d.disposition.kind} by ${d.disposition.by}: ${d.disposition.note}`) : d.closed ? h('p.small.muted', d.closed.reason) : null)
+  }
+
   private updateRelated(r: RunResponse, rec: RunRecord) {
     const wsId = this.data.wsId
     const input = rec.input
+    const parent = this.data.delegView?.parent
     const rel = [
       r.predecessor ? h('div', 'Predecessor: ', h('a', { href: runHash(wsId, r.predecessor.ref) }, r.predecessor.ref)) : null,
+      // A delegated child (p10): the run that asked for it.
+      parent ? h('div', 'Delegated by: ', parent.workspace ? h('a', { href: runHash(parent.workspace, `${parent.parent.workflow}/${parent.parent.run}`) }, `${parent.parent.project} ${parent.parent.workflow}/${parent.parent.run}`) : `${parent.parent.project} ${parent.parent.workflow}/${parent.parent.run}`, h('span.muted', ` (node ${parent.parent.node})`)) : null,
       input.kind === 'request' && input.entrustedBy ? h('div.small', 'Entrusted by: ', input.entrustedBy.kind === 'run' ? h('a', { href: runHash(wsId, runKey(input.entrustedBy)) }, `${runKey(input.entrustedBy)}${input.entrustedBy.node ? ` node ${input.entrustedBy.node}` : ''}`) : input.entrustedBy.kind === 'file' ? input.entrustedBy.path : input.entrustedBy.kind === 'delegation' ? `delegation from ${input.entrustedBy.parent.project}/${input.entrustedBy.parent.workflow}/${input.entrustedBy.parent.run} (node ${input.entrustedBy.parent.node})` : input.entrustedBy.text) : null,
     ].filter((x): x is HTMLDivElement => !!x)
     show(this.related.root, rel.length > 0)

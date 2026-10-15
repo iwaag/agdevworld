@@ -273,6 +273,27 @@ Error codes: `delegate-target`, `delegate-cycle`, `delegate-scope`,
 `delegation-result`, `result-superseded`, `delegation-closed`,
 `delegation-unsatisfied`.
 
+## Views and observation
+
+- **Editor**: the delegate inspector selects the target project (this one or
+  another registered one), its workflow and who accepts the child's result;
+  validation knows the registry's projects (`delegate-project-unknown`,
+  `delegate-target-unknown`, `delegate-no-intake`, `delegate-recursive`).
+  A delegation task can also be a node-catalog template of type `delegate`
+  with an optional `target` ([catalog.md](catalog.md)).
+- **Run view**: the delegate node's card says where its child stands; the
+  selected node and Detail's *Delegations* show each child, its links
+  (run view, conversation, progress, detailed IO), the next move, what it
+  asked and how it was answered, the result manifest and the disposition;
+  the focus card says what the run waits for; a child's *Related runs* links
+  back to the run that delegated it.
+- **Observation** ([observation.md](observation.md), *Delegations*): the
+  wait names the child as responsible; Observer treats a healthy wait as
+  quiet, a relayed fact without a continuation as an unowned continuation,
+  a fact not relayed for 5 minutes and a dispatch without a child for 15
+  minutes as suspicions told to the owners, and the child's own failures as
+  the child's incidents only.
+
 ## Limitations
 
 - Parent and child runs are on the same execution host (the relay reads the

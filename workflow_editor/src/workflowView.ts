@@ -229,8 +229,11 @@ export function renderWorkflowView(root: HTMLElement, wsId: string, file: string
   function context(): ValidationContext {
     return {
       repositories: resp?.repositories ?? [],
-      workflows: (resp?.workflows ?? []).filter(s => s.id).map(s => ({ id: s.id!, file: s.file, delegates: s.delegates })),
+      workflows: (resp?.workflows ?? []).filter(s => s.id).map(s => ({ id: s.id!, file: s.file, delegates: s.delegates, intake: s.intake })),
       file,
+      // p10: delegate targets in the other registered projects.
+      ...(resp?.project ? { project: resp.project } : {}),
+      ...(resp?.peers ? { projects: Object.fromEntries(resp.peers.map(p => [p.project, p.workflows.map(w => ({ id: w.id, file: w.file, delegates: w.delegates, intake: w.intake }))])) } : {}),
     }
   }
 
@@ -518,7 +521,7 @@ export function renderWorkflowView(root: HTMLElement, wsId: string, file: string
     if (selection?.kind === 'node' && !draft.nodes[selection.id]) selection = null
     if (selection?.kind === 'edge' && !draft.edges[selection.index]) selection = null
     if (selection?.kind === 'step' && !effective?.nodes[selection.id]) selection = null
-    canvas.render(draft, { repositories: resp?.repositories ?? [], workflows: resp?.workflows ?? [], errorNodes: new Set(errors.map(i => i.node).filter((n): n is string => !!n)), readonly: readonly(), effective }, selection)
+    canvas.render(draft, { repositories: resp?.repositories ?? [], workflows: resp?.workflows ?? [], project: resp?.project, peers: resp?.peers, errorNodes: new Set(errors.map(i => i.node).filter((n): n is string => !!n)), readonly: readonly(), effective }, selection)
     const open = inspectorOpen()
     if (inspector.hidden === open) { inspector.hidden = !open; body.classList.toggle('with-inspector', open) }
     // Workflow settings are Detail's: Simple keeps them open but out of sight (p8/ex1).
@@ -527,7 +530,7 @@ export function renderWorkflowView(root: HTMLElement, wsId: string, file: string
     settingsToggle.classList.toggle('active', settingsOpen)
     hint.hidden = !!selection
     if (rebuildInspector && open) renderInspector(inspector, {
-      draft, selection, repositories: resp?.repositories ?? [], workflows: resp?.workflows ?? [], issues, readonly: readonly(), file, effective, templates,
+      draft, selection, repositories: resp?.repositories ?? [], workflows: resp?.workflows ?? [], issues, readonly: readonly(), file, effective, templates, project: resp?.project, peers: resp?.peers,
     }, { changed: rebuild => update(rebuild), select: sel => canvas.events.select(sel), deleteNode, deleteEdge, connect, close: closeInspector, issue: showIssue })
     renderBanners()
     renderApprovals()

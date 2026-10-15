@@ -951,7 +951,7 @@ export async function runCommand(c: RunCli): Promise<number> {
         const rec = (await wrap(() => readRun(space, r))).record
         const st = rec ? integrationStatus(rec, { integrations: rows }, space.copyOf ? { kind: 'run-copy', branch: rec.storage?.branch ?? null } : { kind: 'project' }) : null
         const latest = (rec?.decisions.length ?? 0) - 1
-        const head = !rec ? `Run ${runKey(r)} cannot be read; the journal follows.` : st ? `Now: ${st.text}${latest >= 0 ? ` (decision ${latest}, ${rec.decisions[latest].decision} by ${rec.decisions[latest].by})` : ''}${st.detail ? ` — ${st.detail}` : ''}${st.changed?.length ? `\n  changed since the acceptance: ${st.changed.join(', ')}` : ''}` : `Run ${runKey(r)} has no working copy of its own: what it published is already on the project's branches.`
+        const head = !rec ? `Run ${runKey(r)} cannot be read; the journal follows.` : st ? `Now: ${st.text}${latest >= 0 ? ` (decision ${latest}, ${rec.decisions[latest].decision} by ${rec.decisions[latest].by})` : ''}${st.detail ? ` — ${st.detail}` : ''}${st.changed?.length ? `\n  ${st.state === 'target-changed' ? 'changed on the target since this run built on it' : 'changed since the acceptance'}: ${st.changed.join(', ')}` : ''}` : `Run ${runKey(r)} has no working copy of its own: what it published is already on the project's branches.`
         const note = (i: typeof rows[number]) => {
           const recorded = rec?.integrations?.find(x => x.decision === i.decision)
           if (recorded && i.state !== 'integrated') return ` [run.json records decision ${i.decision} integrated at ${recorded.at}]`

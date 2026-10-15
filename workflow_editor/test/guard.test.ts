@@ -153,6 +153,14 @@ test('a shared repository that changed since the run built on it stops as target
   assert.equal(st?.state, 'target-changed')
   assert.deepEqual(st?.changed, ['wedo/wedo-x/cases-by-project.md'])
   assert.equal((await readRun(s.ws, a.ref)).record!.integrations, undefined)
+  // The CLI's standing names the target's changes as such, not as changes since the acceptance.
+  const { main } = await import('../cli/wfe.ts')
+  const out: string[] = []
+  const log = console.log
+  console.log = (...m: unknown[]) => { out.push(m.join(' ')) }
+  try { assert.equal(await main(['run', 'integrate', 'backfill/run-001', '--status', '--workspace', s.id, '--registry', s.registry, '--area', s.area]), 0) } finally { console.log = log }
+  assert.match(out.join('\n'), /changed on the target since this run built on it: wedo\/wedo-x\/cases-by-project\.md/)
+  assert.doesNotMatch(out.join('\n'), /changed since the acceptance/)
 })
 
 test('the root-local area: a change elsewhere in the root still merges; a change inside the guarded folder stops', async () => {

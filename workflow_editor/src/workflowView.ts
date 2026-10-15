@@ -32,7 +32,7 @@ const TYPE_HINT: Record<string, string> = {
   study: 'Read, research, compare',
   do: 'Change or produce something',
   talk: 'Ask or agree with a person',
-  delegate: 'Hand off to another workflow (display only)',
+  delegate: 'Entrust work to another workflow and use its result',
 }
 
 export function renderWorkflowView(root: HTMLElement, wsId: string, file: string): ViewHandle {

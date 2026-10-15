@@ -364,8 +364,8 @@ export function renderProjectView(root: HTMLElement, wsId: string): ViewHandle {
   function renderRequest(): HTMLElement {
     const workflows = data?.workflows.filter(w => w.id && !w.problem) ?? []
     // The person's choice stays; before one, the first workflow a run can be made of.
-    const current = reqWorkflow.value || workflows.find(w => !w.errors && !w.delegates.length)?.id
-    reqWorkflow.replaceChildren(...workflows.map(w => h('option', { value: w.id!, disabled: w.delegates.length > 0, selected: w.id === current }, `${w.name || w.id}${w.delegates.length ? ' — has a delegate node: not executable' : w.errors ? ' — has validation errors' : ''}`)))
+    const current = reqWorkflow.value || workflows.find(w => !w.errors)?.id
+    reqWorkflow.replaceChildren(...workflows.map(w => h('option', { value: w.id!, selected: w.id === current }, `${w.name || w.id}${w.errors ? ' — has validation errors' : w.delegates.length ? ` — delegates to ${w.delegates.join(', ')}` : ''}`)))
     // A per-viewer convenience: storage that is unavailable leaves it empty.
     if (!reqAuthor.value) { try { reqAuthor.value = localStorage.getItem('workflow-editor.actor') ?? '' } catch { /* not remembered */ } }
     const go = h('button.primary', {

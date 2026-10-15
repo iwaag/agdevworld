@@ -442,7 +442,6 @@ fulfils its intent.
 | `delegate-target-missing`, `delegate-target-unknown`, `delegate-self`, `delegate-recursive` | error | delegate target absent, not in its project, itself, or reaching back to itself (across the registry's projects when the registry is known, p10) |
 | `delegate-project-unknown`, `delegate-accepts` | error | a target project that is not a valid id or has no registered workspace; `accepts` other than `person` / `parent` (p10) |
 | `delegate-no-intake` | warning | the target workflow does not accept requests; a dispatch to it is refused (p10) |
-| `delegate-not-executable` | warning | a delegate node: the workflow can be edited and shown, but no run of it is created |
 | `workflow-on-non-delegate` | warning | `workflow`, `project` or `accepts` on a non-delegate node |
 | `edge-from-missing`, `edge-to-missing`, `edge-self`, `graph-cycle` | error | broken or cyclic edges |
 | `edge-duplicate`, `layout-orphan` | warning | redundant entries |

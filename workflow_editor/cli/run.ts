@@ -48,8 +48,8 @@ wfe run create <workflow> --request <file|-> --requester <agent> --entrusted-by 
 Creates devdocs/runs/<workflow>/<run>/ with the input, the fixed definition
 and run.json (docs/runs.md).
   Reads   devdocs/workflows/: the workflow (id or file name); it must validate
-          without errors. A workflow with a delegate node is refused before
-          anything is written: delegate execution is not supported.
+          without errors. A delegate node's work is entrusted to another
+          workflow during the run (wfe delegate help).
   Writes  braindump.md (the person's words, author --author) or request.md
           (an agent's request, --requester, --entrusted-by), definition/<id>.yaml
           (a byte copy), plan.md (--plan <file>), and run.json last.

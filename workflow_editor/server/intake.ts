@@ -29,7 +29,7 @@ import { join } from 'node:path'
 import type { DatabaseSync } from 'node:sqlite'
 import {
   APPLIES, canMove, classify, noticeFor, realmId, requestKey, routeMessage, sourceReceipt, validInbound,
-  type Classification, type InboundMessage, type InboxState, type IntakeNoticeKind, type RequestBinding, type Route, type RouteResult, type RunView, type SourceRef,
+  type Classification, type DelegationPostRef, type InboundMessage, type InboxState, type IntakeNoticeKind, type RequestBinding, type Route, type RouteResult, type RunView, type SourceRef,
 } from '../shared/intake.ts'
 import { questionState, runKey, type RunRecord, type RunRef } from '../shared/run.ts'
 import { assertWorkspaceAllowed, loadBoundary } from './boundary.ts'
@@ -37,6 +37,8 @@ import type { ExecStore } from './exec.ts'
 import { loadNotifyConfig, type NotifyStore } from './notify.ts'
 import { loadRegistry, observe } from './registry.ts'
 import { createRunInCopy, findRunByReceipt, readRun, runOp } from './runs.ts'
+import { DelegateStore } from './delegate.ts'
+import { runSpace } from './runspace.ts'
 import { named, openStore, transaction, type Migration } from './sqlite.ts'
 import { RequestError, Workspace } from './workspace.ts'
 
@@ -119,7 +121,10 @@ export class IntakeStore {
     mkdirSync(dir, { recursive: true })
     this.db = openStore('intake store', join(dir, 'intake.sqlite'), MIGRATIONS)
   }
-  close() { this.db.close() }
+  close() { this.db.close(); this._delegate?.close() }
+  // The delegation relay (p10): created when first needed.
+  private _delegate?: DelegateStore
+  get delegate(): DelegateStore { return this._delegate ??= new DelegateStore({ area: this.area, registryFile: this.registryFile, exec: this.exec }) }
   private all<T>(sql: string, ...a: (string | number | null)[]): T[] { return named('intake store', 'a read', () => this.db.prepare(sql).all(...a) as T[]) }
   private one<T>(sql: string, ...a: (string | number | null)[]): T | undefined { return named('intake store', 'a read', () => this.db.prepare(sql).get(...a) as T | undefined) }
   private run(sql: string, ...a: (string | number | null)[]) { return named('intake store', 'a write', () => this.db.prepare(sql).run(...a)) }
@@ -242,6 +247,9 @@ export class IntakeStore {
         notes.push(`${row.id}: failed at ${stage} (${(e as Error).message}); retried later`)
       }
     }
+    // What delegated children recorded since the last pass reaches their
+    // parents (p10); a failure is the relay's own, kept on its index row.
+    try { notes.push(...await this.delegate.relay()) } catch (e) { notes.push(`delegation relay: ${(e as Error).message}`) }
     return notes
   }
 
@@ -284,8 +292,35 @@ export class IntakeStore {
     const earlier = this.one<{ id: number }>('SELECT id FROM messages WHERE realm = ? AND topic_first = ? AND id < ? AND state != \'done\' ORDER BY id LIMIT 1', m.realm, m.topicFirst, m.id)?.id ?? null
     const requesters = new Set(cfg.intake.requesters.map(r => r.id))
     const agents = new Map((cfg.intake.agents ?? []).map(a => [a.id, new Set(a.workflows)]))
-    const runView = binding?.run ? await this.runView(binding) : null
-    const c = classify(m, { requesters, agents, workflow: `${route.route.project}/${route.route.workflow}`, binding, run: runView, earlierUnsettled: earlier })
+    // A delegation's post (p10): what its delivery recorded, bound by the
+    // message id. A delivery that may have posted it and is not yet
+    // acknowledged makes it wait; a bot post no delivery recorded is
+    // classified as before (ignored).
+    const dp = m.sender.bot && this.notify ? this.notify.delegationPost(m) : null
+    if (dp?.state === 'pending') return 'waiting'
+    let c: Classification
+    if (dp?.state === 'sent') {
+      const ev = dp.event
+      const ref: DelegationPostRef = { uid: ev.uid, workspace: ev.parent.workspace, workflow: ev.parent.workflow, run: ev.parent.run, delegation: ev.delegation, kind: ev.type === 'delegation-request' ? 'request' : ev.type === 'delegation-answer' ? 'answer' : 'instruction', index: ev.index, ...(ev.question ? { question: ev.question } : {}) }
+      if (earlier) return 'waiting'
+      const problem = (detail: string) => { done(route, null, 'problem', detail, binding?.key ?? null); this.finish(row); return 'ok' as const }
+      if (ref.kind === 'request') {
+        if (route.kind !== 'new') return problem(`the request of delegation ${ref.uid} was posted into a topic that is already request ${binding?.key}; a delegation opens its own request topic`)
+        c = { kind: 'request', delegation: ref }
+      } else {
+        if (!binding) return problem(`${ref.kind} ${ref.index} of delegation ${ref.uid} is in a topic that is no request`)
+        if (binding.state === 'opening' || !binding.run) return 'waiting'
+        const child = (await readRun(await this.workspace(binding.workspace), binding.run)).record
+        const ent = child?.input.entrustedBy
+        if (!child || ent?.kind !== 'delegation' || ent.delegation !== ref.uid) return problem(`${ref.kind} ${ref.index} of delegation ${ref.uid} was posted in request ${binding.key}, whose run was not created from that delegation; nothing is applied`)
+        if (child.cancelled || child.execution.state === 'cancelled') c = { kind: 'closed', reason: 'cancelled' } as Classification
+        else if (child.execution.state === 'completed') c = { kind: 'closed', reason: 'completed' } as Classification
+        else c = ref.kind === 'answer' ? { kind: 'answer', question: ref.question ?? '', by: 'delegation', delegation: ref } : { kind: 'instruction', delegation: ref }
+      }
+    } else {
+      const runView = binding?.run ? await this.runView(binding) : null
+      c = classify(m, { requesters, agents, workflow: `${route.route.project}/${route.route.workflow}`, binding, run: runView, earlierUnsettled: earlier })
+    }
     if (c.kind === 'wait') return 'waiting'
     const key = c.kind === 'request' ? requestKey(m.id) : binding?.key ?? null
     this.tx(() => {
@@ -346,6 +381,8 @@ export class IntakeStore {
     const ws = await this.workspace(b.workspace)
     const person = this.personOf(row.sender_id)
     const agent = this.agentOf(row.sender_id)
+    if (c.kind === 'request' && c.delegation) return this.applyDelegationRequest(row, b, ws, c.delegation, receipt)
+    if ((c.kind === 'answer' || c.kind === 'instruction') && c.delegation) return this.applyDelegationPost(row, b, ws, c, c.delegation, receipt)
     if (c.kind === 'request') {
       let ref = await findRunByReceipt(ws, b.workflow, receipt)
       if (!ref) {
@@ -394,6 +431,85 @@ export class IntakeStore {
       // Any other refusal by the record is deterministic: retrying repeats
       // it. Shown and told, not applied.
       if (e instanceof RequestError && e.status === 422) { this.move(row, 'done', { notice: 'problem', detail: `the run refused it: ${e.message}` }); return 'ok' }
+      throw e
+    }
+    return 'ok'
+  }
+
+  // A delegation's request post becomes the child run (p10): the parent's
+  // dispatched request.md (checked by hash) as its request, the human
+  // original beside it, the parent's agent as requester; then the parent
+  // records the child (bind). A crash between the two repeats both: the
+  // child is found by the post's receipt, the bind by its own.
+  private async applyDelegationRequest(row: MessageRow, b: RequestRow, ws: Workspace, ref: DelegationPostRef, receipt: string): Promise<'ok'> {
+    const parent = { workspace: ref.workspace, workflow: ref.workflow, run: ref.run }
+    let dr
+    try { dr = await this.delegate.requestOf(parent, ref.delegation) } catch (e) { return this.refuse(row, b, `the delegating run's request cannot be read: ${(e as Error).message}`) }
+    const { record, delegation } = dr
+    let childRef = await findRunByReceipt(ws, b.workflow, receipt)
+    if (!childRef) {
+      if (record.cancelled || delegation.closed || delegation.disposition) return this.refuse(row, b, `delegation ${delegation.uid} is ${record.cancelled ? 'of a cancelled run' : delegation.disposition ? delegation.disposition.kind : 'closed'}; no child is created for it`)
+      if (delegation.child) return this.refuse(row, b, `delegation ${delegation.uid} already has its child ${delegation.child.workflow}/${delegation.child.run}; one child per delegation`)
+      try {
+        const env = this.exec?.ctx.gitea ? await this.exec.ctx.gitea.gitEnv() : {}
+        const { creationOf } = await import('./observe.ts')
+        childRef = (await createRunInCopy(ws, {
+          workflow: b.workflow, receipt, executor: { host: this.exec?.executor ?? 'autolab' }, by: record.executor.name, via: 'zulip', area: this.area,
+          input: {
+            kind: 'request', text: dr.request, requester: record.executor.name, ...(delegation.onBehalfOf ? { onBehalfOf: delegation.onBehalfOf } : {}),
+            entrustedBy: { kind: 'delegation', delegation: delegation.uid, parent: { project: record.project, workflow: record.workflow, run: record.run, creation: creationOf(record), node: delegation.node }, accepts: delegation.accepts },
+            ...(dr.original !== null ? { original: dr.original } : {}), source: this.source(row),
+          },
+        }, env)).ref
+      } catch (e) {
+        if (e instanceof RequestError && e.status >= 400 && e.status < 500 && !/already exists/.test(e.message)) return this.refuse(row, b, e.message)
+        throw e
+      }
+    }
+    const child = (await readRun(await runSpace(ws, childRef), childRef)).record
+    if (!child) throw new Error(`the child ${childRef.workflow}/${childRef.run} cannot be read after its creation`)
+    await this.delegate.bind(parent, ref.delegation, child, ws.reg.id, { realm: row.realm, message: row.id, stream: row.stream_id, topic: row.topic })
+    this.tx(() => {
+      this.run('UPDATE requests SET run_workflow = ?, run = ?, state = \'bound\', updated = ? WHERE key = ?', childRef!.workflow, childRef!.run, now(), b.key)
+      this.move(row, 'applied', { applied: JSON.stringify({ workflow: childRef!.workflow, run: childRef!.run, seq: 1 }) })
+    })
+    return 'ok'
+  }
+
+  // A delegation's answer or instruction post (p10): the words and whose
+  // they are come from the parent's record, the post is the source and the
+  // receipt. What the child refuses is told to the parent, and wakes it.
+  private async applyDelegationPost(row: MessageRow, b: RequestRow, ws: Workspace, c: Classification & { kind: 'answer' | 'instruction' }, ref: DelegationPostRef, receipt: string): Promise<'ok'> {
+    const parent = { workspace: ref.workspace, workflow: ref.workflow, run: ref.run }
+    const { delegation } = await this.delegate.requestOf(parent, ref.delegation)
+    const item = ref.kind === 'answer' ? delegation.answers.find(a => a.n === ref.index) : delegation.instructions.find(a => a.n === ref.index)
+    if (!item) throw new Error(`delegation ${ref.uid} has no ${ref.kind} ${ref.index}`)
+    const childRef = { workflow: b.run_workflow!, run: b.run! }
+    const op = c.kind === 'answer'
+      ? { op: 'question.answer' as const, question: c.question, text: item.text, from: item.from, source: this.source(row), delegation: { uid: ref.uid, answer: ref.index }, receipt }
+      : { op: 'instruction.receive' as const, text: item.text, from: item.from, source: this.source(row), receipt }
+    const told = async (reason: string) => this.delegate.refused(parent, ref.delegation, { kind: ref.kind as 'answer' | 'instruction', index: ref.index, reason, ...(ref.question ? { question: ref.question } : {}) }).catch(() => undefined)
+    try {
+      const r = await runOp(ws, childRef, op, { by: item.by, via: 'zulip' })
+      const seq = r.record.history.find(h => h.receipt === receipt)?.seq ?? r.record.seq
+      this.move(row, 'applied', { applied: JSON.stringify({ ...childRef, seq }) })
+    } catch (e) {
+      const code = (e as RequestError).detail && typeof (e as RequestError).detail === 'object' ? ((e as RequestError).detail as { code?: string }).code : undefined
+      if (code === 'question-closed' && c.kind === 'answer') {
+        this.move(row, 'done', { notice: 'late', classification: JSON.stringify({ kind: 'late', question: c.question, state: 'taken-up' }), detail: (e as Error).message })
+        await told(`the child's ${c.question} was already closed (${(e as Error).message})`)
+        return 'ok'
+      }
+      if (code === 'run-completed' || code === 'run-cancelled') {
+        this.move(row, 'done', { notice: 'closed', classification: JSON.stringify({ kind: 'closed', reason: code === 'run-completed' ? 'completed' : 'cancelled' }), detail: (e as Error).message })
+        await told(`the child is ${code === 'run-completed' ? 'completed' : 'cancelled'}`)
+        return 'ok'
+      }
+      if (e instanceof RequestError && e.status === 422) {
+        this.move(row, 'done', { notice: 'problem', detail: `the run refused it: ${e.message}` })
+        await told(`the child refused it: ${e.message}`)
+        return 'ok'
+      }
       throw e
     }
     return 'ok'

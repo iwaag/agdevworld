@@ -329,6 +329,12 @@ export function createHandler(config: ServiceConfig) {
         if (!ref.workflow || !ref.run || (parts.length > 7 && sub !== 'checkpoints' && sub !== 'presentations')) throw new RequestError(404, 'not found')
         if (!sub && method === 'GET') return send(res, 200, await runResponse(ws, ref, { rev: url.searchParams.get('rev') || undefined }))
         if (sub === 'exec' && method === 'GET') return send(res, 200, await needExec().runView(ws.reg.id, ref))
+        // Delegations (p10, docs/delegation.md): the parent's, with each child's
+        // current situation; and, for a child, who delegated it. Reads only.
+        if (sub === 'delegations' && method === 'GET') {
+          const { delegationsView } = await import('./delegate.ts')
+          return send(res, 200, await delegationsView(needExec().delegate, ws, ref))
+        }
         // Zulip coordination of this run: its topic, what is still owed, problems.
         if (sub === 'notify' && method === 'GET') {
           const { NotifyStore } = await import('./notify.ts')

@@ -32,6 +32,8 @@ import { readCopy, runSpace } from './runspace.ts'
 import { withLock } from './lock.ts'
 import { catalogBrief } from '../shared/catalog.ts'
 import { activityOf } from './activity.ts'
+import { DelegateStore } from './delegate.ts'
+import { delegationState, isOpenDelegation, pendingEvents } from '../shared/delegation.ts'
 import { named, openStore, transaction } from './sqlite.ts'
 import { inside } from './files.ts'
 import { RequestError, Workspace } from './workspace.ts'
@@ -101,6 +103,31 @@ export function presentationBrief(r: RunRecord): string[] {
   return ['', 'Presentations of this run (wfe present status <run> says what is served now):',
     ...all.map(p => `- ${p.id} "${p.title}" from ${p.node}: ${p.state}${p.last ? ` (${p.last.detail})` : ''}; revision ${p.revision.slice(7, 19)}…${Object.values(r.questions).filter(q => q.presentation?.id === p.id).map(q => `; asked in ${q.id}`).join('')}`)]
 }
+// The run's delegations as the attempt starts (p10, docs/delegation.md):
+// each with its state, the facts relayed and not yet taken up in full, and
+// what is owed. A child created from a delegation is told who asked.
+export function delegationBrief(r: RunRecord): string[] {
+  const out: string[] = []
+  const ent = r.input.entrustedBy
+  if (ent?.kind === 'delegation') {
+    out.push('', `This run was requested by another run's agent: ${r.input.requester}, delegating node ${ent.parent.node} of ${ent.parent.project}/${ent.parent.workflow}/${ent.parent.run}${r.input.onBehalfOf ? ` for ${r.input.onBehalfOf}` : ''}. Its request is ${runDir(r)}/${r.input.file}${r.input.original ? ` (the person's own words: ${runDir(r)}/${r.input.original})` : ''}. Your questions reach that agent through the request topic, as they would a person; ask them --to ${r.input.requester}. ${ent.accepts === 'parent' ? `It may accept your result itself.` : `Accepting your result is ${r.input.onBehalfOf ?? 'the person'}'s: a confirmation answered by ${r.input.requester} in its own name does not become an acceptance (delegate-scope); it relays the person's answer.`}`)
+  }
+  const all = Object.values(r.delegations ?? {})
+  if (!all.length) return out
+  out.push('', 'Delegations of this run (wfe delegate show <run> <d>; help: wfe delegate help):')
+  for (const d of all) {
+    out.push(`- ${d.id} from ${d.node} to ${d.target.project}/${d.target.workflow}: ${delegationState(d)}${d.child ? `; child ${d.child.workflow}/${d.child.run} in ${d.child.workspace}` : '; no child yet (the request is being delivered)'}${d.disposition ? ` — judged ${d.disposition.kind}: ${d.disposition.note}` : ''}`)
+    for (const e of pendingEvents(d)) {
+      out.push(`  - event ${e.n} (${e.type}${e.question ? ` ${e.question}` : ''}${e.confirms ? ', confirms the result' : e.plan ? ', agrees the plan' : ''}), not taken up:`, ...e.text.split('\n').map(l => `      ${l}`))
+      if (e.document) out.push(`      document: ${e.document.path} (${e.document.sha256.slice(0, 12)})`)
+      for (const f of e.subject ?? []) out.push(`      presented: ${f.path} (${f.sha256.slice(0, 12)})`)
+      if (e.manifest) out.push(`      result manifest ${e.manifest.digest.slice(7, 19)}: ${e.manifest.execution}; report ${e.manifest.report?.path ?? '(none)'}; ${e.manifest.artifacts.length} artifact(s)`)
+    }
+  }
+  if (all.some(d => isOpenDelegation(d) && pendingEvents(d).length)) out.push('Take up each fact above before acting on it (wfe delegate take-up <run> <d> <n>…); answer with wfe delegate answer, judge a result with wfe delegate dispose. When only the child\'s work remains, end the attempt: the child runs in this host\'s one slot, and its next fact resumes you.')
+  return out
+}
+
 export interface ControlMeta { because?: BecauseRef; attempt?: string }
 const controlMeta = (m: ControlMeta) => ({ ...(m.because ? { because: m.because } : {}), ...(m.attempt ? { attempt: m.attempt } : {}) })
 const now = () => new Date().toISOString()
@@ -147,7 +174,7 @@ export class ExecStore {
       `),
     }])
   }
-  close() { this.db.close() }
+  close() { this.db.close(); this._delegate?.close() }
   get logsDir() { return join(this.ctx.area, '.local', 'exec', 'logs') }
   get executor() { return this.ctx.executor ?? EXECUTOR }
 
@@ -207,6 +234,11 @@ export class ExecStore {
     if (!r.execution.waiting.some(w => 'question' in w.on && w.on.question === question)) return null
     return this.enqueue(ws.reg.id, ref, 'resume', `answer:${ws.reg.id}/${runKey(ref)}/${question}/${q.answers.length - 1}`, `resume: answer ${q.answers.length - 1} to ${question} recorded`)
   }
+
+  // The parent's continuation for a delegation fact (p10): one job per fact.
+  private _delegate?: DelegateStore
+  get delegate(): DelegateStore { return this._delegate ??= new DelegateStore({ registryFile: this.ctx.registryFile, area: this.ctx.area, exec: this }) }
+  async afterDelegation(ws: Workspace, ref: RunRef): Promise<JobRow | null> { return this.delegate.continuation(ws, ref) }
 
   // ---- the slot ----------------------------------------------------------------------
 
@@ -387,7 +419,7 @@ export class ExecStore {
       lines.push(`Working copy: ${ws.root} — this run's own copy of the project; it is saved to branch ${r.storage.branch} (${owned.join(', ')}), never to a shared branch.`, `Project workspace: ${ws.shared.root} — the person's; this run reads its .local/ resources from there by name and changes nothing in it.`)
     } else lines.push(`Workspace: ${ws.root}`)
     lines.push(`Why this attempt: ${job.reason}`)
-    if (job.kind === 'start') lines.push(`The person's request is ${runDir(ref)}/${r.input.file} (author ${r.input.author ?? r.input.requester}).`)
+    if (job.kind === 'start') lines.push(`The ${r.input.kind === 'request' ? 'request' : 'person\'s request'} is ${runDir(ref)}/${r.input.file} (${r.input.kind === 'request' ? `requester ${r.input.requester}` : `author ${r.input.author}`}).`)
     // The run this one follows (p9): its records and saved work, to reuse,
     // repair or reverse; wfe run reversal <run> lists what its integration brought.
     if (r.predecessor) {
@@ -408,6 +440,7 @@ export class ExecStore {
     lines.push(`Ready: ${r.execution.ready.join(', ') || '(none)'}; running: ${r.execution.active.join(', ') || '(none)'}.`)
     lines.push(...instructionBrief(r))
     lines.push(...presentationBrief(r))
+    lines.push(...delegationBrief(r))
     lines.push(...catalogBrief(catalogOf(r, reading.bundle), runKey(ref)))
     if (r.definition.revisions?.length) lines.push('', `Definition: revision ${r.definition.active} is in force (adjusted ${r.definition.revisions.length} time${r.definition.revisions.length === 1 ? '' : 's'}; wfe run revisions <run>); the original is definition/${r.definition.root}.yaml.`)
     lines.push(...documentationBrief(r))
@@ -477,6 +510,8 @@ export class ExecStore {
     if (kind === 'awaiting-person') {
       for (const w of rec.execution.waiting) if ('question' in w.on) resumeJob = resumeJob ?? await this.afterAnswer(ws, ref, w.on.question)
     }
+    // A child's fact relayed while the attempt ran (p10) queues the next one.
+    if (!resumeJob && Object.values(rec.delegations ?? {}).some(d => isOpenDelegation(d) && pendingEvents(d).length)) resumeJob = await this.afterDelegation(ws, ref)
     return { outcome: rec.control.last?.outcome ?? outcome, checkpoint, resumeJob }
   }
 
@@ -786,8 +821,15 @@ export class ExecStore {
           const j = await this.afterAnswer(ws, ref, wt.on.question)
           if (j && !jobs.some(x => x.id === j.id)) notes.push(`${w.id} ${s.ref}: resume after the answer to ${wt.on.question} queued again`)
         }
+        // A relayed delegation fact whose continuation was lost (p10).
+        if (Object.values(rec.delegations ?? {}).some(d => isOpenDelegation(d) && pendingEvents(d).length)) {
+          const j = await this.afterDelegation(ws, ref)
+          if (j && !jobs.some(x => x.id === j.id)) notes.push(`${w.id} ${s.ref}: resume for a relayed delegation fact queued again`)
+        }
       }
     }
+    // Delegations: indexed from their records, then relayed (p10).
+    try { notes.push(...await this.delegate.rebuild(), ...await this.delegate.relay()) } catch (e) { notes.push(`delegation relay: ${(e as Error).message}`) }
     notes.push(...await this.integrateDue())
     return notes
   }

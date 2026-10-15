@@ -64,7 +64,7 @@ and `accepts` are part of the definition digest and the compiled node.
 | Identity | Form | Notes |
 | --- | --- | --- |
 | Parent run | `<project>/<workflow>/<run>#<creation>` | the observation contract's creation-qualified uid ([observation.md](observation.md)) |
-| Delegation | `d1`, `d2`, … per parent run; uid `<parent uid>~<d>` | stable for the delegation's life; every retry of its delivery keeps it |
+| Delegation | `d1`, `d2`, … per parent run; uid `<parent uid>/<d>` | stable for the delegation's life; every retry of its delivery keeps it |
 | Child run | its own creation-qualified uid | recorded on the parent when bound |
 | Transport | the Zulip post that carried the request (realm, message id, channel id, topic) and the post of each answer or instruction | references, never identities: names follow renames |
 
@@ -240,6 +240,38 @@ not taken up is `interrupted`, like an exit with work left ready.
   `delegation:<uid>:<child seq>:<type>`, so it is recorded once.
 - **No polling inside attempts.** Waiting ends the attempt and frees the
   slot; the child runs in that slot; its events queue the parent.
+
+## Operations
+
+| Operation (`shared/run.ts`) | Who | `wfe delegate …` | Effect |
+| --- | --- | --- | --- |
+| `delegation.dispatch` | the parent's agent (its attempt) | `request <run> <node> --request <file> [--original <file>] [--replaces <d>]` | resolves and checks the target, writes `delegations/<d>/request.md` and `original-input.md`, records the delegation; the node waits on it |
+| `delegation.bind` | intake | — | the child the request post became, and the post |
+| `delegation.event` | relay (intake pass, executor reconcile) | `sync` | one fact of the child, by receipt `delegation:<uid>:<child seq>:<type>`; a waking fact queues the parent's continuation |
+| `delegation.take-up` | the parent's agent | `take-up <run> <d> <n>…` | the facts are read; the node resumes |
+| `delegation.answer` | the parent's agent | `answer <run> <d> <q> --answer <text> [--because answer:<q>]` | posted in the child's request topic and recorded there as the answer; the node waits |
+| `delegation.instruct` | the parent's agent | `instruct <run> <d> --instruction <text>` | recorded as the child's additional instruction |
+| `delegation.dispose` | the parent's agent | `dispose <run> <d> --disposition satisfied\|rejected\|abandoned --note <text>` | closes the delegation; `satisfied` lets the node complete |
+
+Reading: `wfe delegate list|show <run> [<d>]`, `wfe delegate file <run> <d>
+<path> [--out <file>]` (a file of the child's copy, compared with the hash a
+fact recorded), `GET /api/workspaces/<ws>/runs/<wf>/<run>/delegations` (each
+delegation with its state and its child's situation now; for a child, the
+delegation it came from). The attempt's brief lists every delegation and the
+facts not yet taken up in full.
+
+Host stores: the notifier's `runs.kind = delegation` conversation per
+delegation (`<target project>/<target workflow>/from-<parent>.<d>`, its
+`request` the delegation uid, `bound` the child), with one outbox event per
+request/answer/instruction (`…#<seq>:delegation-<kind>@<d>`, critical, sent
+alone); `delegate.sqlite` (index rows: parent, target, child, how far the
+child's history was relayed).
+
+Error codes: `delegate-target`, `delegate-cycle`, `delegate-scope`,
+`delegate-relation`, `delegation-open`, `delegation-predecessor`,
+`delegation-unknown`, `delegation-unbound`, `delegation-event`,
+`delegation-result`, `result-superseded`, `delegation-closed`,
+`delegation-unsatisfied`.
 
 ## Limitations
 

@@ -12,7 +12,7 @@ import { authoredNode, COMPILER_VERSION, compile, isGenerated, type EffectiveGra
 import { docSteps, ID_PATTERN, normalizeRepoPath, type Workflow } from '../shared/model.ts'
 import { validateWorkflow } from '../shared/validate.ts'
 import {
-  activeRevision, checkRecord, delegateNodes, documentPath, graphOfState, hostOf, operate, presentationFolder, runDisplayTitle, type AdjustSource, type AdjustDiff, graphDiff, RUN_ID, RunError, runFolder, RUNS_ROOT, runKey, validRunRef, type Presentation,
+  activeRevision, checkRecord, documentPath, graphOfState, hostOf, operate, presentationFolder, runDisplayTitle, type AdjustSource, type AdjustDiff, graphDiff, RUN_ID, RunError, runFolder, RUNS_ROOT, runKey, validRunRef, type Presentation,
   type BundleEntry, type DefinitionRef, type DocumentEvidence, type EntrustRef, type Executor, type OpInput, type RepoContext, type RunGraph,
   type EntryMeta, type RunInput, type RunRecord, type RunRef, type RunState, type RunStorage,
 } from '../shared/run.ts'
@@ -505,12 +505,14 @@ function validEntrust(e: EntrustRef): EntrustRef {
     return { kind: 'file', path: p }
   }
   if (e.kind === 'note' && e.text.trim()) return { kind: 'note', text: e.text.trim() }
-  throw new RequestError(400, 'entrustedBy must be a run, a project file or a note')
+  // p10: a child created from a delegation's request (the intake builds it).
+  if (e.kind === 'delegation' && e.delegation && e.parent && ['project', 'workflow', 'run', 'creation', 'node'].every(k => typeof (e.parent as Record<string, unknown>)[k] === 'string' && (e.parent as Record<string, string>)[k])) {
+    return { kind: 'delegation', delegation: e.delegation, parent: { project: e.parent.project, workflow: e.parent.workflow, run: e.parent.run, creation: e.parent.creation, node: e.parent.node }, accepts: e.accepts === 'parent' ? 'parent' : 'person' }
+  }
+  throw new RequestError(400, 'entrustedBy must be a run, a project file, a note or a delegation')
 }
 
-// Validates the source workflow and returns its saved bytes. A workflow with
-// a delegate node is refused here, before anything is written (preflight);
-// the reducer refuses it again for any other entrance.
+// Validates the source workflow and returns its saved bytes.
 async function sourceBundle(ws: Workspace, workflow: string): Promise<{ root: string; files: Record<string, { source: string; text: string; workflow: Workflow }>; warnings: string[] }> {
   const { list } = await ws.workflowSummaries()
   const find = (name: string) => list.find(s => s.id === name) ?? list.find(s => s.file === name || s.file === `${name}.yaml` || s.file === `${name}.yml`)
@@ -518,8 +520,6 @@ async function sourceBundle(ws: Workspace, workflow: string): Promise<{ root: st
   if (!s?.id) throw new RequestError(404, `no workflow "${workflow}" in ${WORKFLOWS_DIR} (by id or file name)${s?.problem ? `: ${s.problem.message}` : ''}`)
   const r = await ws.workflowResponse(s.file)
   if (!r.workflow || r.text === null) throw new RequestError(409, `${s.file} cannot be read: ${r.problem?.message}`)
-  const delegates = delegateNodes(graphOf(r.workflow))
-  if (delegates.length) throw new RequestError(422, `${s.id} has delegate node${delegates.length === 1 ? '' : 's'} ${delegates.join(', ')}; delegate execution is not supported, so no run of it is created. Nothing was written.`, { code: 'delegate-unsupported', nodes: delegates })
   const errors = r.issues.filter(i => i.severity === 'error')
   if (errors.length) throw new RequestError(409, `${s.file} has validation errors; a run needs a valid definition (wfe validate ${s.id})`, errors)
   const warnings = r.issues.map(i => `${s.id}: ${i.code}: ${i.message}`)

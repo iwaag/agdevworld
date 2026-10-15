@@ -125,7 +125,6 @@ export function validateWorkflow(w: Workflow, ctx: ValidationContext = {}): Issu
     }
     if (new Set(n.repositories).size !== n.repositories.length) issues.push(warn('node-binding-duplicate', `Node "${id}" lists a repository binding twice.`, { node: id }))
     if (n.type === 'delegate') {
-      issues.push(warn('delegate-not-executable', `Delegate node "${id}" is definition and display only: runs of a workflow with a delegate node are refused.`, { node: id }))
       const own = !n.project || n.project === ctx.project
       const peers = own ? ctx.workflows : ctx.projects?.[n.project!]
       if (n.project && !ID_PATTERN.test(n.project)) issues.push(err('delegate-project-unknown', `Delegate node "${id}" names project "${n.project}", which is not a valid project id.`, { node: id }))

@@ -538,6 +538,7 @@ Runs (docs/runs.md; wfe run help)
   run create <workflow> …   create a run: the input, a fixed copy of the definition, run.json
   run list | show | check   runs, one run in full, record checks
   run start | complete | …  record node starts, waits, questions, answers, outcomes
+  delegate request | …      entrust a delegate node's work to another workflow (docs/delegation.md; wfe delegate help)
 
 Editor
   serve                     start the editor (UI and API) for this registry
@@ -776,6 +777,18 @@ async function cmdRun(p: Parsed): Promise<number> {
     serviceUrl: async () => { const s = await serviceState(p); return s.running && s.sameRegistry ? s.url : null },
     exec: () => execStore!,
     area: () => areaDir(p),
+  }).finally(() => { execStore?.close(); execStore = undefined })
+}
+
+// Delegation (p10): a run's agent entrusting a delegate node's work.
+async function cmdDelegate(p: Parsed): Promise<number> {
+  const { delegateCommand } = await import('./delegate.ts')
+  await openExec(p)
+  return delegateCommand({
+    positional: p.positional, opt: k => opt(p, k), opts: k => p.opts.get(k) ?? [], flag: k => p.flags.has(k),
+    workspace: () => workspace(p), out, usage: m => new UsageError(m), refused: (m, detail) => new Refused(m, detail),
+    serviceUrl: async () => { const s = await serviceState(p); return s.running && s.sameRegistry ? s.url : null },
+    exec: () => execStore!, area: () => areaDir(p),
   }).finally(() => { execStore?.close(); execStore = undefined })
 }
 
@@ -1206,7 +1219,7 @@ async function cmdMigrate(p: Parsed): Promise<number> {
 }
 
 const COMMANDS: Record<string, (p: Parsed) => Promise<number>> = {
-  runs: cmdRuns, observe: cmdObserve, run: cmdRun, present: cmdPresent, project: cmdProject, repo: cmdRepo, dashboard: cmdDashboard, exec: cmdExec, request: cmdRequest, notify: cmdNotify, intake: cmdIntake,
+  runs: cmdRuns, observe: cmdObserve, run: cmdRun, delegate: cmdDelegate, present: cmdPresent, project: cmdProject, repo: cmdRepo, dashboard: cmdDashboard, exec: cmdExec, request: cmdRequest, notify: cmdNotify, intake: cmdIntake,
   create: cmdCreate, register: cmdRegister, list: cmdList, status: cmdStatus, validate: cmdValidate,
   approve: cmdApprove, arrange: cmdArrange, 'add-repo': cmdAddRepo, workflow: cmdWorkflow, serve: cmdServe, setup: cmdSetup,
   version: cmdVersion, nodes: cmdNodes,
@@ -1237,18 +1250,19 @@ export async function main(argv: string[]): Promise<number> {
   if (!cmd || cmd === 'help' || (!cmd && p.flags.has('help'))) {
     const topic = cmd === 'help' ? rest[0] : undefined
     if (topic === 'run') console.log(runIndex())
+    else if (topic === 'delegate') console.log((await import('./delegate.ts')).DELEGATE_INDEX)
     else if (topic && HELP[topic]) console.log(HELP[topic])
     else if (topic) { console.error(`wfe: no command "${topic}"\n`); console.log(index(p)); return 2 }
     else console.log(index(p))
     return 0
   }
   if (!COMMANDS[cmd]) { console.error(`wfe: no command "${cmd}" (see: wfe help)`); return 2 }
-  if (p.flags.has('help') && cmd !== 'run') { console.log(HELP[cmd]); return 0 }
+  if (p.flags.has('help') && cmd !== 'run' && cmd !== 'delegate') { console.log(HELP[cmd]); return 0 }
   p.positional = rest
   try {
     return await COMMANDS[cmd](p)
   } catch (e) {
-    if (e instanceof UsageError) { console.error(`wfe ${cmd}: ${e.message}\n\n${cmd === 'run' ? 'See: wfe run help <subcommand>' : HELP[cmd]}`); return 2 }
+    if (e instanceof UsageError) { console.error(`wfe ${cmd}: ${e.message}\n\n${cmd === 'run' ? 'See: wfe run help <subcommand>' : cmd === 'delegate' ? 'See: wfe delegate help <subcommand>' : HELP[cmd]}`); return 2 }
     if (e instanceof RequestError && !(e instanceof Refused)) e = new Refused(e.message, e.detail)
     // A store that could not be opened or written: store, operation, SQLite code.
     if (e instanceof StoreError) e = new Refused(e.message)

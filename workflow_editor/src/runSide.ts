@@ -963,7 +963,7 @@ export class RunSide {
     const input = rec.input
     const rel = [
       r.predecessor ? h('div', 'Predecessor: ', h('a', { href: runHash(wsId, r.predecessor.ref) }, r.predecessor.ref)) : null,
-      input.kind === 'request' && input.entrustedBy ? h('div.small', 'Entrusted by: ', input.entrustedBy.kind === 'run' ? h('a', { href: runHash(wsId, runKey(input.entrustedBy)) }, `${runKey(input.entrustedBy)}${input.entrustedBy.node ? ` node ${input.entrustedBy.node}` : ''}`) : input.entrustedBy.kind === 'file' ? input.entrustedBy.path : input.entrustedBy.text) : null,
+      input.kind === 'request' && input.entrustedBy ? h('div.small', 'Entrusted by: ', input.entrustedBy.kind === 'run' ? h('a', { href: runHash(wsId, runKey(input.entrustedBy)) }, `${runKey(input.entrustedBy)}${input.entrustedBy.node ? ` node ${input.entrustedBy.node}` : ''}`) : input.entrustedBy.kind === 'file' ? input.entrustedBy.path : input.entrustedBy.kind === 'delegation' ? `delegation from ${input.entrustedBy.parent.project}/${input.entrustedBy.parent.workflow}/${input.entrustedBy.parent.run} (node ${input.entrustedBy.parent.node})` : input.entrustedBy.text) : null,
     ].filter((x): x is HTMLDivElement => !!x)
     show(this.related.root, rel.length > 0)
     if (!rel.length) return

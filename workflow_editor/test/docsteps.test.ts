@@ -293,10 +293,11 @@ test('the brief names the current step, its document and its instructions', asyn
   assert.match(text, /write plan\.md in the run folder and agree it with the person/)
 })
 
-test('creation refuses an empty workflow and still refuses delegates under the default policy', async () => {
+test('creation refuses an empty workflow; a delegate compiles under the default policy (p10)', async () => {
   const { ws, dir } = await project('refuse', WF('default', '  {}\n', '  []\n').replace('nodes:\n  {}', 'nodes: {}').replace('edges:\n  []', 'edges: []'))
   await fails(createRun(ws, opts()), 422, /no nodes/)
   await writeFile(join(dir, 'devdocs', 'workflows', 'docs.yaml'), WF('default', '  a: {type: do, description: A}\n  d: {type: delegate, description: D, workflow: other}\n  other: {type: do, description: O}\n', '  - {from: a, to: d}\n'))
   await writeFile(join(dir, 'devdocs', 'workflows', 'other.yaml'), WF('manual').replace('id: docs', 'id: other'))
-  await fails(createRun(ws, opts()), 422, /delegate/)
+  const c = await createRun(ws, opts())
+  assert.ok(c.record.nodes.d && c.record.nodes['_report.d'], 'the delegate node has its report step like any authored node')
 })

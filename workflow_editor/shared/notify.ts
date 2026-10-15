@@ -134,7 +134,38 @@ function lines(e: NotableEvent, c: RenderContext): { head: string; free: string;
       : { head: `**Result ${e.decision}** by ${e.by}.`, free: e.text ? `Evidence: ${e.text}` : '', tail: [] }
     case 'cancelled': return { head: `**Run cancelled** by ${e.by}:`, free: e.text, tail: [] }
     case 'integrated': return { head: '**Integrated** — the accepted result is on the project\'s shared branches:', free: e.text, tail: [] }
+    // p10: this run entrusted a node's work to another workflow, and what came back.
+    case 'delegated': return { head: `**Delegated** — ${node} to ${e.holder} (${e.delegation}); the request is posted in that workflow's channel.`, free: '', tail: c.next ? [`Next: ${c.next}`] : [] }
+    case 'delegation': return { head: `**${e.holder} — ${e.delegationEvent === 'completed' ? 'result delivered' : e.delegationEvent === 'failed' ? 'failure' : 'cancelled'}** for ${node} (${e.delegation}):`, free: e.text, tail: [`Next: ${c.executor} reviews it.`] }
   }
+}
+
+// ---- delegation posts (p10, docs/delegation.md) ---------------------------------------------
+
+// Bot posts carry text agents and tools wrote: a mention in it must not
+// notify anyone or serve a listener. A zero-width space breaks the syntax
+// (`@**name**`, `@_**name**`, `@*group*`) and leaves it readable.
+export const quietMentions = (text: string) => text.replace(/@(_?\*)/g, '@\u200b$1')
+export const DELEGATION_POST_MAX = 8000
+export interface DelegationPost {
+  kind: 'request' | 'answer' | 'instruction'
+  from: string // whose words
+  by: string // who sent them (the parent's agent)
+  text: string
+  question?: string
+  parent: string // <project>/<workflow>/<run>, node
+  node: string
+  onBehalfOf?: string | null
+  parentLink?: string
+  marker: string
+}
+export function renderDelegationPost(p: DelegationPost): string {
+  const body = quietMentions(p.text.length > DELEGATION_POST_MAX ? `${p.text.slice(0, DELEGATION_POST_MAX)}\n\n_…cut here; the whole text is the run's ${p.kind === 'request' ? 'request.md' : 'record'}._` : p.text.trim())
+  const relayed = p.from !== p.by ? ` (${p.from}'s words, relayed by ${p.by})` : ''
+  const head = p.kind === 'request'
+    ? `**Request from ${p.by}**${p.onBehalfOf ? ` for ${p.onBehalfOf}` : ''} — delegated by ${p.parent} (node ${p.node}).`
+    : p.kind === 'answer' ? `**${p.question}: answer from ${p.from}**${relayed}` : `**Instruction from ${p.from}**${relayed}`
+  return [head, '', body, '', ...(p.parentLink ? [`Delegating run: ${p.parentLink}`] : []), 'Questions here reach the requesting run; its agent answers here.', p.marker].join('\n')
 }
 
 // The last line of a message: which run and entries it carries. Searching a

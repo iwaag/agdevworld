@@ -38,7 +38,7 @@ import { hostname } from 'node:os'
 import { join } from 'node:path'
 import type { DatabaseSync } from 'node:sqlite'
 import {
-  channelDescription, channelName, folderDescription, folderName, messageUrl, renderMessage, renderNotice, renderPublication, renderPublished, topicName, topicUrl,
+  channelDescription, channelName, fitName, folderDescription, folderName, messageUrl, renderDelegationPost, renderMessage, renderNotice, renderPublication, renderPublished, topicName, topicUrl,
   DELAYED_AFTER_MS, type DocLink, type NoticeKind, type RenderContext,
 } from '../shared/notify.ts'
 import type { IntakeStore, RequestRow } from './intake.ts'
@@ -88,7 +88,18 @@ export interface TargetRow { key: string; kind: 'folder' | 'channel'; project: s
 // keyed <project>/<workflow>/<run>. `request`: the request topic a run was
 // asked for in, keyed <project>/<workflow>/<request key>, bound to its run
 // once it exists (`bound`); its place is the intake's recorded topic.
-export interface RunRow { key: string; project: string; workflow: string; run: string; workspace: string; created: string; scan_seq: number; stream_id: number | null; channel: string | null; topic: string | null; last_message_id: number | null; problem: string | null; skipped: string | null; updated: string; kind: 'run' | 'request'; request: string | null; bound: string | null }
+// p10 `delegation`: a delegation's posts into its target workflow's channel
+// (the request, then the parent's answers and instructions), keyed
+// <target project>/<target workflow>/<label>; `request` holds the
+// delegation uid, `bound` the child run once the intake created it.
+export interface RunRow { key: string; project: string; workflow: string; run: string; workspace: string; created: string; scan_seq: number; stream_id: number | null; channel: string | null; topic: string | null; last_message_id: number | null; problem: string | null; skipped: string | null; updated: string; kind: 'run' | 'request' | 'delegation'; request: string | null; bound: string | null }
+// What a delegation's outbox event carries: enough to find the parent's
+// record and the one answer or instruction it is (docs/delegation.md).
+export interface DelegationOutEvent { id: string; seq: number; type: 'delegation-request' | 'delegation-answer' | 'delegation-instruction'; at: string; by: string; critical: true; parent: { workspace: string; project: string; workflow: string; run: string }; delegation: string; uid: string; index: number; question?: string }
+// The conversation key and request topic of a delegation (labels; the
+// delivery's recorded message id is the identity).
+export const delegationLabel = (parent: { project: string; workflow: string; run: string }, d: string) => `from-${parent.project}.${parent.workflow}.${parent.run}.${d}`
+export const delegationTopic = (parent: { project: string; workflow: string; run: string }, d: string) => fitName(`request-${parent.project}.${parent.workflow}.${parent.run}.${d}`)
 // state/attempts/next_try/last_error/uncertain are the pre-p5/ex1 per-event
 // delivery fields: kept for history and migration; deliveries carry them now.
 export interface OutboxRow { id: string; run_key: string; ord: number; type: string; critical: number; event: string; state: 'pending' | 'sent' | 'failed'; attempts: number; next_try: string | null; last_error: string | null; uncertain: number; message_id: number | null; unpublished: string | null; sent_at: string | null; created: string }
@@ -184,7 +195,7 @@ const MIGRATIONS: Migration[] = [
 // elsewhere keeps one topic.
 const REQUEST_ONLY = new Set(['question', 'answered', 'instructed', 'acknowledged', 'accepted', 'notice'])
 // presented and cleanup-failed (p7) need the person: both conversations.
-const RUN_ONLY = new Set(['started', 'reported', 'node-completed'])
+const RUN_ONLY = new Set(['started', 'reported', 'node-completed', 'delegated', 'delegation'])
 export function destinationsOf(type: string, requested: boolean): ('run' | 'request')[] {
   if (!requested) return ['run']
   if (REQUEST_ONLY.has(type)) return ['request']
@@ -336,6 +347,33 @@ export class NotifyStore {
     return key
   }
 
+  // A delegation's conversation row (p10), created with its request topic.
+  private delegationThread(workspace: string, rec: RunRecord, d: NonNullable<RunRecord['delegations']>[string]): string {
+    const label = delegationLabel(rec, d.id)
+    const key = `${d.target.project}/${d.target.workflow}/${label}`
+    this.ensureTarget('channel', d.target.project, d.target.workflow, d.target.workflow)
+    const channel = this.target(`channel:${d.target.project}/${d.target.workflow}`)?.name ?? channelName(d.target.project, d.target.workflow)
+    this.run(`INSERT OR IGNORE INTO runs (key, project, workflow, run, workspace, created, channel, topic, kind, request, bound, updated)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'delegation', ?, ?, ?)`, key, d.target.project, d.target.workflow, label, workspace, d.dispatched.at, channel, delegationTopic(rec, d.id), d.uid, d.child?.run ?? null, now())
+    return key
+  }
+
+  // Which delegation a post in a workflow channel is (p10): the sent
+  // delivery that recorded its message id — never its text. `pending` when
+  // a delegation delivery to that channel may have been posted and is not
+  // yet acknowledged (the intake waits for it).
+  delegationPost(m: { id: number; streamId: number }): { state: 'sent'; event: DelegationOutEvent; destination: Destination } | { state: 'pending' } | null {
+    const d = this.one<DeliveryRow>(`SELECT d.* FROM deliveries d JOIN runs r ON r.key = d.run_key WHERE r.kind = 'delegation' AND d.state = 'sent' AND d.message_id = ?`, m.id)
+    if (d) {
+      const first = (JSON.parse(d.events) as string[])[0]
+      const ev = this.one<OutboxRow>('SELECT * FROM outbox WHERE id = ?', first)
+      if (ev) return { state: 'sent', event: JSON.parse(ev.event) as DelegationOutEvent, destination: { streamId: d.stream_id!, channel: d.channel!, topic: d.topic! } }
+    }
+    const open = this.all<DeliveryRow>(`SELECT d.* FROM deliveries d JOIN runs r ON r.key = d.run_key WHERE r.kind = 'delegation' AND (d.state = 'sending' OR (d.state IN ('failed', 'unresolved') AND d.uncertain = 1))`)
+    if (open.some(x => x.stream_id === m.streamId || (JSON.parse(x.tried) as Destination[]).some(t => t.streamId === m.streamId))) return { state: 'pending' }
+    return null
+  }
+
   // Replies the intake owes the person about posts that changed nothing or
   // need them (docs/intake.md): one message each, in their request topic.
   private scanNotices(cfg: NotifyConfig): string[] {
@@ -407,9 +445,24 @@ export class NotifyStore {
             else insert(`${e.id}${REQUEST_SUFFIX}`, e.seq + k * 0.01, e.type, e.critical, e, reqKey!)
           }
         }
+        // A delegation's posts (p10): its request, then the parent agent's
+        // answers and instructions, into its target workflow's channel, in
+        // record order, each a delivery of its own.
+        for (const h of rec.history) {
+          if (h.seq <= row!.scan_seq || !['delegation.dispatch', 'delegation.answer', 'delegation.instruct'].includes(h.op)) continue
+          const d = rec.delegations?.[(h as { delegation?: string }).delegation ?? '']
+          if (!d) continue
+          const conv = this.delegationThread(ws.reg.id, rec, d)
+          const type = h.op === 'delegation.dispatch' ? 'delegation-request' : h.op === 'delegation.answer' ? 'delegation-answer' : 'delegation-instruction'
+          const index = type === 'delegation-answer' ? d.answers.find(a => a.seq === h.seq)?.n ?? 0 : type === 'delegation-instruction' ? d.instructions.find(a => a.seq === h.seq)?.n ?? 0 : 0
+          const ev: DelegationOutEvent = { id: `${key}#${h.seq}:${type}@${d.id}`, seq: h.seq, type, at: h.at, by: h.by, critical: true, parent: { workspace: ws.reg.id, project: rec.project, workflow: rec.workflow, run: rec.run }, delegation: d.id, uid: d.uid, index, ...(type === 'delegation-answer' ? { question: (h as { question?: string }).question } : {}) }
+          insert(ev.id, h.seq, type, true, ev, conv)
+        }
         this.run('UPDATE runs SET scan_seq = max(scan_seq, ?), updated = ? WHERE key = ?', rec.seq, now(), key)
       })
     }
+    // The delegation conversations follow their child once it is bound.
+    for (const d of Object.values(rec.delegations ?? {})) if (d.child) this.run('UPDATE runs SET bound = ?, updated = ? WHERE kind = \'delegation\' AND request = ? AND bound IS NULL', d.child.run, now(), d.uid)
     // Publication: failures and their recovery, and details that became
     // readable after a message had to call them unpublished.
     for (const cp of this.checkpoints(ws.reg.id, rec)) {
@@ -551,6 +604,10 @@ export class NotifyStore {
   // Where the run's messages go now: its binding (which follows moves), or
   // the workflow's channel and the run's topic.
   private destination(r: RunRow): Destination | null {
+    if (r.kind === 'delegation' && !r.stream_id) {
+      const channel = this.target(`channel:${r.project}/${r.workflow}`)
+      return channel?.state === 'provisioned' && r.topic ? { streamId: channel.zulip_id!, channel: channel.name, topic: r.topic } : null
+    }
     if (r.stream_id && r.channel && r.topic) return { streamId: r.stream_id, channel: r.channel, topic: r.topic }
     const channel = this.target(`channel:${r.project}/${r.workflow}`)
     return channel?.state === 'provisioned' ? { streamId: channel.zulip_id!, channel: channel.name, topic: topicName(r.run) } : null
@@ -646,6 +703,7 @@ export class NotifyStore {
   }
 
   private async render(r: RunRow, batch: OutboxRow[], cfg: NotifyConfig, at: Date): Promise<{ content: string; marker: string; unpublished: string[] }> {
+    if (r.kind === 'delegation') return this.renderDelegation(batch[0], cfg)
     const ws = await this.workspaceOf(r)
     const inRequest = r.kind === 'request'
     const runId = inRequest ? r.bound : r.run
@@ -726,6 +784,31 @@ export class NotifyStore {
     // Which documents this message had to call unpublished: a later
     // published checkpoint answers them with one availability update.
     return { content, marker: content.split('\n').at(-1)!, unpublished: [...new Set(unpublished)] }
+  }
+
+  // A delegation post (p10): the words come from the parent's record — the
+  // dispatched request.md (checked by hash), or the recorded answer or
+  // instruction — never from anything typed into Zulip.
+  private async renderDelegation(o: OutboxRow, cfg: NotifyConfig): Promise<{ content: string; marker: string; unpublished: string[] }> {
+    const ev = JSON.parse(o.event) as DelegationOutEvent
+    const w = (await loadRegistry(this.registryFile)).workspaces.find(x => x.id === ev.parent.workspace)
+    if (!w) throw new Error(`the delegating run's workspace ${ev.parent.workspace} is not registered`)
+    const ws = new Workspace(w)
+    const ref = { workflow: ev.parent.workflow, run: ev.parent.run }
+    const space = await runSpace(ws, ref)
+    const rec = (await readRun(space, ref)).record
+    const d = rec?.delegations?.[ev.delegation]
+    if (!rec || !d) throw new Error(`delegation ${ev.uid} cannot be read from its run`)
+    const marker = `ref ${runKey(ref)} ${markerToken(o.id)}`
+    const parentLink = cfg.viewBase ? `${cfg.viewBase.replace(/\/?$/, '/')}#/ws/${encodeURIComponent(ev.parent.workspace)}/run/${encodeURIComponent(ref.workflow)}/${encodeURIComponent(ref.run)}` : undefined
+    const base = { by: rec.executor.name, parent: `${rec.project}/${runKey(ref)}`, node: d.node, onBehalfOf: d.onBehalfOf, parentLink, marker }
+    if (ev.type === 'delegation-request') {
+      const text = await readFile(join(space.root, d.request.path), 'utf8')
+      return { content: renderDelegationPost({ ...base, kind: 'request', from: rec.executor.name, text }), marker, unpublished: [] }
+    }
+    const item = ev.type === 'delegation-answer' ? d.answers.find(a => a.n === ev.index) : d.instructions.find(a => a.n === ev.index)
+    if (!item) throw new Error(`delegation ${ev.uid} has no ${ev.type === 'delegation-answer' ? 'answer' : 'instruction'} ${ev.index}`)
+    return { content: renderDelegationPost({ ...base, kind: ev.type === 'delegation-answer' ? 'answer' : 'instruction', from: item.from, by: item.by, text: item.text, question: ev.question }), marker, unpublished: [] }
   }
 
   // Commit-addressed links for the run's documents: the newest published

@@ -28,6 +28,22 @@ becomes a run whose input is a `request` in the agent's name (`request.md`,
 posts and its posts in other workflows are ignored. Observer requests
 recovery runs (`agops/recover`) this way.
 
+**Delegation posts (p10, [delegation.md](delegation.md)).** A delegating
+run's request, answers and instructions are posted by the notifier's bot
+into the target workflow's channel. Such a post is input only when it is
+the message a sent delivery of a delegation event recorded (by message id);
+its words and whose they are come from the delegating run's record, not from
+the post. A bot post whose delegation delivery to that channel may have been
+posted and is not acknowledged yet waits; any other bot post is ignored as
+before. The request opens its own topic (`request-<parent>.<d>`) and becomes
+a run whose input is a `request` with `entrustedBy: {kind: delegation}`; an
+answer becomes `question.answer` with its `delegation` provenance; an
+answer or instruction posted into a request whose run was not created from
+that delegation is a problem and applies nothing. What the child refuses
+(a closed question, a completed or cancelled run) is told to the delegating
+run as an `answer-refused` fact. People may still reply in such a topic as
+configured requesters; their words are recorded as theirs.
+
 A channel is a workflow channel only when all three hold:
 
 1. the notifier recorded its stream id as `channel:<project>/<workflow>`;

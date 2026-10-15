@@ -8,6 +8,10 @@ import type { DocSteps } from './model.ts'
 import type { AttemptCatalog, CatalogContext } from './catalog.ts'
 import { INSTRUCTION_RESPONSES, type SourceRef } from './intake.ts'
 import { ID_PATTERN, normalizeRepoPath, type Edge } from './model.ts'
+import {
+  DELEGATION_ID, DISPOSITIONS, EVENT_TYPES, WAKING, isOpenDelegation, latestResult, pendingEvents, questionEvent,
+  type ChildRef, type Delegation, type DelegationEvent, type DelegationTarget, type ResultManifest, type TransportRef,
+} from './delegation.ts'
 
 export const RUN_SCHEMA = 'ag.workflow-run.v2'
 // "plan, reports, final report" / "no generated documents", for messages.
@@ -37,6 +41,8 @@ export type EntrustRef =
   | { kind: 'run'; workflow: string; run: string; node?: string }
   | { kind: 'file'; path: string }
   | { kind: 'note'; text: string }
+  // p10 (docs/delegation.md): a child created from a delegation's request.
+  | { kind: 'delegation'; delegation: string; parent: { project: string; workflow: string; run: string; creation: string; node: string }; accepts: 'person' | 'parent' }
 
 export interface RunInput {
   kind: 'braindump' | 'request'
@@ -174,7 +180,7 @@ export function anyRevisionNode(r: { definition: DefinitionRef }, id: string): E
 }
 export interface RepoContext { path: string; head: string | null; branch: string | null; dirty: number | null }
 
-export type WaitOn = { question: string } | { external: string }
+export type WaitOn = { question: string } | { external: string } | { delegation: string }
 // `deadline` (observer p3): when the awaited result is expected at the latest,
 // as the waiter declared it; a monitor treats a wait past it as uncertain. A
 // statement, not a timer: nothing changes state because of it.
@@ -198,7 +204,9 @@ export interface NodeRecord {
   agreement?: { question: string } // the plan step: the question whose taken-up answer agreed to that document
 }
 // `from` gave the answer; `by` recorded it (the same unless someone relays it).
-export interface Answer { text: string; from: string; by: string; at: string; via: string; source?: SourceRef }
+// `delegation` (p10): the answer came from the parent's agent of a delegated
+// request — which delegation and which of its answers.
+export interface Answer { text: string; from: string; by: string; at: string; via: string; source?: SourceRef; delegation?: { uid: string; answer: number } }
 // An additional instruction (p6): the person's further input to a run that
 // is not an answer. Receiving it changes no node; the executing attempt
 // acknowledges it at a node boundary with what it will do.
@@ -349,6 +357,7 @@ export interface RunState {
   integrations?: IntegrationRecord[] // present once the first one completed (p9)
   recoveries?: Recovery[] // present once the first run.recover is recorded (observer p3)
   sessions?: SessionRecord[] // present once an attempt recorded its session (agent_session p1); the last open one is current
+  delegations?: Record<string, Delegation> // present once the first dispatch is recorded (p10, docs/delegation.md)
   artifacts: Artifact[]
   decisions: Decision[]
   cancelled: { reason: string; at: string; by: string; because?: Because } | null
@@ -371,7 +380,7 @@ export type OpInput =
   | { op: 'node.fail'; node: string; reason: string }
   | { op: 'node.cancel'; node: string; reason: string }
   | { op: 'question.ask'; question: string; node?: string; text: string; to: string; document?: DocumentEvidence; plan?: boolean; subjects?: string[]; subject?: DocumentEvidence[]; presentation?: string; adjustment?: string }
-  | { op: 'question.answer'; question: string; text: string; from?: string; source?: SourceRef }
+  | { op: 'question.answer'; question: string; text: string; from?: string; source?: SourceRef; delegation?: { uid: string; answer: number } }
   | { op: 'instruction.receive'; instruction?: string; text: string; from: string; source?: SourceRef }
   | { op: 'instruction.ack'; instructions: string[]; response: string; note: string }
   | { op: 'question.take-up'; question: string; answer?: number }
@@ -403,6 +412,16 @@ export type OpInput =
   // completing (p8/ex2): the adjustment is made at the completion of that
   // running node; the next entry is its node.complete (one locked write).
   | { op: 'run.adjust'; revision: string; parent: string; file: string; sha256: string; definitionDigest: string; effective: EffectiveGraph; reason: string; source: AdjustSource; diff?: AdjustDiff; completing?: string }
+  // p10 (docs/delegation.md). The parent agent's: dispatch, take-up, answer,
+  // instruct, dispose. The system's: bind (the child the intake created
+  // from the request post) and event (a fact of the child relayed).
+  | { op: 'delegation.dispatch'; delegation: string; uid: string; node: string; target: DelegationTarget; request?: DocumentEvidence; original?: DocumentEvidence; onBehalfOf?: string; predecessor?: string; targetDigest?: string }
+  | { op: 'delegation.bind'; delegation: string; child: ChildRef; transport: TransportRef }
+  | { op: 'delegation.event'; delegation: string; event: Omit<DelegationEvent, 'n' | 'at' | 'seq' | 'during' | 'wakes' | 'takenUp'> }
+  | { op: 'delegation.take-up'; delegation: string; events: number[] }
+  | { op: 'delegation.answer'; delegation: string; question: string; text: string; because?: BecauseRef }
+  | { op: 'delegation.instruct'; delegation: string; text: string; because?: BecauseRef }
+  | { op: 'delegation.dispose'; delegation: string; disposition: string; note: string; event?: number }
 
 // What a recorder gives: the answer (by question and index, default the
 // latest) or the instruction; the reducer resolves and records whose words.
@@ -413,11 +432,13 @@ export const CONTROL_OPS: readonly string[] = ['run.stop', 'run.resume', 'run.ca
 
 export const OPS = ['run.create', 'node.start', 'node.progress', 'node.wait', 'node.complete', 'node.fail', 'node.cancel',
   'question.ask', 'question.answer', 'question.take-up', 'question.withdraw', 'instruction.receive', 'instruction.ack', 'artifact.attach', 'run.cancel', 'run.decide',
-  'attempt.begin', 'attempt.end', 'run.stop', 'run.resume', 'presentation.register', 'presentation.observe', 'run.adjust', 'run.integrate', 'run.relocate', 'run.recover', 'attempt.session', 'session.retire'] as const
+  'attempt.begin', 'attempt.end', 'run.stop', 'run.resume', 'presentation.register', 'presentation.observe', 'run.adjust', 'run.integrate', 'run.relocate', 'run.recover', 'attempt.session', 'session.retire',
+  'delegation.dispatch', 'delegation.bind', 'delegation.event', 'delegation.take-up', 'delegation.answer', 'delegation.instruct', 'delegation.dispose'] as const
 // The executor's own reports. While an attempt is open they must carry its
 // id (`attempt`), so a stopped or superseded attempt cannot write into the
 // record of the one that replaced it.
-export const EXECUTOR_OPS: readonly string[] = ['node.start', 'node.progress', 'node.wait', 'node.complete', 'node.fail', 'question.ask', 'question.take-up', 'question.withdraw', 'instruction.ack', 'artifact.attach', 'presentation.register']
+export const EXECUTOR_OPS: readonly string[] = ['node.start', 'node.progress', 'node.wait', 'node.complete', 'node.fail', 'question.ask', 'question.take-up', 'question.withdraw', 'instruction.ack', 'artifact.attach', 'presentation.register',
+  'delegation.dispatch', 'delegation.take-up', 'delegation.answer', 'delegation.instruct', 'delegation.dispose']
 
 // Received instructions the executor has not acknowledged, in arrival order.
 export const pendingInstructions = (s: Pick<RunState, 'instructions'>): Instruction[] => Object.values(s.instructions ?? {}).filter(i => !i.ack)
@@ -453,8 +474,8 @@ export const stepOf = (graph: RunGraph, node: string): StepSpec | undefined => g
 // The document a step writes, project-relative.
 export const documentPath = (r: RunRef, step: StepSpec) => `${runFolder(r)}/${step.output}`
 
-// Delegate nodes are definition and display only (p4): a workflow that has
-// one is refused at run creation, by every entrance, through this reducer.
+// A run's delegate nodes. Since p10 they execute (docs/delegation.md): a
+// dispatch entrusts their work to another workflow's run.
 export const delegateNodes = (graph: RunGraph) => Object.entries(graph.nodes).filter(([, n]) => n.type === 'delegate').map(([id]) => id).sort()
 
 // ---- readiness and summary ------------------------------------------------------
@@ -514,6 +535,11 @@ export function holderOf(s: RunState, node: string): string {
   if ('question' in w.on) {
     const q = s.questions[w.on.question]
     if (q && q.answers.length && !q.takenUp && !q.withdrawn) return `${s.executor.name} (answer recorded, not yet taken up)`
+  }
+  if ('delegation' in w.on) {
+    const d = s.delegations?.[w.on.delegation]
+    const pending = d ? pendingEvents(d) : []
+    if (pending.length) return `${s.executor.name} (delegation ${d!.id}: ${pending.map(e => `${e.type} #${e.n}`).join(', ')} not yet taken up)`
   }
   return w.holder
 }
@@ -640,6 +666,27 @@ function manifestOf(v: unknown, folder: string): PresentationManifest {
   return { revision: m.revision as string, entry: local(m.entry, 'entry'), review: local(m.review, 'review'), files }
 }
 
+// A child's result manifest (p10): computed by the file layer from the
+// child's record and files; here only its shape.
+function manifestShape(v: unknown): ResultManifest {
+  if (!isObj(v)) return fail('shape', 'a result manifest is an object')
+  const m = v as Record<string, unknown>
+  if (typeof m.digest !== 'string' || !/^sha256:[0-9a-f]{64}$/.test(m.digest)) fail('shape', 'manifest.digest is sha256:<hex>')
+  const file = (f: unknown, what: string) => {
+    if (!isObj(f) || typeof f.path !== 'string' || typeof f.sha256 !== 'string' || !/^[0-9a-f]{64}$/.test(f.sha256) || typeof f.bytes !== 'number' || (f.commit !== null && typeof f.commit !== 'string')) return fail('shape', `${what} is {path, sha256, bytes, commit}`)
+    return { path: f.path, sha256: f.sha256, bytes: f.bytes, commit: (f.commit as string | null) ?? null }
+  }
+  if (!Array.isArray(m.artifacts)) fail('shape', 'manifest.artifacts is a list')
+  const dec = m.decision as Record<string, unknown> | null
+  return {
+    digest: m.digest as string, child: text(m.child, 'manifest.child'), execution: text(m.execution, 'manifest.execution'), outcome: optText(m.outcome, 'manifest.outcome'),
+    report: m.report === null || m.report === undefined ? null : file(m.report, 'manifest.report'),
+    artifacts: (m.artifacts as unknown[]).map((f, i) => file(f, `manifest.artifacts[${i}]`)),
+    decision: isObj(dec) ? { decision: String(dec.decision), by: String(dec.by), at: String(dec.at) } : null,
+    branch: typeof m.branch === 'string' ? m.branch : null,
+  }
+}
+
 function attemptSettings(v: unknown): AttemptSettings {
   if (!isObj(v)) return fail('shape', 'attempt settings must be an object')
   const o = v as Record<string, unknown>
@@ -699,8 +746,6 @@ export function apply(prev: RunState | null, e: HistoryEntry | (OpInput & EntryM
     if (canonicalJson(ids) !== canonicalJson(Object.keys(graph.nodes).sort())) fail('graph', 'the nodes in run.create differ from the bundled definition')
     const eff = e.definition?.effective
     if (eff && canonicalJson({ nodes: eff.nodes, edges: eff.edges }) !== canonicalJson({ nodes: graph.nodes, edges: graph.edges })) fail('graph', 'the graph followed differs from the frozen effective graph')
-    const delegates = delegateNodes(graph)
-    if (delegates.length) fail('delegate-unsupported', `the workflow has delegate node${delegates.length === 1 ? '' : 's'} ${delegates.join(', ')}; delegate execution is not supported, so no run of it is created`)
     if (e.input?.source !== undefined) sourceOf(e.input.source) // checked, recorded as given
     const nodes = Object.fromEntries(ids.map(id => [id, emptyNode()]))
     const state: RunState = {
@@ -817,6 +862,14 @@ export function apply(prev: RunState | null, e: HistoryEntry | (OpInput & EntryM
         n.document = doc
         if (!artifacts.includes(doc.path)) artifacts.unshift(doc.path)
       } else if (e.document !== undefined || e.agreement !== undefined) fail('shape', `node "${e.node}" is authored work; documents and plan agreement belong to documentation steps`)
+      // A delegate completes when its purpose is satisfied (p10): the
+      // parent's agent judged a child's result (delegation.dispose
+      // satisfied), not when something was dispatched or the child ended.
+      if (graph.nodes[e.node]?.type === 'delegate') {
+        const last = Object.values(s.delegations ?? {}).filter(d => d.node === e.node).at(-1)
+        if (!last) fail('delegation-unsatisfied', `${e.node} is a delegate node and has dispatched nothing; dispatch the request (wfe delegate request), then complete it once a result serves it`)
+        if (last!.disposition?.kind !== 'satisfied') fail('delegation-unsatisfied', `${e.node}'s delegation ${last!.id} is ${last!.disposition ? last!.disposition.kind : 'not judged yet'}; a delegate node completes after its result was judged to serve the request (wfe delegate dispose ${last!.id} --satisfied)`)
+      }
       // The last completion of the run is a boundary too: input received
       // before it is considered, whichever node it is.
       if (Object.entries(s.nodes).every(([id, x]) => id === e.node || x.state === 'completed')) {
@@ -904,6 +957,12 @@ export function apply(prev: RunState | null, e: HistoryEntry | (OpInput & EntryM
       if (q.takenUp) fail('question-closed', `the answer to ${q.id} was already taken up; ask a new question`)
       const answer: Answer = { text: text(e.text, 'the answer'), from: optText(e.from, 'from').trim() || by, by, at, via: e.via }
       if (e.source !== undefined) answer.source = sourceOf(e.source)
+      if (e.delegation !== undefined && e.delegation !== null) {
+        const dl = e.delegation as unknown as Record<string, unknown>
+        if (!isObj(dl) || typeof dl.uid !== 'string' || !dl.uid || typeof dl.answer !== 'number' || !Number.isInteger(dl.answer) || dl.answer < 1) fail('shape', 'delegation is {uid, answer}: the delegation and which of its answers this is')
+        if (s.input.entrustedBy?.kind !== 'delegation' || s.input.entrustedBy.delegation !== dl.uid) fail('delegate-relation', `this run was not created from delegation ${String(dl.uid)}; an answer for that delegation does not belong here`)
+        answer.delegation = { uid: dl.uid as string, answer: dl.answer as number }
+      }
       q.answers.push(answer)
       change.question = [q.id, 'answered']
       if (q.node) s.nodes[q.node].updated = at
@@ -973,6 +1032,9 @@ export function apply(prev: RunState | null, e: HistoryEntry | (OpInput & EntryM
       const reason = text(e.reason, 'the reason')
       const why = because(e.because)
       s.cancelled = { reason, at, by, ...(why ? { because: why } : {}) }
+      // Open delegations close with the parent (p10); their children are
+      // not cancelled by this — that is an explicit act of its own.
+      for (const d of Object.values(s.delegations ?? {})) if (isOpenDelegation(d)) d.closed = { at, by, reason: `the parent run was cancelled: ${reason}; the child ${d.child ? `${d.child.workflow}/${d.child.run} in ${d.child.project}` : '(not created yet)'} is left as it is` }
       for (const [id, n] of Object.entries(s.nodes)) {
         if (n.state === 'pending' || n.state === 'running' || n.state === 'waiting') {
           n.cancellation = { reason: `run cancelled: ${reason}`, at, by }
@@ -1058,6 +1120,14 @@ export function apply(prev: RunState | null, e: HistoryEntry | (OpInput & EntryM
         outcome = 'interrupted'
         why = `the executor exited with ${ex.active.length ? `${ex.active.join(', ')} recorded as running` : `${ex.ready.join(', ')} ready and nothing waiting`}${detail ? `; ${detail}` : ''}`
       }
+      // A child's fact that was waiting for this attempt and was not taken
+      // up (p10): like work left ready. One that arrived during it queues
+      // the next attempt instead.
+      const missed = Object.values(s.delegations ?? {}).filter(isOpenDelegation).flatMap(d => pendingEvents(d).filter(x => x.during !== e.attempt).map(x => `${d.id} ${x.type} #${x.n}`))
+      if (outcome === 'exited' && !s.cancelled && missed.length) {
+        outcome = 'interrupted'
+        why = `the executor exited without taking up delegation event${missed.length === 1 ? '' : 's'} ${missed.join(', ')}${detail ? `; ${detail}` : ''}`
+      }
       if (ctl.stop && outcome !== 'unknown') outcome = 'stopped'
       ctl.last = { id: ctl.attempt!.id, outcome, ended: at, detail: why, backend: ctl.attempt!.backend }
       ctl.attempt = null
@@ -1093,7 +1163,8 @@ export function apply(prev: RunState | null, e: HistoryEntry | (OpInput & EntryM
         // recorded and not taken up, or a run never started. (Whether a job
         // is queued is the execution host's fact: ExecStore.recover checks it.)
         const answered = s.execution.waiting.some(w => 'question' in w.on && (() => { const q = s.questions[w.on.question]; return !!q && q.answers.length > 0 && !q.takenUp && !q.withdrawn })())
-        if (!s.execution.ready.length && !s.execution.active.length && !answered && s.execution.state !== 'not-started') fail('state', 'the run is not held and nothing in it waits for the executor; there is nothing to recover')
+        const relayed = Object.values(s.delegations ?? {}).some(d => isOpenDelegation(d) && pendingEvents(d).length > 0)
+        if (!s.execution.ready.length && !s.execution.active.length && !answered && !relayed && s.execution.state !== 'not-started') fail('state', 'the run is not held and nothing in it waits for the executor; there is nothing to recover')
       }
       const reason = text(e.reason, 'the reason for the recovery')
       let agent: RecoveryAgent | undefined
@@ -1153,6 +1224,11 @@ export function apply(prev: RunState | null, e: HistoryEntry | (OpInput & EntryM
       const changed = asked.filter(a => !now.some(n => n.path === a.path && n.sha256 === a.sha256))
       if (changed.length) fail('subject-changed', `${changed.map(c => c.path).join(', ')} changed since ${q.id} presented ${changed.length === 1 ? 'it' : 'them'}; present the current deliverables again`)
       const a = q.answers[index]
+      // A delegated child (p10): the parent's agent accepts only when the
+      // delegate node granted it (accepts: parent); otherwise acceptance is
+      // the parent's person's, relayed with their words.
+      const ent = s.input.entrustedBy
+      if (e.decision === 'accepted' && ent?.kind === 'delegation' && ent.accepts !== 'parent' && a.from === s.input.requester) fail('delegate-scope', `${q.id}'s answer is from ${a.from}, the requesting agent, and this delegation leaves the acceptance of its result to the person (accepts: person); ask again for their decision (the requesting agent relays it), or record rejected`)
       s.decisions.push({
         decision: e.decision, by, at, note: optText(e.note, 'note'),
         evidence: optText(e.evidence, 'evidence') || `${q.id} answer ${index} from ${a.from}${a.source ? ` (Zulip message ${a.source.message})` : ''}, confirming ${q.presentation ? `presentation ${q.presentation.id} (revision ${q.presentation.revision.slice(7, 19)}, ${asked.length} files)` : asked.map(x => `${x.path} (${x.sha256.slice(0, 12)})`).join(', ')}`,
@@ -1238,7 +1314,7 @@ export function apply(prev: RunState | null, e: HistoryEntry | (OpInput & EntryM
       const outs = new Map<string, string[]>()
       for (const ed of edges) outs.set(ed.from, [...(outs.get(ed.from) ?? []), ed.to])
       if (hasCycle(Object.keys(nodes), x => outs.get(x) ?? [])) fail('adjust-graph', 'the adjusted graph has a cycle')
-      if (Object.values(nodes).some(n => n.type === 'delegate')) fail('adjust-graph', 'delegate nodes are not executed; an adjustment does not add one')
+      for (const [nid, n] of Object.entries(nodes)) if (n.type === 'delegate' && !n.workflow) fail('adjust-graph', `delegate node "${nid}" names no target workflow`)
       for (const nid of Object.keys(nodes)) if (!(nid.startsWith('_') ? /^_[a-z0-9_.-]+$/.test(nid) : ID_PATTERN.test(nid))) fail('adjust-graph', `node id "${nid}" is invalid`)
       // Work that is not pending keeps its identity, meaning and dependencies.
       const incoming = (g: { edges: Edge[] }, nid: string) => g.edges.filter(x => x.to === nid).map(x => x.from).sort()
@@ -1303,6 +1379,137 @@ export function apply(prev: RunState | null, e: HistoryEntry | (OpInput & EntryM
       change.presentation = [p.id, before, e.status]
       break
     }
+    case 'delegation.dispatch': {
+      // The parent's agent entrusts its running delegate node's work to
+      // another workflow (p10). The file layer resolved the target and wrote
+      // the request; here, identity, the node and the one open delegation.
+      live()
+      const n = node(e.node)
+      const gn = graph.nodes[e.node]
+      if (gn?.type !== 'delegate') fail('state', `node "${e.node}" is ${gn?.type ?? 'unknown'}; only a delegate node dispatches`)
+      const all = s.delegations ?? {}
+      const id = `d${Object.keys(all).length + 1}`
+      if (e.delegation !== id) fail('shape', `the next delegation is ${id}, not ${String(e.delegation)}`)
+      if (typeof e.uid !== 'string' || !e.uid.endsWith(`/${id}`) || !e.uid.startsWith(`${s.project}/${s.workflow}/${s.run}#`)) fail('shape', `the delegation uid is <this run's uid>/${id}`)
+      const t = e.target as unknown as Record<string, unknown>
+      if (!isObj(t) || ![t.project, t.workflow].every(v => typeof v === 'string' && ID_PATTERN.test(v)) || typeof t.workspace !== 'string' || !t.workspace) fail('shape', 'target is {project, workflow, workspace}')
+      if (t.project !== (gn!.project ?? s.project) || t.workflow !== gn!.workflow) fail('delegate-target', `${e.node} delegates to ${gn!.project ?? s.project}/${gn!.workflow}, not ${String(t.project)}/${String(t.workflow)}`)
+      const mine = Object.values(all).filter(d => d.node === e.node)
+      const open = mine.find(isOpenDelegation)
+      if (open) fail('delegation-open', `${e.node} already has delegation ${open.id} (${open.child ? `child ${open.child.workflow}/${open.child.run}` : 'not bound yet'}); one child per delegate node: judge or abandon it first (wfe delegate dispose)`)
+      if (mine.length && e.predecessor !== mine.at(-1)!.id) fail('delegation-predecessor', `${e.node} delegated before (${mine.at(-1)!.id}, ${mine.at(-1)!.disposition?.kind ?? 'closed'}); a replacement names it as its predecessor (--replaces ${mine.at(-1)!.id})`)
+      if (!mine.length && e.predecessor !== undefined && e.predecessor !== null) fail('delegation-predecessor', `${e.node} has no earlier delegation to replace`)
+      if (n.state !== 'running') fail('state', `node "${e.node}" is ${n.state}; a delegate node dispatches while it is running (start it first)`)
+      const folder = `${runFolder(s)}/delegations/${id}`
+      const request = evidence(e.request, `dispatching ${id}`, `${folder}/request.md`)
+      const original = e.original !== undefined && e.original !== null ? evidence(e.original, `dispatching ${id}`, `${folder}/original-input.md`) : undefined
+      const d: Delegation = {
+        id, uid: e.uid, node: e.node, target: { project: t.project as string, workflow: t.workflow as string, workspace: t.workspace as string },
+        ...(typeof e.targetDigest === 'string' && /^sha256:[0-9a-f]{64}$/.test(e.targetDigest) ? { targetDigest: e.targetDigest } : {}),
+        request, ...(original ? { original } : {}),
+        requester: s.executor.name, onBehalfOf: optText(e.onBehalfOf, 'onBehalfOf').trim() || null, accepts: gn!.accepts === 'parent' ? 'parent' : 'person',
+        dispatched: { at, by, attempt: e.attempt ?? null, seq: e.seq }, ...(e.predecessor ? { predecessor: e.predecessor } : {}),
+        child: null, transport: null, events: [], answers: [], instructions: [], disposition: null, closed: null,
+      }
+      s.delegations = { ...all, [id]: d }
+      n.wait = { reason: `delegation ${id} to ${d.target.project}/${d.target.workflow}`, holder: `${d.target.project}/${d.target.workflow}`, on: { delegation: id } }
+      move(e.node, 'waiting')
+      break
+    }
+    case 'delegation.bind': {
+      // The intake created the child from the request post (p10).
+      live()
+      const d = delegation(e.delegation)
+      if (!isOpenDelegation(d)) fail('delegation-closed', `delegation ${d.id} is closed (${d.disposition?.kind ?? d.closed?.reason}); a child is not bound to it`)
+      const c = e.child as unknown as Record<string, unknown>
+      if (!isObj(c) || ![c.uid, c.workspace, c.project, c.workflow, c.run, c.created].every(v => typeof v === 'string' && v)) fail('shape', 'child is {uid, workspace, project, workflow, run, created}')
+      if (c.project !== d.target.project || c.workflow !== d.target.workflow) fail('delegate-relation', `delegation ${d.id} goes to ${d.target.project}/${d.target.workflow}, not ${String(c.project)}/${String(c.workflow)}`)
+      if (d.child && d.child.uid !== c.uid) fail('delegate-relation', `delegation ${d.id} is bound to ${d.child.uid}; one child per delegation`)
+      const tr = e.transport as unknown as Record<string, unknown>
+      if (!isObj(tr) || typeof tr.realm !== 'string' || ![tr.message, tr.stream].every(v => typeof v === 'number' && Number.isInteger(v) && v > 0) || typeof tr.topic !== 'string') fail('shape', 'transport is {realm, message, stream, topic}')
+      d.child = { uid: c.uid as string, workspace: c.workspace as string, project: c.project as string, workflow: c.workflow as string, run: c.run as string, created: c.created as string }
+      d.transport = { realm: tr.realm as string, message: tr.message as number, stream: tr.stream as number, topic: tr.topic as string }
+      break
+    }
+    case 'delegation.event': {
+      // A fact of the child relayed (p10). Recorded while the parent lives;
+      // a cancelled parent records nothing more (the child stays readable).
+      live()
+      const d = delegation(e.delegation)
+      if (d.closed) fail('delegation-closed', `delegation ${d.id} is closed: ${d.closed.reason}`)
+      const v = e.event as unknown as Record<string, unknown>
+      if (!isObj(v) || !(EVENT_TYPES as readonly string[]).includes(v.type as string)) fail('shape', `event.type is one of ${EVENT_TYPES.join(', ')}`)
+      const ch = v.child as Record<string, unknown>
+      if (!isObj(ch) || typeof ch.seq !== 'number' || typeof ch.at !== 'string' || typeof ch.by !== 'string') fail('shape', 'event.child is {seq, at, by}: the child\'s entry it comes from')
+      if (v.type !== 'answer-refused' && !d.child) fail('delegation-unbound', `delegation ${d.id} has no child yet`)
+      const ev: DelegationEvent = { ...(v as unknown as DelegationEvent), n: d.events.length + 1, at, seq: e.seq, during: ctl.attempt?.id ?? null, wakes: WAKING.has(v.type as string), text: optText(v.text, 'event.text'), takenUp: null }
+      if (ev.type === 'completed' && v.manifest !== undefined) ev.manifest = manifestShape(v.manifest)
+      d.events.push(ev)
+      // A result after the delegation was judged is kept and changes nothing.
+      if (d.disposition) ev.wakes = false
+      if (d.node in s.nodes) s.nodes[d.node].updated = at
+      break
+    }
+    case 'delegation.take-up': {
+      live()
+      const d = delegation(e.delegation)
+      const ns = Array.isArray(e.events) ? [...new Set(e.events)] : []
+      if (!ns.length) fail('missing', 'name the events taken up')
+      for (const k of ns) {
+        const ev = d.events.find(x => x.n === k)
+        if (!ev) fail('delegation-event', `delegation ${d.id} has no event ${String(k)}`)
+        if (ev!.takenUp) fail('delegation-event', `event ${k} of ${d.id} was already taken up by ${ev!.takenUp.by} at ${ev!.takenUp.at}`)
+        ev!.takenUp = { at, by, attempt: e.attempt ?? null }
+      }
+      resumeDelegate(d)
+      break
+    }
+    case 'delegation.answer': {
+      live()
+      const d = delegation(e.delegation)
+      if (!isOpenDelegation(d)) fail('delegation-closed', `delegation ${d.id} is ${d.disposition?.kind ?? 'closed'}; nothing more is sent to its child`)
+      if (!d.child) fail('delegation-unbound', `delegation ${d.id} has no child yet; there is no question to answer`)
+      const q = typeof e.question === 'string' ? questionEvent(d, e.question) : undefined
+      if (!q) fail('question-unknown', `the child of ${d.id} asked no question "${String(e.question)}" that reached this run`)
+      if (!q!.takenUp) fail('delegation-event', `the question ${q!.question} (event ${q!.n}) is not taken up yet; read it first (wfe delegate take-up ${d.id} ${q!.n})`)
+      if (d.events.some(x => x.n > q!.n && x.type === 'withdrawn' && x.question === q!.question)) fail('question-closed', `the child withdrew ${q!.question}; nothing is answered`)
+      const why = because(e.because)
+      if (why && why.from === s.executor.name) fail('because', `the words named are ${s.executor.name}'s own; because names a person's answer or instruction`)
+      if (q!.confirms && d.accepts !== 'parent' && !why) fail('delegate-scope', `${q!.question} asks to confirm the child's result, and ${d.node} leaves accepting it to the person (accepts: person): ask your person, then relay their taken-up answer with --because answer:<q>`)
+      const n = d.answers.length + 1
+      d.answers.push({ n, question: q!.question!, event: q!.n, text: text(e.text, 'the answer'), from: why?.from ?? by, by, at, attempt: e.attempt ?? null, seq: e.seq, ...(why ? { because: why } : {}) })
+      waitOnDelegation(d)
+      break
+    }
+    case 'delegation.instruct': {
+      live()
+      const d = delegation(e.delegation)
+      if (!isOpenDelegation(d)) fail('delegation-closed', `delegation ${d.id} is ${d.disposition?.kind ?? 'closed'}; nothing more is sent to its child`)
+      if (!d.child) fail('delegation-unbound', `delegation ${d.id} has no child yet; wait for its creation before instructing it`)
+      const why = because(e.because)
+      if (why && why.from === s.executor.name) fail('because', `the words named are ${s.executor.name}'s own; because names a person's answer or instruction`)
+      d.instructions.push({ n: d.instructions.length + 1, text: text(e.text, 'the instruction'), from: why?.from ?? by, by, at, attempt: e.attempt ?? null, seq: e.seq, ...(why ? { because: why } : {}) })
+      waitOnDelegation(d)
+      break
+    }
+    case 'delegation.dispose': {
+      live()
+      const d = delegation(e.delegation)
+      if (d.disposition) fail('delegation-closed', `delegation ${d.id} was already judged ${d.disposition.kind} by ${d.disposition.by}`)
+      if (d.closed) fail('delegation-closed', `delegation ${d.id} is closed: ${d.closed.reason}`)
+      if (!(DISPOSITIONS as readonly string[]).includes(e.disposition)) fail('shape', `disposition is one of ${DISPOSITIONS.join(', ')}`)
+      const note = text(e.note, 'what you found (the note)')
+      let ev: DelegationEvent | undefined
+      if (e.disposition !== 'abandoned') {
+        const latest = latestResult(d)
+        ev = e.event !== undefined && e.event !== null ? d.events.find(x => x.n === e.event) : latest
+        if (!ev || ev.type !== 'completed') fail('delegation-result', `delegation ${d.id} has ${ev ? `no result at event ${e.event} (it is ${ev.type})` : 'no result yet'}; a result is judged once the child completed (abandoned needs none)`)
+        if (latest && ev!.n !== latest.n) fail('result-superseded', `event ${ev!.n} is not ${d.id}'s latest result (event ${latest.n} is); judge the latest`)
+        if (!ev!.takenUp) fail('delegation-event', `the result (event ${ev!.n}) is not taken up yet; read it first (wfe delegate take-up ${d.id} ${ev!.n})`)
+      }
+      d.disposition = { kind: e.disposition as typeof DISPOSITIONS[number], note, event: ev?.n ?? null, manifest: ev?.manifest?.digest ?? null, at, by }
+      break
+    }
     default:
       fail('op-unknown', `unknown operation "${(e as { op: string }).op}"`)
   }
@@ -1331,6 +1538,23 @@ export function apply(prev: RunState | null, e: HistoryEntry | (OpInput & EntryM
     const pending = pendingInstructions(s)
     if (!pending.length) return
     fail('instructions-pending', `${what} is a node boundary, and ${pending.length === 1 ? 'an instruction was' : `${pending.length} instructions were`} received and not acknowledged: ${pending.map(i => `${i.id} from ${i.from} (${i.at}): "${i.text.replace(/\s+/g, ' ').slice(0, 200)}"`).join('; ')}. Read ${pending.length === 1 ? 'it' : 'them'} (wfe run instructions <run>) and record what you will do: wfe run ack <run> ${pending.map(i => i.id).join(' ')} --response incorporate|clarify|new-run --note "…"; then retry.`)
+  }
+
+  function delegation(id: unknown): Delegation {
+    if (typeof id !== 'string' || !DELEGATION_ID.test(id) || !s.delegations?.[id]) fail('delegation-unknown', `delegation "${String(id)}" does not exist in this run`)
+    return s.delegations![id as string]
+  }
+  // The delegate node resumes when its agent takes up a fact of the child,
+  // and waits again once it sent the child an answer or an instruction.
+  function resumeDelegate(d: Delegation) {
+    const n = s.nodes[d.node]
+    if (n?.state === 'waiting' && n.wait && 'delegation' in n.wait.on && n.wait.on.delegation === d.id) { n.wait = null; move(d.node, 'running') }
+  }
+  function waitOnDelegation(d: Delegation) {
+    const n = s.nodes[d.node]
+    if (n?.state !== 'running') return
+    n.wait = { reason: `delegation ${d.id} to ${d.target.project}/${d.target.workflow}`, holder: `${d.target.project}/${d.target.workflow}`, on: { delegation: d.id } }
+    move(d.node, 'waiting')
   }
 
   function resumeFrom(q: Question) {
@@ -1476,6 +1700,7 @@ export type NotableType = 'started' | 'question' | 'answered' | 'reported' | 'no
   | 'presented' | 'cleanup-failed' // p7: a presentation became available for review; its shutdown could not be verified
   | 'adjusted' // p7: the run's future work was adjusted (a new revision)
   | 'integrated' // p9: the accepted result reached the project's shared branches
+  | 'delegated' | 'delegation' // p10: a delegate node's dispatch; a child's result, failure or cancellation relayed
 export interface NotableEvent {
   id: string
   seq: number
@@ -1502,6 +1727,8 @@ export interface NotableEvent {
   title?: string // the presentation's title
   revision?: string // adjusted: the revision now in force
   adjusted?: { added: string[]; removed: string[] } // adjusted: authored work added and removed
+  delegation?: string // delegated / delegation: the delegation id (p10)
+  delegationEvent?: string // delegation: the relayed fact's type
 }
 // The hold an entry recorded, as the reducer worded it at that point (the
 // state keeps only the current hold): replayed from the frozen graph.
@@ -1561,6 +1788,15 @@ export function notableEvents(r: RunRecord, sinceSeq = 0): NotableEvent[] {
     if (e.op === 'run.adjust') {
       const diff = (e as unknown as { diff?: AdjustDiff }).diff ?? r.definition.revisions?.find(x => x.revision === d.revision)?.diff
       push('adjusted', false, d.reason, { revision: d.revision, ...(diff ? { adjusted: { added: diff.added.filter(x => !x.startsWith('_')), removed: diff.removed.filter(x => !x.startsWith('_')) } } : {}) })
+    }
+    if (e.op === 'delegation.dispatch') {
+      const dl = r.delegations?.[d.delegation]
+      push('delegated', false, '', { node: d.node, delegation: d.delegation, holder: dl ? `${dl.target.project}/${dl.target.workflow}` : '' })
+    }
+    if (e.op === 'delegation.event') {
+      const ev = (e as unknown as { event: { type: string; text?: string } }).event
+      const dl = r.delegations?.[d.delegation]
+      if (dl && ['completed', 'failed', 'cancelled'].includes(ev.type)) push('delegation', false, ev.text ?? '', { node: dl.node, delegation: dl.id, delegationEvent: ev.type, holder: `${dl.target.project}/${dl.target.workflow}` })
     }
     if (e.op === 'presentation.observe' && (d.status === 'available' || d.status === 'stop-failed')) {
       const p = r.presentations?.[d.presentation]

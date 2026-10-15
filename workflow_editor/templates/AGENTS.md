@@ -73,8 +73,8 @@ What you have:
   `--backend` is what serves you (model, harness) when you know it.
   (p3/pre1 rehearsal: where to put the person's chat text and what to name
   the executor were unclear.)
-- `wfe run create` copies the workflow into `definition/`. A workflow with a
-  delegate node is refused: delegate nodes are definition and display only. The run follows that copy for its whole life, whatever
+- `wfe run create` copies the workflow into `definition/`. A delegate node
+  entrusts its work to another workflow's run (`wfe delegate help`). The run follows that copy for its whole life, whatever
   happens to the workflow files later; a changed definition is a new run. The
   person may edit the workflow files while a run is under way; `wfe run show`
   and the run view then say the current definition changed or was deleted.

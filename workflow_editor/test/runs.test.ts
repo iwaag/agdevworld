@@ -4,7 +4,7 @@
 // refusal, authorship, collisions, malformed records, Git history).
 import { before, after, test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdir, mkdtemp, readFile, rename, rm, stat, unlink, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, rename, rm, unlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
@@ -162,9 +162,9 @@ test('run cancellation cancels open nodes in the same entry and stops further re
   assert.equal(rejected.decisions[0].decision, 'rejected')
 })
 
-test('a graph with a delegate node is refused by the reducer itself', () => {
+test('a graph with a delegate node is a run (p10); an unknown operation is still refused', () => {
   const D: RunGraph = { nodes: { a: { type: 'do' }, d: { type: 'delegate', workflow: 'other' } }, edges: [{ from: 'a', to: 'd' }] }
-  refused(() => create(D), 'delegate-unsupported')
+  assert.deepEqual(Object.keys(create(D).nodes).sort(), ['a', 'd'])
   assert.throws(() => operate(create(), { op: 'node.delegate', node: 'a' } as unknown as OpInput, { at: tick(), by: 'A', via: 'test', graph: G }), (e: unknown) => (e as RunError).code === 'op-unknown')
 })
 
@@ -247,13 +247,13 @@ test('creation in both modes: the new layout, project identity, authorship and c
   }
 })
 
-test('delegate execution is refused before anything is written; the definition stays valid with a warning', async () => {
-  const { dir, ws } = await project('deleg', 'directory')
+test('a workflow with a delegate node is valid and creates a run (p10: delegate nodes execute)', async () => {
+  const { ws } = await project('deleg', 'directory')
   const wr = await ws.workflowResponse('handoff.yaml')
   assert.equal(wr.issues.filter(i => i.severity === 'error').length, 0)
-  assert.ok(wr.issues.some(i => i.code === 'delegate-not-executable' && i.node === 'pass'))
-  await assert.rejects(createRun(ws, base({ workflow: 'handoff' })), (e: unknown) => e instanceof RequestError && e.status === 422 && /delegate/.test(e.message))
-  await assert.rejects(stat(join(dir, 'devdocs', 'runs', 'handoff')), 'nothing was written')
+  assert.ok(!wr.issues.some(i => i.code === 'delegate-not-executable'))
+  const c = await createRun(ws, base({ workflow: 'handoff' }))
+  assert.equal(c.record.nodes.pass.state, 'pending')
 })
 
 test('requests keep their requester and entrusting reference; collisions never overwrite', async () => {
@@ -379,8 +379,8 @@ test('wfe run: create, show, answer and check from the command line', async () =
     await writeFile(join(root, 'bd.md'), 'The person\'s words.')
     const env = ['--registry', registry]
     assert.equal(await main(['run', 'create', 'ship', '--braindump', join(root, 'bd.md'), '--author', 'Test Person', '--executor', 'Omni Agent', '--name', 'run-cli', ...env]), 0)
-    assert.equal(await main(['run', 'create', 'handoff', '--braindump', join(root, 'bd.md'), '--author', 'Test Person', '--executor', 'Omni Agent', ...env]), 1, 'delegate refused in the CLI')
-    assert.equal(await main(['run', 'delegate', 'ship/run-cli', 'survey', ...env]), 2, 'no delegate subcommand')
+    assert.equal(await main(['run', 'create', 'handoff', '--braindump', join(root, 'bd.md'), '--author', 'Test Person', '--executor', 'Omni Agent', ...env]), 0, 'a delegating workflow is a run (p10)')
+    assert.equal(await main(['run', 'delegate', 'ship/run-cli', 'survey', ...env]), 2, 'no delegate subcommand of wfe run (it is wfe delegate)')
     assert.equal(await main(['run', 'start', 'ship/run-cli', 'survey', ...env]), 0)
     assert.equal(await main(['run', 'start', 'run-cli', 'build', ...env]), 1, 'not ready: refused')
     assert.equal(await main(['run', 'ask', 'run-cli', 'survey', '--question', 'Scope?', '--to', 'Test Person', ...env]), 0)

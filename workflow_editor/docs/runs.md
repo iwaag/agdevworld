@@ -126,12 +126,13 @@ editor's rules (errors refuse the run; warnings are kept as facts), and copied
 byte for byte to `definition/<id>.yaml`. The copy keeps layout, approvals and
 comments.
 
-**Delegate nodes are not executed (p4).** A workflow with a delegate node is
-refused before anything is written (preflight, `delegate-unsupported`), and
-the reducer refuses a `run.create` whose graph has one, so no entrance — CLI,
-HTTP or another — can start or delegate such work. Delegate nodes are never
-skipped or marked complete. Cross-project targets and parent/child run
-contracts are designed later, separately.
+**Delegate nodes execute (p10).** A delegate node's work is entrusted to a
+run of another managed workflow — its `project`/`workflow` target — through
+`wfe delegate`: the parent records the dispatch, the child is an ordinary
+request run of the target workflow, and the parent completes the node only
+after judging the child's result. The relationship, its operations and who
+decides what are [delegation.md](delegation.md). (Until p10 a workflow with a
+delegate node was refused: `delegate-unsupported`.)
 
 `run.json` records, per bundled workflow: the bundle file, the source file it
 was copied from, `sha256` of the copied bytes, the semantic definition digest
@@ -325,7 +326,7 @@ and the run is `completed` only when `_final-report` is.
 ### Waiting
 
 A waiting node records `wait: {reason, holder, on}` where `on` is
-`{question: "q1"}` or `{external: "<reference>"}`, and `holder` names who or
+`{question: "q1"}`, `{external: "<reference>"}` or (p10) `{delegation: "d1"}`, and `holder` names who or
 what holds the next move: the person a question is addressed to or the named
 external party. An external wait may declare a `deadline` (observer p3,
 `wfe run wait … --deadline`): when the result is expected at the latest. It
@@ -765,6 +766,7 @@ HTTP routes call them; neither needs the other running.
 | Attach an artifact | `attach <run> <path>` | same | — (reports listed and readable) |
 | Decide on the result | `decide <run> --decision …` | same | run view → Result and decision → Accept / Reject (a completed run without a decision: its focus card) |
 | Integrate the accepted result (p9) | `integrate <run> [--dry-run\|--status]` | `GET/POST runs/<wf>/<run>/integration` | run view → Execution and publication → Integration |
+| Delegations (p10, [delegation.md](delegation.md)) | `wfe delegate request\|list\|show\|take-up\|answer\|instruct\|dispose\|file\|sync` | `GET runs/<wf>/<run>/delegations` | run view → Delegations |
 | The node catalog the run was given (p7/ex1) | `nodes <run> [--show <template>]` | `GET runs/<wf>/<run>` (`catalog`) | run view → Node catalog |
 
 The browser offers the person's operations: answering, deciding on the

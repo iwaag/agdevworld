@@ -149,6 +149,13 @@ function waitingOf(r: RunRecord, job: JobRow | null): ObservedRun['waiting'] {
       const q = r.questions[w.on.question]
       if (q && q.answers.length && !q.takenUp && !q.withdrawn) return { reason: `answer to ${q.id} recorded, not yet taken up, no job queued`, responsible: 'executor', since: q.answers.at(-1)!.at }
       if (q) return { reason: `question ${q.id} to ${q.to}`, responsible: `person:${q.to}`, since: q.asked }
+    } else if ('delegation' in w.on) {
+      // p10: a delegate node waits on its child; a fact of the child not
+      // taken up is the parent's agent's to read.
+      const d = r.delegations?.[w.on.delegation]
+      const pending = d ? d.events.filter(e => e.wakes && !e.takenUp) : []
+      if (d && pending.length) return { reason: `delegation ${d.id}: ${pending.map(e => `${e.type} #${e.n}`).join(', ')} relayed, not yet taken up, no job queued`, responsible: 'executor', since: pending[0].at }
+      if (d) return { reason: `delegation ${d.id} to ${d.target.project}/${d.target.workflow}${d.child ? ` (child ${d.child.run})` : ' (no child yet)'}`, responsible: `delegation:${d.child?.uid ?? d.uid}`, since: r.nodes[w.node]?.updated ?? null }
     } else {
       const deadline = r.nodes[w.node]?.wait?.deadline
       return { reason: `external: ${w.on.external}${deadline ? ` (expected by ${deadline})` : ''}`, responsible: `external:${w.on.external}`, since: r.nodes[w.node]?.updated ?? null }

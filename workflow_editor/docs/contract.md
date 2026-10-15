@@ -258,6 +258,7 @@ execution:
   agent: ppt-agent            # the identity runs are performed as (default: the execution host's name)
   profile: sonnet             # one of the execution host's profiles (default: the host's)
   guides: [agent/guide.md, agent/create.md]   # project-relative; added after the common contract
+                              # or <project>:<path>, a file of another managed project (project_migration p4)
   session: run                # fresh (default) | run: later attempts resume the run's session (docs/sessions.md)
 intake:
   zulip: requests             # the workflow's Zulip channel accepts request topics (docs/intake.md)
@@ -275,6 +276,13 @@ nodes:
   and the host's common contract. A profile the host does not offer, or a
   guide that cannot be read, drops the job with the reason; nothing else is
   launched instead.
+- A guide written `<project>:<path>` (project_migration p4) is a file of
+  another managed project, read at claim from that project's committed
+  default branch through project access ([access.md](access.md)) and
+  recorded as `<project>:<path>` by hash. It lets a project's run follow the
+  guide another project maintains (archsage's task guides for a knowledge
+  run owned by the project whose knowledge it writes) without a copy that
+  drifts. An unreadable one refuses the job.
 - `session` (agent_session p1, [sessions.md](sessions.md)) is the run's
   session policy, frozen with it like the rest of the definition. Any value
   other than `fresh` or `run` is an error; `run` on a profile whose harness
@@ -380,6 +388,13 @@ is reported as missing; a submodule that is not initialized in the current
 workspace is reported as such (a warning — it depends on the workspace, not
 the definition).
 
+`integrate` (optional, project_migration p4) is `merge` (the default) or
+`if-unchanged`. An editable binding declared `if-unchanged` is an
+integration precondition: when the binding's target changed under its path
+since the run's merge base with it, the integration stops as
+`target-changed` and publishes nothing ([integration.md](integration.md),
+*Guarded bindings*). It is part of the definition digest when declared.
+
 `access` is `readonly` or `editable`. It is a declaration and a restriction
 on the editor's own operations, not filesystem isolation: external editors and
 agents can still change a readonly repository. Access belongs to the workflow:
@@ -433,6 +448,8 @@ fulfils its intent.
 | `intent-missing` | error | empty intent |
 | `name-missing` | warning | empty display name |
 | `binding-id-invalid`, `binding-access`, `binding-path-invalid` | error | malformed binding |
+| `binding-integrate` | error | `integrate` other than `merge` / `if-unchanged` (project_migration p4) |
+| `binding-integrate-readonly` | warning | a guard on a readonly binding, which a run does not change |
 | `repository-missing` | error | binding path is not the root, devdocs, a `.gitmodules` path or a declared local area |
 | `area-missing` | error | binding to a declared local area whose folder is not in this workspace |
 | `repository-uninitialized` | warning | submodule exists but is not checked out here |
@@ -445,7 +462,7 @@ fulfils its intent.
 | `workflow-on-non-delegate` | warning | `workflow`, `project` or `accepts` on a non-delegate node |
 | `edge-from-missing`, `edge-to-missing`, `edge-self`, `graph-cycle` | error | broken or cyclic edges |
 | `edge-duplicate`, `layout-orphan` | warning | redundant entries |
-| `execution-agent`, `execution-profile`, `execution-guide-path` | error | malformed agent id, profile name or guide path (p6) |
+| `execution-agent`, `execution-profile`, `execution-guide-path` | error | malformed agent id, profile name or guide path (p6; `<project>:<path>` since project_migration p4) |
 | `execution-guide-duplicate` | warning | a guide listed twice |
 | `intake-mode` | error | `intake.zulip` is not `requests` |
 | `confirms-kind`, `confirms-type`, `confirms-duplicate` | error | `confirms` other than `result`, on a non-talk node, or on more than one node |
@@ -487,6 +504,7 @@ declared approver and the time:
 2. **Definition approval** covers intent, the documentation policy,
    repository bindings (key, path, access), node IDs, types, names,
    descriptions, node repository bindings, delegate targets, and edges;
+  a binding's `integrate` when declared (project_migration p4);
    and, when declared (p6), `execution`, `intake` and a node's `confirms`.
 
 Excluded from both digests: workflow `id` and `name`, approvals, layout,

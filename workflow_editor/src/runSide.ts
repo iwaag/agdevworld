@@ -1144,7 +1144,7 @@ export class RunSide {
     const accepted = rec.decisions[di]?.decision === 'accepted'
     const done = (rec.integrations ?? []).some(i => i.decision === di)
     // A result changed since its acceptance is accepted again, not retried (project_migration p3/ex1).
-    const can = accepted && !done && st.state !== 'integrated' && st.state !== 'needs-agreement' && st.state !== 'unbound' && rec.execution.state === 'completed' && !rec.control.attempt && !this.frozen
+    const can = accepted && !done && st.state !== 'integrated' && st.state !== 'needs-agreement' && st.state !== 'target-changed' && st.state !== 'unbound' && rec.execution.state === 'completed' && !rec.control.attempt && !this.frozen
     return [
       h('h4', 'Integration'),
       h('p.small', h(`span.chip.${st.tone === 'ok' ? 'ok' : st.tone === 'muted' ? 'muted' : 'warn'}`, st.text), st.detail ? h('span.muted', ` ${st.detail}`) : null),
@@ -1155,6 +1155,7 @@ export class RunSide {
         : 'Nothing of it is on the project\'s shared branches: cancelling or abandoning it needs no rollback, and its work stays on its own branch.'),
       ...(row?.steps ?? []).map(x => h('div.small.muted', { dataset: { key: `int:${row!.id}:${x.repo}` } }, `${x.repo === '.' ? 'root' : x.repo} → ${x.target}: ${x.state}${x.method ? ` (${x.method})` : ''}${x.result ? ` ${x.result.slice(0, 7)}${x.pushed ? ' pushed' : ''}` : ''}${x.files?.length ? `; files: ${x.files.join(', ')}` : ''}${x.error ? `; ${x.error}` : ''}`)),
       st.state === 'needs-agreement' || st.state === 'unbound' ? h('p.small.warn-text', 'Accept the result again in the card at the top of the run; its integration is queued then.') : null,
+      st.state === 'target-changed' ? h('p.small.warn-text', 'A guarded target changed after this run prepared its result. Request a successor run (this one as predecessor) to reassess against the current target.') : null,
       can ? h('div.row.tight', h('button', { dataset: { action: 'integrate-check' }, title: 'Combine locally and show what would happen; nothing is pushed' }, 'Check integration'),
         h('button', { dataset: { action: 'integrate-run' }, title: 'Bring the accepted result into the shared branches now' }, row && row.state !== 'queued' ? 'Retry integration' : 'Integrate now')) : null,
     ]

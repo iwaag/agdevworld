@@ -71,7 +71,11 @@ export const ID_PATTERN = /^[a-z0-9][a-z0-9_.-]{0,63}$/
 
 // `type` and `access` stay plain strings so that a hand-edited file with an
 // unknown value is still representable; validation reports it.
-export interface RepositoryBinding { path: string; access: string }
+// `integrate` (project_migration p4, docs/integration.md *Guarded bindings*):
+// 'if-unchanged' stops integration when the binding's target changed since
+// the run built on it; absent or 'merge' is the ordinary integration.
+export interface RepositoryBinding { path: string; access: string; integrate?: string }
+export const INTEGRATE_MODES = ['merge', 'if-unchanged'] as const
 export interface WorkflowNode {
   type: string
   name: string
@@ -212,7 +216,8 @@ export function workflowFromData(raw: unknown): { workflow: Workflow; issues: Sh
   for (const [key, value] of Object.entries(map(raw, 'repositories', '$', issues))) {
     const path = `$.repositories.${key}`
     if (!isRecord(value)) { issues.push({ path, message: 'expected a mapping' }); continue }
-    w.repositories[key] = { path: text(value, 'path', path, issues), access: text(value, 'access', path, issues) }
+    const integrate = text(value, 'integrate', path, issues)
+    w.repositories[key] = { path: text(value, 'path', path, issues), access: text(value, 'access', path, issues), ...(integrate ? { integrate } : {}) }
   }
   for (const [key, value] of Object.entries(map(raw, 'nodes', '$', issues))) {
     const path = `$.nodes.${key}`
@@ -304,6 +309,16 @@ export function projectFromData(raw: unknown): { project: Project; issues: Shape
 }
 
 // Repository paths are project-relative POSIX paths. "." is the project root.
+// An execution guide (p6) is a file of the run's own project, or, written
+// `<project>:<path>` (project_migration p4), a file of another managed
+// project, read from that project's committed default branch.
+export function guideRef(g: string): { project?: string; path: string | null } {
+  const m = /^([a-z0-9][a-z0-9_.-]{0,63}):(.+)$/.exec(g.trim())
+  if (m) return { project: m[1], path: normalizeRepoPath(m[2]) }
+  return { path: normalizeRepoPath(g) }
+}
+export const guideKey = (g: string) => { const r = guideRef(g); return r.path === null ? g : r.project ? `${r.project}:${r.path}` : r.path }
+
 export function normalizeRepoPath(path: string): string | null {
   const trimmed = path.trim()
   if (trimmed === '' ) return null

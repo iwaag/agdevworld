@@ -58,7 +58,7 @@ export class RunProblem extends Error {
 // ---- reading ---------------------------------------------------------------------
 
 // Reads files of one run from the working tree, or from a devdocs commit.
-interface Source {
+export interface Source {
   text(rel: string): Promise<string | null> // run-relative
   list(): Promise<RunFile[]>
 }
@@ -86,7 +86,7 @@ function gitSource(info: DevdocsInfo, rev: DevdocsRev, runRel: string): Source {
   }
 }
 
-interface Bundle { entries: Record<string, { file: string; text?: string; workflow?: Workflow; problem?: string }>; graph?: RunGraph; problem?: string; revisions?: { revision: string; file: string; text: string; workflow: Workflow }[]; catalog?: CatalogSnapshot }
+export interface Bundle { entries: Record<string, { file: string; text?: string; workflow?: Workflow; problem?: string }>; graph?: RunGraph; problem?: string; revisions?: { revision: string; file: string; text: string; workflow: Workflow }[]; catalog?: CatalogSnapshot }
 
 async function loadBundle(src: Source, def: unknown): Promise<Bundle> {
   const out: Bundle = { entries: {} }
@@ -117,12 +117,12 @@ async function loadBundle(src: Source, def: unknown): Promise<Bundle> {
   return out
 }
 
-interface Reading { text: string | null; record?: RunRecord; problem?: FileProblem & { code?: string }; bundle: Bundle; files?: RunFile[] }
+export interface Reading { text: string | null; record?: RunRecord; problem?: FileProblem & { code?: string }; bundle: Bundle; files?: RunFile[] }
 
 // Parses and checks one run. Cached on the stat of run.json and the bundle.
 const cache = new Map<string, { key: string; reading: Reading }>()
 
-async function readFrom(src: Source, expect: RunRef & { project?: string }, cacheKey?: string): Promise<Reading> {
+export async function readFrom(src: Source, expect: RunRef & { project?: string }, cacheKey?: string): Promise<Reading> {
   if (cacheKey) {
     const hit = cache.get(cacheKey.split('\0')[0])
     if (hit && hit.key === cacheKey) return { ...hit.reading, record: hit.reading.record && structuredClone(hit.reading.record) }

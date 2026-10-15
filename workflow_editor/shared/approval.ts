@@ -12,7 +12,7 @@ export interface IntegrationRowLike {
 }
 type Place = { kind: 'run-copy'; branch: string | null } | { kind: 'project' } | undefined
 type Tone = 'ok' | 'warn' | 'muted' | 'error'
-export interface IntegrationStatus { tone: Tone; text: string; detail?: string; state: 'none' | 'integrated' | 'queued' | 'running' | 'partial' | 'needs-agreement' | 'problem' | 'unbound'; decision: number; changed?: string[] }
+export interface IntegrationStatus { tone: Tone; text: string; detail?: string; state: 'none' | 'integrated' | 'queued' | 'running' | 'partial' | 'needs-agreement' | 'target-changed' | 'problem' | 'unbound'; decision: number; changed?: string[] }
 
 const repoName = (p: string) => (p === '.' ? 'root' : p)
 
@@ -54,6 +54,13 @@ export function integrationStatus(rec: RunRecord, exec: { integrations?: Integra
     const changed = [...new Set(row.steps.flatMap(st => st.state === 'needs-agreement' ? (st.files ?? []).map(f => (st.repo === '.' ? f : `${st.repo}/${f}`)) : []))]
     return { state: 'needs-agreement', decision: di, tone: 'warn', text: 'The result changed after it was accepted — accept it again to integrate', detail: row.error ?? undefined, changed }
   }
+  // A guarded binding's target changed since the run built on it
+  // (project_migration p4): the result is not published; a successor run
+  // reassesses it against the current target.
+  if (row.state === 'target-changed') {
+    const changed = [...new Set(row.steps.flatMap(st => st.state === 'target-changed' ? (st.files ?? []).map(f => (st.repo === '.' ? f : `${st.repo}/${f}`)) : []))]
+    return { state: 'target-changed', decision: di, tone: 'warn', text: 'Not integrated: the target changed since this run prepared its result — reassess it in a successor run', detail: row.error ?? undefined, changed }
+  }
   return { state: 'problem', decision: di, tone: row.state === 'refused' ? 'warn' : 'error', text: `Accepted — not integrated: ${row.state}`, detail: row.error ?? undefined }
 }
 
@@ -92,6 +99,7 @@ export function approvalOf(rec: RunRecord, exec: { integrations?: IntegrationRow
   switch (integration.state) {
     case 'integrated': return { ...base, kind: 'integrated', chip: 'Accepted · integrated', tone: 'ok' }
     case 'needs-agreement': return { ...base, kind: 'reaccept', chip: 'Changed since acceptance — accept again', tone: 'warn', canAccept: true }
+    case 'target-changed': return { ...base, kind: 'integration-problem', chip: 'Accepted · target changed — reassess', tone: 'warn' }
     case 'unbound': return { ...base, kind: 'reaccept', chip: 'Accept again to integrate', tone: 'warn', canAccept: true }
     case 'queued': case 'running': return { ...base, kind: 'integrating', chip: 'Accepted · integrating', tone: 'ok' }
     default: return { ...base, kind: 'integration-problem', chip: 'Accepted · not integrated', tone: 'error' }

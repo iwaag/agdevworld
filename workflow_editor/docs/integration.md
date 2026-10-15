@@ -121,6 +121,36 @@ commit before it can reach the remote. The rules:
 - **Serialization.** Updates of one remote branch take turns on this host:
   a lock per remote URL and target, shared across runs and projects.
 
+## Guarded bindings (project_migration p4)
+
+A merge that Git can make is not always a result anyone accepted. Knowledge
+supplemented from another project's records is the clear case: the owning
+project may record the same knowledge meanwhile in another file, or take
+over maintenance, and both merge cleanly. A binding declared
+`integrate: if-unchanged` ([contract.md](contract.md)) makes its target a
+precondition:
+
+- For the repository that holds the binding (the submodule itself, or the
+  root for a root-local path), the step compares the merge base of the
+  candidate and the observed target with the observed target, **under the
+  binding's path** (the whole repository for a submodule binding).
+- Any change there stops the step as `target-changed` with the files,
+  before anything is combined or pushed. A dry run says the same.
+- A change elsewhere in the repository is integrated as usual (merge).
+- A run that brought the current target into its branch (fetched and
+  merged it in its copy, having seen the change) passes: the base is then
+  the target.
+- Reassessment is new work: a successor run (`--predecessor`) starts from
+  the current target, checks again (ownership, what is already recorded)
+  and presents a revised result, or none. Accepting the stopped run again
+  does not change its base and stops again.
+
+The standing reads "Not integrated: the target changed since this run
+prepared its result — reassess it in a successor run" (header: *Accepted ·
+target changed — reassess*). `test/guard.test.ts` covers a shared
+repository, a root-local area (a change outside it merges, one inside it
+stops), and a run that took the target in first.
+
 ## Not atomic, resumable
 
 A multi-repository integration may stop between repositories. Its state is

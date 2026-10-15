@@ -1,7 +1,7 @@
 // Semantic digests for approvals. A digest covers only the content an approval
 // is about; approvals, layout, comments, key order and YAML formatting are
 // excluded. Changing this file changes every digest: bump the projection kind.
-import { normalizeRepoPath, type ApprovalKind, type Workflow } from './model.ts'
+import { guideKey, normalizeRepoPath, type ApprovalKind, type Workflow } from './model.ts'
 
 // Canonical JSON: object keys sorted by UTF-16 code unit, no whitespace,
 // arrays in the order the projection produces. Only JSON values are allowed.
@@ -39,7 +39,8 @@ export function intentProjection(w: Workflow) {
 export function definitionProjection(w: Workflow) {
   const repositories: Record<string, unknown> = {}
   for (const [key, b] of Object.entries(w.repositories)) {
-    repositories[key] = { path: normalizeRepoPath(b.path) ?? b.path, access: b.access }
+    // The integration guard (project_migration p4) is projected when declared.
+    repositories[key] = { path: normalizeRepoPath(b.path) ?? b.path, access: b.access, ...(b.integrate ? { integrate: b.integrate } : {}) }
   }
   const nodes: Record<string, unknown> = {}
   for (const [id, n] of Object.entries(w.nodes)) {
@@ -65,7 +66,7 @@ export function definitionProjection(w: Workflow) {
   // a workflow without them keeps the digest it had.
   // The session policy (agent_session p1) is projected when declared.
   const execution = w.execution && (w.execution.agent || w.execution.profile || w.execution.guides.length || w.execution.session)
-    ? { execution: { agent: w.execution.agent, profile: w.execution.profile, guides: w.execution.guides.map(g => normalizeRepoPath(g) ?? g), ...(w.execution.session ? { session: w.execution.session } : {}) } } : {}
+    ? { execution: { agent: w.execution.agent, profile: w.execution.profile, guides: w.execution.guides.map(guideKey), ...(w.execution.session ? { session: w.execution.session } : {}) } } : {}
   const intake = w.intake?.zulip ? { intake: { zulip: w.intake.zulip } } : {}
   // The three steps (p8/ex2) are projected when declared, so a default or
   // manual workflow keeps the digest it had.

@@ -191,6 +191,31 @@ export function createHandler(config: ServiceConfig) {
         }))
       }
 
+      // ---- project access (project_migration p4, docs/access.md): read-only ----
+      if (a === 'projects' && method === 'GET') {
+        const x = await import('./access.ts')
+        const ctx: import('./access.ts').AccessContext = { registryFile: config.registryFile, area, gitea: config.gitea, giteaProblem: config.giteaProblem, refresh: url.searchParams.get('refresh') === '1' }
+        const q = (k: string) => url.searchParams.get(k) || undefined
+        const num = (k: string) => { const v = q(k); if (v === undefined) return undefined; const n = Number(v); if (!Number.isInteger(n) || n < 1) throw new RequestError(400, `${k} must be a positive integer`); return n }
+        const source = q('source')
+        if (source !== undefined && source !== 'committed' && source !== 'worktree') throw new RequestError(400, 'source is committed or worktree')
+        const ro = { rev: q('rev'), upstream: q('upstream') === '1', require: q('require'), source: source as 'committed' | 'worktree' | undefined, workspace: q('workspace') }
+        if (!wsId) return send(res, 200, await x.list(ctx))
+        if (!b) return send(res, 200, await x.show(ctx, wsId, ro))
+        if (b === 'tree' && !file) return send(res, 200, await x.tree(ctx, wsId, q('path') ?? '.', { ...ro, depth: num('depth'), max: num('max') }))
+        if (b === 'file' && !file) return send(res, 200, x.serializable(await x.read(ctx, wsId, str(q('path'), 'path'), { ...ro, maxBytes: num('maxBytes') })))
+        if (b === 'search' && !file) return send(res, 200, await x.search(ctx, wsId, str(q('q'), 'q'), q('path') ?? '.', { ...ro, max: num('max'), regex: q('regex') === '1', ignoreCase: q('i') === '1' }))
+        if (b === 'runs') {
+          const published = q('published') === '1'
+          if (!file) return send(res, 200, await x.runs(ctx, wsId, { ...ro, workflow: q('workflow'), published }))
+          const [, , , , wf, run, sub] = parts
+          if (!run) throw new RequestError(404, 'not found')
+          if (!sub) return send(res, 200, await x.run(ctx, wsId, `${wf}/${run}`, { ...ro, published }))
+          if (sub === 'file') return send(res, 200, x.serializable(await x.runFile(ctx, wsId, `${wf}/${run}`, str(q('path'), 'path'), { ...ro, published, maxBytes: num('maxBytes') })))
+        }
+        throw new RequestError(404, 'not found')
+      }
+
       // ---- the agdev dashboard and resources (p4) ----
       if (a === 'agdev') {
         if (!wsId && method === 'GET') return send(res, 200, await dashboard(agdev))

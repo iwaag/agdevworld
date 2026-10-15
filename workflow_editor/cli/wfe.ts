@@ -22,6 +22,7 @@ import { listRuns } from '../server/runs.ts'
 import { setupArea } from './setup.ts'
 import { runCommand, runIndex } from './run.ts'
 import { NODES_HELP, nodesCommand } from './nodes.ts'
+import { PROJECTS_HELP, projectsCommand } from './projects.ts'
 import { codeVersion } from '../server/version.ts'
 import { assertNotRetired, assertWorkspaceAllowed, loadBoundary, retiredByUrl } from '../server/boundary.ts'
 
@@ -37,7 +38,7 @@ class Refused extends Error { detail?: unknown; constructor(m: string, detail?: 
 // ---- arguments ---------------------------------------------------------------
 
 interface Parsed { positional: string[]; opts: Map<string, string[]>; flags: Set<string> }
-const FLAGS = new Set(['json', 'help', 'resume', 'h', 'new', 'history', 'no-gitea', 'reuse', 'lost', 'uncertain', 'found', 'complete', 'not-posted', 'ok', 'about-plan', 'all', 'dry-run', 'commit', 'push', 'status', 'rebuild', 'allow-live-executor', 'terminal', 'missing', 'retire']) // p7: present stop --all, run adjust --dry-run
+const FLAGS = new Set(['json', 'help', 'resume', 'h', 'new', 'history', 'no-gitea', 'reuse', 'lost', 'uncertain', 'found', 'complete', 'not-posted', 'ok', 'about-plan', 'all', 'dry-run', 'commit', 'push', 'status', 'rebuild', 'allow-live-executor', 'terminal', 'missing', 'retire', 'upstream', 'published', 'regex', 'ignore-case', 'refresh']) // p7: present stop --all, run adjust --dry-run
 function parse(argv: string[]): Parsed {
   const p: Parsed = { positional: [], opts: new Map(), flags: new Set() }
   for (let i = 0; i < argv.length; i++) {
@@ -158,6 +159,7 @@ function workflowLine(w: WorkflowSummary) {
 
 const HELP: Record<string, string> = {
   nodes: NODES_HELP,
+  projects: PROJECTS_HELP,
   create: `wfe create <dir> --name <name> [--id <id>] [--intent <text>] [--goal <text>]... [--devdocs directory|submodule] [--devdocs-source <path|url>] [--resume]
 
 Creates a new project and registers it as a workspace. With a Gitea setting
@@ -521,6 +523,8 @@ Projects and workspaces
   project register|obtain   a project on Gitea: register it here, or clone a workspace of it
   repo register|create|add  shared repositories on Gitea, and adding one to this project
   dashboard                 every project and shared repository, with where each fact was read
+  projects <subcommand>     read any managed project: list, show, tree, read, search, runs, run
+                            (committed by default, at a revision, with provenance; docs/access.md)
   request <workflow> …      a person's request to the executor (autolab): a run, queued
   intake <subcommand>       requests from Zulip: status, messages, receive, process … (autolab fetches)
   exec <subcommand>         the executor's interface: claim, started, finished, stops, reconcile …
@@ -1222,10 +1226,19 @@ async function cmdMigrate(p: Parsed): Promise<number> {
 }
 
 const COMMANDS: Record<string, (p: Parsed) => Promise<number>> = {
-  runs: cmdRuns, observe: cmdObserve, run: cmdRun, delegate: cmdDelegate, present: cmdPresent, project: cmdProject, repo: cmdRepo, dashboard: cmdDashboard, exec: cmdExec, request: cmdRequest, notify: cmdNotify, intake: cmdIntake,
+  runs: cmdRuns, observe: cmdObserve, projects: cmdProjects, run: cmdRun, delegate: cmdDelegate, present: cmdPresent, project: cmdProject, repo: cmdRepo, dashboard: cmdDashboard, exec: cmdExec, request: cmdRequest, notify: cmdNotify, intake: cmdIntake,
   create: cmdCreate, register: cmdRegister, list: cmdList, status: cmdStatus, validate: cmdValidate,
   approve: cmdApprove, arrange: cmdArrange, 'add-repo': cmdAddRepo, workflow: cmdWorkflow, serve: cmdServe, setup: cmdSetup,
   version: cmdVersion, nodes: cmdNodes,
+}
+
+// Project access (project_migration p4): reads of any managed project.
+async function cmdProjects(p: Parsed): Promise<number> {
+  return projectsCommand({
+    positional: p.positional, opt: k => opt(p, k), flag: k => p.flags.has(k), out, json: () => json,
+    usage: m => new UsageError(m),
+    ctx: async () => { const g = await giteaOf(p); return { registryFile: registryFile(p), area: areaDir(p), gitea: g, giteaProblem: g ? undefined : `no Gitea setting at ${giteaFile(p)}`, refresh: p.flags.has('refresh') } },
+  })
 }
 
 // The person's node catalog (p7/ex1): templates, examples, instantiation.

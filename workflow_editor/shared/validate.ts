@@ -2,7 +2,7 @@
 // well-formed and that its references resolve; it never judges whether the
 // graph fulfils the intent. Errors block approval; drafts may still be saved.
 import {
-  ACCESS_LEVELS, APPEARANCE_COLORS, APPEARANCE_ICONS, CONFIRMS, DELEGATE_ACCEPTS, DEVDOCS_MODES, DOC_POLICIES, DOC_STEPS, ID_PATTERN, INTAKE_MODES, NODE_TYPES, PROFILE_PATTERN, SESSION_POLICIES, PROJECT_SCHEMA, WORKFLOW_SCHEMA, normalizeRepoPath,
+  ACCESS_LEVELS, APPEARANCE_COLORS, APPEARANCE_ICONS, CONFIRMS, DELEGATE_ACCEPTS, DEVDOCS_MODES, DOC_POLICIES, DOC_STEPS, ID_PATTERN, INTAKE_MODES, NODE_TYPES, PROFILE_PATTERN, SESSION_POLICIES, PROJECT_SCHEMA, WORKFLOW_SCHEMA, INTEGRATE_MODES, guideKey, guideRef, normalizeRepoPath,
   type Issue, type Project, type Workflow,
 } from './model.ts'
 
@@ -93,10 +93,10 @@ export function validateWorkflow(w: Workflow, ctx: ValidationContext = {}): Issu
   if (w.execution.profile && !PROFILE_PATTERN.test(w.execution.profile)) issues.push(err('execution-profile', `execution.profile "${w.execution.profile}" must be a profile name (${PROFILE_PATTERN.source}).`, { field: 'execution' }))
   if (w.execution.session && !(SESSION_POLICIES as readonly string[]).includes(w.execution.session)) issues.push(err('execution-session', `execution.session "${w.execution.session}" is not a session policy; expected ${SESSION_POLICIES.join(' or ')} (or leave it out for fresh).`, { field: 'execution' }))
   w.execution.guides.forEach((g, i) => {
-    const p = normalizeRepoPath(g)
-    if (p === null || p === '.') issues.push(err('execution-guide-path', `execution.guides[${i}] "${g}" must be a project-relative file path without "..".`, { field: 'execution' }))
+    const { path: p } = guideRef(g)
+    if (p === null || p === '.') issues.push(err('execution-guide-path', `execution.guides[${i}] "${g}" must be a project-relative file path without "..", or <project>:<path> for a file of another managed project.`, { field: 'execution' }))
   })
-  if (new Set(w.execution.guides.map(g => normalizeRepoPath(g))).size !== w.execution.guides.length) issues.push(warn('execution-guide-duplicate', 'execution.guides lists a guide twice.', { field: 'execution' }))
+  if (new Set(w.execution.guides.map(guideKey)).size !== w.execution.guides.length) issues.push(warn('execution-guide-duplicate', 'execution.guides lists a guide twice.', { field: 'execution' }))
   if (w.intake.zulip && !(INTAKE_MODES as readonly string[]).includes(w.intake.zulip)) issues.push(err('intake-mode', `intake.zulip "${w.intake.zulip}" is not supported; expected ${INTAKE_MODES.join(' or ')} (or leave it out).`, { field: 'intake' }))
 
   // Repository bindings
@@ -104,6 +104,8 @@ export function validateWorkflow(w: Workflow, ctx: ValidationContext = {}): Issu
   for (const [key, b] of Object.entries(w.repositories)) {
     if (!ID_PATTERN.test(key)) issues.push(err('binding-id-invalid', `Repository binding "${key}" must match ${ID_PATTERN.source}.`, { binding: key }))
     if (!(ACCESS_LEVELS as readonly string[]).includes(b.access)) issues.push(err('binding-access', `Binding "${key}" has access "${b.access}"; expected readonly or editable.`, { binding: key }))
+    if (b.integrate !== undefined && !(INTEGRATE_MODES as readonly string[]).includes(b.integrate)) issues.push(err('binding-integrate', `Binding "${key}" has integrate "${b.integrate}"; expected ${INTEGRATE_MODES.join(' or ')} (or leave it out).`, { binding: key }))
+    else if (b.integrate === 'if-unchanged' && b.access !== 'editable') issues.push(warn('binding-integrate-readonly', `Binding "${key}" guards integration but is readonly; the guard applies only to what a run may change.`, { binding: key }))
     const path = normalizeRepoPath(b.path)
     if (path === null) { issues.push(err('binding-path-invalid', `Binding "${key}" path "${b.path}" must be project-relative without "..".`, { binding: key })); continue }
     if (!ctx.repositories || path === '.') continue

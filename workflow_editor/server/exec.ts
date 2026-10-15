@@ -18,14 +18,14 @@ import { lstat, readFile, realpath } from 'node:fs/promises'
 import { hostname } from 'node:os'
 import { join } from 'node:path'
 import type { DatabaseSync } from 'node:sqlite'
-import { normalizeRepoPath, sessionPolicyOf } from '../shared/model.ts'
+import { guideRef, normalizeRepoPath, sessionPolicyOf } from '../shared/model.ts'
 import { configChanges, currentSession, unverifiedReason, unverifiedSession, describeSteps, effectiveOf, holderOf, hostOf, pendingInstructions, RECOVERY_BUDGET, runKey, sameConfig, sessionConfig, situation, type AttemptSession, type AttemptSettings, type BecauseRef, type RecoveryAgent, type RunRecord, type RunRef } from '../shared/run.ts'
 import { git } from './git.ts'
 import { docStepsOf } from '../shared/compile.ts'
 import { assertWorkspaceAllowed, loadBoundary } from './boundary.ts'
 import type { Gitea } from './gitea.ts'
 import { baseline, publish, publishRun, type Baseline, type RepoStep } from './publish.ts'
-import { integrate, resultChanges, type IntegrationState, type IntegrationStep } from './integrate.ts'
+import { guardsFor, integrate, resultChanges, type Guard, type IntegrationState, type IntegrationStep } from './integrate.ts'
 import { loadRegistry, observe, type Registration } from './registry.ts'
 import { catalogOf, createRunInCopy, listRuns, readRun, RUN_FILE, runDir, runOp } from './runs.ts'
 import { readCopy, runSpace } from './runspace.ts'
@@ -339,6 +339,21 @@ export class ExecStore {
     }
     const guides: AttemptExecution['guides'] = []
     for (const g of ex?.guides ?? []) {
+      // A guide of another managed project (project_migration p4): read
+      // from that project's committed default branch through project
+      // access, recorded as <project>:<path> by content hash.
+      const other = guideRef(g)
+      if (other.project) {
+        if (!other.path || other.path === '.') return { refused: `guide "${g}" is not <project>:<path>` }
+        try {
+          const { committedText } = await import('./access.ts')
+          const r = await committedText({ registryFile: this.ctx.registryFile, area: this.ctx.area, gitea: this.ctx.gitea, giteaProblem: this.ctx.gitea ? undefined : 'no Gitea setting', refresh: true }, other.project, other.path)
+          guides.push({ path: `${other.project}:${other.path}`, sha256: r.sha256, text: r.text })
+          continue
+        } catch (e) {
+          return { refused: `guide ${g} of project ${other.project} cannot be read: ${(e as Error).message}` }
+        }
+      }
       const path = normalizeRepoPath(g)
       if (!path || path === '.') return { refused: `guide "${g}" is not a project-relative path` }
       try {
@@ -778,6 +793,14 @@ export class ExecStore {
     return { space, record, decision }
   }
 
+  // The guarded bindings (project_migration p4) of the definition the run
+  // follows now: its latest adjusted revision, else its frozen root.
+  private async guards(space: Workspace, ref: RunRef, record: RunRecord): Promise<Guard[]> {
+    const { bundle } = await readRun(space, ref)
+    const w = bundle.revisions?.at(-1)?.workflow ?? bundle.entries[record.definition.root]?.workflow
+    return w && record.storage ? guardsFor(w.repositories, record.storage) : []
+  }
+
   // Queues the integration of the latest accepted decision (once per decision).
   async queueIntegration(ws: Workspace, ref: RunRef, by: string): Promise<IntegrationRow> {
     const space = await runSpace(ws, ref)
@@ -803,8 +826,9 @@ export class ExecStore {
     const copy = await readCopy(ws, ref)
     const env = this.ctx.gitea ? await this.ctx.gitea.gitEnv() : {}
     const lockDir = join(this.ctx.area, '.local', 'exec', 'integration-locks')
+    const guards = await this.guards(space, ref, ok.record)
     if (o.dryRun) {
-      const r = await integrate({ space, ref, project: ok.record.project, storage: ok.record.storage!, accepted: ok.record.decisions[decision].revision!, previous: [], env, lockDir, dryRun: true, save: () => {} })
+      const r = await integrate({ space, ref, project: ok.record.project, storage: ok.record.storage!, accepted: ok.record.decisions[decision].revision!, previous: [], env, lockDir, dryRun: true, guards, save: () => {} })
       return { state: r.state, steps: r.steps, error: r.error, row: null }
     }
     // The final checkpoint: everything in the copy saved on its branches.
@@ -817,7 +841,7 @@ export class ExecStore {
       const save = (steps: IntegrationStep[]) => this.run('UPDATE integrations SET steps = ?, updated = ? WHERE id = ?', JSON.stringify(steps), now(), row.id)
       let r
       try {
-        r = await integrate({ space, ref, project: ok.record.project, storage: ok.record.storage!, accepted: ok.record.decisions[decision].revision!, previous: JSON.parse(row.steps) as IntegrationStep[], env, lockDir, save })
+        r = await integrate({ space, ref, project: ok.record.project, storage: ok.record.storage!, accepted: ok.record.decisions[decision].revision!, previous: JSON.parse(row.steps) as IntegrationStep[], env, lockDir, guards, save })
       } catch (e) {
         r = { state: 'failed' as const, steps: JSON.parse(this.one<IntegrationRow>('SELECT * FROM integrations WHERE id = ?', row.id)!.steps) as IntegrationStep[], error: (e as Error).message }
       }

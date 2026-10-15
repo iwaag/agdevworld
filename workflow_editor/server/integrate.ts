@@ -24,10 +24,16 @@
 //   and is the agent's work (a linked repair run). Nothing is ever forced.
 // - Updates of one remote branch take turns across runs and projects (a
 //   lock per remote URL and target branch on this host).
+// - A binding declared `integrate: if-unchanged` (project_migration p4) is a
+//   precondition on its target: when the target changed under the binding's
+//   path since the run's merge base with it, the step stops as
+//   `target-changed` before anything is combined or pushed. A run that
+//   brought the current target into its branch passes.
 import { createHash } from 'node:crypto'
 import { mkdir, mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { normalizeRepoPath, type RepositoryBinding } from '../shared/model.ts'
 import { runFolder, runKey, type RunRef, type RunStorage } from '../shared/run.ts'
 import { git, gitOk } from './git.ts'
 import { withLock } from './lock.ts'
@@ -36,7 +42,7 @@ import type { Workspace } from './workspace.ts'
 
 export interface RevisionEntry { path: string; tree: string }
 
-export type StepState = 'pending' | 'done' | 'conflict' | 'needs-agreement' | 'attention' | 'failed' | 'planned'
+export type StepState = 'pending' | 'done' | 'conflict' | 'needs-agreement' | 'target-changed' | 'attention' | 'failed' | 'planned'
 export interface IntegrationStep {
   repo: string // project-relative ('.' root)
   target: string // the shared branch
@@ -50,7 +56,28 @@ export interface IntegrationStep {
   files?: string[] // conflicts, or reviewed files the combination would change
   error?: string
 }
-export type IntegrationState = 'integrated' | 'partial' | 'conflict' | 'needs-agreement' | 'refused' | 'attention' | 'failed' | 'planned'
+export type IntegrationState = 'integrated' | 'partial' | 'conflict' | 'needs-agreement' | 'target-changed' | 'refused' | 'attention' | 'failed' | 'planned'
+
+// A guarded binding as integration applies it: the repository that holds
+// it and the paths in it ('' = the whole repository).
+export interface Guard { binding: string; repo: string; paths: string[] }
+
+// The guards of a run's bindings in force: each editable `if-unchanged`
+// binding, resolved against the repositories its storage owns (a
+// submodule, a path inside one, or a path of the root).
+export function guardsFor(bindings: Record<string, RepositoryBinding>, storage: RunStorage): Guard[] {
+  const subs = storage.repositories.filter(r => r.path !== '.').map(r => r.path)
+  const out: Guard[] = []
+  for (const [binding, b] of Object.entries(bindings)) {
+    if (b.integrate !== 'if-unchanged' || b.access !== 'editable') continue
+    const path = normalizeRepoPath(b.path)
+    if (!path) continue
+    const sub = subs.find(sp => path === sp || path.startsWith(`${sp}/`))
+    if (sub) out.push({ binding, repo: sub, paths: [path === sub ? '' : path.slice(sub.length + 1)] })
+    else out.push({ binding, repo: '.', paths: [path === '.' ? '' : path] })
+  }
+  return out
+}
 export interface IntegrationOutcome { state: IntegrationState; steps: IntegrationStep[]; error?: string }
 
 const isAncestor = async (dir: string, a: string, b: string) => (await git(dir, ['merge-base', '--is-ancestor', a, b])).code === 0
@@ -133,6 +160,7 @@ export interface IntegrateOptions {
   env: Record<string, string>
   lockDir: string // where per-target locks live (this host)
   dryRun?: boolean
+  guards?: Guard[] // project_migration p4: guarded bindings of the run's definition in force
   save: (steps: IntegrationStep[]) => void // durable journal write, before and after each push
 }
 
@@ -191,7 +219,7 @@ export async function integrate(o: IntegrateOptions): Promise<IntegrationOutcome
   if (states.every(s => s === 'done')) return { state: 'integrated', steps }
   if (states.every(s => s === 'planned' || s === 'done')) return { state: 'planned', steps }
   const some = steps.some(s => s.state === 'done' && s.method !== 'already') // progress that reached a target
-  const blocking: IntegrationState = stop?.state === 'conflict' ? 'conflict' : stop?.state === 'needs-agreement' ? 'needs-agreement' : stop?.state === 'failed' ? 'failed' : 'attention'
+  const blocking: IntegrationState = stop?.state === 'conflict' ? 'conflict' : stop?.state === 'needs-agreement' ? 'needs-agreement' : stop?.state === 'target-changed' ? 'target-changed' : stop?.state === 'failed' ? 'failed' : 'attention'
   return { state: some ? 'partial' : blocking, steps, error: stop ? `${stop.repo}: ${stop.error}` : undefined }
 }
 
@@ -204,6 +232,19 @@ async function integrateOne(o: IntegrateOptions, step: IntegrationStep, dir: str
   if (step.result && await isAncestor(dir, step.result, observed)) { step.pushed = true; step.state = 'done'; step.error = undefined; return step.state }
   if (step.state === 'done' && step.result) { step.state = 'attention'; step.error = `${step.target} no longer contains the integrated commit ${step.result.slice(0, 10)} (rewritten by someone else); nothing was forced`; return step.state }
   step.observed = observed
+  // A guarded binding: the target must not have changed under its paths
+  // since the run's merge base with it (the run built on what it saw).
+  const guards = (o.guards ?? []).filter(g => g.repo === step.repo)
+  if (guards.length && !(await isAncestor(dir, observed, candidate))) {
+    const base = (await gitOk(dir, ['merge-base', observed, candidate])).trim()
+    const paths = guards.flatMap(g => g.paths)
+    const moved = names(await gitOk(dir, ['diff', '--name-only', base, observed, ...(paths.includes('') ? [] : ['--', ...paths])]))
+    if (moved.length) {
+      step.state = 'target-changed'; step.files = moved
+      step.error = `${step.target} changed under the guarded binding${guards.length === 1 ? '' : 's'} ${guards.map(g => `${g.binding} (${g.paths.map(x => x || 'the repository').join(', ')})`).join(', ')} since this run built on it (${base.slice(0, 10)} → ${observed.slice(0, 10)}: ${moved.slice(0, 20).join(', ')}${moved.length > 20 ? ' …' : ''}); nothing was integrated: reassess against the current target in a successor run`
+      return step.state
+    }
+  }
   // Submodule commits the root must record: what each integration produced.
   const gitlinks = step.repo === '.' ? [...results.entries()] : []
   const linksMatch = async (commit: string) => {

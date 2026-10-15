@@ -183,7 +183,17 @@ test('holds, cancellation, decisions and adjustments by others are in the delta 
   assert.match(t, /run\.stop by Test Person[^\n]*: wait for Monday/)
   assert.match(t, /run\.resume by Test Person[^\n]*: Monday now/)
   assert.ok(t.indexOf('run.stop') < t.indexOf('run.resume'), 'in record order')
+  // A person's decision recorded during a wait: in the next delta and the state.
+  await report(space, ref, c2.attempt.id, { op: 'question.take-up', question: 'q1' })
+  await report(space, ref, c2.attempt.id, { op: 'question.ask', question: '', node: 'scope', text: 'Shall I go on?', to: 'Test Person' })
   await end(x, c2.attempt.id)
+  await person(space, ref, { op: 'run.decide', decision: 'rejected', evidence: 'the scope is wrong' })
+  await person(space, ref, { op: 'question.answer', question: 'q2', text: 'See my decision.', from: 'Test Person' })
+  await x.afterAnswer(space, ref, 'q2')
+  const c3 = await claim(x)
+  assert.match(c3.continuation!, /run\.decide by Test Person: the scope is wrong/)
+  assert.match(c3.continuation!, /Decision: rejected by Test Person at /)
+  await end(x, c3.attempt.id)
   // Cancelled while waiting: nothing is claimed, and the state read says so.
   await x.cancel(space, ref, 'Test Person', 'not needed', 'cli')
   const rec = await record(space, ref)

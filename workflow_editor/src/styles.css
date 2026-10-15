@@ -814,3 +814,9 @@ html[data-display="simple"] .q-text { font-size: 15px; line-height: 1.5; }
    wherever the page is scrolled (p8/ex1). */
 .topbar, .app-header { position: sticky; top: 0; z-index: 30; }
 .inspector, .run-side { top: 52px; max-height: calc(100vh - 52px); }
+
+/* p10: conversation links in the title band; one detailed IO entry in full */
+.conv-links { margin: 4px 0 0; }
+.conv-links .conv-link { font-weight: 600; }
+.io-main { max-width: 1100px; margin: 16px auto; padding: 0 16px; }
+.io-body { white-space: pre-wrap; word-break: break-word; background: var(--panel, #f6f7f9); border: 1px solid var(--border, #d9dde3); padding: 10px; border-radius: 6px; font-size: 12.5px; max-height: none; }

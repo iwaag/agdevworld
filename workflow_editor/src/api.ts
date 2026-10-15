@@ -104,6 +104,7 @@ export const api = {
     call<RunOpResponse>('POST', `${ws(id)}/runs/${encodeURIComponent(workflow)}/${encodeURIComponent(run)}/ops`, op),
   runExec: (id: string, workflow: string, run: string, signal?: AbortSignal) => call<RunExecView>('GET', `${ws(id)}/runs/${encodeURIComponent(workflow)}/${encodeURIComponent(run)}/exec`, undefined, [], signal),
   runNotify: (id: string, workflow: string, run: string, signal?: AbortSignal) => call<RunNotifyView>('GET', `${ws(id)}/runs/${encodeURIComponent(workflow)}/${encodeURIComponent(run)}/notify`, undefined, [], signal),
+  runIo: (id: string, workflow: string, run: string, attempt: string, line: number) => call<IoEntryView>('GET', `${ws(id)}/runs/${encodeURIComponent(workflow)}/${encodeURIComponent(run)}/io?attempt=${encodeURIComponent(attempt)}&line=${line}`),
   runPresentations: (id: string, workflow: string, run: string, signal?: AbortSignal) => call<{ presentations: PresentationView[] }>('GET', `${ws(id)}/runs/${encodeURIComponent(workflow)}/${encodeURIComponent(run)}/presentations`, undefined, [], signal),
   presentation: (id: string, workflow: string, run: string, p: string, action: 'start' | 'stop', by: string) => call<{ ok: boolean }>('POST', `${ws(id)}/runs/${encodeURIComponent(workflow)}/${encodeURIComponent(run)}/presentations/${encodeURIComponent(p)}/${action}`, { by }),
   adjustRun: (id: string, workflow: string, run: string, body: { text: string; reason: string; by: string; dryRun: boolean; expectRevision?: string; expectSeq?: number }) => call<AdjustView>('POST', `${ws(id)}/runs/${encodeURIComponent(workflow)}/${encodeURIComponent(run)}/adjust`, body, [422]),
@@ -125,4 +126,7 @@ export interface RunNotifyView {
   topic?: { url: string | null; channel: string; topic: string }
   request?: { url: string | null; channel: string; topic: string } // p6: the request topic the run was asked for in
   pending: number; failed: number; uncertain?: boolean; lastError?: string; lastSent?: string; provisioning?: string; viewBase: string | null
+  // p10: the run's detailed IO channel
+  io?: { state: 'disabled' | 'pending' | 'provisioned' | 'problem'; url: string | null; problem?: string; attempts: { attempt: string; line: number; gap: string | null; ended: boolean }[] }
 }
+export interface IoEntryView { attempt: string; line: number; entries: { line: number; kind: string; head: string; body?: string }[]; io?: RunNotifyView['io'] }

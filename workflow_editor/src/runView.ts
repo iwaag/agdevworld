@@ -336,7 +336,7 @@ export function renderRunView(root: HTMLElement, wsId: string, workflow: string,
     }))
     patchContent(titleMain,
       h('h1.run-name', { title: t.title }, t.title),
-      progress(rec), activity.el,
+      progress(rec), activity.el, conversationLinks(),
       h('p.run-lead.d-only', statusLine(rec)),
       h('p.wf-file.d-only', `${t.sub} · ${rec.definition.revisions?.length ? `adjusted, ${rec.definition.active ?? 'r1'} in force` : 'fixed snapshot'}`))
     const last = rec.decisions.at(-1)
@@ -359,6 +359,19 @@ export function renderRunView(root: HTMLElement, wsId: string, workflow: string,
       openDefinition.title = 'The editable, reusable definition in devdocs/workflows; this run follows its own fixed copy'
     }
     renderDetails(rec)
+  }
+
+  // Where the run's conversations are (p10): the request topic, its progress
+  // topic and its detailed IO channel — a link only once it opens.
+  function conversationLinks(): HTMLElement | null {
+    const v = notifyView
+    if (rev || !v?.configured) return null
+    const a = (label: string, url: string | null | undefined, title: string) => (url ? h('a.conv-link', { href: url, target: '_blank', rel: 'noopener', title }, label) : null)
+    const io = v.io && v.io.state !== 'disabled'
+      ? (v.io.url ? a('Detailed IO', v.io.url, 'The agent\'s messages, tool calls and results, attempt by attempt (Zulip)') : h('span.muted.small', { title: v.io.problem ?? 'the channel is being set up' }, v.io.state === 'problem' ? 'Detailed IO: not available' : 'Detailed IO: being set up'))
+      : null
+    const links = [a('Conversation', v.request?.url, 'The request topic: questions and answers (Zulip)'), a('Progress', v.topic?.url, 'The run\'s progress topic (Zulip)'), io].filter(Boolean)
+    return links.length ? h('p.conv-links.small', { dataset: { key: 'conv-links' } }, ...links.flatMap((l, i) => (i ? [' · ', l] : [l]))) : null
   }
 
   // Simple (p8/ex1): the authored work done, as a bar and a few words; the

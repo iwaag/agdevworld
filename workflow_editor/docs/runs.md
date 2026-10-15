@@ -623,6 +623,11 @@ progress in its run topic:
 | request topic | the request accepted (with the run topic's link), questions (with their id and how to reply), receipts of answers and instructions (recorded, not yet read), instructions taken up, holds and failures, the completed execution with the result's state, the decision, cancellation, and replies about posts that changed nothing (late, unclear, after completion, refused, routing problems) |
 | run topic | started (with the request topic's link), node reports, holds and failures, resumption, publication failures and recovery, the completed execution, the decision |
 
+Beside them, since p10 every run has a **detailed IO channel** — the
+agent's messages, tool calls and results, attempt by attempt, from the
+attempt logs; output only ([io.md](io.md)). The request receipt and the run
+topic's start link to it.
+
 Each destination is a conversation of its own in the notifier (`runs.kind`
 `request`, keyed `<project>/<workflow>/r<origin post>`, its place the
 intake's recorded topic, bound to the run): the same event sent to both is

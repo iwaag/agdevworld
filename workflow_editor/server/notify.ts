@@ -44,13 +44,15 @@ import {
 import type { IntakeStore, RequestRow } from './intake.ts'
 import { effectiveOf, notableEvents, openPresentations, questionState, runKey, type NotableEvent, type RunRecord, type RunRef } from '../shared/run.ts'
 import { assertWorkspaceAllowed, loadBoundary } from './boundary.ts'
-import type { CheckpointRow, ExecStore } from './exec.ts'
+import type { AttemptRow, CheckpointRow, ExecStore } from './exec.ts'
 import { git } from './git.ts'
 import { loadRegistry, observe } from './registry.ts'
 import { listRuns, readRun, runDir } from './runs.ts'
 import { named, openStore, transaction, type Migration } from './sqlite.ts'
 import { RequestError, Workspace } from './workspace.ts'
 import { runSpace } from './runspace.ts'
+import { chunk, entriesOf, ioConfig, ioDescription, ioKey, IO_TOPIC, readFrom, Redactor, renderEntry, type IoConfig, type ReaderState } from './io.ts'
+import { creationOf } from './observe.ts'
 
 // <area>/zulip.json — system configuration, outside every repository. No
 // credentials: the transport holds those.
@@ -61,6 +63,7 @@ export interface NotifyConfig {
   since: string // runs created before this are not announced (no backfill)
   person?: string // who decides results, as messages name them
   intake?: unknown // requests from Zulip (p6): read by server/intake.ts loadIntakeConfig
+  io?: unknown // detailed IO channels (p10): read by server/io.ts ioConfig
 }
 
 export function loadNotifyConfig(area: string): NotifyConfig | { problem: string } | null {
@@ -72,7 +75,7 @@ export function loadNotifyConfig(area: string): NotifyConfig | { problem: string
       return { problem: `${file} needs {"enabled": bool, "zulipUrl": text, "since": ISO time, "viewBase": URL or null}` }
     }
     if (raw.viewBase && /^https?:\/\/(localhost|127\.|\[::1\])/.test(raw.viewBase)) return { problem: `${file}: viewBase ${raw.viewBase} is reachable only on this host; set null or a URL remote readers reach` }
-    return { enabled: raw.enabled, zulipUrl: raw.zulipUrl, viewBase: raw.viewBase ?? null, since: raw.since, person: raw.person, ...(raw.intake !== undefined ? { intake: raw.intake } : {}) }
+    return { enabled: raw.enabled, zulipUrl: raw.zulipUrl, viewBase: raw.viewBase ?? null, since: raw.since, person: raw.person, ...(raw.intake !== undefined ? { intake: raw.intake } : {}), ...(raw.io !== undefined ? { io: raw.io } : {}) }
   } catch (e) {
     return { problem: `${file} cannot be read: ${(e as Error).message}` }
   }
@@ -92,7 +95,11 @@ export interface TargetRow { key: string; kind: 'folder' | 'channel'; project: s
 // (the request, then the parent's answers and instructions), keyed
 // <target project>/<target workflow>/<label>; `request` holds the
 // delegation uid, `bound` the child run once the intake created it.
-export interface RunRow { key: string; project: string; workflow: string; run: string; workspace: string; created: string; scan_seq: number; stream_id: number | null; channel: string | null; topic: string | null; last_message_id: number | null; problem: string | null; skipped: string | null; updated: string; kind: 'run' | 'request' | 'delegation'; request: string | null; bound: string | null }
+// p10 `io`: a run's detailed IO channel (one per run, topic `io`), keyed
+// <ioKey>/io; `request` holds the run uid.
+export interface RunRow { key: string; project: string; workflow: string; run: string; workspace: string; created: string; scan_seq: number; stream_id: number | null; channel: string | null; topic: string | null; last_message_id: number | null; problem: string | null; skipped: string | null; updated: string; kind: 'run' | 'request' | 'delegation' | 'io'; request: string | null; bound: string | null }
+// How far an attempt's log has become IO messages (p10).
+export interface IoAttemptRow { attempt: string; run_key: string; log: string | null; ino: number | null; offset: number; line: number; reader: string; began_queued: number; ended_queued: number; gap: string | null; updated: string }
 // What a delegation's outbox event carries: enough to find the parent's
 // record and the one answer or instruction it is (docs/delegation.md).
 export interface DelegationOutEvent { id: string; seq: number; type: 'delegation-request' | 'delegation-answer' | 'delegation-instruction'; at: string; by: string; critical: true; parent: { workspace: string; project: string; workflow: string; run: string }; delegation: string; uid: string; index: number; question?: string }
@@ -184,6 +191,14 @@ const MIGRATIONS: Migration[] = [
       ALTER TABLE runs ADD COLUMN kind TEXT NOT NULL DEFAULT 'run';
       ALTER TABLE runs ADD COLUMN request TEXT;
       ALTER TABLE runs ADD COLUMN bound TEXT;
+    `),
+  },
+  {
+    version: 4, // p10: detailed IO — how far each attempt's log was relayed
+    up: db => db.exec(`
+      CREATE TABLE io_attempts (attempt TEXT PRIMARY KEY, run_key TEXT NOT NULL, log TEXT, ino INTEGER, offset INTEGER NOT NULL DEFAULT 0, line INTEGER NOT NULL DEFAULT 0,
+        reader TEXT NOT NULL DEFAULT '{"tools":{},"format":null}', began_queued INTEGER NOT NULL DEFAULT 0, ended_queued INTEGER NOT NULL DEFAULT 0, gap TEXT, updated TEXT NOT NULL);
+      CREATE INDEX io_attempts_run ON io_attempts (run_key);
     `),
   },
 ]
@@ -347,6 +362,126 @@ export class NotifyStore {
     return key
   }
 
+  // ---- detailed IO (p10, server/io.ts) -------------------------------------------------------
+
+  private ioOf(cfg: NotifyConfig): IoConfig | null { return ioConfig(cfg.io) }
+  ioTargetOf(rec: RunRecord): TargetRow | undefined { return this.target(`channel:${ioKey(rec, creationOf(rec))}`) }
+
+  // The IO channel target and its conversation, once per run.
+  private ensureIo(workspace: string, rec: RunRecord) {
+    const creation = creationOf(rec)
+    const key = ioKey(rec, creation)
+    const uid = `${rec.project}/${rec.workflow}/${rec.run}#${creation}`
+    const name = fitName(`wf-${rec.project}.${rec.workflow}.${rec.run}.io`)
+    this.run('INSERT OR IGNORE INTO targets (key, kind, project, workflow, name, description, state, created, updated) VALUES (?, \'channel\', ?, ?, ?, ?, \'pending\', ?, ?)', `channel:${key}`, rec.project, `${rec.workflow}/${rec.run}@${creation}`, name, ioDescription(rec, creation, uid), now(), now())
+    this.run(`INSERT OR IGNORE INTO runs (key, project, workflow, run, workspace, created, channel, topic, kind, request, updated) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'io', ?, ?)`, `${key}/io`, rec.project, rec.workflow, rec.run, workspace, rec.created, name, IO_TOPIC, uid, now())
+  }
+
+  // Turns what each attempt of each IO-enabled run appended to its log into
+  // messages of the run's IO conversation (p10). Positions persist: nothing
+  // is relayed twice, a restart goes on where it stopped, and a log that is
+  // missing, truncated or replaced is said to be so, never shown as whole.
+  async ioScan(at = new Date()): Promise<string[]> {
+    const cfg = this.config()
+    if (!cfg || 'problem' in cfg || !cfg.enabled || !this.exec) return []
+    const io = this.ioOf(cfg)
+    if (!io) return []
+    const notes: string[] = []
+    const redact = await Redactor.from(io.secretFiles)
+    for (const r of this.all<RunRow>('SELECT * FROM runs WHERE kind = \'io\' AND problem IS NULL ORDER BY key')) {
+      const attempts = this.exec.db.prepare('SELECT a.*, j.kind AS job_kind, j.reason AS job_reason FROM attempts a LEFT JOIN jobs j ON j.id = a.job WHERE a.workspace = ? AND a.workflow = ? AND a.run = ? ORDER BY a.began').all(r.workspace, r.workflow, r.run) as unknown as (AttemptRow & { job_kind: string | null; job_reason: string | null })[]
+      // How each attempt ended as the record says it (an exit with work left
+      // running is an interruption there, whatever the exit code).
+      let ends: Map<string, string> | null = null
+      const endOf = async (attempt: string) => {
+        if (!ends) {
+          ends = new Map()
+          const w = (await loadRegistry(this.registryFile)).workspaces.find(x => x.id === r.workspace)
+          const rec = w ? (await readRun(await runSpace(new Workspace(w), { workflow: r.workflow, run: r.run }), { workflow: r.workflow, run: r.run }).catch(() => null))?.record : undefined
+          for (const h of rec?.history ?? []) if (h.op === 'attempt.end') ends.set((h as { attempt: string }).attempt, `${h.change.hold?.[1] ?? (h as { outcome: string }).outcome}${(h as { detail?: string }).detail ? `: ${(h as { detail?: string }).detail}` : ''}`)
+        }
+        return ends.get(attempt)
+      }
+      for (const a of attempts) {
+        try { notes.push(...await this.ioAttempt(r, a, cfg, redact, at, endOf)) } catch (e) { notes.push(`io ${r.key} ${a.id}: ${(e as Error).message}`) }
+      }
+    }
+    return notes
+  }
+
+  private async ioAttempt(r: RunRow, a: AttemptRow & { job_kind: string | null; job_reason: string | null }, cfg: NotifyConfig, redact: Redactor, at: Date, endOf: (attempt: string) => Promise<string | undefined>): Promise<string[]> {
+    this.run('INSERT OR IGNORE INTO io_attempts (attempt, run_key, log, updated) VALUES (?, ?, ?, ?)', a.id, r.key, a.log, now())
+    let row = this.one<IoAttemptRow>('SELECT * FROM io_attempts WHERE attempt = ?', a.id)!
+    if (row.ended_queued) return []
+    const out: string[] = []
+    const ord = () => (this.one<{ o: number | null }>('SELECT max(ord) AS o FROM outbox WHERE run_key = ?', r.key)?.o ?? 0) + 1
+    const queue = (id: string, text: string, type = 'io') => {
+      const res = this.run('INSERT OR IGNORE INTO outbox (id, run_key, ord, type, critical, event, state, created) VALUES (?, ?, ?, ?, 1, ?, \'pending\', ?)', `${r.key}#io:${a.id}:${id}`, r.key, ord(), type, JSON.stringify({ id: `${r.key}#io:${a.id}:${id}`, type, at: now(), text }), now())
+      if (Number(res.changes)) out.push(`queued io ${r.workflow}/${r.run} ${a.id} ${id}`)
+    }
+    const label = `${r.workflow}/${r.run}`
+    const full = (line: number) => cfg.viewBase ? `[open the whole entry](${cfg.viewBase.replace(/\/?$/, '/')}#/ws/${encodeURIComponent(r.workspace)}/run/${encodeURIComponent(r.workflow)}/${encodeURIComponent(r.run)}/io/${a.id}/${line})` : `\`wfe run io ${label} --attempt ${a.id} --line ${line}\` on the execution host`
+    if (!row.began_queued) {
+      queue('begin', `**Attempt ${a.id} began** ${a.began.replace('T', ' ').slice(0, 19)} UTC — ${a.job_kind ?? 'job'}${a.job_reason ? `: ${redact.apply(a.job_reason)}` : ''}${a.backend ? ` (${a.backend})` : ''}`)
+      this.run('UPDATE io_attempts SET began_queued = 1, updated = ? WHERE attempt = ?', now(), a.id)
+    }
+    if (a.log) {
+      const read = await readFrom(a.log, row.offset, row.line)
+      if (!read) {
+        if (a.state === 'ended' && row.gap !== 'missing') {
+          queue(`gap:missing`, `_The log of attempt ${a.id} is not on this host; its IO ${row.offset ? `after line ${row.line} ` : ''}cannot be shown here (a gap, not an empty attempt)._`, 'io-gap')
+          this.run('UPDATE io_attempts SET gap = ?, updated = ? WHERE attempt = ?', 'missing', now(), a.id)
+        }
+        if (a.state === 'ended') {
+          queue('end', `**Attempt ${a.id} ended** — ${redact.apply((await endOf(a.id)) ?? a.outcome ?? 'ended')} (its log is gone: the IO above is all this channel has of it).`, 'io')
+          this.run('UPDATE io_attempts SET ended_queued = 1, updated = ? WHERE attempt = ?', now(), a.id)
+        }
+      } else {
+        if ((row.ino !== null && read.ino !== row.ino) || read.size < row.offset) {
+          const what = row.ino !== null && read.ino !== row.ino ? 'replaced' : 'truncated'
+          queue(`gap:${row.offset}`, `_The log of attempt ${a.id} was ${what} after line ${row.line} (byte ${row.offset}); what it held beyond that point and was not yet shown is missing here (a gap)._`, 'io-gap')
+          this.run('UPDATE io_attempts SET gap = ?, ino = ?, offset = ?, line = ?, updated = ? WHERE attempt = ?', what, read.ino, what === 'replaced' ? 0 : read.size, what === 'replaced' ? 0 : row.line, now(), a.id)
+          return out // read the new content next pass, from its start
+        }
+        if (row.ino === null) this.run('UPDATE io_attempts SET ino = ? WHERE attempt = ?', read.ino, a.id)
+        if (read.lines.length) {
+          const reader = JSON.parse(row.reader) as ReaderState
+          const entries = entriesOf(read.lines, reader)
+          const rendered = entries.map(e => ({ line: e.line, text: renderEntry(e, redact, full) }))
+          const size = rendered.reduce((n, x) => n + x.text.length, 0)
+          // While the attempt writes, small increments wait a little to be one message.
+          const settled = a.state === 'ended' || size >= 1500 || at.getTime() - read.mtimeMs > 15_000 || read.offset < read.size
+          if (settled) {
+            for (const c of chunk(rendered)) queue(`L${c.from}-${c.to}`, `_${a.id} · log ${c.from === c.to ? `line ${c.from}` : `lines ${c.from}–${c.to}`}_\n\n${c.text}`)
+            this.run('UPDATE io_attempts SET offset = ?, line = ?, reader = ?, updated = ? WHERE attempt = ?', read.offset, read.line, JSON.stringify(reader), now(), a.id)
+            row = this.one<IoAttemptRow>('SELECT * FROM io_attempts WHERE attempt = ?', a.id)!
+          }
+        }
+        if (a.state === 'ended' && row.offset >= read.size) {
+          const recorded = await endOf(a.id)
+          queue('end', `**Attempt ${a.id} ended** — ${redact.apply(recorded ?? a.outcome ?? 'ended')}${a.exit_code !== null && a.exit_code !== undefined ? ` (process exit ${a.exit_code})` : a.signal ? ` (process signal ${a.signal})` : ''}.`, 'io')
+          this.run('UPDATE io_attempts SET ended_queued = 1, updated = ? WHERE attempt = ?', now(), a.id)
+        }
+      }
+    }
+    if (!a.log && a.state === 'ended') {
+      queue('end', `**Attempt ${a.id} ended** — ${redact.apply((await endOf(a.id)) ?? a.outcome ?? 'ended')} (no log was kept).`, 'io')
+      this.run('UPDATE io_attempts SET ended_queued = 1, updated = ? WHERE attempt = ?', now(), a.id)
+    }
+    return out
+  }
+
+  // The IO channel of a run as views state it.
+  ioStatus(rec: RunRecord): { state: 'disabled' | 'pending' | 'provisioned' | 'problem'; url: string | null; problem?: string; attempts: { attempt: string; line: number; gap: string | null; ended: boolean }[] } {
+    const cfg = this.config()
+    if (!cfg || 'problem' in cfg || !this.ioOf(cfg) || Date.parse(rec.created) < Date.parse(this.ioOf(cfg)!.since)) return { state: 'disabled', url: null, attempts: [] }
+    const t = this.ioTargetOf(rec)
+    const key = `${ioKey(rec, creationOf(rec))}/io`
+    const attempts = this.all<IoAttemptRow>('SELECT * FROM io_attempts WHERE run_key = ? ORDER BY rowid', key).map(x => ({ attempt: x.attempt, line: x.line, gap: x.gap, ended: !!x.ended_queued }))
+    if (!t) return { state: 'pending', url: null, attempts }
+    return { state: t.state, url: t.state === 'provisioned' && t.zulip_id ? topicUrl(cfg.zulipUrl, t.zulip_id, t.name, IO_TOPIC) : null, ...(t.problem ? { problem: t.problem } : {}), attempts }
+  }
+
   // A delegation's conversation row (p10), created with its request topic.
   private delegationThread(workspace: string, rec: RunRecord, d: NonNullable<RunRecord['delegations']>[string]): string {
     const label = delegationLabel(rec, d.id)
@@ -423,6 +558,9 @@ export class NotifyStore {
     }
     const added: string[] = []
     const reqKey = req ? this.requestThread(req) : null
+    // The run's detailed IO channel (p10), from its creation on.
+    const io = this.ioOf(cfg)
+    if (io && Date.parse(rec.created) >= Date.parse(io.since)) this.ensureIo(ws.reg.id, rec)
     const insert = (id: string, ord: number, type: string, critical: boolean, event: unknown, thread = key) => {
       const r = this.run('INSERT OR IGNORE INTO outbox (id, run_key, ord, type, critical, event, state, created) VALUES (?, ?, ?, ?, ?, ?, \'pending\', ?)', id, thread, ord, type, critical ? 1 : 0, JSON.stringify(event), now())
       if (Number(r.changes)) added.push(id)
@@ -432,6 +570,12 @@ export class NotifyStore {
     if (reqKey) {
       const first = rec.history[0]
       insert(`${key}#1:accepted${REQUEST_SUFFIX}`, 1, 'accepted', false, { id: `${key}#1:accepted`, seq: 1, type: 'accepted', at: first.at, by: first.by, critical: false, text: '' }, reqKey)
+      // The receipt went out before the IO channel existed: its link follows (p10).
+      const t = io ? this.ioTargetOf(rec) : undefined
+      if (t?.state === 'provisioned') {
+        const sent = this.one<{ content: string | null }>(`SELECT d.content FROM outbox o JOIN delivery_events e ON e.event = o.id JOIN deliveries d ON d.id = e.delivery WHERE o.id = ? AND o.state = 'sent'`, `${key}#1:accepted${REQUEST_SUFFIX}`)
+        if (sent && !sent.content?.includes('Detailed IO: http')) insert(`${key}#1:io-ready${REQUEST_SUFFIX}`, 1.5, 'io-ready', false, { id: `${key}#1:io-ready`, seq: 1, type: 'io-ready', at: now(), by: 'wfe', critical: false, text: '' }, reqKey)
+      }
     }
     if (rec.seq > row.scan_seq) {
       // Events of one entry keep the order the selection gives them; each
@@ -523,6 +667,7 @@ export class NotifyStore {
     const e = this.enabled()
     if ('disabled' in e) return { protocol: NOTIFY_PROTOCOL, disabled: e.disabled, provision: [], problems: e.problems }
     await this.scan()
+    await this.ioScan().catch(() => [])
     const provision: ProvisionTask[] = []
     for (const t of this.all<TargetRow>('SELECT * FROM targets ORDER BY kind DESC, key')) {
       if (t.state !== 'pending') continue
@@ -604,6 +749,10 @@ export class NotifyStore {
   // Where the run's messages go now: its binding (which follows moves), or
   // the workflow's channel and the run's topic.
   private destination(r: RunRow): Destination | null {
+    if (r.kind === 'io' && !r.stream_id) {
+      const t = this.all<TargetRow>('SELECT * FROM targets WHERE key = ?', `channel:${r.key.slice(0, -'/io'.length)}`)[0]
+      return t?.state === 'provisioned' && t.zulip_id ? { streamId: t.zulip_id, channel: t.name, topic: IO_TOPIC } : null
+    }
     if (r.kind === 'delegation' && !r.stream_id) {
       const channel = this.target(`channel:${r.project}/${r.workflow}`)
       return channel?.state === 'provisioned' && r.topic ? { streamId: channel.zulip_id!, channel: channel.name, topic: r.topic } : null
@@ -704,6 +853,11 @@ export class NotifyStore {
 
   private async render(r: RunRow, batch: OutboxRow[], cfg: NotifyConfig, at: Date): Promise<{ content: string; marker: string; unpublished: string[] }> {
     if (r.kind === 'delegation') return this.renderDelegation(batch[0], cfg)
+    if (r.kind === 'io') {
+      const ev = JSON.parse(batch[0].event) as { text: string }
+      const marker = `ref io ${r.workflow}/${r.run} ${markerToken(batch[0].id)}`
+      return { content: `${ev.text}\n${marker}`, marker, unpublished: [] }
+    }
     const ws = await this.workspaceOf(r)
     const inRequest = r.kind === 'request'
     const runId = inRequest ? r.bound : r.run
@@ -716,6 +870,26 @@ export class NotifyStore {
     const space = ws && runId ? await runSpace(ws, ref).catch(() => null) : null
     const links = space ? await this.links(space, ref) : new Map<string, DocLink>()
     const marker = `ref ${label} ${batch.map(o => markerToken(o.id)).join(' ')}`
+    // The run's IO channel now (p10): its link, or that it is being set up.
+    const ioState = rec && this.ioOf(cfg) ? this.ioStatus(rec) : null
+    // Each delegation's child, followed where it lives (p10).
+    const children = new Map<string, { conversation?: string; progress?: string; io?: string; run?: string }>()
+    for (const d of Object.values(rec?.delegations ?? {})) {
+      if (!d.child) continue
+      const cref = { workflow: d.child.workflow, run: d.child.run }
+      const st = this.runStatus(d.child.project, cref)
+      const w = (await loadRegistry(this.registryFile)).workspaces.find(x => x.id === d.child!.workspace)
+      const crec = w ? (await readRun(await runSpace(new Workspace(w), cref), cref).catch(() => null))?.record : undefined
+      const cio = crec ? this.ioStatus(crec) : null
+      children.set(d.id, {
+        ...(st.request?.url ? { conversation: st.request.url } : {}), ...(st.topic?.url ? { progress: st.topic.url } : {}), ...(cio?.url ? { io: cio.url } : {}),
+        ...(cfg.viewBase ? { run: `${cfg.viewBase.replace(/\/?$/, '/')}#/ws/${encodeURIComponent(d.child.workspace)}/run/${encodeURIComponent(cref.workflow)}/${encodeURIComponent(cref.run)}` } : {}),
+      })
+    }
+    if (batch[0].type === 'io-ready') {
+      const content = ioState?.url ? `**Detailed IO** of run ${label} is ready: ${ioState.url} — the agent's messages, tool calls and results, attempt by attempt.\n${marker}` : `**Detailed IO** of run ${label} could not be set up${ioState?.problem ? `: ${ioState.problem}` : ''}.\n${marker}`
+      return { content, marker, unpublished: [] }
+    }
     if (batch[0].type === 'notice') {
       const e = JSON.parse(batch[0].event) as { kind: NoticeKind; post: number; stream: number; topic: string; classification: null; text: string }
       const content = renderNotice({ kind: e.kind, post: messageUrl(cfg.zulipUrl, e.stream, r.channel ?? '', e.topic, e.post), classification: e.classification, detail: e.text, ref: label, executor: rec?.executor.name ?? 'the agent', marker })
@@ -735,7 +909,8 @@ export class NotifyStore {
       if (!l.url && !l.commit) unpublished.push(path)
       return l
     }
-    const runView = cfg.viewBase ? `${cfg.viewBase.replace(/\/?$/, '/')}#/ws/${encodeURIComponent(r.workspace)}/run/${encodeURIComponent(r.workflow)}/${encodeURIComponent(r.run)}` : undefined
+    // The run itself, also from its request topic (whose row is keyed by the request).
+    const runView = cfg.viewBase ? `${cfg.viewBase.replace(/\/?$/, '/')}#/ws/${encodeURIComponent(r.workspace)}/run/${encodeURIComponent(r.workflow)}/${encodeURIComponent(ref.run)}` : undefined
     const answerRoute = (q: string) => inRequest
       ? `reply in this topic — quote this message, or start your reply with \`${q || 'q<n>'}:\`.`
       : req && requestTopic ? `in the request topic: ${requestTopic}`
@@ -765,6 +940,8 @@ export class NotifyStore {
       now: at, next: nextOf(), person: cfg.person,
       conversation: inRequest ? 'request' : 'run', runTopic: inRequest ? runTopic : undefined, requestTopic: inRequest ? undefined : requestTopic,
       decision: rec?.decisions.length ? (d => ({ decision: d.decision, by: d.by, question: d.confirmation?.question, from: d.confirmation?.from }))(rec.decisions.at(-1)!) : undefined,
+      ...(ioState && ioState.state !== 'disabled' ? { io: ioState.url ?? 'pending' } : {}),
+      child: id => children.get(id) ?? null,
     }
     const events = batch.map(o => JSON.parse(o.event) as NotableEvent & { checkpoint?: number; state?: string; detail?: string; docs?: string[] })
     let content: string
@@ -1055,6 +1232,14 @@ export class NotifyStore {
       pending, failed: d && ['failed', 'unresolved'].includes(d.state) ? 1 : 0, uncertain: !!d && (!!d.uncertain || d.state === 'sending'),
       lastError: d?.last_error ?? undefined, lastSent: last?.sent_at ?? undefined, provisioning, viewBase: cfg.viewBase,
     }
+  }
+
+  // runStatus with the run's IO channel (p10); the record is read by the caller.
+  async runStatusOf(project: string, ws: Workspace, ref: RunRef): Promise<ReturnType<NotifyStore['runStatus']> & { io?: ReturnType<NotifyStore['ioStatus']> }> {
+    const st = this.runStatus(project, ref)
+    if (!st.configured) return st
+    const rec = (await readRun(await runSpace(ws, ref), ref).catch(() => null))?.record
+    return rec ? { ...st, io: this.ioStatus(rec) } : st
   }
 
   overview(): { targets: TargetRow[]; runs: (RunRow & { pending: number; failed: number; uncertain: number })[]; sender: SenderRow | null } {

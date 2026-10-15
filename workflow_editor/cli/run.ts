@@ -64,6 +64,12 @@ and run.json (docs/runs.md).
   --recorded-by <name> who saved a braindump (default --by).
 Nothing is committed. Result: the run reference, folder and files written.
 Exit 0 created; 1 refused (an invalid definition, an existing run …).`,
+  io: `wfe run io <run> [--attempt <id> --line <n>]
+
+The run's detailed IO (p10): its Zulip channel (one per run) and, per
+attempt, how far its log was relayed and any gap. With --attempt and
+--line, one entry of that attempt's log in full — what a cut IO message
+links to — redacted like the messages. Reads only; never the raw log.`,
   list: `wfe run list [<workflow>]
 
 Lists the runs of the project (or of one workflow): execution state, node
@@ -385,6 +391,7 @@ export function runIndex(): string {
   recover <run>            a recovering agent continues an interrupted/unknown hold (incident, attempt)
   session <run>            the run's harness sessions; --retire ends the current one
   events <run>             notification-worthy events (selection only)
+  io <run>                 the run's detailed IO channel; one IO entry in full (--attempt, --line)
   ask / answer / take-up / withdraw    questions
   instructions / instruct / ack       additional instructions: list, give, acknowledge
   access <run> [<path>]... what the run's definition declares for a path
@@ -782,6 +789,18 @@ export async function runCommand(c: RunCli): Promise<number> {
       const ids = args.slice(1)
       if (!ids.length) throw c.usage('<instruction>... is required (i1 i2 …)')
       return op({ op: 'instruction.ack', instructions: ids, response: need(c, 'response', 'incorporate, clarify or new-run'), note: need(c, 'note', 'what you will do about it') }, () => `Recorded: ${ids.join(', ')} acknowledged.`)
+    }
+    case 'io': {
+      const r = await ref()
+      const { ioEntries } = await import('../server/ioview.ts')
+      const line = c.opt('line') !== undefined ? Number(c.opt('line')) : undefined
+      const v = await wrap(() => ioEntries(c.area(), c.exec(), ws, r, c.opt('attempt'), line))
+      const io = v.io
+      const head = !io || io.state === 'disabled' ? 'Detailed IO: not enabled for this run (zulip.json io, runs created since its since).' : `Detailed IO: ${io.state}${io.url ? ` — ${io.url}` : ''}${io.problem ? ` (${io.problem})` : ''}`
+      const attempts = (io?.attempts ?? []).map(a => `  ${a.attempt}: relayed through log line ${a.line}${a.ended ? ', ended' : ''}${a.gap ? `, GAP (${a.gap})` : ''}`)
+      const entries = v.entries.flatMap(e => [`--- line ${e.line} ${e.kind}${e.head ? `: ${e.head}` : ''}`, ...(e.body !== undefined ? [e.body] : [])])
+      c.out([head, ...attempts, ...entries].join('\n'), v)
+      return 0
     }
     case 'events': {
       const r = await ref()

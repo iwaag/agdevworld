@@ -1,11 +1,13 @@
 // Hash routes: #/ (projects, create and register), #/nodes (user nodes, p7/ex1), #/ws/<workspace>
 // (project editor), #/ws/<workspace>/wf/<file> (workflow editor) and
-// #/ws/<workspace>/run/<workflow>/<run>[/at/<devdocs commit>] (run view).
+// #/ws/<workspace>/run/<workflow>/<run>[/at/<devdocs commit>] (run view) and
+// #/ws/<workspace>/run/<workflow>/<run>/io/<attempt>/<line> (one IO entry in full, p10).
 import './styles.css'
 import { renderHomeView } from './homeView.ts'
 import { renderNodesView } from './nodesView.ts'
 import { renderProjectView } from './projectView.ts'
 import { renderRunView } from './runView.ts'
+import { renderIoEntry } from './ioEntryView.ts'
 import { renderWorkflowView } from './workflowView.ts'
 
 const app = document.getElementById('app')!
@@ -24,7 +26,9 @@ function route() {
   dispose?.(); current = undefined
   const parts = location.hash.replace(/^#\/?/, '').split('/').filter(Boolean).map(decodeURIComponent)
   app.replaceChildren()
-  if (parts[0] === 'ws' && parts[1] && parts[2] === 'run' && parts[3] && parts[4]) {
+  if (parts[0] === 'ws' && parts[1] && parts[2] === 'run' && parts[3] && parts[4] && parts[5] === 'io' && parts[6] && parts[7]) {
+    current = renderIoEntry(app, parts[1], parts[3], parts[4], parts[6], Number(parts[7]))
+  } else if (parts[0] === 'ws' && parts[1] && parts[2] === 'run' && parts[3] && parts[4]) {
     current = renderRunView(app, parts[1], parts[3], parts[4], parts[5] === 'at' ? parts[6] : undefined)
   } else if (parts[0] === 'ws' && parts[1] && parts[2] === 'wf' && parts[3]) {
     current = renderWorkflowView(app, parts[1], parts[3])

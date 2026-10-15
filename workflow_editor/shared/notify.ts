@@ -71,6 +71,12 @@ export interface RenderContext {
   // which presentations are still open (cleanup pending).
   presentation?: (id: string) => { url: string; local: boolean; live: boolean } | null
   openPresentations?: string[]
+  // p10: the run's detailed IO channel — its link, or 'pending' while it is
+  // being set up (then a follow-up message gives the link). Absent: none.
+  io?: string | 'pending'
+  // p10: where a delegation's child is followed — its conversation, progress,
+  // detailed IO and run view — as links (absent ones are left out).
+  child?: (delegation: string) => { conversation?: string; progress?: string; io?: string; run?: string } | null
 }
 
 const cut = (text: string, n: number) => { const t = text.replace(/\s+/g, ' ').trim(); return t.length > n ? `${t.slice(0, Math.max(0, n - 1))}…` : t }
@@ -79,6 +85,16 @@ const TEXT_LIKE = /\.(md|txt|json|ya?ml|csv|html?|py|js|ts|svg)$/i
 const docText = (d: DocLink) => (d.url ? (d.raw && !TEXT_LIKE.test(d.name) ? `[${d.name}](${d.raw}) ([view](${d.url}))` : `[${d.name}](${d.url})`) : d.commit ? `${d.name} (published at ${d.commit.slice(0, 7)}; no web link for its repository)` : `${d.name} (not yet published: only on the execution host)`)
 const when = (iso: string) => iso.replace('T', ' ').slice(0, 16) + ' UTC'
 
+// The detailed IO line (p10): a working link, or a plain statement that it
+// is being set up — never a link that does not open yet.
+// The child of a delegation, followed where it lives (never copied here).
+const childLine = (c: RenderContext, d?: string) => {
+  const l = d ? c.child?.(d) : null
+  const parts = l ? [l.conversation && `[conversation](${l.conversation})`, l.progress && `[progress](${l.progress})`, l.io && `[detailed IO](${l.io})`, l.run && `[run view](${l.run})`].filter(Boolean) : []
+  return parts.length ? [`Child: ${parts.join(' · ')}`] : []
+}
+const ioLine = (c: RenderContext) => (c.io === undefined ? [] : c.io === 'pending' ? ['Detailed IO: being set up; a follow-up message here gives its link.'] : [`Detailed IO: ${c.io}`])
+
 // One event: its lines, the free text kept apart so the budget can shorten it.
 function lines(e: NotableEvent, c: RenderContext): { head: string; free: string; tail: string[] } {
   const node = e.node ? c.label(e.node) : ''
@@ -86,8 +102,8 @@ function lines(e: NotableEvent, c: RenderContext): { head: string; free: string;
   const subject = e.subject?.length ? e.subject.map(p => docText(c.link(p))).join(', ') : ''
   const inRequest = c.conversation === 'request'
   switch (e.type) {
-    case 'accepted': return { head: `**Request received** — ${c.executor} performs it as run ${c.ref}.`, free: '', tail: [...(c.runTopic ? [`Progress: ${c.runTopic}`] : []), ...(c.next ? [`Next: ${c.next}`] : []), 'Reply here: answers to questions, further instructions.'] }
-    case 'started': return { head: `**Started** — ${c.executor} took up the request${c.request ? ':' : '.'}`, free: c.request ? `“${c.request}”` : '', tail: [...(c.requestTopic ? [`Request and conversation: ${c.requestTopic}`] : []), ...(c.next ? [`Next: ${c.next}`] : [])] }
+    case 'accepted': return { head: `**Request received** — ${c.executor} performs it as run ${c.ref}.`, free: '', tail: [...(c.runTopic ? [`Progress: ${c.runTopic}`] : []), ...ioLine(c), ...(c.next ? [`Next: ${c.next}`] : []), 'Reply here: answers to questions, further instructions.'] }
+    case 'started': return { head: `**Started** — ${c.executor} took up the request${c.request ? ':' : '.'}`, free: c.request ? `“${c.request}”` : '', tail: [...(c.requestTopic ? [`Request and conversation: ${c.requestTopic}`] : []), ...ioLine(c), ...(c.next ? [`Next: ${c.next}`] : [])] }
     case 'presented': {
       const at = e.presentation ? c.presentation?.(e.presentation) : null
       const where = at ? (at.live ? `[Open the review](${at.url})${at.local ? ' — opens on the execution host (this address is local to it)' : ''}` : `no longer served (${at.url} was its address)`) : 'its address is not known on this host'
@@ -136,7 +152,7 @@ function lines(e: NotableEvent, c: RenderContext): { head: string; free: string;
     case 'integrated': return { head: '**Integrated** — the accepted result is on the project\'s shared branches:', free: e.text, tail: [] }
     // p10: this run entrusted a node's work to another workflow, and what came back.
     case 'delegated': return { head: `**Delegated** — ${node} to ${e.holder} (${e.delegation}); the request is posted in that workflow's channel.`, free: '', tail: c.next ? [`Next: ${c.next}`] : [] }
-    case 'delegation': return { head: `**${e.holder} — ${e.delegationEvent === 'completed' ? 'result delivered' : e.delegationEvent === 'failed' ? 'failure' : 'cancelled'}** for ${node} (${e.delegation}):`, free: e.text, tail: [`Next: ${c.executor} reviews it.`] }
+    case 'delegation': return { head: `**${e.holder} — ${e.delegationEvent === 'completed' ? 'result delivered' : e.delegationEvent === 'failed' ? 'failure' : 'cancelled'}** for ${node} (${e.delegation}):`, free: e.text, tail: [...childLine(c, e.delegation), `Next: ${c.executor} reviews it.`] }
   }
 }
 

@@ -339,7 +339,13 @@ export function createHandler(config: ServiceConfig) {
         if (sub === 'notify' && method === 'GET') {
           const { NotifyStore } = await import('./notify.ts')
           const n = new NotifyStore({ area, registryFile: config.registryFile, exec: config.exec })
-          try { return send(res, 200, n.runStatus((await ws.readProject()).project?.id ?? '', ref)) } finally { n.close() }
+          try { return send(res, 200, await n.runStatusOf((await ws.readProject()).project?.id ?? '', ws, ref)) } finally { n.close() }
+        }
+        // Detailed IO (p10): one entry of an attempt's log in full, redacted
+        // like its messages (?attempt=&line=); without them, the IO status.
+        if (sub === 'io' && method === 'GET') {
+          const { ioEntries } = await import('./ioview.ts')
+          return send(res, 200, await ioEntries(area, needExec(), ws, ref, url.searchParams.get('attempt') ?? undefined, url.searchParams.get('line') ? Number(url.searchParams.get('line')) : undefined))
         }
         if (sub === 'checkpoints' && parts[7] && parts[8] === 'publish' && method === 'POST') return send(res, 200, await needExec().publishCheckpoint(Number(parts[7])))
         // What undoing the run involves (p9): facts, never an operation.

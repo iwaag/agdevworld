@@ -349,7 +349,7 @@ test('migration: sent evidence, bindings and pending work survive; legacy uncert
   db.close()
 
   const n = new NotifyStore({ area: dir, registryFile: join(dir, 'registry.json') })
-  assert.equal((n.db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, 3, 'p6 adds the request conversations')
+  assert.equal((n.db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, 4, 'p6 adds the request conversations; p10 the IO positions')
   const out = Object.fromEntries(n.outbox().map(o => [o.id, o]))
   assert.equal(out['p/w/run-001#2:started'].message_id, 500)
   assert.equal(out['p/w/run-001#3:reported'].state, 'sent')

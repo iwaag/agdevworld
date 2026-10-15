@@ -232,3 +232,11 @@ test('a new workflow file reads back as the same model', async () => {
   assert.deepEqual(r.model, w)
   assert.match(text, /^# Workflow definition/)
 })
+
+test('the plain-JS SHA-256 (pages opened over LAN HTTP have no Web Crypto) agrees with Node\'s', async () => {
+  const { createHash } = await import('node:crypto')
+  const { sha256Plain } = await import('../shared/canonical.ts')
+  for (const text of ['', 'abc', 'a'.repeat(55), 'a'.repeat(56), 'a'.repeat(64), 'ワークフロー 🙂'.repeat(40), JSON.stringify({ x: [1, 2, 3] }).repeat(500)]) {
+    assert.equal(sha256Plain(new TextEncoder().encode(text)), createHash('sha256').update(text).digest('hex'), `${text.length} chars`)
+  }
+})

@@ -8,7 +8,7 @@ import assert from 'node:assert/strict'
 import { appendFile, mkdtemp, rm, truncate, unlink, utimes, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { chunk, entriesOf, IO_MESSAGE_MAX, Redactor, renderEntry, type ReaderState } from '../server/io.ts'
+import { chunk, entriesOf, entryAt, IO_MESSAGE_MAX, readFrom, Redactor, renderEntry, type ReaderState } from '../server/io.ts'
 import { createProject } from '../server/create.ts'
 import { ExecStore } from '../server/exec.ts'
 import { gitOk } from '../server/git.ts'
@@ -76,6 +76,24 @@ test('messages: long output is cut with a pointer to the whole; mentions do not 
 
 // ---- through the notifier ----------------------------------------------------------------
 
+test('log reading: a line can exceed the batch budget; incomplete UTF-8 lines wait for their newline', async () => {
+  const path = join(root, 'long-lines.jsonl')
+  const text = 'a'.repeat(7) + '日本語'.repeat(20)
+  await writeFile(path, text)
+  const partial = await readFrom(path, 0, 0, 8)
+  assert.ok(partial)
+  assert.deepEqual([partial.lines, partial.offset, partial.line], [[], 0, 0], 'an unfinished line is not parsed or consumed')
+  await appendFile(path, '\nnext\n')
+  const first = await readFrom(path, 0, 0, 8)
+  assert.ok(first)
+  assert.deepEqual(first.lines, [{ n: 1, text }], 'chunks are decoded together without corrupting multibyte characters')
+  assert.equal(first.offset, Buffer.byteLength(text + '\n'))
+  const next = await readFrom(path, first.offset, first.line, 8)
+  assert.ok(next)
+  assert.deepEqual(next.lines, [{ n: 2, text: 'next' }])
+  assert.equal(next.offset, next.size)
+})
+
 const WF = `schema: ag.workflow.v2
 id: make
 name: Make
@@ -136,6 +154,36 @@ async function pass(s: S, o: { provision?: boolean; fail?: boolean } = {}) {
   return sent
 }
 const io = <T extends { run: string }>(sent: T[]) => sent.filter(m => m.run.endsWith('/io'))
+
+test('a tool result larger than 2 MiB is relayed once, links to the full entry and does not block later output', async () => {
+  const s = await setup()
+  try {
+    await s.x.request({ workspace: s.ws.reg.id, workflow: 'make', text: 'Make it.', author: 'Pat', receipt: 'io-long-result', via: 'browser' })
+    const c = await s.x.claim('test')
+    assert.ok('attempt' in c)
+    const log = c.attempt.log!
+    const output = 'large result: ' + '日本語'.repeat(250_000) + ' END OF LARGE RESULT'
+    const large = result('big', output)
+    assert.ok(Buffer.byteLength(large) > 2 * 1024 * 1024)
+    await writeFile(log, [init, call('big', 'produce a large result'), large, said('Work after the large result.'), done, ''].join('\n'))
+    await s.x.finished(c.attempt.id, { code: 0, signal: null })
+    const sent = io(await pass(s))
+    const body = sent.map(m => m.content).join('\n')
+    assert.match(body, /← Bash/)
+    assert.match(body, /open the whole entry/)
+    assert.match(body, /Work after the large result\./)
+    assert.match(body, new RegExp(`Attempt ${c.attempt.id} ended`))
+    assert.ok(!body.includes('PRIVATE REASONING'))
+    const full = await entryAt(log, 3)
+    assert.equal(full[0].body, output, 'the linked line retains the complete result')
+    assert.equal(full[0].head, '← Bash')
+    const status = await s.n.runStatusOf('p', s.ws, c.ref)
+    assert.deepEqual(status.io?.attempts.map(a => [a.line, a.ended, a.gap]), [[5, true, null]])
+    s.n.close()
+    s.n = new NotifyStore({ area: s.area, registryFile: s.registry, exec: s.x })
+    assert.equal(io(await pass(s)).length, 0, 'restart does not replay the large result')
+  } finally { s.n.close(); s.x.close() }
+})
 
 test('one IO channel per run: attempts, entries and boundaries in order; positions survive a restart; gaps are said; output only', async () => {
   const s = await setup()

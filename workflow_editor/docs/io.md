@@ -72,6 +72,12 @@ Both show the entry redacted the same way, never the raw log. While an
 attempt writes, small increments wait for about 15 s of quiet (or 1500
 characters) so one burst of work is one message.
 
+The normal log-reading batch is 2 MiB. A single JSON line larger than that
+is read through its newline, within the file size observed at the start of
+the pass, and rendered with the same excerpt and full-entry link. Incomplete
+lines wait for a later pass. Memory for that read scales with the line's
+size; the batch budget is not a maximum supported entry size.
+
 ## Durability
 
 - Positions persist in the notifier's store (`io_attempts`: per attempt the

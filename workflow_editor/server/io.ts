@@ -150,8 +150,11 @@ export function entriesOf(lines: { n: number; text: string }[], st: ReaderState)
   return out
 }
 
-// Reads the complete lines appended to a log since `offset`, at most `max`
-// bytes. `lines` carry their 1-based numbers.
+// Reads complete lines appended since `offset`. `max` is the usual batch
+// budget; a single longer line is read through its newline so it cannot
+// stall every later entry. Read only the size observed at the start, even
+// while the log is growing. Incomplete lines wait for a later pass, and
+// chunks are decoded together so UTF-8 and JSON are never split.
 export async function readFrom(path: string, offset: number, line: number, max = 2 * 1024 * 1024): Promise<{ lines: { n: number; text: string }[]; offset: number; line: number; size: number; ino: number; mtimeMs: number } | null> {
   const st = await stat(path).catch(() => null)
   if (!st?.isFile()) return null
@@ -161,10 +164,29 @@ export async function readFrom(path: string, offset: number, line: number, max =
     const want = Math.min(st.size - offset, max)
     const buf = Buffer.alloc(want)
     const { bytesRead } = await fh.read(buf, 0, want, offset)
-    const end = buf.subarray(0, bytesRead).lastIndexOf(0x0a)
-    if (end < 0) return { lines: [], offset, line, size: st.size, ino: st.ino, mtimeMs: st.mtimeMs }
-    const lines = buf.subarray(0, end).toString('utf8').split('\n').map((text, i) => ({ n: line + i + 1, text }))
-    return { lines, offset: offset + end + 1, line: line + lines.length, size: st.size, ino: st.ino, mtimeMs: st.mtimeMs }
+    let end = buf.subarray(0, bytesRead).lastIndexOf(0x0a)
+    let complete = buf.subarray(0, Math.max(0, end))
+    let consumed = end + 1
+    if (end < 0) {
+      const parts = [buf.subarray(0, bytesRead)]
+      let scanned = bytesRead
+      while (bytesRead > 0 && offset + scanned < st.size) {
+        const next = Buffer.alloc(Math.min(max, st.size - offset - scanned))
+        const read = await fh.read(next, 0, next.length, offset + scanned)
+        if (!read.bytesRead) break // the file may have been truncated
+        end = next.subarray(0, read.bytesRead).indexOf(0x0a)
+        parts.push(next.subarray(0, end < 0 ? read.bytesRead : end))
+        if (end >= 0) {
+          consumed = scanned + end + 1
+          complete = Buffer.concat(parts)
+          break
+        }
+        scanned += read.bytesRead
+      }
+      if (end < 0) return { lines: [], offset, line, size: st.size, ino: st.ino, mtimeMs: st.mtimeMs }
+    }
+    const lines = complete.toString('utf8').split('\n').map((text, i) => ({ n: line + i + 1, text }))
+    return { lines, offset: offset + consumed, line: line + lines.length, size: st.size, ino: st.ino, mtimeMs: st.mtimeMs }
   } finally { await fh.close() }
 }
 

@@ -92,12 +92,65 @@ the end's detail.
 
 ## Continuation
 
-A new session gets the whole bootstrap (common contract, project guides,
-brief). A resumed one gets a continuation: the new attempt id, that earlier
-attempt ids in the conversation are ended (their reports are refused) and
-earlier processes are gone, that memory is context and the record decides,
-the brief, and the command to read the run. Contract and guides are not
-appended again: they are unchanged, or the session would have been replaced.
+A new session gets the whole bootstrap: the common contract, the project
+guides and the brief. Since agent_session p1 ex2 the brief always names the
+original input and the current `plan.md`, and it gives every pending answer
+in full. A replacement session therefore reconstructs the original
+requirement and the agreed plan, and not only the run's first attempt does.
+
+An ordinary resume gets the **continuation** that `wfe exec claim` returns
+(`continuation`; `server/continuation.ts`). The executor puts the attempt
+identity before it: the new attempt id, earlier ids ended (their reports
+are refused), earlier processes gone, memory is context and the record
+decides. The continuation then holds:
+
+- why the attempt runs, and how the previous attempt ended. An attempt that
+  did not end normally adds that its effects are uncertain: files and record
+  are checked before a command is repeated. A recovery's finding, a
+  person's resume and the project's commits since the copy's base follow.
+- **The delta**: one line per record entry after the session's previous
+  attempt's `attempt.begin` that the previous attempt did not write itself.
+  The executor's own bookkeeping is left out. The list has at most 30
+  lines, with a `wfe run state <run> --since <seq>` refresh for the rest.
+  The boundary is a record seq. Nothing is inferred from timestamps or from
+  a normal process exit.
+- **The compact state** at the snapshot's seq: hold or cancellation, nodes
+  ready, running, waiting (for whom) and failed, presentations not stopped,
+  the definition revision in force, decisions.
+- **The pending input, in full**: every answer recorded and not taken up
+  (exact text, question, answer index, author, the question it answers),
+  every instruction not acknowledged, every delegation fact not taken up.
+  It is selected by state, not by a delivery cursor. An input sent in a
+  prompt whose attempt failed is still pending, so the next continuation
+  carries it again. Repetition is bounded by take-up.
+- the instructions of documentation steps that are running, ready or
+  waiting now and that this conversation was not briefed with. That means
+  steps not active at the beginning of any of its attempts since it last
+  got the whole bootstrap.
+- the snapshot's seq, the refresh command, and `wfe run show` for the full
+  record.
+
+Nothing else is repeated: identity paths, the node catalog, the
+documentation policy, contract and guides. They are unchanged, or the
+session would have been replaced. Nothing tells the agent to read the whole
+run. `wfe run state <run> [--since <seq>]` is the compact read: the same
+state and pending input, plus the entries after a seq. It is also the
+node-boundary check in the wfrun guide. `wfe run show` (`--history`) stays
+the full record and a diagnostic. Input recorded after the snapshot is
+found at node boundaries, and the write-time refusals stay in force
+(`instructions-pending`, `attempt-stale`).
+
+**Compaction.** At claim, a resume of the current session checks the logs
+of its attempts since it last got the whole bootstrap. The bootstrap is
+given in the session's first attempt and in every reconstruction. A
+`compact_boundary` event in any of those logs means that a summary may have
+replaced the bootstrap. So does a log that cannot be read: a compaction
+cannot be ruled out. In either case the attempt resumes the same
+conversation with the whole bootstrap again. The reason is recorded before
+launch (`settings.session.reconstruct`), and the executor tells the agent
+why. The next ordinary resume after that is a continuation again. Cache
+expiry alone is not a reason: the conversation is intact and only the
+provider's cache is cold.
 
 ## Lifecycle
 

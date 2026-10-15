@@ -75,8 +75,11 @@ export interface AttemptSettings { agent: string; profile: string | null; backen
 // `id` when the host's harness takes a caller-chosen id (null otherwise:
 // the id becomes known only from the harness, attempt.session). `resume`:
 // the run's current session, by its id — never "the latest conversation".
-// `replaces`: the session this one supersedes and why.
-export interface AttemptSession { policy: 'fresh' | 'run'; mode: 'new' | 'resume'; id: string | null; replaces?: { id: string | null; reason: string } }
+// `replaces`: the session this one supersedes and why. `reconstruct`
+// (agent_session p1 ex2): why a resumed session is given the whole
+// bootstrap again instead of a continuation (it was compacted, or a
+// compaction cannot be ruled out).
+export interface AttemptSession { policy: 'fresh' | 'run'; mode: 'new' | 'resume'; id: string | null; replaces?: { id: string | null; reason: string }; reconstruct?: string }
 export const SESSION_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/
 // One harness conversation of this run. Portable identity only: the id, the
 // configuration it was created under (by hash) and the attempts it served;
@@ -718,7 +721,9 @@ function attemptSettings(v: unknown): AttemptSettings {
       if (!isObj(r)) fail('shape', 'settings.session.replaces must be {id, reason}')
       replaces = { id: typeof r.id === 'string' ? r.id : null, reason: text(r.reason, 'settings.session.replaces.reason') }
     }
-    session = { policy: x.policy as 'fresh' | 'run', mode: x.mode as 'new' | 'resume', id, ...(replaces ? { replaces } : {}) }
+    if (x.reconstruct !== undefined && x.mode !== 'resume') fail('shape', 'settings.session.reconstruct belongs to a resumed session')
+    const reconstruct = x.reconstruct === undefined ? undefined : text(x.reconstruct, 'settings.session.reconstruct')
+    session = { policy: x.policy as 'fresh' | 'run', mode: x.mode as 'new' | 'resume', id, ...(replaces ? { replaces } : {}), ...(reconstruct ? { reconstruct } : {}) }
   }
   return { agent: text(o.agent, 'settings.agent'), profile: optText(o.profile, 'settings.profile') || null, backend: optText(o.backend, 'settings.backend') || null, contract, guides, ...(catalog ? { catalog } : {}), ...(session ? { session } : {}) }
 }
@@ -1092,7 +1097,7 @@ export function apply(prev: RunState | null, e: HistoryEntry | (OpInput & EntryM
         cur!.state = 'replaced'; cur!.ended = { at, by, reason }
         const st = ctl.attempt!.settings!
         s.sessions!.push({ id, policy: cur!.policy, began: at, attempt: e.attempt, attempts: [e.attempt], config: sessionConfig(st), state: 'open' })
-        if (st.session) st.session = { ...st.session, mode: 'new', id, replaces: { id: cur!.id, reason } }
+        if (st.session) { const { reconstruct: _, ...rest } = st.session; st.session = { ...rest, mode: 'new', id, replaces: { id: cur!.id, reason } } }
       } else fail('shape', 'event must be attached or replaced')
       break
     }

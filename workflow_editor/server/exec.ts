@@ -13,7 +13,7 @@
 // run until a person resumes it. A request or answer sent twice (same
 // receipt) is queued once.
 import { createHash, randomBytes, randomUUID } from 'node:crypto'
-import { mkdirSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync } from 'node:fs'
 import { lstat, readFile, realpath } from 'node:fs/promises'
 import { hostname } from 'node:os'
 import { join } from 'node:path'
@@ -35,6 +35,7 @@ import { activityOf } from './activity.ts'
 import { DelegateStore } from './delegate.ts'
 import { delegationState, isOpenDelegation, pendingEvents } from '../shared/delegation.ts'
 import { named, openStore, transaction } from './sqlite.ts'
+import { briefedSteps, changeLines, newStepLines, pendingAnswerLines, stateLines } from './continuation.ts'
 import { inside } from './files.ts'
 import { RequestError, Workspace } from './workspace.ts'
 
@@ -125,6 +126,20 @@ export function delegationBrief(r: RunRecord): string[] {
     }
   }
   if (all.some(d => isOpenDelegation(d) && pendingEvents(d).length)) out.push('Take up each fact above before acting on it (wfe delegate take-up <run> <d> <n>…); answer with wfe delegate answer, judge a result with wfe delegate dispose. When only the child\'s work remains, end the attempt: the child runs in this host\'s one slot, and its next fact resumes you.')
+  return out
+}
+
+// The attempts of a session from the last one that was given the whole
+// bootstrap (the session's first attempt, or a reconstruction) on, of
+// `attempts` (the session's attempts, in order).
+function sinceBootstrap(r: RunRecord, attempts: string[]): string[] {
+  const cur = currentSession(r)
+  const out: string[] = []
+  for (const a of [...attempts].reverse()) {
+    out.unshift(a)
+    const begin = r.history.find(e => e.op === 'attempt.begin' && (e as { attempt?: string }).attempt === a) as { settings?: AttemptSettings } | undefined
+    if (a === cur?.attempt || begin?.settings?.session?.reconstruct) break
+  }
   return out
 }
 
@@ -247,7 +262,11 @@ export class ExecStore {
   // already open are dropped with the reason.
   // `workspace` is the logical workspace; `cwd` is where the attempt works:
   // the run's own copy (p9), or the project workspace for a run without one.
-  async claim(backend: string | null, offer: HostOffer = {}): Promise<{ job: JobRow; attempt: AttemptRow; workspace: Registration; cwd: string; ref: RunRef; brief: string; execution: AttemptExecution } | { idle: string }> {
+  // `brief` is the whole "This attempt" text a new session is given;
+  // `continuation` (agent_session p1 ex2) the compact text an ordinary resume
+  // of the run's session is given instead (null: the session is new, or it is
+  // resumed for a reconstruction and gets the whole bootstrap).
+  async claim(backend: string | null, offer: HostOffer = {}): Promise<{ job: JobRow; attempt: AttemptRow; workspace: Registration; cwd: string; ref: RunRef; brief: string; continuation: string | null; execution: AttemptExecution } | { idle: string }> {
     const busy = this.one<AttemptRow>('SELECT * FROM attempts WHERE state != \'ended\'')
     if (busy) return { idle: `the slot is held by attempt ${busy.id} (${busy.workspace} ${busy.workflow}/${busy.run})` }
     for (;;) {
@@ -270,6 +289,13 @@ export class ExecStore {
       if ('refused' in execution) { drop(execution.refused); continue }
       const session = this.sessionFor(rec, execution, sessionPolicyOf(reading.bundle.entries[rec.definition.root]?.workflow?.execution), offer)
       if ('refused' in session) { drop(session.refused); continue }
+      // A resumed conversation that was compacted (or whose compaction cannot
+      // be ruled out) no longer reliably holds its bootstrap: it is resumed
+      // with the whole bootstrap again, and the attempt records why.
+      if (session.mode === 'resume') {
+        const why = this.reconstructionNeeded(rec)
+        if (why) session.reconstruct = why
+      }
       execution.session = session
       const id = `a${Date.now().toString(36)}-${randomBytes(3).toString('hex')}`
       const claimed = this.tx(() => {
@@ -293,7 +319,8 @@ export class ExecStore {
         continue
       }
       this.run('UPDATE attempts SET baseline = ?, log = ? WHERE id = ?', JSON.stringify(base), join(this.logsDir, `${id}.jsonl`), id)
-      return { job: this.one<JobRow>('SELECT * FROM jobs WHERE id = ?', job.id)!, attempt: this.attemptRow(id)!, workspace: ws.reg, cwd: space.root, ref, brief: await this.brief(space, ref, job), execution }
+      const continuation = execution.session?.mode === 'resume' && !execution.session.reconstruct ? await this.continuation(space, ref, job) : null
+      return { job: this.one<JobRow>('SELECT * FROM jobs WHERE id = ?', job.id)!, attempt: this.attemptRow(id)!, workspace: ws.reg, cwd: space.root, ref, brief: await this.brief(space, ref, job), continuation, execution }
     }
   }
 
@@ -419,7 +446,11 @@ export class ExecStore {
       lines.push(`Working copy: ${ws.root} — this run's own copy of the project; it is saved to branch ${r.storage.branch} (${owned.join(', ')}), never to a shared branch.`, `Project workspace: ${ws.shared.root} — the person's; this run reads its .local/ resources from there by name and changes nothing in it.`)
     } else lines.push(`Workspace: ${ws.root}`)
     lines.push(`Why this attempt: ${job.reason}`)
-    if (job.kind === 'start') lines.push(`The ${r.input.kind === 'request' ? 'request' : 'person\'s request'} is ${runDir(ref)}/${r.input.file} (${r.input.kind === 'request' ? `requester ${r.input.requester}` : `author ${r.input.author}`}).`)
+    // The original requirement and the current plan, on every attempt of a
+    // new session (agent_session p1 ex2): a replacement or a fresh session
+    // reconstructs from them, not only the run's first attempt.
+    lines.push(`The ${r.input.kind === 'request' ? 'request' : 'person\'s request'} is ${runDir(ref)}/${r.input.file} (${r.input.kind === 'request' ? `requester ${r.input.requester}` : `author ${r.input.author}`})${r.input.original ? `; the person's own words are ${runDir(ref)}/${r.input.original}` : ''}.`)
+    if (job.kind !== 'start' && existsSync(join(ws.root, runDir(ref), 'plan.md'))) lines.push(`The current plan is ${runDir(ref)}/plan.md${r.nodes._plan?.agreement ? ` (agreed in ${r.nodes._plan.agreement.question})` : ''}.`)
     // The run this one follows (p9): its records and saved work, to reuse,
     // repair or reverse; wfe run reversal <run> lists what its integration brought.
     if (r.predecessor) {
@@ -438,6 +469,7 @@ export class ExecStore {
       for (const w of r.execution.waiting) lines.push(`Node ${w.node} waits; next move: ${holderOf(r, w.node)}.`)
     }
     lines.push(`Ready: ${r.execution.ready.join(', ') || '(none)'}; running: ${r.execution.active.join(', ') || '(none)'}.`)
+    lines.push(...pendingAnswerLines(r))
     lines.push(...instructionBrief(r))
     lines.push(...presentationBrief(r))
     lines.push(...delegationBrief(r))
@@ -445,6 +477,59 @@ export class ExecStore {
     if (r.definition.revisions?.length) lines.push('', `Definition: revision ${r.definition.active} is in force (adjusted ${r.definition.revisions.length} time${r.definition.revisions.length === 1 ? '' : 's'}; wfe run revisions <run>); the original is definition/${r.definition.root}.yaml.`)
     lines.push(...documentationBrief(r))
     return lines.join('\n')
+  }
+
+  // What an ordinary resume of the run's session is told (agent_session p1
+  // ex2, server/continuation.ts): why it runs and how the previous attempt
+  // ended, what was recorded since the session's previous attempt began
+  // that it did not write, the compact state, the pending input in full and
+  // the instructions of documentation steps it reaches for the first time.
+  // Identity paths, the catalog, the documentation policy and the steps it
+  // was already briefed with are in the conversation and unchanged.
+  async continuation(ws: Workspace, ref: RunRef, job: JobRow): Promise<string> {
+    const r = (await readRun(ws, ref)).record!
+    const cur = currentSession(r)!
+    const attempts = cur.attempts
+    const previous = attempts.at(-2)
+    const begin = (a?: string) => r.history.find(e => e.op === 'attempt.begin' && (e as { attempt?: string }).attempt === a)
+    const since = begin(previous)?.seq ?? 0
+    const lines = [`Run: ${r.project} / ${runKey(ref)} (record ${runDir(ref)}/run.json).`, `Why this attempt: ${job.reason}`]
+    const last = r.control.last
+    if (last) {
+      lines.push(`The previous attempt ${last.id} ended: ${last.outcome}${last.detail ? ` — ${last.detail}` : ''}.`)
+      if (last.outcome !== 'exited') lines.push('It did not end normally: work may have happened after its last record, and commands it started may or may not have taken effect. Look at the files (git status, git diff) and the record before repeating any of them.')
+    }
+    const rc = r.recoveries?.at(-1)
+    if (rc && (!last || rc.at >= last.ended)) lines.push(`This run was continued by recovery: ${rc.by}${rc.agent ? ` (run ${rc.agent.workflow}/${rc.agent.run} in ${rc.agent.workspace})` : ''} ${rc.lifted ? `lifted the ${rc.lifted} hold after attempt ${rc.attempt}` : `queued its continuation, which nothing had queued (after attempt ${rc.attempt})`} for incident ${rc.incident}: "${rc.reason}". That is the recovering agent's finding, not a fact about side effects.`)
+    const resume = [...r.history].reverse().find(e => e.op === 'run.resume') as (RunRecord['history'][number] & { reason?: string }) | undefined
+    if (resume && (!last || resume.at > last.ended)) lines.push(`The person resumed the run: "${resume.reason}" (${resume.by}).`)
+    lines.push(...await this.sinceBase(ws, r))
+    const delta = changeLines(r, since, [previous, attempts.at(-1)].filter((a): a is string => !!a))
+    lines.push('', delta.count ? `Recorded since your previous attempt began (after seq ${since}), not by it (${delta.count}):` : `Nothing was recorded since your previous attempt began (seq ${since}) except by it.`, ...delta.lines)
+    lines.push('', ...stateLines(r))
+    lines.push(...pendingAnswerLines(r), ...instructionBrief(r), ...delegationBrief(r))
+    lines.push(...newStepLines(r, briefedSteps(r, sinceBootstrap(r, attempts.slice(0, -1)))))
+    lines.push('', `Unchanged and not repeated: the contract, the guides, the node catalog (wfe run nodes ${runKey(ref)}) and the documentation policy you were given. This is the record at seq ${r.seq}; wfe run state ${runKey(ref)} --since ${r.seq} shows what is recorded after it, wfe run show ${runKey(ref)} the full record.`)
+    return lines.join('\n')
+  }
+
+  // Whether a resume of the run's current session must give the whole
+  // bootstrap again (agent_session p1 ex2): a compaction in any of its
+  // attempts since it was last given the bootstrap (the harness's
+  // `compact_boundary` in the attempt's log), or a log that cannot be read,
+  // so that a compaction cannot be ruled out. Null: an ordinary
+  // continuation.
+  reconstructionNeeded(r: RunRecord): string | null {
+    const cur = currentSession(r)
+    if (!cur) return null
+    for (const a of sinceBootstrap(r, cur.attempts)) {
+      const log = this.attemptRow(a)?.log
+      let text: string
+      try { text = log ? readFileSync(log, 'utf8') : '' } catch { return `the log of attempt ${a} cannot be read, so a compaction of the conversation cannot be ruled out` }
+      if (!log) return `attempt ${a} has no log on this host, so a compaction of the conversation cannot be ruled out`
+      if (/"subtype"\s*:\s*"compact_boundary"/.test(text)) return `the conversation was compacted in attempt ${a}`
+    }
+    return null
   }
 
   // What happened in the project while this run was held or waiting (p9):

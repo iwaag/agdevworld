@@ -89,6 +89,16 @@ answers, artifacts, decisions, the run folder's files and the latest history
                   devdocs gitlink is followed, and the output names both.
 "running" is what the executor reported, not a check that anything runs.
 Reads only.`,
+  state: `wfe run state <run> [--since <seq>]
+
+The run's current state in a few lines, for an agent continuing it
+(agent_session p1 ex2): the record's seq, a hold or cancellation, which
+nodes are ready, running, waiting (for whom) or failed, open presentations,
+the definition revision in force and decisions; then, in full, every answer
+recorded and not yet taken up, every instruction not acknowledged and every
+delegation fact not taken up. --since <seq>: also one line per entry
+recorded after that seq. Not the whole record: wfe run show for that.
+Reads only.`,
   check: `wfe run check [<run>]
 
 Checks one run, or every run: run.json parses, its history replays to exactly
@@ -380,6 +390,7 @@ export function runIndex(): string {
   create <workflow> …      create a run: input, fixed definition bundle, run.json
   list [<workflow>]        runs, their state and what waits for whom
   show <run>               one run in full (--history, --rev [root:]<commit>)
+  state <run>              current state and pending input only (--since <seq>: entries after it)
   check [<run>]            check records and their definition copies
   start <run> <node>       record a start (ready nodes), resume, or restart a failed node
   progress <run> <node>    add a progress note
@@ -668,6 +679,18 @@ export async function runCommand(c: RunCli): Promise<number> {
       const resp = await wrap(() => runResponse(ws, r, { rev: c.opt('rev') }))
       c.out(describeRun(resp, { history: c.flag('history'), url: c.opt('rev') ? null : await link(runKey(r)) }), resp)
       return resp.record ? 0 : 1
+    }
+    case 'state': {
+      const r = await ref()
+      const resp = await wrap(() => runResponse(ws, r))
+      if (!resp.record) throw c.refused(`run ${runKey(r)} cannot be used: ${resp.problem?.message}`)
+      const raw = c.opt('since')
+      const since = raw === undefined ? undefined : Number(raw)
+      if (since !== undefined && (!Number.isInteger(since) || since < 0)) throw c.usage('--since is a record seq (0 or more)')
+      const { describeState, pendingAnswers } = await import('../server/continuation.ts')
+      const rec = resp.record
+      c.out(describeState(rec, since), { ref: runKey(r), seq: rec.seq, execution: rec.execution, hold: rec.control.hold, pendingAnswers: pendingAnswers(rec).map(({ q, index }) => ({ question: q.id, answer: index, ...q.answers[index] })), pendingInstructions: Object.values(rec.instructions ?? {}).filter(i => !i.ack), since: since ?? null, entries: since === undefined ? [] : rec.history.filter(e => e.seq > since) })
+      return 0
     }
     case 'check': {
       const refs = args[0] ? [await ref()] : (await listRuns(ws)).map(s => ({ workflow: s.workflow, run: s.run }))

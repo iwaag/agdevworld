@@ -107,6 +107,10 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 async function claim(x: ExecStore, offer: HostOffer = OFFER) {
   const c = await x.claim('claude_code / anthropic/claude-sonnet-5', offer)
   assert.ok('attempt' in c, JSON.stringify(c))
+  // The executor opens the attempt's log before it launches anything; a
+  // resume whose earlier logs are gone is a reconstruction (p1 ex2).
+  await mkdir(join(c.attempt.log!, '..'), { recursive: true })
+  await writeFile(c.attempt.log!, '', { flag: 'a' })
   return c as Exclude<typeof c, { idle: string }>
 }
 // One attempt that asks and ends normally (the process exits during the wait).

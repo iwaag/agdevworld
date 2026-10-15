@@ -388,9 +388,10 @@ claimed to have reached the run.
 An instruction that would change completed work or the graph is asked about
 (`clarify`); completed nodes are not reopened. A revised plan is asked about
 again with `wfe run ask … --about-plan`, which records the revised plan.md's
-hash like the plan step's own question. The execution brief lists the
-unacknowledged instructions in full; `wfe run instructions` and the run view
-show them all.
+hash like the plan step's own question. The execution brief and a resumed
+session's continuation list the unacknowledged instructions in full;
+`wfe run state` shows them with the answers not yet taken up, and
+`wfe run instructions` and the run view show them all.
 
 An answer to another question leaves a node waiting. Recording an answer is
 not taking it up, taking it up is not completing the node, and none of these
@@ -756,6 +757,7 @@ HTTP routes call them; neither needs the other running.
 | Create a run (snapshot, input) | `create <workflow> --braindump <file>` / `--request <file> --entrusted-by …` | — | — (input comes through the IDE; see below) |
 | List runs | `list [<workflow>]` | `GET runs` | project view → Runs |
 | Inspect a run, its definition, ready nodes, history | `show <run> [--history] [--rev [root:]<commit>]`, `check` | `GET runs/<wf>/<run>[?rev=]` | run view |
+| The current state and pending input only (agent_session p1 ex2) | `state <run> [--since <seq>]` | — | — |
 | What the definition declares for a path | `access <run> [<path>]…` | — | — |
 | Start / resume, progress note | `start`, `progress` | `POST runs/<wf>/<run>/ops` | — |
 | Wait, complete, fail | `wait`, `complete`, `fail` | same | — |

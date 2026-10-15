@@ -34,8 +34,8 @@ export class RequestError extends Error {
 function categoryOf(path: string): RepoCategory {
   if (path === '.') return 'root'
   if (path === 'devdocs') return 'devdocs'
-  if (path.startsWith('study/')) return 'study'
-  if (path.startsWith('wedo/')) return 'wedo'
+  if (path === 'study' || path.startsWith('study/')) return 'study'
+  if (path === 'wedo' || path.startsWith('wedo/')) return 'wedo'
   return 'other'
 }
 

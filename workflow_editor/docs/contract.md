@@ -61,8 +61,9 @@ reads it and never rewrites it; edit the file.
   root: it is committed and published with the root, its history is the
   root's, and it is not shared with other projects or listed on the
   dashboard's shared repositories.
-- The category follows the path convention (`study/…` study, `wedo/…` wedo,
-  anything else other), so the Project Editor shows an area beside the
+- The category follows the path convention (`study` or `study/…` study,
+  `wedo` or `wedo/…` wedo, anything else other; a top-level `study`/`wedo`
+  folder since project_migration p4), so the Project Editor shows an area beside the
   submodules of its category, marked *local area*.
 - Invalid declarations (`project-area-path-invalid`, `-duplicate`,
   `-nested`, shown as project warnings): the root, `devdocs` or anything

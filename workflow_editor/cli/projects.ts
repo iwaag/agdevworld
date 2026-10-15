@@ -129,7 +129,11 @@ export async function projectsCommand(c: ProjectsCli): Promise<number> {
     }
     case 'runs': {
       const r = await x.runs(ctx, need(target, 'a project'), { ...ro, workflow: a1, published: c.flag('published') })
-      const lines = [provenanceLine(r.provenance), `Live records: ${'workspace' in r.live ? `workspace ${r.live.workspace}` : `not read (${r.live.unavailable})`}`]
+      const lines = [
+        ...(r.provenance ? [provenanceLine(r.provenance)] : []),
+        ...(r.publishedUnavailable ? [`Published records: unavailable [${r.publishedUnavailable.state}]: ${r.publishedUnavailable.message}`] : []),
+        `Live records: ${'workspace' in r.live ? `workspace ${r.live.workspace}` : `not read (${r.live.unavailable})`}`,
+      ]
       for (const run of r.runs) {
         const l = run.live, p = run.published
         lines.push(`  ${run.ref.padEnd(30)} live: ${l ? `${l.execution ?? l.problem?.code ?? '?'}${l.decision ? `, ${l.decision}` : ''} (${l.place})` : '—'}  published: ${p ? `${p.execution ?? p.problem?.code ?? '?'}${p.decision ? `, ${p.decision}` : ''}` : '—'}`)

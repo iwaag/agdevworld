@@ -314,6 +314,53 @@ test('execution: the live record beside the published snapshot; a run only on th
   assert.equal(await workspaceState(), before, 'reading runs changed nothing in the workspace')
 })
 
+test('search distinguishes an absent target from an existing target with no matches', async () => {
+  for (const source of ['committed', 'worktree'] as const) {
+    for (const path of ['missing-review-folder', 'wedo/missing.md', 'study/study-x/notes/missing.md']) {
+      await assert.rejects(search(s.ctx, 'a', 'anything', path, { source }),
+        (e: unknown) => e instanceof AccessError && e.state === 'absent')
+    }
+    for (const path of ['.', 'wedo', 'wedo/knowledge.yaml', 'study/study-x/notes']) {
+      const r = await search(s.ctx, 'a', 'no-such-review-phrase', path, { source })
+      assert.equal(r.total, 0)
+      assert.deepEqual(r.matches, [])
+    }
+  }
+})
+
+test('run discovery keeps live records when published content cannot be read, with an explicit failure', async () => {
+  const offline = { ...s.ctx, gitea: undefined, giteaProblem: 'review outage' }
+  const unavailable: AccessContext = {
+    ...s.ctx, area: join(root, 'no-access-cache'),
+    gitea: { ...s.ctx.gitea!, repoById: async () => { throw new Error('Gitea unavailable') } },
+  }
+  for (const [ctx, state] of [[offline, 'inaccessible'], [unavailable, 'fetch-failed']] as const) {
+    const r = await runs(ctx, 'a')
+    assert.equal(r.provenance, undefined, 'no committed provenance is invented')
+    assert.equal(r.publishedUnavailable?.state, state)
+    assert.deepEqual(r.live, { workspace: 'a' })
+    assert.ok(r.runs.some(r => r.ref === 'ship/run-001' && r.live))
+    assert.ok(r.runs.every(r => !r.published))
+    await assert.rejects(runs(ctx, 'a', { published: true }), (e: unknown) => e instanceof AccessError && e.state === state)
+    await assert.rejects(runs(ctx, 'b'), (e: unknown) => e instanceof AccessError && e.state === state, 'no source is available for b')
+  }
+  await assert.rejects(runs(offline, 'unknown-project'), (e: unknown) => e instanceof AccessError && e.state === 'absent')
+  const empty = await runs(offline, 'a', { workflow: 'no-runs' })
+  assert.deepEqual(empty.runs, [])
+  assert.equal(empty.publishedUnavailable?.state, 'inaccessible', 'an empty live list still discloses the failure')
+
+  const { projectsCommand } = await import('../cli/projects.ts')
+  let human = '', data: unknown
+  assert.equal(await projectsCommand({
+    positional: ['runs', 'a'], opt: () => undefined, flag: () => false,
+    ctx: async () => offline, json: () => false, usage: m => new Error(m),
+    out: (h, d) => { human = h; data = d },
+  }), 0)
+  assert.match(human, /Published records: unavailable \[inaccessible\]/)
+  assert.match(human, /ship\/run-001/)
+  assert.equal((data as Awaited<ReturnType<typeof runs>>).publishedUnavailable?.state, 'inaccessible')
+})
+
 test('the CLI reads with no project of its own; --json carries the failure state', async () => {
   const { main } = await import('../cli/wfe.ts')
   const out: string[] = []

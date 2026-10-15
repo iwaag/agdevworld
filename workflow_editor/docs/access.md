@@ -135,6 +135,8 @@ its own state: a submodule's `state`/`problem`, or a project's
 - Binary content is reported by size and sha256. The CLI saves it with `--out`.
 - Search covers the one repository that holds the path. The submodules below
   it are listed as `notSearched`, so search them by their own path.
+- A search path must exist in the selected source. A missing path returns
+  `absent`; an existing path without matches returns a successful empty list.
 
 ## Runs: live and published
 
@@ -150,9 +152,15 @@ its own state: a submodule's `state`/`problem`, or a project's
   it. When both exist, the live record is the run's state.
 - A run that was never integrated exists only on this host.
 - A read never substitutes one record for the other.
+- If the published source cannot be read, `runs` still returns available
+  live records, including an empty live list. `publishedUnavailable` gives
+  the failure's `state` and `message`; `provenance` is absent when no
+  committed source was read. The CLI displays the failure beside the live
+  records. If neither source is available, the operation fails.
 
 `--published` skips the live record. A run file is read from the live folder
 by default, or from the published one with `--published`.
+With `--published`, a published-source failure remains an error.
 
 ## Through agdevworld
 

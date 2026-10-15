@@ -445,6 +445,7 @@ export async function search(ctx: AccessContext, target: string, pattern: string
     const w = await locateWorktree(ctx, target, path, opts.workspace)
     prov = worktreeProvenance(ctx, target, w, path || '.')
     if (w.uninitialized) throw new AccessError('uninitialized', `${w.uninitialized} is not checked out in workspace ${w.ws.reg.id}`, { provenance: prov })
+    if (!(await exists(await inside(w.repoRoot, w.inner || '.')))) throw new AccessError('absent', `${path} does not exist in workspace ${w.ws.reg.id}`, { provenance: prov })
     const r = await git(w.repoRoot, ['grep', ...flags, '--', w.inner || '.'], { timeoutMs: 60_000 })
     if (r.code > 1) throw new RequestError(400, `search failed: ${r.stderr.trim()}`)
     out = r.stdout; strip = s => s; mount = w.repoRoot === w.root ? '' : w.repoRoot.slice(w.root.length + 1)
@@ -452,6 +453,7 @@ export async function search(ctx: AccessContext, target: string, pattern: string
   } else {
     const l = await locate(ctx, target, path, opts)
     prov = provenance(ctx, l, projectPath(l, l.inner))
+    if (l.inner && (await git(l.dir, ['cat-file', '-e', `${l.commit}:${l.inner}`])).code !== 0) throw new AccessError('absent', `${prov.path} does not exist in ${l.repository.fullName}@${l.commit.slice(0, 10)}`, { provenance: prov })
     const r = await git(l.dir, ['grep', ...flags, l.commit, '--', ...(l.inner ? [l.inner] : [])], { timeoutMs: 60_000 })
     if (r.code > 1) throw new RequestError(400, `search failed: ${r.stderr.trim()}`)
     out = r.stdout; strip = s => s.slice(l.commit.length + 1); mount = l.repository.path === '.' ? '' : l.repository.path
@@ -656,7 +658,12 @@ export interface RunListItem {
   live?: RunSummary & { place: 'run-copy' | 'project'; workspace: string }
   published?: RunSummary & { commit: string; integrated: boolean }
 }
-export interface RunList { provenance: Provenance; runs: RunListItem[]; live: { workspace: string } | { unavailable: string } }
+export interface RunList {
+  provenance?: Provenance // present only when the committed source was read
+  publishedUnavailable?: { state: FailureState; message: string }
+  runs: RunListItem[]
+  live: { workspace: string } | { unavailable: string }
+}
 
 // A run folder in committed content, as the run reader expects its source.
 function committedSource(l: Located, runInner: string): Source {
@@ -693,12 +700,23 @@ async function liveWorkspace(ctx: AccessContext, project: string, id?: string): 
 
 export async function runs(ctx: AccessContext, project: string, opts: ReadOptions & { workflow?: string; published?: boolean } = {}): Promise<RunList> {
   if (project.includes(':')) throw new RequestError(400, 'runs belong to projects; a repository has none')
-  const { l, refs } = await publishedRuns(ctx, project, opts.workflow, opts)
+  // Validate identity and the operating boundary even when only live reads
+  // are possible. Published-source failures must not hide this host's runs.
+  await start(ctx, project)
   const byRef = new Map<string, RunListItem>()
-  for (const ref of refs) {
-    const { reading } = await readPublished(l, project, ref)
-    const s = summaryOf(ref, reading)
-    byRef.set(runKey(ref), { ref: runKey(ref), published: { ...s, commit: l.commit, integrated: !!reading.record?.integrations?.length } })
+  let prov: Provenance | undefined
+  let publishedError: AccessError | undefined
+  try {
+    const { l, refs } = await publishedRuns(ctx, project, opts.workflow, opts)
+    prov = provenance(ctx, l, RUNS_ROOT)
+    for (const ref of refs) {
+      const { reading } = await readPublished(l, project, ref)
+      const s = summaryOf(ref, reading)
+      byRef.set(runKey(ref), { ref: runKey(ref), published: { ...s, commit: l.commit, integrated: !!reading.record?.integrations?.length } })
+    }
+  } catch (e) {
+    if (!(e instanceof AccessError) || opts.published) throw e
+    publishedError = e
   }
   let live: RunList['live'] = { unavailable: 'not asked (--published)' }
   if (!opts.published) {
@@ -714,7 +732,12 @@ export async function runs(ctx: AccessContext, project: string, opts: ReadOption
       }
     }
   }
-  return { provenance: provenance(ctx, l, RUNS_ROOT), runs: [...byRef.values()].sort((a, b) => a.ref.localeCompare(b.ref)), live }
+  if (publishedError && !('workspace' in live)) throw publishedError
+  return {
+    ...(prov ? { provenance: prov } : {}),
+    ...(publishedError ? { publishedUnavailable: { state: publishedError.state, message: publishedError.message } } : {}),
+    runs: [...byRef.values()].sort((a, b) => a.ref.localeCompare(b.ref)), live,
+  }
 }
 
 export interface RunView {

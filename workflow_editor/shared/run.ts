@@ -7,7 +7,7 @@ import { docStepsOf, type EffectiveGraph, type StepSpec } from './compile.ts'
 import type { DocSteps } from './model.ts'
 import type { AttemptCatalog, CatalogContext } from './catalog.ts'
 import { INSTRUCTION_RESPONSES, type SourceRef } from './intake.ts'
-import { ID_PATTERN, normalizeRepoPath, type Edge } from './model.ts'
+import { ID_PATTERN, PROFILE_PATTERN, normalizeRepoPath, type Edge } from './model.ts'
 import {
   DELEGATION_ID, DISPOSITIONS, EVENT_TYPES, WAKING, isOpenDelegation, latestResult, pendingEvents, questionEvent,
   type ChildRef, type Delegation, type DelegationEvent, type DelegationTarget, type ResultManifest, type TransportRef,
@@ -318,6 +318,13 @@ export interface Control {
   last: { id: string; outcome: AttemptOutcome; ended: string; detail: string; backend: string | null } | null
   hold: { kind: HoldKind; since: string; by: string; reason: string; because?: Because } | null // nothing resumes it but run.resume
   stop: { at: string; by: string; reason: string; because?: Because } | null // stop requested; not yet confirmed by the attempt's end
+  // The execution profile a person chose when resuming (project_migration
+  // p6 ex2): later attempts resolve it instead of the definition's. Which
+  // model serves the run is the person's choice; who performs it (the
+  // agent) and what it may touch stay the definition's. Absent: the
+  // definition's profile. `previous`: the choice it replaced (null: the
+  // definition's).
+  profile?: { name: string; seq: number; at: string; by: string; previous: string | null }
 }
 
 // A recovery (observer p3, docs/observation.md): an interrupted or unknown
@@ -407,7 +414,7 @@ export type OpInput =
   // attempt starts a new one from the records.
   | { op: 'session.retire'; reason: string; because?: BecauseRef }
   | { op: 'run.stop'; reason: string; because?: BecauseRef }
-  | { op: 'run.resume'; reason: string; because?: BecauseRef }
+  | { op: 'run.resume'; reason: string; because?: BecauseRef; profile?: string }
   // observer p3: a recovering agent continues an interrupted/unknown hold for an incident.
   | { op: 'run.recover'; incident: string; attempt: string; reason: string; agent?: RecoveryAgent }
   | { op: 'presentation.register'; presentation?: string; node: string; title: string; manifest?: PresentationManifest }
@@ -1190,6 +1197,11 @@ export function apply(prev: RunState | null, e: HistoryEntry | (OpInput & EntryM
       if (unverified) fail('session-mismatch', unverifiedReason(unverified, runKey({ workflow: s.workflow, run: s.run })))
       text(e.reason, 'the resume instruction')
       because(e.because)
+      if (e.profile !== undefined && e.profile !== null) {
+        if (typeof e.profile !== 'string' || !PROFILE_PATTERN.test(e.profile)) fail('shape', `profile "${String(e.profile)}" is not a profile name (${PROFILE_PATTERN.source})`)
+        const previous = ctl.profile?.name ?? null // null: the definition's
+        ctl.profile = { name: e.profile, seq: e.seq, at, by, previous }
+      }
       ctl.hold = null
       break
     }

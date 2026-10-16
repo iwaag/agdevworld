@@ -331,10 +331,14 @@ export class ExecStore {
   // missing, refuses the job with the reason instead of launching something
   // else.
   async execution(ws: Workspace, rec: RunRecord, ex: { agent: string; profile: string; guides: string[] } | undefined, backend: string | null, offer: HostOffer): Promise<AttemptExecution | { refused: string }> {
-    const profile = ex?.profile || null
+    // A profile a person chose when resuming (project_migration p6 ex2)
+    // replaces the definition's for every later attempt.
+    const resumed = rec.control?.profile
+    const profile = resumed?.name || ex?.profile || null
     let chosen = backend
     if (profile && offer.profiles) {
-      if (!(profile in offer.profiles)) return { refused: `the workflow asks for execution profile "${profile}", which this execution host does not offer (${Object.keys(offer.profiles).sort().join(', ')})` }
+      const asker = resumed ? `the run was resumed (seq ${resumed.seq}, by ${resumed.by}) on execution profile` : 'the workflow asks for execution profile'
+      if (!(profile in offer.profiles)) return { refused: `${asker} "${profile}", which this execution host does not offer (${Object.keys(offer.profiles).sort().join(', ')})` }
       chosen = offer.profiles[profile]
     }
     const guides: AttemptExecution['guides'] = []
@@ -626,8 +630,10 @@ export class ExecStore {
     return r.record
   }
 
-  async resume(ws: Workspace, ref: RunRef, by: string, reason: string, via: string, receipt?: string, meta: ControlMeta = {}) {
-    const r = await runOp(ws, ref, { op: 'run.resume', reason, ...controlMeta(meta), ...(receipt ? { receipt: `resume:${receipt}` } : {}) }, { by, via })
+  // `profile` (project_migration p6 ex2): the execution profile later
+  // attempts resolve instead of the definition's.
+  async resume(ws: Workspace, ref: RunRef, by: string, reason: string, via: string, receipt?: string, meta: ControlMeta & { profile?: string } = {}) {
+    const r = await runOp(ws, ref, { op: 'run.resume', reason, ...controlMeta(meta), ...(meta.profile ? { profile: meta.profile } : {}), ...(receipt ? { receipt: `resume:${receipt}` } : {}) }, { by, via })
     const job = hostOf(r.record.executor) === this.executor ? this.enqueue(ws.reg.id, ref, 'resume', `resume:${ws.reg.id}/${runKey(ref)}/${r.record.seq}`, `resume: ${reason}`) : null
     return { record: r.record, job }
   }

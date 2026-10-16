@@ -34,7 +34,8 @@ and resumes exactly that id; `''` is the host's default profile):
   configuration — agent, profile, backend, common contract and project guides
   by hash. Otherwise a new session (new UUID) replaces it, and the reason
   says what changed (`configuration changed: guide agent/g.md changed`), or
-  that the previous one was retired or ended.
+  that the previous one was retired or ended. A profile chosen at a resume
+  ([runs.md](runs.md), *Holds*) is such a change: the next session is new.
 
 The decision is recorded in `attempt.begin` (`settings.session = {policy,
 mode: new|resume, id, replaces?: {id, reason}}`) **before** anything is

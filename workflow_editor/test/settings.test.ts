@@ -190,3 +190,35 @@ test('claim refuses what the host cannot launch as declared: an unknown profile,
     x.close()
   }
 })
+
+test('a person resuming a held run may move it to another profile: later attempts resolve it, the definition is unchanged (project_migration p6 ex2)', async () => {
+  const { x, ws } = await setup()
+  const r = await x.request({ workspace: ws.reg.id, workflow: 'make', text: 'Make a thing.', author: 'Test Person', receipt: 'settings-req-0006', via: 'browser' })
+  const c1 = await x.claim('fallback', OFFER)
+  assert.ok('attempt' in c1, JSON.stringify(c1))
+  assert.equal(c1.execution.profile, 'sonnet')
+  await x.stop(ws, r.ref, 'Test Person', 'hold', 'browser')
+  await x.finished(c1.attempt.id, { code: null, signal: 'SIGTERM' })
+  await assert.rejects(x.resume(ws, r.ref, 'Test Person', 'go on', 'cli', undefined, { profile: 'Bad Name' }), /not a profile name/)
+  const res = await x.resume(ws, r.ref, 'Test Person', 'go on, on the other model', 'cli', undefined, { profile: 'stub' })
+  assert.deepEqual({ ...res.record.control.profile, at: undefined, seq: undefined }, { name: 'stub', by: 'Test Person', previous: null, at: undefined, seq: undefined })
+  const entry = res.record.history.at(-1) as unknown as { op: string; profile?: string }
+  assert.deepEqual([entry.op, entry.profile], ['run.resume', 'stub'], 'the history entry names the profile')
+  const c2 = await x.claim('fallback', OFFER)
+  assert.ok('attempt' in c2, JSON.stringify(c2))
+  assert.equal(c2.execution.profile, 'stub')
+  assert.equal(c2.execution.backend, 'fake / m')
+  assert.equal(c2.execution.agent, 'ppt-agent', 'the agent stays the definition\'s')
+  const rec = (await readRun(ws, r.ref)).record!
+  assert.equal(rec.control.attempt?.settings?.profile, 'stub')
+  assert.equal(rec.definition.active ?? 'r1', 'r1', 'no revision: the definition is unchanged')
+  // A profile the host does not offer refuses the next claim, naming the resume.
+  await x.stop(ws, r.ref, 'Test Person', 'hold again', 'browser')
+  await x.finished(c2.attempt.id, { code: null, signal: 'SIGTERM' })
+  const again = await x.resume(ws, r.ref, 'Test Person', 'try the third', 'cli', undefined, { profile: 'opus' })
+  assert.equal(again.record.control.profile?.previous, 'stub')
+  assert.deepEqual(await x.claim('fallback', OFFER), { idle: 'no queued job' })
+  const jobs = (await x.runView(ws.reg.id, r.ref)).jobs
+  assert.match(jobs.at(-1)?.note ?? jobs[0].note ?? '', /resumed \(seq \d+, by Test Person\) on execution profile "opus", which this execution host does not offer/)
+  x.close()
+})

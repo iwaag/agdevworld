@@ -515,7 +515,8 @@ person's; local resources are read from there by name).
 profile and project guides (contract.md, *Execution, intake and result
 confirmation*). `wfe exec claim` takes what the host offers (`--profiles-json`,
 `--contract <name>=<sha256>`), resolves the run's settings from its frozen
-definition and records them with `attempt.begin` (`settings`: agent, profile,
+definition (the profile from a person's resume when one was chosen, *Holds*
+above) and records them with `attempt.begin` (`settings`: agent, profile,
 backend, contract and guides by hash); the host composes the prompt from the
 common contract, the guides it was handed and the brief.
 
@@ -542,6 +543,20 @@ An `interrupted` or `unknown` hold may instead be lifted by a recovering agent
 with `run.recover` (observer p3, [observation.md](observation.md)): Observer
 asks a recovery run to investigate, and the record names the incident, the
 ended attempt and the recovering run; a `stopped` hold is only a person's.
+
+**Resuming on another profile (project_migration p6 ex2).** A person's
+`run.resume` may carry `profile` (`wfe run resume --profile <name>`, or the
+profile field of the run view's resume form): one of the execution host's
+profiles, which later attempts resolve instead of the frozen definition's.
+It is recorded in `control.profile` (`name`, `seq`, `at`, `by`, `previous`:
+the earlier choice, null for the definition's) and shown in Run details. It
+changes which model serves the run, not who performs it: the agent, the
+guides, the bindings and the session policy stay the definition's, no
+revision is made, and a profile the host does not offer drops the next job
+with the reason. It exists because a run that has started work cannot be
+adjusted while a node runs, and an adjustment never changes `execution`
+([adjustments.md](adjustments.md)); a held run is exactly where a person
+looks at it and decides how it continues.
 
 - `run.stop` while an attempt is open is a request (`control.stop`, shown
   as "stopping"). The hold is recorded only when the attempt's end confirms

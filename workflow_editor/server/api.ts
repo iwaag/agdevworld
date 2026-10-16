@@ -441,7 +441,7 @@ export function createHandler(config: ServiceConfig) {
           // which also terminates, queues or publishes as they require.
           if (x && op.op === 'run.stop') { const rec = await x.stop(ws, ref, by, reason, 'browser'); return send(res, 200, { ok: true, seq: rec.seq, record: rec }) }
           if (x && op.op === 'run.cancel') { const { record: rec, cleanup } = await x.cancel(ws, ref, by, reason, 'browser'); return send(res, 200, { ok: true, seq: rec.seq, record: rec, cleanup }) }
-          if (x && op.op === 'run.resume') { const r = await x.resume(ws, ref, by, reason, 'browser', typeof op.receipt === 'string' ? op.receipt : undefined); return send(res, 200, { ok: true, seq: r.record.seq, record: r.record, job: r.job }) }
+          if (x && op.op === 'run.resume') { const r = await x.resume(ws, ref, by, reason, 'browser', typeof op.receipt === 'string' ? op.receipt : undefined, typeof op.profile === 'string' && op.profile.trim() ? { profile: op.profile.trim() } : {}); return send(res, 200, { ok: true, seq: r.record.seq, record: r.record, job: r.job }) }
           const r = await runOp(ws, ref, op as unknown as OpInput, { by, via: 'browser', expectSeq })
           const extra: Record<string, unknown> = { duplicate: r.duplicate ?? false }
           // The host that executes the run (executor.host); executor.name is

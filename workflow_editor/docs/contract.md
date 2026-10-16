@@ -276,7 +276,9 @@ nodes:
   `attempt.begin` (`settings`), with the profile, the backend it resolved to
   and the host's common contract. A profile the host does not offer, or a
   guide that cannot be read, drops the job with the reason; nothing else is
-  launched instead.
+  launched instead. A person resuming a held run may name another profile
+  for later attempts ([runs.md](runs.md), *Holds*); the definition itself is
+  not changed.
 - A guide written `<project>:<path>` (project_migration p4) is a file of
   another managed project, read at claim from that project's committed
   default branch through project access ([access.md](access.md)) and

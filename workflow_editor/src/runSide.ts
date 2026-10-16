@@ -247,9 +247,13 @@ export class RunSide {
     resumeButton.addEventListener('click', () => {
       if (!instruction.el.value.trim()) { this.act.notice('error', 'A resume needs your instruction.'); return }
       if (!this.data.shown?.record?.control.hold) { this.act.notice('error', 'The run is not held: there is nothing to resume.'); return }
-      void instruction.submit(text => this.act.record({ op: 'run.resume', reason: text }, 'Resumed: the executor is queued.'))
+      const profile = profileInput.value.trim()
+      void instruction.submit(text => this.act.record({ op: 'run.resume', reason: text, ...(profile ? { profile } : {}) }, profile ? `Resumed on profile ${profile}: the executor is queued.` : 'Resumed: the executor is queued.'))
     })
-    this.resume = { root: h('div.resume-form', h('label.small', { htmlFor: 'resume-instruction' }, 'Your instruction for the executor'), instruction.el, instruction.note, h('div.row.tight', resumeButton), instruction.status), draft: instruction, button: resumeButton }
+    // project_migration p6 ex2: the person may move the run to another of
+    // the execution host's profiles (which model serves it) when resuming.
+    const profileInput = h('input.resume-profile', { type: 'text', placeholder: 'profile (optional, e.g. luna)', 'aria-label': 'Execution profile for later attempts', spellcheck: false }) as HTMLInputElement
+    this.resume = { root: h('div.resume-form', h('label.small', { htmlFor: 'resume-instruction' }, 'Your instruction for the executor'), instruction.el, instruction.note, h('div.row.tight', profileInput, resumeButton), instruction.status), draft: instruction, button: resumeButton }
     instruction.el.id = 'resume-instruction'
     this.execution.content.append(this.execMore)
 

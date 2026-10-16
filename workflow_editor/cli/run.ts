@@ -280,13 +280,16 @@ or a conversation that keeps failing on resume) or when its context should
 not be carried on. Refused while an attempt is open or a process of the run
 lives. It changes no hold: a held run still needs a resume or a recovery.
 Writes run.json.`,
-  resume: `wfe run resume <run> --reason <instruction> [--because answer:<q>[:<n>]|instruction:<i>]
+  resume: `wfe run resume <run> --reason <instruction> [--because answer:<q>[:<n>]|instruction:<i>] [--profile <name>]
 
 Resumes a run held as stopped, interrupted or unknown: the instruction, after
 looking at the run's copy and records. It queues the executor; the next
 attempt works in the same copy, from the run's own base (the project's newer
 commits are not merged in; the brief names them). Refused after cancellation.
---because names the person's words it follows. Writes run.json.`,
+--because names the person's words it follows. --profile <name> moves the
+run to another of the execution host's profiles (which model serves it) for
+every later attempt; the agent, guides and access stay the definition's, and
+a profile the host does not offer refuses the next claim. Writes run.json.`,
   access: `wfe run access <run> [<path>]...
 
 Says what this run's fixed definition declares for each path (relative to
@@ -741,8 +744,9 @@ export async function runCommand(c: RunCli): Promise<number> {
     case 'resume': {
       const r = await ref()
       const who = await recorder(r) ?? (await wrap(() => readRun(ws, r))).record?.executor.name ?? ''
-      const res = await wrap(() => c.exec().resume(ws, r, who, need(c, 'reason', 'the resume instruction: what the executor should do now'), 'cli', receipt, { because: because() }))
-      return report(r, res.record, `Recorded: resumed.${res.job ? ` Queued job ${res.job.id} (${res.job.state}).` : ''}`)
+      const profile = c.opt('profile')
+      const res = await wrap(() => c.exec().resume(ws, r, who, need(c, 'reason', 'the resume instruction: what the executor should do now'), 'cli', receipt, { because: because(), ...(profile ? { profile } : {}) }))
+      return report(r, res.record, `Recorded: resumed${profile ? ` on profile ${profile}` : ''}.${res.job ? ` Queued job ${res.job.id} (${res.job.state}).` : ''}`)
     }
     case 'session': {
       const r = await ref()

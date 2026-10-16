@@ -49,7 +49,7 @@ reason, when it:
 | `adjust-started` | removes, retypes or edits (type, name, description, repositories, delegate target, `confirms`) a node that is not `pending` — started, waiting, completed, failed or cancelled work keeps its identity, meaning and state |
 | `adjust-dependencies` | changes the incoming edges of a node that is not `pending` (its recorded dependencies) |
 | `adjust-question` | removes or rewrites a node with an open or answered question — covered by the rule above, named separately |
-| `adjust-access` | changes `repositories` (bindings, paths or access), `execution` (agent, profile, guides), `intake` or `documentation` — adjustments never broaden access or change who performs the run |
+| `adjust-access` | changes `repositories` (bindings, paths or access), `execution` (agent, profile, guides), `intake` or `documentation` — adjustments never broaden access or change who performs the run (a held run moves to another profile by a person's resume, [runs.md](runs.md) *Holds*) |
 | `adjust-graph` | makes the graph invalid: a cycle, an edge to an unknown node, a delegate node, a second `confirms: result`, a node id that is not valid, or anything the definition validation calls an error |
 | `adjust-generated` | would change the frozen documentation step (plan, report, final report) of a node that is not `pending`, or its incoming edges |
 | `adjust-nothing` | changes nothing executable (appearance and layout alone are not adjustments) |

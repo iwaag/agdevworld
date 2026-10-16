@@ -24,7 +24,7 @@ import { quietMentions } from '../shared/notify.ts'
 
 // zulip.json `io`: {enabled, since, secretFiles?}. Runs created before
 // `since` get no IO channel (no backfill: nothing is manufactured for logs
-// that were never relayed). `secretFiles`: host credential files (KEY=VALUE
+// that were never relayed). `secretFiles`: host credential files (KEY=VALUE, a single raw value
 // or JSON) whose values are masked wherever they appear.
 export interface IoConfig { enabled: boolean; since: string; secretFiles: string[] }
 export function ioConfig(raw: unknown): IoConfig | null {
@@ -74,10 +74,15 @@ export class Redactor {
         }
         walk(JSON.parse(text))
       } catch {
+        let pairs = 0
         for (const line of text.split('\n')) {
           const m = /^\s*(?:export\s+)?[A-Za-z_][A-Za-z0-9_]*\s*=\s*["']?(.*?)["']?\s*$/.exec(line)
-          if (m && m[1]) r.add(m[1])
+          if (m && m[1]) { r.add(m[1]); pairs++ }
         }
+        // A raw-value file (a bare token, a vault password: project_migration p5) holds
+        // its secret as the whole content; it is redacted as one value.
+        const whole = text.trim()
+        if (!pairs && whole && !/\n/.test(whole)) r.add(whole)
       }
     }
     return r

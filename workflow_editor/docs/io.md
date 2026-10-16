@@ -53,7 +53,7 @@ an interruption).
 **Redaction** before anything is rendered: common credential formats (API
 keys, tokens, bearer and basic authorization, passwords in `key=value`,
 credentials in URLs) and the exact values of the host's credential files
-named in `io.secretFiles` (KEY=VALUE or JSON) become `***`.
+named in `io.secretFiles` (KEY=VALUE, JSON, or a file whose whole content is one raw value such as a bare token or a vault password — project_migration p5) become `***`.
 
 ## Messages and long output
 

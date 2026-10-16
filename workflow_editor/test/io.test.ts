@@ -60,6 +60,16 @@ test('redaction: credential patterns, and the exact values of the host\'s secret
   assert.match(text, /user developer/, 'ordinary words stay')
 })
 
+test('redaction: a raw-value secret file (bare token, vault password) is one secret (project_migration p5)', async () => {
+  const token = join(root, 'nautobot.token'); await writeFile(token, 'synthetic-0f3a9c27e1b84d55\n')
+  const vault = join(root, 'vault.pass'); await writeFile(vault, 'Synthetic Vault Pass 42')
+  const many = join(root, 'notes.txt'); await writeFile(many, 'first line\nsecond line\n')
+  const r = await Redactor.from([token, vault, many])
+  const text = r.apply('nctl read token synthetic-0f3a9c27e1b84d55 and vault Synthetic Vault Pass 42; first line stays')
+  assert.ok(!text.includes('synthetic-0f3a9c27e1b84d55') && !text.includes('Synthetic Vault Pass 42'), text)
+  assert.match(text, /first line stays/, 'a multi-line file is not taken as one value')
+})
+
 test('messages: long output is cut with a pointer to the whole; mentions do not notify; fences survive backticks; size is bounded', () => {
   const r = new Redactor()
   const long = 'x'.repeat(5000)

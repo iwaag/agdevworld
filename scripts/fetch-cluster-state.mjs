@@ -44,7 +44,8 @@ export async function fetchClusterState(env = process.env) {
   const base = new URL(env.WFE_URL.endsWith('/') ? env.WFE_URL : `${env.WFE_URL}/`)
   const prefix = `api/workspaces/${encodeURIComponent(env.CAGENT_WORKSPACE || 'cagent')}/runs`
   const list = await getJson(new URL(prefix, base))
-  const latest = latestScan(list.runs || [])
+  if (!Array.isArray(list)) throw new Error("WFE returned an invalid run index")
+  const latest = latestScan(list)
   const ref = latest.ref
   const artifactUrl = new URL(`${prefix}/${ref.split('/').map(encodeURIComponent).join('/')}/file`, base)
   artifactUrl.searchParams.set('path', 'snapshot.json')

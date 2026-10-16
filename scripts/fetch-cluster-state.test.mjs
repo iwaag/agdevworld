@@ -28,7 +28,7 @@ test('partial artifact preserves provenance; invalid source leaves previous file
   const server = createServer((req, res) => {
     urls.push(req.url)
     res.setHeader('content-type', 'application/json')
-    res.end(JSON.stringify(req.url.endsWith('/runs') ? { runs: [run] } : { path: 'snapshot.json', text: JSON.stringify(current) }))
+    res.end(JSON.stringify(req.url.endsWith('/runs') ? [run] : { path: 'snapshot.json', text: JSON.stringify(current) }))
   })
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
   const env = { WFE_URL: `http://127.0.0.1:${server.address().port}/wfe/`,

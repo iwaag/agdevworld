@@ -91,6 +91,21 @@ async function loadSnapshotJson(primaryUrl: string, sampleUrl: string): Promise<
   return response.json()
 }
 
+export async function loadClusterSnapshotNotice(): Promise<string> {
+  const response = await fetchSnapshot('/cluster/snapshot.json')
+  if (response.status === 404 || !response.headers.get('content-type')?.includes('application/json')) {
+    return 'Snapshot provenance unavailable · sample or legacy data'
+  }
+  if (!response.ok) throw new Error(`Unable to load snapshot provenance (HTTP ${response.status})`)
+  const value = await response.json()
+  const time = Date.parse(value.generated_at)
+  if (!Number.isFinite(time)) throw new Error('Invalid snapshot timestamp')
+  const ageHours = Math.max(0, (Date.now() - time) / 3600000)
+  const age = ageHours >= 24 ? `stale · ${Math.floor(ageHours / 24)}d old` : `${Math.floor(ageHours)}h old`
+  const coverage = value.complete === true ? 'observation complete' : 'partial observation'
+  return `${value.run} · ${new Date(time).toISOString()} · ${age} · ${coverage}`
+}
+
 export async function loadExistingNodes(): Promise<TargetPanelModel[]> {
   return filterExistingTargets(
     targetsOf(await loadSnapshotJson('/cluster/state.json', '/state.sample.json')),

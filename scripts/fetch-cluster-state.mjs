@@ -1,195 +1,86 @@
-import { readFile, mkdir, rename, unlink, writeFile } from 'node:fs/promises'
-import { homedir } from 'node:os'
+import { mkdir, rename, unlink, writeFile } from 'node:fs/promises'
 import { dirname, resolve } from 'node:path'
-import { fileURLToPath } from 'node:url'
-import http from 'node:http'
-import https from 'node:https'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url))
-const DEFAULT_TOKEN_FILE = resolve(homedir(), '.local/state/cagent/human_token')
-const TERMINAL_STATES = new Set(['completed', 'failed', 'cancelled', 'interrupted'])
-
-// One cagent request per artifact: sequential requests are simpler and more
-// robust than teaching cagent to zip multiple files into one upload.
 const ARTIFACTS = [
-  {
-    command: 'nctl drift --json',
-    schema: 'nctl.drift.v1',
-    outputEnv: 'CLUSTER_STATE_OUTPUT',
-    defaultOutput: resolve(SCRIPT_DIR, '../public/cluster/state.json'),
-  },
-  {
-    command: 'nctl workspaces --json',
-    schema: 'nctl.workspaces.v1',
-    outputEnv: 'CLUSTER_WORKSPACES_OUTPUT',
-    defaultOutput: resolve(SCRIPT_DIR, '../public/cluster/workspaces.json'),
-  },
-  {
-    command: 'nctl actual --json --detail',
-    schema: 'nctl.actual.v2',
-    outputEnv: 'CLUSTER_ACTUAL_OUTPUT',
-    defaultOutput: resolve(SCRIPT_DIR, '../public/cluster/actual.json'),
-  },
+  ['drift', 'nctl.drift.v1', 'CLUSTER_STATE_OUTPUT', 'state.json'],
+  ['workspaces', 'nctl.workspaces.v1', 'CLUSTER_WORKSPACES_OUTPUT', 'workspaces.json'],
+  ['actual', 'nctl.actual.v2', 'CLUSTER_ACTUAL_OUTPUT', 'actual.json'],
 ]
 
-function artifactPrompt(command) {
-  return `Please run \`${command}\`, save the output as a file, and upload it with \`nctl upload\`. This script reads the download URL out of your reply.`
-}
-
-function positiveInteger(name, fallback) {
-  const raw = process.env[name]
-  if (raw === undefined) return fallback
-  const value = Number(raw)
-  if (!Number.isSafeInteger(value) || value <= 0) {
-    throw new Error(`${name} must be a positive integer`)
+export function latestScan(runs) {
+  const scans = runs.filter((r) => r.workflow === 'scan').sort((a, b) => b.created.localeCompare(a.created))
+  const latest = scans[0]
+  if (!latest) throw new Error('No cagent scan run exists; request a scan first')
+  if (latest.execution !== 'completed') {
+    throw new Error(`Latest scan ${latest.ref} is ${latest.execution}; snapshots were not refreshed`)
   }
-  return value
+  return latest
 }
 
-function sleep(milliseconds) {
-  return new Promise((resolvePromise) => setTimeout(resolvePromise, milliseconds))
+export function validateSnapshot(snapshot, ref) {
+  if (snapshot?.schema !== 'cagent.snapshot.v1' || snapshot.run !== ref || !Number.isFinite(Date.parse(snapshot.generated_at))) {
+    throw new Error(`Invalid snapshot identity or timestamp for ${ref}`)
+  }
+  for (const [key, schema] of ARTIFACTS) {
+    const source = snapshot[key]
+    if (source?.schema !== schema || source.ok !== true || !source.data || !Number.isFinite(Date.parse(source.generated_at))) {
+      throw new Error(`Snapshot ${ref} has an unreadable ${key} source; existing files were not replaced`)
+    }
+  }
+  return snapshot
 }
 
-async function loadToken() {
-  if (process.env.CAGENT_TOKEN?.trim()) return process.env.CAGENT_TOKEN.trim()
+async function getJson(url) {
+  const response = await fetch(url, { signal: AbortSignal.timeout(30_000) })
+  if (!response.ok) throw new Error(`GET ${url.pathname} returned HTTP ${response.status}`)
+  return response.json()
+}
 
-  const tokenFile = resolve(process.env.CAGENT_TOKEN_FILE ?? DEFAULT_TOKEN_FILE)
+// Reads a completed run's artifact; it never opens a request or buys an LLM run.
+export async function fetchClusterState(env = process.env) {
+  if (!env.WFE_URL) throw new Error('WFE_URL is required: the workflow editor URL (including /wfe/ when proxied)')
+  const base = new URL(env.WFE_URL.endsWith('/') ? env.WFE_URL : `${env.WFE_URL}/`)
+  const prefix = `api/workspaces/${encodeURIComponent(env.CAGENT_WORKSPACE || 'cagent')}/runs`
+  const list = await getJson(new URL(prefix, base))
+  const latest = latestScan(list.runs || [])
+  const ref = latest.ref
+  const artifactUrl = new URL(`${prefix}/${ref.split('/').map(encodeURIComponent).join('/')}/file`, base)
+  artifactUrl.searchParams.set('path', 'snapshot.json')
+  const artifact = await getJson(artifactUrl)
+  const snapshot = validateSnapshot(JSON.parse(artifact.text), ref)
+  // Validate every source before changing any output. Partial observation is
+  // usable data, but remains explicitly partial in metadata and the UI.
+  const metadata = {
+    schema: snapshot.schema, run: ref, generated_at: snapshot.generated_at,
+    fetched_at: new Date().toISOString(), complete: snapshot.complete === true,
+    observation: snapshot.observation, sources: snapshot.sources,
+  }
+  const outputs = ARTIFACTS.map(([key, , outputEnv, file]) => [
+    resolve(env[outputEnv] || resolve(SCRIPT_DIR, '../public/cluster', file)), snapshot[key],
+  ])
+  outputs.push([resolve(env.CLUSTER_METADATA_OUTPUT || resolve(SCRIPT_DIR, '../public/cluster/snapshot.json')), metadata])
+  const staged = []
   try {
-    const token = (await readFile(tokenFile, 'utf8')).trim()
-    if (token) return token
-  } catch (error) {
-    if (error?.code !== 'ENOENT') throw error
+    for (const [path, value] of outputs) {
+      await mkdir(dirname(path), { recursive: true })
+      const temporary = `${path}.${process.pid}.tmp`
+      staged.push([temporary, path])
+      await writeFile(temporary, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600 })
+    }
+    for (const [temporary, path] of staged) await rename(temporary, path)
+  } finally {
+    await Promise.all(staged.map(([temporary]) => unlink(temporary).catch(() => {})))
   }
-  throw new Error(`No cagent token found; set CAGENT_TOKEN or CAGENT_TOKEN_FILE (checked ${tokenFile})`)
+  return metadata
 }
 
-function request(url, { method = 'GET', headers = {}, body, redirects = 5 } = {}) {
-  return new Promise((resolvePromise, reject) => {
-    const transport = url.protocol === 'https:' ? https : http
-    const requestHeaders = body
-      ? { ...headers, 'Content-Length': Buffer.byteLength(body) }
-      : headers
-    const req = transport.request(
-      url,
-      {
-        method,
-        headers: requestHeaders,
-        rejectUnauthorized: process.env.CAGENT_TLS_REJECT_UNAUTHORIZED === '1',
-      },
-      (response) => {
-        const status = response.statusCode ?? 0
-        if ([301, 302, 303, 307, 308].includes(status) && response.headers.location) {
-          response.resume()
-          if (redirects === 0) {
-            reject(new Error(`Too many redirects while downloading ${url.origin}`))
-            return
-          }
-          const redirectUrl = new URL(response.headers.location, url)
-          const redirectMethod = status === 303 ? 'GET' : method
-          request(redirectUrl, {
-            method: redirectMethod,
-            headers: redirectMethod === 'GET' ? {} : headers,
-            body: redirectMethod === 'GET' ? undefined : body,
-            redirects: redirects - 1,
-          }).then(resolvePromise, reject)
-          return
-        }
-
-        const chunks = []
-        response.on('data', (chunk) => chunks.push(chunk))
-        response.on('end', () => {
-          const responseBody = Buffer.concat(chunks)
-          if (status < 200 || status >= 300) {
-            reject(new Error(`${method} ${url.pathname} returned HTTP ${status}: ${responseBody.toString('utf8')}`))
-            return
-          }
-          resolvePromise(responseBody)
-        })
-      },
-    )
-    req.setTimeout(30_000, () => req.destroy(new Error(`${method} ${url.pathname} timed out`)))
-    req.on('error', reject)
-    if (body) req.write(body)
-    req.end()
+if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
+  fetchClusterState().then((metadata) => {
+    console.log(`Saved ${metadata.run} snapshot from ${metadata.generated_at} (${metadata.complete ? 'complete' : 'partial observation'})`)
+  }).catch((error) => {
+    console.error(error.message)
+    process.exitCode = 1
   })
 }
-
-async function requestJson(url, options) {
-  const body = await request(url, options)
-  try {
-    return JSON.parse(body.toString('utf8'))
-  } catch {
-    throw new Error(`Expected JSON from ${url.pathname}`)
-  }
-}
-
-// cagent answers in prose; take the last URL it mentions. Nothing tells it to
-// reply with the URL alone.
-function extractDownloadUrl(responseText) {
-  const matches = responseText.match(/https?:\/\/[^\s<>"'`]+/gu)
-  if (!matches) throw new Error('The cagent reply contains no URL to download')
-  return new URL(matches[matches.length - 1].replace(/[),.\]}]+$/u, ''))
-}
-
-async function fetchArtifact(baseUrl, authHeaders, artifact) {
-  const created = await requestJson(new URL('requests', baseUrl), {
-    method: 'POST',
-    headers: authHeaders,
-    body: JSON.stringify({ message: artifactPrompt(artifact.command) }),
-  })
-  if (!created.request_id) throw new Error('cagent did not return a request_id')
-
-  console.log(`Submitted cagent request ${created.request_id} (${artifact.command})`)
-  const deadline = Date.now() + positiveInteger('CAGENT_DEADLINE_SECONDS', 360) * 1000
-  const pollMilliseconds = positiveInteger('CAGENT_POLL_SECONDS', 8) * 1000
-  let result = created
-  while (!TERMINAL_STATES.has(result.state)) {
-    if (Date.now() >= deadline) throw new Error(`Timed out waiting for cagent request ${created.request_id}`)
-    await sleep(pollMilliseconds)
-    result = await requestJson(new URL(`requests/${encodeURIComponent(created.request_id)}`, baseUrl), {
-      headers: authHeaders,
-    })
-    console.log(`cagent request ${created.request_id}: ${result.state}`)
-  }
-
-  if (result.state !== 'completed' || typeof result.response !== 'string') {
-    throw new Error(`cagent request ended in ${result.state}: ${JSON.stringify(result.error ?? null)}`)
-  }
-
-  const downloadUrl = extractDownloadUrl(result.response)
-  const downloaded = await request(downloadUrl)
-  const text = downloaded.toString('utf8')
-  // Where the file lands is this script's decision, not the reply's: a URL
-  // lifted out of prose chooses what is written, never where.
-  const output = resolve(process.env[artifact.outputEnv] ?? artifact.defaultOutput)
-  const temporaryOutput = `${output}.tmp`
-  await mkdir(dirname(output), { recursive: true })
-  try {
-    await writeFile(temporaryOutput, text.endsWith('\n') ? text : `${text}\n`, { mode: 0o600 })
-    await rename(temporaryOutput, output)
-  } catch (error) {
-    await unlink(temporaryOutput).catch(() => {})
-    throw error
-  }
-  console.log(`Saved ${text.length} bytes from ${downloadUrl.pathname} to ${output}`)
-}
-
-async function main() {
-  const baseUrlValue = process.env.CAGENT_URL?.trim()
-  if (!baseUrlValue) throw new Error('CAGENT_URL is required (for example, https://agstudio:8789)')
-
-  const baseUrl = new URL(baseUrlValue.endsWith('/') ? baseUrlValue : `${baseUrlValue}/`)
-  const token = await loadToken()
-  const authHeaders = {
-    Authorization: `Bearer ${token}`,
-    'Content-Type': 'application/json',
-  }
-  for (const artifact of ARTIFACTS) {
-    await fetchArtifact(baseUrl, authHeaders, artifact)
-  }
-}
-
-main().catch((error) => {
-  console.error(error instanceof Error ? error.message : error)
-  process.exitCode = 1
-})

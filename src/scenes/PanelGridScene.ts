@@ -52,6 +52,7 @@ export interface PanelGridConfig {
   unavailableText: string
   subtitle: (count: number) => string
   footer: string
+  snapshotNotice?: () => Promise<string>
   switchTo?: { key: string; label: string }
   // The agent room's names are `<agent>-<host>` and run to 19 characters,
   // which the default 19px clips. Views whose names are long say so instead of
@@ -174,7 +175,7 @@ export class PanelGridScene extends Phaser.Scene {
       const rows = await this.config.loadRows()
       this.createPanels(rows)
       this.subtitle.setText(this.config.subtitle(rows.length))
-      this.footer.setText(this.config.footer)
+      this.footer.setText(this.config.snapshotNotice ? await this.config.snapshotNotice() : this.config.footer)
     } catch (error) {
       console.error(error)
       this.subtitle.setText(this.config.unavailableText)

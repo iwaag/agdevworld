@@ -1,3 +1,4 @@
+import { loadClusterSnapshotNotice } from './clusterState'
 import {
   loadExistingNodes,
   loadWorkspaceRows,
@@ -85,6 +86,7 @@ export function nodesViewConfig(onSelect: (selection: PanelSelection) => void): 
     unavailableText: 'cluster snapshot unavailable',
     subtitle: (count) => `${count} nodes are present`,
     footer: 'desired nodes with confirmed actual state',
+    snapshotNotice: loadClusterSnapshotNotice,
     switchTo: { key: 'workspaces', label: 'workspaces' },
     loadRows: async () =>
       (await loadExistingNodes()).map((node) => ({
@@ -105,6 +107,7 @@ export function workspacesViewConfig(onSelect: (selection: PanelSelection) => vo
     unavailableText: 'workspace snapshot unavailable',
     subtitle: (count) => `${count} workspaces are present`,
     footer: 'desired workspaces and their activity',
+    snapshotNotice: loadClusterSnapshotNotice,
     switchTo: { key: 'agentroom', label: 'agent room' },
     loadRows: async () =>
       (await loadWorkspaceRows()).map((row) => ({

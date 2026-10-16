@@ -44,7 +44,7 @@ each agdevworld screen's purpose and usage.
 - `scripts/wfe-release.sh deploy <area>` — build, check and install the workflow editor service and its `wfe` launcher from an agdevworld commit (see "The workflow editor").
 - `docker compose up --build -d web` — production-style bundle behind nginx on :8090. Keep it current when a user may want to look.
 - `docker compose ps web` / `curl -I http://localhost:8090/` — confirm it came up.
-- `CAGENT_URL=https://localhost:8789 npm run cluster:fetch` — refresh the three cluster snapshots through cagent.
+- `WFE_URL=<workflow-editor URL> npm run cluster:fetch` — read the latest completed cagent scan artifact into the three cluster snapshots and their provenance metadata. Include `/wfe/` in the URL when using the web proxy. This opens no agent request.
 - `AGENTROOM_ZULIP_ENV=<a zulip .env> OPSROOM_ZULIP_ENV=<the opsroom bot's .env> agentroom/service/serve.sh` — the relay on :8094, serving both the agent room and the operation room. Without `OPSROOM_ZULIP_ENV` the relay still runs and `/ops` answers 503; the operation room then says so rather than showing an empty board.
 - `node .local/opsshot.mjs http://localhost:5173/ .local/shots` — the ~70-line CDP screenshot driver (`OPSSHOT_STEPS` scripts the clicks). `--headless --screenshot` hangs on this app: `--virtual-time-budget` waits for the page to go idle and `PanelGridScene` tweens forever.
 - `agentroom/service/serve.sh check` — one read, counts printed, no listener. Tells a credentials problem from a UI one.
@@ -69,7 +69,7 @@ each agdevworld screen's purpose and usage.
 - `src/clusterState.ts` — snapshot reads for the cluster panels.
 - `workflow_editor/` — the workflow editor (agdev dashboard, Project Editor, runs, `wfe`): a system component with its own package (see "The workflow editor").
 - `scripts/wfe-release.sh` — builds and installs the workflow editor's service and launcher.
-- `scripts/fetch-cluster-state.mjs` — snapshot refresh through cagent. The one piece of JavaScript outside `src/`; it is a developer command, not part of the service.
+- `scripts/fetch-cluster-state.mjs` — snapshot refresh from a managed cagent scan artifact. The one piece of JavaScript outside `src/`; it is a developer command, not part of the service.
 - `public/cluster/*.json` — live snapshots, git-ignored; `public/*.sample.json` is the fallback. The Docker build copies whatever is in `public/` at build time, so move a live snapshot out first if a sample-only image is wanted.
 
 ## The agent room
@@ -493,3 +493,22 @@ imported commit).
   on a thread of the executor. Configuration is `<area>/zulip.json`
   (no credentials). Answers are recorded in agdevworld, never from Zulip.
   Contract: `workflow_editor/docs/runs.md`.
+
+## Cluster snapshot publication
+
+`cluster:fetch` reads WFE's live run/file API (`CAGENT_WORKSPACE`, default
+`cagent`). It selects the newest scan by creation time and refuses an
+unfinished/failed run or missing/invalid artifact instead of falling back to
+an older successful run. Existing files remain on fetch/validation failure;
+the command exits nonzero. A scan with partial host observation may publish
+valid source envelopes; `snapshot.json` retains `complete: false`, per-host
+outcomes and source times, and the cluster views display the scan's age and
+partial state. It does not imply every host was just observed.
+
+The outputs remain ignored under `public/cluster/`. `CLUSTER_STATE_OUTPUT`,
+`CLUSTER_WORKSPACES_OUTPUT`, `CLUSTER_ACTUAL_OUTPUT` and
+`CLUSTER_METADATA_OUTPUT` override individual paths. Refresh before building
+the static web image. Metadata older than 24 hours is labelled stale in the
+view. No cagent HTTP credentials, prose URL extraction or upload is used.
+
+Check the importer with `node --test scripts/fetch-cluster-state.test.mjs`.

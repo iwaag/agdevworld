@@ -198,15 +198,13 @@ conversational entrance that runs the `front` role and records the run, and
 `/healthz` is what the deployment probes. A dead browser caller does not make
 a whole service dead.
 
-## cagent convention (agcluster)
+## Managed cagent snapshots
 
-agdevworld sends only read-shaped requests to cagent — today that is the
-snapshot fetch in `scripts/fetch-cluster-state.mjs`. Write-shaped prompts
-(`desired apply`, `reconcile --yes`) are out of bounds. This is a
-convention, not enforced: the human token cannot distinguish reads from
-writes. Enforcement is deferred to the future system-wide auth (JWT)
-episode — see `devdocs/episodes/zero_auth/` (the single pointer to that
-vision).
+agdevworld reads completed `scan` artifacts through WFE's read-only run/file
+API. It neither submits conversational requests to the retired HTTP doors
+nor holds their human token. Cluster mutations belong to the managed
+`change` workflow. See *Cluster snapshot publication* below for refresh,
+selection and failure behavior.
 
 ## Operation room dashboard (p5)
 

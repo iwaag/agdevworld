@@ -50,7 +50,7 @@ export interface CopyRepo {
   kind: 'root' | 'submodule'
   initialized: boolean // a submodule the project workspace has not checked out stays so here
   base: string | null // the commit the run started from (a submodule: the root base's gitlink)
-  branch: string | null // the run's branch; null for a nested submodule (checked out at its gitlink)
+  branch: string | null // the run's branch (null until the copy is made, and for an uninitialized submodule)
   target: string | null // where integration goes: the branch the project workspace had checked out
   url: string | null // its remote (host-local; never written into run.json)
 }
@@ -226,15 +226,38 @@ async function planRepositories(ws: Workspace): Promise<{ repositories: CopyRepo
   }
   const url = await remoteUrl(ws.root)
   const out: CopyRepo[] = [{ path: '.', kind: 'root', initialized: true, base, branch: null, target: branch, url }]
-  for (const sm of await ws.submodulePaths()) {
-    const path = sm.path.replace(/\/+$/, '')
-    const tree = await git(ws.root, ['ls-tree', base, '--', path])
-    const link = /^160000 commit ([0-9a-f]+)\t/.exec(tree.stdout)?.[1] ?? null
-    const dir = join(ws.root, path)
-    const initialized = await isRepoTop(dir)
-    out.push({ path, kind: 'submodule', initialized: initialized && !!link, base: link, branch: null, target: initialized ? await targetOf(dir) : null, url: initialized ? await remoteUrl(dir) : null })
-  }
+  await submodulesOf(ws.root, '', base, out)
   return { repositories: out, from }
+}
+
+// The submodules of one repository of the workspace (`prefix`: its
+// project-relative path, '' the root) at the commit `base`, and theirs in
+// turn: every repository the workspace has checked out, at any depth, is
+// the run's (project_migration p6 ex1: a backend superproject whose own
+// submodules carry the work and whose gitlinks are their pins).
+async function submodulesOf(dir: string, prefix: string, base: string, out: CopyRepo[]) {
+  const r = await git(dir, ['config', '-f', '.gitmodules', '--get-regexp', '^submodule\\..*\\.path$'])
+  if (r.code !== 0) return
+  for (const line of r.stdout.split('\n')) {
+    const m = /^submodule\.(.+)\.path (.*)$/.exec(line)
+    if (!m) continue
+    const rel = m[2].replace(/\/+$/, '')
+    const tree = await git(dir, ['ls-tree', base, '--', rel])
+    const link = /^160000 commit ([0-9a-f]+)\t/.exec(tree.stdout)?.[1] ?? null
+    const sub = join(dir, rel)
+    const initialized = await isRepoTop(sub) && !!link
+    const path = prefix ? `${prefix}/${rel}` : rel
+    out.push({ path, kind: 'submodule', initialized, base: link, branch: null, target: initialized ? await targetOf(sub) : null, url: initialized ? await remoteUrl(sub) : null })
+    if (initialized) await submodulesOf(sub, path, link!, out)
+  }
+}
+
+// The owned repository a project-relative path belongs to: the longest
+// owned path that contains it ('.' the root).
+export function ownerOf(path: string, owned: string[]): string {
+  let best = '.'
+  for (const o of owned) if (o !== '.' && path.startsWith(`${o}/`) && o.length > best.length) best = o
+  return best
 }
 
 async function remoteUrl(dir: string): Promise<string | null> {
@@ -281,11 +304,15 @@ export async function materialize(ws: Workspace, ref: RunRef, env: Record<string
     await ownBranch(tree, m.branch, root.base!)
     root.branch = m.branch
     await exclude(tree, '/.local/')
-    for (const sub of m.repositories.filter(r => r.kind === 'submodule' && r.initialized)) {
-      await submodule(ws.root, tree, sub.path, sub.url, env)
+    // Parents before their own submodules, each on the run branch at its base.
+    const subs = m.repositories.filter(r => r.kind === 'submodule' && r.initialized)
+    const depth = (p: string) => p.split('/').length
+    for (const sub of [...subs].sort((a, b) => depth(a.path) - depth(b.path))) {
+      const parent = ownerOf(sub.path, subs.map(s => s.path))
+      const rel = parent === '.' ? sub.path : sub.path.slice(parent.length + 1)
+      await submodule(join(ws.root, parent), join(tree, parent), rel, sub.url, env)
       await ownBranch(join(tree, sub.path), m.branch, sub.base!)
       sub.branch = m.branch
-      await nested(join(ws.root, sub.path), join(tree, sub.path), env)
     }
     m.local = await localFiles(ws.root, tree)
     m.state = 'ready'
@@ -342,22 +369,6 @@ async function submoduleName(tree: string, path: string): Promise<string> {
     if (m && m[2].replace(/\/+$/, '') === path) return m[1]
   }
   throw new RequestError(409, `${path} is not a submodule of the run's base commit`)
-}
-
-// Nested submodules (a submodule's own submodules) that the project
-// workspace has checked out are checked out here too, at their gitlinks.
-// They are not the run's to change: no branch, nothing published.
-async function nested(sharedDir: string, dir: string, env: Record<string, string>) {
-  const r = await git(dir, ['config', '-f', '.gitmodules', '--get-regexp', '^submodule\\..*\\.path$'])
-  if (r.code !== 0) return
-  for (const line of r.stdout.split('\n')) {
-    const m = /^submodule\.(.+)\.path (.*)$/.exec(line)
-    if (!m) continue
-    const path = m[2].replace(/\/+$/, '')
-    if (!(await isRepoTop(join(sharedDir, path)))) continue
-    await submodule(sharedDir, dir, path, await remoteUrl(join(sharedDir, path)), env)
-    await nested(join(sharedDir, path), join(dir, path), env)
-  }
 }
 
 // The project workspace's local notes and settings (regular files directly

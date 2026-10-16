@@ -37,7 +37,8 @@ import { normalizeRepoPath, type RepositoryBinding } from '../shared/model.ts'
 import { runFolder, runKey, type RunRef, type RunStorage } from '../shared/run.ts'
 import { git, gitOk } from './git.ts'
 import { withLock } from './lock.ts'
-import { copyDir } from './runspace.ts'
+import { publicationOrder } from './publish.ts'
+import { copyDir, ownerOf } from './runspace.ts'
 import type { Workspace } from './workspace.ts'
 
 export interface RevisionEntry { path: string; tree: string }
@@ -72,7 +73,7 @@ export function guardsFor(bindings: Record<string, RepositoryBinding>, storage: 
     if (b.integrate !== 'if-unchanged' || b.access !== 'editable') continue
     const path = normalizeRepoPath(b.path)
     if (!path) continue
-    const sub = subs.find(sp => path === sp || path.startsWith(`${sp}/`))
+    const sub = subs.includes(path) ? path : (o => (o === '.' ? undefined : o))(ownerOf(path, subs))
     if (sub) out.push({ binding, repo: sub, paths: [path === sub ? '' : path.slice(sub.length + 1)] })
     else out.push({ binding, repo: '.', paths: [path === '.' ? '' : path] })
   }
@@ -121,7 +122,7 @@ async function administrative(space: Workspace, ref: RunRef, storage: RunStorage
   const owner = info.owner === 'devdocs' ? 'devdocs' : '.'
   const folder = info.owner === 'devdocs' ? runFolder(ref).slice('devdocs/'.length) : runFolder(ref)
   const subs = storage.repositories.filter(r => r.path !== '.' && r.branch).map(r => r.path)
-  return (repo, path) => (repo === owner && path === `${folder}/run.json`) || (repo === '.' && subs.includes(path))
+  return (repo, path) => (repo === owner && path === `${folder}/run.json`) || subs.includes(repo === '.' ? path : `${repo}/${path}`)
 }
 
 // What differs between two revisions of the run's result, apart from the
@@ -143,11 +144,12 @@ export async function resultChanges(space: Workspace, ref: RunRef, storage: RunS
   return out
 }
 
-// Orders the repositories as they are published: submodules (devdocs
-// first), then the root.
+// Orders the repositories as they are published: the deepest submodules
+// first (devdocs first among its depth), each before the repository that
+// records it, then the root.
 function ordered(storage: RunStorage) {
-  const subs = storage.repositories.filter(r => r.path !== '.' && r.branch).sort((a, b) => (a.path === 'devdocs' ? -1 : b.path === 'devdocs' ? 1 : a.path < b.path ? -1 : 1))
-  return [...subs, ...storage.repositories.filter(r => r.path === '.')]
+  const owned = storage.repositories.filter(r => r.path === '.' || r.branch)
+  return publicationOrder(owned.map(r => r.path)).map(p => owned.find(r => r.path === p)!)
 }
 
 export interface IntegrateOptions {
@@ -172,6 +174,7 @@ export async function integrate(o: IntegrateOptions): Promise<IntegrationOutcome
   })
   const admin = await administrative(o.space, o.ref, o.storage)
   const results = new Map<string, string>() // submodule → its integrated commit
+  const owners = o.storage.repositories.filter(r => r.path !== '.' && r.branch).map(r => r.path)
   const message = `Integrate ${o.project}/${runKey(o.ref)} into `
   for (const step of steps) {
     const dir = step.repo === '.' ? o.space.root : join(o.space.root, step.repo)
@@ -204,7 +207,9 @@ export async function integrate(o: IntegrateOptions): Promise<IntegrationOutcome
       const url = (await gitOk(dir, ['remote', 'get-url', 'origin'])).trim()
       const key = createHash('sha256').update(`${url}\0${step.target}`).digest('hex').slice(0, 24)
       await mkdir(o.lockDir, { recursive: true })
-      const outcome = await withLock(join(o.lockDir, `target-${key}`), () => integrateOne(o, step, dir, candidate, admin, results, `${message}${step.target}`, () => o.save(steps)), { what: `integration into ${step.target} of ${step.repo === '.' ? 'the project root' : step.repo}`, timeoutMs: 600_000 })
+      // The integrated commits of this repository's own submodules, as its gitlinks record them.
+      const links = new Map([...results].filter(([p]) => ownerOf(p, owners) === step.repo).map(([p, sha]) => [step.repo === '.' ? p : p.slice(step.repo.length + 1), sha]))
+      const outcome = await withLock(join(o.lockDir, `target-${key}`), () => integrateOne(o, step, dir, candidate, admin, links, `${message}${step.target}`, () => o.save(steps)), { what: `integration into ${step.target} of ${step.repo === '.' ? 'the project root' : step.repo}`, timeoutMs: 600_000 })
       if (outcome !== 'done' && outcome !== 'planned') break
       if (step.repo !== '.') results.set(step.repo, step.result!)
     } catch (e) {
@@ -245,8 +250,8 @@ async function integrateOne(o: IntegrateOptions, step: IntegrationStep, dir: str
       return step.state
     }
   }
-  // Submodule commits the root must record: what each integration produced.
-  const gitlinks = step.repo === '.' ? [...results.entries()] : []
+  // Submodule commits this repository must record: what each integration produced.
+  const gitlinks = [...results.entries()]
   const linksMatch = async (commit: string) => {
     for (const [path, sha] of gitlinks) {
       const m = /^160000 commit ([0-9a-f]+)\t/.exec((await gitOk(dir, ['ls-tree', commit, '--', path])).toString())

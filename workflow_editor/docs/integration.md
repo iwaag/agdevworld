@@ -84,7 +84,11 @@ brought in (records from before the refusal above). Neither is integrated.
 
 ## Per repository, in order
 
-Submodules are integrated first (devdocs first), then the root. For each
+Submodules are integrated first, each before the repository that records
+its gitlink: the most deeply nested first, then the root's own submodules
+(devdocs first), then the root. A nested submodule's integrated commit is
+recorded in its parent the way the root records its own submodules'
+(project_migration p6 ex1). For each
 repository the journal (`integrations.steps`) records:
 
 - the target branch;
@@ -115,9 +119,9 @@ commit before it can reach the remote. The rules:
 - **Pushes.** Every push is a plain push of the combined commit to the target
   branch, never forced. A rejection (the target moved meanwhile, or the
   remote refused) stops with `attention`, and a retry combines again.
-- **Root gitlinks.** The root records the integrated commits of its
-  submodules, never a run-branch commit that the submodule's target does not
-  have.
+- **Gitlinks.** The root, and a submodule that has submodules of the run's,
+  records the integrated commits of its submodules, never a run-branch
+  commit that the submodule's target does not have.
 - **Serialization.** Updates of one remote branch take turns on this host:
   a lock per remote URL and target, shared across runs and projects.
 

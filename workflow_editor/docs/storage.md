@@ -85,9 +85,12 @@ finds its run again, finished or not.
 - **Submodules** use the standard layout (`.git/modules/…` under the copy's
   root). Each one the workspace has checked out gets the run branch at its
   base gitlink. A submodule the workspace has not checked out stays
-  uninitialized. A **nested** submodule (a submodule's own) that the
-  workspace has checked out is checked out at its gitlink, detached, and is
-  not the run's: no branch, nothing published from it.
+  uninitialized. A **nested** submodule (a submodule's own) is treated the
+  same way (project_migration p6 ex1): when the workspace has it checked
+  out, it gets the run branch at the gitlink its parent's base records, and
+  it is published and integrated like any other repository of the run. A
+  backend superproject whose submodules carry the work is therefore one
+  binding, and its gitlinks are the pins integration records.
 - **Git configuration** is the copy's own (`.git/config`: remotes, submodule
   URLs). Identity and credentials come from the host's environment as for
   every other Git operation here.
@@ -222,5 +225,6 @@ edits left out; local notes copied and ignored; allocation under
 concurrency, with records, copies and run branches all counting; the same
 receipt; interrupted creation (a half clone, a manifest left at `creating`)
 and a restart; devdocs and study submodules on the run branch at their
-gitlinks (a workspace-only commit included); a nested submodule detached;
+gitlinks (a workspace-only commit included); a nested submodule on the run
+branch (`test/nested.test.ts`: checkpoint and integration order, pins);
 a damaged, missing or reconstructed manifest; a missing copy.

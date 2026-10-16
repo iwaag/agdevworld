@@ -2,7 +2,7 @@
 // on fixture projects — each run gets its own root, manifest and branches;
 // numbers are unique under concurrency; the same request, an interrupted
 // creation and a restart find the same identity; submodules are owned by
-// the run, nested ones only checked out; damaged copies are reported and
+// the run, nested ones too (project_migration p6 ex1); damaged copies are reported and
 // reconstructed only when asked.
 import { after, before, test } from 'node:test'
 import assert from 'node:assert/strict'
@@ -10,7 +10,7 @@ import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createProject } from '../server/create.ts'
-import { git, gitOk, LOCAL_TRANSPORT } from '../server/git.ts'
+import { gitOk, LOCAL_TRANSPORT } from '../server/git.ts'
 import { loadRegistry } from '../server/registry.ts'
 import { createRun, readRun } from '../server/runs.ts'
 import { copyDir, inspectIndex, listCopies, materialize, prepareCopy, readCopy, reserve, runBranch, runSpace, storageOf } from '../server/runspace.ts'
@@ -175,7 +175,7 @@ test('interrupted creation is finished by the next call; a restart reads the sam
   assert.equal((await reserve(fresh, { project, workflow: 'ship' })).ref.run, 'run-002')
 })
 
-test('submodules: devdocs and a study each get the run branch at the base gitlink; a nested submodule is checked out at its gitlink only', async () => {
+test('submodules: devdocs and a study each get the run branch at the base gitlink; a nested submodule gets the run branch at its parent\'s gitlink too', async () => {
   const { ws, dir, project, area } = await setup('submodule')
   const nestedRemote = await bare(area, 'nested', { 'n.txt': 'n\n' })
   const studyRemote = await bare(area, 'study-x', { 's.txt': 's\n' }, [{ path: 'nest', url: nestedRemote }])
@@ -194,7 +194,7 @@ test('submodules: devdocs and a study each get the run branch at the base gitlin
   const p = await prepareCopy(ws, { project, workflow: 'ship', receipt: 'subs' })
   const m = p.copy.manifest!
   const byPath = Object.fromEntries(m.repositories.map(r => [r.path, r]))
-  assert.deepEqual(Object.keys(byPath).sort(), ['.', 'devdocs', 'study/study-x'])
+  assert.deepEqual(Object.keys(byPath).sort(), ['.', 'devdocs', 'study/study-x', 'study/study-x/nest'])
   for (const [path, base] of [['devdocs', docsBase], ['study/study-x', studyBase]] as const) {
     const d = join(p.copy.tree, path)
     assert.equal(byPath[path].base, base)
@@ -206,11 +206,12 @@ test('submodules: devdocs and a study each get the run branch at the base gitlin
     assert.equal((await gitOk(d, ['remote', 'get-url', 'origin'])).trim(), (await gitOk(join(dir, path), ['remote', 'get-url', 'origin'])).trim())
   }
   assert.equal(await readFile(join(p.copy.tree, 'study/study-x/s.txt'), 'utf8'), 's2\n')
-  // Nested: checked out at its gitlink, detached, not owned by the run.
+  // Nested (project_migration p6 ex1): the run's too, on its branch at the gitlink the study records.
   const nest = join(p.copy.tree, 'study/study-x/nest')
   assert.equal(await readFile(join(nest, 'n.txt'), 'utf8'), 'n\n')
-  assert.equal((await git(nest, ['symbolic-ref', '-q', 'HEAD'])).code, 1, 'detached')
-  assert.equal(m.repositories.some(r => r.path.includes('nest')), false)
+  assert.equal(await branch(nest), m.branch)
+  assert.equal(byPath['study/study-x/nest'].base, await head(join(dir, 'study/study-x/nest')))
+  assert.equal(byPath['study/study-x/nest'].target, 'main')
   // Git sees the copy as clean and the gitlinks as recorded.
   assert.equal((await gitOk(p.copy.tree, ['status', '--porcelain'])).trim(), '')
   // The workspace's study is untouched (its branch, its uncommitted edit).

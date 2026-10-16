@@ -155,14 +155,28 @@ export async function publish(ws: Workspace, base: Baseline, message: string, pr
 
 // ---- runs with their own working copy (p9) ----------------------------------------
 
+// The order a run's repositories are published and integrated in: the most
+// deeply nested first, so every repository comes after the submodules whose
+// gitlinks it records (project_migration p6 ex1); among the root's own
+// submodules devdocs first, then by path; the root last.
+export function publicationOrder(paths: string[]): string[] {
+  const level = (p: string) => (p === '.' ? 0 : 1 + paths.filter(o => o !== '.' && p.startsWith(`${o}/`)).length)
+  return [...paths].sort((a, b) => level(b) - level(a) || (a === 'devdocs' ? -1 : b === 'devdocs' ? 1 : a < b ? -1 : a > b ? 1 : 0))
+}
+
 // Publishes the copy's repositories to their run branches (`targets`: repo
 // path → branch). Commits happen inside `commitLock` (the run's record
 // lock), so no record operation lands between staging and committing; the
-// pushes follow outside it, submodules before the root, and the root is not
-// pushed while a submodule's branch is not. A repository that has another
+// pushes follow outside it, submodules before the repository that records
+// them, and no repository is pushed while one of its submodules' branches
+// is not. A repository that has another
 // branch checked out is not committed and needs attention.
 export async function publishRun(ws: Workspace, message: string, previous: RepoStep[], env: Record<string, string>, targets: Record<string, string>, commitLock: <T>(f: () => Promise<T>) => Promise<T>): Promise<PublishResult> {
-  const order = (await repos(ws)).filter(r => r in targets)
+  const order = publicationOrder(Object.keys(targets))
+  // A repository's own submodules among the run's (nested ones included,
+  // project_migration p6 ex1): their gitlinks are its to record.
+  const inside = (parent: string, child: string) => child !== parent && (parent === '.' || child.startsWith(`${parent}/`))
+  const childOf = (parent: string, rel: string) => (parent === '.' ? rel : `${parent}/${rel}`)
   const steps: RepoStep[] = order.map(repo => {
     const prev = previous.find(s => s.repo === repo)
     return prev ? { ...prev, error: undefined } : { repo, include: [], excluded: [], conflicts: [], branch: targets[repo] }
@@ -183,7 +197,7 @@ export async function publishRun(ws: Workspace, message: string, previous: RepoS
         if (step.commit) continue // committed by an earlier try
         for (const d of await dirtyPaths(dir)) {
           // A gitlink of a submodule that is not on its run branch is not recorded.
-          if (step.repo === '.' && blocked.has(d.path)) { step.excluded.push(d.path); continue }
+          if (blocked.has(childOf(step.repo, d.path))) { step.excluded.push(d.path); continue }
           step.include.push(d.path)
         }
         if (!step.include.length) continue
@@ -202,9 +216,9 @@ export async function publishRun(ws: Workspace, message: string, previous: RepoS
   // Pushes: exactly the run branch, submodules first.
   for (const step of steps) {
     if (blocked.has(step.repo) && !step.commit) continue
-    if (step.repo === '.' && steps.some(s => s.repo !== '.' && !s.pushed && (s.commit || !blocked.has(s.repo)))) {
+    if (steps.some(s => inside(step.repo, s.repo) && !s.pushed && (s.commit || !blocked.has(s.repo)))) {
       attention = true
-      step.error = 'not pushed: a submodule\'s run branch is not published yet (the root would record a commit its remote lacks)'
+      step.error = `not pushed: a submodule's run branch is not published yet (${step.repo === '.' ? 'the root' : step.repo} would record a commit its remote lacks)`
       break
     }
     const dir = join(ws.root, step.repo)

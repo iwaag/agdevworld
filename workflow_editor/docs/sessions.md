@@ -135,11 +135,10 @@ Nothing else is repeated: identity paths, the node catalog, the
 documentation policy, contract and guides. They are unchanged, or the
 session would have been replaced. Nothing tells the agent to read the whole
 run. `wfe run state <run> [--since <seq>]` is the compact read: the same
-state and pending input, plus the entries after a seq. It is also the
-node-boundary check in the wfrun guide. `wfe run show` (`--history`) stays
-the full record and a diagnostic. Input recorded after the snapshot is
-found at node boundaries, and the write-time refusals stay in force
-(`instructions-pending`, `attempt-stale`).
+state and pending input, plus the entries after a seq. `wfe run show`
+(`--history`) stays the full record and a diagnostic. Input recorded after
+the snapshot is found in the next state read; the write-time fence
+(`attempt-stale`) stays in force. (`instructions-pending` was removed in p11.)
 
 **Compaction.** At claim, a resume of the current session checks the logs
 of its attempts since it last got the whole bootstrap. The bootstrap is

@@ -172,21 +172,20 @@ Writes run.json.`,
 
 The person's additional instructions to this run (p6): each one's text, who
 gave it and where, the nodes running when it arrived, and whether it was
-acknowledged and how. Received is not read: the executor acknowledges each
-(wfe run ack) at a node boundary. Reads only.`,
+acknowledged and how. Received is not read: the executor can acknowledge
+each (wfe run ack) whenever it reads them. Reads only.`,
   instruct: `wfe run instruct <run> --instruction <text> [--from <person>]
 
 Records a person's additional instruction to the run (the same record a post
 in its Zulip request topic becomes): it changes no node and interrupts
-nothing; the executor reads it at the next node boundary. --from names whose
+nothing; the executor sees it in its next state read or attempt brief. --from names whose
 words they are (default --by). Writes run.json.`,
   ack: `wfe run ack <run> <instruction>... --response incorporate|clarify|new-run --note <text>
 
 Records that the executor took up these instructions and what it will do:
 incorporate them into upcoming work, clarify them with a question to the
-person, or explain why they need a new run. Starting a node, and the run's
-last completion, are refused while a received instruction is
-unacknowledged. Writes run.json.`,
+person, or explain why they need a new run. It tells the person their words
+reached the executor; no transition waits for it. Writes run.json.`,
   integrate: `wfe run integrate <run> [--dry-run|--status] [--by <actor>]
 
 Integrates the actual saved run copy into its recorded target branches.

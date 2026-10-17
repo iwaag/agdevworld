@@ -41,7 +41,7 @@ export function pendingAnswers(r: RunRecord): { q: Question; index: number }[] {
 export function pendingAnswerLines(r: RunRecord): string[] {
   const all = pendingAnswers(r)
   if (!all.length) return []
-  return ['', `Answers recorded and not yet taken up (${all.length}), exact text; take each up before acting on it (wfe run take-up <run> <question>):`,
+  return ['', `Answers recorded and not yet taken up (${all.length}), exact text; wfe run take-up <run> <question> records that you read one:`,
     ...all.flatMap(({ q, index }) => {
       const a = q.answers[index]
       return [`- ${q.id} answer ${index} from ${a.from}${a.by !== a.from ? ` (recorded by ${a.by})` : ''} via ${a.via} at ${a.at}${a.source ? ` (Zulip message ${a.source.message})` : ''}; your question${q.node ? ` from ${q.node}` : ''}: "${one(q.text, 160)}"`, ...indent(a.text)]

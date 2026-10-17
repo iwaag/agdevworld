@@ -98,9 +98,9 @@ test('an existing project: dry run, then added once with settings learned from i
   const [added] = await placeBasics(p.ws)
   assert.equal(added.status, 'added')
   const w = await model(file(p.dir))
-  // The most permissive access an existing workflow grants each path; keys
-  // from the first file (by name) that bound it.
-  assert.deepEqual(w.repositories, { root: { path: '.', access: 'readonly' }, lab: { path: 'lab', access: 'editable' }, study: { path: 'study/notes', access: 'editable' } })
+  // Every path an existing workflow binds, editable (p11: no inherited
+  // readonly); keys from the first file (by name) that bound it.
+  assert.deepEqual(w.repositories, { root: { path: '.', access: 'editable' }, lab: { path: 'lab', access: 'editable' }, study: { path: 'study/notes', access: 'editable' } })
   assert.deepEqual(w.execution, { agent: 'proj-agent', profile: 'sonnet', guides: ['agent/guide.md'] })
   assert.deepEqual(validateWorkflow(w, { repositories: await p.ws.repositories() }).filter(i => i.severity === 'error'), [])
   const text = await readFile(file(p.dir), 'utf8')

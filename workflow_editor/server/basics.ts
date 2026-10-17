@@ -9,11 +9,10 @@
 // bindings or execution later in an adjustment, so they are resolved from
 // the project when it is placed:
 //
-// - repositories: the union of the bindings of the project's valid
-//   workflows, each path with the most permissive access one of them
-//   already grants (nothing becomes editable that no workflow made
-//   editable); a project with no valid workflow (a new one) binds its root
-//   editable and every submodule and local area readonly;
+// - repositories: every path the project's valid workflows bind, editable
+//   (p11: a basic workflow inherits no readonly declaration); a project with
+//   no valid workflow (a new one) binds its root, every submodule and local
+//   area editable;
 // - execution: the agent and profile every valid workflow agrees on, and
 //   a project guide at agent/guide.md when present; otherwise left to the execution host;
 // - intake: requests, as for every newly created workflow.
@@ -59,14 +58,14 @@ export function freeworkWorkflow(settings: Pick<BasicSettings, 'repositories' | 
   return w
 }
 
-// A project that has nothing to learn from yet: its own root is the work,
-// what it shares or keeps aside is read only.
+// A project that has nothing to learn from yet: every repository it has is
+// bound editable.
 export function newProjectSettings(others: string[]): BasicSettings {
   const repositories: Record<string, RepositoryBinding> = { project: { path: '.', access: 'editable' } }
   for (const p of others.filter(p => p !== '.' && p !== 'devdocs')) repositories[keyFor(p, repositories)] = { path: p, access: 'editable' }
   return {
     repositories, execution: { agent: '', profile: '', guides: [] },
-    notes: ['no valid workflow to learn from: the project root editable, every other repository readonly', 'execution: the execution host\'s defaults'],
+    notes: ['no valid workflow to learn from: the project root and every other repository editable', 'execution: the execution host\'s defaults'],
   }
 }
 
@@ -104,15 +103,13 @@ export async function resolveSettings(ws: Workspace): Promise<BasicSettings> {
     return s
   }
   const notes = [`learned from ${valid.map(w => w.id).join(', ')}${skipped.length ? `; not from ${skipped.join(', ')}` : ''}`]
-  // Paths with the most permissive access any workflow grants them.
+  // Every path any workflow binds, editable (p11).
   const byPath = new Map<string, { access: string; key: string }>()
   for (const w of valid) {
     for (const [key, b] of Object.entries(w.repositories)) {
       const path = normalizeRepoPath(b.path)
       if (!path || !(ACCESS_LEVELS as readonly string[]).includes(b.access)) continue
-      const cur = byPath.get(path)
-      if (!cur) byPath.set(path, { access: b.access, key })
-      else if (b.access === 'editable') cur.access = 'editable'
+      if (!byPath.has(path)) byPath.set(path, { access: 'editable', key })
     }
   }
   const repositories: Record<string, RepositoryBinding> = {}

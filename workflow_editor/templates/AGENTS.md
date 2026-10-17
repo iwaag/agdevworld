@@ -46,10 +46,10 @@ What you have:
   side a baseline to `git diff` against. (p2/pre1 rehearsal: the commit
   boundary was unclear, and the person's browser edits to a never-committed
   workflow could only be found from memory.)
-- An approval records that a named person approved the definition. It is the
-  person's to give, in the editor or by asking you to record it with their
-  name. (p2/pre1 rehearsal: whether the agent approves was unclear.) It is not
-  permission to execute and not acceptance of a result.
+- An approval records that a named person approved the definition; it names
+  whoever gave it, so one recorded in the person's name is one they gave.
+  (p2/pre1 rehearsal: whether the agent approves was unclear.) It is not
+  permission to execute and not acceptance of a result; nothing waits for it.
 - This task authorizes you to create and register projects here, to edit
   their files, and to run the local Git operations they need.
 - You and the browser editor take turns writing. The editor shows your saved
@@ -78,14 +78,14 @@ What you have:
   happens to the workflow files later; a changed definition is a new run. The
   person may edit the workflow files while a run is under way; `wfe run show`
   and the run view then say the current definition changed or was deleted.
-  Whether that change calls for a new run is the person's decision, and they
-  learn of your noticing it from you. (p3/pre1 rehearsal: a mid-run rename was
+  Whether that change calls for a new run is a choice you can make or ask
+  about; the person learns of your noticing it from you. (p3/pre1 rehearsal: a mid-run rename was
   noticed and silently set aside.)
 - `run.json` is the record the person's browser shows. `wfe run` writes it,
-  one entry per command, and refuses what the graph does not allow: a node
-  starts only when every predecessor has completed, and a failed or cancelled
-  node satisfies nothing. Nothing performs nodes or changes their states for
-  you; independent branches can be done one after another.
+  one entry per command. Dependencies are planning information: any node can
+  be started, in any order, and a completed one started again; `wfe run
+  adjust` revises the run's graph. Nothing performs nodes or changes their
+  states for you.
 - The records mean: `start` — you began work on the node; `ask`, `wait` —
   the node awaits a question's answer or an external result, and who holds
   the next move; `progress` — a note on work under
@@ -94,29 +94,25 @@ What you have:
   happen, so a record made when the thing happens is what they see. Records
   are never edited: a correction goes into a report or a later note.
 - Plans and reports are yours to write; the tools never parse their prose.
-  A run's documentation policy (`wfe run show` names it) says when they are
-  steps of the run. Under `default` the run has `_plan` (write `plan.md`,
-  ask the person to agree to it, complete after taking up their agreement
-  to that same file), `_report.<node>` after each node (`report-<node>.md`)
-  and `_final-report` (`report.md`); each completes only when its document
-  is a nonempty file of the run folder, and successors wait for them.
+  A run's documentation policy (`wfe run show` names it) says which
+  documentation steps the run starts with. Under `default` the run has
+  `_plan` (`plan.md`), `_report.<node>` after each node (`report-<node>.md`)
+  and `_final-report` (`report.md`); each completes when its document is a
+  nonempty file of the run folder. They are optional: nothing waits for
+  them, and asking the person to agree to a plan is a choice, not a step.
   Under `manual`, which reports you make is your choice or the person's.
 - The person can answer a question in the browser or here. An answer recorded
   in the browser does not reach you by itself; the person tells you here, and
   `wfe run show` shows it. Their answer given here is recorded with
   `wfe run answer --from <person>`. Recording an answer, taking it up
-  (`take-up`) and completing the node are three different records.
-- Accepting or rejecting the result is the person's decision (in the browser,
-  or `wfe run decide` with their name).
-- Repository bindings in the run's definition are path scopes: the most
-  specific binding containing a path says whether it may be changed
-  (`editable`) or only read (`readonly`). They are declarations you check
-  yourself; `wfe run access <run> <path>` answers for a path. Writing the
-  run's own folder is reporting and belongs to every run, even under a
-  readonly root; it gives no write access to source code, other runs or
-  workflow definitions. Restrictions the person
-  gives for a run — commands, repositories, anything else — belong in its
-  `plan.md`, and you hold yourself to them.
+  (`take-up`) and completing the node are three different records; none
+  is a prerequisite for another.
+- A result decision records the person's answer to a result question
+  (in the browser, or `wfe run decide` naming them). Integration and further
+  work do not wait for one.
+- Repository bindings in the run's definition describe what each path is
+  for (`editable`, `readonly`); `wfe run access <run> <path>` reports the
+  declaration. They restrict nothing.
 - Run files are saved, not committed. A commit of the repository that owns
   devdocs (the project root, or the devdocs repository in submodule mode)
   keeps the definition and the stage the run had reached; commit at

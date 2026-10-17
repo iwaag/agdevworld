@@ -158,7 +158,7 @@ manage instances in `present.sqlite`:
 | `run.stop` — the run is held, resumable | stays served: a paused review keeps its presentation |
 | `run.cancel` — final | the cancellation is recorded first; then every open presentation of the run is stopped through the cancellation's own cleanup path (`ExecStore.cancel` → `Presenter.stop(…, 'all')`), whatever successors the graph has. Failures are recorded as `stop-failed`, shown beside the cancellation, and retried with `wfe present stop <run> --all`; the run stays `cancelled` |
 | Result accepted, cleanup not done | the run view and messages say **accepted; cleanup pending** |
-| Execution completion | refused while a presentation is open (`presentation-open`): the last completion — the final report under the default policy — waits until shutdown is verified |
+| Execution completion | not held by open presentations (p11; `presentation-open` no longer exists); they keep serving until stopped or the run is cancelled |
 
 The cleanup node of a workflow stops the run's presentations and completes
 with the verified outcome. A failed stop leaves the node running or failed

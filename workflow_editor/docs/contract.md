@@ -228,12 +228,11 @@ workflow.
 
 - **Settings are resolved when it is placed**, since an adjustment never
   changes bindings or execution (`server/basics.ts`): the union of the
-  bindings of the project's valid workflows, each path with the most
-  permissive access one of them grants; the agent and profile all of them
+  bindings of the project's valid workflows, each path editable; the agent and profile all of them
   agree on, and the project-wide `agent/guide.md` when that file exists.
   Workflow-specific guides are not inferred or copied. A project without valid
   workflows (a new one) binds its root editable and every submodule and
-  local area readonly. Newly created workflows, including freework, declare
+  local area editable. Newly created workflows, including freework, declare
   `intake: {zulip: requests}` by default.
 - **Placed by one mechanism**: project creation (`create.ts`, in the initial
   commit; in the devdocs source in submodule mode) and `wfe workflow basics
@@ -392,24 +391,20 @@ workspace is reported as such (a warning — it depends on the workspace, not
 the definition).
 
 `integrate` (optional, project_migration p4) is `merge` (the default) or
-`if-unchanged`. An editable binding declared `if-unchanged` is an
-integration precondition: when the binding's target changed under its path
-since the run's merge base with it, the integration stops as
-`target-changed` and publishes nothing ([integration.md](integration.md),
-*Guarded bindings*). It is part of the definition digest when declared.
+`if-unchanged`. Since p11 `if-unchanged` is informational: integration
+merges the actual saved changes whatever the target did meanwhile, and a real
+Git conflict names its files ([integration.md](integration.md)). It is part
+of the definition digest when declared.
 
-`access` is `readonly` or `editable`. It is a declaration and a restriction
-on the editor's own operations, not filesystem isolation: external editors and
-agents can still change a readonly repository. Access belongs to the workflow:
-the same repository can be readonly in one workflow and editable in another.
+`access` is `readonly` or `editable`. Since p11 it is a description of what a
+path is for, not a restriction: no operation of the editor, the executor or
+integration refuses a change under a `readonly` binding, and agents choose
+what to change. Access belongs to the workflow: the same repository can be
+declared differently in different workflows.
 
 Since p4, bindings are **path scopes**: the most specific binding whose path
-contains a path governs it (`.` contains everything), so `root: readonly`
-with `game: editable` leaves only `game/` editable. A run may always write its
-own records (`devdocs/runs/<workflow>/<run>/`) — reporting, not permission to
-edit source code, other runs or workflow definitions (`shared/access.ts`,
-`wfe run access`). Restrictions are the executor's self-checks, never
-described as OS-enforced.
+contains a path describes it (`.` contains everything); `wfe run access`
+reports what is declared for a path (`shared/access.ts`).
 
 ### Node types and repository conventions
 

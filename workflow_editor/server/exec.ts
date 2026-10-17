@@ -83,8 +83,7 @@ export function documentationBrief(r: RunRecord): string[] {
 }
 // The person's additional instructions as the attempt starts (p6): the
 // unacknowledged ones in full, in arrival order. More may arrive while it
-// works; each node boundary shows them (wfe run start refuses until they are
-// acknowledged).
+// works; wfe run state shows them. Acknowledgment is a record, not a gate (p11).
 export function instructionBrief(r: RunRecord): string[] {
   const all = Object.values(r.instructions ?? {})
   if (!all.length) return []

@@ -221,6 +221,14 @@ export function renderRunView(root: HTMLElement, wsId: string, workflow: string,
     await refresh.request('full')
   }
 
+  // A full check of shared bytes against their manifest (project_migration p6).
+  async function verifyShared(id: string) {
+    const name = actorName('who checks it')
+    if (!name) return
+    try { const r = await api.verifyShared(wsId, workflow, run, id, name); opNotice = { kind: r.status === 'verified' ? 'ok' : 'warn', text: `${id}: ${r.status} — ${r.detail}` } } catch (e) { opNotice = { kind: 'error', text: `Checking ${id} failed: ${(e as Error).message}` } }
+    await refresh.request('full')
+  }
+
   // Integration of the accepted result (p9): a check (dry run) or now.
   async function integrateRun(dryRun: boolean) {
     const name = actorName('who integrates the result')
@@ -289,6 +297,7 @@ export function renderRunView(root: HTMLElement, wsId: string, workflow: string,
       case 'records': setDisplay('detail'); side.revealRecords(); break
       case 'present-start': void presentation(d.presentation!, 'start'); break
       case 'present-stop': void presentation(d.presentation!, 'stop'); break
+      case 'share-verify': void verifyShared(d.id!); break
       case 'retry-checkpoint': void retryCheckpoint(Number(d.checkpoint)); break
       case 'integrate-check': void integrateRun(true); break
       case 'integrate-run': void integrateRun(false); break

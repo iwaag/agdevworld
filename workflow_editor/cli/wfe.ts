@@ -326,6 +326,21 @@ receipt twice queues once. Other runs of the project — held, waiting or
 working — never refuse it (p9). --predecessor names an earlier run this one
 follows (reusing its plan, repairing or reversing it): the record keeps the
 link and the agent is told where that run's records and saved branch are.`,
+  share: `wfe share <subcommand> …   (shared areas on this host; docs/shares.md)
+
+list                       the shares this host has configured (<area>/shares.json) and
+                           whether each is mounted here (its marker file answers)
+resolve <ref>              where shared://<share>/<path> is on this host, its state
+                           (ok, unknown-share, unmounted, absent, outside …) and its
+                           LAN download address. Paths printed here are this host's:
+                           never write them into a tracked record, name the reference
+ls <ref> [--max <n>]       the files a reference holds (path and size; nothing is hashed)
+verify <manifest.json> [--quick]
+                           check an input-set or output manifest (devdocs/runs/…/inputs/
+                           i<n>.json, outputs/o<n>.json, or a copy of one) against this
+                           host's share: verified, changed or missing. Needs no run and
+                           no workspace — how another PC checks a delivery it received
+                           by reference. Exit 1 unless verified`,
   present: `wfe present <subcommand> …   (presentations of a run's result; docs/presentations.md)
 
 register <run> <node> --source <dir> --entry <file> --review <file.md> --title <text>
@@ -532,6 +547,7 @@ Projects and workspaces
   observe                   a read-only snapshot of every run for monitors (observer p3)
   notify <subcommand>       Zulip coordination: status, deliveries, claim, resolve … (autolab delivers)
   present <subcommand>      presentations of a run's result: register, start, status, stop, reconcile
+  share <subcommand>        shared areas on this host: list, resolve, ls, verify (docs/shares.md)
 
 Workflows (by file name or id)
   workflow new <id>         create devdocs/workflows/<id>.yaml from the template
@@ -807,6 +823,45 @@ async function openExec(p: Parsed): Promise<ExecStore> {
 
 // Presentations of a run's result (p7): frozen bundles in the run folder,
 // served on this host by instances that outlive the attempt.
+async function cmdShare(p: Parsed): Promise<number> {
+  const [sub, arg] = p.positional
+  const m = await import('../server/shares.ts')
+  const { humanBytes } = await import('../shared/shares.ts')
+  m.setShareArea(areaDir(p))
+  switch (sub) {
+    case 'list': {
+      const cfg = m.loadShareConfig()
+      const rows = await Promise.all(Object.entries(cfg.shares).map(async ([id, s]) => ({ share: id, root: s.root, ...(await m.shareRoot(id, cfg)), download: m.downloadBase(id, cfg) })))
+      out(rows.length ? rows.map(r => `${r.share.padEnd(16)} ${r.state.padEnd(12)} ${r.root}${r.detail ? `  (${r.detail})` : ''}${r.download ? `\n${' '.repeat(17)}download: ${r.download}` : ''}`).join('\n') : `No shares configured on this host (${join(areaDir(p), m.SHARES_FILE)}).`, { ok: true, file: cfg.file, shares: rows })
+      return 0
+    }
+    case 'resolve':
+    case 'ls': {
+      if (!arg) throw new UsageError(`${sub} <shared://share/path>`)
+      const r = await m.resolveRef(arg)
+      const parsed = (await import('../shared/shares.ts')).parseRef(arg)!
+      if (sub === 'resolve') {
+        const url = r.state === 'ok' ? m.downloadUrl(parsed) : null
+        out(`${r.ref}: ${r.state}${r.abs ? `\n  here: ${r.abs}` : ''}${r.detail ? `\n  ${r.detail}` : ''}${url ? `\n  download: ${url}` : ''}`, { ok: r.state === 'ok', ...r, url })
+        return r.state === 'ok' ? 0 : 1
+      }
+      if (r.state !== 'ok') throw new Refused(`${r.ref}: ${r.detail}`)
+      const max = Number(opt(p, 'max') ?? 500)
+      const files = await m.listFiles(r.abs!, { max: 100000 })
+      out([...files.slice(0, max).map(f => `${String(f.bytes).padStart(12)}  ${f.path}`), `${files.length} files, ${humanBytes(files.reduce((n, f) => n + f.bytes, 0))}${files.length > max ? ` (first ${max} shown)` : ''}`].join('\n'), { ok: true, ref: r.ref, files })
+      return 0
+    }
+    case 'verify': {
+      if (!arg) throw new UsageError('verify <manifest.json>')
+      const { readFileSync } = await import('node:fs')
+      const r = await m.verifyManifest(readFileSync(resolve(arg), 'utf8'), { quick: p.flags.has('quick') })
+      out(`${r.ref} (${r.digest.slice(0, 19)}…): ${r.status} — ${r.detail}`, { ok: r.status === 'verified', ...r })
+      return r.status === 'verified' ? 0 : 1
+    }
+    default: throw new UsageError('share list | resolve <ref> | ls <ref> | verify <manifest.json>')
+  }
+}
+
 async function cmdPresent(p: Parsed): Promise<number> {
   const [sub, runArg, third] = p.positional
   const { Presenter } = await import('../server/present.ts')
@@ -1226,7 +1281,7 @@ async function cmdMigrate(p: Parsed): Promise<number> {
 }
 
 const COMMANDS: Record<string, (p: Parsed) => Promise<number>> = {
-  runs: cmdRuns, observe: cmdObserve, projects: cmdProjects, run: cmdRun, delegate: cmdDelegate, present: cmdPresent, project: cmdProject, repo: cmdRepo, dashboard: cmdDashboard, exec: cmdExec, request: cmdRequest, notify: cmdNotify, intake: cmdIntake,
+  runs: cmdRuns, observe: cmdObserve, projects: cmdProjects, run: cmdRun, delegate: cmdDelegate, present: cmdPresent, share: cmdShare, project: cmdProject, repo: cmdRepo, dashboard: cmdDashboard, exec: cmdExec, request: cmdRequest, notify: cmdNotify, intake: cmdIntake,
   create: cmdCreate, register: cmdRegister, list: cmdList, status: cmdStatus, validate: cmdValidate,
   approve: cmdApprove, arrange: cmdArrange, 'add-repo': cmdAddRepo, workflow: cmdWorkflow, serve: cmdServe, setup: cmdSetup,
   version: cmdVersion, nodes: cmdNodes,
@@ -1275,6 +1330,9 @@ export async function main(argv: string[]): Promise<number> {
   if (!COMMANDS[cmd]) { console.error(`wfe: no command "${cmd}" (see: wfe help)`); return 2 }
   if (p.flags.has('help') && cmd !== 'run' && cmd !== 'delegate') { console.log(HELP[cmd]); return 0 }
   p.positional = rest
+  // Shared-area references resolve against this area's shares.json
+  // (docs/shares.md); a command without a registry (setup) has no area yet.
+  try { (await import('../server/shares.ts')).setShareArea(areaDir(p)) } catch (e) { if (!(e instanceof UsageError)) throw e }
   try {
     return await COMMANDS[cmd](p)
   } catch (e) {

@@ -12,6 +12,7 @@ import {
   adjustRun, checkRun, createRun, listRuns, readRun, resolveRef, runDir, runOp, runResponse, type AdjustResult, type CreateRunOptions,
 } from '../server/runs.ts'
 import { RequestError, type Workspace } from '../server/workspace.ts'
+import { humanBytes } from '../shared/shares.ts'
 import { runSpace } from '../server/runspace.ts'
 import { integrationStatus } from '../shared/approval.ts'
 import type { ExecStore } from '../server/exec.ts'
@@ -150,7 +151,7 @@ running or waiting node is cancelled in the same entry. Final. The run's
 working copy, records and saved branch stay as they are (nothing is
 reverted). --because names the person's answer or instruction you acted on
 (the record shows whose words they were). Writes run.json.`,
-  ask: `wfe run ask <run> [<node>] --question <text> --to <who> [--id q<n>] [--about-plan] [--about-adjustment <name>] [--subject <path>]... [--presentation <p>]
+  ask: `wfe run ask <run> [<node>] --question <text> --to <who> [--id q<n>] [--about-plan] [--about-adjustment <name>] [--subject <path>]... [--presentation <p>] [--output <o>]
 
 Records a question (ids q1, q2, … unless --id). With <node>, the running node
 then waits on it and <who> holds the next move. A question from _plan needs
@@ -162,7 +163,10 @@ hash. From the result-confirmation node
 (confirms: result) the question presents the deliverables with --subject
 (project-relative files, written first; recorded by hash), or a served
 presentation with --presentation <p> (wfe present): its files by hash and its
-revision; the answer then binds that revision only. Writes run.json.`,
+revision; the answer then binds that revision only. --output <o> presents an
+external output (wfe run publish): its bytes on the share are verified against
+its manifest in full, and the manifest is recorded as a subject, alone or
+with a presentation (a preview of it). Writes run.json.`,
   answer: `wfe run answer <run> <question> --answer <text> [--from <person>]
 
 Records an answer to that question. The waiting node stays waiting until the
@@ -299,6 +303,42 @@ for its records, even under a readonly root), or undeclared. The most
 specific repository binding that contains a path governs it. Without paths
 it lists the bindings as scopes. These are declarations you check yourself
 before changing something; nothing enforces them at the OS level. Reads only.`,
+  input: `wfe run input <run> <node> --ref shared://<share>/<path>[/] [--stage copy|in-place]
+
+Selects an input set for a running node (docs/shares.md): the files the
+reference holds on this host now, each by path, size and sha256, written to
+inputs/i<n>.json in the run folder and recorded (input.select). --stage copy
+(default) also copies them into the run copy's .local/inputs/i<n>/ and
+verifies the copy: work reads that copy, so a later change on the share does
+not reach the run. --stage in-place reads them where they are; use wfe run
+inputs --verify before relying on them again. A reference that is not
+mounted, missing or empty is refused (nothing recorded). Selecting the same
+reference again makes a new set; nothing replaces one. Writes run.json.`,
+  inputs: `wfe run inputs <run> [--verify <i>|--verify-all] [--quick]
+
+The run's references (written in its input) and input sets: digest, files,
+bytes, staging, the last check and where they are on this host. --verify
+re-reads a set (the staged copy, or the share for in-place) against its
+manifest and records what it found: verified, changed or missing — a changed
+input is recorded, never silently consumed. --quick compares sizes only.`,
+  publish: `wfe run publish <run> <node> --source <folder> --title <text> --candidate <name> [--share <share>] [--input <i>]...
+
+Publishes a folder of the run copy (usually under .local/) as output o<n>
+(docs/shares.md): copied to shared://<share>/runs/<project>/<workflow>/<run>/o<n>/
+through an unfinished .o<n>.partial-* folder, every file verified, the manifest
+written inside, then renamed into place — a partial copy is never published.
+outputs/o<n>.json in the run folder keeps the manifest in Git; the payload
+stays outside it. --candidate names the approach or variant (a later output
+of the same candidate supersedes an earlier one in a confirmation; another
+candidate coexists). --input names the input sets it was made from (default:
+all of the run's). --share defaults to the share of the run's first input
+set. Writes run.json.`,
+  outputs: `wfe run outputs <run> [--verify <o>] [--quick]
+
+The run's external outputs: candidate, digest, files, bytes, the last check
+and the LAN download address. --verify re-reads an output on the share against
+its manifest and records what it found. Ask about one with wfe run ask …
+--output <o> (its bytes are verified in full then).`,
   attach: `wfe run attach <run> <path> [--node <node>] [--title <text>]
 
 Records an artifact reference (a report, a result file). <path> is
@@ -410,6 +450,8 @@ export function runIndex(): string {
   instructions / instruct / ack       additional instructions: list, give, acknowledge
   access <run> [<path>]... what the run's definition declares for a path
   attach <run> <path>      record an artifact
+  input / inputs <run>     select an input set from a shared:// reference; list and verify them
+  publish / outputs <run>  publish an output to a shared area; list and verify them
   decide <run>             record acceptance or rejection of the result
   integrate <run>          bring the accepted result into the shared branches (or --dry-run, --status)
   reversal <run>           what undoing the run involves (facts only)
@@ -553,6 +595,12 @@ export function describeRun(r: RunResponse, opts: { history?: boolean; url?: str
     for (const i of ins) lines.push(...instructionLines(i))
   }
   if (r.artifacts.length) lines.push('Artifacts:', ...r.artifacts.map(a => `  ${a.path}${a.exists ? '' : ' (missing)'}`))
+  // Shared areas (project_migration p6): what the input pointed at, the
+  // input sets and the outputs, as this host reaches them now.
+  const sh = r.shares
+  if (rec.input.references?.length) lines.push('Shared references:', ...rec.input.references.map((x, k) => `  ${x.ref}  ${sh?.references[k]?.state ?? 'not checked'}`))
+  if (rec.inputs) lines.push('Input sets:', ...Object.values(rec.inputs).map(x => `  ${x.id} ${x.ref}: ${x.count} files, ${humanBytes(x.bytes)}, ${x.digest.slice(0, 19)}…, ${x.staging}${x.last && x.last.status !== 'verified' ? ` — ${x.last.status}` : ''}`))
+  if (rec.outputs) lines.push('Outputs:', ...Object.values(rec.outputs).map(x => `  ${x.id} ${x.candidate} "${x.title}": ${x.count} files, ${humanBytes(x.bytes)}, ${x.digest.slice(0, 19)}…${x.last && x.last.status !== 'verified' ? ` — ${x.last.status}` : ''}${sh?.outputs[x.id]?.url ? `  ${sh.outputs[x.id].url}` : ''}`))
   if (rec.decisions.length) lines.push('Decisions:', ...rec.decisions.map(d => `  ${d.decision} by ${d.by} at ${d.at}; evidence: ${d.evidence}${d.note ? `; ${d.note}` : ''}`))
   if (r.files.length) lines.push(`Files in ${r.dir}/: ${r.files.map(f => f.name).join(', ')}; the fixed definition in definition/`)
   const hist = opts.history ? rec.history : rec.history.slice(-5)
@@ -782,7 +830,7 @@ export async function runCommand(c: RunCli): Promise<number> {
     case 'ask': {
       const r = await ref()
       const root = await rootOf(r)
-      return op({ op: 'question.ask', question: c.opt('id') ?? '', node: args[1], text: need(c, 'question', 'the question'), to: need(c, 'to', 'to whom it is addressed'), ...(c.flag('about-plan') ? { plan: true } : {}), ...(c.opts('subject').length ? { subjects: c.opts('subject').map(p => projectPath(root, p)) } : {}), ...(c.opt('presentation') ? { presentation: c.opt('presentation') } : {}), ...(c.opt('about-adjustment') ? { adjustment: c.opt('about-adjustment') } : {}) },
+      return op({ op: 'question.ask', question: c.opt('id') ?? '', node: args[1], text: need(c, 'question', 'the question'), to: need(c, 'to', 'to whom it is addressed'), ...(c.flag('about-plan') ? { plan: true } : {}), ...(c.opts('subject').length ? { subjects: c.opts('subject').map(p => projectPath(root, p)) } : {}), ...(c.opt('presentation') ? { presentation: c.opt('presentation') } : {}), ...(c.opt('output') ? { output: c.opt('output') } : {}), ...(c.opt('about-adjustment') ? { adjustment: c.opt('about-adjustment') } : {}) },
         rec => { const q = Object.values(rec.questions).at(-1)!; return `Recorded question ${q.id} to ${q.to}${q.node ? `; ${q.node} waits on it` : ''}.` }, r)
     }
     case 'answer': {
@@ -852,6 +900,67 @@ export async function runCommand(c: RunCli): Promise<number> {
         : [`Scopes of ${runKey(r)} (most specific wins):`, ...scopes, `  ${'(records)'.padEnd(16)} ${dir.padEnd(28)} report — this run's own folder`].join('\n'),
       { ref: runKey(r), bindings: def.repositories, records: dir, answers })
       return 0
+    }
+    case 'input': {
+      const r = await ref()
+      const nodeId = node()
+      const stage = c.opt('stage') ?? 'copy'
+      if (stage !== 'copy' && stage !== 'in-place') throw c.usage('--stage is copy or in-place')
+      const { selectInput, setShareArea } = await import('../server/shares.ts')
+      setShareArea(c.area())
+      const res = await wrap(async () => selectInput(ws, r, { node: nodeId, ref: need(c, 'ref', 'the shared:// reference'), staging: stage }, { by: await recorder(r), via: 'cli', expectSeq, attempt, receipt }))
+      const set = res.record.inputs![res.input]
+      return report(r, res.record, res.duplicate ? `Already recorded (same receipt): input set ${res.input}.` : `Selected input set ${set.id} from ${set.ref}: ${set.count} files, ${humanBytes(set.bytes)}, ${set.digest.slice(0, 19)}…, ${set.staging === 'copy' ? `staged in .local/inputs/${set.id}/` : 'read in place'}. Manifest: ${set.file}`)
+    }
+    case 'inputs':
+    case 'outputs': {
+      const r = await ref()
+      const m = await import('../server/shares.ts')
+      m.setShareArea(c.area())
+      const verifyId = c.opt('verify')
+      const ids = c.flag('verify-all') ? Object.keys((await wrap(() => readRun(ws, r))).record?.inputs ?? {}) : verifyId ? [verifyId] : []
+      const checks: { id: string; status: string; detail: string }[] = []
+      for (const id of ids) {
+        const res = await wrap(async () => sub === 'inputs' ? m.verifyInput(ws, r, id, { by: await recorder(r), via: 'cli', quick: c.flag('quick') }) : m.verifyOutput(ws, r, id, { by: await recorder(r), via: 'cli', quick: c.flag('quick') }))
+        checks.push({ id, status: res.status, detail: res.detail })
+      }
+      const rec = (await wrap(() => readRun(ws, r))).record
+      if (!rec) throw c.refused(`run ${runKey(r)} cannot be read`)
+      const avail = await m.availability(rec)
+      const lines: string[] = []
+      if (sub === 'inputs') {
+        lines.push(`References in ${rec.input.file}: ${avail.references.length ? '' : 'none'}`)
+        for (const a of avail.references) lines.push(`  ${a.ref}  ${a.state}${a.url ? `  ${a.url}` : ''}`)
+        lines.push(`Input sets: ${Object.keys(rec.inputs ?? {}).length ? '' : 'none'}`)
+        for (const i of Object.values(rec.inputs ?? {})) {
+          const where = await m.inputLocation(ws, r, i.id).catch(() => null)
+          lines.push(`  ${i.id} ${i.ref} (${i.node}): ${i.count} files, ${humanBytes(i.bytes)}, ${i.digest.slice(0, 19)}…, ${i.staging}; last check ${i.last ? `${i.last.status} at ${i.last.at}: ${i.last.detail}` : 'none'}${where ? `\n     here: ${where}` : `\n     here: not reachable (${avail.inputs[i.id]?.state})`}`)
+        }
+      } else {
+        lines.push(`Outputs: ${Object.keys(rec.outputs ?? {}).length ? '' : 'none'}`)
+        for (const o of Object.values(rec.outputs ?? {})) {
+          lines.push(`  ${o.id} "${o.title}" candidate ${o.candidate} (${o.node}): ${o.count} files, ${humanBytes(o.bytes)}, ${o.digest.slice(0, 19)}…; last check ${o.last ? `${o.last.status} at ${o.last.at}: ${o.last.detail}` : 'none'}`)
+          lines.push(`     ${o.ref}  ${avail.outputs[o.id]?.state}${avail.outputs[o.id]?.url ? `  ${avail.outputs[o.id].url}` : ''}`)
+        }
+      }
+      for (const x of checks) lines.push(`Checked ${x.id}: ${x.status} — ${x.detail}`)
+      c.out(lines.join('\n'), { ref: runKey(r), references: rec.input.references ?? [], inputs: rec.inputs ?? {}, outputs: rec.outputs ?? {}, availability: avail, checks })
+      return checks.some(x => x.status !== 'verified') ? 1 : 0
+    }
+    case 'publish': {
+      const r = await ref()
+      const nodeId = node()
+      const m = await import('../server/shares.ts')
+      m.setShareArea(c.area())
+      const rec = (await wrap(() => readRun(ws, r))).record
+      const share = c.opt('share') ?? (rec?.inputs ? Object.values(rec.inputs)[0]?.ref.slice('shared://'.length).split('/')[0] : undefined)
+      if (!share) throw c.usage('--share is required: the run has no input set to take it from')
+      const root = await rootOf(r)
+      const source = projectPath(root, need(c, 'source', 'the folder to publish'))
+      const res = await wrap(async () => m.publishOutput(ws, r, { node: nodeId, source, title: need(c, 'title', 'what the output is'), candidate: need(c, 'candidate', 'the approach or variant it belongs to'), share, ...(c.opts('input').length ? { inputs: c.opts('input') } : {}) }, { by: await recorder(r), via: 'cli', expectSeq, attempt, receipt }))
+      const o = res.record.outputs![res.output]
+      const url = (await m.availability(res.record)).outputs[o.id]?.url
+      return report(r, res.record, res.duplicate ? `Already recorded (same receipt): output ${res.output}.` : `Published output ${o.id} (${o.candidate}): ${o.count} files, ${humanBytes(o.bytes)}, ${o.digest.slice(0, 19)}… at ${o.ref}${url ? `\nDownload: ${url}` : ''}\nManifest: ${o.file}. Ask about it: wfe run ask ${runKey(r)} <confirming node> --output ${o.id} …`)
     }
     case 'attach': {
       const r = await ref()

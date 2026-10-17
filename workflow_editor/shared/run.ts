@@ -7,6 +7,10 @@ import { docStepsOf, type EffectiveGraph, type StepSpec } from './compile.ts'
 import type { DocSteps } from './model.ts'
 import type { AttemptCatalog, CatalogContext } from './catalog.ts'
 import { INSTRUCTION_RESPONSES, type SourceRef } from './intake.ts'
+import {
+  CANDIDATE, INPUT_ID, OUTPUT_ID, SET_OBSERVATIONS, STAGINGS, outputNumber, parseRef,
+  type ExternalOutput, type InputSet, type SetObservation, type ShareRef, type Staging,
+} from './shares.ts'
 import { ID_PATTERN, PROFILE_PATTERN, normalizeRepoPath, type Edge } from './model.ts'
 import {
   DELEGATION_ID, DISPOSITIONS, EVENT_TYPES, WAKING, isOpenDelegation, latestResult, pendingEvents, questionEvent,
@@ -55,6 +59,10 @@ export interface RunInput {
   original?: string // run-relative file keeping the input a request was derived from
   source?: SourceRef // where the person's words were posted (p6: the Zulip post that became the braindump)
   sha256?: string // of the input file as written at creation (p7/ex1); what a request-sourced adjustment binds to
+  // Shared-area references written in the input (project_migration p6,
+  // docs/shares.md), in order: what the person pointed at. Whether a host
+  // can reach them is observed when they are used, never recorded here.
+  references?: ShareRef[]
 }
 // `name` is the agent identity the run is performed as (p6: the workflow's
 // execution.agent); `host` the execution host that launches it, when that is
@@ -238,6 +246,7 @@ export interface Question {
   document?: DocumentEvidence // asked from the plan step: the plan.md it asked about (p5)
   subject?: DocumentEvidence[] // asked from the result-confirmation node: the deliverables it presents (p6)
   presentation?: { id: string; revision: string } // the presentation it asks about (p7); subject = its files
+  output?: { id: string; digest: string } // the external output it asks about (project_migration p6); its manifest is in the subject
 }
 export interface Artifact { path: string; node: string | null; title: string; by: string; at: string }
 // A presentation (p7, docs/presentations.md): one frozen revision of the
@@ -289,7 +298,7 @@ export interface Decision {
   // A decision the person gave by answering the result-confirmation
   // question (p6): which question and answer, whose words, and the
   // deliverables (by hash) it confirmed.
-  confirmation?: { question: string; answer: number; from: string; source?: SourceRef; subject: DocumentEvidence[]; presentation?: { id: string; revision: string } }
+  confirmation?: { question: string; answer: number; from: string; source?: SourceRef; subject: DocumentEvidence[]; presentation?: { id: string; revision: string }; output?: { id: string; digest: string } }
 }
 export interface Execution {
   state: ExecutionState
@@ -364,6 +373,8 @@ export interface RunState {
   questions: Record<string, Question>
   instructions?: Record<string, Instruction> // present once the first one arrives (p6)
   presentations?: Record<string, Presentation> // present once the first one is registered (p7)
+  inputs?: Record<string, InputSet> // present once the first input set is selected (project_migration p6)
+  outputs?: Record<string, ExternalOutput> // present once the first external output is published (project_migration p6)
   integrations?: IntegrationRecord[] // present once the first one completed (p9)
   recoveries?: Recovery[] // present once the first run.recover is recorded (observer p3)
   sessions?: SessionRecord[] // present once an attempt recorded its session (agent_session p1); the last open one is current
@@ -389,7 +400,7 @@ export type OpInput =
   | { op: 'node.complete'; node: string; outcome: string; artifacts?: string[]; document?: DocumentEvidence; agreement?: string }
   | { op: 'node.fail'; node: string; reason: string }
   | { op: 'node.cancel'; node: string; reason: string }
-  | { op: 'question.ask'; question: string; node?: string; text: string; to: string; document?: DocumentEvidence; plan?: boolean; subjects?: string[]; subject?: DocumentEvidence[]; presentation?: string; adjustment?: string }
+  | { op: 'question.ask'; question: string; node?: string; text: string; to: string; document?: DocumentEvidence; plan?: boolean; subjects?: string[]; subject?: DocumentEvidence[]; presentation?: string; output?: string; adjustment?: string }
   | { op: 'question.answer'; question: string; text: string; from?: string; source?: SourceRef; delegation?: { uid: string; answer: number } }
   | { op: 'instruction.receive'; instruction?: string; text: string; from: string; source?: SourceRef }
   | { op: 'instruction.ack'; instructions: string[]; response: string; note: string }
@@ -419,6 +430,13 @@ export type OpInput =
   | { op: 'run.recover'; incident: string; attempt: string; reason: string; agent?: RecoveryAgent }
   | { op: 'presentation.register'; presentation?: string; node: string; title: string; manifest?: PresentationManifest }
   | { op: 'presentation.observe'; presentation: string; status: Observation; instance?: string; detail?: string }
+  // project_migration p6 (docs/shares.md). The file layer reads the share,
+  // writes the manifest and gives its facts; select and publish are the
+  // executor's, observe is a host fact (like presentation.observe).
+  | { op: 'input.select'; input?: string; node: string; ref: string; staging: Staging; manifest?: { file: string; digest: string; count: number; bytes: number } }
+  | { op: 'input.observe'; input: string; status: SetObservation; detail?: string }
+  | { op: 'output.publish'; output?: string; node: string; title: string; candidate: string; ref?: string; manifest?: { file: string; digest: string; count: number; bytes: number; inputs: string[] } }
+  | { op: 'output.observe'; output: string; status: SetObservation; detail?: string }
   // completing (p8/ex2): the adjustment is made at the completion of that
   // running node; the next entry is its node.complete (one locked write).
   | { op: 'run.adjust'; revision: string; parent: string; file: string; sha256: string; definitionDigest: string; effective: EffectiveGraph; reason: string; source: AdjustSource; diff?: AdjustDiff; completing?: string }
@@ -443,12 +461,14 @@ export const CONTROL_OPS: readonly string[] = ['run.stop', 'run.resume', 'run.ca
 export const OPS = ['run.create', 'node.start', 'node.progress', 'node.wait', 'node.complete', 'node.fail', 'node.cancel',
   'question.ask', 'question.answer', 'question.take-up', 'question.withdraw', 'instruction.receive', 'instruction.ack', 'artifact.attach', 'run.cancel', 'run.decide',
   'attempt.begin', 'attempt.end', 'run.stop', 'run.resume', 'presentation.register', 'presentation.observe', 'run.adjust', 'run.integrate', 'run.relocate', 'run.recover', 'attempt.session', 'session.retire',
-  'delegation.dispatch', 'delegation.bind', 'delegation.event', 'delegation.take-up', 'delegation.answer', 'delegation.instruct', 'delegation.dispose'] as const
+  'delegation.dispatch', 'delegation.bind', 'delegation.event', 'delegation.take-up', 'delegation.answer', 'delegation.instruct', 'delegation.dispose',
+  'input.select', 'input.observe', 'output.publish', 'output.observe'] as const
 // The executor's own reports. While an attempt is open they must carry its
 // id (`attempt`), so a stopped or superseded attempt cannot write into the
 // record of the one that replaced it.
 export const EXECUTOR_OPS: readonly string[] = ['node.start', 'node.progress', 'node.wait', 'node.complete', 'node.fail', 'question.ask', 'question.take-up', 'question.withdraw', 'instruction.ack', 'artifact.attach', 'presentation.register',
-  'delegation.dispatch', 'delegation.take-up', 'delegation.answer', 'delegation.instruct', 'delegation.dispose']
+  'delegation.dispatch', 'delegation.take-up', 'delegation.answer', 'delegation.instruct', 'delegation.dispose',
+  'input.select', 'output.publish']
 
 // Received instructions the executor has not acknowledged, in arrival order.
 export const pendingInstructions = (s: Pick<RunState, 'instructions'>): Instruction[] => Object.values(s.instructions ?? {}).filter(i => !i.ack)
@@ -759,6 +779,10 @@ export function apply(prev: RunState | null, e: HistoryEntry | (OpInput & EntryM
     const eff = e.definition?.effective
     if (eff && canonicalJson({ nodes: eff.nodes, edges: eff.edges }) !== canonicalJson({ nodes: graph.nodes, edges: graph.edges })) fail('graph', 'the graph followed differs from the frozen effective graph')
     if (e.input?.source !== undefined) sourceOf(e.input.source) // checked, recorded as given
+    if (e.input?.references !== undefined) {
+      if (!Array.isArray(e.input.references)) fail('shape', 'input.references must be a list')
+      for (const r of e.input.references) if (!isObj(r) || typeof r.ref !== 'string' || parseRef(r.ref)?.ref !== r.ref) fail('shape', `input reference "${String((r as { ref?: unknown })?.ref)}" is not a shared:// reference`)
+    }
     const nodes = Object.fromEntries(ids.map(id => [id, emptyNode()]))
     const state: RunState = {
       schema: RUN_SCHEMA, project: e.project, workflow: e.workflow, run: e.run, created: at,
@@ -940,7 +964,7 @@ export function apply(prev: RunState | null, e: HistoryEntry | (OpInput & EntryM
       // them by hash (the file layer checks them), so a confirmation is of
       // exactly those files.
       if (e.node && graph.nodes[e.node]?.confirms === 'result') {
-        if (!Array.isArray(e.subject) || !e.subject.length) fail('subject-missing', `${e.node} confirms the result: name the deliverables it presents (--presentation <p>, or --subject <path> written first)`)
+        if (!Array.isArray(e.subject) || !e.subject.length) fail('subject-missing', `${e.node} confirms the result: name the deliverables it presents (--presentation <p>, --output <o>, or --subject <path> written first)`)
         q.subject = e.subject!.map((d, i) => subjectOf(d, `subject ${i + 1}`))
         // A presentation (p7): the question asks about exactly its files,
         // checked on disk by the file layer against the registered manifest.
@@ -948,11 +972,27 @@ export function apply(prev: RunState | null, e: HistoryEntry | (OpInput & EntryM
           const p = s.presentations?.[e.presentation]
           if (!p) fail('presentation-unknown', `presentation "${e.presentation}" does not exist in this run`)
           if (p!.state !== 'available') fail('presentation-unavailable', `presentation ${p!.id} is ${p!.state}; ask about it once it is served (wfe present start)`)
-          const same = q.subject.length === p!.files.length && p!.files.every(f => q.subject!.some(x => x.path === f.path && x.sha256 === f.sha256))
+          const same = p!.files.every(f => q.subject!.some(x => x.path === f.path && x.sha256 === f.sha256))
           if (!same) fail('presentation-changed', `the files of presentation ${p!.id} differ from its manifest; register the result again`)
           q.presentation = { id: p!.id, revision: p!.revision }
         }
-      } else if (e.subject !== undefined || e.presentation !== undefined) fail('shape', 'only a question from the result-confirmation node presents deliverables')
+        // An external output (project_migration p6): its manifest, by hash,
+        // is a subject; the file layer verified the payload against it in
+        // full just before (an earlier failed check does not block a repaired one).
+        if (e.output !== undefined) {
+          const o = s.outputs?.[e.output]
+          if (!o) fail('output-unknown', `output "${e.output}" does not exist in this run`)
+          if (!q.subject.some(x => x.path === o!.file)) fail('output-unverified', `the manifest ${o!.file} of output ${o!.id} is not among the subjects`)
+          q.output = { id: o!.id, digest: o!.digest }
+        }
+        // With a presentation, the subjects are exactly its files (and an
+        // output's manifest, when one is presented with it).
+        if (q.presentation) {
+          const p = s.presentations![q.presentation.id]
+          const extra = q.subject.filter(x => !p.files.some(f => f.path === x.path) && x.path !== (q.output ? s.outputs![q.output.id].file : null))
+          if (extra.length) fail('presentation-changed', `${extra.map(x => x.path).join(', ')} ${extra.length === 1 ? 'is' : 'are'} not in presentation ${p.id}; present loose files without a presentation`)
+        }
+      } else if (e.subject !== undefined || e.presentation !== undefined || e.output !== undefined) fail('shape', 'only a question from the result-confirmation node presents deliverables')
       if (e.node !== undefined && e.node !== null) {
         const n = node(e.node)
         if (n.state !== 'running') fail('state', `node "${e.node}" is ${n.state}; a question waits from a running node${n.state === 'waiting' ? ' (it already waits on something)' : ''}`)
@@ -1236,6 +1276,13 @@ export function apply(prev: RunState | null, e: HistoryEntry | (OpInput & EntryM
         const later = Object.values(s.presentations ?? {}).filter(p => presentationNumber(p.id) > presentationNumber(q.presentation!.id)).map(p => p.id)
         if (later.length) fail('presentation-superseded', `${q.id} asked about presentation ${q.presentation.id}; ${later.join(', ')} ${later.length === 1 ? 'was' : 'were'} registered after it. Ask about the latest presentation`)
       }
+      // An answer about one output never accepts a later output of the same
+      // candidate (project_migration p6): a replaced result is a new revision.
+      if (q.output) {
+        const asked = s.outputs?.[q.output.id]
+        const later = Object.values(s.outputs ?? {}).filter(o => asked && o.candidate === asked.candidate && outputNumber(o.id) > outputNumber(asked.id)).map(o => o.id)
+        if (later.length) fail('output-superseded', `${q.id} asked about output ${q.output.id}; ${later.join(', ')} of the same candidate ${later.length === 1 ? 'was' : 'were'} published after it. Ask about the latest output`)
+      }
       const now = (e.subject ?? []).map((d, i) => subjectOf(d, `subject ${i + 1}`))
       const asked = q.subject ?? []
       const changed = asked.filter(a => !now.some(n => n.path === a.path && n.sha256 === a.sha256))
@@ -1248,8 +1295,8 @@ export function apply(prev: RunState | null, e: HistoryEntry | (OpInput & EntryM
       if (e.decision === 'accepted' && ent?.kind === 'delegation' && ent.accepts !== 'parent' && a.from === s.input.requester) fail('delegate-scope', `${q.id}'s answer is from ${a.from}, the requesting agent, and this delegation leaves the acceptance of its result to the person (accepts: person); ask again for their decision (the requesting agent relays it), or record rejected`)
       s.decisions.push({
         decision: e.decision, by, at, note: optText(e.note, 'note'),
-        evidence: optText(e.evidence, 'evidence') || `${q.id} answer ${index} from ${a.from}${a.source ? ` (Zulip message ${a.source.message})` : ''}, confirming ${q.presentation ? `presentation ${q.presentation.id} (revision ${q.presentation.revision.slice(7, 19)}, ${asked.length} files)` : asked.map(x => `${x.path} (${x.sha256.slice(0, 12)})`).join(', ')}`,
-        confirmation: { question: q.id, answer: index, from: a.from, ...(a.source ? { source: a.source } : {}), subject: asked, ...(q.presentation ? { presentation: q.presentation } : {}) },
+        evidence: optText(e.evidence, 'evidence') || `${q.id} answer ${index} from ${a.from}${a.source ? ` (Zulip message ${a.source.message})` : ''}, confirming ${q.output ? `output ${q.output.id} (${q.output.digest.slice(7, 19)})${q.presentation ? ` and presentation ${q.presentation.id}` : ''}` : q.presentation ? `presentation ${q.presentation.id} (revision ${q.presentation.revision.slice(7, 19)}, ${asked.length} files)` : asked.map(x => `${x.path} (${x.sha256.slice(0, 12)})`).join(', ')}`,
+        confirmation: { question: q.id, answer: index, from: a.from, ...(a.source ? { source: a.source } : {}), subject: asked, ...(q.presentation ? { presentation: q.presentation } : {}), ...(q.output ? { output: q.output } : {}) },
         ...revisionOf(e),
       })
       break
@@ -1290,6 +1337,58 @@ export function apply(prev: RunState | null, e: HistoryEntry | (OpInput & EntryM
       s.presentations = { ...all, [id]: p }
       n.updated = at
       change.presentation = [id, null, 'registered']
+      break
+    }
+    case 'input.select': {
+      // An input set (project_migration p6): the files a reference held when
+      // the file layer read and hashed them, by manifest. A later selection
+      // of the same reference is a new set; nothing replaces one.
+      live()
+      if (s.execution.state === 'completed') fail('run-completed', 'the run\'s execution is completed; it selects no more input')
+      const n = node(e.node)
+      if (n.state !== 'running') fail('state', `node "${e.node}" is ${n.state}; input is selected from a running node`)
+      const r = typeof e.ref === 'string' ? parseRef(e.ref) : null
+      if (!r) fail('shape', `"${String(e.ref)}" is not a shared:// reference`)
+      if (!STAGINGS.includes(e.staging)) fail('shape', `staging is ${STAGINGS.join(' or ')}`)
+      const all = s.inputs ?? {}
+      const id = e.input || `i${Object.keys(all).length + 1}`
+      if (!INPUT_ID.test(id)) fail('shape', `input id "${id}" must match ${INPUT_ID.source}`)
+      if (id in all) fail('input-exists', `input set ${id} already exists`)
+      const m = e.manifest
+      if (!isObj(m) || m.file !== `${runFolder(s)}/inputs/${id}.json` || typeof m.digest !== 'string' || !/^sha256:[0-9a-f]{64}$/.test(m.digest) || !Number.isInteger(m.count) || m.count < 1 || !Number.isInteger(m.bytes) || m.bytes < 0) fail('input-missing', 'an input set needs the manifest the file layer writes (wfe run input reads and hashes the files first)')
+      s.inputs = { ...all, [id]: { id, ref: r!.ref, node: e.node, file: m!.file, digest: m!.digest, count: m!.count, bytes: m!.bytes, staging: e.staging, selected: { at, by, attempt: e.attempt ?? null }, last: { at, by, status: 'verified', detail: e.staging === 'copy' ? 'staged and verified' : 'read and hashed in place' } } }
+      n.updated = at
+      break
+    }
+    case 'output.publish': {
+      // An external output (project_migration p6): a finished publication
+      // folder on a share, by manifest; the payload stays outside Git.
+      live()
+      if (s.execution.state === 'completed') fail('run-completed', 'the run\'s execution is completed; nothing more is published')
+      const n = node(e.node)
+      if (n.state !== 'running') fail('state', `node "${e.node}" is ${n.state}; an output is published from a running node`)
+      const all = s.outputs ?? {}
+      const id = e.output || `o${Object.keys(all).length + 1}`
+      if (!OUTPUT_ID.test(id)) fail('shape', `output id "${id}" must match ${OUTPUT_ID.source}`)
+      if (id in all) fail('output-exists', `output ${id} already exists`)
+      if (typeof e.candidate !== 'string' || !CANDIDATE.test(e.candidate)) fail('shape', `candidate "${String(e.candidate)}" must match ${CANDIDATE.source}`)
+      const r = typeof e.ref === 'string' ? parseRef(e.ref) : null
+      if (!r || !r.folder) fail('output-missing', 'an output names its publication folder on a share (the file layer publishes it first)')
+      const m = e.manifest
+      if (!isObj(m) || m.file !== `${runFolder(s)}/outputs/${id}.json` || typeof m.digest !== 'string' || !/^sha256:[0-9a-f]{64}$/.test(m.digest) || !Number.isInteger(m.count) || m.count < 1 || !Number.isInteger(m.bytes) || m.bytes < 0 || !Array.isArray(m.inputs)) fail('output-missing', 'an output needs the manifest the file layer writes (wfe run publish copies and verifies the files first)')
+      for (const d of m!.inputs) if (!Object.values(s.inputs ?? {}).some(i => i.digest === d)) fail('input-unknown', `input digest ${String(d).slice(0, 19)}… is not an input set of this run`)
+      s.outputs = { ...all, [id]: { id, ref: r!.ref, node: e.node, title: text(e.title, 'the title'), candidate: e.candidate, file: m!.file, digest: m!.digest, count: m!.count, bytes: m!.bytes, inputs: [...m!.inputs], published: { at, by, attempt: e.attempt ?? null }, last: { at, by, status: 'verified', detail: 'published and verified' } } }
+      n.updated = at
+      break
+    }
+    case 'input.observe':
+    case 'output.observe': {
+      // What a check on this host found about the bytes (a host fact, not
+      // an execution report): verified, changed or missing.
+      const which = e.op === 'input.observe' ? s.inputs?.[e.input] : s.outputs?.[e.output]
+      if (!which) return fail(e.op === 'input.observe' ? 'input-unknown' : 'output-unknown', `${e.op === 'input.observe' ? `input set "${String(e.input)}"` : `output "${String(e.output)}"`} does not exist in this run`)
+      if (!(SET_OBSERVATIONS as readonly string[]).includes(e.status)) fail('shape', `status must be one of ${SET_OBSERVATIONS.join(', ')}`)
+      which.last = { at, by, status: e.status, detail: optText(e.detail, 'detail') }
       break
     }
     case 'run.adjust': {

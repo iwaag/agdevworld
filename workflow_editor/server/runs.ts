@@ -19,6 +19,7 @@ import {
 import type { SourceRef } from '../shared/intake.ts'
 import { atomicWrite, inside, readTextOrNull } from './files.ts'
 import { MANIFEST_KIND } from '../shared/review.ts'
+import { refsIn } from '../shared/shares.ts'
 import { parseSnapshot, type CatalogContext, type CatalogSnapshot, type RunCatalog } from '../shared/catalog.ts'
 import { withLock } from './lock.ts'
 import { blobSizeAt, listAt, resolveRev, RevError, showAt, type DevdocsInfo, type DevdocsRev } from './devdocs.ts'
@@ -259,7 +260,7 @@ export async function readRun(ws: Workspace, ref: RunRef): Promise<Reading & { d
 }
 
 // The project a run must belong to: project.yaml's id (undefined when unreadable).
-async function projectId(ws: Workspace): Promise<string | undefined> {
+export async function projectId(ws: Workspace): Promise<string | undefined> {
   return (await ws.readProject().catch(() => ({ project: undefined }))).project?.id || undefined
 }
 
@@ -413,6 +414,7 @@ export async function runResponse(ws: Workspace, ref: RunRef, opts: { rev?: stri
     place: ws.copyOf ? { kind: 'run-copy', branch: record?.storage?.branch ?? null } : { kind: 'project' },
     files: reading.files ?? [], predecessor, artifacts,
     ...(record ? { catalog: catalogOf(record, reading.bundle) } : {}),
+    ...(record && !opts.rev && (record.input.references?.length || record.inputs || record.outputs) ? { shares: await (await import('./shares.ts')).availability(record).catch(() => undefined) } : {}),
   }
 }
 
@@ -581,6 +583,7 @@ function inputOf(o: CreateRunOptions['input']): { input: RunInput; files: Record
     if (o.recordedBy?.trim() && o.recordedBy.trim() !== input.author) input.recordedBy = o.recordedBy.trim()
     if (o.source) input.source = o.source
     input.sha256 = sha256(o.text) // what a request-sourced adjustment binds to (p7/ex1)
+    withReferences(input, o.text)
     return { input, files: { 'braindump.md': o.text } }
   }
   if (!o.requester?.trim()) throw new RequestError(400, 'a request needs its requester: the agent that wrote it (--requester)')
@@ -589,7 +592,16 @@ function inputOf(o: CreateRunOptions['input']): { input: RunInput; files: Record
   if (o.source) input.source = o.source // observer p3: an agent's request posted in a Zulip request topic
   const files: Record<string, string> = { 'request.md': o.text }
   if (o.original !== undefined) { input.original = 'original-input.md'; files['original-input.md'] = o.original }
+  withReferences(input, o.text)
   return { input, files }
+}
+
+// The shared-area references the person wrote (project_migration p6): taken
+// from the words themselves, so every entrance — a request, the editor, a
+// Zulip post, a delegation — records them without a form.
+function withReferences(input: RunInput, text: string) {
+  const refs = refsIn(text)
+  if (refs.length) input.references = refs
 }
 
 // A run created in the project workspace without a name (an IDE agent's
@@ -718,7 +730,7 @@ export async function runOp(ws: Workspace, ref: RunRef, input: OpInput & EntryMe
   }
 }
 
-async function runOpLocked(ws: Workspace, ref: RunRef, input: OpInput & EntryMeta, ctx: OpContext): Promise<{ record: RunRecord; ref: RunRef; duplicate?: boolean }> {
+export async function runOpLocked(ws: Workspace, ref: RunRef, input: OpInput & EntryMeta, ctx: OpContext): Promise<{ record: RunRecord; ref: RunRef; duplicate?: boolean }> {
   const { record, graph, dir } = await usableRun(ws, ref)
   const prepared = await prepareOp(ws, ref, record, graph, input)
   const next = applyOp(record, prepared, graph, ctx)
@@ -760,19 +772,39 @@ async function prepareOp(ws: Workspace, ref: RunRef, record: RunRecord, graph: R
   // when a decision is recorded from it: checked here, on disk (p6).
   if (op.op === 'question.ask') {
     delete op.subject
+    if ((op.presentation !== undefined || op.output !== undefined) && op.subjects?.length) throw new RequestError(400, 'a question presents a presentation and/or an output, or loose files (--subject), not both')
     if (op.presentation !== undefined) {
       // A presentation's files, as they are on disk now (p7); the reducer
       // compares them with the registered manifest.
-      if (op.subjects?.length) throw new RequestError(400, 'a question presents either a presentation or loose files (--subject), not both')
       const p = record.presentations?.[op.presentation]
       if (p) op.subject = await Promise.all(p.files.map(f => checkSubject(ws, f.path)))
     } else if (op.subjects?.length) op.subject = await Promise.all(op.subjects.map(p => checkSubject(ws, p)))
+    // An external output (project_migration p6): its bytes on the share are
+    // verified against its manifest now, in full; the manifest file is the
+    // subject that binds the answer to exactly those bytes.
+    if (op.output !== undefined) {
+      const o = record.outputs?.[op.output]
+      if (o) {
+        const { checkOutput } = await import('./shares.ts')
+        const found = await checkOutput(ws, record, op.output)
+        if (found.status !== 'verified') throw new RequestError(422, `output ${op.output} is ${found.status} on this host: ${found.detail}; it is presented only when its bytes match its manifest (publish again for a new revision)`, { code: found.status === 'missing' ? 'output-missing' : 'output-altered' })
+        op.subject = [...(op.subject ?? []), await checkSubject(ws, o.file)]
+      }
+    }
     delete op.subjects
   }
   if (op.op === 'run.decide') {
     delete op.subject
     const q = op.question ? record.questions[op.question] : undefined
     if (q?.subject) op.subject = (await Promise.all(q.subject.map(d => checkSubject(ws, d.path).catch(() => null)))).filter((d): d is DocumentEvidence => !!d)
+    // The output a confirmation asked about is still there as published
+    // (sizes; its manifest is a hashed subject above). An accepted result is
+    // never one whose bytes went missing or changed size.
+    if (q?.output && op.decision === 'accepted') {
+      const { checkOutput } = await import('./shares.ts')
+      const found = await checkOutput(ws, record, q.output.id, { quick: true })
+      if (found.status !== 'verified') throw new RequestError(422, `output ${q.output.id} that ${q.id} asked about is ${found.status} on this host: ${found.detail}; it cannot be accepted as the verified result`, { code: found.status === 'missing' ? 'output-missing' : 'output-altered' })
+    }
     // What an acceptance binds to (p9): the run's copy as it is now, by tree.
     delete op.revision
     if (op.decision === 'accepted' && ws.copyOf && record.storage) {

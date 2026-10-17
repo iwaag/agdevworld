@@ -122,7 +122,7 @@ async function backup(x: ExecStore, dir: string, inv: Inventory) {
     const db = new DatabaseSync(file, { readOnly: true })
     try { db.exec(`VACUUM INTO '${out.replace(/'/g, "''")}'`) } finally { db.close() }
   }
-  for (const f of ['registry.json', 'zulip.json', 'present.json', 'node-catalog.json', 'system.json']) {
+  for (const f of ['registry.json', 'zulip.json', 'present.json', 'node-catalog.json', 'system.json', 'shares.json']) {
     const src = join(x.ctx.area, f)
     if (await stat(src).catch(() => null)) await copyFile(src, join(dir, f))
   }

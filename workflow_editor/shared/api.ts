@@ -214,7 +214,12 @@ export interface RunResponse {
   // Where the run's files are (p9, docs/storage.md): its own working copy
   // (with its branch), or the project workspace.
   place?: { kind: 'run-copy'; branch: string | null } | { kind: 'project' }
+  // Shared-area references, input sets and outputs as this host reaches them
+  // now (project_migration p6, docs/shares.md): a bounded stat, never a hash;
+  // `url` is where the LAN downloads them.
+  shares?: { references: ShareAvailability[]; inputs: Record<string, ShareAvailability>; outputs: Record<string, ShareAvailability> }
 }
+export interface ShareAvailability { ref: string; state: 'ok' | 'unknown-share' | 'unmounted' | 'absent' | 'outside' | 'not-a-folder' | 'not-a-file'; url: string | null }
 
 export interface RunOpResponse { ok: true; seq: number; record: RunRecord }
 

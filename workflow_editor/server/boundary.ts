@@ -75,6 +75,7 @@ export async function loadBoundary(registryFile: string, area?: string): Promise
     { path: reg, why: 'the registry' },
     { path: join(dir, 'gitea.json'), why: 'the Gitea setting' },
     { path: file, why: 'the operating boundary' },
+    { path: join(dir, 'shares.json'), why: 'where this host mounts shared areas (project_migration p6)' },
     ...control(dir),
     ...(area && resolve(area) !== dir ? control(resolve(area)) : []),
   ]

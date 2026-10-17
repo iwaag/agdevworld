@@ -246,6 +246,7 @@ node cli/wfe.ts help          # from the checkout (or: npm run wfe -- help)
 | `workflow new`, `validate`, `approve`, `arrange` | workflows: template, validation, approvals, auto-arrange |
 | `run create`, `list`, `show`, `check`, `access`, `start`, `complete`, `ask`, `answer`, … | workflow runs (docs/runs.md) |
 | `present register|start|status|stop|reconcile` | presentations of a run's result (docs/presentations.md) |
+| `share list|resolve|ls|verify`, `run input|inputs|publish|outputs` | shared areas: large inputs and outputs outside Git, by `shared://` reference and manifest (docs/shares.md) |
 | `runs index [--rebuild]` | runs' own working copies on this host (docs/storage.md) |
 | `observe` | a read-only snapshot of every run for monitors (docs/observation.md) |
 | `projects list|show|tree|read|search|runs|run` | read any managed project, committed by default, at a revision, with provenance (docs/access.md, project_migration p4) |

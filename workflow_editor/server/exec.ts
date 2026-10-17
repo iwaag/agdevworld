@@ -98,6 +98,31 @@ export function instructionBrief(r: RunRecord): string[] {
 // The run's presentations as the attempt starts (p7): which revision each
 // is, its recorded state, and which questions asked about it. Whether one
 // is served now is `wfe present status <run>`.
+// Shared areas (project_migration p6, docs/shares.md): the references the
+// input wrote and the run's input sets and outputs, with this host's state.
+// A continued attempt first re-checks each input set (sizes, bounded) and
+// records what it found, so a changed or missing set is a recorded fact and
+// never silently consumed.
+async function shareBrief(ws: Workspace, ref: RunRef, r: RunRecord, check: { by: string } | null): Promise<string[]> {
+  if (!r.input.references?.length && !r.inputs && !r.outputs) return []
+  const m = await import('./shares.ts')
+  const run = runKey(ref)
+  if (check) {
+    for (const i of Object.values(r.inputs ?? {})) {
+      const found = await m.verifyInput(ws, ref, i.id, { by: check.by, via: 'exec', quick: true }).catch(e => ({ record: null, status: 'missing' as const, detail: (e as Error).message }))
+      if (found.record) r = found.record
+      else i.last = { at: new Date().toISOString(), by: check.by, status: found.status, detail: found.detail }
+    }
+  }
+  const a = await m.availability(r).catch(() => null)
+  const out = ['', `Shared areas (wfe run inputs / outputs ${run}; wfe share):`]
+  for (const [k, x] of (r.input.references ?? []).entries()) out.push(`  the input names ${x.ref} — ${a?.references[k]?.state ?? 'unknown'} on this host`)
+  for (const i of Object.values(r.inputs ?? {})) out.push(`  input set ${i.id} from ${i.ref}: ${i.count} files, ${i.digest.slice(0, 19)}…, ${i.staging === 'copy' ? `staged in .local/inputs/${i.id}/ of your copy` : 'read in place on the share'}; last check ${i.last ? `${i.last.status}${i.last.status !== 'verified' ? ` — ${i.last.detail}. Do not work from it as if it were the selected set: select again (a new set) or report it` : ''}` : 'none'}`)
+  for (const o of Object.values(r.outputs ?? {})) out.push(`  output ${o.id} (${o.candidate}) "${o.title}": ${o.digest.slice(0, 19)}… at ${o.ref}; last check ${o.last?.status ?? 'none'}`)
+  if (r.input.references?.length && !r.inputs) out.push(`  No input set is selected yet: wfe run input ${run} <node> --ref <reference> records exactly what you use.`)
+  return out
+}
+
 export function presentationBrief(r: RunRecord): string[] {
   const all = Object.values(r.presentations ?? {})
   if (!all.length) return []
@@ -491,6 +516,7 @@ export class ExecStore {
     lines.push(...pendingAnswerLines(r))
     lines.push(...instructionBrief(r))
     lines.push(...presentationBrief(r))
+    lines.push(...await shareBrief(ws, ref, r, job.kind === 'start' ? null : { by: this.executor }))
     lines.push(...delegationBrief(r))
     lines.push(...catalogBrief(catalogOf(r, reading.bundle), runKey(ref)))
     if (r.definition.revisions?.length) lines.push('', `Definition: revision ${r.definition.active} is in force (adjusted ${r.definition.revisions.length} time${r.definition.revisions.length === 1 ? '' : 's'}; wfe run revisions <run>); the original is definition/${r.definition.root}.yaml.`)
@@ -527,6 +553,7 @@ export class ExecStore {
     lines.push('', delta.count ? `Recorded since your previous attempt began (after seq ${since}), not by it (${delta.count}):` : `Nothing was recorded since your previous attempt began (seq ${since}) except by it.`, ...delta.lines)
     lines.push('', ...stateLines(r))
     lines.push(...pendingAnswerLines(r), ...instructionBrief(r), ...delegationBrief(r))
+    lines.push(...await shareBrief(ws, ref, r, { by: this.executor }))
     lines.push(...newStepLines(r, briefedSteps(r, sinceBootstrap(r, attempts.slice(0, -1)))))
     lines.push('', `Unchanged and not repeated: the contract, the guides, the node catalog (wfe run nodes ${runKey(ref)}) and the documentation policy you were given. This is the record at seq ${r.seq}; wfe run state ${runKey(ref)} --since ${r.seq} shows what is recorded after it, wfe run show ${runKey(ref)} the full record.`)
     return lines.join('\n')

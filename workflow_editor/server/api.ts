@@ -102,6 +102,8 @@ const MIME: Record<string, string> = {
 export function createHandler(config: ServiceConfig) {
   async function registry(): Promise<Registry> { return loadRegistry(config.registryFile) }
   const area = config.area ?? dirname(config.registryFile)
+  // Shared areas resolve against this area's shares.json (project_migration p6).
+  void import('./shares.ts').then(m => m.setShareArea(area))
   const texts = (v: unknown) => Array.isArray(v) && v.every(x => typeof x === 'string')
 
   const agdev: AgdevContext = { registryFile: config.registryFile, area, gitea: config.gitea, giteaProblem: config.giteaProblem, executor: config.exec ? async () => config.exec!.executorState() : undefined }
@@ -179,6 +181,14 @@ export function createHandler(config: ServiceConfig) {
       const [, a, wsId, b, file, action] = parts
       const routed = req.headers[ROUTE_HEADER] !== undefined
       const localOnly = (what: string) => { if (routed) throw new RequestError(403, `${what} takes a host path or repository location and is not offered through agdevworld; use the wfe command line on this host`) }
+
+      // A shared area's file or folder listing (project_migration p6,
+      // docs/shares.md): read-only, streamed with byte ranges.
+      if (a === 'shares' && wsId && (method === 'GET' || method === 'HEAD')) {
+        const { serveShare, setShareArea } = await import('./shares.ts')
+        setShareArea(area)
+        return await serveShare(req, res, wsId, parts.slice(3).join('/'), url.pathname.endsWith('/') || parts.length === 3)
+      }
 
       // The code this service runs (an installed release names its agdevworld commit).
       if (a === 'version' && !wsId && method === 'GET') return send(res, 200, { ...codeVersion(), registry: config.registryFile })
@@ -357,6 +367,18 @@ export function createHandler(config: ServiceConfig) {
         if (!ref.workflow || !ref.run || (parts.length > 7 && sub !== 'checkpoints' && sub !== 'presentations')) throw new RequestError(404, 'not found')
         if (!sub && method === 'GET') return send(res, 200, await runResponse(ws, ref, { rev: url.searchParams.get('rev') || undefined }))
         if (sub === 'exec' && method === 'GET') return send(res, 200, await needExec().runView(ws.reg.id, ref))
+        // A full check of an input set's or output's bytes, on a person's
+        // request (project_migration p6): the result is recorded as a host fact.
+        if (sub === 'verify' && method === 'POST') {
+          const input = await body(req) as Record<string, unknown>
+          const by = typeof input.by === 'string' ? input.by.trim() : ''
+          if (!by) throw new RequestError(400, 'by is required: the name of who checks')
+          const m = await import('./shares.ts')
+          m.setShareArea(area)
+          const id = str(input.id, 'the input set or output id')
+          const r = /^i[0-9]+$/.test(id) ? await m.verifyInput(ws, ref, id, { by, via: 'browser' }) : await m.verifyOutput(ws, ref, id, { by, via: 'browser' })
+          return send(res, 200, { ok: true, status: r.status, detail: r.detail, seq: r.record.seq })
+        }
         // Delegations (p10, docs/delegation.md): the parent's, with each child's
         // current situation; and, for a child, who delegated it. Reads only.
         if (sub === 'delegations' && method === 'GET') {
@@ -429,7 +451,7 @@ export function createHandler(config: ServiceConfig) {
         if (sub === 'ops' && method === 'POST') {
           const input = await body(req) as Record<string, unknown>
           // Attempts and presentation facts are the execution host's; adjustments have their own route.
-          const offered = OPS.filter(o => o !== 'run.create' && !o.startsWith('attempt.') && !o.startsWith('presentation.') && (o as string) !== 'run.adjust' && (o as string) !== 'run.integrate' && (o as string) !== 'run.relocate' && (o as string) !== 'run.recover')
+          const offered = OPS.filter(o => o !== 'run.create' && !o.startsWith('attempt.') && !o.startsWith('presentation.') && !o.startsWith('input.') && !o.startsWith('output.') && (o as string) !== 'run.adjust' && (o as string) !== 'run.integrate' && (o as string) !== 'run.relocate' && (o as string) !== 'run.recover')
           if (!(offered as readonly string[]).includes(input.op as string)) throw new RequestError(400, `op must be one of ${offered.join(', ')} (attempts and presentation facts are the execution host's)`)
           const by = typeof input.by === 'string' ? input.by : ''
           if (!by.trim()) throw new RequestError(400, 'by is required: the name of who records this')

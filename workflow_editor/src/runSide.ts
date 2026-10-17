@@ -192,6 +192,7 @@ export class RunSide {
   private readonly qItems = new Map<string, QuestionItem>()
   private readonly instructions = section('instructions', h('div.questions'))
   private readonly presentations = section('presentations', h('div.sec-body'))
+  private readonly shared = section('shared', h('div.sec-body'))
   private readonly definition = section('definition', h('div.sec-body'))
   private readonly adjust: { root: HTMLDetailsElement; ta: Owned; reason: Owned<HTMLInputElement>; preview: HTMLElement; previewButton: HTMLButtonElement; apply: HTMLButtonElement; base: string | null; result: Preview | null; busy: boolean }
   private readonly catalog = section('catalog', h('div.sec-body'))
@@ -287,7 +288,7 @@ export class RunSide {
     }, 'Cancel run')
     this.decide = { root: h('div.decide', evidence.el, h('div.row.tight', accept, reject, cancel), evidence.status), evidence, accept, reject, cancel, busy: false }
 
-    this.disclosures = [this.questions, this.instructions, this.delegations, this.presentations, this.definition, this.catalog, this.related, this.files, this.execution, this.coordination, this.result, this.history]
+    this.disclosures = [this.questions, this.instructions, this.delegations, this.presentations, this.shared, this.definition, this.catalog, this.related, this.files, this.execution, this.coordination, this.result, this.history]
     for (const sec of this.disclosures) {
       sec.root.classList.add('d-only')
       this.setOpen(sec, this.opened[sec.key] ?? false)
@@ -296,7 +297,7 @@ export class RunSide {
     this.focus.append(this.focusDisplay, this.focusQuestions, this.holdSlot, this.decideSlot, this.focusLinks)
     this.el.dataset.keepScroll = 'run-side'
     this.el.append(this.placeholder, this.actorRow, this.sideHint, this.fileCard,
-      ...[this.selected, this.questions, this.instructions, this.delegations, this.presentations, this.definition, this.catalog, this.related, this.files, this.execution, this.coordination, this.result, this.history].map(s => s.root))
+      ...[this.selected, this.questions, this.instructions, this.delegations, this.presentations, this.shared, this.definition, this.catalog, this.related, this.files, this.execution, this.coordination, this.result, this.history].map(s => s.root))
   }
 
   // ---- what the view reads --------------------------------------------------
@@ -411,6 +412,7 @@ export class RunSide {
     this.updateQuestions(rec) // presentation links in questions
     this.updateResult(rec)
     this.updatePresentations(rec)
+    this.updateShared(rec)
     this.updateExecution(rec)
     this.updateCoordination()
     this.updateDelegations(rec)
@@ -423,7 +425,7 @@ export class RunSide {
     this.data = d
     const r = d.shown
     const rec = r?.record
-    const sections = [this.selected, this.questions, this.instructions, this.delegations, this.presentations, this.definition, this.catalog, this.related, this.files, this.execution, this.coordination, this.result, this.history]
+    const sections = [this.selected, this.questions, this.instructions, this.delegations, this.presentations, this.shared, this.definition, this.catalog, this.related, this.files, this.execution, this.coordination, this.result, this.history]
     if (!r || !rec) {
       setText(this.placeholder, d.resp?.problem ? 'No usable record.' : 'Loading…')
       show(this.placeholder, true)
@@ -443,6 +445,7 @@ export class RunSide {
     this.updateQuestions(rec)
     this.updateInstructions(rec)
     this.updatePresentations(rec)
+    this.updateShared(rec)
     this.updateDefinition(rec)
     this.updateCatalog(rec)
     this.updateRelated(r, rec)
@@ -857,6 +860,42 @@ export class RunSide {
       h('div.q-head', h('strong', i.id), chip(i.ack ? 'completed' : 'waiting', i.ack ? `acknowledged: ${i.ack.response}` : 'received'), h('span.muted.small', ` from ${i.from} via ${i.via} · ${when(i.at)}${i.during.length ? ` · while ${i.during.join(', ')} ran` : ''}`)),
       h('p.q-text', i.text),
       i.ack ? h('p.small.ok-text', `${i.ack.by}: ${i.ack.note}`) : h('p.small.muted', `${rec.executor.name} reads it at the next node boundary; no node starts before it is acknowledged.`))))
+  }
+
+  // Shared data (project_migration p6, docs/shares.md): what the input
+  // pointed at, the input sets and outputs, by digest, with this host's
+  // reach (a stat, never a hash) and the LAN download link. A full check of
+  // the bytes runs only when asked (Verify).
+  private updateShared(rec: RunRecord) {
+    const refs = rec.input.references ?? []
+    const inputs = Object.values(rec.inputs ?? {}), outputs = Object.values(rec.outputs ?? {})
+    show(this.shared.root, !!(refs.length || inputs.length || outputs.length))
+    if (!refs.length && !inputs.length && !outputs.length) return
+    const sh = this.data.shown?.shares
+    const bad = [...inputs, ...outputs].some(x => x.last && x.last.status !== 'verified')
+    setText(this.shared.title, `Shared data (${[refs.length && `${refs.length} referenced`, inputs.length && `${inputs.length} input set${inputs.length === 1 ? '' : 's'}`, outputs.length && `${outputs.length} output${outputs.length === 1 ? '' : 's'}`].filter(Boolean).join(', ')})`)
+    this.attend(this.shared, bad ? 'warn' : null)
+    const rev = this.data.rev
+    const reach = (st?: string) => st === 'ok' ? h('span.muted', ' reachable here') : h('span', ` ${st ?? 'not checked'} on this host`)
+    const last = (x: { last: { status: string; at: string; detail: string } | null }) => x.last ? h('span.muted', ` · last check ${x.last.status} ${ago(x.last.at)}${x.last.status !== 'verified' ? `: ${x.last.detail}` : ''}`) : null
+    const size = (n: number) => n < 1024 ** 2 ? `${(n / 1024).toFixed(1)} KiB` : n < 1024 ** 3 ? `${(n / 1024 ** 2).toFixed(1)} MiB` : `${(n / 1024 ** 3).toFixed(2)} GiB`
+    patchContent(this.shared.content.children[0] as HTMLElement,
+      refs.length ? h('p.small', h('strong', 'Named in the request: '), ...refs.flatMap((x, k) => [h('code', x.ref), reach(sh?.references[k]?.state), k < refs.length - 1 ? h('span', '; ') : null])) : null,
+      ...inputs.map(i => h('div.presentation', { dataset: { key: `i:${i.id}` } },
+        h('div.q-head', h('strong', i.id), h('span.muted.small', ` input from ${i.node} · ${i.count} files · ${size(i.bytes)} · ${i.staging === 'copy' ? 'staged copy' : 'read in place'}`)),
+        h('p.small', h('code', i.ref), reach(sh?.inputs[i.id]?.state), h('span.muted', ` · ${i.digest.slice(0, 19)}…`), last(i)),
+        rev ? null : h('div.row.tight', h('button', { title: 'Read every file again and compare it with the manifest', dataset: { action: 'share-verify', id: i.id } }, 'Verify')))),
+      ...outputs.slice().reverse().map(o => {
+        const a = sh?.outputs[o.id]
+        const asked = Object.values(rec.questions).filter(q => q.output?.id === o.id)
+        const decided = rec.decisions.filter(d => d.confirmation?.output?.id === o.id)
+        return h('div.presentation', { dataset: { key: `o:${o.id}` } },
+          h('div.q-head', h('strong', o.id), h('span.muted.small', ` ${o.title} · candidate ${o.candidate} · from ${o.node} · ${o.count} files · ${size(o.bytes)}`)),
+          h('p.small', h('code', o.ref), reach(a?.state), h('span.muted', ` · ${o.digest.slice(0, 19)}…`), last(o)),
+          a?.url ? h('p.small', h('a.button.small-btn', { href: a.url, target: '_blank', rel: 'noopener' }, 'Open the files ↗'), h('span.muted', ` ${a.url}`)) : null,
+          asked.length ? h('p.small', `Asked about in ${asked.map(q => `${q.id} (${questionState(q)})`).join(', ')}${decided.length ? `; result ${decided.map(d => d.decision).join(', ')}` : ''}.`) : null,
+          rev ? null : h('div.row.tight', h('button', { title: 'Read every file on the share again and compare it with the manifest', dataset: { action: 'share-verify', id: o.id } }, 'Verify')))
+      }))
   }
 
   // Presentations (p7): the record's state beside this host's observation;

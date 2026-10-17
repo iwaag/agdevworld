@@ -56,7 +56,9 @@ holds), your answers and instructions, and the disposition. Reads only.`,
 
 Records that you read relayed facts n… of delegation <d> (wfe delegate show).
 The delegate node resumes running. Taking up tells the record you read
-the facts; answering and disposing do not wait for it.`,
+the facts; answering and disposing do not wait for it. An attempt that ends
+with a fact it was started for not taken up is held as interrupted, like
+work left ready, so recovery or the person looks at it.`,
   answer: `wfe delegate answer <run> <d> <question> --answer <text> [--because answer:<q>[:<n>]]
 
 Answers the child's question (its id, as the child asked it). The answer is

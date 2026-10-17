@@ -472,6 +472,18 @@ export async function serveShare(req: IncomingMessage, res: ServerResponse, shar
   if (st.isDirectory()) {
     const entries = (await readdir(r.abs!, { withFileTypes: true })).filter(e => !transportMetadata(e.name)).sort((a, b) => (a.name < b.name ? -1 : 1)).slice(0, 2000)
     const list = await Promise.all(entries.map(async e => ({ name: e.name, folder: e.isDirectory(), bytes: e.isFile() ? (await stat(join(r.abs!, e.name))).size : null })))
+    if (inline) {
+      // A page a person can browse (p12): files open in place, with a download beside each.
+      const esc = (t: string) => t.replace(/[&<>"']/g, c => `&#${c.charCodeAt(0)};`)
+      const size = (n: number) => (n < 1024 ? `${n} B` : n < 1048576 ? `${(n / 1024).toFixed(1)} KiB` : n < 1073741824 ? `${(n / 1048576).toFixed(1)} MiB` : `${(n / 1073741824).toFixed(2)} GiB`)
+      const rows = list.map(e => { const u = encodeURIComponent(e.name); return e.folder
+        ? `<tr><td><a href="${u}/?inline=1">${esc(e.name)}/</a></td><td></td><td></td></tr>`
+        : `<tr><td><a href="${u}?inline=1">${esc(e.name)}</a></td><td>${size(e.bytes ?? 0)}</td><td><a href="${u}">download</a></td></tr>` }).join('')
+      const { shareInlineHeaders } = await import('./boast.ts')
+      res.writeHead(200, { ...shareInlineHeaders('index.html'), 'cache-control': 'no-store' })
+      res.end(`<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>${esc(r.ref)}</title><style>body{font:14px system-ui,sans-serif;margin:20px;color:#1f2329}td{padding:4px 14px 4px 0}a{color:#2456c8}code{background:#eef0f3;padding:2px 5px;border-radius:4px}</style><h1 style="font-size:17px"><code>${esc(r.ref)}</code></h1>${path ? '<p><a href="../?inline=1">↑ up</a></p>' : ''}<table>${rows || '<tr><td>(empty)</td></tr>'}</table>`)
+      return
+    }
     res.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
     res.end(JSON.stringify({ ref: r.ref, entries: list }))
     return

@@ -229,7 +229,7 @@ export async function resolveShared(ref: string): Promise<SharedResolution> {
   const ok = r.state === 'ok'
   return {
     ref: r.ref ?? ref, state: r.state, detail: r.detail, folder,
-    url: ok && !folder ? `api/shares/${rel}?inline=1` : null,
+    url: ok ? `api/shares/${rel}?inline=1` : null, // a folder shows as a browsable listing
     download: ok ? `api/shares/${rel}` : null,
     host: hostname(), path: ok ? r.abs ?? null : null,
   }

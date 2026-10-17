@@ -66,9 +66,10 @@ embedded or opened alone in a tab:
 
 `GET api/share-ref?ref=shared://<share>/<path>` resolves a reference on
 this host: `{ref, state, detail, url, download, host, path, folder}`.
-`url` is the display route `api/shares/<share>/<path>?inline=1` (the file's
-own media type, byte ranges, sandboxed like the page); `download` is the
-attachment route. Payloads stay on the share, outside Git. These URLs do not
+`url` is the display route `api/shares/<share>/<path>?inline=1`: a file in
+its own media type with byte ranges, a folder as a browsable listing, both
+sandboxed like the page. `download` is the attachment route (a folder's is
+its JSON listing). `path` is where the serving host has it. Payloads stay on the share, outside Git. These URLs do not
 depend on a run's presentation server.
 
 ## Messages to the editor (optional)

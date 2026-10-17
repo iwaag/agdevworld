@@ -195,6 +195,11 @@ test('shared:// references resolve to an inline display route with ranges', asyn
   const html = await get('api/shares/agshare/runs/o1/page.html?inline=1')
   assert.match(html.headers.get('content-type')!, /^text\/html/)
   assert.match(html.headers.get('content-security-policy')!, /^sandbox /)
+  const folder = (await (await get(`api/share-ref?ref=${encodeURIComponent('shared://agshare/runs/o1/')}`)).json()) as { url: string }
+  assert.equal(folder.url, 'api/shares/agshare/runs/o1/?inline=1')
+  const listing = await get(folder.url)
+  assert.match(listing.headers.get('content-type')!, /^text\/html/)
+  assert.match(await listing.text(), /href="clip\.mp4\?inline=1"/)
   const missing = (await (await get(`api/share-ref?ref=${encodeURIComponent('shared://agshare/none.png')}`)).json()) as { state: string; url: null }
   assert.equal(missing.state, 'absent')
   assert.equal(missing.url, null)

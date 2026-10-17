@@ -632,9 +632,13 @@ export class ExecStore {
     }
     const kind = situation(rec)
     const checkpoint = await this.checkpoint(ws, ref, `after attempt ${attempt}: ${kind}`, attempt, a.baseline)
-    // An acceptance recorded during the attempt (a confirmation) is
-    // integrated once the run is completed and saved (p9).
-    if (rec.execution.state === 'completed' && rec.storage) await this.queueIntegration(ws, ref, this.executor).catch(() => null)
+    // A completed run is integrated (p9). So is an acceptance the attempt
+    // recorded from a confirmation, as a person's decision through the
+    // service or the CLI is (afterDecision): it need not wait for the run's
+    // completion, which may itself wait on a delegation that wants this
+    // result on main (workflow_editor p12).
+    const accepted = rec.decisions.at(-1)?.decision === 'accepted' && rec.decisions.some(d => d.decision === 'accepted' && d.at >= a.began)
+    if ((rec.execution.state === 'completed' || accepted) && rec.storage) await this.queueIntegration(ws, ref, this.executor).catch(() => null)
     // An answer may have arrived while the attempt was still running.
     let resumeJob: JobRow | null = null
     if (kind === 'awaiting-person') {

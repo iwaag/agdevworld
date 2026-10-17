@@ -271,3 +271,28 @@ test('p11: no approval or acceptance, final reporting and later edits integrate 
     assert.equal(rec.integrations?.at(-1)?.by, 'Agent')
   } finally { s.x.close() }
 })
+
+test('p12: an acceptance recorded during an attempt integrates when the attempt ends, before the run completes', async () => {
+  const s = await setup({ confirm: true })
+  const { ref } = await s.x.request({ workspace: s.id, workflow: 'ship', text: 'Build it.', author: 'Test Person', receipt: 'int-p12-0001', via: 'browser' })
+  const c = await s.x.claim('t')
+  assert.ok('attempt' in c)
+  s.x.started(c.attempt.id, process.pid)
+  const A = c.attempt.id
+  await report(s, ref, A, { op: 'node.start', node: 'build' })
+  await writeFile(join(c.cwd, 'app.txt'), 'accepted work\n')
+  await report(s, ref, A, { op: 'node.complete', node: 'build', outcome: 'built' })
+  await report(s, ref, A, { op: 'node.start', node: 'confirm' })
+  await report(s, ref, A, { op: 'question.ask', question: '', node: 'confirm', text: 'Is app.txt right?', to: 'Test Person', subjects: ['app.txt'] })
+  await runOp(s.ws, ref, { op: 'question.answer', question: 'q1', text: 'Yes.' }, { by: 'Test Person', via: 'browser' })
+  await report(s, ref, A, { op: 'question.take-up', question: 'q1' })
+  await runOp(s.ws, ref, { op: 'run.decide', decision: 'accepted', question: 'q1', attempt: A }, { by: 'autolab', via: 'cli' })
+  // The run goes on (here: the confirm node is left running, as a delegate would wait).
+  await s.x.finished(A, { code: 0, signal: null })
+  assert.notEqual((await record(s, ref)).execution.state, 'completed')
+  assert.deepEqual(s.x.integrations(s.id, ref).map(i => i.state), ['queued'], 'queued by the acceptance, not by completion')
+  await s.x.integrateDue()
+  assert.equal(s.x.integrations(s.id, ref)[0].state, 'integrated')
+  assert.equal(await show(s.remote, 'main:app.txt'), 'accepted work\n')
+  s.x.close()
+})

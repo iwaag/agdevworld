@@ -17,6 +17,7 @@ import {
   availability, listFiles, publishOutput, resolveRef, selectInput, serveShare, setShareArea, verifyInput, verifyManifest, verifyOutput,
 } from '../server/shares.ts'
 import { RequestError, Workspace } from '../server/workspace.ts'
+import { main } from '../cli/wfe.ts'
 import { outputBody, parseRef, refsIn } from '../shared/shares.ts'
 import type { OpInput, RunRef } from '../shared/run.ts'
 
@@ -307,4 +308,23 @@ test('download: a file streamed with byte ranges, a folder listed, dot entries a
     assert.equal((await fetch(`${base}/agshare/runs/.partial-x/`)).status, 404)
     assert.equal((await fetch(`${base}/agshare/inputs/nothing.bin`)).status, 404)
   } finally { server.close() }
+})
+
+test('CLI: share list/resolve/verify and run inputs take their flags; --quick and --verify-all need no value', async () => {
+  const { ws, ref, area } = await setup()
+  await op(ws, ref, { op: 'node.start', node: 'build' })
+  const s = await selectInput(ws, ref, { node: 'build', ref: 'shared://agshare/inputs/wolf/', staging: 'in-place' }, { by: 'agent', via: 'cli' })
+  const lines: string[] = []
+  const log = console.log, err = console.error
+  const run = async (argv: string[]) => {
+    lines.length = 0
+    console.log = (...a: unknown[]) => { lines.push(a.join(' ')) }; console.error = (...a: unknown[]) => { lines.push(a.join(' ')) }
+    try { return await main([...argv, '--registry', join(area, 'registry.json'), '--json']) } finally { console.log = log; console.error = err; setShareArea(area) }
+  }
+  assert.equal(await run(['share', 'list']), 0)
+  assert.equal(JSON.parse(lines.join('\n')).shares[0].state, 'ok')
+  assert.equal(await run(['share', 'resolve', 'shared://agshare/inputs/wolf/']), 0)
+  assert.equal(await run(['share', 'verify', join(ws.root, s.record.inputs!.i1.file), '--quick']), 0, lines.join('\n'))
+  assert.equal(await run(['run', 'inputs', `${ref.workflow}/${ref.run}`, '--workspace', 'p', '--verify-all', '--quick', '--by', 'Pat']), 0, lines.join('\n'))
+  assert.equal(await run(['share', 'resolve', 'shared://agshare/nothing/']), 1)
 })

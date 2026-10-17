@@ -825,3 +825,4 @@ html[data-display="simple"] .q-text { font-size: 15px; line-height: 1.5; }
 .delegation .dl-links a { font-weight: 600; }
 .delegation ul { margin: 4px 0 4px 18px; padding: 0; }
 .ok-text { color: #2d7a3e; }
+.share-url { overflow-wrap: anywhere; }

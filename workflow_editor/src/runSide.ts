@@ -804,6 +804,8 @@ export class RunSide {
       h('div.q-head', h('strong', q.id), chip(questionChip(st), st), h('span.muted.small.d-only', ` to ${q.to}${q.node ? ` · node ${q.node}` : ''} · asked by ${q.askedBy}, ${ago(q.asked)}`)),
       h('p.q-text', q.text),
       q.presentation ? h('p.small.d-only', 'About presentation ', h('strong', q.presentation.id), h('span.d-only', ` (revision ${q.presentation.revision.slice(7, 19)})`), ' — ', v?.live ? h('a', { href: v.url!, target: '_blank', rel: 'noopener' }, 'open the review ↗') : h('span.muted', 'not served now')) : null,
+      // The external output it confirms (project_migration p6): its digest and download.
+      q.output ? h('p.small', 'Confirms output ', h('strong', q.output.id), h('span.d-only', ` (${q.output.digest.slice(7, 19)})`), ' — ', this.data.shown?.shares?.outputs[q.output.id]?.url ? h('a', { href: this.data.shown.shares.outputs[q.output.id].url!, target: '_blank', rel: 'noopener' }, 'open the files ↗') : h('span.muted', `${this.data.shown?.shares?.outputs[q.output.id]?.state ?? 'not reachable'} on this host`)) : null,
       q.document ? h('p.small', 'About ', doc ? fileLink(`${this.data.shown!.dir}/${doc.name}`, q.document.path.split('/').pop()!) : h('code', q.document.path), doc ? '' : ' (not in the run folder now)') : null,
       ...q.answers.map((a, i) => h('div.answer', { dataset: { key: `a:${i}` } }, h('span.muted.small.d-only', `Answer ${i}${q.takenUp?.answer === i ? ' — taken up' : ''} · from ${a.from}${a.by !== a.from ? `, recorded by ${a.by}` : ''} via ${a.via} · ${when(a.at)}`), h('div', a.text))),
       q.takenUp ? h('p.small.ok-text', `Taken up by ${q.takenUp.by} ${ago(q.takenUp.at)}.`) : null,
@@ -892,7 +894,7 @@ export class RunSide {
         return h('div.presentation', { dataset: { key: `o:${o.id}` } },
           h('div.q-head', h('strong', o.id), h('span.muted.small', ` ${o.title} · candidate ${o.candidate} · from ${o.node} · ${o.count} files · ${size(o.bytes)}`)),
           h('p.small', h('code', o.ref), reach(a?.state), h('span.muted', ` · ${o.digest.slice(0, 19)}…`), last(o)),
-          a?.url ? h('p.small', h('a.button.small-btn', { href: a.url, target: '_blank', rel: 'noopener' }, 'Open the files ↗'), h('span.muted', ` ${a.url}`)) : null,
+          a?.url ? h('p.small', h('a.button.small-btn', { href: a.url, target: '_blank', rel: 'noopener' }, 'Open the files ↗'), h('span.muted.share-url', ` ${a.url}`)) : null,
           asked.length ? h('p.small', `Asked about in ${asked.map(q => `${q.id} (${questionState(q)})`).join(', ')}${decided.length ? `; result ${decided.map(d => d.decision).join(', ')}` : ''}.`) : null,
           rev ? null : h('div.row.tight', h('button', { title: 'Read every file on the share again and compare it with the manifest', dataset: { action: 'share-verify', id: o.id } }, 'Verify')))
       }))

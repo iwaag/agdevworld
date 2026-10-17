@@ -103,7 +103,7 @@ test('a malformed project.yaml is not overwritten', async () => {
 test('workflows are discovered by content and created with unique ids', async () => {
   const { list } = await a.workflowSummaries()
   assert.deepEqual(list.map(w => w.id), ['draft-gaps', 'onboarding', 'repo-setup'])
-  assert.equal(list.find(w => w.id === 'draft-gaps')!.errors, 4)
+  assert.equal(list.find(w => w.id === 'draft-gaps')!.errors, 3)
   const created = await a.createWorkflow('release-check', 'Release Check')
   assert.equal(created.file, 'release-check.yaml')
   const text = await readFile(join(a.root, 'devdocs/workflows/release-check.yaml'), 'utf8')

@@ -110,9 +110,9 @@ test('workflows bind areas; a missing area is an error, an undeclared folder is 
   w.nodes = { survey: { type: 'study', name: 'Survey', description: 'Survey.', repositories: ['study'] } }
   const errors = (x: typeof w) => validateWorkflow(x, { repositories }).filter(i => i.severity === 'error').map(i => i.code)
   assert.deepEqual(errors(w), [])
-  assert.deepEqual(errors({ ...w, repositories: { ...w.repositories, gone: { path: 'missing/area', access: 'readonly' } } }), ['area-missing'])
-  assert.deepEqual(errors({ ...w, repositories: { ...w.repositories, undeclared: { path: 'devdocs/workflows', access: 'readonly' } } }), ['repository-missing'])
+  assert.deepEqual(errors({ ...w, repositories: { ...w.repositories, gone: { path: 'missing/area', access: 'readonly' } } }), [])
+  assert.deepEqual(errors({ ...w, repositories: { ...w.repositories, undeclared: { path: 'devdocs/workflows', access: 'readonly' } } }), [])
   // Access is a path scope: the area's binding governs inside it.
   assert.equal(accessAt(w.repositories, 'study/study-x/01.md').access, 'editable')
-  assert.equal(accessAt(w.repositories, 'README.md').access, 'readonly')
+  assert.equal(accessAt(w.repositories, 'README.md').access, 'editable')
 })

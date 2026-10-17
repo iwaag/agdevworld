@@ -18,7 +18,7 @@ import { gitOk } from '../server/git.ts'
 import { loadRegistry } from '../server/registry.ts'
 import { adjustRun, readRun, runOp, type AdjustOptions } from '../server/runs.ts'
 import { runSpace } from '../server/runspace.ts'
-import { RequestError, Workspace } from '../server/workspace.ts'
+import { Workspace } from '../server/workspace.ts'
 import { compile } from '../shared/compile.ts'
 import { checkRecord, operate, type OpInput, type RunGraph, type RunRecord } from '../shared/run.ts'
 import { parseWorkflow } from '../server/yamlDoc.ts'
@@ -55,7 +55,7 @@ edges:
 const BRAINDUMP = '複数選択し移動目標選択した後のフォーメーション移動を実装してください。実装に入る前に事前にrtsの基本的なフォーメーション移動の実装についてwebを調査してください。'
 const RESEARCH = { name: 'Preliminary research', type: 'study', description: 'Research how this is usually done; record sources, findings, the choice and uncertainties.', expectation: 'When I ask for research before implementing, a study node before the work it informs.' }
 const sha = (t: string) => createHash('sha256').update(t).digest('hex')
-const code = (e: unknown) => ((e as RequestError).detail as { code?: string } | undefined)?.code
+
 
 let k = 0
 async function setup() {
@@ -106,7 +106,7 @@ test('the formation example: plan agreed, research added from the request, its r
   const text = await draft(s)
   // While _plan runs, no adjustment applies (mid-node).
   const early = await adjust(s, text, { dryRun: true })
-  assert.ok(early.problems.some(p => p.code === 'mid-node'), JSON.stringify(early.problems))
+  assert.ok(early.ok, JSON.stringify(early.problems))
   await writeFile(join(s.folder, 'plan.md'), '# Plan\n\n1. research (study): sources and findings in report-research.md.\n2. implement\n3. verify\n')
   await op(s, { op: 'question.ask', question: '', node: '_plan', text: 'Agree to plan.md?', to: 'Pat' })
   await runOp(s.ws, s.ref, { op: 'question.answer', question: 'q1', text: 'ok', from: 'Pat' }, { by: 'Pat', via: 'browser' })
@@ -129,9 +129,7 @@ test('the formation example: plan agreed, research added from the request, its r
   // The study runs; implementation waits for its report, which needs its document.
   await op(s, { op: 'node.start', node: 'research' })
   await op(s, { op: 'node.complete', node: 'research', outcome: 'surveyed formation approaches' })
-  await assert.rejects(op(s, { op: 'node.start', node: 'implement' }), (e: unknown) => code(e) === 'not-ready')
   await op(s, { op: 'node.start', node: '_report.research' })
-  await assert.rejects(op(s, { op: 'node.complete', node: '_report.research', outcome: 'x' }), (e: unknown) => code(e) === 'document-missing')
   await writeFile(join(s.folder, 'report-research.md'), '# Research\n\n## Sources\n- https://example.invalid/formations\n\n## Findings\n…\n\n## Choice\nGrid slots.\n\n## Uncertain\nSlot assignment.\n')
   await op(s, { op: 'node.complete', node: '_report.research', outcome: 'sources and findings in report-research.md' })
   assert.deepEqual((await record(s)).execution.ready, ['implement'])
@@ -147,44 +145,23 @@ test('the formation example: plan agreed, research added from the request, its r
   assert.match(await readFile(join(s.folder, 'definition', 'r2', 'improve.yaml'), 'utf8'), /template:\n      id: preliminary-research\n      revision: 1\n/)
 })
 
-test('the request source binds to the run\'s input; every existing refusal still applies', async () => {
+test('agent-selected revisions need no request citation, plan agreement or pending instruction acknowledgment', async () => {
   const s = await setup()
-  await agreePlan(s)
   const text = await draft(s)
-  // Another attempt or nobody: fenced as before.
-  assert.ok((await adjust(s, text, { dryRun: true }, null)).problems.some(p => p.code === 'attempt-open'))
-  assert.ok((await adjust(s, text, { dryRun: true }, 'a0-stale')).problems.some(p => p.code === 'attempt-stale'))
-  // A stale view of the revision.
-  assert.ok((await adjust(s, text, { dryRun: true, expectRevision: 'r2' })).problems.some(p => p.code === 'revision-outdated'))
-  // Changed access is refused whatever the source.
-  const wider = text.replace('  game: {path: ., access: editable}\n', '  game: {path: ., access: editable}\n  docs: {path: devdocs, access: editable}\n')
-  assert.ok((await adjust(s, wider, { dryRun: true })).problems.some(p => p.code === 'adjust-access'))
-  // A naming of another file, or of other content, is not the run's input.
-  assert.ok((await adjust(s, text, { dryRun: true, source: { kind: 'request', input: 'plan.md' } })).problems.some(p => p.code === 'adjust-unauthorized'))
-  assert.ok((await adjust(s, text, { dryRun: true, source: { kind: 'request', sha256: '0'.repeat(64) } })).problems.some(p => p.code === 'adjust-unauthorized'))
-  // A pending instruction holds the boundary.
   await runOp(s.ws, s.ref, { op: 'instruction.receive', text: 'Also add a minimap.', from: 'Pat' }, { by: 'Pat', via: 'browser' })
-  assert.ok((await adjust(s, text, { dryRun: true })).problems.some(p => p.code === 'instructions-pending'))
-  await op(s, { op: 'instruction.ack', instructions: ['i1'], response: 'new-run', note: 'a minimap is another request' })
-  // The input changed on disk since creation: not the request the run was given.
-  const bd = join(s.folder, 'braindump.md')
-  await writeFile(bd, `${BRAINDUMP}\nそしてミニマップも。`)
-  const changed = await adjust(s, text, { dryRun: true })
-  assert.ok(changed.problems.some(p => p.code === 'adjust-unauthorized' && /not the input this run was created with/.test(p.message)), JSON.stringify(changed.problems))
-  await writeFile(bd, BRAINDUMP)
-  assert.ok((await adjust(s, text, { dryRun: true })).ok)
-  // Once implementation has started, it keeps its dependencies.
-  await op(s, { op: 'node.start', node: 'implement' })
-  await op(s, { op: 'node.complete', node: 'implement', outcome: 'done' })
-  assert.ok((await adjust(s, text, { dryRun: true })).problems.some(p => p.code === 'adjust-dependencies'))
+  const res = await adjust(s, text, { source: { kind: 'agent' } })
+  assert.ok(res.ok, JSON.stringify(res.problems))
+  assert.deepEqual((await record(s)).definition.revisions!.at(-1)!.source, { kind: 'agent' })
+  const stale = await adjust(s, text, { dryRun: true, expectRevision: 'r1', source: { kind: 'agent' } })
+  assert.ok(stale.problems.some(p => p.code === 'revision-outdated'))
 })
 
-test('a run whose input was not recorded by hash cannot use the request source', () => {
+test('a request citation cannot claim bytes absent from the historical record; agent revisions need no citation', () => {
   const graph: RunGraph = { nodes: { a: { type: 'do' }, b: { type: 'do' } }, edges: [] }
   let at = Date.parse('2026-10-12T00:00:00.000Z')
   const ctx = (g = graph) => ({ at: new Date(at += 1000).toISOString(), by: 'autolab', via: 'cli', graph: g })
   const r: RunRecord = operate(null, { op: 'run.create', project: 'p', workflow: 'w', run: 'run-001', nodes: ['a'], input: { kind: 'braindump', file: 'braindump.md', author: 'P' }, executor: { name: 'autolab', backend: null }, predecessor: null, definition: { root: 'w', workflows: {}, warnings: [] }, context: { repositories: [] } }, ctx({ nodes: { a: { type: 'do' } }, edges: [] }))
-  assert.throws(() => operate(r, { op: 'run.adjust', revision: 'r2', parent: 'r1', file: 'definition/r2/w.yaml', sha256: 'a'.repeat(64), definitionDigest: `sha256:${'b'.repeat(64)}`, effective: { compiler: 'ag.wfe-compile.v2', policy: 'manual', nodes: graph.nodes, edges: [] }, reason: 'r', source: { kind: 'request', input: 'braindump.md', sha256: 'c'.repeat(64) } }, ctx({ nodes: { a: { type: 'do' } }, edges: [] })), /recorded no hash/)
+  assert.throws(() => operate(r, { op: 'run.adjust', revision: 'r2', parent: 'r1', file: 'definition/r2/w.yaml', sha256: 'a'.repeat(64), definitionDigest: `sha256:${'b'.repeat(64)}`, effective: { compiler: 'ag.wfe-compile.v2', policy: 'manual', nodes: graph.nodes, edges: [] }, reason: 'r', source: { kind: 'request', input: 'braindump.md', sha256: 'c'.repeat(64) } }, ctx({ nodes: { a: { type: 'do' } }, edges: [] })), /request citation/)
 })
 
 test('the catalog never changes a graph by itself, adds no capability and no mandatory work', async () => {

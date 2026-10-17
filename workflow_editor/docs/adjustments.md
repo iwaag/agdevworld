@@ -1,217 +1,26 @@
-# Run adjustments: changing a run's future work (p7)
+# Run revisions
 
-A run follows a fixed definition ([runs.md](runs.md), *Definition
-snapshot*). An **adjustment** changes the work a run has not started yet —
-adding repair and re-presentation after a review, removing a cleanup node a
-run does not need — without touching the reusable workflow definition, the
-run's original snapshot or anything already done. Each adjustment is a
-complete, immutable **revision** of the run's definition.
+`wfe run adjust <run> --definition <file> --reason <text>` applies an
+agent-selected revision. `--dry-run` shows the authored and effective graph
+difference. `--expect-revision <r>` detects a stale read. The CLI defaults to
+`--source agent`; the API accepts `{kind: "agent"}`. Optional answer,
+instruction, request and person citations record provenance, not permission.
+A request citation still identifies the original input bytes truthfully.
 
-Arbitrary mid-node graph changes, rollback of completed work and automatic
-updates of `devdocs/workflows/` are not adjustments.
+Revisions can change running/completed nodes, edges, repository bindings,
+execution settings and documentation choices. Historical entries keep their
+original actors and content. Removed node records leave the current graph;
+their events remain in history. Existing nodes keep their state until an agent
+starts, completes, fails or cancels them. Starting completed work reopens it.
+Dependency edges suggest an order and do not prohibit starting other work.
 
-## Revisions
+Revisions are immutable files under `definition/rN/`, with parent revision,
+hash, actor, reason and difference in the run history. A stale parent or
+attempt reports the current revision/attempt for recovery. Concurrent writes
+are serialized. Invalid YAML, unknown endpoints and cyclic graphs report
+argument errors; no approval or prescribed workflow is used to repair them.
 
-| Revision | Where | Content |
-| --- | --- | --- |
-| `r1` (original) | `definition/<workflow>.yaml` and `definition` in `run.create` | the byte copy taken at creation; never rewritten |
-| `r2`, `r3`, … | `definition/<revision>/<workflow>.yaml` and the `run.adjust` entry that applied it | the complete authored definition of that revision and its complete compiled graph |
-
-Each `run.adjust` entry records: `revision` (`r<n>`, the next number),
-`parent` (the revision it was made from, which must be the active one),
-`file`, `sha256` of the bytes, `definitionDigest` (the definition-approval
-projection), `effective` (the whole compiled graph, with its compiler
-version), `reason`, `source` (below) and the `diff` it applies. The state's
-`definition.active` names the revision in force (absent: `r1`), and
-`definition.revisions` lists every applied revision in order.
-
-**Replay** follows the history with the graph in force at each entry: the
-original graph until the first `run.adjust`, then the graph that entry
-carries. Reading checks each revision's file against its recorded `sha256`
-and its graph against its authored nodes, as for the original; a missing or
-changed revision file makes the record unusable, never silently recompiled.
-A later compiler never regenerates a revision.
-
-Because the graph is part of the history entry and the file is written
-before `run.json` (under the run's lock), a crash between the two leaves an
-unreferenced revision file and an unchanged run. The next attempt
-overwrites that file. A run never points at a revision that is not on
-disk.
-
-## What an adjustment may change
-
-An adjustment is a whole authored definition (the active one, edited). It is
-compared with the active revision and refused, atomically and with every
-reason, when it:
-
-| Code | Refused change |
-| --- | --- |
-| `adjust-started` | removes, retypes or edits (type, name, description, repositories, delegate target, `confirms`) a node that is not `pending` — started, waiting, completed, failed or cancelled work keeps its identity, meaning and state |
-| `adjust-dependencies` | changes the incoming edges of a node that is not `pending` (its recorded dependencies) |
-| `adjust-question` | removes or rewrites a node with an open or answered question — covered by the rule above, named separately |
-| `adjust-access` | changes `repositories` (bindings, paths or access), `execution` (agent, profile, guides), `intake` or `documentation` — adjustments never broaden access or change who performs the run (a held run moves to another profile by a person's resume, [runs.md](runs.md) *Holds*) |
-| `adjust-graph` | makes the graph invalid: a cycle, an edge to an unknown node, a delegate node, a second `confirms: result`, a node id that is not valid, or anything the definition validation calls an error |
-| `adjust-generated` | would change the frozen documentation step (plan, report, final report) of a node that is not `pending`, or its incoming edges |
-| `adjust-nothing` | changes nothing executable (appearance and layout alone are not adjustments) |
-
-Appearance and layout of new or pending nodes may change with an
-adjustment; on their own they are not one.
-
-The new revision is compiled with the current compiler under the run's
-documentation setting, which never changes: the policy's name and its
-normalized steps (p8/ex2) are compared, so a v2 graph and a v3 graph of the
-same policy are the same setting. New authored nodes get their report steps
-(when the run has reports); the final report (when it has one) follows the
-new terminal nodes. Generated steps of nodes that are not
-pending must come out identical, which they do when only future work
-changes.
-
-**Preserved state.** Nodes of the parent revision keep their records.
-New nodes (authored or generated) start `pending`. Nodes the adjustment
-removes (necessarily `pending`) leave the state; their history before the
-adjustment stays as it was. Questions, answers, instructions, artifacts,
-presentations and decisions are untouched: completed reports and decisions
-never change.
-
-## When an adjustment may be applied
-
-At a **node boundary**:
-
-- no node is `running` (`mid-node` otherwise) — a waiting node may stay
-  waiting, it just cannot be changed;
-- no received instruction is unacknowledged (`instructions-pending`), as for
-  a node start: an adjustment never bypasses the person's input;
-- the execution is neither completed (`run-completed`) nor cancelled;
-- `--expect-seq` / `expectSeq` and `parent` (`--expect-revision`) match the
-  record (`outdated`, `revision-outdated`), checked under the run's lock, so
-  a stale view or two concurrent proposals cannot both apply;
-- while an attempt is open, only that attempt applies adjustments (fenced
-  like its reports); a person's adjustment waits until no attempt is open.
-
-### At a node's completion (p8/ex2)
-
-A run without a final report ends with the completion of its last node:
-once every node is completed the execution is completed, and a completed
-run is not adjusted (`run-completed`). Adjusting first is `mid-node` while
-that node runs. When the conversation in that last node added work, the
-adjustment is made **at its completion**:
-
-- `run.adjust` carries `completing: <node>`. That node may be running — it
-  must be, and it must be the only running node — and every other rule
-  applies (it keeps its identity and dependencies, the boundary's
-  instructions, authorization, revisions, attempt fencing).
-- The service records it with the node's `node.complete`, as the next
-  entry, in the same locked write: both or neither. A refusal of either
-  part (the completion's document, an unacknowledged instruction, an open
-  presentation when nothing is left) refuses both, and the revision file is
-  removed.
-- `replay` (and so every read and `wfe run check`) refuses a `completing`
-  adjustment that is not followed directly by that node's completion
-  (`completion-owed`), so no record shows work changed in mid-node.
-- The completion carries its own receipt (`<receipt>/complete`); a
-  retransmission of the pair is answered from the record and writes
-  nothing, not even a revision file.
-
-`wfe run adjust <run> … --completing <node> --outcome <text> [--artifact
-<path>]…`. A completed run is never revived; a run whose last node adds
-nothing ends with its plain completion as before. This is general: it does
-not depend on a workflow's id, and a run with a final report does not need
-it (the final report is the pending work the adjustment goes before).
-
-### Growing a run's work from its conversation (p8/ex2)
-
-A workflow may start with a talk alone (the basic `freework`,
-[contract.md](contract.md)). Its run grows like this, with the operations
-above and nothing particular to it:
-
-1. The talk reads the braindump, asks, and takes the answer up.
-2. The work the answer makes concrete is written as a draft of the
-   definition in force and checked (`--dry-run`).
-3. It is applied at the boundary — after the talk completes, before the
-   next node starts; at the talk's completion (`--completing`) when the
-   run has no final report — with the source that says why: `request`,
-   `answer:<q>`, `instruction:<i>`, or `agreement:<q>` for a change of the
-   agreed scope.
-4. The next node is chosen from the updated graph. A later consultation is
-   a new talk with its own id; a finished talk keeps its question and answer.
-5. With nothing more to add, the run goes on to the end it has.
-
-The grown definition is the run's revisions only. Nothing is written back
-into `devdocs/workflows/`.
-
-## Who authorizes it
-
-An adjustment names its **source**, and the reducer checks it:
-
-| `source` | Means | Checked |
-| --- | --- | --- |
-| `{kind: "answer", question, answer}` | the person asked for this change in an answer (a correction after review) | the question exists, that answer was taken up |
-| `{kind: "instruction", instruction}` | the person's additional instruction asked for it | the instruction exists and was acknowledged |
-| `{kind: "agreement", question}` | the executor proposed a change of the agreed scope and the person agreed to it | the question was asked about this exact proposal (its `document` is the proposed revision file, by hash), and its answer was taken up |
-| `{kind: "person", by}` | a person applies it themselves (CLI, browser) | recorded as declared, like an approval; not allowed while an attempt is open |
-| `{kind: "request", input, sha256}` (p7/ex1) | the run's original braindump or entrusted request already asks for this work (research before implementing, a review step it names) | `input` is the run's own input file (`braindump.md` or `request.md`), `sha256` equals the hash recorded with `run.create` (`input.sha256`), and the file on disk still has that hash. A run created before p7/ex1 recorded no input hash and cannot use this source |
-
-Routine implementation choices already authorized by the person's request
-are not adjustments and need no prompt.
-
-**From the original request (p7/ex1).** When the request itself asks for
-work that the graph does not show (the formation-movement request of
-`improve-game/run-004` asked for Web research before implementing), the
-executor may add that work with source `request`, without a separate
-permission question. Plan agreement is still a separate record: the plan
-says which nodes the run will add or where the activity is integrated, and
-the person agrees to the plan as usual. The adjustment is applied at a
-boundary like any other. Applying it while `_plan` is running is `mid-node`;
-it can be applied once the plan is agreed (`_plan` completed) and before the
-work it precedes starts. The source states *why*. It is not a claim that the
-person approved a particular graph, and it never covers a change of scope the
-request does not contain: that needs `agreement`. The person's node catalog
-(catalog.md) says which activities they expect as visible nodes. It never
-adds nodes by itself. A material change of agreed scope
-that the person did not ask for needs `agreement`: write the proposal
-(`wfe run adjust … --propose`, which writes
-`definition/proposals/<name>.yaml` and prints the difference), ask about it
-(`wfe run ask <run> <node> --about-adjustment <name>`), and apply it with
-the taken-up answer. Acknowledging an instruction and applying a revision
-are two records: the acknowledgment says what the executor will do; the
-adjustment is the graph change it made.
-
-## A correction after review
-
-When the person asks for changes in their answer to the result
-confirmation:
-
-1. take the answer up; the confirming node is running again;
-2. complete the confirming node with an outcome that says a correction was
-   requested (no decision is recorded; asking for changes is not a
-   rejection);
-3. at the boundary, apply an adjustment with source `{answer}` that adds
-   repair, verification, a new presentation and a new result-confirmation
-   talk after it, and reconnects the pending cleanup (and anything else
-   pending) to follow the new confirmation; the old confirming node keeps
-   `confirms: result` only if the new one does not — a run has one result
-   confirmation node, so the new talk carries `confirms: result` and the old
-   node, already completed, keeps its frozen meaning in the revision history
-   (see below);
-4. the new presentation and question bind a new revision; the earlier
-   question, answer and presentation stay as they were.
-
-`confirms: result` belongs to a node's meaning. A completed confirming node
-cannot be edited, so a correction adds the new confirmation with a
-different id and the validation rule "one result confirmation per workflow"
-counts only nodes that are not completed in the run (`adjust-graph`
-otherwise). The decision rule takes the **latest** question asked from any
-node that is a result confirmation in the active revision.
-
-## Views and operations
-
-`wfe run adjust <run> --definition <file> --reason <text> --source …
-[--dry-run] [--expect-revision r<n>]`, the HTTP route `POST
-runs/<wf>/<run>/adjust` and the run view use one operation
-(`server/runs.ts` `adjustRun`): `--dry-run` returns the difference
-(authored nodes added, removed, changed; edges added and removed; generated
-steps added and removed) and every refusal without writing. `wfe run
-revisions <run>` and the run view show the original definition, the active
-revision and the difference between any two. The run view draws the active
-revision; a history view (`/at/<commit>`) draws the revision active at that
-commit.
+`--completing <node> --outcome <text>` records a revision and the running
+node's completion atomically. Other nodes may be running. Questions,
+proposals (`--propose <name>`), plans and reports remain available when useful;
+none is required to authorize an adjustment.

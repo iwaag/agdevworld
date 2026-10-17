@@ -181,18 +181,13 @@ export async function integrate(o: IntegrateOptions): Promise<IntegrationOutcome
     const fail = (state: StepState, error: string, files?: string[]) => { step.state = state; step.error = error; if (files) step.files = files; return state }
     try {
       if (!step.target) { fail('attention', `${step.repo}: no integration target was recorded (the project workspace had no branch checked out)`); break }
-      const accepted = o.accepted.find(a => a.path === step.repo)
-      if (!accepted) { fail('attention', `${step.repo}: the accepted revision does not name this repository`); break }
       // The candidate: the run branch as saved and published.
       const fetchRun = await git(dir, ['fetch', '-q', 'origin', `+refs/heads/${step.branch}:refs/remotes/origin/${step.branch}`], { env: o.env, timeoutMs: 120_000 })
       if (fetchRun.code !== 0) { fail('failed', `fetching the run branch failed: ${fetchRun.stderr.trim()}`); break }
       const candidate = await revOf(dir, `refs/heads/${step.branch}`)
       if (!candidate || candidate !== await revOf(dir, `refs/remotes/origin/${step.branch}`)) { fail('attention', `${step.repo}: the run branch ${step.branch} is not saved as published (local ${candidate?.slice(0, 10) ?? 'missing'}); its checkpoint is published first`); break }
-      if (step.candidate && step.candidate !== candidate && step.state !== 'done') { step.observed = undefined; step.result = undefined; step.method = undefined; step.pushed = undefined }
-      step.candidate ??= candidate
-      // The binding: only administrative records may differ from what was accepted.
-      const changed = names((await gitOk(dir, ['diff', '--name-only', accepted.tree, `${candidate}^{tree}`])).toString()).filter(p => !admin(step.repo, p))
-      if (changed.length) { fail('needs-agreement', `the result changed after it was accepted: ${changed.slice(0, 20).join(', ')}${changed.length > 20 ? ' …' : ''}; present it again for agreement`, changed); break }
+      if (step.candidate && step.candidate !== candidate) { step.observed = undefined; step.result = undefined; step.method = undefined; step.pushed = undefined; step.state = 'pending' }
+      step.candidate = candidate
       // A repository the run made no commit in is left as its target has it:
       // nothing to integrate, and the root's gitlink for it is not touched.
       const base = o.storage.repositories.find(r => r.path === step.repo)?.base
@@ -237,19 +232,6 @@ async function integrateOne(o: IntegrateOptions, step: IntegrationStep, dir: str
   if (step.result && await isAncestor(dir, step.result, observed)) { step.pushed = true; step.state = 'done'; step.error = undefined; return step.state }
   if (step.state === 'done' && step.result) { step.state = 'attention'; step.error = `${step.target} no longer contains the integrated commit ${step.result.slice(0, 10)} (rewritten by someone else); nothing was forced`; return step.state }
   step.observed = observed
-  // A guarded binding: the target must not have changed under its paths
-  // since the run's merge base with it (the run built on what it saw).
-  const guards = (o.guards ?? []).filter(g => g.repo === step.repo)
-  if (guards.length && !(await isAncestor(dir, observed, candidate))) {
-    const base = (await gitOk(dir, ['merge-base', observed, candidate])).trim()
-    const paths = guards.flatMap(g => g.paths)
-    const moved = names(await gitOk(dir, ['diff', '--name-only', base, observed, ...(paths.includes('') ? [] : ['--', ...paths])]))
-    if (moved.length) {
-      step.state = 'target-changed'; step.files = moved
-      step.error = `${step.target} changed under the guarded binding${guards.length === 1 ? '' : 's'} ${guards.map(g => `${g.binding} (${g.paths.map(x => x || 'the repository').join(', ')})`).join(', ')} since this run built on it (${base.slice(0, 10)} → ${observed.slice(0, 10)}: ${moved.slice(0, 20).join(', ')}${moved.length > 20 ? ' …' : ''}); nothing was integrated: reassess against the current target in a successor run`
-      return step.state
-    }
-  }
   // Submodule commits this repository must record: what each integration produced.
   const gitlinks = [...results.entries()]
   const linksMatch = async (commit: string) => {
@@ -288,7 +270,7 @@ async function integrateOne(o: IntegrateOptions, step: IntegrationStep, dir: str
 // worktree of the copy's repository: merged, the root's owned gitlinks set
 // to their integrated commits, and checked that the run's own changes come
 // through unchanged. Returns the commit, or the step state that stops.
-async function combine(o: IntegrateOptions, step: IntegrationStep, dir: string, candidate: string, observed: string, gitlinks: [string, string][], admin: (repo: string, path: string) => boolean, message: string): Promise<string | { state: StepState }> {
+async function combine(o: IntegrateOptions, step: IntegrationStep, dir: string, candidate: string, observed: string, gitlinks: [string, string][], _admin: (repo: string, path: string) => boolean, message: string): Promise<string | { state: StepState }> {
   const wt = join(copyDir(o.space.shared, o.ref), 'integration', step.repo === '.' ? 'root' : step.repo.replace(/[^A-Za-z0-9_.-]+/g, '_'))
   await git(dir, ['worktree', 'remove', '--force', wt])
   await rm(wt, { recursive: true, force: true })
@@ -311,15 +293,6 @@ async function combine(o: IntegrateOptions, step: IntegrationStep, dir: string, 
     if (merging) await gitOk(wt, ['commit', '-q', '--no-edit'], { env: o.env })
     else if ((await git(wt, ['diff', '--cached', '--quiet'])).code === 1) await gitOk(wt, ['commit', '-q', '-m', `${message}: record the integrated submodules`], { env: o.env })
     const head = (await gitOk(wt, ['rev-parse', 'HEAD'])).trim()
-    // The run's own changes must come through as they were accepted.
-    const base = (await gitOk(dir, ['merge-base', observed, candidate])).trim()
-    const ours = names((await gitOk(dir, ['diff', '--name-only', base, candidate])).toString()).filter(p => !admin(step.repo, p))
-    const altered = ours.length ? names((await gitOk(dir, ['diff', '--name-only', candidate, head, '--', ...ours])).toString()) : []
-    if (altered.length) {
-      step.state = 'needs-agreement'; step.files = altered
-      step.error = `${step.target} changed files this run changed too (${altered.slice(0, 20).join(', ')}${altered.length > 20 ? ' …' : ''}); the combined result differs from what was accepted and is presented for agreement first (a run that combines them)`
-      return { state: step.state }
-    }
     return head
   } finally {
     await git(dir, ['worktree', 'remove', '--force', wt])

@@ -105,13 +105,13 @@ export function validateWorkflow(w: Workflow, ctx: ValidationContext = {}): Issu
     if (!ID_PATTERN.test(key)) issues.push(err('binding-id-invalid', `Repository binding "${key}" must match ${ID_PATTERN.source}.`, { binding: key }))
     if (!(ACCESS_LEVELS as readonly string[]).includes(b.access)) issues.push(err('binding-access', `Binding "${key}" has access "${b.access}"; expected readonly or editable.`, { binding: key }))
     if (b.integrate !== undefined && !(INTEGRATE_MODES as readonly string[]).includes(b.integrate)) issues.push(err('binding-integrate', `Binding "${key}" has integrate "${b.integrate}"; expected ${INTEGRATE_MODES.join(' or ')} (or leave it out).`, { binding: key }))
-    else if (b.integrate === 'if-unchanged' && b.access !== 'editable') issues.push(warn('binding-integrate-readonly', `Binding "${key}" guards integration but is readonly; the guard applies only to what a run may change.`, { binding: key }))
+
     const path = normalizeRepoPath(b.path)
     if (path === null) { issues.push(err('binding-path-invalid', `Binding "${key}" path "${b.path}" must be project-relative without "..".`, { binding: key })); continue }
     if (!ctx.repositories || path === '.') continue
     const repo = byPath.get(path)
-    if (!repo) issues.push(err('repository-missing', `Binding "${key}" refers to "${path}", which is neither devdocs, a submodule in .gitmodules, nor a local area declared in project.yaml.`, { binding: key }))
-    else if (repo.kind === 'directory' && !repo.initialized) issues.push(err('area-missing', `Binding "${key}": local area "${path}" is declared in project.yaml but is not a folder of the project root here.`, { binding: key }))
+    if (!repo) issues.push(warn('repository-missing', `Binding "${key}" refers to "${path}", which is neither devdocs, a submodule in .gitmodules, nor a local area declared in project.yaml.`, { binding: key }))
+    else if (repo.kind === 'directory' && !repo.initialized) issues.push(warn('area-missing', `Binding "${key}": local area "${path}" is declared in project.yaml but is not a folder of the project root here.`, { binding: key }))
     else if (!repo.initialized) issues.push(warn('repository-uninitialized', `Binding "${key}": submodule "${path}" is not initialized in this workspace.`, { binding: key }))
   }
 

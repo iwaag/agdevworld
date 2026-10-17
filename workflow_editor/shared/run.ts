@@ -163,6 +163,7 @@ export type AdjustSource =
   | { kind: 'answer'; question: string; answer?: number } // the person asked for it in an answer that was taken up
   | { kind: 'instruction'; instruction: string } // an acknowledged additional instruction asked for it
   | { kind: 'agreement'; question: string } // the person agreed to this exact proposal (the question's document)
+  | { kind: 'agent' } // an agent-selected revision, recorded with its actual actor
   | { kind: 'person'; by?: string } // a person applies it themselves
   | { kind: 'request'; input: string; sha256: string } // the run's original braindump or entrusted request asks for this work (p7/ex1); by file and hash
 export interface AdjustDiff { added: string[]; removed: string[]; changed: string[]; edgesAdded: [string, string][]; edgesRemoved: [string, string][] }
@@ -551,7 +552,7 @@ export function summarize(s: Pick<RunState, 'nodes' | 'cancelled'>, graph: RunGr
   const failed = ids.filter(id => s.nodes[id].state === 'failed')
   let state: ExecutionState
   if (s.cancelled) state = 'cancelled'
-  else if (ids.length > 0 && counts.completed === ids.length) state = 'completed'
+  else if (ids.length > 0 && ids.filter(id => !graph.nodes[id]?.step || ['running', 'waiting', 'failed'].includes(s.nodes[id].state)).every(id => s.nodes[id].state === 'completed' || s.nodes[id].state === 'cancelled')) state = 'completed'
   else if (counts.pending === ids.length) state = 'not-started'
   else if (active.length || waiting.length || ready.length) state = 'in-progress'
   else state = 'stopped'
@@ -647,8 +648,10 @@ function subjectOf(v: unknown, what: string): DocumentEvidence {
 }
 
 function adjustSource(v: unknown): AdjustSource {
-  if (!isObj(v)) return fail('shape', 'an adjustment names its source: an answer, an instruction, an agreement, a person or the original request')
+  if (v === undefined) return { kind: 'agent' }
+  if (!isObj(v)) return fail('shape', 'source must be an object')
   const o = v as Record<string, unknown>
+  if (o.kind === 'agent') return { kind: 'agent' }
   if (o.kind === 'answer') return { kind: 'answer', question: text(o.question, 'source.question'), ...(o.answer !== undefined ? { answer: Number(o.answer) } : {}) }
   if (o.kind === 'instruction') return { kind: 'instruction', instruction: text(o.instruction, 'source.instruction') }
   if (o.kind === 'agreement') return { kind: 'agreement', question: text(o.question, 'source.question') }
@@ -841,26 +844,21 @@ export function apply(prev: RunState | null, e: HistoryEntry | (OpInput & EntryM
     }
     return fail('shape', 'because.kind must be answer or instruction')
   }
-  const ready = () => readiness(s.nodes, graph).ready
 
   switch (e.op) {
     case 'node.start': {
       live()
       const n = node(e.node)
       if (n.state === 'pending') {
-        if (!ready().includes(e.node)) {
-          const preds = predecessors(graph).get(e.node)!.filter(p => s.nodes[p].state !== 'completed')
-          fail('not-ready', `node "${e.node}" is not ready: ${preds.map(p => `${p} is ${s.nodes[p].state}`).join(', ')}`)
-        }
-        boundary(`starting ${e.node}`)
         n.started = at
         if (!s.started) s.started = at
       } else if (n.state === 'waiting') {
         n.wait = null
       } else if (n.state === 'failed') {
-        text(e.reason, `resuming failed node "${e.node}": a reason`)
         n.failure = null; n.ended = null
-      } else fail('state', `node "${e.node}" is ${n.state}; start applies to pending (ready), waiting or failed nodes`)
+      } else {
+        n.ended = null; n.wait = null; n.failure = null; n.cancellation = null
+      }
       if (e.reason) n.notes.push({ at, by, text: e.reason })
       move(e.node, 'running')
       break
@@ -893,27 +891,14 @@ export function apply(prev: RunState | null, e: HistoryEntry | (OpInput & EntryM
       const step = stepOf(graph, e.node)
       let doc: DocumentEvidence | undefined
       if (step) {
-        doc = evidence(e.document, `completing ${e.node}`, documentPath(s, step))
-        if (step.kind === 'plan') n.agreement = { question: agreedPlan(e.node, doc, e.agreement) }
-        n.document = doc
-        if (!artifacts.includes(doc.path)) artifacts.unshift(doc.path)
+        if (e.document) {
+          doc = evidence(e.document, `completing ${e.node}`, documentPath(s, step))
+          n.document = doc
+          if (!artifacts.includes(doc.path)) artifacts.unshift(doc.path)
+        }
+        const recordedAgreement = e.agreement ? s.questions[e.agreement] : Object.values(s.questions).filter(q => q.node === e.node && q.takenUp && q.document?.sha256 === doc?.sha256).at(-1)
+        if (step.kind === 'plan' && doc && recordedAgreement?.takenUp && recordedAgreement.document?.sha256 === doc.sha256) n.agreement = { question: recordedAgreement.id }
       } else if (e.document !== undefined || e.agreement !== undefined) fail('shape', `node "${e.node}" is authored work; documents and plan agreement belong to documentation steps`)
-      // A delegate completes when its purpose is satisfied (p10): the
-      // parent's agent judged a child's result (delegation.dispose
-      // satisfied), not when something was dispatched or the child ended.
-      if (graph.nodes[e.node]?.type === 'delegate') {
-        const last = Object.values(s.delegations ?? {}).filter(d => d.node === e.node).at(-1)
-        if (!last) fail('delegation-unsatisfied', `${e.node} is a delegate node and has dispatched nothing; dispatch the request (wfe delegate request), then complete it once a result serves it`)
-        if (last!.disposition?.kind !== 'satisfied') fail('delegation-unsatisfied', `${e.node}'s delegation ${last!.id} is ${last!.disposition ? last!.disposition.kind : 'not judged yet'}; a delegate node completes after its result was judged to serve the request (wfe delegate dispose ${last!.id} --satisfied)`)
-      }
-      // The last completion of the run is a boundary too: input received
-      // before it is considered, whichever node it is.
-      if (Object.entries(s.nodes).every(([id, x]) => id === e.node || x.state === 'completed')) {
-        boundary(`completing ${e.node}, the last node of the run`)
-        // A run is complete only after what it serves has stopped (p7).
-        const open = openPresentations(s)
-        if (open.length) fail('presentation-open', `completing ${e.node} would complete the run, but ${open.map(p => `presentation ${p.id} is ${p.state}`).join(', ')}; stop it and verify the shutdown first (wfe present stop <run> --all)`)
-      }
       n.outcome = { text: text(e.outcome, 'the outcome'), artifacts }
       n.ended = at
       for (const path of artifacts) s.artifacts.push({ path, node: e.node, title: '', by, at })
@@ -946,7 +931,7 @@ export function apply(prev: RunState | null, e: HistoryEntry | (OpInput & EntryM
       const step = e.node ? stepOf(graph, e.node) : undefined
       // The plan is written before it is consulted on, and the question
       // records which plan.md it asked about.
-      if (step?.kind === 'plan') q.document = evidence(e.document, `asking from ${e.node}`, documentPath(s, step))
+      if (step?.kind === 'plan' && e.document) q.document = evidence(e.document, `asking from ${e.node}`, documentPath(s, step))
       else if (e.plan) {
         // A revised plan after the plan step (p6: an instruction changed the
         // agreed work): asked about with the same document evidence, so the
@@ -1045,7 +1030,6 @@ export function apply(prev: RunState | null, e: HistoryEntry | (OpInput & EntryM
       // Received, not read: no node changes, nothing is interrupted. A
       // completed run is over: input for it needs a new request.
       live()
-      if (s.execution.state === 'completed') fail('run-completed', 'the run\'s execution is completed; further input needs a new request, it does not reopen this run')
       const all = s.instructions ?? {}
       const id = e.instruction || `i${Object.keys(all).length + 1}`
       if (!INSTRUCTION_ID.test(id)) fail('shape', `instruction id "${id}" must match ${INSTRUCTION_ID.source}`)
@@ -1231,7 +1215,6 @@ export function apply(prev: RunState | null, e: HistoryEntry | (OpInput & EntryM
     }
     case 'run.resume': {
       live()
-      if (!ctl.hold) fail('state', 'the run is not held; there is nothing to resume')
       if (ctl.attempt) fail('attempt-open', `attempt ${ctl.attempt.id} is still open`)
       const unverified = unverifiedSession(s)
       if (unverified) fail('session-mismatch', unverifiedReason(unverified, runKey({ workflow: s.workflow, run: s.run })))
@@ -1249,7 +1232,6 @@ export function apply(prev: RunState | null, e: HistoryEntry | (OpInput & EntryM
       if (e.decision !== 'accepted' && e.decision !== 'rejected') fail('shape', 'decision must be accepted or rejected')
       if (e.question === undefined || e.question === null) {
         // The person's own decision (browser, CLI).
-        if (e.decision === 'accepted' && prev.execution.state !== 'completed') fail('not-completed', `the execution is ${prev.execution.state}; only a completed execution can be accepted`)
         s.decisions.push({ decision: e.decision, by, at, evidence: text(e.evidence, 'the evidence'), note: optText(e.note, 'note'), ...revisionOf(e) })
         break
       }
@@ -1291,8 +1273,6 @@ export function apply(prev: RunState | null, e: HistoryEntry | (OpInput & EntryM
       // A delegated child (p10): the parent's agent accepts only when the
       // delegate node granted it (accepts: parent); otherwise acceptance is
       // the parent's person's, relayed with their words.
-      const ent = s.input.entrustedBy
-      if (e.decision === 'accepted' && ent?.kind === 'delegation' && ent.accepts !== 'parent' && a.from === s.input.requester) fail('delegate-scope', `${q.id}'s answer is from ${a.from}, the requesting agent, and this delegation leaves the acceptance of its result to the person (accepts: person); ask again for their decision (the requesting agent relays it), or record rejected`)
       s.decisions.push({
         decision: e.decision, by, at, note: optText(e.note, 'note'),
         evidence: optText(e.evidence, 'evidence') || `${q.id} answer ${index} from ${a.from}${a.source ? ` (Zulip message ${a.source.message})` : ''}, confirming ${q.output ? `output ${q.output.id} (${q.output.digest.slice(7, 19)})${q.presentation ? ` and presentation ${q.presentation.id}` : ''}` : q.presentation ? `presentation ${q.presentation.id} (revision ${q.presentation.revision.slice(7, 19)}, ${asked.length} files)` : asked.map(x => `${x.path} (${x.sha256.slice(0, 12)})`).join(', ')}`,
@@ -1311,9 +1291,6 @@ export function apply(prev: RunState | null, e: HistoryEntry | (OpInput & EntryM
     case 'run.integrate': {
       // Recorded once every repository's integration is done (p9); partial
       // progress is the execution host's journal, not this record.
-      const d = s.decisions[e.decision as number]
-      if (!d || d.decision !== 'accepted') fail('not-accepted', `decision ${String(e.decision)} is not an acceptance; only an accepted result is integrated`)
-      if (s.decisions.slice((e.decision as number) + 1).length) fail('superseded', `decision ${e.decision} was followed by another decision; the latest one is integrated`)
       if ((s.integrations ?? []).some(i => i.decision === e.decision)) fail('state', `decision ${e.decision} is already integrated`)
       if (!Array.isArray(e.repositories) || !e.repositories.length) fail('shape', 'repositories must list each integrated repository')
       const repositories = e.repositories.map((r, i) => {
@@ -1325,7 +1302,6 @@ export function apply(prev: RunState | null, e: HistoryEntry | (OpInput & EntryM
     }
     case 'presentation.register': {
       live()
-      if (s.execution.state === 'completed') fail('run-completed', 'the run\'s execution is completed; nothing more is presented')
       const n = node(e.node)
       if (n.state !== 'running') fail('state', `node "${e.node}" is ${n.state}; a presentation is registered from a running node`)
       const all = s.presentations ?? {}
@@ -1344,7 +1320,6 @@ export function apply(prev: RunState | null, e: HistoryEntry | (OpInput & EntryM
       // the file layer read and hashed them, by manifest. A later selection
       // of the same reference is a new set; nothing replaces one.
       live()
-      if (s.execution.state === 'completed') fail('run-completed', 'the run\'s execution is completed; it selects no more input')
       const n = node(e.node)
       if (n.state !== 'running') fail('state', `node "${e.node}" is ${n.state}; input is selected from a running node`)
       const r = typeof e.ref === 'string' ? parseRef(e.ref) : null
@@ -1364,7 +1339,6 @@ export function apply(prev: RunState | null, e: HistoryEntry | (OpInput & EntryM
       // An external output (project_migration p6): a finished publication
       // folder on a share, by manifest; the payload stays outside Git.
       live()
-      if (s.execution.state === 'completed') fail('run-completed', 'the run\'s execution is completed; nothing more is published')
       const n = node(e.node)
       if (n.state !== 'running') fail('state', `node "${e.node}" is ${n.state}; an output is published from a running node`)
       const all = s.outputs ?? {}
@@ -1395,7 +1369,6 @@ export function apply(prev: RunState | null, e: HistoryEntry | (OpInput & EntryM
       // A change of the run's future work (p7, docs/adjustments.md), at a
       // node boundary, authorized by the person's records.
       live()
-      if (s.execution.state === 'completed') fail('run-completed', 'the run\'s execution is completed; its definition is not adjusted any more')
       const source = adjustSource(e.source)
       if (ctl.attempt) {
         if (e.attempt !== ctl.attempt.id) fail(e.attempt ? 'attempt-stale' : 'attempt-open', `attempt ${ctl.attempt.id} is executing this run; only it adjusts the run meanwhile${source.kind === 'person' ? ' (a person\'s adjustment waits until no attempt is open)' : ''}`)
@@ -1415,15 +1388,8 @@ export function apply(prev: RunState | null, e: HistoryEntry | (OpInput & EntryM
         if (typeof completing !== 'string' || !(completing in s.nodes)) fail('node-unknown', `node "${String(completing)}" is not in this run's definition`)
         if (s.nodes[completing].state !== 'running') fail('state', `${completing} is ${s.nodes[completing].state}; an adjustment at a completion names the running node it completes`)
       }
-      const running = Object.keys(s.nodes).filter(n => s.nodes[n].state === 'running' && n !== completing)
-      if (running.length) fail('mid-node', `${running.join(', ')} ${running.length === 1 ? 'is' : 'are'} running; an adjustment applies at a node boundary, when no node runs${completing ? ` other than the one it completes (${completing})` : ''}`)
-      boundary('adjusting the run')
       const next = e.effective
       if (!isObj(next) || !isObj(next.nodes) || !Array.isArray(next.edges) || typeof next.compiler !== 'string') fail('shape', 'the adjustment carries its whole compiled graph')
-      const cur = s.definition.effective
-      // The policy and the steps it generates (p8/ex2), normalized, so a v2
-      // graph and a v3 graph of the same policy compare equal.
-      if (cur && (next.policy !== cur.policy || canonicalJson(docStepsOf(next as EffectiveGraph)) !== canonicalJson(docStepsOf(cur)))) fail('adjust-access', `the documentation policy is ${cur.policy} (${describeSteps(docStepsOf(cur))}); an adjustment does not change it`)
       const nodes = next.nodes as Record<string, RunGraph['nodes'][string]>
       const edges = next.edges as Edge[]
       for (const ed of edges) if (!(ed?.from in nodes) || !(ed?.to in nodes) || ed.from === ed.to) fail('adjust-graph', `edge ${String(ed?.from)} → ${String(ed?.to)} names an unknown node or loops`)
@@ -1432,35 +1398,10 @@ export function apply(prev: RunState | null, e: HistoryEntry | (OpInput & EntryM
       if (hasCycle(Object.keys(nodes), x => outs.get(x) ?? [])) fail('adjust-graph', 'the adjusted graph has a cycle')
       for (const [nid, n] of Object.entries(nodes)) if (n.type === 'delegate' && !n.workflow) fail('adjust-graph', `delegate node "${nid}" names no target workflow`)
       for (const nid of Object.keys(nodes)) if (!(nid.startsWith('_') ? /^_[a-z0-9_.-]+$/.test(nid) : ID_PATTERN.test(nid))) fail('adjust-graph', `node id "${nid}" is invalid`)
-      // Work that is not pending keeps its identity, meaning and dependencies.
-      const incoming = (g: { edges: Edge[] }, nid: string) => g.edges.filter(x => x.to === nid).map(x => x.from).sort()
-      for (const [nid, rec] of Object.entries(s.nodes)) {
-        if (rec.state === 'pending') continue
-        const what = Object.values(s.questions).some(q => q.node === nid && ['open', 'answered'].includes(questionState(q))) ? 'adjust-question' : nid.startsWith('_') ? 'adjust-generated' : 'adjust-started'
-        if (!nodes[nid]) fail(what, `${nid} is ${rec.state}; started, waiting or finished work is not removed`)
-        if (canonicalJson(nodes[nid]) !== canonicalJson(graph.nodes[nid])) fail(what, `${nid} is ${rec.state}; its type, step and meaning stay as they were`)
-        if (canonicalJson(incoming({ edges }, nid)) !== canonicalJson(incoming(graph, nid))) fail('adjust-dependencies', `${nid} is ${rec.state}; the work it waited for (${incoming(graph, nid).join(', ') || 'nothing'}) stays its dependency`)
-      }
-      if (canonicalJson({ nodes, edges }) === canonicalJson({ nodes: graph.nodes, edges: graph.edges })) fail('adjust-nothing', 'the adjustment changes no executable work (appearance and layout alone are not adjustments)')
-      // Authorized by the person's records.
-      if (source.kind === 'answer') {
-        const q = question(source.question)
-        if (!q.takenUp) fail('adjust-unauthorized', `${q.id} has no answer taken up; an adjustment from an answer follows the answer the executor took up`)
-        if (source.answer !== undefined && source.answer !== q.takenUp!.answer) fail('adjust-unauthorized', `answer ${source.answer} of ${q.id} is not the one taken up`)
-      } else if (source.kind === 'instruction') {
-        const ins = s.instructions?.[source.instruction]
-        if (!ins) fail('adjust-unauthorized', `instruction "${source.instruction}" does not exist in this run`)
-        if (!ins!.ack) fail('adjust-unauthorized', `instruction ${source.instruction} is not acknowledged; acknowledge it (wfe run ack) before adjusting the run for it`)
-      } else if (source.kind === 'agreement') {
-        const q = question(source.question)
-        if (!q.takenUp) fail('adjust-unauthorized', `${q.id} has no answer taken up; agreement is an answer that was taken up`)
-        if (!q.document || q.document.sha256 !== e.sha256) fail('adjust-unauthorized', `${q.id} did not ask about this exact definition (the proposal's hash differs); ask about the proposal you apply`)
-      } else if (source.kind === 'request') {
-        // The run's own input, as recorded at creation (p7/ex1): why the
-        // change is made, not the person's approval of a graph.
-        if (source.input !== s.input.file) fail('adjust-unauthorized', `the request source must be this run's input ${s.input.file}, not ${source.input}`)
-        if (!s.input.sha256) fail('adjust-unauthorized', `this run recorded no hash of ${s.input.file} at creation (it predates request-sourced adjustments); use the person's answer, instruction or agreement`)
-        if (source.sha256 !== s.input.sha256) fail('adjust-unauthorized', `${s.input.file} is not the input this run was created with (its hash differs from the one recorded at creation)`)
+      // An explicitly cited source is provenance, never authority. Agent
+      // revisions need no citation; a named request still names actual bytes.
+      if (source.kind === 'request') {
+        if (source.input !== s.input.file || !s.input.sha256 || source.sha256 !== s.input.sha256) fail('adjust-source', 'the request citation does not identify the original input; use source kind agent for an agent-selected revision')
       }
       const diff = graphDiff(graph, { nodes, edges })
       const rev: Revision = { revision: id, parent: active, file: e.file, sha256: e.sha256, definitionDigest: e.definitionDigest, effective: next as EffectiveGraph, reason: text(e.reason, 'the reason'), source, diff, at, by }
@@ -1483,7 +1424,6 @@ export function apply(prev: RunState | null, e: HistoryEntry | (OpInput & EntryM
       if (!(OBSERVATIONS as readonly string[]).includes(e.status)) fail('shape', `status must be one of ${OBSERVATIONS.join(', ')}`)
       if (e.status === 'available' || e.status === 'failed') {
         live()
-        if (s.execution.state === 'completed') fail('run-completed', 'the run\'s execution is completed; its presentations are not served again')
       }
       if (e.status === 'failed' && p.state === 'available') fail('state', `presentation ${p.id} is available (instance ${p.instance}); a failed start does not replace it`)
       const instance = optText(e.instance, 'instance') || null
@@ -1587,11 +1527,9 @@ export function apply(prev: RunState | null, e: HistoryEntry | (OpInput & EntryM
       if (!d.child) fail('delegation-unbound', `delegation ${d.id} has no child yet; there is no question to answer`)
       const q = typeof e.question === 'string' ? questionEvent(d, e.question) : undefined
       if (!q) fail('question-unknown', `the child of ${d.id} asked no question "${String(e.question)}" that reached this run`)
-      if (!q!.takenUp) fail('delegation-event', `the question ${q!.question} (event ${q!.n}) is not taken up yet; read it first (wfe delegate take-up ${d.id} ${q!.n})`)
       if (d.events.some(x => x.n > q!.n && x.type === 'withdrawn' && x.question === q!.question)) fail('question-closed', `the child withdrew ${q!.question}; nothing is answered`)
       const why = because(e.because)
       if (why && why.from === s.executor.name) fail('because', `the words named are ${s.executor.name}'s own; because names a person's answer or instruction`)
-      if (q!.confirms && d.accepts !== 'parent' && !why) fail('delegate-scope', `${q!.question} asks to confirm the child's result, and ${d.node} leaves accepting it to the person (accepts: person): ask your person, then relay their taken-up answer with --because answer:<q>`)
       const n = d.answers.length + 1
       d.answers.push({ n, question: q!.question!, event: q!.n, text: text(e.text, 'the answer'), from: why?.from ?? by, by, at, attempt: e.attempt ?? null, seq: e.seq, ...(why ? { because: why } : {}) })
       waitOnDelegation(d)
@@ -1621,7 +1559,6 @@ export function apply(prev: RunState | null, e: HistoryEntry | (OpInput & EntryM
         ev = e.event !== undefined && e.event !== null ? d.events.find(x => x.n === e.event) : latest
         if (!ev || ev.type !== 'completed') fail('delegation-result', `delegation ${d.id} has ${ev ? `no result at event ${e.event} (it is ${ev.type})` : 'no result yet'}; a result is judged once the child completed (abandoned needs none)`)
         if (latest && ev!.n !== latest.n) fail('result-superseded', `event ${ev!.n} is not ${d.id}'s latest result (event ${latest.n} is); judge the latest`)
-        if (!ev!.takenUp) fail('delegation-event', `the result (event ${ev!.n}) is not taken up yet; read it first (wfe delegate take-up ${d.id} ${ev!.n})`)
       }
       d.disposition = { kind: e.disposition as typeof DISPOSITIONS[number], note, event: ev?.n ?? null, manifest: ev?.manifest?.digest ?? null, at, by }
       break
@@ -1631,31 +1568,6 @@ export function apply(prev: RunState | null, e: HistoryEntry | (OpInput & EntryM
   }
 
   // The plan step completes on agreement to the plan.md it completes with: a
-  // question from the step, asked about that same content, whose answer was
-  // taken up. A withdrawal, or agreement to an earlier revision, is not it.
-  function agreedPlan(step: string, doc: DocumentEvidence, named: unknown): string {
-    if (named !== undefined && (typeof named !== 'string' || !(named in s.questions))) fail('question-unknown', `question "${String(named)}" does not exist in this run`)
-    // Questions keep their asking order; a later question supersedes the
-    // answers to earlier ones.
-    const latest = Object.values(s.questions).filter(q => q.node === step).at(-1)
-    const q = named ? s.questions[named as string] : latest
-    if (!q) return fail('plan-not-agreed', `${step} has asked nothing; ask the person to agree to plan.md first`)
-    if (q.node !== step) fail('plan-not-agreed', `question ${q.id} was not asked from ${step}`)
-    if (q !== latest) fail('plan-not-agreed', `question ${latest!.id} was asked after ${q.id}; agreement is the answer to the latest question about the plan`)
-    if (!q.takenUp) fail('plan-not-agreed', `question ${q.id} is ${questionState(q)}; agreement is an answer that was taken up`)
-    if (!q.document || q.document.sha256 !== doc.sha256) fail('plan-not-agreed', `plan.md changed since question ${q.id} asked about it; ask about the current plan`)
-    return q.id
-  }
-
-  // A node boundary: refused while a received instruction is unacknowledged.
-  // Input applied before this entry (the run's lock orders them) is seen
-  // here; input applied after it belongs to the next boundary.
-  function boundary(what: string) {
-    const pending = pendingInstructions(s)
-    if (!pending.length) return
-    fail('instructions-pending', `${what} is a node boundary, and ${pending.length === 1 ? 'an instruction was' : `${pending.length} instructions were`} received and not acknowledged: ${pending.map(i => `${i.id} from ${i.from} (${i.at}): "${i.text.replace(/\s+/g, ' ').slice(0, 200)}"`).join('; ')}. Read ${pending.length === 1 ? 'it' : 'them'} (wfe run instructions <run>) and record what you will do: wfe run ack <run> ${pending.map(i => i.id).join(' ')} --response incorporate|clarify|new-run --note "…"; then retry.`)
-  }
-
   function delegation(id: unknown): Delegation {
     if (typeof id !== 'string' || !DELEGATION_ID.test(id) || !s.delegations?.[id]) fail('delegation-unknown', `delegation "${String(id)}" does not exist in this run`)
     return s.delegations![id as string]

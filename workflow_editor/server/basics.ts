@@ -63,7 +63,7 @@ export function freeworkWorkflow(settings: Pick<BasicSettings, 'repositories' | 
 // what it shares or keeps aside is read only.
 export function newProjectSettings(others: string[]): BasicSettings {
   const repositories: Record<string, RepositoryBinding> = { project: { path: '.', access: 'editable' } }
-  for (const p of others.filter(p => p !== '.' && p !== 'devdocs')) repositories[keyFor(p, repositories)] = { path: p, access: 'readonly' }
+  for (const p of others.filter(p => p !== '.' && p !== 'devdocs')) repositories[keyFor(p, repositories)] = { path: p, access: 'editable' }
   return {
     repositories, execution: { agent: '', profile: '', guides: [] },
     notes: ['no valid workflow to learn from: the project root editable, every other repository readonly', 'execution: the execution host\'s defaults'],

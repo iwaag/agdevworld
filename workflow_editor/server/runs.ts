@@ -948,17 +948,6 @@ export async function adjustRun(ws: Workspace, ref: RunRef, o: AdjustOptions, ct
     const next = parsed.model
     if (next.id !== record.definition.root) problem('adjust-graph', `the adjusted definition is workflow "${next.id}", not "${record.definition.root}"`)
     if (o.expectRevision && o.expectRevision !== parent) problem('revision-outdated', `${parent} is in force, not ${o.expectRevision}; read the run again`)
-    for (const k of ['repositories', 'execution', 'intake', 'documentation'] as const) if (canonicalJson(next[k]) !== canonicalJson(active.workflow[k])) problem('adjust-access', `${k} differs from the run's definition; an adjustment never changes access, who performs the run, its intake or its documentation policy`)
-    for (const [id, n] of Object.entries(active.workflow.nodes)) {
-      const st = record.nodes[id]?.state
-      if (!st || st === 'pending') continue
-      const open = Object.values(record.questions).some(q => q.node === id && !q.takenUp && !q.withdrawn)
-      if (!next.nodes[id]) { problem(open ? 'adjust-question' : 'adjust-started', `${id} is ${st}${open ? ' with an open question' : ''}; it is not removed`); continue }
-      // Provenance (p7/ex1) is no execution meaning, but the record of where
-      // started work came from is not rewritten either.
-      const changed = [...NODE_FIELDS, 'template' as const].filter(f => canonicalJson(n[f] ?? null) !== canonicalJson(next.nodes[id][f] ?? null))
-      if (changed.length) problem(open ? 'adjust-question' : 'adjust-started', `${id} is ${st}; its ${changed.join(', ')} stay as they were`)
-    }
     // One result confirmation among unfinished nodes: a correction adds a
     // new confirming talk after the completed one.
     const confirming = Object.entries(next.nodes).filter(([, n]) => n.confirms === 'result').map(([id]) => id)

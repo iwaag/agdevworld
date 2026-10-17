@@ -63,47 +63,32 @@ const code = (e: unknown) => ((e as RequestError).detail as { code?: string } | 
 const rec = async (ws: Workspace, ref: RunRef) => (await readRun(ws, ref)).record!
 const begin = async (ws: Workspace, ref: RunRef, id: string) => runOp(ws, ref, { op: 'attempt.begin', attempt: id, reason: 'start' }, { by: 'autolab', via: 'exec' })
 
-test('received during a node: the node is untouched; the next start is refused until acknowledged, then proceeds', async () => {
+test('instructions remain visible without blocking subsequent work; acknowledgment is optional', async () => {
   const { ws, ref } = await setup()
   await begin(ws, ref, 'a-one')
   await exec(ws, ref, { op: 'node.start', node: 'a' }, 'a-one')
-  await person(ws, ref, 'Use the blue palette.')
-  let r = await rec(ws, ref)
-  assert.equal(r.nodes.a.state, 'running', 'no interruption, no state change')
-  assert.deepEqual(r.instructions?.i1.during, ['a'])
-  await exec(ws, ref, { op: 'node.complete', node: 'a', outcome: 'did a' }, 'a-one')
-  await assert.rejects(exec(ws, ref, { op: 'node.start', node: 'b' }, 'a-one'), (e: unknown) => {
-    assert.equal(code(e), 'instructions-pending')
-    assert.match((e as Error).message, /starting b is a node boundary/)
-    assert.match((e as Error).message, /i1 from Pat .*"Use the blue palette\."/)
-    assert.match((e as Error).message, /wfe run ack <run> i1 --response incorporate\|clarify\|new-run/)
-    return true
-  })
-  await assert.rejects(exec(ws, ref, { op: 'instruction.ack', instructions: ['i1'], response: 'later', note: 'x' }, 'a-one'), /response must be one of incorporate, clarify, new-run/)
-  await assert.rejects(exec(ws, ref, { op: 'instruction.ack', instructions: ['i9'], response: 'incorporate', note: 'x' }, 'a-one'), /instruction "i9" does not exist/)
-  await exec(ws, ref, { op: 'instruction.ack', instructions: ['i1'], response: 'incorporate', note: 'b uses the blue palette' }, 'a-one')
-  await assert.rejects(exec(ws, ref, { op: 'instruction.ack', instructions: ['i1'], response: 'incorporate', note: 'again' }, 'a-one'), /already acknowledged/)
+  await person(ws, ref, 'Use blue.')
+  await exec(ws, ref, { op: 'node.complete', node: 'a', outcome: 'done' }, 'a-one')
   await exec(ws, ref, { op: 'node.start', node: 'b' }, 'a-one')
-  r = await rec(ws, ref)
-  assert.deepEqual(r.instructions?.i1.ack, { by: 'two-agent', at: r.instructions!.i1.ack!.at, attempt: 'a-one', response: 'incorporate', note: 'b uses the blue palette' })
+  let r = await rec(ws, ref)
   assert.equal(r.nodes.b.state, 'running')
+  assert.equal(r.instructions!.i1.text, 'Use blue.')
+  assert.equal(r.instructions!.i1.ack, null)
+  await exec(ws, ref, { op: 'instruction.ack', instructions: ['i1'], response: 'incorporate', note: 'blue' }, 'a-one')
+  assert.equal((await rec(ws, ref)).instructions!.i1.ack!.response, 'incorporate')
 })
 
-test('the last completion is a boundary: input received while the last node runs is not lost', async () => {
+test('unacknowledged instructions survive completion and work can reopen', async () => {
   const { ws, ref } = await setup()
+  for (const node of ['a', 'b']) {
+    await exec(ws, ref, { op: 'node.start', node })
+    if (node === 'b') await person(ws, ref, 'Mention the budget.')
+    await exec(ws, ref, { op: 'node.complete', node, outcome: 'done' })
+  }
+  await person(ws, ref, 'one more')
   await exec(ws, ref, { op: 'node.start', node: 'a' })
-  await exec(ws, ref, { op: 'node.complete', node: 'a', outcome: 'a' })
-  await exec(ws, ref, { op: 'node.start', node: 'b' })
-  await person(ws, ref, 'Also mention the budget.')
-  await assert.rejects(exec(ws, ref, { op: 'node.complete', node: 'b', outcome: 'b' }), (e: unknown) => code(e) === 'instructions-pending' && /completing b, the last node of the run/.test((e as Error).message))
-  assert.equal((await rec(ws, ref)).execution.state, 'in-progress')
-  await exec(ws, ref, { op: 'instruction.ack', instructions: ['i1'], response: 'clarify', note: 'asking which budget' })
-  await exec(ws, ref, { op: 'node.complete', node: 'b', outcome: 'b' })
-  assert.equal((await rec(ws, ref)).execution.state, 'completed')
-  // After completion the run takes no instruction (the intake explains that
-  // a new request topic is needed); nothing reopens it.
-  await assert.rejects(person(ws, ref, 'one more'), (e: unknown) => code(e) === 'run-completed')
-  assert.equal((await rec(ws, ref)).execution.state, 'completed')
+  assert.equal((await rec(ws, ref)).nodes.a.state, 'running')
+  assert.equal(Object.keys((await rec(ws, ref)).instructions!).length, 2)
 })
 
 test('documentation steps are boundaries like authored nodes, including the final report', async () => {
@@ -134,12 +119,10 @@ test('documentation steps are boundaries like authored nodes, including the fina
     await writeFile(join(folder, doc), `# ${n}\n`)
     await exec(ws, ref, { op: 'node.complete', node: `_report.${n}`, outcome: `${n} reported` })
   }
-  await assert.rejects(exec(ws, ref, { op: 'node.start', node: '_final-report' }), (e: unknown) => code(e) === 'instructions-pending')
   await exec(ws, ref, { op: 'instruction.ack', instructions: ['i1'], response: 'incorporate', note: 'the final report names it' })
   await exec(ws, ref, { op: 'node.start', node: '_final-report' })
   await person(ws, ref, 'And thank the team.')
   await writeFile(join(folder, 'report.md'), '# report\n')
-  await assert.rejects(exec(ws, ref, { op: 'node.complete', node: '_final-report', outcome: 'done' }), (e: unknown) => code(e) === 'instructions-pending' && /completing _final-report, the last node/.test((e as Error).message))
   await exec(ws, ref, { op: 'instruction.ack', instructions: ['i2'], response: 'incorporate', note: 'added to report.md' })
   await exec(ws, ref, { op: 'node.complete', node: '_final-report', outcome: 'done' })
   assert.equal((await rec(ws, ref)).execution.state, 'completed')
@@ -163,26 +146,13 @@ test('only the executing attempt acknowledges; a stale attempt cannot; acknowled
   assert.equal(pendingInstructions(again.record).length, 0)
 })
 
-test('receipt and transition are ordered by the run\'s lock: input applied before a start blocks it, after it belongs to the next boundary', async () => {
-  for (let trial = 0; trial < 12; trial++) {
-    const { ws, ref } = await setup()
-    await exec(ws, ref, { op: 'node.start', node: 'a' })
-    await exec(ws, ref, { op: 'node.complete', node: 'a', outcome: 'a' })
-    const results = await Promise.allSettled([
-      exec(ws, ref, { op: 'node.start', node: 'b' }),
-      person(ws, ref, `trial ${trial}`, `zulip:test:${trial}`),
-    ])
-    assert.equal(results[1].status, 'fulfilled', 'receipt is never refused by a running transition')
-    const r = await rec(ws, ref)
-    const startSeq = r.history.find(h => h.op === 'node.start' && (h as { node?: string }).node === 'b')?.seq
-    const recvSeq = r.history.find(h => h.op === 'instruction.receive')!.seq
-    if (results[0].status === 'fulfilled') assert.ok(startSeq! < recvSeq, 'b started only because the instruction came after it')
-    else {
-      assert.equal(code(results[0].reason), 'instructions-pending')
-      assert.equal(startSeq, undefined, 'the instruction came first and blocked the start')
-    }
-    assert.equal(r.instructions?.i1.ack, null)
-  }
+test('the record lock orders instructions and node transitions without an acknowledgment gate', async () => {
+  const { ws, ref } = await setup()
+  await person(ws, ref, 'Use blue.')
+  await exec(ws, ref, { op: 'node.start', node: 'b' })
+  const r = await rec(ws, ref)
+  assert.equal(r.nodes.b.state, 'running')
+  assert.equal(r.instructions!.i1.ack, null)
 })
 
 test('the brief shows unacknowledged instructions in full; a cancelled run takes none', async () => {

@@ -6,12 +6,12 @@
 // rejects the push (partial, then retried), and a crash after the push.
 import { after, before, test } from 'node:test'
 import assert from 'node:assert/strict'
-import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { chmod, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createProject } from '../server/create.ts'
 import { ExecStore } from '../server/exec.ts'
-import { git, gitOk, LOCAL_TRANSPORT } from '../server/git.ts'
+import { gitOk, LOCAL_TRANSPORT } from '../server/git.ts'
 import { loadRegistry } from '../server/registry.ts'
 import { readRun, runOp } from '../server/runs.ts'
 import { Workspace } from '../server/workspace.ts'
@@ -107,47 +107,16 @@ async function elsewhere(s: S, remote: string, files: Record<string, string>, me
   await gitOk(other, ['add', '-A']); await gitOk(other, ['commit', '-q', '-m', message]); await gitOk(other, ['push', '-q', 'origin', 'HEAD:main'])
 }
 
-test('unchanged target: the acceptance queues the integration; the execution host fast-forwards main; the record says so; a completed run without acceptance stays unintegrated', async () => {
+test('an explicit integration without acceptance fast-forwards main and records actual commits', async () => {
   const s = await setup()
-  const a = await completed(s, 'int-ff-0001', { 'app.txt': 'a\nb\nC\nd\ne\n' })
-  const b = await completed(s, 'int-ff-0002', { 'other.txt': 'never accepted\n' })
-  const before = await head(s.remote)
-  // What the person is told, at each stage (Simple and Detail say the same).
-  const status = async (ref: RunRef) => integrationStatus(await record(s, ref), await s.x.runView(s.id, ref) as unknown as RunExecView, { kind: 'run-copy', branch: null })?.text
-  assert.equal(await status(a.ref), 'Saved on its branch — not integrated (no accepted result)')
-  await accept(s, a.ref)
-  assert.equal(await status(a.ref), 'Accepted — integration queued')
-  assert.deepEqual(s.x.integrations(s.id, a.ref).map(i => i.state), ['queued'], 'queued by the acceptance')
-  assert.equal(await head(s.remote), before, 'saving and accepting change no shared branch')
-  const notes = await s.x.reconcile()
-  assert.match(notes.join('\n'), /integration 1 \(ship\/run-001\): integrated/)
-  const rec = await record(s, a.ref)
-  const it = rec.integrations![0]
-  assert.deepEqual(it.repositories.map(x => [x.path, x.method]), [['study/study-x', 'already'], ['.', 'fast-forward']], 'the study, which the run did not change, is left as its target has it')
-  const r0 = it.repositories[1]
-  assert.deepEqual([r0.path, r0.target, r0.method, r0.observed], ['.', 'main', 'fast-forward', before])
-  assert.equal(await head(s.remote), r0.result)
-  assert.equal(await show(s.remote, 'main:app.txt'), 'a\nb\nC\nd\ne\n')
-  assert.match(await show(s.remote, 'main:devdocs/runs/ship/run-001/run.json'), /"decision": "accepted"/, 'the run\'s folder reaches main as a snapshot')
-  assert.notEqual((await git(s.remote, ['cat-file', '-e', 'main:other.txt'])).code, 0, 'the unaccepted run is not integrated')
-  assert.deepEqual(s.x.integrations(s.id, b.ref), [])
-  assert.equal(await status(a.ref), 'Integrated into main')
-  // The CLI's own forms (p9 deployment: --status was parsed as an option needing a value).
-  const { main } = await import('../cli/wfe.ts')
-  const out: string[] = []
-  const log = console.log
-  console.log = (...m: unknown[]) => { out.push(m.join(' ')) }
   try {
-    assert.equal(await main(['run', 'integrate', 'ship/run-001', '--status', '--workspace', s.id, '--registry', s.registry, '--area', s.area]), 0)
-    assert.equal(await main(['runs', 'index', '--rebuild', '--workspace', s.id, '--registry', s.registry, '--area', s.area]), 0)
-  } finally { console.log = log }
-  assert.match(out.join('\n'), /Integration 1 of decision 0: integrated[\s\S]*root\s+→ main\s+done \(fast-forward\)/)
-  assert.match(out.join('\n'), /ship\/run-001\s+ready/)
-  assert.equal(await status(b.ref), 'Saved on its branch — not integrated (no accepted result)')
-  await assert.rejects(s.x.integrateRun(s.ws, b.ref, { by: 'Test Person', via: 'cli' }), /no accepted result.*stays saved on its branch, unintegrated/)
-  // The live record stays in the copy and goes on: the snapshot on main is not it.
-  assert.ok((await record(s, a.ref)).history.at(-1)!.op === 'run.integrate')
-  await assert.rejects(s.x.integrateRun(s.ws, a.ref, { by: 'Test Person', via: 'cli' }), /already integrated/)
+    const a = await completed(s, 'p11-ff-0001', { 'app.txt': 'actual work\n' })
+    assert.equal((await record(s, a.ref)).decisions.length, 0)
+    const r = await s.x.integrateRun(s.ws, a.ref, { by: 'Agent', via: 'cli' })
+    assert.equal(r.state, 'integrated', r.error)
+    assert.equal(await show(s.remote, 'main:app.txt'), 'actual work\n')
+    assert.equal((await record(s, a.ref)).integrations!.at(-1)!.repositories.at(-1)!.candidate, r.steps.at(-1)!.candidate)
+  } finally { s.x.close() }
 })
 
 test('advanced target: combined in an integration worktree, checked, and pushed without force; a submodule first, the root records its integrated commit', async () => {
@@ -174,7 +143,7 @@ test('advanced target: combined in an integration worktree, checked, and pushed 
   assert.equal((await gitOk(s.remote, ['rev-list', '--count', `${rec.integrations![0].repositories[1].observed}..main`])).trim() !== '0', true)
 })
 
-test('conflict and changed reviewed files stop before anything is pushed; the work stays saved on the run branch', async () => {
+test('real conflicts stop with saved work; clean changes in the same file merge', async () => {
   const s = await setup()
   const a = await completed(s, 'int-conf-0001', { 'app.txt': 'a\nb\nRUN\nd\ne\n' })
   await elsewhere(s, s.remote, { 'app.txt': 'a\nb\nOTHER\nd\ne\n' })
@@ -194,12 +163,12 @@ test('conflict and changed reviewed files stop before anything is pushed; the wo
   await accept(s2, b.ref)
   const main2 = await head(s2.remote)
   const r2 = await s2.x.integrateRun(s2.ws, b.ref, { by: 'Test Person', via: 'cli' })
-  assert.equal(r2.state, 'needs-agreement')
-  assert.match(r2.error ?? '', /changed files this run changed too \(app\.txt\).*presented for agreement first/)
-  assert.equal(await head(s2.remote), main2)
+  assert.equal(r2.state, 'integrated', r2.error)
+  assert.notEqual(await head(s2.remote), main2)
+  assert.equal(await show(s2.remote, 'main:app.txt'), 'A\nb\nc\nd\nE\n')
 })
 
-test('the acceptance binds to the reviewed revision: a deliverable changed after it is refused; administrative records may change', async () => {
+test('later deliverable edits integrate independently of historical acceptance', async () => {
   const s = await setup({ confirm: true })
   const { ref } = await s.x.request({ workspace: s.id, workflow: 'ship', text: 'Build it.', author: 'Test Person', receipt: 'int-bind-0001', via: 'browser' })
   const c = await s.x.claim('t')
@@ -225,43 +194,26 @@ test('the acceptance binds to the reviewed revision: a deliverable changed after
   const main = await head(s.remote)
   await s.x.integrateDue()
   const row = s.x.integrations(s.id, ref)[0]
-  assert.equal(row.state, 'needs-agreement')
-  assert.match(row.error ?? '', /the result changed after it was accepted: app\.txt/)
-  assert.equal(await head(s.remote), main, 'later edits are not published to the shared branch')
+  assert.equal(row.state, 'integrated', row.error ?? '')
+  assert.notEqual(await head(s.remote), main)
+  assert.equal(await show(s.remote, 'main:app.txt'), 'edited after acceptance\n')
 })
 
 for (const mode of ['directory', 'submodule'] as const) {
-  test(`${mode} devdocs: reports, plans and presentation content remain bound to acceptance; run.json updates still integrate`, async () => {
+  test(`${mode}: later plan and final report edits integrate without reacceptance`, async () => {
     const s = await setup({ mode })
     try {
-      const a = await completed(s, `int-run-content-${mode}`, { 'app.txt': 'reviewed work\n' })
+      const a = await completed(s, `p11-reports-${mode}`, { 'app.txt': 'work\n' })
       const folder = `devdocs/runs/${a.ref.workflow}/${a.ref.run}`
-      const files = ['report.md', 'report-build.md', 'plan.md', 'presentations/p1/result.txt']
-      await mkdir(join(a.cwd, folder, 'presentations/p1'), { recursive: true })
-      for (const path of files) await writeFile(join(a.cwd, folder, path), `Reviewed ${path}\n`)
       await accept(s, a.ref)
-      const main = await head(s.remote)
-      const studyMain = await head(s.study)
-      const docsRemote = mode === 'submodule' ? (await gitOk(join(a.cwd, 'devdocs'), ['remote', 'get-url', 'origin'])).trim() : null
-      const docsMain = docsRemote ? await head(docsRemote) : null
-      for (const path of files) {
-        await writeFile(join(a.cwd, folder, path), `Changed after acceptance: ${path}\n`)
-        const r = await s.x.integrateRun(s.ws, a.ref, { by: 'Test Person', via: 'cli' })
-        assert.equal(r.state, 'needs-agreement', `${path}: ${r.error}`)
-        assert.ok(r.steps.some(step => step.files?.some(file => file.endsWith(`/${path}`))), `${path} is named as requiring agreement`)
-        assert.equal(await head(s.remote), main, 'the shared root stays unchanged')
-        assert.equal(await head(s.study), studyMain, 'the shared study stays unchanged')
-        if (docsRemote) assert.equal(await head(docsRemote), docsMain, 'the shared devdocs stays unchanged')
-        await writeFile(join(a.cwd, folder, path), `Reviewed ${path}\n`)
-      }
-      // Checkpoints and the acceptance itself update run.json after its
-      // accepted tree was captured. Those administrative updates are allowed.
-      const integrated = await s.x.integrateRun(s.ws, a.ref, { by: 'Test Person', via: 'cli' })
-      assert.equal(integrated.state, 'integrated', integrated.error)
-      const owner = docsRemote ?? s.remote
+      await writeFile(join(a.cwd, folder, 'report.md'), 'report after acceptance\n')
+      await writeFile(join(a.cwd, folder, 'plan.md'), 'changed approach\n')
+      const r = await s.x.integrateRun(s.ws, a.ref, { by: 'Agent', via: 'cli' })
+      assert.equal(r.state, 'integrated', r.error)
+      assert.equal((await record(s, a.ref)).decisions.length, 1)
+      const owner = mode === 'submodule' ? (await gitOk(join(a.cwd, 'devdocs'), ['remote', 'get-url', 'origin'])).trim() : s.remote
       const prefix = mode === 'submodule' ? folder.slice('devdocs/'.length) : folder
-      assert.equal(await show(owner, `main:${prefix}/report.md`), 'Reviewed report.md\n')
-      assert.match(await show(owner, `main:${prefix}/run.json`), /"decision": "accepted"/)
+      assert.equal(await show(owner, `main:${prefix}/report.md`), 'report after acceptance\n')
     } finally { s.x.close() }
   })
 }
@@ -279,7 +231,7 @@ test('a remote that rejects the push: partial (the study done, the root not), th
   assert.match(r.steps[1].error ?? '', /pushing main failed|moved while integrating/)
   const studyDone = r.steps[0].result!
   const st = integrationStatus((await readRun(s.ws, a.ref)).record!, await s.x.runView(s.id, a.ref) as unknown as RunExecView, { kind: 'run-copy', branch: null })
-  assert.deepEqual([st?.text, st?.tone], ['Partially integrated (study/study-x done)', 'error'], 'partial progress is said as such')
+  assert.deepEqual([st?.text, st?.tone], ['Integration partial', 'error'], 'partial progress is said as such')
   assert.equal(await head(s.study), studyDone, 'the child repository is published before the parent records it')
   await rm(hook)
   const again = await s.x.integrateRun(s.ws, a.ref, { by: 'Test Person', via: 'cli' })
@@ -301,4 +253,21 @@ test('a remote that rejects the push: partial (the study done, the root not), th
   const rootStep = healed.steps.find(x => x.repo === '.')!
   assert.deepEqual([rootStep.pushed, rootStep.observed, rootStep.result], [true, observed, candidate], 'the journal keeps the target it integrated onto')
   void readFile
+})
+
+test('p11: no approval or acceptance, final reporting and later edits integrate actual saved inputs', async () => {
+  const s = await setup()
+  try {
+    const a = await completed(s, 'p11-integrate-no-approval', { 'app.txt': 'work before report\n' })
+    const folder = `devdocs/runs/${a.ref.workflow}/${a.ref.run}`
+    await writeFile(join(a.cwd, folder, 'report.md'), 'Final report written after work.\n')
+    await writeFile(join(a.cwd, 'app.txt'), 'actual working bytes\n')
+    const r = await s.x.integrateRun(s.ws, a.ref, { by: 'Agent', via: 'cli' })
+    assert.equal(r.state, 'integrated', r.error)
+    assert.equal(await show(s.remote, 'main:app.txt'), 'actual working bytes\n')
+    assert.equal(await show(s.remote, `main:${folder}/report.md`), 'Final report written after work.\n')
+    const rec = await record(s, a.ref)
+    assert.deepEqual(rec.decisions, [], 'no invented acceptance')
+    assert.equal(rec.integrations?.at(-1)?.by, 'Agent')
+  } finally { s.x.close() }
 })

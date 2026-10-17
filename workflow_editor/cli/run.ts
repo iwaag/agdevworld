@@ -108,10 +108,9 @@ record belongs to this project and location. Reads only; it never repairs. Exit 
 (warnings allowed); 1 otherwise.`,
   start: `wfe run start <run> <node> [--reason <text>]
 
-Records that work on <node> started. A pending node must be ready (every
-predecessor completed). On a waiting node it records resuming; on a failed
-node it needs --reason.
-Writes run.json (one history entry).`,
+Records starting or reopening a node. Dependency edges suggest an order;
+any known node can start, including completed, waiting and failed work.
+An open attempt supplies its attempt id; stale writers receive its actual state. Writes run.json. Writes run.json.`,
   progress: `wfe run progress <run> <node> --note <text>
 
 Adds a progress note to a running or waiting node; its state stays. Writes run.json.`,
@@ -125,21 +124,10 @@ looks into it, while a wait inside it is left alone. Nothing changes state
 because of a deadline. Writes run.json.`,
   complete: `wfe run complete <run> <node> --outcome <text> [--artifact <path>]... [--agreement <question>]
 
-Records the completion of a running node with its outcome and optional
-artifacts (project-relative, relative to the current directory, or a file name
-in the run folder). Writes run.json.
-Documentation steps (_plan, _report.<node>, _final-report, as the run's policy
-generates them: default all three, custom those it chose)
-complete only when their document (plan.md, report-<node>.md, report.md) is
-a nonempty file of the run folder; its hash and size are recorded as
-evidence, and the document is listed with the outcome. _plan completes only
-on agreement: a question asked from _plan about this same plan.md whose
-answer was taken up (--agreement names it; default the latest taken up).
-When this completion would complete the run but the conversation added
-work, complete it with the adjustment instead: wfe run adjust <run>
---completing <node> --outcome … (wfe run help adjust).
-Keep the outcome short (result, main verification fact, next action): it is
-what coordination messages quote.`,
+Records the outcome of a running node. Available documentation is recorded
+by hash. Documents, plan agreement, review decisions, acknowledged input and
+presentation shutdown are optional records and do not gate completion.
+A combined adjustment is available with --definition and --completing. Writes run.json.`,
   fail: `wfe run fail <run> <node> --reason <text>
 
 Records that a problem prevents the running or waiting node from continuing.
@@ -199,24 +187,15 @@ incorporate them into upcoming work, clarify them with a question to the
 person, or explain why they need a new run. Starting a node, and the run's
 last completion, are refused while a received instruction is
 unacknowledged. Writes run.json.`,
-  integrate: `wfe run integrate <run> [--dry-run | --status] --by <name>
+  integrate: `wfe run integrate <run> [--dry-run|--status] [--by <actor>]
 
-Brings the run's accepted result into the project's shared branches (p9,
-docs/integration.md): for each repository the run owns — submodules first,
-then the root, which records their integrated commits — its run branch is
-fast-forwarded onto the target the run's storage names, or, when the target
-moved, combined with it in an integration working tree and checked. A
-conflict, or a combination that changes files the run changed, stops before
-anything is pushed: that is agent work (a repair run). Nothing is forced.
-Needs the latest decision to be an acceptance (recorded with its revision),
-the execution completed and no attempt open; the copy is saved first, and
-only the run's own records may have changed since the acceptance. Each
-repository's target, observed commit, candidate and result are journaled; a
-retry continues from the journal. --dry-run combines locally and shows the
-plan (nothing is pushed or recorded); --status shows the journal. An
-acceptance queues its integration by itself: the execution host carries it
-out once the run is completed and saved. Writes run.json (run.integrate)
-when every repository is integrated.`,
+Integrates the actual saved run copy into its recorded target branches.
+No approval, agreement, acceptance or completed graph is required. An open
+attempt finishes before integration; explicit stop/cancel intent remains.
+--dry-run combines locally without pushing or recording an integration.
+--status reads the journal. Actual conflicts name files: fetch the target,
+merge and resolve in the run copy, commit the resolution, then retry.
+Later reports and changes integrate without renewed acceptance. Writes commits and the integration journal; --status reads only.`,
   reversal: `wfe run reversal <run>
 
 What undoing the run involves (p9, docs/integration.md). Reads only; it
@@ -294,15 +273,11 @@ commits are not merged in; the brief names them). Refused after cancellation.
 run to another of the execution host's profiles (which model serves it) for
 every later attempt; the agent, guides and access stay the definition's, and
 a profile the host does not offer refuses the next claim. Writes run.json.`,
-  access: `wfe run access <run> [<path>]...
+  access: `wfe run access <run> [--path <project-relative path>]
 
-Says what this run's fixed definition declares for each path (relative to
-the current directory or project-relative): editable, readonly, report (the
-run's own folder devdocs/runs/<workflow>/<run>/, which every run may write
-for its records, even under a readonly root), or undeclared. The most
-specific repository binding that contains a path governs it. Without paths
-it lists the bindings as scopes. These are declarations you check yourself
-before changing something; nothing enforces them at the OS level. Reads only.`,
+Shows binding descriptions and the explicit target path. Readonly and
+if-unchanged declarations are historical descriptions, not write or merge
+permissions. Project content is editable without a binding declaration. Reads only.`,
   input: `wfe run input <run> <node> --ref shared://<share>/<path>[/] [--stage copy|in-place]
 
 Selects an input set for a running node (docs/shares.md): the files the
@@ -344,52 +319,15 @@ its manifest and records what it found. Ask about one with wfe run ask …
 Records an artifact reference (a report, a result file). <path> is
 project-relative, relative to the current directory, or a file name in the
 run folder. A missing file is recorded and shown as missing. Writes run.json.`,
-  adjust: `wfe run adjust <run> --definition <file|-> --reason <text> --source <source> [--dry-run] [--propose <name>] [--expect-revision r<n>]
-               [--completing <node> --outcome <text> [--artifact <path>]...]
+  adjust: `wfe run adjust <run> --definition <file|-> --reason <text> [--source agent|request|answer:<q>|instruction:<i>|agreement:<q>|person] [--dry-run] [--expect-revision <r>]
 
-Changes the run's future work (docs/adjustments.md): <file> is the whole
-definition in force (wfe run revisions <run> --show r<n> > <draft>), edited by
-hand or with wfe nodes instantiate <template> --run <run> --file <draft>. Only pending
-work may change: nodes added, removed or rewired, a pending cleanup moved
-after a new confirmation. Started, waiting and finished work keeps its
-identity, meaning and dependencies; bindings, execution settings, intake
-and documentation policy never change. Applied at a node boundary (nothing
-running, no unacknowledged instruction), as a new immutable revision
-(definition/r<n>/<workflow>.yaml) recorded in run.json; the original stays.
-  --source request            the run's original request (braindump.md or
-                              request.md, as recorded at creation) already
-                              asks for this work, e.g. research before
-                              implementing: no separate permission question.
-                              It says why, not that the person approved this
-                              graph; plan.md says which nodes the run adds and
-                              the plan is agreed as usual. Not for scope the
-                              request does not contain (use agreement)
-           answer:<q>[:<n>]   the person's answer asked for it (taken up)
-           instruction:<i>    an acknowledged instruction asked for it
-           agreement:<q>      the person agreed to this exact proposal
-           person             a person applies it (no attempt open)
-  --dry-run       print the difference and every refusal; write nothing
-  --propose <n>   write definition/proposals/<n>.yaml to ask about first:
-                  wfe run ask <run> <node> --about-adjustment <n> …, then
-                  apply the same file with --source agreement:<q>
-  --completing <node> --outcome <text> [--artifact <path>]...
-                  adjust at the completion of <node>, which is running (it
-                  is the one node that may run): the adjustment and the
-                  node's completion are recorded together. Use it when the
-                  completion would otherwise complete the run (no final
-                  report and nothing pending after it), so the work the
-                  conversation agreed is added before the run ends. Both
-                  or neither are recorded.
-A node is an entry under nodes (type, name, description, repositories);
-what it waits for is the top-level edges list, as in the workflow files:
-  nodes:
-    build: {type: do, name: Build, description: …, repositories: [project]}
-  edges:
-    - {from: talk, to: build}
-The result notes an added node nothing leads to, and node fields the
-contract does not know (they are kept and mean nothing).
-Writes the revision file and run.json (one history entry; two with
---completing: the adjustment, then the completion).`,
+Records a revision of the work graph, bindings, documentation or execution
+choices, including running and completed work. Default source is agent;
+no question, answer take-up or human agreement is a prerequisite.
+--dry-run shows changes without writing. --propose <name> saves an optional
+proposal. --completing <node> --outcome <text> records a revision and that
+running node's completion atomically. Stale revisions and writers receive
+concrete diagnostics so the agent can re-read and retry. Writes revision files and run.json.`,
   nodes: `wfe run nodes <run> [--show <template>]
 
 The person's node catalog as this run was given it at creation (docs/catalog.md):
@@ -409,22 +347,12 @@ The run's definition revisions: the original (r1) and each adjustment —
 parent, reason, source, who, when and what it changed. --show prints a
 revision's definition; --diff compares two (authored nodes and edges).
 Reads only.`,
-  decide: `wfe run decide <run> --decision accepted|rejected --evidence <ref> --by <person> [--note <text>]
+  decide: `wfe run decide <run> --decision accepted|rejected --evidence <ref> --by <actor> [--note <text>]
 wfe run decide <run> --decision accepted|rejected --question <q> [--note <text>]
 
-Records a decision on the run's result.
-
-The person's own decision (--by, --evidence): accepted needs a completed
-execution.
-
-From a confirmation (--question): the executor records the decision the
-person's answer to the result-confirmation question is — the latest question
-from the confirms: result node, its answer taken up, its deliverables
-unchanged since it presented them. It may precede the execution's completion
-(they stay separate facts). The record names the question, the answer, whose
-words they were and the deliverables by hash. A plan agreement, an answer to
-any other question, or a completion record never becomes a decision.
-Writes run.json.`,
+Records a decision with the actual actor and evidence. A question-based
+decision identifies the answer and content it refers to; it never invents
+an answer. Decisions are independent of execution and integration. Writes run.json.`,
 }
 
 export function runIndex(): string {
@@ -453,7 +381,7 @@ export function runIndex(): string {
   input / inputs <run>     select an input set from a shared:// reference; list and verify them
   publish / outputs <run>  publish an output to a shared area; list and verify them
   decide <run>             record acceptance or rejection of the result
-  integrate <run>          bring the accepted result into the shared branches (or --dry-run, --status)
+  integrate <run>          bring saved work into the shared branches (or --dry-run, --status)
   reversal <run>           what undoing the run involves (facts only)
   adjust <run>             change the run's future work (a recorded revision)
   revisions <run>          the original definition and each adjustment
@@ -971,10 +899,10 @@ export async function runCommand(c: RunCli): Promise<number> {
     case 'adjust': {
       const r = await ref()
       const text = readInput(c, need(c, 'definition', 'the adjusted definition file (- for standard input)'))
-      const src = need(c, 'source', 'request | answer:<q>[:<n>] | instruction:<i> | agreement:<q> | person')
+      const src = c.opt('source') ?? 'agent'
       const m = /^(answer|instruction|agreement):([a-z0-9]+)(?::(\d+))?$/.exec(src)
-      const source = src === 'request' ? { kind: 'request' as const } : src === 'person' ? { kind: 'person' as const, ...(by ? { by } : {}) } : m?.[1] === 'answer' ? { kind: 'answer' as const, question: m[2], ...(m[3] ? { answer: Number(m[3]) } : {}) } : m?.[1] === 'instruction' ? { kind: 'instruction' as const, instruction: m[2] } : m?.[1] === 'agreement' ? { kind: 'agreement' as const, question: m[2] } : null
-      if (!source) throw c.usage(`--source "${src}" must be request, answer:<q>[:<n>], instruction:<i>, agreement:<q> or person`)
+      const source = src === 'agent' ? { kind: 'agent' as const } : src === 'request' ? { kind: 'request' as const } : src === 'person' ? { kind: 'person' as const, ...(by ? { by } : {}) } : m?.[1] === 'answer' ? { kind: 'answer' as const, question: m[2], ...(m[3] ? { answer: Number(m[3]) } : {}) } : m?.[1] === 'instruction' ? { kind: 'instruction' as const, instruction: m[2] } : m?.[1] === 'agreement' ? { kind: 'agreement' as const, question: m[2] } : null
+      if (!source) throw c.usage(`--source "${src}" must be agent, request, answer:<q>[:<n>], instruction:<i>, agreement:<q> or person`)
       const completingNode = c.opt('completing')
       const root = await rootOf(r)
       const completing = completingNode ? { node: completingNode, outcome: need(c, 'outcome', `what ${completingNode} produced or concluded`), artifacts: c.opts('artifact').map(p => artifactPath(root, r, p)) } : undefined
@@ -1065,12 +993,7 @@ export async function runCommand(c: RunCli): Promise<number> {
         const st = rec ? integrationStatus(rec, { integrations: rows }, space.copyOf ? { kind: 'run-copy', branch: rec.storage?.branch ?? null } : { kind: 'project' }) : null
         const latest = (rec?.decisions.length ?? 0) - 1
         const head = !rec ? `Run ${runKey(r)} cannot be read; the journal follows.` : st ? `Now: ${st.text}${latest >= 0 ? ` (decision ${latest}, ${rec.decisions[latest].decision} by ${rec.decisions[latest].by})` : ''}${st.detail ? ` — ${st.detail}` : ''}${st.changed?.length ? `\n  ${st.state === 'target-changed' ? 'changed on the target since this run built on it' : 'changed since the acceptance'}: ${st.changed.join(', ')}` : ''}` : `Run ${runKey(r)} has no working copy of its own: what it published is already on the project's branches.`
-        const note = (i: typeof rows[number]) => {
-          const recorded = rec?.integrations?.find(x => x.decision === i.decision)
-          if (recorded && i.state !== 'integrated') return ` [run.json records decision ${i.decision} integrated at ${recorded.at}]`
-          return i.decision < latest ? ` [earlier decision; decision ${latest} is the latest]` : ''
-        }
-        const journal = rows.slice().reverse().flatMap(i => [`Integration ${i.id} of decision ${i.decision}: ${i.state} (${i.updated}, requested by ${i.requested_by})${i.error ? ` — ${i.error}` : ''}${note(i)}`, ...lines(i.steps)])
+        const journal = rows.slice().reverse().flatMap(i => [`Integration ${i.id} requested at history seq ${i.decision}: ${i.state} (${i.updated}, requested by ${i.requested_by})${i.error ? ` — ${i.error}` : ''}`, ...lines(i.steps)])
         c.out([head, ...(journal.length ? ['', 'Journal (newest first):', ...journal] : [`Run ${runKey(r)} has no integration.`])].join('\n'), { ref: runKey(r), status: st, latestDecision: latest, integrations: rows })
         return 0
       }

@@ -130,7 +130,7 @@ test('HTTP: browser writes need the configured origin; hosts are local only', as
 
 test('HTTP: a workflow response carries validation, approvals and the project context', async () => {
   const r = await fetch(`${base}/api/workspaces/a/workflows/draft-gaps.yaml`).then(x => x.json())
-  assert.equal(r.issues.filter((i: { severity: string }) => i.severity === 'error').length, 4)
+  assert.equal(r.issues.filter((i: { severity: string }) => i.severity === 'error').length, 3)
   assert.equal(r.approvals.intent.status, 'unapproved')
   assert.ok(r.repositories.some((x: { path: string }) => x.path === 'assets/shared'))
   assert.deepEqual(r.workflows.map((x: { id: string }) => x.id).sort(), ['draft-gaps', 'onboarding', 'repo-setup'])

@@ -212,7 +212,7 @@ test('registration of existing projects and repositories; the dashboard keeps un
   await assert.rejects(registerGiteaProject(octx, ownerOf(), 'pj-old'), /no project\.yaml/)
 })
 
-test('HTTP: agdev routes; through the agdevworld route no host path or location is accepted', { skip }, async () => {
+test('HTTP: agdev routes accept explicit targets and report concrete Git failures', { skip }, async () => {
   const { createHandler, ROUTE_HEADER } = await import('../server/api.ts')
   const { createServer } = await import('node:http')
   const handler = createHandler({ registryFile: registry, area, allowedOrigins: ['http://localhost:8093'], allowedHosts: ['127.0.0.1', 'localhost'], gitea: tg.gitea })
@@ -225,9 +225,9 @@ test('HTTP: agdev routes; through the agdevworld route no host path or location 
     assert.equal(d.gitea.state, 'ok')
     assert.ok(d.projects.some(p => p.id === 'alpha'))
     let r = await fetch(`${base}/workspaces`, { method: 'POST', headers: routed, body: JSON.stringify({ path: '/etc' }) })
-    assert.equal(r.status, 403, 'no path registration through the route')
+    assert.equal(r.status, 422, 'an explicit path is tried and reports its concrete repository error')
     r = await fetch(`${base}/workspaces/alpha/submodules`, { method: 'POST', headers: routed, body: JSON.stringify({ path: 'x', url: 'file:///etc' }) })
-    assert.equal(r.status, 403, 'no submodule from an arbitrary location through the route')
+    assert.equal(r.status, 422, 'the explicit transport is tried and reports its concrete Git error')
     r = await fetch(`${base}/agdev/repositories`, { method: 'POST', headers: routed, body: JSON.stringify({ create: true, name: 'wedo-http', category: 'wedo', description: 'made over HTTP' }) })
     assert.equal(r.status, 201, await r.clone().text())
     const key = ((await r.json()) as { repository: { key: string } }).repository.key

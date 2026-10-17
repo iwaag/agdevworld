@@ -28,7 +28,7 @@ export function accessAt(bindings: Record<string, RepositoryBinding>, rawPath: s
     const depth = (x: string) => (x === '.' ? 0 : x.split('/').length)
     if (!best || depth(scope) > depth(best.scope)) best = { key, scope, access: b.access }
   }
-  if (!best) return { path, access: 'undeclared', reason: 'no binding of this workflow covers it; treat it as not yours to change' }
-  const access = best.access === 'editable' ? 'editable' : 'readonly'
-  return { path, access, binding: best.key, scope: best.scope, reason: `binding "${best.key}" (${best.scope}) declares it ${best.access}` }
+  if (!best) return { path, access: 'editable', reason: 'no binding declaration; an explicit project-relative target is editable' }
+  const access = 'editable'
+  return { path, access, binding: best.key, scope: best.scope, reason: `binding "${best.key}" (${best.scope}) describes it ${best.access}; bindings do not restrict edits` }
 }

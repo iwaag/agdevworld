@@ -238,10 +238,11 @@ test('stop touches only the owned instance: an unrelated process on a recorded p
   assert.equal(alive(s.instance.pid!), true, 'nothing was killed on a weak identity')
   let r = await rec(ws, ref)
   assert.equal(r.presentations!.p1.state, 'stop-failed')
-  await assert.rejects(op(ws, ref, { op: 'node.complete', node: 'present', outcome: 'x' }).then(async () => {
-    await op(ws, ref, { op: 'node.start', node: 'check' }); await op(ws, ref, { op: 'node.complete', node: 'check', outcome: 'ok' })
-    await op(ws, ref, { op: 'node.start', node: 'cleanup' }); return op(ws, ref, { op: 'node.complete', node: 'cleanup', outcome: 'done' })
-  }), (e: unknown) => code(e) === 'presentation-open', 'the run does not complete while a presentation may be served')
+  await op(ws, ref, { op: 'node.complete', node: 'present', outcome: 'x' })
+  await op(ws, ref, { op: 'node.start', node: 'check' }); await op(ws, ref, { op: 'node.complete', node: 'check', outcome: 'ok' })
+  await op(ws, ref, { op: 'node.start', node: 'cleanup' }); await op(ws, ref, { op: 'node.complete', node: 'cleanup', outcome: 'done' })
+  assert.equal((await rec(ws, ref)).execution.state, 'completed', 'serving a presentation does not veto completion')
+
   // Retry once the identity is right again.
   execFileSync('true')
   db.prepare('UPDATE instances SET signature = ? WHERE id = ?').run(Presenter.signature(s.instance.pid!), s.instance.id)
@@ -251,6 +252,7 @@ test('stop touches only the owned instance: an unrelated process on a recorded p
   assert.equal(alive(s.instance.pid!), false)
   r = await rec(ws, ref)
   assert.equal(r.presentations!.p1.state, 'stopped')
+  await op(ws, ref, { op: 'node.start', node: 'cleanup' })
   await op(ws, ref, { op: 'node.complete', node: 'cleanup', outcome: 'done' })
   assert.equal((await rec(ws, ref)).execution.state, 'completed')
   bystander.kill('SIGKILL')
@@ -260,7 +262,7 @@ test('stop touches only the owned instance: an unrelated process on a recorded p
   blocker.close()
 })
 
-test('confirmation is bound to the presentation revision: stale answers never accept a newer one; acceptance then cleanup without a second acceptance', async () => {
+test('optional confirmation keeps content provenance; cleanup needs no renewed acceptance', async () => {
   const { ws, ref, pr, dir } = await setup()
   await toPresent(ws, ref)
   await register(ws, ref)
@@ -301,7 +303,6 @@ test('confirmation is bound to the presentation revision: stale answers never ac
   assert.match(renderMessage([ev], ctx), /Cleanup pending: presentation p1 still served/)
   const presented = notableEvents(r).find(e => e.type === 'presented')!
   assert.match(renderMessage([presented], { ...ctx, presentation: () => ({ url: 'http://127.0.0.1:8300/', local: true, live: true }) }), /\[Open the review\]\(http:\/\/127\.0\.0\.1:8300\/\) — opens on the execution host/)
-  await assert.rejects(op(b.ws, b.ref, { op: 'node.complete', node: 'cleanup', outcome: 'done' }), (e: unknown) => code(e) === 'presentation-open')
   const stopped = await b.pr.stop(b.ws, b.ref, 'all')
   assert.ok(stopped.every(x => x.ok))
   await op(b.ws, b.ref, { op: 'node.complete', node: 'cleanup', outcome: 'stopped p1, verified' })

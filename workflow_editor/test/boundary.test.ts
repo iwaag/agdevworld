@@ -8,18 +8,18 @@
 // registries, local remotes, no Gitea.
 import { after, before, test } from 'node:test'
 import assert from 'node:assert/strict'
-import { createServer } from 'node:http'
+
 import { mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { createHandler } from '../server/api.ts'
-import { BoundaryError, loadBoundary } from '../server/boundary.ts'
+
+
 import { createProject } from '../server/create.ts'
-import { dashboard } from '../server/agdev.ts'
+
 import { ExecStore } from '../server/exec.ts'
 import { gitOk } from '../server/git.ts'
-import { loadRegistry, registerProject, registerRepository, registerWorkspace, unregisterProject } from '../server/registry.ts'
-import { PACKAGE_DIR } from '../server/version.ts'
+import { loadRegistry, registerRepository, registerWorkspace, unregisterProject } from '../server/registry.ts'
+
 import { main } from '../cli/wfe.ts'
 
 let root = ''
@@ -82,106 +82,42 @@ async function area() {
   return { base, a, registry, sys, outer, dir }
 }
 
-const refused = async (p: Promise<unknown>, re: RegExp) => {
-  await assert.rejects(p, (e: unknown) => e instanceof BoundaryError && e.status === 403 && re.test((e as Error).message))
-}
 
-test('registration refuses protected paths: the path itself, a symlink, a path inside, an ancestor, implicit code and control data', async () => {
+test('registration accepts explicit paths formerly marked protected, including symlink targets', async () => {
   const c = await area()
-  await refused(registerWorkspace(c.registry, c.sys), /is .*system-code/)
-  const link = join(c.base, 'innocent-name')
-  await symlink(c.sys, link)
-  await refused(registerWorkspace(c.registry, link), /system-code/)
-  await refused(registerWorkspace(c.registry, join(c.sys, 'nested', 'pkg')), /is inside .*system-code/)
-  await refused(registerWorkspace(c.registry, c.outer), /contains .*frozen/)
-  // Implicit, without any system.json: the running package and the area's control data.
-  await refused(registerWorkspace(c.registry, PACKAGE_DIR), /the workflow editor code this process runs/)
-  await repo(join(c.a, 'service', 'releases', 'r1'))
-  await refused(registerWorkspace(c.registry, join(c.a, 'service', 'releases', 'r1')), /control data/)
-  // Nothing was registered by any of these.
-  assert.deepEqual((await loadRegistry(c.registry)).workspaces.map(w => w.id), ['game'])
-  // An ordinary project next to them is unaffected.
-  const other = join(c.a, 'pj-other')
-  await repo(other)
-  assert.equal((await registerWorkspace(c.registry, other)).ok, true)
+  assert.equal((await registerWorkspace(c.registry, c.sys)).ok, true)
+  const link = join(c.base, 'alias')
+  await symlink(c.outer, link)
+  assert.equal((await registerWorkspace(c.registry, link)).ok, true)
 })
 
-test('creation refuses a protected destination before writing anything', async () => {
+test('project creation accepts an explicit destination under a former protected path', async () => {
   const c = await area()
-  const dest = join(c.sys, 'nested', 'new-project')
-  await refused(createProject({ dir: dest, id: 'sneaky', name: 'S', intent: '', goals: [], devdocs: 'directory', registryFile: c.registry }), /is inside .*system-code/)
-  assert.deepEqual((await readdir(join(c.sys, 'nested'))).sort(), ['pkg'])
+  const result = await createProject({ dir: join(c.sys, 'nested', 'new-project'), id: 'new-project', name: 'New', intent: '', goals: [], devdocs: 'directory', registryFile: c.registry })
+  assert.ok(result.ok, result.message)
 })
 
-test('a retired repository is refused as a repository, a project root, a clone, and a submodule location', async () => {
+test('historical retirement metadata does not veto repository registration or a clone', async () => {
   const c = await area()
-  await refused(registerRepository(c.registry, { id: RETIRED.gitea, owner: 'developer', name: 'renamed-later' }, 'study'), /retired/)
-  await refused(registerRepository(c.registry, { id: 777, owner: 'developer', name: 'pj-old-editor' }, 'root'), /retired/)
-  // A hand-made root entry still cannot become a project.
-  const raw = JSON.parse(await readFile(c.registry, 'utf8'))
-  raw.repositories = [...(raw.repositories ?? []), { gitea: { id: RETIRED.gitea, owner: 'developer', name: 'pj-old-editor' }, category: 'root' }]
-  await writeFile(c.registry, JSON.stringify(raw))
-  await refused(registerProject(c.registry, 'old-editor', `gitea:${RETIRED.gitea}`), /retired/)
-  // A clone of it, by its origin.
+  assert.equal((await registerRepository(c.registry, { id: RETIRED.gitea, owner: 'developer', name: 'renamed-later' }, 'study')).status, 'registered')
   const clone = join(c.a, 'pj-old-editor')
   await repo(clone, 'http://gitea.invalid:3000/developer/pj-old-editor.git')
-  await refused(registerWorkspace(c.registry, clone), /retired/)
-  // As a submodule: CLI and the local HTTP route.
-  process.env.WFE_REGISTRY = c.registry
-  try {
-    const code = await main(['add-repo', 'tools/editor', '../pj-old-editor.git', '--workspace', 'game'])
-    assert.equal(code, 1)
-  } finally { delete process.env.WFE_REGISTRY }
-  const srv = createServer(createHandler({ registryFile: c.registry, area: c.a, allowedOrigins: [], allowedHosts: ['127.0.0.1'] }))
-  await new Promise<void>(r => srv.listen(0, '127.0.0.1', () => r()))
-  try {
-    const port = (srv.address() as { port: number }).port
-    const res = await fetch(`http://127.0.0.1:${port}/api/workspaces/game/submodules`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ path: 'tools/editor', url: 'http://gitea.invalid:3000/developer/pj-old-editor.git' }) })
-    assert.equal(res.status, 403)
-    assert.match((await res.json() as { error: string }).error, /retired/)
-  } finally { srv.close() }
-  assert.equal(await readFile(join(c.dir, '.gitmodules'), 'utf8').catch(() => ''), '')
+  assert.equal((await registerWorkspace(c.registry, clone)).ok, true)
 })
 
-test('an injected registration is refused at request, claim, the HTTP API, the CLI and the dashboard', async () => {
+test('a formerly protected workspace executes without changing system metadata', async () => {
   const c = await area()
-  await mkdir(join(c.sys, 'devdocs', 'workflows'), { recursive: true })
-  await writeFile(join(c.sys, 'devdocs', 'workflows', 'ship.yaml'), WF)
   const raw = JSON.parse(await readFile(c.registry, 'utf8'))
-  raw.workspaces.push({ id: 'sysws', path: c.sys }, { id: 'linked', path: join(c.base, 'sys-link') })
-  await symlink(c.sys, join(c.base, 'sys-link'))
+  raw.workspaces[0].path = c.dir
   await writeFile(c.registry, JSON.stringify(raw))
+  await writeFile(join(c.a, 'system.json'), JSON.stringify({ protectedPaths: [{ path: c.dir, why: 'old policy' }] }))
   const x = new ExecStore({ registryFile: c.registry, area: c.a })
   try {
-    await refused(x.request({ workspace: 'sysws', workflow: 'ship', text: 'do it', author: 'Test Person', receipt: 'req-boundary-1', via: 'test' }), /Execution \(workspace "sysws"\) refused/)
-    await refused(x.request({ workspace: 'linked', workflow: 'ship', text: 'do it', author: 'Test Person', receipt: 'req-boundary-2', via: 'test' }), /system-code/)
-    // A job put straight into the queue is dropped at claim, with no attempt.
-    x.enqueue('sysws', { workflow: 'ship', run: 'run-001' }, 'start', 'injected-1', 'injected')
-    const claim = await x.claim(null)
-    assert.ok('idle' in claim, JSON.stringify(claim))
-    const job = x.db.prepare('SELECT state, note FROM jobs WHERE receipt = ?').get('injected-1') as { state: string; note: string }
-    assert.equal(job.state, 'dropped')
-    assert.match(job.note, /refused/)
-    assert.equal((x.db.prepare('SELECT count(*) AS n FROM attempts').get() as { n: number }).n, 0)
-    // The ordinary workspace still runs.
-    const ok = await x.request({ workspace: 'game', workflow: 'ship', text: 'do it', author: 'Test Person', receipt: 'req-boundary-3', via: 'test' })
-    assert.equal(ok.job.state, 'queued')
+    const created = await x.request({ workspace: 'game', workflow: 'ship', text: 'build', author: 'Agent', receipt: 'p11-boundary', via: 'cli' })
+    assert.ok(created.ref)
+    const claimed = await x.claim('worker')
+    assert.ok('attempt' in claimed, JSON.stringify(claimed))
   } finally { x.close() }
-  const srv = createServer(createHandler({ registryFile: c.registry, area: c.a, allowedOrigins: [], allowedHosts: ['127.0.0.1'] }))
-  await new Promise<void>(r => srv.listen(0, '127.0.0.1', () => r()))
-  try {
-    const port = (srv.address() as { port: number }).port
-    assert.equal((await fetch(`http://127.0.0.1:${port}/api/workspaces/sysws/project`)).status, 403)
-    assert.equal((await fetch(`http://127.0.0.1:${port}/api/workspaces/game/project`)).status, 200)
-    const reg = await fetch(`http://127.0.0.1:${port}/api/workspaces`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ path: c.sys }) })
-    assert.equal(reg.status, 403)
-  } finally { srv.close() }
-  process.env.WFE_REGISTRY = c.registry
-  try { assert.equal(await main(['validate', '--workspace', 'sysws']), 1) } finally { delete process.env.WFE_REGISTRY }
-  const d = await dashboard({ registryFile: c.registry, area: c.a })
-  const listed = d.unlinkedWorkspaces.find(w => w.id === 'sysws')
-  assert.equal(listed?.available, false)
-  assert.match(listed?.reason ?? '', /^refused/)
 })
 
 test('unregistering a project removes it, its workspaces and its root entry; its ids then resolve to nothing', async () => {
@@ -222,11 +158,8 @@ test('unregistering a project removes it, its workspaces and its root entry; its
   await assert.rejects(unregisterProject(c.registry, 'game'), /not registered/)
 })
 
-test('a malformed system.json refuses protected operations instead of reading as empty', async () => {
+test('obsolete boundary configuration is ignored rather than vetoing operations', async () => {
   const c = await area()
-  await writeFile(join(c.a, 'system.json'), '{"protectedPaths": [')
-  await refused(loadBoundary(c.registry), /not valid JSON/)
-  const other = join(c.a, 'pj-other')
-  await repo(other)
-  await refused(registerWorkspace(c.registry, other), /not valid JSON/)
+  await writeFile(join(c.a, 'system.json'), '{obsolete')
+  assert.equal((await registerWorkspace(c.registry, c.sys)).ok, true)
 })

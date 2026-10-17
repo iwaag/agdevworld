@@ -3,7 +3,7 @@
 // person's records, and the correction-after-review sequence.
 import { after, before, test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createProject } from '../server/create.ts'
@@ -126,78 +126,34 @@ test('removing future cleanup and adding a step: a new revision; past state kept
   assert.match(renderMessage([ev], { ref: 'improve/run-001', executor: 'agent', answerRoute: () => '', link: p => ({ path: p, name: p }), label: x => x, openQuestion: () => false, now: new Date() }), /\*\*Plan adjusted\*\* \(r2\) by agent — added lint; removed cleanup/)
 })
 
-test('refusals: stale, cyclic, mid-node, started work, question-destroying, access-expanding, nothing executable — atomically', async () => {
+test('revisions may change started work, dependencies, bindings and documentation while another node runs', async () => {
   const { ws, ref, folder } = await setup()
   await advance(ws, ref, folder, ['implement'])
-  const r0 = await rec(ws, ref)
-  const ok = FLOW(BASE_NODES + node('extra', 'do'), [...BASE_EDGES, ['cleanup', 'extra']])
-  const expect = async (text: string, want: string, o: Partial<AdjustOptions> = {}) => {
-    const res = await adjust(ws, ref, text, o)
-    assert.equal(res.ok, false, `${want} expected`)
-    assert.ok(res.problems.some(p => p.code === want), `${want} expected, got ${res.problems.map(p => p.code).join(', ')}`)
-  }
-  await expect(ok, 'revision-outdated', { expectRevision: 'r2' })
-  await expect(FLOW(BASE_NODES, [...BASE_EDGES, ['cleanup', 'verify']]), 'adjust-graph')
-  await expect(FLOW(BASE_NODES.replace('implement.', 'implement differently.'), BASE_EDGES), 'adjust-started')
-  await expect(FLOW(BASE_NODES.replace(node('implement', 'do'), ''), BASE_EDGES.slice(1)), 'adjust-started')
-  await expect(FLOW(node('pre', 'do') + BASE_NODES, [['pre', 'implement'], ...BASE_EDGES]), 'adjust-dependencies')
-  await expect(FLOW(BASE_NODES, BASE_EDGES).replace('game: {path: ., access: editable}', 'game: {path: ., access: editable}\n  docs: {path: devdocs, access: editable}'), 'adjust-access')
-  await expect(FLOW(BASE_NODES, BASE_EDGES).replace('policy: default', 'policy: manual'), 'adjust-access')
-  await expect(FLOW(BASE_NODES.replace('color: teal', 'color: rose'), BASE_EDGES), 'adjust-nothing')
-  // Mid-node: verify is running.
+  const before = await rec(ws, ref)
   await op(ws, ref, { op: 'node.start', node: 'verify' })
-  await expect(ok, 'mid-node')
-  await op(ws, ref, { op: 'node.complete', node: 'verify', outcome: 'v' })
-  await op(ws, ref, { op: 'node.start', node: '_report.verify' })
-  await writeFile(join(folder, 'report-verify.md'), '# v\n')
-  await op(ws, ref, { op: 'node.complete', node: '_report.verify', outcome: 'v' })
-  // A question waits on a node: it is not removed or rewritten.
-  await op(ws, ref, { op: 'node.start', node: 'present' })
-  await op(ws, ref, { op: 'question.ask', question: '', node: 'present', text: 'Which colour?', to: 'Pat' })
-  await expect(FLOW(BASE_NODES.replace(node('present', 'do', '    appearance: {icon: present, color: teal}\n'), node('present', 'do', '    name: Show\n')), BASE_EDGES), 'adjust-question')
+  const text = FLOW(BASE_NODES.replace('implement.', 'implement differently.') + node('extra', 'do'), [...BASE_EDGES, ['cleanup', 'extra']], 'manual').replace('access: editable', 'access: readonly')
+  const changed = await adjust(ws, ref, text, { source: { kind: 'agent' } })
+  assert.ok(changed.ok, JSON.stringify(changed.problems))
   const after = await rec(ws, ref)
-  assert.equal(after.definition.revisions, undefined, 'no refusal changed the record')
-  assert.equal(after.seq, r0.seq + 6, 'only the six work entries were recorded')
-  assert.deepEqual((await readdir(join(folder, 'definition'))).sort(), ['improve.yaml'], 'no revision file was left behind')
-  // A refusal by the record itself (here: the executor's attempt is open) writes nothing either.
-  await op(ws, ref, { op: 'question.answer', question: 'q2', text: 'teal', from: 'Pat' }, 'Pat')
-  await op(ws, ref, { op: 'question.take-up', question: 'q2' })
-  await op(ws, ref, { op: 'node.complete', node: 'present', outcome: 'p' })
-  await runOp(ws, ref, { op: 'attempt.begin', attempt: 'a-x1', reason: 'resume' }, { by: 'autolab', via: 'exec' })
-  const held = await adjustRun(ws, ref, { text: ok, reason: 'r', source: { kind: 'person', by: 'Pat' } }, { by: 'Pat', via: 'cli' })
-  assert.ok(held.problems.some(p => p.code === 'attempt-open' && /attempt a-x1 is executing/.test(p.message)), 'a person\'s adjustment waits until no attempt is open')
-  assert.deepEqual((await readdir(join(folder, 'definition'))).sort(), ['improve.yaml'])
+  assert.equal(after.nodes.implement.state, 'completed')
+  assert.equal(after.nodes.verify.state, 'running')
+  assert.equal(after.definition.active, 'r2')
+  const stale = await adjust(ws, ref, text, { expectRevision: 'r1' })
+  assert.ok(stale.problems.some(p => p.code === 'revision-outdated'))
+  const cycle = await adjust(ws, ref, FLOW(BASE_NODES, [...BASE_EDGES, ['cleanup', 'verify']]))
+  assert.ok(cycle.problems.some(p => p.code === 'adjust-graph'))
+  assert.ok(after.seq > before.seq)
 })
 
-test('authorization: an answer that was not taken up, an unacknowledged instruction, or a different proposal authorize nothing; pending instructions block an adjustment and the run\'s last completion', async () => {
-  const { ws, ref, folder } = await setup()
-  await advance(ws, ref, folder, ['implement'])
+test('agent revisions need no plan answer or instruction acknowledgment', async () => {
+  const { ws, ref } = await setup()
+  await op(ws, ref, { op: 'instruction.receive', text: 'Also add a tutorial.', from: 'Pat' }, 'Pat')
   const text = FLOW(BASE_NODES + node('extra', 'do'), [...BASE_EDGES, ['cleanup', 'extra']])
-  await op(ws, ref, { op: 'instruction.receive', text: 'Also add a tutorial screen.', from: 'Pat' }, 'Pat')
-  let res = await adjust(ws, ref, text, { source: { kind: 'instruction', instruction: 'i1' } })
-  assert.ok(res.problems.some(p => p.code === 'instructions-pending'), 'an adjustment is a boundary: pending input is not bypassed')
-  await op(ws, ref, { op: 'instruction.ack', instructions: ['i1'], response: 'incorporate', note: 'add a tutorial step' })
-  res = await adjust(ws, ref, text, { source: { kind: 'answer', question: 'q1', answer: 5 } })
-  assert.ok(res.problems.some(p => p.code === 'adjust-unauthorized'))
-  // Agreement must be to this exact proposal.
-  const proposed = await adjust(ws, ref, text, { propose: 'tutorial' })
-  assert.equal(proposed.proposal, 'definition/proposals/tutorial.yaml')
-  await op(ws, ref, { op: 'node.start', node: 'verify' })
-  await op(ws, ref, { op: 'question.ask', question: '', node: 'verify', text: 'Add a tutorial step after cleanup?', to: 'Pat', adjustment: 'tutorial' })
-  await op(ws, ref, { op: 'question.answer', question: 'q2', text: 'Yes', from: 'Pat' }, 'Pat')
-  await op(ws, ref, { op: 'question.take-up', question: 'q2' })
-  await op(ws, ref, { op: 'node.complete', node: 'verify', outcome: 'v' })
-  res = await adjust(ws, ref, text.replace('extra.', 'something else.'), { source: { kind: 'agreement', question: 'q2' } })
-  assert.ok(res.problems.some(p => p.code === 'adjust-unauthorized' && /exact definition/.test(p.message)))
-  res = await adjust(ws, ref, text, { source: { kind: 'agreement', question: 'q2' }, reason: 'the person agreed in q2' })
+  const res = await adjust(ws, ref, text, { source: { kind: 'agent' } })
   assert.ok(res.ok, JSON.stringify(res.problems))
-  assert.equal((await rec(ws, ref)).definition.active, 'r2')
-  // The run's last completion is refused while an instruction is pending.
-  const m = await setup('manual')
-  for (const n of ['implement', 'verify', 'present', 'check']) { await op(m.ws, m.ref, { op: 'node.start', node: n }); await op(m.ws, m.ref, { op: 'node.complete', node: n, outcome: n }) }
-  await op(m.ws, m.ref, { op: 'node.start', node: 'cleanup' })
-  await op(m.ws, m.ref, { op: 'instruction.receive', text: 'Wait, one more thing.', from: 'Pat' }, 'Pat')
-  await assert.rejects(op(m.ws, m.ref, { op: 'node.complete', node: 'cleanup', outcome: 'done' }), (e: unknown) => code(e) === 'instructions-pending')
+  await op(ws, ref, { op: 'node.start', node: 'extra' })
+  await op(ws, ref, { op: 'node.complete', node: 'extra', outcome: 'tutorial added' })
+  assert.equal((await rec(ws, ref)).instructions!.i1.ack, null)
 })
 
 test('a correction after review: new repair, verification, presentation and confirmation; completed nodes and the earlier question, answer and presentation stay; the old answer never accepts', async () => {

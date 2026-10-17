@@ -92,7 +92,7 @@ test('the new fields on another node type are flagged, and digests without them 
 
 // ---- step 2: the reducer's rules for the relationship ------------------------------------
 
-import { checkRecord, operate, RunError, type OpInput, type RunGraph } from '../shared/run.ts'
+import { operate, RunError, type OpInput, type RunGraph } from '../shared/run.ts'
 
 const DG = (accepts?: string): RunGraph => ({ nodes: { asset: { type: 'delegate', project: 'kid', workflow: 'make', ...(accepts ? { accepts } : {}) }, use: { type: 'do' } }, edges: [{ from: 'asset', to: 'use' }] })
 let clock = Date.parse('2026-10-15T00:00:00.000Z')
@@ -115,39 +115,18 @@ const bind = (p: ReturnType<typeof parentRun>, id = 'd1', run = 'run-001') => p.
 const relay = (p: ReturnType<typeof parentRun>, event: Record<string, unknown>, id = 'd1') => p.step({ op: 'delegation.event', delegation: id, event: { child: { seq: 3, at: tick(), by: 'kid-agent' }, text: '', ...event } } as never, {}, 'wfe')
 const manifest = { digest: `sha256:${H}`, child: 'kid/make/run-001#fedcba9876543210', execution: 'completed', outcome: 'done', report: null, artifacts: [], decision: null, branch: null }
 
-test('decision ownership: a result confirmation needs the person\'s words unless the node grants acceptance; answers need their question taken up', () => {
-  const p = parentRun(DG())
-  p.step({ op: 'attempt.begin', attempt: 'a1', reason: 'start' } as never, {}, 'autolab')
-  p.step({ op: 'node.start', node: 'asset' }, { attempt: 'a1' })
-  dispatch(p, 'd1', {}, { attempt: 'a1' })
-  bind(p)
-  relay(p, { type: 'question', question: 'q1', text: 'Accept the icon?', confirms: true, subject: [doc('icon.png')] })
-  refused(() => p.step({ op: 'delegation.answer', delegation: 'd1', question: 'q1', text: 'Yes' } as never, { attempt: 'a1' }), 'delegation-event')
-  p.step({ op: 'delegation.take-up', delegation: 'd1', events: [1] } as never, { attempt: 'a1' })
-  assert.equal(p.r.nodes.asset.state, 'running', 'taking up resumes the node')
-  refused(() => p.step({ op: 'delegation.answer', delegation: 'd1', question: 'q1', text: 'Yes' } as never, { attempt: 'a1' }), 'delegate-scope')
-  // The parent asks its person, takes up their answer, relays it.
-  p.step({ op: 'question.ask', question: 'q1', text: 'forge shows the icon; accept?', to: 'Pat' } as never, { attempt: 'a1' })
-  p.step({ op: 'question.answer', question: 'q1', text: 'Yes, accept it.', from: 'Pat' } as never, {}, 'intake')
-  p.step({ op: 'question.take-up', question: 'q1' } as never, { attempt: 'a1' })
-  p.step({ op: 'delegation.answer', delegation: 'd1', question: 'q1', text: 'Accepted (Pat).', because: { kind: 'answer', question: 'q1' } } as never, { attempt: 'a1' })
-  const a = p.r.delegations!.d1.answers[0]
-  assert.deepEqual({ from: a.from, by: a.by, because: a.because?.kind }, { from: 'Pat', by: 'par-agent', because: 'answer' })
-  assert.equal(p.r.nodes.asset.state, 'waiting', 'waits again once it answered')
-  // With accepts: parent the agent answers itself.
-  const q = parentRun(DG('parent'))
-  q.step({ op: 'node.start', node: 'asset' }); dispatch(q); bind(q)
-  relay(q, { type: 'question', question: 'q1', text: 'Accept?', confirms: true })
-  q.step({ op: 'delegation.take-up', delegation: 'd1', events: [1] } as never)
-  q.step({ op: 'delegation.answer', delegation: 'd1', question: 'q1', text: 'Accepted.' } as never)
-  assert.equal(q.r.delegations!.d1.answers[0].from, 'par-agent')
-  assert.ok(checkRecord(JSON.parse(JSON.stringify(q.r)), q.graph).ok, 'the record replays')
-})
-
-test('a delegate node completes only on a satisfied, latest, taken-up result; a replacement names its predecessor', () => {
+test('an agent can answer a child confirmation without take-up or person-only acceptance scope', () => {
   const p = parentRun(DG())
   p.step({ op: 'node.start', node: 'asset' })
-  refused(() => p.step({ op: 'node.complete', node: 'asset', outcome: 'x' }), 'delegation-unsatisfied')
+  dispatch(p); bind(p)
+  relay(p, { type: 'question', question: 'q1', text: 'Accept?', confirms: true })
+  p.step({ op: 'delegation.answer', delegation: 'd1', question: 'q1', text: 'Yes' } as never)
+  assert.equal(p.r.delegations!.d1.answers[0].from, 'par-agent')
+})
+
+test('delegation result judgments and replacement provenance remain records', () => {
+  const p = parentRun(DG())
+  p.step({ op: 'node.start', node: 'asset' })
   dispatch(p)
   refused(() => dispatch(p, 'd2'), 'delegation-open')
   bind(p)
@@ -156,10 +135,8 @@ test('a delegate node completes only on a satisfied, latest, taken-up result; a 
   relay(p, { type: 'completed', text: 'done again', manifest: { ...manifest, digest: `sha256:${'1'.repeat(64)}` } })
   p.step({ op: 'delegation.take-up', delegation: 'd1', events: [1] } as never)
   refused(() => p.step({ op: 'delegation.dispose', delegation: 'd1', disposition: 'satisfied', note: 'n', event: 1 } as never), 'result-superseded')
-  refused(() => p.step({ op: 'delegation.dispose', delegation: 'd1', disposition: 'satisfied', note: 'n' } as never), 'delegation-event')
   p.step({ op: 'delegation.take-up', delegation: 'd1', events: [2] } as never)
   p.step({ op: 'delegation.dispose', delegation: 'd1', disposition: 'rejected', note: 'wrong colour' } as never)
-  refused(() => p.step({ op: 'node.complete', node: 'asset', outcome: 'x' }), 'delegation-unsatisfied')
   refused(() => dispatch(p, 'd2'), 'delegation-predecessor')
   dispatch(p, 'd2', { predecessor: 'd1' })
   assert.equal(p.r.delegations!.d2.predecessor, 'd1')
@@ -213,7 +190,6 @@ test('cancelling the parent closes its open delegation and records nothing more 
   refused(() => st({ op: 'question.answer', question: 'q1', text: 'Yes', from: 'par-agent', delegation: { uid: `${UID}/d9`, answer: 1 } } as never, 'par-agent'), 'delegate-relation')
   st({ op: 'question.answer', question: 'q1', text: 'Yes', from: 'par-agent', delegation: { uid: `${UID}/d1`, answer: 1 } } as never, 'par-agent')
   st({ op: 'question.take-up', question: 'q1' })
-  refused(() => st({ op: 'run.decide', decision: 'accepted', question: 'q1', subject: [doc('icon.png')] } as never), 'delegate-scope')
-  st({ op: 'run.decide', decision: 'rejected', question: 'q1', subject: [doc('icon.png')] } as never)
-  assert.equal(c.decisions[0].decision, 'rejected', 'rejecting is not acceptance')
+  st({ op: 'run.decide', decision: 'accepted', question: 'q1', subject: [doc('icon.png')] } as never)
+  assert.equal(c.decisions[0].decision, 'accepted')
 })

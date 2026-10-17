@@ -19,13 +19,13 @@ import { hostname } from 'node:os'
 import { join } from 'node:path'
 import type { DatabaseSync } from 'node:sqlite'
 import { guideRef, normalizeRepoPath, sessionPolicyOf } from '../shared/model.ts'
-import { configChanges, currentSession, unverifiedReason, unverifiedSession, describeSteps, effectiveOf, holderOf, hostOf, pendingInstructions, RECOVERY_BUDGET, runKey, sameConfig, sessionConfig, situation, type AttemptSession, type AttemptSettings, type BecauseRef, type RecoveryAgent, type RunRecord, type RunRef } from '../shared/run.ts'
+import { configChanges, currentSession, unverifiedReason, unverifiedSession, describeSteps, effectiveOf, holderOf, hostOf, pendingInstructions, runKey, sameConfig, sessionConfig, situation, type AttemptSession, type AttemptSettings, type BecauseRef, type RecoveryAgent, type RunRecord, type RunRef } from '../shared/run.ts'
 import { git } from './git.ts'
 import { docStepsOf } from '../shared/compile.ts'
 import { assertWorkspaceAllowed, loadBoundary } from './boundary.ts'
 import type { Gitea } from './gitea.ts'
 import { baseline, publish, publishRun, type Baseline, type RepoStep } from './publish.ts'
-import { guardsFor, integrate, resultChanges, type Guard, type IntegrationState, type IntegrationStep } from './integrate.ts'
+import { guardsFor, integrate, type Guard, type IntegrationState, type IntegrationStep } from './integrate.ts'
 import { loadRegistry, observe, type Registration } from './registry.ts'
 import { catalogOf, createRunInCopy, listRuns, readRun, RUN_FILE, runDir, runOp } from './runs.ts'
 import { readCopy, runSpace } from './runspace.ts'
@@ -65,13 +65,13 @@ const sha256 = (b: string | Buffer) => createHash('sha256').update(b).digest('he
 // purpose, its document and the instructions frozen with the run.
 export function documentationBrief(r: RunRecord): string[] {
   const eff = effectiveOf(r) // the revision in force (p7)
-  if (!eff) return ['Documentation policy: none (this run was created before p5); write plans and reports only where a node or the person asks.']
+  if (!eff) return ['Documentation policy: none (this run was created before p5); plans and reports are available as optional records.']
   const d = docStepsOf(eff)
-  if (!d.plan && !d.reports && !d.final) return [`Documentation policy: ${eff.policy}. No plan or report is a step of this run; write documents only where a node description or the person asks for them.`]
+  if (!d.plan && !d.reports && !d.final) return [`Documentation policy: ${eff.policy}. No plan or report is a step of this run; documents can still be written when useful.`]
   // The steps this run has (p8/ex2: any of the three), by name.
   const named = [d.plan && '_plan', d.reports && '_report.<node>', d.final && '_final-report'].filter(Boolean).join(', ')
   const absent = [!d.plan && 'no plan talk', !d.reports && 'no per-node reports', !d.final && 'no final report'].filter(Boolean)
-  const out = [`Documentation policy: ${eff.policy} (${describeSteps(d)}). ${named} ${named.includes(',') ? 'are steps' : 'is a step'} of this run, recorded like any node (start, complete); each completes only when its document is a nonempty file of the run folder.${absent.length ? ` This run has ${absent.join(' and ')}: write those documents only where a node description or the person asks for them.` : ''}`]
+  const out = [`Documentation policy: ${eff.policy} (${describeSteps(d)}). ${named} ${named.includes(',') ? 'are steps' : 'is a step'} of this run, recorded like any node (start, complete); each is optional; available documents are recorded by hash.${absent.length ? ` This run has ${absent.join(' and ')}: documents can still be written when useful.` : ''}`]
   const now = [...r.execution.active, ...r.execution.ready, ...r.execution.waiting.map(w => w.node)]
   for (const id of [...new Set(now)]) {
     const step = eff.nodes[id]?.step
@@ -91,7 +91,7 @@ export function instructionBrief(r: RunRecord): string[] {
   const pending = pendingInstructions(r)
   if (!pending.length) return [`Additional instructions: ${all.length}, all acknowledged (wfe run instructions <run>).`]
   return [
-    '', `Additional instructions received and not yet acknowledged (${pending.length}); acknowledge each with what you will do before starting a node (wfe run ack <run> <id>… --response incorporate|clarify|new-run --note …):`,
+    '', `Additional instructions received and not yet acknowledged (${pending.length}); optional acknowledgment records what you will do (wfe run ack <run> <id>… --response incorporate|clarify|new-run --note …):`,
     ...pending.flatMap(i => [`- ${i.id}, from ${i.from} at ${i.at}${i.during.length ? ` (while ${i.during.join(', ')} ran)` : ''}:`, ...i.text.split('\n').map(l => `    ${l}`)]),
   ]
 }
@@ -136,7 +136,7 @@ export function delegationBrief(r: RunRecord): string[] {
   const out: string[] = []
   const ent = r.input.entrustedBy
   if (ent?.kind === 'delegation') {
-    out.push('', `This run was requested by another run's agent: ${r.input.requester}, delegating node ${ent.parent.node} of ${ent.parent.project}/${ent.parent.workflow}/${ent.parent.run}${r.input.onBehalfOf ? ` for ${r.input.onBehalfOf}` : ''}. Its request is ${runDir(r)}/${r.input.file}${r.input.original ? ` (the person's own words: ${runDir(r)}/${r.input.original})` : ''}. Your questions reach that agent through the request topic, as they would a person; ask them --to ${r.input.requester}. ${ent.accepts === 'parent' ? `It may accept your result itself.` : `Accepting your result is ${r.input.onBehalfOf ?? 'the person'}'s: a confirmation answered by ${r.input.requester} in its own name does not become an acceptance (delegate-scope); it relays the person's answer.`}`)
+    out.push('', `This run was requested by another run's agent: ${r.input.requester}, delegating node ${ent.parent.node} of ${ent.parent.project}/${ent.parent.workflow}/${ent.parent.run}${r.input.onBehalfOf ? ` for ${r.input.onBehalfOf}` : ''}. Its request is ${runDir(r)}/${r.input.file}${r.input.original ? ` (the person's own words: ${runDir(r)}/${r.input.original})` : ''}. Your questions reach that agent through the request topic, as they would a person; ask them --to ${r.input.requester}. The requesting agent can record its own answers and decisions; acceptance scope is descriptive.`)
   }
   const all = Object.values(r.delegations ?? {})
   if (!all.length) return out
@@ -150,7 +150,7 @@ export function delegationBrief(r: RunRecord): string[] {
       if (e.manifest) out.push(`      result manifest ${e.manifest.digest.slice(7, 19)}: ${e.manifest.execution}; report ${e.manifest.report?.path ?? '(none)'}; ${e.manifest.artifacts.length} artifact(s)`)
     }
   }
-  if (all.some(d => isOpenDelegation(d) && pendingEvents(d).length)) out.push('Take up each fact above before acting on it (wfe delegate take-up <run> <d> <n>…); answer with wfe delegate answer, judge a result with wfe delegate dispose. When only the child\'s work remains, end the attempt: the child runs in this host\'s one slot, and its next fact resumes you.')
+  if (all.some(d => isOpenDelegation(d) && pendingEvents(d).length)) out.push('Facts can be marked taken up (wfe delegate take-up <run> <d> <n>…); answer with wfe delegate answer, record a result judgment with wfe delegate dispose. When only the child\'s work remains, end the attempt: the child runs in this host\'s one slot, and its next fact resumes you.')
   return out
 }
 
@@ -635,7 +635,7 @@ export class ExecStore {
     const checkpoint = await this.checkpoint(ws, ref, `after attempt ${attempt}: ${kind}`, attempt, a.baseline)
     // An acceptance recorded during the attempt (a confirmation) is
     // integrated once the run is completed and saved (p9).
-    if (rec.execution.state === 'completed' && rec.decisions.at(-1)?.decision === 'accepted' && rec.storage) await this.queueIntegration(ws, ref, this.executor).catch(() => null)
+    if (rec.execution.state === 'completed' && rec.storage) await this.queueIntegration(ws, ref, this.executor).catch(() => null)
     // An answer may have arrived while the attempt was still running.
     let resumeJob: JobRow | null = null
     if (kind === 'awaiting-person') {
@@ -703,10 +703,6 @@ export class ExecStore {
       if (job) throw new RequestError(409, `run ${runKey(ref)} is not held and job ${job.id} (${job.kind}) is ${job.state}: its continuation is owned`, { code: 'recover-owned' })
     }
     // The budget: recoveries since the last control that came from a person.
-    const PERSON = ['run.create', 'run.resume', 'question.answer', 'instruction.receive']
-    const lastPerson = Math.max(0, ...rec.history.filter(h => PERSON.includes(h.op)).map(h => h.seq))
-    const spent = rec.history.filter(h => (h.op as string) === 'run.recover' && h.seq > lastPerson).length
-    if (spent >= RECOVERY_BUDGET) throw new RequestError(409, `run ${runKey(ref)} was recovered ${spent} times since the last person's instruction (seq ${lastPerson}); a person decides now (wfe run resume)`, { code: 'recover-budget' })
     const r = await runOp(space, ref, { op: 'run.recover', incident: o.incident, attempt: o.attempt, reason: o.reason, ...(agent ? { agent } : {}), receipt } as never, { by, via: o.via, expectSeq: o.expectSeq })
     const job = hostOf(r.record.executor) === this.executor ? this.enqueue(ws.reg.id, ref, 'resume', `recover:${ws.reg.id}/${runKey(ref)}/${o.incident}/${o.attempt}`, `recover: incident ${o.incident} (${o.reason})`) : null
     return { record: r.record, job, duplicate: !!r.duplicate }
@@ -808,22 +804,10 @@ export class ExecStore {
     const space = await runSpace(ws, ref)
     const record = (await readRun(space, ref)).record
     if (!record) return { refused: `run ${runKey(ref)} cannot be read` }
+    if (record.cancelled || record.control.hold?.kind === 'stopped' || record.control.stop) return { refused: `run ${runKey(ref)} was explicitly stopped or cancelled; resume it before integration` }
     if (!space.copyOf || !record.storage) return { refused: `run ${runKey(ref)} has no working copy of its own; what it published is already on the project's branches` }
-    const decision = record.decisions.length - 1
-    const d = record.decisions[decision]
-    if (!d || d.decision !== 'accepted') return { refused: `run ${runKey(ref)} has no accepted result${d ? ` (its latest decision is ${d.decision})` : ''}; a completed run without acceptance stays saved on its branch, unintegrated` }
-    if (!d.revision) return { refused: `the acceptance of run ${runKey(ref)} was recorded before p9 and names no revision; accept the result again to integrate it` }
-    if ((record.integrations ?? []).some(i => i.decision === decision)) return { refused: `run ${runKey(ref)}'s accepted result is already integrated` }
-    // The same result integrated under an earlier acceptance (project_migration
-    // p3/ex1): nothing is integrated again.
-    for (const i of (record.integrations ?? []).slice().reverse()) {
-      const earlier = record.decisions[i.decision]?.revision
-      const changed = earlier ? await resultChanges(space, ref, record.storage, earlier, d.revision).catch(() => null) : null
-      if (changed && !changed.length) return { refused: `decision ${decision} accepts the same result as decision ${i.decision}, already integrated (${i.at}); nothing is integrated again`, superseded: true }
-    }
     if (record.control.attempt) return { refused: `attempt ${record.control.attempt.id} is executing run ${runKey(ref)}; integration waits until it has ended and its work is saved`, wait: true }
-    if (record.execution.state !== 'completed') return { refused: `run ${runKey(ref)} is ${record.execution.state}; its accepted result is integrated once the execution is completed`, wait: true }
-    return { space, record, decision }
+    return { space, record, decision: record.seq }
   }
 
   // The guarded bindings (project_migration p4) of the definition the run
@@ -838,10 +822,10 @@ export class ExecStore {
   async queueIntegration(ws: Workspace, ref: RunRef, by: string): Promise<IntegrationRow> {
     const space = await runSpace(ws, ref)
     const record = (await readRun(space, ref)).record
-    const decision = (record?.decisions.length ?? 0) - 1
-    if (!record || decision < 0 || record.decisions[decision].decision !== 'accepted') throw new RequestError(409, `run ${runKey(ref)} has no accepted result to integrate`)
+    if (!record) throw new RequestError(409, `run ${runKey(ref)} cannot be read`)
+    const decision = record.seq
     return this.tx(() => {
-      const have = this.one<IntegrationRow>('SELECT * FROM integrations WHERE workspace = ? AND workflow = ? AND run = ? AND decision = ?', ws.reg.id, ref.workflow, ref.run, decision)
+      const have = this.one<IntegrationRow>('SELECT * FROM integrations WHERE workspace = ? AND workflow = ? AND run = ? AND state NOT IN (\'integrated\', \'superseded\', \'refused\') ORDER BY id DESC LIMIT 1', ws.reg.id, ref.workflow, ref.run)
       if (have) return have
       const id = Number(this.run('INSERT INTO integrations (workspace, workflow, run, decision, state, created, updated, steps, requested_by) VALUES (?, ?, ?, ?, \'queued\', ?, ?, \'[]\', ?)', ws.reg.id, ref.workflow, ref.run, decision, now(), now(), by).lastInsertRowid)
       return this.one<IntegrationRow>('SELECT * FROM integrations WHERE id = ?', id)!
@@ -852,36 +836,36 @@ export class ExecStore {
   // the combined commits are made locally and nothing is pushed or
   // recorded). The copy is saved first when it holds unsaved records; the
   // binding to the accepted revision decides whether anything else changed.
-  async integrateRun(ws: Workspace, ref: RunRef, o: { by: string; via: string; dryRun?: boolean }): Promise<{ state: IntegrationRow['state']; steps: IntegrationStep[]; error?: string; row: IntegrationRow | null }> {
+  async integrateRun(ws: Workspace, ref: RunRef, o: { by: string; via: string; dryRun?: boolean; integration?: number }): Promise<{ state: IntegrationRow['state']; steps: IntegrationStep[]; error?: string; row: IntegrationRow | null }> {
     const ok = await this.integrable(ws, ref)
     if ('refused' in ok) throw new RequestError(409, ok.refused)
-    const { space, decision } = ok
+    const { space } = ok
     const copy = await readCopy(ws, ref)
     const env = this.ctx.gitea ? await this.ctx.gitea.gitEnv() : {}
     const lockDir = join(this.ctx.area, '.local', 'exec', 'integration-locks')
     const guards = await this.guards(space, ref, ok.record)
     if (o.dryRun) {
-      const r = await integrate({ space, ref, project: ok.record.project, storage: ok.record.storage!, accepted: ok.record.decisions[decision].revision!, previous: [], env, lockDir, dryRun: true, guards, save: () => {} })
+      const r = await integrate({ space, ref, project: ok.record.project, storage: ok.record.storage!, accepted: [], previous: [], env, lockDir, dryRun: true, guards, save: () => {} })
       return { state: r.state, steps: r.steps, error: r.error, row: null }
     }
     // The final checkpoint: everything in the copy saved on its branches.
     const cp = await this.checkpoint(ws.shared, ref, 'before integration', null, null)
     if (cp.state !== 'published' && cp.state !== 'nothing') throw new RequestError(409, `the run's copy could not be saved before integration (checkpoint ${cp.id}: ${cp.state}${cp.error ? `, ${cp.error}` : ''}); retry the publication first`)
-    const row = await this.queueIntegration(ws, ref, o.by)
+    const row = o.integration ? this.one<IntegrationRow>('SELECT * FROM integrations WHERE id = ?', o.integration)! : await this.queueIntegration(ws, ref, o.by)
     if (row.state === 'integrated') return { state: row.state, steps: JSON.parse(row.steps), row }
     return withLock(join(copy!.dir, 'integration'), async () => {
       this.run('UPDATE integrations SET state = \'running\', error = NULL, updated = ? WHERE id = ?', now(), row.id)
       const save = (steps: IntegrationStep[]) => this.run('UPDATE integrations SET steps = ?, updated = ? WHERE id = ?', JSON.stringify(steps), now(), row.id)
       let r
       try {
-        r = await integrate({ space, ref, project: ok.record.project, storage: ok.record.storage!, accepted: ok.record.decisions[decision].revision!, previous: JSON.parse(row.steps) as IntegrationStep[], env, lockDir, guards, save })
+        r = await integrate({ space, ref, project: ok.record.project, storage: ok.record.storage!, accepted: [], previous: JSON.parse(row.steps) as IntegrationStep[], env, lockDir, guards, save })
       } catch (e) {
         r = { state: 'failed' as const, steps: JSON.parse(this.one<IntegrationRow>('SELECT * FROM integrations WHERE id = ?', row.id)!.steps) as IntegrationStep[], error: (e as Error).message }
       }
       if (r.state === 'integrated') {
         const repositories = r.steps.map(s => ({ path: s.repo, target: s.target, observed: s.observed!, candidate: s.candidate!, method: s.method!, result: s.result! }))
         try {
-          await runOp(space, ref, { op: 'run.integrate', decision, repositories, integration: String(row.id), receipt: `integration:${row.id}` }, { by: o.by, via: o.via })
+          await runOp(space, ref, { op: 'run.integrate', decision: row.decision, repositories, integration: String(row.id), receipt: `integration:${row.id}` }, { by: o.by, via: o.via })
         } catch (e) {
           r = { ...r, state: 'attention' as const, error: `integrated, but the record could not say so: ${(e as Error).message}; retry to record it` }
         }
@@ -905,19 +889,12 @@ export class ExecStore {
       const ref = { workflow: row.workflow, run: row.run }
       let ws: Workspace
       try { ws = await this.workspace(row.workspace) } catch (e) { notes.push(`integration ${row.id} (${runKey(ref)}): ${(e as Error).message}`); continue }
-      // A row speaks for its own decision only: a later decision supersedes it.
-      const latest = ((await readRun(await runSpace(ws, ref), ref).catch(() => null))?.record?.decisions.length ?? 0) - 1
-      if (latest > row.decision) {
-        this.run('UPDATE integrations SET state = \'superseded\', error = ?, updated = ? WHERE id = ? AND state = \'queued\'', `decision ${latest} followed decision ${row.decision}; only the latest decision is integrated`, now(), row.id)
-        notes.push(`integration ${row.id} (${runKey(ref)}): superseded by decision ${latest}`)
-        continue
-      }
       const ok = await this.integrable(ws, ref).catch(e => ({ refused: (e as Error).message, wait: false, superseded: false }))
       if ('refused' in ok) {
         if (!ok.wait) { this.run('UPDATE integrations SET state = ?, error = ?, updated = ? WHERE id = ? AND state = \'queued\'', ok.superseded ? 'superseded' : 'refused', ok.refused, now(), row.id); notes.push(`integration ${row.id} (${runKey(ref)}): ${ok.superseded ? 'superseded' : 'refused'} — ${ok.refused}`) }
         continue
       }
-      const r = await this.integrateRun(ws, ref, { by: this.executor, via: 'exec' }).catch(e => ({ state: 'failed', error: (e as Error).message }))
+      const r = await this.integrateRun(ws, ref, { by: this.executor, via: 'exec', integration: row.id }).catch(e => ({ state: 'failed', error: (e as Error).message }))
       notes.push(`integration ${row.id} (${runKey(ref)}): ${r.state}${r.error ? ` — ${r.error}` : ''}`)
     }
     return notes

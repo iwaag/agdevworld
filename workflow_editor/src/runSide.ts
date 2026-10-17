@@ -519,7 +519,7 @@ export class RunSide {
     }
     else if (this.approval?.kind === 'integration-problem') { kind = 'integration'; head = 'Accepted — not integrated'; lead = 'The accepted result could not be brought into the shared branch. The integration record below says why.' }
     else if (accepted && ex.state !== 'completed') { kind = 'accepted'; head = 'Accepted — cleanup is still running'; lead = h('span', 'The result was accepted', last!.confirmation ? h('span.d-only', ` from ${last!.confirmation.question}`) : null, '; the run completes after its remaining steps.') }
-    else if (ex.state === 'completed') { kind = 'completed'; head = !last ? 'Completed — your decision is needed' : accepted ? (this.approval?.kind === 'integrated' ? 'Completed, accepted and integrated' : this.approval?.kind === 'integrating' ? 'Accepted — integrating' : 'Completed and accepted') : 'Completed — result rejected'; lead = !last ? 'Every node recorded completion. Accepting the result is your separate decision.' : h('span', `${last.decision === 'accepted' ? 'Accepted' : 'Rejected'}${last.confirmation ? ` from ${last.confirmation.from}'s answer` : ` by ${last.by}`}`, h('span.d-only', `${last.confirmation ? ` (${last.confirmation.question}, recorded by ${last.by})` : ''}, ${when(last.at)}`), '.') }
+    else if (ex.state === 'completed') { kind = 'completed'; head = !last ? 'Completed' : accepted ? (this.approval?.kind === 'integrated' ? 'Completed, accepted and integrated' : this.approval?.kind === 'integrating' ? 'Accepted — integrating' : 'Completed and accepted') : 'Completed — result rejected'; lead = !last ? 'Work completed. Reviews and decisions can be recorded independently of integration.' : h('span', `${last.decision === 'accepted' ? 'Accepted' : 'Rejected'}${last.confirmation ? ` from ${last.confirmation.from}'s answer` : ` by ${last.by}`}`, h('span.d-only', `${last.confirmation ? ` (${last.confirmation.question}, recorded by ${last.by})` : ''}, ${when(last.at)}`), '.') }
     else if (ex.active.length || rec.control.attempt) { kind = 'working'; head = 'Work in progress'; lead = this.observation(rec)[0] === 'warn' ? 'Recorded as in progress, but this host does not see the work running: look below.' : 'Nothing is needed from you now.' }
     else if (ex.state === 'not-started') { kind = 'not-started'; head = 'Not started'; lead = `Waiting for ${rec.executor.name} to start.` }
     // A delegate node waits on its child (p10): the next move is the child's, or this run's agent's when a fact came back.
@@ -861,7 +861,7 @@ export class RunSide {
     patchContent(this.instructions.content.children[0] as HTMLElement, ...ins.slice().reverse().map(i => h(`div.question.q-${i.ack ? 'taken-up' : 'answered'}`, { dataset: { instruction: i.id, key: `i:${i.id}` } },
       h('div.q-head', h('strong', i.id), chip(i.ack ? 'completed' : 'waiting', i.ack ? `acknowledged: ${i.ack.response}` : 'received'), h('span.muted.small', ` from ${i.from} via ${i.via} · ${when(i.at)}${i.during.length ? ` · while ${i.during.join(', ')} ran` : ''}`)),
       h('p.q-text', i.text),
-      i.ack ? h('p.small.ok-text', `${i.ack.by}: ${i.ack.note}`) : h('p.small.muted', `${rec.executor.name} reads it at the next node boundary; no node starts before it is acknowledged.`))))
+      i.ack ? h('p.small.ok-text', `${i.ack.by}: ${i.ack.note}`) : h('p.small.muted', `${rec.executor.name} can read and optionally acknowledge it; it remains visible while work continues.`))))
   }
 
   // Shared data (project_migration p6, docs/shares.md): what the input
@@ -1184,25 +1184,20 @@ export class RunSide {
     const d = this.data
     const st = integrationStatus(rec, d.execView, d.resp?.place)
     if (!st) return []
-    const di = rec.decisions.length - 1
-    const row = d.execView?.integrations?.filter(i => i.decision === di).at(-1)
-    const accepted = rec.decisions[di]?.decision === 'accepted'
-    const done = (rec.integrations ?? []).some(i => i.decision === di)
-    // A result changed since its acceptance is accepted again, not retried (project_migration p3/ex1).
-    const can = accepted && !done && st.state !== 'integrated' && st.state !== 'needs-agreement' && st.state !== 'target-changed' && st.state !== 'unbound' && rec.execution.state === 'completed' && !rec.control.attempt && !this.frozen
+    const row = d.execView?.integrations?.at(-1)
+    const done = !!rec.integrations?.length
+    const can = !rec.control.attempt && !this.frozen && !rec.cancelled
     return [
       h('h4', 'Integration'),
       h('p.small', h(`span.chip.${st.tone === 'ok' ? 'ok' : st.tone === 'muted' ? 'muted' : 'warn'}`, st.text), st.detail ? h('span.muted', ` ${st.detail}`) : null),
-      h('p.small.muted', 'Saving puts the run\'s work on its own branch; integrating brings an accepted result into the project\'s shared branches. They are separate steps.'),
+      h('p.small.muted', 'Saving puts the run\'s work on its own branch; integrating brings the saved result into the project\'s shared branches. They are separate steps.'),
       // Abandonment and reversal (p9): facts, not an operation.
       h('p.small.muted.reversal-note', done
         ? `Undoing it is new work: a run that names this one as its predecessor and reverts the integrated commits with new ones (wfe run reversal ${runKey(rec)} lists them); later changes stay, and effects outside Git need their own check.`
         : 'Nothing of it is on the project\'s shared branches: cancelling or abandoning it needs no rollback, and its work stays on its own branch.'),
       ...(row?.steps ?? []).map(x => h('div.small.muted', { dataset: { key: `int:${row!.id}:${x.repo}` } }, `${x.repo === '.' ? 'root' : x.repo} → ${x.target}: ${x.state}${x.method ? ` (${x.method})` : ''}${x.result ? ` ${x.result.slice(0, 7)}${x.pushed ? ' pushed' : ''}` : ''}${x.files?.length ? `; files: ${x.files.join(', ')}` : ''}${x.error ? `; ${x.error}` : ''}`)),
-      st.state === 'needs-agreement' || st.state === 'unbound' ? h('p.small.warn-text', 'Accept the result again in the card at the top of the run; its integration is queued then.') : null,
-      st.state === 'target-changed' ? h('p.small.warn-text', 'A guarded target changed after this run prepared its result. Request a successor run (this one as predecessor) to reassess against the current target.') : null,
       can ? h('div.row.tight', h('button', { dataset: { action: 'integrate-check' }, title: 'Combine locally and show what would happen; nothing is pushed' }, 'Check integration'),
-        h('button', { dataset: { action: 'integrate-run' }, title: 'Bring the accepted result into the shared branches now' }, row && row.state !== 'queued' ? 'Retry integration' : 'Integrate now')) : null,
+        h('button', { dataset: { action: 'integrate-run' }, title: 'Bring the saved result into the shared branches now' }, row && row.state !== 'queued' ? 'Retry integration' : 'Integrate now')) : null,
     ]
   }
 

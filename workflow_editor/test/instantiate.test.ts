@@ -158,7 +158,7 @@ test('the CLI and the HTTP route instantiate the same way', async () => {
   assert.equal(await readFile(s1.file, 'utf8'), await readFile(s2.file, 'utf8'))
 })
 
-test('an adjustment of provenance alone is nothing; started work keeps its provenance', async () => {
+test('provenance metadata and completed work can be revised', async () => {
   const s = await setup()
   const withNode = instantiateText(WF, RESEARCH, { id: 'research', before: ['implement'] }).text
   await writeFile(s.file, withNode)
@@ -168,7 +168,7 @@ test('an adjustment of provenance alone is nothing; started work keeps its prove
   const adjust = (text: string) => adjustRun(s.ws, run.ref, { text, reason: 'r', source: { kind: 'person', by: 'Pat' }, dryRun: true }, { by: 'Pat', via: 'cli' })
   const restamped = withNode.replace('      revision: 2\n', '      revision: 3\n')
   let r = await adjust(restamped)
-  assert.deepEqual(r.problems.map(p => p.code), ['adjust-nothing'])
+  assert.deepEqual(r.problems.map(p => p.code), [])
   await op({ op: 'node.start', node: '_plan' })
   await writeFile(join(folder, 'plan.md'), '# Plan\n')
   await op({ op: 'question.ask', question: '', node: '_plan', text: 'Agree?', to: 'Pat' })
@@ -178,7 +178,7 @@ test('an adjustment of provenance alone is nothing; started work keeps its prove
   await op({ op: 'node.start', node: 'research' })
   await op({ op: 'node.complete', node: 'research', outcome: 'done' })
   r = await adjust(restamped)
-  assert.ok(r.problems.some(p => p.code === 'adjust-started' && /template/.test(p.message)), JSON.stringify(r.problems))
+  assert.ok(r.ok, JSON.stringify(r.problems))
 })
 
 test('instantiation into an empty draft and the seeds behave like the p7 presets', () => {

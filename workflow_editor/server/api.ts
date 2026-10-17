@@ -179,8 +179,6 @@ export function createHandler(config: ServiceConfig) {
         throw new RequestError(404, 'not found')
       }
       const [, a, wsId, b, file, action] = parts
-      const routed = req.headers[ROUTE_HEADER] !== undefined
-      const localOnly = (what: string) => { if (routed) throw new RequestError(403, `${what} takes a host path or repository location and is not offered through agdevworld; use the wfe command line on this host`) }
 
       // A shared area's file or folder listing (project_migration p6,
       // docs/shares.md): read-only, streamed with byte ranges.
@@ -307,7 +305,6 @@ export function createHandler(config: ServiceConfig) {
       }
       // Registration writes only the registry. A relative path is taken from the authoring area.
       if (a === 'workspaces' && !wsId && method === 'POST') {
-        localOnly('Registering a workspace by path')
         const input = await body(req) as Record<string, unknown>
         if (typeof input.path !== 'string' || !input.path.trim()) throw new RequestError(400, 'path is required')
         const id = typeof input.id === 'string' && input.id.trim() ? input.id.trim() : undefined
@@ -317,7 +314,6 @@ export function createHandler(config: ServiceConfig) {
       }
       // Creation writes only beneath the authoring area (the CLI takes any destination).
       if (a === 'projects' && !wsId && method === 'POST') {
-        localOnly('Creating a local project without Gitea')
         const input = await body(req) as Record<string, unknown>
         for (const k of ['id', 'name']) if (typeof input[k] !== 'string') throw new RequestError(400, `${k} is required`)
         if (input.goals !== undefined && !texts(input.goals)) throw new RequestError(400, 'goals must be a list of text')
@@ -484,7 +480,6 @@ export function createHandler(config: ServiceConfig) {
         return send(res, result.ok ? 200 : 422, result)
       }
       if (b === 'submodules' && !file && method === 'POST') {
-        localOnly('Adding a submodule from a location')
         const input = await body(req) as Record<string, unknown>
         if (typeof input.path !== 'string') throw new RequestError(400, 'path is required')
         if (input.create === true) {

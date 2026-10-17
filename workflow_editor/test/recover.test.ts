@@ -141,7 +141,7 @@ test('a person\'s hold, another episode, an outdated view and a live process are
   await assert.rejects(x.recover(ws, a, { incident: 'i3', attempt: c.attempt.id, reason: 'r', by: 'R', via: 'cli' }), code(/run-cancelled/))
 })
 
-test('the budget: two recoveries since the last person-originated control, then a person decides; a person\'s resume restores it', async () => {
+test('recovery has no person-reset budget', async () => {
   const { x, ws, id } = await setup()
   const a = (await x.request({ workspace: id, workflow: 'ship', text: 'build', author: 'Pat', receipt: 'req-recover-3', via: 'browser' })).ref
   let ended = await interrupt(x, ws, a)
@@ -149,13 +149,13 @@ test('the budget: two recoveries since the last person-originated control, then 
   ended = await interrupt(x, ws, a, false)
   await x.recover(ws, a, { incident: 'i2', attempt: ended, reason: 'second', by: 'R', via: 'cli' })
   ended = await interrupt(x, ws, a, false)
-  await assert.rejects(x.recover(ws, a, { incident: 'i3', attempt: ended, reason: 'third', by: 'R', via: 'cli' }), code(/recover-budget/))
+  await x.recover(ws, a, { incident: 'i3', attempt: ended, reason: 'third', by: 'R', via: 'cli' })
   // A re-described incident of the same episode does not buy another one either.
-  await assert.rejects(x.recover(ws, a, { incident: 'i3-reworded', attempt: ended, reason: 'third', by: 'R', via: 'cli' }), code(/recover-budget/))
+  ended = await interrupt(x, ws, a, false)
   await x.resume(ws, a, 'Pat', 'looked; continue', 'browser')
   ended = await interrupt(x, ws, a, false)
   const ok = await x.recover(ws, a, { incident: 'i4', attempt: ended, reason: 'after the person', by: 'R', via: 'cli' })
-  assert.equal(ok.record.recoveries?.length, 3)
+  assert.equal(ok.record.recoveries?.length, 4)
 })
 
 test('from a recovery run\'s attempt the actor is that run\'s agent with its run and attempt; a run cannot recover itself', async () => {

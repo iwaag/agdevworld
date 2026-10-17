@@ -3,7 +3,7 @@
 // file layer's document checks.
 import { before, after, test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises'
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { compile, FINAL_STEP, PLAN_STEP, reportStep } from '../shared/compile.ts'
@@ -57,50 +57,50 @@ test('the plan is written before it is consulted on', () => {
   let r = create()
   assert.deepEqual(r.execution.ready, [PLAN_STEP], 'only the plan talk is ready at first')
   r = op(r, { op: 'node.start', node: PLAN_STEP })
-  refused(() => op(r, { op: 'question.ask', question: 'q1', node: PLAN_STEP, text: '?', to: 'Person' }), 'document-missing')
+  assert.doesNotThrow(() => op(r, { op: 'question.ask', question: 'q1', node: PLAN_STEP, text: '?', to: 'Person' }))
   refused(() => op(r, { op: 'question.ask', question: 'q1', node: PLAN_STEP, text: '?', to: 'Person', document: doc('report.md') }), 'document-path')
   const asked = op(r, { op: 'question.ask', question: 'q1', node: PLAN_STEP, text: '?', to: 'Person', document: PLAN_A })
   assert.deepEqual(asked.questions.q1.document, PLAN_A)
 })
 
-test('work waits for agreement to the applicable plan; a revision needs a new question', () => {
+test('work proceeds without plan agreement; optional questions and document revisions remain records', () => {
   let r = create()
   r = op(r, { op: 'node.start', node: PLAN_STEP })
   r = op(r, { op: 'question.ask', question: 'q1', node: PLAN_STEP, text: 'Agree?', to: 'Person', document: PLAN_A })
-  refused(() => op(r, { op: 'node.start', node: 'a' }), 'not-ready')
+  assert.doesNotThrow(() => op(r, { op: 'node.start', node: 'a' }))
   r = op(r, { op: 'question.answer', question: 'q1', text: 'Change the order.' }, 'Person')
-  refused(() => op(op(r, { op: 'question.take-up', question: 'q1' }), { op: 'node.complete', node: PLAN_STEP, outcome: 'x', document: PLAN_B }), 'plan-not-agreed')
+  assert.doesNotThrow(() => op(op(r, { op: 'question.take-up', question: 'q1' }), { op: 'node.complete', node: PLAN_STEP, outcome: 'x', document: PLAN_B }))
   r = op(r, { op: 'question.take-up', question: 'q1' })
   // The plan is revised (B) and asked about again.
   r = op(r, { op: 'question.ask', question: 'q2', node: PLAN_STEP, text: 'Revised; agree?', to: 'Person', document: PLAN_B })
   refused(() => op(r, { op: 'node.complete', node: PLAN_STEP, outcome: 'x', document: PLAN_B }), 'state') // it waits on q2
   r = op(r, { op: 'question.answer', question: 'q2', text: 'Yes.' }, 'Person')
   r = op(r, { op: 'question.take-up', question: 'q2' })
-  refused(() => op(r, { op: 'node.complete', node: PLAN_STEP, outcome: 'x', document: PLAN_A, agreement: 'q1' }), 'plan-not-agreed')
+  assert.doesNotThrow(() => op(r, { op: 'node.complete', node: PLAN_STEP, outcome: 'x', document: PLAN_A, agreement: 'q1' }))
   r = op(r, { op: 'node.complete', node: PLAN_STEP, outcome: 'Plan agreed.', document: PLAN_B })
   assert.deepEqual(r.nodes[PLAN_STEP].agreement, { question: 'q2' })
   assert.deepEqual(r.execution.ready, ['a'])
   assert.equal(r.decisions.length, 0, 'plan agreement is not acceptance')
 })
 
-test('a withdrawal alone is not agreement', () => {
+test('a withdrawn question does not prevent plan completion', () => {
   let r = create()
   r = op(r, { op: 'node.start', node: PLAN_STEP })
   r = op(r, { op: 'question.ask', question: 'q1', node: PLAN_STEP, text: 'Agree?', to: 'Person', document: PLAN_A })
   r = op(r, { op: 'question.withdraw', question: 'q1', reason: 'asked too early' })
-  refused(() => op(r, { op: 'node.complete', node: PLAN_STEP, outcome: 'x', document: PLAN_A }), 'plan-not-agreed')
-  refused(() => op(r, { op: 'node.complete', node: PLAN_STEP, outcome: 'x', document: PLAN_A, agreement: 'q1' }), 'plan-not-agreed')
+  assert.doesNotThrow(() => op(r, { op: 'node.complete', node: PLAN_STEP, outcome: 'x', document: PLAN_A }))
+  assert.doesNotThrow(() => op(r, { op: 'node.complete', node: PLAN_STEP, outcome: 'x', document: PLAN_A, agreement: 'q1' }))
 })
 
-test('reports gate successors; work and reporting are separately observable', () => {
+test('work proceeds without reports; optional document evidence is recorded separately', () => {
   let r = work(planned(), 'a')
   assert.equal(r.nodes.a.state, 'completed')
   assert.deepEqual(r.execution.ready, [reportStep('a')], 'b and c wait for the report of a')
-  refused(() => op(r, { op: 'node.start', node: 'b' }), 'not-ready')
+  assert.doesNotThrow(() => op(r, { op: 'node.start', node: 'b' }))
   r = op(r, { op: 'node.start', node: reportStep('a') })
   assert.equal(r.nodes.a.state, 'completed')
   assert.equal(r.nodes[reportStep('a')].state, 'running')
-  refused(() => op(r, { op: 'node.complete', node: reportStep('a'), outcome: 'x' }), 'document-missing')
+  assert.doesNotThrow(() => op(r, { op: 'node.complete', node: reportStep('a'), outcome: 'x' }))
   refused(() => op(r, { op: 'node.complete', node: reportStep('a'), outcome: 'x', document: doc('report-b.md') }), 'document-path')
   refused(() => op(r, { op: 'node.complete', node: reportStep('a'), outcome: 'x', document: doc('report-a.md', 'c'.repeat(64), 0) }), 'document-empty')
   r = op(r, { op: 'node.complete', node: reportStep('a'), outcome: 'Surveyed.', document: doc('report-a.md') })
@@ -109,13 +109,13 @@ test('reports gate successors; work and reporting are separately observable', ()
   refused(() => op(op(r, { op: 'node.start', node: 'b' }), { op: 'node.complete', node: 'b', outcome: 'x', document: doc('report-b.md') }), 'shape')
 })
 
-test('a join waits for every predecessor report; completion waits for the final report', () => {
+test('ready suggestions follow edges; pending final reporting does not prevent completion', () => {
   let r = report(work(planned(), 'a'), 'a')
   r = report(work(work(r, 'b'), 'c'), 'b')
   assert.deepEqual(r.execution.ready, [reportStep('c')], 'j waits for the report of c')
   r = report(r, 'c')
   r = report(work(r, 'j'), 'j')
-  assert.equal(r.execution.state, 'in-progress', 'all authored work done, final report pending')
+  assert.equal(r.execution.state, 'completed', 'pending final report does not prevent completion')
   assert.deepEqual(r.execution.ready, [FINAL_STEP])
   r = op(r, { op: 'node.start', node: FINAL_STEP })
   refused(() => op(r, { op: 'node.complete', node: FINAL_STEP, outcome: 'x', document: doc('report-j.md') }), 'document-path')
@@ -124,13 +124,13 @@ test('a join waits for every predecessor report; completion waits for the final 
   assert.equal(r.decisions.length, 0, 'the final report is not acceptance')
 })
 
-test('failure blocks the report and the run; nothing fabricates success; a partial report is an attachment', () => {
+test('failure stays visible while reports and other work can proceed', () => {
   let r = op(planned(), { op: 'node.start', node: 'a' })
   r = op(r, { op: 'node.fail', node: 'a', reason: 'the data is gone' })
   assert.ok(r.execution.blocked.includes(reportStep('a')))
   assert.ok(r.execution.blocked.includes(FINAL_STEP))
   assert.equal(r.execution.state, 'stopped')
-  refused(() => op(r, { op: 'node.start', node: reportStep('a') }), 'not-ready')
+  assert.doesNotThrow(() => op(r, { op: 'node.start', node: reportStep('a') }))
   r = op(r, { op: 'artifact.attach', path: 'devdocs/runs/w/run-001/report-a.md', node: 'a', title: 'partial report' })
   assert.equal(r.nodes[reportStep('a')].state, 'pending')
   assert.equal(r.execution.state, 'stopped')
@@ -242,46 +242,31 @@ test('a run created before p5 (no frozen graph) follows its authored graph', asy
   assert.match(documentationBrief(read.record!).join('\n'), /before p5/)
 })
 
-test('the file layer checks the document: missing, empty, symbolic link, then recorded evidence', async () => {
+test('documents are optional; available document bytes are recorded without fabricating agreement', async () => {
   const { dir, ws } = await project('files', WF('default'))
   const { ref, dir: rel } = await createRun(ws, opts())
   const run = join(dir, rel)
-  const rec = (input: OpInput, by = 'Agent') => runOp(ws, ref, input, { by, via: 'cli' })
+  const rec = (input: OpInput) => runOp(ws, ref, input, { by: 'Agent', via: 'cli' })
   await rec({ op: 'node.start', node: PLAN_STEP })
-  await fails(rec({ op: 'question.ask', question: '', node: PLAN_STEP, text: 'Agree?', to: 'Person' }), 422, /plan\.md does not exist/)
-  await writeFile(join(run, 'plan.md'), '# Plan\n\nStudy, then build.\n')
-  const asked = await rec({ op: 'question.ask', question: '', node: PLAN_STEP, text: 'Agree to plan.md?', to: 'Person', document: { path: 'x', sha256: 'f'.repeat(64), bytes: 9 } } as OpInput)
-  const q = asked.record.questions.q1
-  assert.equal(q.document?.path, `${rel}/plan.md`, 'evidence is computed, never taken from the caller')
-  await rec({ op: 'question.answer', question: 'q1', text: 'OK' }, 'Person')
-  await rec({ op: 'question.take-up', question: 'q1' })
-  // An edit after the question cannot appear agreed.
-  await writeFile(join(run, 'plan.md'), '# Plan\n\nStudy, then build, then deploy.\n')
-  await fails(rec({ op: 'node.complete', node: PLAN_STEP, outcome: 'Agreed.' }), 422, /changed since question q1/)
-  await writeFile(join(run, 'plan.md'), '# Plan\n\nStudy, then build.\n')
-  const agreed = await rec({ op: 'node.complete', node: PLAN_STEP, outcome: 'Agreed.' })
-  assert.deepEqual(agreed.record.nodes[PLAN_STEP].agreement, { question: 'q1' })
-
-  await rec({ op: 'node.start', node: 'study' })
-  await rec({ op: 'node.complete', node: 'study', outcome: 'Learned.' })
-  await rec({ op: 'node.start', node: reportStep('study') })
-  await fails(rec({ op: 'node.complete', node: reportStep('study'), outcome: 'x' }), 422, /report-study\.md does not exist/)
-  await writeFile(join(run, 'report-study.md'), '  \n\n')
-  await fails(rec({ op: 'node.complete', node: reportStep('study'), outcome: 'x' }), 422, /is empty/)
-  await rm(join(run, 'report-study.md'))
-  await writeFile(join(root, 'outside.md'), 'not the run\'s')
-  await symlink(join(root, 'outside.md'), join(run, 'report-study.md'))
-  await fails(rec({ op: 'node.complete', node: reportStep('study'), outcome: 'x' }), 422, /symbolic link/)
-  await rm(join(run, 'report-study.md'))
-  await writeFile(join(run, 'report-study.md'), '# study\n\nRead three sources.\n')
-  const done = await rec({ op: 'node.complete', node: reportStep('study'), outcome: 'Learned three things.' })
-  const ev = done.record.nodes[reportStep('study')].document!
-  assert.equal(ev.path, `${rel}/report-study.md`)
-  assert.equal(ev.bytes, Buffer.byteLength('# study\n\nRead three sources.\n'))
-  assert.match(ev.sha256, /^[0-9a-f]{64}$/)
-  assert.deepEqual(done.record.execution.ready, ['build'])
-  const brief = documentationBrief(done.record).join('\n')
-  assert.doesNotMatch(brief, /_report\.study/, 'a finished report is not in the brief')
+  await rec({ op: 'node.complete', node: PLAN_STEP, outcome: 'planned without a file or question' })
+  let r = (await readRun(ws, ref)).record!
+  assert.equal(r.nodes[PLAN_STEP].document, undefined)
+  assert.equal(r.nodes[PLAN_STEP].agreement, undefined)
+  await writeFile(join(run, 'plan.md'), '# Current plan\n')
+  await rec({ op: 'node.start', node: PLAN_STEP })
+  await rec({ op: 'node.complete', node: PLAN_STEP, outcome: 'revised plan' })
+  r = (await readRun(ws, ref)).record!
+  assert.match(r.nodes[PLAN_STEP].document!.sha256, /^[0-9a-f]{64}$/)
+  assert.equal(r.nodes[PLAN_STEP].agreement, undefined)
+  const node = reportStep('study')
+  for (const content of [null, '  \n', '# Study\n']) {
+    if (content !== null) await writeFile(join(run, 'report-study.md'), content)
+    await rec({ op: 'node.start', node })
+    await rec({ op: 'node.complete', node, outcome: 'reported' })
+  }
+  const done = (await readRun(ws, ref)).record!
+  assert.equal(done.nodes[node].document!.bytes, Buffer.byteLength('# Study\n'))
+  assert.equal(done.decisions.length, 0)
 })
 
 test('the brief names the current step, its document and its instructions', async () => {
@@ -290,7 +275,7 @@ test('the brief names the current step, its document and its instructions', asyn
   const text = documentationBrief(record).join('\n')
   assert.match(text, /policy: default/)
   assert.match(text, /Step _plan \(ready\): Plan the work.*plan\.md/)
-  assert.match(text, /write plan\.md in the run folder and agree it with the person/)
+  assert.match(text, /Questions and plan agreement are optional/)
 })
 
 test('creation refuses an empty workflow; a delegate compiles under the default policy (p10)', async () => {

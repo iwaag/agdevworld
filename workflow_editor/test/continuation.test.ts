@@ -155,7 +155,7 @@ test('pending input survives a failed launch and an interruption; several inputs
   x.close()
 })
 
-test('input after the snapshot: the state read shows it, and the write-time refusal still holds', async () => {
+test('input after the snapshot remains visible without blocking work', async () => {
   const { x, space, ref } = await setup()
   const c1 = await claim(x)
   const seq = (await record(space, ref)).seq
@@ -164,7 +164,8 @@ test('input after the snapshot: the state read shows it, and the write-time refu
   const s = describeState(rec, seq)
   assert.match(s, /Recorded after seq \d+ \(1\):\n {2}\d+ instruction\.receive by Test Person \(instruction i1\): Also add a legend\./)
   assert.match(s, /not yet acknowledged \(1\)/)
-  await assert.rejects(report(space, ref, c1.attempt.id, { op: 'node.start', node: 'scope' }), /unacknowledged|not yet acknowledged|acknowledge/)
+  await report(space, ref, c1.attempt.id, { op: 'node.start', node: 'scope' })
+  assert.equal((await record(space, ref)).nodes.scope.state, 'running')
   x.close()
 })
 

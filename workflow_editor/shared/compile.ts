@@ -31,7 +31,7 @@ import { findCycle } from './validate.ts'
 // v3 (p8/ex2): the custom policy; graphs carry their normalized
 // `documentation`. Default and manual graphs are node for node and edge for
 // edge what v2 made, step instructions included.
-export const COMPILER_VERSION = 'ag.wfe-compile.v3'
+export const COMPILER_VERSION = 'ag.wfe-compile.v4'
 
 // Generated identities start with "_", which an authored id never does
 // (ID_PATTERN), so the two can never collide.
@@ -72,39 +72,14 @@ export const hasDocSteps = (g: Pick<EffectiveGraph, 'nodes'> | null | undefined)
 
 export type CompileResult = { ok: true; graph: EffectiveGraph } | { ok: false; code: string; message: string }
 
-const PLAN_INSTRUCTIONS = [
-  'Before any authored work, write plan.md in the run folder and agree it with the person.',
-  'plan.md states the intended result, the sequence of work, how the result will be verified, the restrictions that apply (bindings, the person\'s instructions) and the open questions.',
-  'Then ask the person to agree to it (a question from this step), with enough context to answer and a reference to plan.md. The question records which plan.md it asked about.',
-  'If the answer asks for changes, revise plan.md and ask again. Complete this step only after taking up an answer that agrees to the current plan.md; a withdrawn question is not agreement.',
-  'This agreement is about the proposed work. It is not a definition approval and not acceptance of the result.',
-].join('\n')
-
-const REPORT_INSTRUCTIONS = (node: string) => [
-  `Node "${node}" is complete; write report-${node}.md in the run folder before its successors start.`,
-  'State what was done or decided, the evidence or checks that support it, the remaining uncertainty, limitations or blockers, and the relevant artifacts and next action.',
-  'A talk report can be brief: the question, the answer and the resulting decision. Do not invent checks, and do not imply that an unchanged artifact was modified.',
-  'Complete this step with a short outcome (one to three lines: the result, the main verification fact, the next action); it is what coordination messages quote.',
-].join('\n')
-
-const FINAL_INSTRUCTIONS = [
-  'All authored work and its reports are complete; write report.md in the run folder.',
-  'Summarize the request, the delivered result, its verification, the remaining work, and any human decisions already recorded. Link to the per-node reports rather than copying them.',
-  'Completing this step completes the execution. It is not acceptance of the result: that stays the person\'s explicit decision.',
-  'Complete it with a short outcome (the overall result, limitations, what remains for the person to review).',
-].join('\n')
-// Without node reports (p8/ex2) there are none to link to: the record's
-// outcomes, artifacts, questions and answers are the run's evidence.
-const FINAL_INSTRUCTIONS_UNREPORTED = [
-  'All authored work is complete; write report.md in the run folder.',
-  'Summarize the request, the delivered result, its verification, the remaining work, and any human decisions already recorded. This run has no per-node reports: cite the nodes\' recorded outcomes and artifacts, and the questions and answers, rather than restating the work.',
-  'Completing this step completes the execution. It is not acceptance of the result: that stays the person\'s explicit decision.',
-  'Complete it with a short outcome (the overall result, limitations, what remains for the person to review).',
-].join('\n')
+const PLAN_INSTRUCTIONS = 'A plan can record the intended result, approach, checks and open questions. Questions and plan agreement are optional records.'
+const REPORT_INSTRUCTIONS = (node: string) => `A report for ${node} (report-${node}.md) can record work, evidence, uncertainty and next actions.`
+const FINAL_INSTRUCTIONS = 'A final report can summarize the delivered work, actual checks and remaining work. Completion and integration require no acceptance.'
+const FINAL_INSTRUCTIONS_UNREPORTED = FINAL_INSTRUCTIONS
 
 function step(kind: StepKind, node: string | null, reports = true): StepSpec {
   const output = DOCUMENT_OF[kind](node)
-  if (kind === 'plan') return { kind, for: null, output, purpose: 'Plan the work and agree it with the person', instructions: PLAN_INSTRUCTIONS }
+  if (kind === 'plan') return { kind, for: null, output, purpose: 'Plan the work', instructions: PLAN_INSTRUCTIONS }
   if (kind === 'report') return { kind, for: node, output, purpose: `Report on ${node}`, instructions: REPORT_INSTRUCTIONS(node!) }
   return { kind, for: null, output, purpose: 'Final report of the run', instructions: reports ? FINAL_INSTRUCTIONS : FINAL_INSTRUCTIONS_UNREPORTED }
 }

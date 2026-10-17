@@ -10,7 +10,7 @@ import { join } from 'node:path'
 import { approvalStates, semanticDigest, canonicalJson } from '../shared/canonical.ts'
 import { COMPILER_VERSION, compile, docStepsOf, FINAL_STEP, hasDocSteps, PLAN_STEP, reportStep, type EffectiveGraph } from '../shared/compile.ts'
 import { cloneWorkflow, docSteps, emptyWorkflow, type DocSteps, type Workflow } from '../shared/model.ts'
-import { notableEvents, operate, readiness, RunError, type OpInput, type RunGraph, type RunRecord } from '../shared/run.ts'
+import { notableEvents, operate, readiness, type OpInput, type RunGraph, type RunRecord } from '../shared/run.ts'
 import { validateWorkflow } from '../shared/validate.ts'
 import { newWorkflowText, parseWorkflow, renderWorkflow } from '../server/yamlDoc.ts'
 import { createProject } from '../server/create.ts'
@@ -70,7 +70,7 @@ test('all eight combinations: the generated steps chosen, wired so that every au
     }
     assert.ok(Object.values(states).every(s => s.state === 'completed'), `${what}: every node becomes ready in turn`)
     // The final report's instructions only point at reports that exist.
-    if (d.final) assert.equal(/its reports are complete/.test(g.nodes[FINAL_STEP].step!.instructions), d.reports, `${what}: final instructions`)
+    if (d.final) assert.match(g.nodes[FINAL_STEP].step!.instructions, /require no acceptance/)
   }
 })
 
@@ -85,7 +85,7 @@ test('default and manual compile exactly as before (v2 nodes and edges); custom 
   assert.deepEqual(docStepsOf({ policy: 'default' }), { plan: true, reports: true, final: true })
   assert.deepEqual(docStepsOf({ policy: 'manual' }), { plan: false, reports: false, final: false })
   // The v2 final report instructions are unchanged under default.
-  assert.match(def.nodes[FINAL_STEP].step!.instructions, /^All authored work and its reports are complete; write report\.md in the run folder\./)
+  assert.match(def.nodes[FINAL_STEP].step!.instructions, /require no acceptance/)
 })
 
 test('validation: custom declares all three; default and manual declare none; values are booleans', () => {
@@ -164,7 +164,7 @@ test('a run without reports tells of each completed node; a run with them tells 
   assert.equal(s.execution.state, 'completed')
 })
 
-test('an adjustment keeps the policy and its steps: a name or a step that changes is refused', () => {
+test('an adjustment can change documentation policy and generated steps', () => {
   const base = ok(wf(custom({ plan: false, reports: false, final: true }), ['a'], []))
   const { r, op } = runOf(base)
   const started = op(r, { op: 'node.start', node: 'a' })
@@ -172,7 +172,7 @@ test('an adjustment keeps the policy and its steps: a name or a step that change
   const adjust = (next: EffectiveGraph) => operate(done, { op: 'run.adjust', revision: 'r2', parent: 'r1', file: 'definition/r2/w.yaml', sha256: 'a'.repeat(64), definitionDigest: `sha256:${'b'.repeat(64)}`, effective: next, reason: 'more', source: { kind: 'person', by: 'P' } }, { at: tick(), by: 'P', via: 'test', graph: { nodes: base.nodes, edges: base.edges } })
   const grown = ok(wf(custom({ plan: false, reports: false, final: true }), ['a', 'b'], [['a', 'b']]))
   assert.equal(adjust(grown).definition.active, 'r2', 'the same setting adjusts')
-  const refused = (g: EffectiveGraph) => assert.throws(() => adjust(g), (e: unknown) => e instanceof RunError && e.code === 'adjust-access')
+  const refused = (g: EffectiveGraph) => assert.equal(adjust(g).definition.active, 'r2')
   refused(ok(wf(custom({ plan: false, reports: true, final: true }), ['a', 'b'], [['a', 'b']])))
   refused({ ...grown, policy: 'default' })
 })
@@ -187,7 +187,7 @@ after(async () => { await rm(root, { recursive: true, force: true }) })
 
 const FILE = (doc: string) => `schema: ag.workflow.v2\nid: free\nname: Free\nintent: Grow the work in conversation.\ndocumentation:\n${doc}\nnodes:\n  talk: {type: talk, name: Talk, description: Understand the request and agree the next work.}\n`
 
-test('file layer: a custom run freezes its steps, briefs them, refuses a changed setting in an adjustment', async () => {
+test('file layer: custom steps are frozen, briefed and revisable', async () => {
   const registry = join(root, 'r.registry.json')
   const dir = join(root, 'pj-cp')
   const made = await createProject({ dir, id: 'cp', name: 'cp', intent: 'x', goals: ['g'], devdocs: 'directory', sourcesDir: join(root, 'sources'), registryFile: registry })
@@ -197,7 +197,7 @@ test('file layer: a custom run freezes its steps, briefs them, refuses a changed
   await writeFile(join(dir, 'devdocs', 'workflows', 'free.yaml'), text)
   const run = await createRun(ws, { workflow: 'free', input: { kind: 'braindump', text: 'Please.', author: 'Person' }, executor: { name: 'Agent', backend: null }, by: 'Agent', via: 'cli' })
   const eff = run.record.definition.effective!
-  assert.equal(eff.compiler, 'ag.wfe-compile.v3')
+  assert.equal(eff.compiler, 'ag.wfe-compile.v4')
   assert.deepEqual(eff.documentation, { plan: false, reports: false, final: true })
   assert.deepEqual(Object.keys(run.record.nodes).sort(), ['_final-report', 'talk'])
   // The run reads back usable; a later edit of the source does not touch it.
@@ -211,7 +211,7 @@ test('file layer: a custom run freezes its steps, briefs them, refuses a changed
   const frozen = await readFile(join(dir, 'devdocs', 'runs', 'free', run.ref.run, 'definition', 'free.yaml'), 'utf8')
   const changed = frozen.replace('  reports: false', '  reports: true').replace('nodes:\n', 'nodes:\n  more: {type: do, name: More, description: More work.}\n') + 'edges:\n  - {from: talk, to: more}\n'
   const res = await adjustRun(ws, run.ref, { text: changed, reason: 'more', source: { kind: 'person', by: 'P' }, dryRun: true }, { via: 'cli', by: 'P' })
-  assert.ok(!res.ok && res.problems.some(p => p.code === 'adjust-access'), JSON.stringify(res.problems))
+  assert.ok(res.ok, JSON.stringify(res.problems))
   const same = frozen.replace('nodes:\n', 'nodes:\n  more: {type: do, name: More, description: More work.}\n') + 'edges:\n  - {from: talk, to: more}\n'
   const fine = await adjustRun(ws, run.ref, { text: same, reason: 'more', source: { kind: 'person', by: 'P' }, dryRun: true }, { via: 'cli', by: 'P' })
   assert.ok(fine.ok, JSON.stringify(fine.problems))
@@ -257,6 +257,6 @@ test('a run frozen by compiler v2 (no documentation field) reads, runs and adjus
   assert.ok(res.ok, JSON.stringify(res.problems))
   const after = await readRun(ws, run.ref)
   assert.ok(after.record, after.problem?.message)
-  assert.equal(after.record!.definition.revisions!.at(-1)!.effective.compiler, 'ag.wfe-compile.v3')
+  assert.equal(after.record!.definition.revisions!.at(-1)!.effective.compiler, 'ag.wfe-compile.v4')
   assert.deepEqual(Object.keys(after.record!.nodes).sort(), ['_final-report', '_plan', '_report.a', '_report.b', 'a', 'b'])
 })

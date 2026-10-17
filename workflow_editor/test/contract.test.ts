@@ -58,8 +58,8 @@ test('example project and valid workflows parse and validate cleanly', async () 
 test('the gaps draft reports each broken reference', async () => {
   const w = await load('project/workflows/draft-gaps.yaml')
   const issues = validateWorkflow(w, await projectContext('draft-gaps.yaml'))
-  assert.deepEqual(codes(issues), ['delegate-target-unknown', 'edge-to-missing', 'node-binding-missing', 'repository-missing'])
-  assert.ok(codes(issues, 'warning').includes('repository-uninitialized'))
+  assert.deepEqual(codes(issues), ['delegate-target-unknown', 'edge-to-missing', 'node-binding-missing'])
+  assert.ok(codes(issues, 'warning').includes('repository-uninitialized') && codes(issues, 'warning').includes('repository-missing'))
 })
 
 test('unsupported YAML is rejected without a model', async () => {

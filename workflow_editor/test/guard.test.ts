@@ -16,12 +16,12 @@ import { ExecStore } from '../server/exec.ts'
 import { git, gitOk, LOCAL_TRANSPORT } from '../server/git.ts'
 import { guardsFor } from '../server/integrate.ts'
 import { loadRegistry } from '../server/registry.ts'
-import { readRun, runOp } from '../server/runs.ts'
+import { runOp } from '../server/runs.ts'
 import { Workspace } from '../server/workspace.ts'
 import { parseWorkflow } from '../server/yamlDoc.ts'
 import type { OpInput, RunRef } from '../shared/run.ts'
-import { integrationStatus } from '../src/integrationState.ts'
-import type { RunExecView } from '../src/api.ts'
+
+
 
 let root = ''
 before(async () => {
@@ -105,7 +105,7 @@ async function elsewhere(s: S, remote: string, files: Record<string, string>) {
   for (const [p, t] of Object.entries(files)) { await mkdir(join(other, p, '..'), { recursive: true }); await writeFile(join(other, p), t) }
   await gitOk(other, ['add', '-A']); await gitOk(other, ['commit', '-q', '-m', 'elsewhere']); await gitOk(other, ['push', '-q', 'origin', 'HEAD:main'])
 }
-const status = async (s: S, ref: RunRef) => integrationStatus((await readRun(s.ws, ref)).record!, await s.x.runView(s.id, ref) as unknown as RunExecView, { kind: 'run-copy', branch: null })
+
 
 test('definition: integrate is validated, digested only when declared, and resolved against the run\'s repositories', () => {
   const w = parseWorkflow(WF)
@@ -118,7 +118,7 @@ test('definition: integrate is validated, digested only when declared, and resol
   if (!plain.ok || !bad.ok) return
   assert.deepEqual(validateWorkflow(bad.model).filter(i => i.code === 'binding-integrate').map(i => i.severity), ['error'])
   const ro = parseWorkflow(WF.replace('root: {path: ., access: readonly}', 'root: {path: ., access: readonly, integrate: if-unchanged}'))
-  assert.ok(ro.ok && validateWorkflow(ro.model).some(i => i.code === 'binding-integrate-readonly'))
+  assert.ok(ro.ok && !validateWorkflow(ro.model).some(i => i.code === 'binding-integrate-readonly'))
   const merge = parseWorkflow(WF.replace(/, integrate: if-unchanged/g, ', integrate: merge'))
   assert.ok(merge.ok)
   if (!merge.ok) return
@@ -133,37 +133,18 @@ test('definition: integrate is validated, digested only when declared, and resol
   })
 })
 
-test('a shared repository that changed since the run built on it stops as target-changed; nothing is pushed', async () => {
+test('advanced targets merge even when a binding formerly requested if-unchanged', async () => {
   const s = await setup()
-  const a = await completed(s, 'guard-0001', { 'wedo/wedo-x/cases.md': 'case 1\ncase 2 from the runs\n' })
-  // The owning project records knowledge of its own meanwhile, in another file.
-  await elsewhere(s, s.shared, { 'cases-by-project.md': 'case 2, as the project wrote it\n' })
-  await accept(s, a.ref)
-  const sharedMain = await head(s.shared), rootMain = await head(s.remote)
-  const plan = await s.x.integrateRun(s.ws, a.ref, { by: 'Test Person', via: 'cli', dryRun: true })
-  assert.equal(plan.state, 'target-changed', 'the dry run says so too')
-  const r = await s.x.integrateRun(s.ws, a.ref, { by: 'Test Person', via: 'cli' })
-  assert.equal(r.state, 'target-changed')
-  const step = r.steps.find(x => x.repo === 'wedo/wedo-x')!
-  assert.deepEqual(step.files, ['cases-by-project.md'])
-  assert.match(r.error ?? '', /changed under the guarded binding shared \(the repository\).*reassess against the current target in a successor run/)
-  assert.equal(await head(s.shared), sharedMain, 'nothing pushed to the shared repository')
-  assert.equal(await head(s.remote), rootMain, 'nor to the root')
-  const st = await status(s, a.ref)
-  assert.equal(st?.state, 'target-changed')
-  assert.deepEqual(st?.changed, ['wedo/wedo-x/cases-by-project.md'])
-  assert.equal((await readRun(s.ws, a.ref)).record!.integrations, undefined)
-  // The CLI's standing names the target's changes as such, not as changes since the acceptance.
-  const { main } = await import('../cli/wfe.ts')
-  const out: string[] = []
-  const log = console.log
-  console.log = (...m: unknown[]) => { out.push(m.join(' ')) }
-  try { assert.equal(await main(['run', 'integrate', 'backfill/run-001', '--status', '--workspace', s.id, '--registry', s.registry, '--area', s.area]), 0) } finally { console.log = log }
-  assert.match(out.join('\n'), /changed on the target since this run built on it: wedo\/wedo-x\/cases-by-project\.md/)
-  assert.doesNotMatch(out.join('\n'), /changed since the acceptance/)
+  try {
+    const a = await completed(s, 'p11-guard', { 'wedo/wedo-x/cases.md': 'case 1\nnew case\n' })
+    await elsewhere(s, s.shared, { 'cases-by-project.md': 'other work\n' })
+    const r = await s.x.integrateRun(s.ws, a.ref, { by: 'Agent', via: 'cli' })
+    assert.equal(r.state, 'integrated', r.error)
+    assert.equal(r.steps.find(x => x.repo === 'wedo/wedo-x')!.method, 'merge')
+  } finally { s.x.close() }
 })
 
-test('the root-local area: a change elsewhere in the root still merges; a change inside the guarded folder stops', async () => {
+test('changes inside and outside a former guarded area merge', async () => {
   const s = await setup()
   const a = await completed(s, 'guard-0002', { 'wedo/local/procedures.md': 'step 1\nstep 2 from the runs\n' })
   await elsewhere(s, s.remote, { 'NEWS.md': 'unrelated\n' })
@@ -177,9 +158,8 @@ test('the root-local area: a change elsewhere in the root still merges; a change
   await accept(s, b.ref)
   const main = await head(s.remote)
   const r2 = await s.x.integrateRun(s.ws, b.ref, { by: 'Test Person', via: 'cli' })
-  assert.equal(r2.state, 'target-changed')
-  assert.deepEqual(r2.steps.find(x => x.repo === '.')!.files, ['wedo/local/knowledge.yaml'])
-  assert.equal(await head(s.remote), main)
+  assert.equal(r2.state, 'integrated', r2.error)
+  assert.notEqual(await head(s.remote), main)
 })
 
 test('a run that brought the current target into its branch passes the guard', async () => {

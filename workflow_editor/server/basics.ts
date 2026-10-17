@@ -44,8 +44,8 @@ export function freeworkWorkflow(settings: Pick<BasicSettings, 'repositories' | 
   const w = emptyWorkflow(id, name)
   w.intent = [
     'Serve the person\'s request starting from their braindump and one conversation.',
-    'Agree in that conversation what to do, add that work to the run, do it,',
-    'and talk again whenever the person needs to be consulted, until the request is served.',
+    'Work out what to do, add that work to the run, do it,',
+    'and talk with the person whenever that helps, until the request is served.',
   ].join('\n')
   w.documentation = { policy: 'custom', plan: false, reports: false, final: true }
   w.repositories = structuredClone(settings.repositories)

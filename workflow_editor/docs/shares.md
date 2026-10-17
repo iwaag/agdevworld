@@ -136,6 +136,16 @@ again and ask again.
   — taken from any run record or received by itself — against this host's
   share: how another PC verifies a delivery it got only by reference.
 
+## Large files and run branches
+
+A run branch never carries large files. A checkpoint leaves a file over
+50 MiB (`WFE_CHECKPOINT_MAX_BYTES`) uncommitted in the copy and records a
+publication problem naming it; a run branch whose unpublished commits carry
+such a blob (the agent's own commit) is not pushed. Large outputs go to a
+shared area (`wfe run publish`). Found in project_migration p6 Step 7, where
+materials re-saved with embedded textures (≈2 GB) reached a run branch and
+would have entered the project's history at integration.
+
 ## Where things live
 
 | Fact | Authority |

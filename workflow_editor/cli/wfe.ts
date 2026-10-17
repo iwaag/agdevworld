@@ -158,6 +158,18 @@ function workflowLine(w: WorkflowSummary) {
 // ---- help --------------------------------------------------------------------
 
 const HELP: Record<string, string> = {
+  boast: `wfe boast [status] <project> [--source worktree] [--workspace <id>] [--refresh]
+wfe boast reference
+
+boast/index.html is the page displayed in the Project Editor's Boast area.
+It can freely introduce the project's capabilities and outputs using HTML,
+CSS and JavaScript. Related files can live in the same directory.
+
+status     whether the page is published on the project's main (or, with
+           --source worktree, in a workspace's working tree), the commit,
+           and the addresses where the Project Editor and the page open
+reference  the optional technical reference (docs/boast.md): paths,
+           publication sources, media, browser capabilities, messages`,
   nodes: NODES_HELP,
   projects: PROJECTS_HELP,
   create: `wfe create <dir> --name <name> [--id <id>] [--intent <text>] [--goal <text>]... [--devdocs directory|submodule] [--devdocs-source <path|url>] [--resume]
@@ -548,6 +560,7 @@ Projects and workspaces
   notify <subcommand>       Zulip coordination: status, deliveries, claim, resolve … (autolab delivers)
   present <subcommand>      presentations of a run's result: register, start, status, stop, reconcile
   share <subcommand>        shared areas on this host: list, resolve, ls, verify (docs/shares.md)
+  boast [status] <project>  a project's Boast page (boast/index.html): published or previewed; reference
 
 Workflows (by file name or id)
   workflow new <id>         create devdocs/workflows/<id>.yaml from the template
@@ -1284,7 +1297,7 @@ const COMMANDS: Record<string, (p: Parsed) => Promise<number>> = {
   runs: cmdRuns, observe: cmdObserve, projects: cmdProjects, run: cmdRun, delegate: cmdDelegate, present: cmdPresent, share: cmdShare, project: cmdProject, repo: cmdRepo, dashboard: cmdDashboard, exec: cmdExec, request: cmdRequest, notify: cmdNotify, intake: cmdIntake,
   create: cmdCreate, register: cmdRegister, list: cmdList, status: cmdStatus, validate: cmdValidate,
   approve: cmdApprove, arrange: cmdArrange, 'add-repo': cmdAddRepo, workflow: cmdWorkflow, serve: cmdServe, setup: cmdSetup,
-  version: cmdVersion, nodes: cmdNodes,
+  version: cmdVersion, nodes: cmdNodes, boast: cmdBoast,
 }
 
 // Project access (project_migration p4): reads of any managed project.
@@ -1305,6 +1318,33 @@ async function cmdNodes(p: Parsed): Promise<number> {
     workspace: () => workspace(p), workflowFile, out,
     usage: m => new UsageError(m), refused: (m, d) => new Refused(m, d),
   })
+}
+
+// Boast (p12, docs/boast.md): a project's showcase page, read-only.
+async function cmdBoast(p: Parsed): Promise<number> {
+  const [first, ...rest] = p.positional
+  if (first === 'reference') { console.log(readFileSync(join(dirname(fileURLToPath(import.meta.url)), '..', 'docs', 'boast.md'), 'utf8')); return 0 }
+  const project = first === 'status' ? rest[0] : first
+  if (!project) throw new UsageError('boast needs a project id')
+  const source = opt(p, 'source') ?? 'committed'
+  if (source !== 'committed' && source !== 'worktree') throw new UsageError('--source is committed or worktree')
+  const g = await giteaOf(p)
+  const { boastState } = await import('../server/boast.ts')
+  const { loadPresentConfig } = await import('../server/present.ts')
+  const s = await boastState({ registryFile: registryFile(p), area: areaDir(p), gitea: g, giteaProblem: g ? undefined : `no Gitea setting at ${giteaFile(p)}`, refresh: p.flags.has('refresh') }, project, { source, workspace: opt(p, 'workspace') })
+  const base = (() => { try { return loadPresentConfig(areaDir(p)).answerBase } catch { return null } })()
+  const reg = await loadRegistry(registryFile(p)).catch(() => null)
+  const ws = s.workspace?.id ?? reg?.workspaces.find(w => w.project === project)?.id
+  const editor = base && ws ? `${base}#/ws/${encodeURIComponent(ws)}` : null
+  const page = base && s.entry ? new URL(s.entry, base).href : null
+  const fetch = s.provenance.fetch
+  out([
+    `${project}: ${s.state === 'present' ? 'boast/index.html is' : 'no boast/index.html'} ${s.source === 'committed' ? `on ${s.provenance.revision.ref ?? 'main'} at ${s.commit}` : `in workspace ${s.workspace?.id}'s working tree (HEAD ${short(s.commit)}${s.workspace?.dirty ? ', boast/ has uncommitted changes' : ''})`}`,
+    ...(fetch?.state === 'stale' ? [`  fetched ${fetch.at}; Gitea could not be read now: ${fetch.error}`] : []),
+    ...(page ? [`  page:           ${page}`] : []),
+    ...(editor ? [`  Project Editor: ${editor}`] : base ? [] : ['  (present.json has no answerBase: no LAN address to name)']),
+  ].join('\n'), { ...s, urls: { page, editor } })
+  return 0
 }
 
 async function cmdVersion(): Promise<number> {

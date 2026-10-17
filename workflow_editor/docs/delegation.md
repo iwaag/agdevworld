@@ -18,7 +18,7 @@ between two runs and the delivery of a few kinds of fact between them.
 | The parent's agent | what to request, whether to answer a question itself or ask its person first, how to answer, whether the result serves the request (its disposition), whether to replace a failed child |
 | The child's agent | how to do the work, what to ask, how to read an answer, when to present and how to record the decision a confirmation is |
 | The system (WFE, its intake, its notifier) | identities, dispatch intent, delivery and its journal, binding the child to the intent, relaying the child's events to the parent, queueing the parent's continuation, refusing what a record does not allow |
-| The person (the parent's requester) | everything beyond the parent's entrusted scope: the child's result acceptance unless the workflow grants it to the parent (`accepts`), and the parent's own result |
+| The person (the parent's requester) | the parent's own result, and whatever the parent's agent chooses to ask them |
 
 ## Definition
 
@@ -35,11 +35,12 @@ nodes:
 
 - `project` and `workflow` are a **portable target**: identities, never a
   workspace, a path, a channel or a topic.
-- `accepts` is the entrusted scope for the child's *result decision*:
-  `person` — the parent's agent answers the child's result confirmation only
-  with its own person's words (below); `parent` — the workflow's author lets
-  the parent's agent accept the child's result itself. Answers to every
-  other question of the child are within the parent agent's scope.
+- `accepts` records whom the workflow's author entrusted with the child's
+  *result decision*: `person` (the parent's person) or `parent` (the
+  parent's agent). Since p11 it is a record, not a gate: the parent's agent
+  answers every question of the child, the result confirmation included,
+  and the child records the decision its answer represents. Where a
+  workflow means the parent to judge, `accepts: parent` says so.
 - A delegate node binds no repository of its own work (it may name bindings
   for the files it reads back); its outcome is the delegation's result.
 
@@ -163,17 +164,16 @@ accepting the parent's result.
 | What to request | the parent's agent | the request file by hash; the original input beside it |
 | Answer a child's question (the plan agreement of a `_plan` step included) | the parent's agent | the answer text; `from` = the agent |
 | Answer within scope after asking its own person first | the parent's agent | `because: answer <q>` of the parent's own taken-up answer; `from` = that person |
-| Answer the child's **result confirmation** with `accepts: parent` | the parent's agent | the confirmation question it answers (subject hashes are the child's to check) |
-| … with `accepts: person` | the parent's person | `because: answer <q>` of the parent's taken-up answer from a person; refused otherwise (`delegate-scope`) |
+| Answer the child's **result confirmation** | the parent's agent (with `accepts: person`, usually after asking its person; `because: answer <q>` relays their words) | the confirmation question it answers (subject hashes are the child's to check) |
 | Whether the child's answer is agreement or acceptance | the child's agent (its reading, as for any request) | the child's existing rules: plan agreement binds plan.md's hash, a decision binds the presented subject |
 | Whether the result serves the request | the parent's agent | `delegation.dispose` naming the result event and its manifest digest |
 | Replace a failed child | the parent's agent | the old delegation closed first; the new one names its predecessor |
 | Cancel the child | whoever cancels it, explicitly | the child's own `run.cancel`; never implied by the parent's stop or cancellation |
 | Accept the parent's result | the parent's person | the parent's own decision |
 
-The child enforces the same boundary from its side: a result confirmation
-answered by its requester agent when its `entrustedBy.accepts` is `person`
-does not become a decision (`delegate-scope`); the agent asks again.
+Before p11 the child refused a decision from its requester agent when
+`entrustedBy.accepts` was `person` (`delegate-scope`); that gate is gone
+and the field remains in the record.
 
 ## Transitions
 
@@ -267,7 +267,7 @@ request/answer/instruction (`…#<seq>:delegation-<kind>@<d>`, critical, sent
 alone); `delegate.sqlite` (index rows: parent, target, child, how far the
 child's history was relayed).
 
-Error codes: `delegate-target`, `delegate-cycle`, `delegate-scope`,
+Error codes: `delegate-target`, `delegate-cycle`,
 `delegate-relation`, `delegation-open`, `delegation-predecessor`,
 `delegation-unknown`, `delegation-unbound`, `delegation-event`,
 `delegation-result`, `result-superseded`, `delegation-closed`,

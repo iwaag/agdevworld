@@ -1,6 +1,4 @@
-// project_migration p6 Step 7: large files never enter a run branch. A
-// checkpoint leaves a file over the limit uncommitted; a branch whose new
-// commits carry one (the agent's own commit) is not pushed. Both say so.
+// p11: checkpoints and agent commits can publish files above the former 50 MiB limit.
 import { after, before, test } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
@@ -20,9 +18,8 @@ before(async () => {
   await writeFile(join(root, 'gitconfig'), '[user]\n\tname = Test Person\n\temail = t@example.invalid\n[protocol "file"]\n\tallow = always\n')
   process.env.GIT_CONFIG_GLOBAL = join(root, 'gitconfig')
   process.env.WFE_LOCK_DIR = join(root, 'locks')
-  process.env.WFE_CHECKPOINT_MAX_BYTES = String(64 * 1024)
 })
-after(async () => { delete process.env.WFE_CHECKPOINT_MAX_BYTES; await rm(root, { recursive: true, force: true }) })
+after(async () => { await rm(root, { recursive: true, force: true }) })
 
 const WF = `schema: ag.workflow.v2
 documentation: {policy: manual}
@@ -55,7 +52,7 @@ async function setup() {
 }
 const report = (ws: Workspace, ref: RunRef, attempt: string, op: OpInput) => runOp(ws, ref, { ...op, attempt }, { by: 'autolab', via: 'cli' })
 
-test('a checkpoint leaves a file over the limit out and says so; the rest is committed and pushed', async () => {
+test('p11: a checkpoint commits and publishes intended content above the former size limit', async () => {
   const s = await setup()
   const { ref } = await s.x.request({ workspace: 'demo', workflow: 'ship', text: 'Build.', author: 'Test Person', receipt: 'receipt-oversized-1', via: 'browser' })
   const c = await s.x.claim('test'); assert.ok('attempt' in c)
@@ -63,31 +60,35 @@ test('a checkpoint leaves a file over the limit out and says so; the rest is com
   await report(s.ws, ref, c.attempt.id, { op: 'node.start', node: 'build' })
   await mkdir(join(c.cwd, 'materials'), { recursive: true })
   await writeFile(join(c.cwd, 'materials', 'small.tres'), 'small\n')
-  await writeFile(join(c.cwd, 'materials', 'huge.tres'), Buffer.alloc(200 * 1024, 1))
+  await writeFile(join(c.cwd, 'materials', 'huge.tres'), Buffer.alloc(51 * 1024 * 1024, 1))
   await report(s.ws, ref, c.attempt.id, { op: 'node.complete', node: 'build', outcome: 'built' })
   const f = await s.x.finished(c.attempt.id, { code: 0, signal: null })
   const root = (JSON.parse(f.checkpoint!.steps) as import('../server/publish.ts').RepoStep[]).find(st => st.repo === '.')!
-  assert.equal(f.checkpoint?.state, 'attention', JSON.stringify(f.checkpoint))
-  assert.deepEqual(root.oversized?.map(o => o.path), ['materials/huge.tres'])
-  assert.match(root.error ?? '', /huge\.tres \(0 MiB\)|huge\.tres/)
+  assert.equal(f.checkpoint?.state, 'published', JSON.stringify(f.checkpoint))
+  assert.equal(root.oversized, undefined)
+  assert.equal(root.error, undefined)
   const tree = await gitOk(s.remote, ['ls-tree', '-r', '--name-only', `refs/heads/${root.branch}`])
   assert.ok(tree.includes('materials/small.tres'))
-  assert.ok(!tree.includes('materials/huge.tres'))
+  assert.ok(tree.includes('materials/huge.tres'))
+  assert.equal(Number(await gitOk(s.remote, ['cat-file', '-s', `refs/heads/${root.branch}:materials/huge.tres`])), 51 * 1024 * 1024)
+  s.x.close()
 })
 
-test('a run branch whose own commit carries a large file is not pushed', async () => {
+test('p11: the agent can commit and publish a file above the former size limit', async () => {
   const s = await setup()
   const { ref } = await s.x.request({ workspace: 'demo', workflow: 'ship', text: 'Build.', author: 'Test Person', receipt: 'receipt-oversized-2', via: 'browser' })
   const c = await s.x.claim('test'); assert.ok('attempt' in c)
   s.x.started(c.attempt.id, process.pid)
   await report(s.ws, ref, c.attempt.id, { op: 'node.start', node: 'build' })
-  await writeFile(join(c.cwd, 'blob.bin'), Buffer.alloc(200 * 1024, 2))
+  await writeFile(join(c.cwd, 'blob.bin'), Buffer.alloc(51 * 1024 * 1024, 2))
   await gitOk(c.cwd, ['add', 'blob.bin']); await gitOk(c.cwd, ['commit', '-q', '-m', 'the agent commits a large file'])
   await report(s.ws, ref, c.attempt.id, { op: 'node.complete', node: 'build', outcome: 'built' })
   const f = await s.x.finished(c.attempt.id, { code: 0, signal: null })
   const root = (JSON.parse(f.checkpoint!.steps) as import('../server/publish.ts').RepoStep[]).find(st => st.repo === '.')!
-  assert.equal(f.checkpoint?.state, 'attention', JSON.stringify(f.checkpoint))
-  assert.match(root.error ?? '', /not pushed: .*blob\.bin/)
+  assert.equal(f.checkpoint?.state, 'published', JSON.stringify(f.checkpoint))
+  assert.equal(root.error, undefined)
   const remoteBranches = await gitOk(s.remote, ['branch', '--list'])
-  assert.ok(!remoteBranches.includes(root.branch!), 'nothing of the run branch reached the remote')
+  assert.ok(remoteBranches.includes(root.branch!), 'the agent commit is published')
+  assert.equal(Number(await gitOk(s.remote, ['cat-file', '-s', `refs/heads/${root.branch}:blob.bin`])), 51 * 1024 * 1024)
+  s.x.close()
 })

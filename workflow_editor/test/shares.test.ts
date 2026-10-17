@@ -103,7 +103,7 @@ test('the same logical reference resolves on two hosts with different mount path
   await op(ws, ref, { op: 'node.start', node: 'build' })
   const s = await selectInput(ws, ref, { node: 'build', ref: 'shared://agshare/inputs/wolf/' }, { by: 'agent', via: 'cli' })
   const set = s.record.inputs![s.input]
-  assert.equal(set.count, 2) // dot entries are not content
+  assert.equal(set.count, 2) // the OS metadata file is not content
   assert.equal(set.bytes, 300_000 + 'png bytes'.length)
   const manifestText = await readFile(join(ws.root, set.file), 'utf8')
   assert.ok(!manifestText.includes(shareRoot))
@@ -283,7 +283,7 @@ test('ordinary project artifacts are unchanged: attach and loose-file confirmati
   assert.equal(r.decisions.at(-1)!.confirmation?.output, undefined)
 })
 
-test('download: a file streamed with byte ranges, a folder listed, dot entries and escapes never served', async () => {
+test('download: a file streamed with byte ranges, a folder listed, transport metadata and escapes never served', async () => {
   const { shareRoot } = await setup()
   await mkdir(join(shareRoot, 'runs', '.partial-x'), { recursive: true })
   const server: Server = createServer((req, res) => {
@@ -346,4 +346,38 @@ test('a copy killed mid-way leaves an unfinished folder that the next copy on th
   await mkdir(join(ws.root, '.local', 'inputs', `.staging-${hostname()}-999999-0badf00d`), { recursive: true })
   await selectInput(ws, ref, { node: 'build', ref: 'shared://agshare/inputs/wolf/' }, { by: 'agent', via: 'cli' })
   assert.deepEqual(await readdir(join(ws.root, '.local', 'inputs')), ['i1'])
+})
+
+
+test('p11: intended dotfiles survive transport, including nested dot directories', async () => {
+  const { ws, ref, shareRoot } = await setup()
+  const source = join(shareRoot, 'dotfiles')
+  await mkdir(join(source, '.config'), { recursive: true })
+  await writeFile(join(source, '.gitignore'), 'cache/\n')
+  await writeFile(join(source, '.config', 'settings.json'), '{}\n')
+  await writeFile(join(source, '.DS_Store'), 'OS metadata')
+  assert.deepEqual((await listFiles(source)).map(f => f.path), ['.config/settings.json', '.gitignore'])
+  await op(ws, ref, { op: 'node.start', node: 'build' })
+  const input = await selectInput(ws, ref, { node: 'build', ref: 'shared://agshare/dotfiles/' }, { by: 'agent', via: 'cli' })
+  assert.equal(input.record.inputs![input.input].count, 2)
+  assert.equal((await verifyInput(ws, ref, input.input, { by: 'agent', via: 'cli' })).status, 'verified')
+  await cp(source, join(ws.root, '.local', 'dot-output'), { recursive: true })
+  const output = await publishOutput(ws, ref, { node: 'build', source: '.local/dot-output', title: 'Dotfiles', candidate: 'dots', share: 'agshare' }, { by: 'agent', via: 'cli' })
+  assert.equal(output.record.outputs![output.output].count, 2)
+  assert.equal((await verifyOutput(ws, ref, output.output, { by: 'agent', via: 'cli' })).status, 'verified')
+  const publication = parseRef(output.record.outputs![output.output].ref)!
+  const server = createServer((req, res) => {
+    const url = new URL(req.url!, 'http://test')
+    serveShare(req, res, 'agshare', url.pathname.slice(1), url.pathname.endsWith('/')).catch((e: RequestError) => { res.writeHead(e.status); res.end(e.message) })
+  })
+  await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve))
+  try {
+    const base = `http://127.0.0.1:${(server.address() as { port: number }).port}/${publication.path}`
+    assert.equal(await (await fetch(`${base}/.gitignore`)).text(), 'cache/\n')
+    assert.equal(await (await fetch(`${base}/.config/settings.json`)).text(), '{}\n')
+    assert.equal((await fetch(`${base}/.wfe-output.json`)).status, 404)
+    const listed = await (await fetch(`${base}/`)).json() as { entries: { name: string }[] }
+    assert.deepEqual(listed.entries.map(e => e.name), ['.config', '.gitignore'])
+  } finally { await new Promise<void>(resolve => server.close(() => resolve())) }
+
 })

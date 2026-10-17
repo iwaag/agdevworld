@@ -25,7 +25,7 @@
 // branch is recorded in the step before anything is written, so a retry
 // publishes to the same place.
 import { createHash } from 'node:crypto'
-import { lstat, readFile } from 'node:fs/promises'
+import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { git } from './git.ts'
 import type { Workspace } from './workspace.ts'
@@ -43,7 +43,7 @@ export interface RepoStep {
   error?: string
   head?: string // p9: the run branch's commit that was pushed (it may hold the agent's own commits)
   updated?: boolean // p9: the push changed the remote branch
-  oversized?: { path: string; bytes: number }[] // project_migration p6: left out of the checkpoint, larger than the limit
+  oversized?: { path: string; bytes: number }[] // legacy checkpoint evidence; new checkpoints impose no file-size limit
 }
 export interface PublishResult { state: 'published' | 'nothing' | 'attention' | 'failed'; steps: RepoStep[]; error?: string }
 
@@ -157,36 +157,6 @@ export async function publish(ws: Workspace, base: Baseline, message: string, pr
 // ---- runs with their own working copy (p9) ----------------------------------------
 
 // The order a run's repositories are published and integrated in: the most
-
-// Large files never enter a run branch (project_migration p6, docs/shares.md):
-// a checkpoint leaves a file over the limit uncommitted in the copy, and a
-// run branch whose new commits carry such a blob is not pushed. Both say
-// so as a publication problem; large outputs belong on a shared area.
-export const MAX_COMMITTED_BYTES = () => Number(process.env.WFE_CHECKPOINT_MAX_BYTES) || 50 * 2 ** 20
-async function oversizedFiles(dir: string, paths: string[]): Promise<{ path: string; bytes: number }[]> {
-  const out: { path: string; bytes: number }[] = []
-  for (const p of paths) {
-    const st = await lstat(join(dir, p)).catch(() => null)
-    if (st?.isFile() && st.size > MAX_COMMITTED_BYTES()) out.push({ path: p, bytes: st.size })
-  }
-  return out
-}
-async function oversizedBlobs(dir: string, range: string): Promise<{ path: string; bytes: number }[]> {
-  const limit = MAX_COMMITTED_BYTES()
-  const omitted = await git(dir, ['rev-list', '--objects', `--filter=blob:limit=${limit + 1}`, '--filter-print-omitted', ...range.split(' ')], { timeoutMs: 120_000 })
-  const big = new Set(omitted.stdout.split('\n').filter(l => l.startsWith('~')).map(l => l.slice(1).trim()))
-  if (!big.size) return []
-  const names = new Map<string, string>()
-  for (const l of (await git(dir, ['rev-list', '--objects', ...range.split(' ')], { timeoutMs: 120_000 })).stdout.split('\n')) {
-    const sp = l.indexOf(' ')
-    if (sp > 0 && big.has(l.slice(0, sp))) names.set(l.slice(0, sp), l.slice(sp + 1))
-  }
-  const out: { path: string; bytes: number }[] = []
-  for (const oid of big) out.push({ path: names.get(oid) ?? oid, bytes: Number((await git(dir, ['cat-file', '-s', oid])).stdout.trim()) })
-  return out
-}
-const mib = (n: number) => `${(n / 2 ** 20).toFixed(0)} MiB`
-
 // deeply nested first, so every repository comes after the submodules whose
 // gitlinks it records (project_migration p6 ex1); among the root's own
 // submodules devdocs first, then by path; the root last.
@@ -231,13 +201,6 @@ export async function publishRun(ws: Workspace, message: string, previous: RepoS
           if (blocked.has(childOf(step.repo, d.path))) { step.excluded.push(d.path); continue }
           step.include.push(d.path)
         }
-        const big = await oversizedFiles(dir, step.include)
-        if (big.length) {
-          step.include = step.include.filter(p => !big.some(b => b.path === p))
-          step.oversized = big
-          step.error = `${big.length} file${big.length === 1 ? '' : 's'} over ${mib(MAX_COMMITTED_BYTES())} left out of the checkpoint (uncommitted in the copy): ${big.map(b => `${b.path} (${mib(b.bytes)})`).join(', ')}. Large files do not belong in Git: keep them under .local/ and publish them to a shared area (wfe run publish)`
-          attention = true
-        }
         if (!step.include.length) continue
         const add = await git(dir, ['add', '-A', '--', ...step.include])
         if (add.code !== 0) throw new Error(`${step.repo}: git add failed: ${add.stderr.trim()}`)
@@ -262,13 +225,6 @@ export async function publishRun(ws: Workspace, message: string, previous: RepoS
     const dir = join(ws.root, step.repo)
     const ref = `refs/heads/${step.branch}`
     const head = (await git(dir, ['rev-parse', '--verify', '-q', ref])).stdout.trim()
-    // What the push would add: commits not on any remote-tracking ref yet.
-    const heavy = head ? await oversizedBlobs(dir, `${head} --not --remotes=origin`) : []
-    if (heavy.length) {
-      attention = true
-      step.error = `not pushed: the run branch carries ${heavy.length} file${heavy.length === 1 ? '' : 's'} over ${mib(MAX_COMMITTED_BYTES())} in commits not yet published: ${heavy.map(b => `${b.path} (${mib(b.bytes)})`).join(', ')}. Large files do not belong in Git; a person decides how to rewrite or drop those commits`
-      continue
-    }
     const p = await git(dir, ['push', '--porcelain', 'origin', `${ref}:${ref}`], { env, timeoutMs: 120_000 })
     if (p.code !== 0) {
       if (/rejected|non-fast-forward|fetch first/i.test(p.stderr + p.stdout)) { attention = true; step.error = `the remote ${step.branch} moved; it is the run's own branch, so something else pushed to it (nothing was forced): ${(p.stderr.trim() || p.stdout.trim()).split('\n').pop()}`; continue }

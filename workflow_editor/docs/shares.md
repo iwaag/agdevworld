@@ -5,8 +5,7 @@ export, or the server's own backing folder — known to every project by a
 logical name. A person supplies large inputs by putting a folder there and
 naming it in the request; a run records exactly which bytes it used and
 publishes large outputs back to the share. Tracked records hold references
-and manifests; the payload never enters Git, the editor state or a
-presentation bundle.
+and manifests. Shared storage is available alongside Git for payloads.
 
 Distributed execution, Google Drive, a storage-provider framework, automatic
 retention and garbage collection are not part of this contract.
@@ -50,9 +49,10 @@ or an overlap with the area), `not-a-folder`, `not-a-file`.
 from a running node — reads the files the reference holds now and records an
 **input set** `i<n>`:
 
-- Files are regular files under the reference, relative to it; dot entries
-  (`.DS_Store`, markers, unfinished publications) are not content; symbolic
-  links are refused; at most 20,000 files.
+- Files are regular files under the reference, relative to it, including user
+  dotfiles and dot directories. Transport metadata (`.wfe-share.json`,
+  `.wfe-output.json`, `.partial-*`, `.staging-*`), Git metadata (`.git`) and
+  `.DS_Store` are omitted. Symbolic links are refused; at most 20,000 files.
 - `inputs/i<n>.json` in the run folder is the manifest: `{kind:
   "ag.wfe-input-set.v1", id, ref, staging, staged, digest, files: [{path,
   bytes, sha256}]}`. The **digest** is `sha256:` + hex SHA-256 of the
@@ -129,7 +129,8 @@ again and ask again.
   show references, sets and outputs with this host's state. Views stat; they
   never hash or list large folders. A full check runs only on request.
 - `GET|HEAD /api/shares/<share>/<path>` streams one file with byte ranges, or
-  lists a folder (at most 2000 entries) as JSON. Dot entries are not served.
+  lists a folder (at most 2000 entries) as JSON. User dotfiles are served;
+  the named transport, Git and OS metadata above are hidden.
   Read-only. The project file API is unchanged and never reaches a share.
 - `wfe share list|resolve|ls|verify` works on this host without a run.
   `wfe share verify <manifest.json>` checks an input-set or output manifest
@@ -138,13 +139,11 @@ again and ask again.
 
 ## Large files and run branches
 
-A run branch never carries large files. A checkpoint leaves a file over
-50 MiB (`WFE_CHECKPOINT_MAX_BYTES`) uncommitted in the copy and records a
-publication problem naming it; a run branch whose unpublished commits carry
-such a blob (the agent's own commit) is not pushed. Large outputs go to a
-shared area (`wfe run publish`). Found in project_migration p6 Step 7, where
-materials re-saved with embedded textures (≈2 GB) reached a run branch and
-would have entered the project's history at integration.
+Checkpointing and pushing run branches have no WFE file-size threshold.
+Intended large files are committed and pushed with the rest of the run's work.
+Shared storage (`wfe run publish`) remains available for inputs and outputs;
+choosing storage does not require a size-based exception. A remote Git service
+can still return its own storage or transport error, which publication records.
 
 ## Where things live
 

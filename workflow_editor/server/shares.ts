@@ -26,6 +26,9 @@ import { projectId, runOpLocked, usableRun, type OpContext } from './runs.ts'
 import { runSpace } from './runspace.ts'
 import { RequestError, type Workspace } from './workspace.ts'
 
+// User dotfiles are content; these names belong to the transport or OS.
+const transportMetadata = (name: string) => name === '.wfe-share.json' || name === OUTPUT_MANIFEST || name === '.DS_Store' || name === '.git' || name.startsWith('.partial-') || name.startsWith('.staging-')
+
 // ---- configuration: <area>/shares.json ----------------------------------------------------
 
 // The operating area whose shares.json applies (the CLI's and the service's
@@ -125,8 +128,8 @@ export async function resolveRef(text: string, cfg = loadShareConfig()): Promise
 // ---- files -----------------------------------------------------------------------------------
 
 const MAX_FILES = 20000
-// The files a folder holds, relative to it: regular files only; dot entries
-// (.DS_Store, a share marker, an unfinished publication) are not content;
+// The files a folder holds, relative to it: regular files, including user
+// dotfiles. Named transport metadata and OS metadata are not content;
 // a symbolic link is refused rather than followed out of the share.
 export async function listFiles(abs: string, opts: { max?: number } = {}): Promise<{ path: string; bytes: number }[]> {
   const out: { path: string; bytes: number }[] = []
@@ -135,7 +138,7 @@ export async function listFiles(abs: string, opts: { max?: number } = {}): Promi
   if (st.isFile()) return [{ path: basename(abs), bytes: st.size }]
   const walk = async (rel: string) => {
     for (const e of (await readdir(join(abs, rel), { withFileTypes: true })).sort((a, b) => (a.name < b.name ? -1 : 1))) {
-      if (e.name.startsWith('.')) continue
+      if (transportMetadata(e.name)) continue
       const r = rel ? `${rel}/${e.name}` : e.name
       if (e.isSymbolicLink()) throw new RequestError(422, `${r} is a symbolic link; a set holds regular files only`, { code: 'set-source' })
       if (e.isDirectory()) { await walk(r); continue }
@@ -458,16 +461,16 @@ export async function availability(record: RunRecord): Promise<{ references: Ava
 // ---- downloads: GET api/shares/<share>/<path> ------------------------------------------------
 
 // Serves one file of a share, streamed with byte ranges, or a folder's
-// listing as JSON (bounded). Read-only; dot entries (markers, unfinished
-// publications) are not served. Nothing is loaded into memory whole.
+// listing as JSON (bounded). Named transport metadata is hidden; user
+// dotfiles are served. Nothing is loaded into memory whole.
 export async function serveShare(req: IncomingMessage, res: ServerResponse, share: string, path: string, folder: boolean): Promise<void> {
   const ref = formatRef(share, path, folder)
-  if (path.split('/').some(p => p.startsWith('.'))) throw new RequestError(404, 'not found')
+  if (path.split('/').some(transportMetadata)) throw new RequestError(404, 'not found')
   const r = await resolveRef(ref)
   if (r.state !== 'ok') throw new RequestError(r.state === 'unknown-share' ? 404 : r.state === 'absent' ? 404 : 503, r.detail)
   const st = await stat(r.abs!)
   if (st.isDirectory()) {
-    const entries = (await readdir(r.abs!, { withFileTypes: true })).filter(e => !e.name.startsWith('.')).sort((a, b) => (a.name < b.name ? -1 : 1)).slice(0, 2000)
+    const entries = (await readdir(r.abs!, { withFileTypes: true })).filter(e => !transportMetadata(e.name)).sort((a, b) => (a.name < b.name ? -1 : 1)).slice(0, 2000)
     const list = await Promise.all(entries.map(async e => ({ name: e.name, folder: e.isDirectory(), bytes: e.isFile() ? (await stat(join(r.abs!, e.name))).size : null })))
     res.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
     res.end(JSON.stringify({ ref: r.ref, entries: list }))

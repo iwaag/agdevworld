@@ -273,7 +273,7 @@ const projectPath = (l: Located, inner: string) => join2(l.repository.path === '
 
 // ---- the working tree (explicit only) -----------------------------------------------
 
-interface WorktreeLocated { ws: Workspace; root: string; repoRoot: string; inner: string; uninitialized?: string; dirty: boolean; head?: string; branch?: string | null }
+export interface WorktreeLocated { ws: Workspace; root: string; repoRoot: string; inner: string; uninitialized?: string; dirty: boolean; head?: string; branch?: string | null }
 
 async function projectWorkspace(ctx: AccessContext, project: string, id?: string): Promise<Registration> {
   const reg = await loadRegistry(ctx.registryFile)
@@ -287,7 +287,7 @@ async function projectWorkspace(ctx: AccessContext, project: string, id?: string
   return w
 }
 
-async function locateWorktree(ctx: AccessContext, project: string, rawPath: string, workspaceId?: string): Promise<WorktreeLocated> {
+export async function locateWorktree(ctx: AccessContext, project: string, rawPath: string, workspaceId?: string): Promise<WorktreeLocated> {
   const path = rawPath === '' || rawPath === '.' ? '' : normalizeRepoPath(rawPath)
   if (path === null || path === undefined) throw new RequestError(400, `"${rawPath}" is not a project-relative path`)
   if (path === '.local' || path.startsWith('.local/') || path.split('/').includes('.git')) throw new AccessError('inaccessible', `${path} is host-local and never project content`)
@@ -319,7 +319,7 @@ function worktreeProvenance(ctx: AccessContext, project: string, w: WorktreeLoca
   }
 }
 
-async function ignored(repoRoot: string, rel: string): Promise<boolean> {
+export async function ignored(repoRoot: string, rel: string): Promise<boolean> {
   return (await git(repoRoot, ['check-ignore', '-q', '--', rel])).code === 0
 }
 

@@ -185,7 +185,29 @@ export function createHandler(config: ServiceConfig) {
       if (a === 'shares' && wsId && (method === 'GET' || method === 'HEAD')) {
         const { serveShare, setShareArea } = await import('./shares.ts')
         setShareArea(area)
-        return await serveShare(req, res, wsId, parts.slice(3).join('/'), url.pathname.endsWith('/') || parts.length === 3)
+        return await serveShare(req, res, wsId, parts.slice(3).join('/'), url.pathname.endsWith('/') || parts.length === 3, url.searchParams.get('inline') === '1')
+      }
+      // What a shared:// reference is on this host (p12, for Boast pages' helpers).
+      if (a === 'share-ref' && !wsId && method === 'GET') {
+        const { resolveShared } = await import('./boast.ts')
+        const { setShareArea } = await import('./shares.ts')
+        setShareArea(area)
+        return send(res, 200, await resolveShared(str(url.searchParams.get('ref'), 'ref')))
+      }
+
+      // ---- Boast (p12, docs/boast.md): a project's showcase, read-only ----
+      if (a === 'boast' && wsId && (method === 'GET' || method === 'HEAD')) {
+        const x = await import('./boast.ts')
+        const ctx: import('./access.ts').AccessContext = { registryFile: config.registryFile, area, gitea: config.gitea, giteaProblem: config.giteaProblem, refresh: url.searchParams.get('refresh') === '1' }
+        const slash = url.pathname.endsWith('/')
+        if (!b) {
+          const source = url.searchParams.get('source') ?? 'committed'
+          if (source !== 'committed' && source !== 'worktree') throw new RequestError(400, 'source is committed or worktree')
+          return send(res, 200, await x.boastState(ctx, wsId, { source, workspace: url.searchParams.get('workspace') || undefined }))
+        }
+        if (b === 'c' && file) return await x.serveCommitted(req, res, ctx, wsId, file, parts.slice(5).join('/'), slash)
+        if (b === 'w' && file) return await x.serveWorktree(req, res, ctx, wsId, file, parts.slice(5).join('/'), slash)
+        throw new RequestError(404, 'not found')
       }
 
       // The code this service runs (an installed release names its agdevworld commit).

@@ -8,8 +8,9 @@
 import { createHash, timingSafeEqual } from 'node:crypto'
 import { readFileSync } from 'node:fs'
 import { createServer, type ServerResponse } from 'node:http'
-import { extname, join, resolve, sep } from 'node:path'
+import { join, resolve, sep } from 'node:path'
 import { escapeHtml, MANIFEST_KIND, renderReview } from '../shared/review.ts'
+import { byteRange, typeOf } from './staticServe.ts'
 
 export interface ServeConfig {
   instance: string
@@ -25,12 +26,6 @@ export interface ServeConfig {
 }
 export interface ManifestFile { kind: string; presentation: string; entry: string; review: string; files: { path: string; sha256: string; bytes: number }[] }
 
-const TYPES: Record<string, string> = {
-  '.html': 'text/html; charset=utf-8', '.htm': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.mjs': 'text/javascript; charset=utf-8',
-  '.css': 'text/css; charset=utf-8', '.json': 'application/json; charset=utf-8', '.md': 'text/markdown; charset=utf-8', '.txt': 'text/plain; charset=utf-8',
-  '.svg': 'image/svg+xml', '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.gif': 'image/gif', '.webp': 'image/webp', '.ico': 'image/x-icon',
-  '.wav': 'audio/wav', '.mp3': 'audio/mpeg', '.ogg': 'audio/ogg', '.mp4': 'video/mp4', '.webm': 'video/webm', '.pdf': 'application/pdf', '.woff2': 'font/woff2', '.wasm': 'application/wasm',
-}
 const sha256 = (b: Buffer) => createHash('sha256').update(b).digest('hex')
 
 function arg(name: string): string {
@@ -57,19 +52,7 @@ export function loadBundle(folder: string): { manifest: ManifestFile; files: Map
   return { manifest, files }
 }
 
-// One byte range of a `Range: bytes=…` header (RFC 9110), or null when the
-// whole file is sent. Safari plays <video> only from 206 responses: it asks
-// for bytes=0-1 first and gives up on a 200 (project_migration p1).
-// Several ranges are answered with the whole file, which RFC 9110 allows.
-export function byteRange(header: string | undefined, size: number): { start: number; end: number } | 'unsatisfiable' | null {
-  const m = /^bytes=(\d*)-(\d*)$/.exec((header ?? '').trim())
-  if (!m || (m[1] === '' && m[2] === '')) return null
-  let start: number, end: number
-  if (m[1] === '') { const n = Number(m[2]); if (n === 0) return 'unsatisfiable'; start = Math.max(0, size - n); end = size - 1 }
-  else { start = Number(m[1]); end = m[2] === '' ? size - 1 : Math.min(Number(m[2]), size - 1) }
-  if (start >= size || start > end) return 'unsatisfiable'
-  return { start, end }
-}
+export { byteRange }
 
 export function reviewPage(c: ServeConfig, manifest: ManifestFile, review: string): string {
   const answer = c.answer.url ? `<a class="answer" href="${escapeHtml(c.answer.url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(c.answer.text)}</a>` : `<span class="answer">${escapeHtml(c.answer.text)}</span>`
@@ -137,7 +120,7 @@ function main() {
       const rel = `content/${path.slice('/content/'.length) || ''}`
       const bytes = bundle.files.get(rel) ?? (rel.endsWith('/') ? bundle.files.get(`${rel}index.html`) : undefined)
       if (bytes) {
-        const type = TYPES[extname(rel).toLowerCase()] ?? 'application/octet-stream'
+        const type = typeOf(rel)
         const base = { 'content-type': type, 'cache-control': 'no-store', 'x-content-type-options': 'nosniff', 'content-security-policy': "frame-ancestors 'self'", 'referrer-policy': 'no-referrer', 'accept-ranges': 'bytes' }
         const range = byteRange(req.headers.range, bytes.length)
         if (range === 'unsatisfiable') { res.writeHead(416, { ...base, 'content-range': `bytes */${bytes.length}` }); return res.end() }

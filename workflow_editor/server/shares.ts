@@ -463,7 +463,7 @@ export async function availability(record: RunRecord): Promise<{ references: Ava
 // Serves one file of a share, streamed with byte ranges, or a folder's
 // listing as JSON (bounded). Named transport metadata is hidden; user
 // dotfiles are served. Nothing is loaded into memory whole.
-export async function serveShare(req: IncomingMessage, res: ServerResponse, share: string, path: string, folder: boolean): Promise<void> {
+export async function serveShare(req: IncomingMessage, res: ServerResponse, share: string, path: string, folder: boolean, inline = false): Promise<void> {
   const ref = formatRef(share, path, folder)
   if (path.split('/').some(transportMetadata)) throw new RequestError(404, 'not found')
   const r = await resolveRef(ref)
@@ -476,22 +476,13 @@ export async function serveShare(req: IncomingMessage, res: ServerResponse, shar
     res.end(JSON.stringify({ ref: r.ref, entries: list }))
     return
   }
-  const size = st.size
-  const range = typeof req.headers.range === 'string' ? /^bytes=(\d*)-(\d*)$/.exec(req.headers.range) : null
-  let start = 0, end = size - 1, status = 200
-  if (range && (range[1] || range[2])) {
-    start = range[1] ? Number(range[1]) : Math.max(0, size - Number(range[2]))
-    end = range[1] && range[2] ? Math.min(Number(range[2]), size - 1) : size - 1
-    if (start > end || start >= size) { res.writeHead(416, { 'content-range': `bytes */${size}` }); res.end(); return }
-    status = 206
-  }
-  res.writeHead(status, {
-    'content-type': 'application/octet-stream', 'accept-ranges': 'bytes', 'content-length': String(end - start + 1),
-    'content-disposition': `attachment; filename="${basename(r.abs!).replace(/"/g, '')}"`, 'cache-control': 'no-store',
-    ...(status === 206 ? { 'content-range': `bytes ${start}-${end}/${size}` } : {}),
-  })
-  if (req.method === 'HEAD') { res.end(); return }
-  await pipeline(createReadStream(r.abs!, { start, end }), res)
+  // Display (p12, `?inline=1`): the file's own media type, sandboxed like a
+  // Boast page, revalidated on each use. Otherwise a download.
+  const { sendStatic } = await import('./staticServe.ts')
+  const headers = inline
+    ? (await import('./boast.ts')).shareInlineHeaders(r.abs!)
+    : { 'content-type': 'application/octet-stream', 'content-disposition': `attachment; filename="${basename(r.abs!).replace(/"/g, '')}"`, 'cache-control': 'no-store' }
+  await sendStatic(req, res, { file: r.abs!, size: st.size }, headers, `W/"${st.size}-${Math.floor(st.mtimeMs)}"`)
 }
 
 export const sharePaths = { staged: stagedPath }

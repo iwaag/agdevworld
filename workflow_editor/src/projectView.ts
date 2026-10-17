@@ -11,6 +11,7 @@ import { displayToggle, onDisplay, showDetail } from './displayMode.ts'
 import { icon } from './icons.ts'
 import type { ViewHandle } from './main.ts'
 import { ago, runHash, STATE_LABEL } from './runCommon.ts'
+import { boastPanel } from './boastPanel.ts'
 
 const GROUPS: { key: RepositoryStatus['category'][]; title: string }[] = [
   { key: ['root', 'devdocs'], title: 'Fixed repositories' },
@@ -69,7 +70,12 @@ export function renderProjectView(root: HTMLElement, wsId: string): ViewHandle {
   const runsCard = h('section.card.runs-card')
 
   const header = h('header.topbar')
-  const main = h('main.project-grid', h('p.muted', 'Loading project…'))
+  // Boast (p12) sits below the heading in both modes and is never detached:
+  // re-renders replace only the slots around it.
+  const boast = boastPanel()
+  const heroSlot = h('div.slot')
+  const bodySlot = h('div.slot', h('p.muted', 'Loading project…'))
+  const main = h('main.project-grid', heroSlot, boast.el, bodySlot)
   root.append(header, main)
 
   interface LoadOpts { workspaces?: boolean; force?: boolean; refresh?: boolean }
@@ -90,7 +96,7 @@ export function renderProjectView(root: HTMLElement, wsId: string): ViewHandle {
       if (accessWorkflow) accessData = await api.workflow(wsId, accessWorkflow).catch(() => null)
       render()
     } catch (e) {
-      main.replaceChildren(h('p.error', (e as Error).message))
+      bodySlot.replaceChildren(h('p.error', (e as Error).message))
     }
   }, (a, b) => ({ workspaces: a.workspaces || b.workspaces, force: a.force || b.force, refresh: a.refresh || b.refresh }))
 
@@ -467,11 +473,13 @@ export function renderProjectView(root: HTMLElement, wsId: string): ViewHandle {
     // Project reads supply the workflow choices independently of run reads.
     // Refresh the retained card too, even when the runs response arrived first.
     renderRuns()
-    keepingFocus(main, () => main.replaceChildren(
-      hero = renderHero(),
-      h('div.col.d-only', renderProjectCard(), renderRepos()),
-      h('div.col.project-work', renderWorkspaces(), runsCard, renderWorkflows()),
-    ))
+    keepingFocus(main, () => {
+      heroSlot.replaceChildren(hero = renderHero())
+      bodySlot.replaceChildren(
+        h('div.col.d-only', renderProjectCard(), renderRepos()),
+        h('div.col.project-work', renderWorkspaces(), runsCard, renderWorkflows()))
+    })
+    boast.show(data?.project?.id ?? workspaces.find(w => w.id === wsId)?.observed.projectId ?? null, wsId)
   }
 
   // External changes: reload what has no draft; guard the project draft.
@@ -484,10 +492,12 @@ export function renderProjectView(root: HTMLElement, wsId: string): ViewHandle {
         return null
       }
       if (ev.kind === 'run' || ev.kind === 'runs') return ['runs']
+      if (ev.kind === 'git') return ['content', 'git']
       return ev.kind === 'registry' ? ['registry'] : ['content']
     },
     flush: async (needs, all) => {
       if (all || needs.has('runs')) void loadRuns({})
+      if (all || needs.has('git')) boast.check()
       if (all || needs.has('content') || needs.has('registry')) await load({ workspaces: all || needs.has('registry') })
     },
     state: c => { connected = c; renderHeader() },
@@ -497,7 +507,7 @@ export function renderProjectView(root: HTMLElement, wsId: string): ViewHandle {
   void loadRuns({})
   renderRuns()
   return {
-    dispose: () => { disposed = true; offDisplay(); stream.close() },
+    dispose: () => { disposed = true; offDisplay(); stream.close(); boast.dispose() },
     isDirty: dirty,
   }
 }

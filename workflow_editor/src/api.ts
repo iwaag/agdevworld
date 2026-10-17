@@ -71,6 +71,8 @@ const wf = (id: string, file: string) => `${ws(id)}/workflows/${encodeURICompone
 
 export const api = {
   workspaces: () => call<WorkspacesResponse>('GET', 'api/workspaces'),
+  // What a shared:// reference is on this host (p12, server/boast.ts resolveShared).
+  shareRef: (ref: string) => call<{ ref: string; state: string; detail: string; url: string | null; download: string | null; host: string; path: string | null; folder: boolean }>('GET', `api/share-ref?ref=${encodeURIComponent(ref)}`),
   dashboard: () => call<DashboardResponse>('GET', 'api/agdev'),
   createGiteaProject: (input: { id: string; name: string; intent: string; goals: string[]; devdocs: 'directory' | 'submodule'; resume?: boolean; reuse?: boolean }) =>
     call<CreateProjectResult>('POST', 'api/agdev/projects', input, [422]),

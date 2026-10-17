@@ -8,6 +8,7 @@ import { createHash, randomBytes } from 'node:crypto'
 import { createReadStream, createWriteStream, readFileSync } from 'node:fs'
 import { lstat, mkdir, readdir, readFile, realpath, rename, rm, stat } from 'node:fs/promises'
 import type { IncomingMessage, ServerResponse } from 'node:http'
+import { hostname } from 'node:os'
 import { basename, dirname, isAbsolute, join, sep } from 'node:path'
 import { pipeline } from 'node:stream/promises'
 import { Transform } from 'node:stream'
@@ -194,6 +195,24 @@ export async function compareSet(abs: string | null, manifest: SetFile[], opts: 
   return { status: 'verified', detail: `${manifest.length} files, ${totalBytes(manifest)} bytes, every hash matches` }
 }
 
+// Unfinished copies (a publication's .partial-*, an input's .staging-*) are
+// named after the host and process that write them. One left by a process
+// that died (killed mid-copy: nothing ran its cleanup) is removed by the next
+// copy on that host; another host's, or a live process's, is never touched.
+const unfinished = (kind: 'partial' | 'staging') => `.${kind}-${hostname()}-${process.pid}-${randomBytes(4).toString('hex')}`
+const UNFINISHED = /^\.(partial|staging)-(.+)-(\d+)-[0-9a-f]{8}$/
+const alive = (pid: number) => { try { process.kill(pid, 0); return true } catch (e) { return (e as NodeJS.ErrnoException).code === 'EPERM' } }
+export async function sweepUnfinished(dir: string): Promise<string[]> {
+  const removed: string[] = []
+  for (const name of await readdir(dir).catch(() => [] as string[])) {
+    const m = UNFINISHED.exec(name)
+    if (!m || m[2] !== hostname() || alive(Number(m[3]))) continue
+    await rm(join(dir, name), { recursive: true, force: true })
+    removed.push(name)
+  }
+  return removed
+}
+
 // ---- input sets ------------------------------------------------------------------------------
 
 export interface InputManifestFile { kind: string; id: string; ref: string; staging: Staging; staged: string | null; digest: string; files: SetFile[] }
@@ -223,7 +242,8 @@ export async function selectInput(ws: Workspace, ref: RunRef, o: { node: string;
   if (resolved.state !== 'ok') throw new RequestError(422, `${resolved.ref}: ${resolved.detail}`, { code: `share-${resolved.state}` })
   const listed = await listFiles(resolved.abs!)
   if (!listed.length) throw new RequestError(422, `${resolved.ref} holds no files`, { code: 'set-source' })
-  const tmp = staging === 'copy' ? await inside(ws.root, `.local/inputs/.staging-${randomBytes(4).toString('hex')}`) : null
+  if (staging === 'copy') await sweepUnfinished(await inside(ws.root, '.local/inputs'))
+  const tmp = staging === 'copy' ? await inside(ws.root, `.local/inputs/${unfinished('staging')}`) : null
   try {
     let files: SetFile[]
     if (tmp) {
@@ -302,7 +322,7 @@ export async function inputLocation(ws: Workspace, ref: RunRef, id: string): Pro
 
 // Publishes a folder of the run copy as an output of the run, o<n>, at
 // shared://<share>/runs/<project>/<wf>/<run>/<o>/. The files are copied into
-// an unfinished `.partial-*` folder beside it, each hashed as read and again
+// an unfinished `.partial-<host>-<pid>-*` folder beside it, each hashed as read and again
 // as landed — outside the run's lock, so concurrent candidates copy at once.
 // Under the lock the id is taken, the manifest written inside and the folder
 // renamed into place, so a reader never sees a partial publication. The run
@@ -333,7 +353,8 @@ export async function publishOutput(ws: Workspace, ref: RunRef, o: { node: strin
   if (root.state !== 'ok') throw new RequestError(422, root.detail, { code: `share-${root.state}` })
   const parent = join(root.root!, ...outputFolderPath(project, ref.workflow, ref.run, 'x').split('/').slice(0, -1))
   await mkdir(parent, { recursive: true })
-  const partial = join(parent, `.partial-${randomBytes(4).toString('hex')}`)
+  await sweepUnfinished(parent)
+  const partial = join(parent, unfinished('partial'))
   try {
     const files: SetFile[] = []
     for (const f of listed) files.push({ path: f.path, bytes: f.bytes, sha256: await copyVerified(join(srcAbs, ...f.path.split('/')), join(partial, ...f.path.split('/'))) })

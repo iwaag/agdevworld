@@ -88,7 +88,10 @@ the run copy (usually under `.local/`) as **output** `o<n>`:
   once. Under the lock the id is taken, `.wfe-output.json` (the manifest) is
   written inside and the folder is renamed into place. A reader never sees a
   partial publication as published; `.partial-*` folders are not content and
-  are never served.
+  are never served. Unfinished folders (`.partial-<host>-<pid>-*` on the
+  share, `.staging-<host>-<pid>-*` in the run copy) left by a process killed
+  mid-copy are removed by the next copy on the same host; another host's, or
+  a live process's, is never touched.
 - The manifest: `{kind: "ag.wfe-external-artifact.v1", id, ref, candidate,
   inputs: [input-set digests], digest, files, run, project}`; the digest
   covers `{kind, ref, candidate, inputs sorted, files sorted}`. A copy is

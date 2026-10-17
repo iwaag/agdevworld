@@ -5,7 +5,7 @@ import { after, before, test } from 'node:test'
 import assert from 'node:assert/strict'
 import { cp, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { createServer, type Server } from 'node:http'
-import { tmpdir } from 'node:os'
+import { hostname, tmpdir } from 'node:os'
 import { createHash } from 'node:crypto'
 import { canonicalJson } from '../shared/canonical.ts'
 import { join } from 'node:path'
@@ -327,4 +327,23 @@ test('CLI: share list/resolve/verify and run inputs take their flags; --quick an
   assert.equal(await run(['share', 'verify', join(ws.root, s.record.inputs!.i1.file), '--quick']), 0, lines.join('\n'))
   assert.equal(await run(['run', 'inputs', `${ref.workflow}/${ref.run}`, '--workspace', 'p', '--verify-all', '--quick', '--by', 'Pat']), 0, lines.join('\n'))
   assert.equal(await run(['share', 'resolve', 'shared://agshare/nothing/']), 1)
+})
+
+test('a copy killed mid-way leaves an unfinished folder that the next copy on this host removes; another host\'s or a live one is kept', async () => {
+  const { ws, ref, shareRoot } = await setup()
+  await op(ws, ref, { op: 'node.start', node: 'build' })
+  const runDir = join(shareRoot, 'runs', 'p', ref.workflow, ref.run)
+  await mkdir(runDir, { recursive: true })
+  const dead = `.partial-${hostname()}-999999-0badf00d`, other = '.partial-elsewhere.local-1-0badf00d', live = `.partial-${hostname()}-${process.pid}-0badf00d`
+  for (const d of [dead, other, live]) { await mkdir(join(runDir, d)); await writeFile(join(runDir, d, 'half.bin'), 'x') }
+  const src = await outputDir(ws, 'out', { 'a.txt': 'a' })
+  await publishOutput(ws, ref, { node: 'build', source: src, title: 'A', candidate: 'main', share: 'agshare' }, { by: 'agent', via: 'cli' })
+  const left = await readdir(runDir)
+  assert.ok(!left.includes(dead))
+  assert.ok(left.includes(other) && left.includes(live))
+  assert.ok(left.includes('o1'))
+  // the same for an input's staging folder in the run copy
+  await mkdir(join(ws.root, '.local', 'inputs', `.staging-${hostname()}-999999-0badf00d`), { recursive: true })
+  await selectInput(ws, ref, { node: 'build', ref: 'shared://agshare/inputs/wolf/' }, { by: 'agent', via: 'cli' })
+  assert.deepEqual(await readdir(join(ws.root, '.local', 'inputs')), ['i1'])
 })

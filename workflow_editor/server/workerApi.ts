@@ -102,7 +102,10 @@ export async function manifestOf(tree: string, paths: string[], skip: (rel: stri
 
 function tar(args: string[], cwd: string, input?: Buffer): Promise<{ code: number; stdout: Buffer; stderr: string }> {
   return new Promise((resolve, reject) => {
-    const p = spawn('tar', args, { cwd })
+    // macOS tar would add AppleDouble `._*` entries for extended attributes;
+    // a Linux worker extracts them as ordinary files and commits them
+    // (project_migration p7, playprey freework/run-001).
+    const p = spawn('tar', args, { cwd, env: { ...process.env, COPYFILE_DISABLE: '1' } })
     const out: Buffer[] = []; let err = ''
     p.stdout.on('data', d => out.push(d)); p.stderr.on('data', d => { err += d })
     p.on('error', reject)

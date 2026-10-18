@@ -101,7 +101,7 @@ async function localManifest(tree: string, paths: string[], skip: (rel: string) 
 }
 function run(cmd: string, args: string[], cwd: string, input?: Buffer): Promise<{ code: number; stdout: Buffer; stderr: string }> {
   return new Promise((res, rej) => {
-    const p = spawn(cmd, args, { cwd })
+    const p = spawn(cmd, args, { cwd, env: { ...process.env, COPYFILE_DISABLE: '1' } }) // no AppleDouble entries from a macOS tar
     const out: Buffer[] = []; let err = ''
     p.stdout.on('data', d => out.push(d)); p.stderr.on('data', d => { err += d })
     p.on('error', rej)

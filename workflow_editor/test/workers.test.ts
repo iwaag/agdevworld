@@ -130,6 +130,20 @@ test('workers: assignment, two slots at once, a job waits for its own worker, fe
   assert.ok(!claim.brief.includes((await runSpace(s.ws, a.ref)).root), 'and never the coordinator\'s')
   assert.match(claim.brief, /godot: 4\.7 at \/opt\/godot/)
   assert.ok(existsSync(join(tree, `devdocs/runs/onpc/${a.ref.run}/run.json`)), 'the record snapshot came with it')
+  // The record copy's tar carries no AppleDouble entries (a macOS tar adds
+  // `._*` for extended attributes; a Linux worker committed them in the trial).
+  const recDir = join((await runSpace(s.ws, a.ref)).root, `devdocs/runs/onpc/${a.ref.run}`)
+  await pexec('xattr', ['-w', 'com.example.p7', '1', join(recDir, 'braindump.md')]).catch(() => null)
+  const tarBody = Buffer.from(await (await fetch(new URL(`api/workers/pc/files?workspace=${s.id}&workflow=onpc&run=${a.ref.run}&path=devdocs/runs/onpc/${a.ref.run}`, s.url), { headers: { authorization: 'Bearer secret-of-pc' } })).arrayBuffer())
+  const names: string[] = []
+  for (let off = 0; off + 512 <= tarBody.length;) {
+    const name = tarBody.subarray(off, off + 100).toString('utf8').replace(/\0.*$/s, '')
+    if (!name) break
+    names.push(name)
+    const size = parseInt(tarBody.subarray(off + 124, off + 136).toString('utf8').replace(/\0.*$/s, '').trim() || '0', 8)
+    off += 512 + Math.ceil(size / 512) * 512
+  }
+  assert.ok(names.length > 0 && !names.some(n => n.split('/').pop()!.startsWith('._')), names.join(', '))
 
   // pc's slot is held now; the next pc job waits.
   const r2 = JSON.parse((await s.wfe(['exec', 'claim', ...OFFER, '--json'])).stdout)

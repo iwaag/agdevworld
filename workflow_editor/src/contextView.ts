@@ -218,7 +218,7 @@ export function runContextPanel(wsId: string, workflow: string, run: string, con
       h('h4', 'Next attempt with current settings'),
       h('p.small.muted', v.changes.length ? 'Not yet applied to any attempt. Marked: what differs from the last prepared attempt.' : last ? 'Same sources as the last prepared attempt.' : 'Not yet applied to any attempt.'),
       ...v.next.sources.filter(s => s.scope !== 'run').map(s => { const row = sourceRow(s); const c = changed.get(s.key); if (c) { row.classList.add(`ctx-${c}`); row.querySelector('.ctx-source-head')!.append(h(`span.pill.ctx-change-${c}`, c)) } return row }),
-      ...v.changes.filter(c => c.change === 'removed' && !v.next.sources.some(s => s.key === c.key && s.delivery !== 'absent')).map(c => h('div.ctx-source.ctx-removed', h('div.ctx-source-head', h('span.pill.ctx-change-removed', 'removed'), h('span', c.title ?? c.key)))),
+      ...v.changes.filter(c => c.change === 'removed' && !v.next.sources.some(s => s.key === c.key)).map(c => h('div.ctx-source.ctx-removed', h('div.ctx-source-head', h('span.pill.ctx-change-removed', 'removed'), h('span', c.title ?? c.key)))),
       h('p.small', `Session: ${v.session.next}`),
       h('p.small.muted', 'Preferences reach the next attempt only. To steer the work now, send an instruction: ', conv ? h('a', { href: conv, target: '_blank', rel: 'noopener' }, 'post in the Conversation') : h('span', 'post in the run\'s request conversation'), `, or wfe run instruct ${workflow}/${run} --instruction "…". Nothing is sent or started from here.`),
       h('details', h('summary.small', 'The text the next attempt would get'), h('pre.ctx-rendered', v.nextRendered)))

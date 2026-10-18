@@ -132,6 +132,12 @@ try {
   check(/Next attempt with current settings/.test(run) && /Not yet applied/.test(run), 'the next attempt is labelled as not yet applied')
   check(await page.locator('.ctx-run .pill.ctx-change-added').count() >= 1, 'the added workflow override is marked')
   check(/wfe run instruct/.test(run), 'current-run steering is pointed at the instruction route')
+  // Cleared: the source is marked removed once.
+  const cur2 = await store.read({ scope: 'workflow', project: 'p', workflow: 'make' })
+  await store.write({ scope: 'workflow', project: 'p', workflow: 'make' }, null, { by: 'Check', base: cur2.sha256 })
+  await page.click('.ctx-run button:has-text("Refresh")')
+  await page.waitForTimeout(800)
+  check(await page.locator('.ctx-run .pill.ctx-change-removed').count() === 0, 'a source absent in both the last attempt and now is not marked')
   await shot(page, 'p13-run-context')
 
   // Narrow layout.

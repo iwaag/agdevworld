@@ -1,15 +1,15 @@
 // Context overview (workflow_editor p13, p13 ex1; docs/context.md): the
 // scope matrix of a project (and one of its workflows) — what is kept as a
-// default in the project's repositories and what is the Developer's local
-// override, at each scope — with links to the editor that owns each cell,
-// the same override editor the editors use, and the bundle the same
-// resolver as execution produces. #/context/<workspace>[/<workflow>].
-import { sourceLabel, type ContextBundle, type ContextSource, type OverrideState, type OverrideTarget } from '../shared/context.ts'
+// default in the project's repositories and which local blocks (p14) each
+// scope has, with their kind and manager — with links to the editor that
+// owns each cell, the same block cards the editors use, and the bundle the
+// same resolver as execution produces. #/context/<workspace>[/<workflow>].
+import { sourceLabel, type BlockState, type ContextBundle, type ContextSource, type ScopeTarget } from '../shared/context.ts'
 import { api, type ContextMatrixView } from './api.ts'
 import { append, h, when } from './dom.ts'
 import type { ViewHandle } from './main.ts'
 import { displayToggle } from './displayMode.ts'
-import { OverrideEditor } from './contextParts.ts'
+import { ago, BlockList } from './contextParts.ts'
 import { keepingFocus } from './createWorkflow.ts'
 
 type Scope = 'system' | 'project' | 'workflow'
@@ -56,7 +56,7 @@ export function renderContextView(root: HTMLElement, wsId: string, workflowId?: 
   let selected: Scope = workflowId ? 'workflow' : 'project'
   let preview: 'execution' | 'authoring' = workflowId ? 'execution' : 'authoring'
   let disposed = false
-  const editors = new Map<Scope, OverrideEditor>()
+  const editors = new Map<Scope, BlockList>()
 
   const agdevworld = location.pathname.startsWith('/wfe/') ? '/' : 'http://localhost:8093/'
   const header = h('header.topbar', h('div.crumbs', h('a.back-to-world', { href: agdevworld }, '← agdevworld'), h('span.sep', '|'),
@@ -67,24 +67,24 @@ export function renderContextView(root: HTMLElement, wsId: string, workflowId?: 
   const editorSlot = h('section.card.ctx-edit')
   root.append(header, main)
 
-  const target = (s: Scope): OverrideTarget => s === 'system' ? { scope: s } : s === 'project' ? { scope: s, project: view!.project } : { scope: s, project: view!.project, workflow: view!.workflow! }
-  const overrideOf = (s: Scope): OverrideState | null => !view ? null : s === 'system' ? view.overrides.system : s === 'project' ? view.overrides.project : view.overrides.workflow
+  const target = (s: Scope): ScopeTarget => s === 'system' ? { scope: s } : s === 'project' ? { scope: s, project: view!.project } : { scope: s, project: view!.project, workflow: view!.workflow! }
+  const blocksOf = (s: Scope): BlockState[] | null => !view ? null : s === 'system' ? view.blocks.system : s === 'project' ? view.blocks.project : view.blocks.workflow
   const dirty = () => [...editors.values()].some(e => e.isDirty())
   const ownerHref = (s: Scope) => s === 'system' ? systemContextHref : s === 'project' ? projectContextHref(wsId) : workflowContextHref(wsId, view!.workflow!)
   const editorOf = (s: Scope) => {
     let e = editors.get(s)
     if (!e) {
-      e = new OverrideEditor(target(s), { label: s === 'system' ? 'Instructions for all projects' : s === 'project' ? `Instructions for project ${view!.project}` : `Instructions for workflow ${view!.workflow}`, onSaved: () => void load(), onChange: () => {} })
+      e = new BlockList(target(s), { add: true, wider: s !== 'workflow', onSaved: () => void load() })
       editors.set(s, e)
-      void e.refresh()
     }
+    const b = blocksOf(s)
+    if (b) e.set(b)
     return e
   }
 
   async function load() {
     try { view = await api.context(wsId, workflowId ?? null); loadError = '' } catch (e) { loadError = (e as Error).message }
     if (view && selected === 'workflow' && !view.workflow) selected = 'project'
-    if (view) await Promise.all([...editors.values()].map(e => e.refresh()))
     if (!disposed) render()
   }
 
@@ -95,12 +95,15 @@ export function renderContextView(root: HTMLElement, wsId: string, workflowId?: 
     const of = (scope: string, category: string) => [...all.values()].filter(s => s.scope === scope && s.category === category && s.scope !== 'run')
     const link = (s: ContextSource) => s.scope === 'project' && s.category === 'default' ? projectContextHref(wsId) : s.scope === 'workflow' && s.category === 'default' && v.workflow ? workflowContextHref(wsId, v.workflow) : null
     const overrideCell = (s: Scope) => {
-      const o = overrideOf(s)
-      if (!o) return h('td.ctx-cell.muted', 'choose a workflow')
+      const all = blocksOf(s)
+      if (!all) return h('td.ctx-cell.muted', 'choose a workflow')
+      const present = all.filter(b => b.block || b.problem)
       return h(`td.ctx-cell.ctx-override${selected === s ? '.selected' : ''}`, { dataset: { scope: s } },
-        h('div.ctx-source-head', h(`span.pill.ctx-${o.problem ? 'error' : o.text === null ? 'absent' : 'body'}`, o.problem ? 'unreadable' : o.text === null ? 'not set' : 'set'), h('code.small.d-only', o.file)),
-        o.text !== null ? h('div.small.muted', o.revision !== null ? `revision ${o.revision} · ${when(o.updated!.at)} by ${o.updated!.by}` : 'edited outside WFE') : null,
-        o.text ? h('div.ctx-excerpt.small', o.text.length > 160 ? `${o.text.slice(0, 160)}…` : o.text) : null,
+        present.length ? present.map(b => h('div.ctx-cell-block', { dataset: { block: b.id } },
+          h('div.ctx-source-head', h(`span.pill.ctx-${b.problem ? 'error' : 'body'}`, b.problem ? 'unreadable' : b.block!.kind === 'information' ? 'information' : 'instruction'), h('strong.small', b.block?.title ?? b.id)),
+          b.block ? h('div.small.muted', `managed by ${b.block.manager} · last edited by ${b.block.editor.by} ${ago(b.block.editor.at)}${b.size ? ` · ${b.size.lines} lines` : ''}`) : h('div.small.error-text', b.problem ?? ''),
+          b.block?.refresh ? h('div.small.error-text', `refresh ${b.block.refresh.outcome} ${ago(b.block.refresh.at)}`) : null,
+          h('code.small.d-only', b.file))) : h(`span.pill.ctx-absent`, 'not set'),
         h('div.row.tight', h('a.button.small', { href: ownerHref(s), title: 'Open the editor where this instruction belongs' }, s === 'system' ? 'Open in Home' : s === 'project' ? 'Open in the project' : 'Open in the workflow'),
           h('button.small', { disabled: selected === s, onclick: () => { selected = s; render() } }, selected === s ? 'Editing below' : 'Quick edit')))
     }
@@ -162,13 +165,13 @@ export function renderContextView(root: HTMLElement, wsId: string, workflowId?: 
 export function renderContextChooser(root: HTMLElement): ViewHandle {
   const agdevworld = location.pathname.startsWith('/wfe/') ? '/' : 'http://localhost:8093/'
   const main = h('main.context-view')
-  const system = new OverrideEditor({ scope: 'system' }, { label: 'Instructions for all projects', onChange: () => {} })
+  const system = new BlockList({ scope: 'system' }, { add: true })
   const list = h('section.card', h('h2', 'Projects'), h('p.muted', 'Loading…'))
   root.append(h('header.topbar', h('div.crumbs', h('a.back-to-world', { href: agdevworld }, '← agdevworld'), h('span.sep', '|'), h('a', { href: '#/' }, 'agdev'), h('span.sep', '/'), h('span.muted', 'Context overview')), h('div.top-actions', displayToggle())), main)
   main.append(h('section.card.ctx-edit', h('h2', 'All projects'), system.el), list)
   void system.refresh()
   void api.workspaces().then(r => list.replaceChildren(h('h2', 'Projects'),
-    h('p', 'Each project\'s scope matrix compares its shared and local instructions with its workflows\'. Choose a project:'),
+    h('p', 'Each project\'s scope matrix compares its shared and local context with its workflows\'. Choose a project:'),
     h('ul.ctx-projects', r.workspaces.filter(w => w.observed.available).map(w => h('li', h('a', { href: `#/context/${encodeURIComponent(w.id)}` }, w.label || w.id), h('span.small.muted', ` ${w.id}`))))))
     .catch(e => list.replaceChildren(h('div.banner.error', (e as Error).message)))
   return { dispose: () => {}, isDirty: () => system.isDirty() }

@@ -1,24 +1,28 @@
-// Context inside the editors (workflow_editor p13 ex1, docs/context.md):
+// Context inside the editors (workflow_editor p13 ex1, p14; docs/context.md):
 // the parts every editor uses to show and change what agents are told,
 // where the person already works on the object.
 //
-// - OverrideEditor: one local instruction (system, project or workflow
-//   override) with its own draft, save, conflict recovery and history. It is
-//   built once and kept, so a live refresh, a display switch or a re-render
-//   of the host never replaces the text being typed.
+// - BlockCard: one local context block — a Developer instruction, or
+//   environment information an agent such as cagent maintains — as a card
+//   with its kind, manager, last editor, scope, freshness and size, and its
+//   own draft, save, conflict recovery and history. It is built once and
+//   kept, so a live refresh, a display switch or a re-render of the host
+//   never replaces the text being typed.
+// - BlockList: the blocks of one scope, each a card, with "add" for new
+//   ones; inherited lists name their scope and edit it in place.
 // - ListEditor: a list of short values (goals, guide references) edited in
 //   place, writing into the host's draft; the host owns the save.
 // - ContextSection: the collapsible Context section of Home, a project or a
 //   workflow — a summary that is always shown, the host's repository-owned
-//   controls ("Shared with this project"), the local instructions ("Only in
-//   this environment") and the wider scopes' content ("Inherited
-//   instructions") with in-place editors for those scopes.
+//   controls ("Shared with this project"), the local blocks ("Only in this
+//   environment") and the wider scopes' blocks and defaults ("Inherited").
 //
-// Storage is the p13 store and resolver: overrides through
-// api.override/saveOverride, everything shown as inherited from api.context.
+// Storage is the p14 block store and the p13 resolver: blocks through
+// api.blocks/block/putBlock, everything shown as inherited from api.context.
 // Default edits stay in the host's own save (project.yaml, the workflow
-// file); nothing here saves both kinds at once.
-import type { ContextSource, OverrideRevision, OverrideState, OverrideTarget } from '../shared/context.ts'
+// file); nothing here saves both kinds at once. Ownership is shown, not
+// enforced: anyone may edit any block, and the card says whose it is.
+import type { BlockKind, BlockRevision, BlockState, ContextSource, EvidenceRef, ScopeTarget } from '../shared/context.ts'
 import { api, ApiError, type ContextMatrixView } from './api.ts'
 import { append, h, when } from './dom.ts'
 import { icon } from './icons.ts'
@@ -27,178 +31,362 @@ const ACTOR_KEY = 'workflow-editor.actor'
 export const storedActor = () => { try { return localStorage.getItem(ACTOR_KEY) ?? '' } catch { return '' } }
 const storeActor = (v: string) => { try { localStorage.setItem(ACTOR_KEY, v) } catch { /* per-viewer convenience only */ } }
 
-// Who an instruction applies to, in the words the person chose by.
-export function scopeWords(t: OverrideTarget): string {
+// Who a block applies to, in the words the person chose by.
+export function scopeWords(t: ScopeTarget): string {
   return t.scope === 'system' ? 'all projects' : t.scope === 'project' ? `every workflow of project ${t.project}` : `every run of workflow ${t.workflow}`
 }
-const sameTarget = (a: OverrideTarget, b: OverrideTarget) => a.scope === b.scope && a.project === b.project && a.workflow === b.workflow
+// The scope a card names (inherited cards say where they really live).
+export const scopeName = (t: ScopeTarget) => t.scope === 'system' ? 'all projects' : t.scope === 'project' ? `project ${t.project}` : `workflow ${t.workflow}`
+const sameTarget = (a: ScopeTarget, b: ScopeTarget) => a.scope === b.scope && a.project === b.project && a.workflow === b.workflow
 
 // A textarea that grows with its text, within bounds.
 export function fitRows(ta: HTMLTextAreaElement, min = 3, max = 14) {
   ta.rows = Math.min(max, Math.max(min, ta.value.split('\n').reduce((n, line) => n + Math.max(1, Math.ceil(line.length / 80)), 0)))
 }
 
-export interface OverrideEditorOptions {
-  // Shown above the text: what this instruction is.
-  label: string
-  // Shown under it in both modes: who it applies to and what saving does.
-  hint?: string
-  placeholder?: string
-  // A wider scope edited from a narrower editor says so at its save.
+// "3 h ago", from a recorded time; the prompt never carries this.
+export function ago(at: string, now = Date.now()): string {
+  const s = Math.max(0, (now - Date.parse(at)) / 1000)
+  if (!Number.isFinite(s)) return at
+  return s < 90 ? 'just now' : s < 5400 ? `${Math.round(s / 60)} min ago` : s < 172800 ? `${Math.round(s / 3600)} h ago` : `${Math.round(s / 86400)} days ago`
+}
+const KIND_WORD: Record<BlockKind, string> = { instruction: 'Instruction', information: 'Environment information' }
+// The oldest observation the block's evidence rests on, and the worst status.
+export function freshness(evidence: EvidenceRef[]): { oldest: string | null; unknownTime: boolean; worst: EvidenceRef['status'] | null } {
+  const times = evidence.map(e => e.observed).filter((t): t is string => !!t).sort()
+  const order = ['ok', 'unknown', 'partial', 'failed'] as const
+  const worst = evidence.reduce<EvidenceRef['status'] | null>((w, e) => (w === null || order.indexOf(e.status) > order.indexOf(w) ? e.status : w), null)
+  return { oldest: times[0] ?? null, unknownTime: evidence.some(e => !e.observed), worst }
+}
+// A system block reaches every run of every project: a few short lines.
+const SYSTEM_LINES = 5
+const fill = (el: HTMLElement, ...kids: Parameters<typeof append>[1]) => { el.replaceChildren(); append(el, kids) }
+const slug = (title: string) => title.toLowerCase().normalize('NFKD').replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40) || 'block'
+
+export interface BlockCardOptions {
+  // An inherited card: edited in place, but saving says it applies to a wider scope.
   wider?: boolean
+  // A new block of this kind (no id yet): opens in edit mode.
+  create?: BlockKind
+  taken?: () => string[] // ids already used in the scope (a new block picks a free one)
   onChange?: () => void // the draft or its saved state changed
-  onSaved?: (s: OverrideState) => void
+  onSaved?: (s: BlockState) => void
+  onCancelNew?: () => void
 }
 
-export class OverrideEditor {
+export class BlockCard {
   readonly el: HTMLElement
-  private target: OverrideTarget
-  private readonly opts: OverrideEditorOptions
+  private target: ScopeTarget
+  private id: string | null
+  private readonly opts: BlockCardOptions
+  private readonly head = h('div.ctx-block-head')
+  private readonly facts = h('div.ctx-block-facts')
+  private readonly content = h('div.ctx-block-content')
+  private readonly editBox = h('div.ctx-block-edit')
+  private readonly titleIn: HTMLInputElement
+  private readonly kindIn: HTMLSelectElement
   private readonly ta: HTMLTextAreaElement
   private readonly by: HTMLInputElement
   private readonly buttons = h('div.row.tight.ctx-save-row')
   private readonly status = h('div.ctx-status')
-  private readonly meta = h('p.small.muted.d-only.ctx-meta')
+  private readonly detail = h('div.d-only.ctx-block-detail')
   private readonly history = h('details.ctx-history.d-only')
-  private readonly labelEl = h('span')
-  private readonly hintEl = h('p.small.muted.ctx-hint')
-  private base: OverrideState | null = null // the override as last read (what a save replaces)
-  private remote: OverrideState | null = null // a newer saved state seen while the draft was dirty
-  private revisions: (OverrideRevision & { text: string | null })[] = []
+  private base: BlockState | null = null // the block as last read (what a save replaces)
+  private remote: BlockState | null = null // a newer saved state seen while the draft was dirty
+  private revisions: BlockRevision[] | null = null
+  private editing = false
   private busy = false
-  private loaded = false
-  private loadError = ''
+  private message: { kind: 'ok' | 'error' | 'warn'; text: string; extra?: HTMLElement } | null = null
 
-  constructor(target: OverrideTarget, opts: OverrideEditorOptions) {
+  constructor(target: ScopeTarget, state: BlockState | null, opts: BlockCardOptions = {}) {
     this.target = target
     this.opts = opts
-    this.ta = h('textarea.context-editor', { rows: 3, spellcheck: false, placeholder: opts.placeholder ?? 'Instructions agents should follow, in your words.', disabled: true }) as HTMLTextAreaElement
-    this.ta.addEventListener('input', () => { fitRows(this.ta); this.renderButtons(); this.opts.onChange?.() })
+    this.id = state?.id ?? null
+    const uid = `blk-${Math.random().toString(36).slice(2, 9)}`
+    this.titleIn = h('input.ctx-block-title', { id: `${uid}-t`, placeholder: 'A short title', oninput: () => this.changed() }) as HTMLInputElement
+    this.kindIn = h('select.ctx-block-kind', { id: `${uid}-k`, onchange: () => this.changed() },
+      h('option', { value: 'instruction' }, 'Instruction — guidance agents follow'), h('option', { value: 'information' }, 'Environment information — facts and advice')) as HTMLSelectElement
+    this.ta = h('textarea.context-editor', { id: `${uid}-b`, rows: 3, spellcheck: false, placeholder: 'In your words. Keep blocks for all projects to a few short lines.' }) as HTMLTextAreaElement
+    this.ta.addEventListener('input', () => { fitRows(this.ta); this.changed() })
     this.by = h('input.ctx-by', { 'aria-label': 'Revision author', placeholder: 'your name', value: storedActor(), size: 12, oninput: () => storeActor(this.by.value.trim()) }) as HTMLInputElement
-    const id = `ctx-${Math.random().toString(36).slice(2, 9)}`
-    this.ta.id = id
-    this.el = h('div.ctx-override', { dataset: { scope: target.scope } },
-      h('label.ctx-label', { htmlFor: id }, this.labelEl),
-      this.hintEl, this.ta, this.buttons, this.status, this.meta, this.history)
-    this.relabel()
-    this.renderButtons()
-  }
-
-  private relabel() {
-    this.labelEl.textContent = this.opts.label
-    this.ta.setAttribute('aria-label', `${this.opts.label} (${scopeWords(this.target)})`)
-    this.hintEl.textContent = this.opts.hint ?? `Applies to ${scopeWords(this.target)}. Kept on this host only, never in Git. Used from the next attempt; saving starts nothing.`
-  }
-
-  get scope() { return this.target.scope }
-  get saved(): OverrideState | null { return this.base }
-  get text() { return this.ta.value }
-  isDirty() { return this.loaded && this.ta.value !== (this.base?.text ?? '') }
-  focus() { this.ta.focus({ preventScroll: true }); this.ta.scrollIntoView({ block: 'nearest' }) }
-
-  // A workflow's id can change with its file; a different target starts
-  // from what is saved there at the next refresh.
-  setTarget(t: OverrideTarget) {
-    if (sameTarget(t, this.target)) return
-    this.target = t
-    this.loaded = false
-    this.base = null; this.remote = null; this.message = null
-    this.setText('')
-    this.relabel()
+    this.editBox.append(
+      h('label.field.small', { htmlFor: this.titleIn.id }, h('span', 'Title'), this.titleIn),
+      h('label.field.small', { htmlFor: this.kindIn.id }, h('span', 'Kind'), this.kindIn),
+      h('label.ctx-label', { htmlFor: this.ta.id }, 'Text'), this.ta, this.buttons)
+    this.el = h('article.ctx-block', { dataset: { scope: target.scope } }, this.head, this.facts, this.content, this.editBox, this.status, this.detail, this.history)
+    this.history.addEventListener('toggle', () => { if (this.history.open && this.revisions === null) void this.loadHistory() })
+    if (state) this.update(state)
+    else { this.editing = true; this.kindIn.value = opts.create ?? 'instruction'; this.setDraft('', '') }
     this.renderAll()
   }
 
-  // Reads the saved state. A clean editor follows it; a draft is never
-  // replaced: a newer saved text is announced, and a save then conflicts.
-  async refresh(): Promise<void> {
-    const t = this.target
-    let r
-    try { r = await api.override(t.scope, t.project, t.workflow) } catch (e) { this.loadError = (e as Error).message; this.renderStatus(); return }
-    if (!sameTarget(t, this.target)) return
-    this.loadError = ''
-    this.revisions = r.revisions
-    if (!this.loaded || !this.isDirty()) {
-      this.base = r.state; this.remote = null
-      this.setText(r.state.text ?? '')
-      this.loaded = true
-    } else if ((r.state.sha256 ?? null) !== (this.base?.sha256 ?? null)) this.remote = r.state
-    else this.remote = null
-    this.ta.disabled = !!r.state.problem && r.state.text === null
-    this.renderButtons(); this.renderMeta(); this.renderStatus()
-    this.opts.onChange?.()
+  get blockId() { return this.id }
+  get saved(): BlockState | null { return this.base }
+  isNew() { return this.id === null }
+  isDirty() {
+    if (!this.editing) return false
+    const b = this.base?.block
+    if (!b) return this.ta.value.trim() !== '' || this.titleIn.value.trim() !== ''
+    return this.ta.value !== b.body || this.titleIn.value !== b.title || this.kindIn.value !== b.kind
   }
+  focus() { (this.editing ? this.ta : this.head.querySelector('button') as HTMLElement | null)?.focus({ preventScroll: true }); this.el.scrollIntoView({ block: 'nearest' }) }
+  edit() { if (!this.editing) { this.editing = true; this.resetDraft(); this.renderAll() } this.ta.focus({ preventScroll: true }) }
 
+  // A newer read of the block. A clean card follows it; a draft is never
+  // replaced: a newer saved state is announced, and saving then conflicts.
+  update(state: BlockState) {
+    if (this.id !== null && state.id !== this.id) return
+    if (!this.isDirty()) {
+      this.base = state; this.remote = null
+      if (!this.editing) this.resetDraft()
+    } else if (state.base !== this.base?.base) this.remote = state
+    else this.remote = null
+    if (this.revisions && state.revision !== this.base?.revision) this.revisions = null
+    this.renderAll()
+  }
+  setTarget(t: ScopeTarget) { if (!sameTarget(t, this.target)) { this.target = t; this.renderAll() } }
+
+  private changed() { this.renderButtons(); this.opts.onChange?.() }
+  private resetDraft() { const b = this.base?.block; this.setDraft(b?.title ?? '', b?.body ?? ''); if (b) this.kindIn.value = b.kind }
   // Replaces the text without losing the caret of someone typing in it.
-  private setText(text: string) {
-    if (this.ta.value === text) return
+  private setDraft(title: string, body: string) {
+    if (this.titleIn.value !== title && document.activeElement !== this.titleIn) this.titleIn.value = title
+    if (this.ta.value === body) return
     const focused = document.activeElement === this.ta
     const sel = focused ? [this.ta.selectionStart, this.ta.selectionEnd] as const : null
-    this.ta.value = text
+    this.ta.value = body
     fitRows(this.ta)
-    if (sel) try { this.ta.setSelectionRange(Math.min(sel[0], text.length), Math.min(sel[1], text.length)) } catch { /* not focused */ }
+    if (sel) try { this.ta.setSelectionRange(Math.min(sel[0], body.length), Math.min(sel[1], body.length)) } catch { /* not focused */ }
   }
-
-  private message: { kind: 'ok' | 'error' | 'warn'; text: string; extra?: HTMLElement } | null = null
   private say(kind: 'ok' | 'error' | 'warn', text: string, extra?: HTMLElement) { this.message = { kind, text, extra }; this.renderStatus() }
 
-  async save(text: string | null) {
+  private async loadHistory() {
+    if (!this.id) return
+    try { this.revisions = (await api.block(this.target, this.id)).revisions } catch (e) { this.revisions = []; this.say('error', `History not read: ${(e as Error).message}`) }
+    this.renderHistory()
+  }
+
+  async save(remove = false) {
     const by = this.by.value.trim()
-    if (!by) { this.say('error', 'Enter your name next to Save: every revision records who wrote it.'); this.by.focus(); return }
+    if (!by) { this.say('error', `Enter your name next to ${remove ? 'Remove' : 'Save'}: every revision records who wrote it.`); this.by.focus(); return }
+    const title = this.titleIn.value.trim()
+    if (!remove && (!title || !this.ta.value.trim())) { this.say('error', 'A block needs a title and some text.'); return }
     this.busy = true; this.renderButtons()
+    let id = this.id
+    if (id === null) {
+      const taken = new Set(this.opts.taken?.() ?? [])
+      const s = slug(title)
+      id = s
+      for (let n = 2; taken.has(id); n++) id = `${s}-${n}`
+    }
     const t = this.target
     try {
-      const r = await api.saveOverride({ ...t, text, base: this.base?.sha256 ?? null, by })
+      const r = await api.putBlock(remove
+        ? { ...t, op: 'remove', block: id, base: this.base?.base ?? 0, by }
+        : { ...t, op: 'set', block: id, base: this.base?.base ?? 0, by, title, kind: this.kindIn.value as BlockKind, body: this.ta.value })
+      this.id = id
       this.base = r.state; this.remote = null; this.revisions = r.revisions
-      this.setText(r.state.text ?? '')
-      const where = scopeWords(t)
-      this.say('ok', !r.changed ? 'Unchanged: that is already the saved text.'
-        : `${text === null ? 'Cleared' : 'Saved'} for ${where}. It is used from the next attempt${this.opts.wider ? ' of every affected run' : ''}; nothing was started or resumed, and work in progress keeps what it was given.`)
+      this.editing = false
+      this.resetDraft()
+      this.say('ok', !r.changed ? 'Unchanged: that is already the saved block.'
+        : `${remove ? 'Removed' : 'Saved'} for ${scopeWords(t)}. It is used from the next attempt${this.opts.wider ? ' of every affected run' : ''}; nothing was started or resumed, and work in progress keeps what it was given.`)
       this.opts.onSaved?.(r.state)
     } catch (e) {
       const conflict = e instanceof ApiError && (e.detail as { code?: string } | undefined)?.code === 'context-conflict'
-      const cur = conflict ? (e.detail as { current: OverrideState }).current : null
+      const cur = conflict ? (e.detail as { current: BlockState }).current : null
       if (cur) {
-        this.say('error', `Not saved: someone saved this instruction${cur.updated ? ` (${when(cur.updated.at)}, ${cur.updated.by})` : ''} after you started. Your text is kept here.`,
-          h('div.ctx-conflict', h('p.small', 'Saved now:'), h('pre.small', cur.text ?? '(not set)'),
+        const cb = cur.block
+        this.say('error', `Not ${remove ? 'removed' : 'saved'}: ${cb ? `${cb.editor.by} changed this block (${when(cb.editor.at)})` : 'it was removed'} after you started. Your text is kept here.`,
+          h('div.ctx-conflict', h('p.small', 'Saved now:'), h('pre.small', cb?.body ?? '(removed)'),
             h('div.row.tight',
-              h('button', { type: 'button', onclick: () => { this.base = cur; this.remote = null; this.setText(cur.text ?? ''); this.message = null; this.renderAll() } }, 'Use the saved text (discard mine)'),
-              h('button', { type: 'button', onclick: () => { this.base = cur; this.remote = null; this.message = null; void this.save(text) } }, 'Save mine over it'))))
-      } else this.say('error', `Not saved: ${(e as Error).message} Your text is kept; try again.`)
+              h('button', { type: 'button', onclick: () => { this.base = cur; this.remote = null; this.editing = false; this.resetDraft(); this.message = null; this.renderAll(); this.opts.onChange?.() } }, 'Use the saved text (discard mine)'),
+              h('button', { type: 'button', onclick: () => { this.base = cur; this.remote = null; this.message = null; void this.save(remove) } }, remove ? 'Remove it anyway' : 'Save mine over it'))))
+      } else this.say('error', `Not ${remove ? 'removed' : 'saved'}: ${(e as Error).message} Your text is kept; try again.`)
     }
     this.busy = false
     this.renderAll()
     this.opts.onChange?.()
   }
 
-  private renderAll() { this.renderButtons(); this.renderMeta(); this.renderStatus() }
+  private renderAll() { this.renderHead(); this.renderFacts(); this.renderContent(); this.renderButtons(); this.renderStatus(); this.renderDetail(); this.renderHistory() }
 
-  private renderButtons() {
-    const dirty = this.isDirty()
-    this.buttons.replaceChildren(
-      h('button.primary', { type: 'button', disabled: this.busy || !dirty, onclick: () => void this.save(this.ta.value) }, this.busy ? 'Saving…' : 'Save'),
-      h('button', { type: 'button', disabled: this.busy || !dirty, onclick: () => { this.setText(this.base?.text ?? ''); this.message = null; this.renderAll(); this.opts.onChange?.() } }, 'Discard changes'),
-      h('button.ghost', { type: 'button', disabled: this.busy || !this.base?.text, title: 'Remove this instruction; wider and repository-owned ones stay', onclick: () => { if (confirm(`Remove the instruction for ${scopeWords(this.target)}? Wider and repository-owned instructions stay.`)) void this.save(null) } }, 'Remove'),
-      h('label.small.ctx-by-label', 'as ', this.by),
-      h(`span.small.ctx-state${dirty ? '.warn-text' : '.muted'}`, dirty ? 'Unsaved changes' : !this.loaded ? 'Loading…' : this.base?.text ? 'Saved' : 'Not set'))
+  private renderHead() {
+    const b = this.base?.block
+    const kind = (b?.kind ?? this.kindIn.value) as BlockKind
+    this.el.dataset.kind = kind
+    this.el.classList.toggle('editing', this.editing)
+    this.el.classList.toggle('removed', !!this.base && !b)
+    const actions = h('div.row.tight.ctx-block-actions',
+      !this.editing && b ? h('button.small', { type: 'button', onclick: () => this.edit(), 'aria-label': `Edit ${b.title}` }, 'Edit') : null,
+      !this.editing && b ? h('button.small.ghost', { type: 'button', disabled: this.busy, title: 'Remove this block; other blocks and repository-owned context stay', onclick: () => { if (confirm(`Remove "${b.title}" for ${scopeWords(this.target)}? Other blocks stay.`)) void this.save(true) } }, 'Remove') : null)
+    this.head.replaceChildren(
+      h('div.ctx-block-title-row', h('strong.ctx-block-name', b?.title ?? (this.isNew() ? (kind === 'information' ? 'New environment information' : 'New instruction') : this.id ?? '')),
+        h(`span.chip.ctx-kind-${kind}`, KIND_WORD[kind]),
+        this.opts.wider || this.target.scope !== 'system' ? h('span.chip.muted.ctx-block-scope', scopeName(this.target)) : h('span.chip.muted.ctx-block-scope', 'all projects')),
+      actions)
   }
 
-  private renderMeta() {
-    const b = this.base
-    this.meta.textContent = !b ? '' : [b.file, b.revision !== null ? `revision ${b.revision}` : b.text !== null ? 'edited outside WFE' : null, b.updated ? `${when(b.updated.at)} by ${b.updated.by}` : null, b.sha256 ? `sha256 ${b.sha256.slice(0, 12)}` : null].filter(Boolean).join(' · ')
-    this.history.replaceChildren(h('summary.small', `Revision history (${this.revisions.length})`),
-      this.revisions.length ? h('ol.ctx-revisions', { reversed: true }, ...[...this.revisions].reverse().map(r => h('li',
-        h('div.small', h('strong', `revision ${r.rev}`), ` · ${when(r.at)} · ${r.by}${r.external ? ' (found edited outside WFE)' : ''} · ${r.sha256 ? r.sha256.slice(0, 12) : 'removed'}`),
-        r.text !== null ? h('pre.small', r.text) : h('p.small.muted', 'removed')))) : h('p.small.muted', 'No revision yet.'))
+  private renderFacts() {
+    const s = this.base, b = s?.block
+    if (!b) { this.facts.replaceChildren(...(s && !b ? [h('p.small.muted', `Removed (revision ${s.revision}); its history stays.`)] : [])); return }
+    const f = freshness(b.evidence)
+    const bits: (HTMLElement | null)[] = [
+      h('span.ctx-manager', 'Managed by ', h('strong', b.manager)),
+      h('span.ctx-editor', `Last edited by ${b.editor.by}${b.editor.by === b.manager ? '' : ''} · ${ago(b.editor.at)}`, b.editor.run ? h('span.muted', ` · ${b.editor.run}`) : null),
+    ]
+    if (b.kind === 'information') {
+      bits.push(!b.evidence.length ? h('span.warn-text.ctx-fresh', 'no evidence recorded')
+        : h(`span.ctx-fresh${f.worst === 'failed' || f.worst === 'partial' ? '.warn-text' : ''}`, f.oldest ? `observed ${ago(f.oldest)}` : 'observation time not known', f.worst && f.worst !== 'ok' ? ` · ${f.worst}` : ''))
+      if (b.checked) bits.push(h('span.muted.ctx-checked', `checked ${ago(b.checked.at)} by ${b.checked.by}`))
+    }
+    if (b.refresh) bits.push(h('span.error-text.ctx-refresh', icon('alert', 'icon small'), ` refresh ${b.refresh.outcome} ${ago(b.refresh.at)}: ${b.refresh.detail}`))
+    // The body's lines are the editorial measure (a few for all projects);
+    // the bytes are the whole delivered section, headings and evidence included.
+    const size = s.size
+    const lines = b.body.trimEnd().split('\n').length
+    const heavy = this.target.scope === 'system' && lines > SYSTEM_LINES
+    if (size) bits.push(h(`span.ctx-size${heavy ? '.warn-text' : '.muted'}`, { title: `The whole section every affected run is given: ${size.lines} lines, ${size.bytes} bytes` }, `${lines} line${lines === 1 ? '' : 's'} · ${size.bytes} bytes delivered${heavy ? ` — every run of every project gets this; aim for ${SYSTEM_LINES} lines or fewer` : ''}`))
+    this.facts.replaceChildren(...bits.filter(Boolean).map(x => h('span.ctx-fact.small', x!)))
+  }
+
+  private renderContent() {
+    const b = this.base?.block
+    if (!b || this.editing) { this.content.replaceChildren(); this.content.hidden = true; return }
+    this.content.hidden = false
+    const text = b.body.trim()
+    const lines = text.split('\n')
+    const long = lines.length > 6 || text.length > 480
+    fill(this.content, long ? h('details.ctx-src-text', h('summary.small', lines.find(l => l.trim())!.slice(0, 140)), h('pre.ctx-text', text)) : h('pre.ctx-text', text),
+      b.details.length || b.consult ? h('p.small.ctx-routes', b.details.length ? ['Details: ', ...b.details.flatMap((d, i) => [i ? ', ' : '', h('a', { href: api.detailUrl(`context:${this.scopePath()}/${b.id}/${d.name}`), target: '_blank', rel: 'noopener' }, d.name)])] : null,
+        b.details.length && b.consult ? ' · ' : null, b.consult ? `Ask ${b.manager}: ${b.consult}` : null) : null)
+  }
+  private scopePath() { const t = this.target; return t.scope === 'system' ? 'system' : t.scope === 'project' ? `project/${t.project}` : `workflow/${t.project}/${t.workflow}` }
+
+  private renderButtons() {
+    this.editBox.hidden = !this.editing
+    if (!this.editing) { this.buttons.replaceChildren(); return }
+    const dirty = this.isDirty()
+    const b = this.base?.block
+    const theirs = b && b.manager !== this.by.value.trim() ? h('p.small.muted.ctx-theirs', `This block is managed by ${b.manager}. Your edit is kept in its history with your name; ${b.manager} reads it before its next update.`) : null
+    fill(this.buttons,
+      h('button.primary', { type: 'button', disabled: this.busy || !dirty, onclick: () => void this.save() }, this.busy ? 'Saving…' : 'Save'),
+      h('button', { type: 'button', disabled: this.busy, onclick: () => { if (this.isNew()) { this.opts.onCancelNew?.(); return } this.editing = false; this.resetDraft(); this.message = null; this.renderAll(); this.opts.onChange?.() } }, dirty ? 'Discard changes' : 'Close'),
+      h('label.small.ctx-by-label', 'as ', this.by),
+      h(`span.small.ctx-state${dirty ? '.warn-text' : '.muted'}`, dirty ? 'Unsaved changes' : 'No changes'),
+      theirs,
+      this.opts.wider ? h('p.small.muted.ctx-wider-note', `You are editing a wider scope: this applies to ${scopeWords(this.target)}, not only here.`) : null)
   }
 
   private renderStatus() {
     const parts: HTMLElement[] = []
-    if (this.loadError) parts.push(h('div.banner.error.small', `Cannot read this instruction now: ${this.loadError}`))
     if (this.base?.problem) parts.push(h('div.banner.error.small', this.base.problem))
-    if (this.base?.external) parts.push(h('div.banner.warn.small', 'This file was edited outside WFE since its last revision; saving keeps that content as a revision first.'))
-    if (this.remote) parts.push(h('div.banner.warn.small', `Saved elsewhere while you were editing${this.remote.updated ? ` (${when(this.remote.updated.at)}, ${this.remote.updated.by})` : ''}. Your text is kept; saving it will ask which one to keep.`))
+    if (this.base?.external) parts.push(h('div.banner.warn.small', 'This block\'s file was edited outside WFE since its last revision; saving keeps that content as a revision first.'))
+    if (this.remote) parts.push(h('div.banner.warn.small', `Changed elsewhere while you were editing${this.remote.block ? ` (${this.remote.block.editor.by}, ${when(this.remote.block.editor.at)})` : ' (removed)'}. Your text is kept; saving it will ask which one to keep.`))
     if (this.message) parts.push(h(`div.banner.${this.message.kind}.small`, this.message.text, this.message.extra ?? null))
     this.status.replaceChildren(...parts)
+  }
+
+  private renderDetail() {
+    const s = this.base, b = s?.block
+    if (!s) { this.detail.replaceChildren(); return }
+    fill(this.detail,
+      h('p.small.muted', [s.file, `revision ${s.revision}`, `content revision ${s.base}`, s.sha256 ? `section sha256 ${s.sha256.slice(0, 12)}` : null, b ? `id ${b.id}` : null, b?.editor.via ? `via ${b.editor.via}` : null].filter(Boolean).join(' · ')),
+      b?.evidence.length ? h('div.ctx-evidence', h('p.small', h('strong', 'Evidence')), h('ul.small', ...b.evidence.map(e => h('li',
+        h('span.chip.muted', e.basis), ' ', h(`span.chip${e.status === 'ok' ? '.ok' : e.status === 'unknown' ? '.muted' : '.warn'}`, e.status), ' ',
+        e.observed ? `observed ${when(e.observed)} (${ago(e.observed)})` : 'observation time not known', e.coverage ? ` · ${e.coverage}` : '', ' — ',
+        e.ref.startsWith('context:') ? h('a', { href: api.detailUrl(e.ref), target: '_blank', rel: 'noopener' }, e.title ?? e.ref) : h('span', e.title ? `${e.title}: ` : '', h('code', e.ref)))))) : null,
+      b?.checked ? h('p.small.muted', `Checked ${when(b.checked.at)} by ${b.checked.by}${b.checked.run ? ` (${b.checked.run})` : ''}${b.checked.note ? ` — ${b.checked.note}` : ''}. A check is bookkeeping: it changes no prompt.`) : null,
+      b?.refresh ? h('p.small.error-text', `Refresh ${b.refresh.outcome} ${when(b.refresh.at)} by ${b.refresh.by}${b.refresh.run ? ` (${b.refresh.run})` : ''}: ${b.refresh.detail}. The content above is from the earlier evidence.`) : null,
+      b?.details.length ? h('p.small.muted', 'Details: ', ...b.details.flatMap((d, i) => [i ? ', ' : '', h('code', `context:${this.scopePath()}/${b.id}/${d.name}`), ` (${d.bytes} bytes, ${when(d.at)})`])) : null)
+  }
+
+  private renderHistory() {
+    if (!this.base) { this.history.hidden = true; return }
+    this.history.hidden = false
+    const r = this.revisions
+    const summary = h('summary.small', `Revision history (${this.base.revisions})`)
+    if (!this.history.open && r === null) { this.history.replaceChildren(summary); return }
+    this.history.replaceChildren(summary, r === null ? h('p.small.muted', 'Loading…')
+      : r.length ? h('ol.ctx-revisions', { reversed: true }, ...[...r].reverse().map(x => h('li',
+        h('div.small', h('strong', `revision ${x.rev}`), ` · ${x.op}${x.content ? '' : ' (bookkeeping)'} · ${when(x.at)} · ${x.by}${x.run ? ` · ${x.run}` : ''}${x.via ? ` · ${x.via}` : ''}${x.note ? ` — ${x.note}` : ''}`),
+        x.block && (x.op === 'set' || x.op === 'external' || x.op === 'converted') ? h('pre.small', x.block.body) : x.block ? null : h('p.small.muted', 'removed'))))
+        : h('p.small.muted', 'No revision yet.'))
+  }
+}
+
+// The blocks of one scope as cards, with "add" for new ones. Cards are
+// kept by id across refreshes, so drafts survive.
+export class BlockList {
+  readonly el: HTMLElement
+  private target: ScopeTarget
+  private readonly opts: { wider?: boolean; add?: boolean; empty?: string; onChange?: () => void; onSaved?: () => void }
+  private readonly cards = new Map<string, BlockCard>()
+  private readonly fresh: BlockCard[] = []
+  private readonly list = h('div.ctx-blocks')
+  private readonly addRow = h('div.row.tight.ctx-add')
+  private states: BlockState[] = []
+  private loaded = false
+  private error = ''
+
+  constructor(target: ScopeTarget, opts: BlockList['opts'] = {}) {
+    this.target = target
+    this.opts = opts
+    this.el = h('div.ctx-block-list', { dataset: { scope: target.scope } }, this.list, this.addRow)
+    if (opts.add) this.addRow.append(
+      h('button.ghost.small', { type: 'button', onclick: () => this.add('instruction') }, '+ Add an instruction'),
+      h('button.ghost.small', { type: 'button', onclick: () => this.add('information') }, '+ Add environment information'))
+    this.render()
+  }
+
+  get scope() { return this.target }
+  isDirty() { return [...this.cards.values(), ...this.fresh].some(c => c.isDirty()) }
+  present() { return this.states.filter(s => s.block) }
+  setTarget(t: ScopeTarget) {
+    if (sameTarget(t, this.target)) return
+    this.target = t
+    this.cards.clear(); this.fresh.length = 0; this.states = []; this.loaded = false
+    this.render()
+  }
+  focus() { (this.fresh[0] ?? [...this.cards.values()][0])?.focus() }
+  // Focus the first block, or open a new instruction when there is none.
+  focusOrAdd() { if (this.present().length) this.focus(); else this.add('instruction') }
+
+  add(kind: BlockKind) {
+    const card: BlockCard = new BlockCard(this.target, null, {
+      create: kind, wider: this.opts.wider, taken: () => this.states.map(s => s.id),
+      onChange: () => this.opts.onChange?.(),
+      onSaved: s => { this.fresh.splice(this.fresh.indexOf(card), 1); this.cards.set(s.id, card); this.states = [...this.states.filter(x => x.id !== s.id), s]; this.render(); this.opts.onSaved?.() },
+      onCancelNew: () => { this.fresh.splice(this.fresh.indexOf(card), 1); this.render(); this.opts.onChange?.() },
+    })
+    this.fresh.push(card)
+    this.render()
+    card.focus()
+    this.opts.onChange?.()
+  }
+
+  // Blocks as read by the host (the matrix) or by this list itself.
+  set(states: BlockState[]) {
+    this.loaded = true; this.error = ''
+    this.states = states
+    for (const s of states) {
+      const c = this.cards.get(s.id)
+      if (c) c.update(s)
+      else if (s.block) this.cards.set(s.id, new BlockCard(this.target, s, { wider: this.opts.wider, onChange: () => this.opts.onChange?.(), onSaved: () => this.opts.onSaved?.() }))
+    }
+    this.render()
+  }
+  async refresh() {
+    try { this.set((await api.blocks(this.target)).blocks) } catch (e) { this.error = (e as Error).message; this.loaded = true; this.render() }
+  }
+
+  private render() {
+    const shown = this.states.filter(s => s.block || this.cards.get(s.id)?.isDirty()).map(s => this.cards.get(s.id)).filter((c): c is BlockCard => !!c)
+    const removed = this.states.filter(s => !s.block && !this.cards.get(s.id)?.isDirty())
+    this.list.replaceChildren(
+      ...(this.error ? [h('div.banner.error.small', `Cannot read these blocks now: ${this.error}`)] : []),
+      ...shown.map(c => c.el), ...this.fresh.map(c => c.el),
+      ...(!shown.length && !this.fresh.length ? [h('p.small.muted.ctx-none', !this.loaded ? 'Loading…' : this.opts.empty ?? 'None set.')] : []),
+      ...(removed.length ? [h('p.small.muted.d-only', `Removed blocks (history kept): ${removed.map(s => s.id).join(', ')}`)] : []))
   }
 }
 
@@ -289,10 +477,9 @@ export class ContextSection {
   private readonly inheritedBox = h('div.ctx-inherited-list')
   private readonly preview = h('div.ctx-preview')
   private readonly ownBox = h('div.ctx-own')
-  private readonly local: OverrideEditor
-  // Editors of wider scopes, opened from an inherited instruction; kept so
-  // closing and reopening one keeps its draft.
-  private readonly wider = new Map<string, { editor: OverrideEditor; box: HTMLElement }>()
+  private readonly local: BlockList
+  // Blocks of wider scopes, edited in place; kept so drafts survive.
+  private readonly wider = new Map<string, BlockList>()
   private workflow: string | null = null
   private view: ContextMatrixView | null = null
   private loadError = ''
@@ -303,18 +490,20 @@ export class ContextSection {
     const key = opts.scope
     this.toggle = h('button.ctx-toggle', { type: 'button', 'aria-expanded': 'false', onclick: () => this.setOpen(this.body.hidden === true) },
       icon('caret', 'icon small ctx-caret'), h('span.ctx-title', 'Context'), this.summary) as HTMLButtonElement
-    const localLabel = opts.scope === 'system' ? 'Instructions for all projects' : opts.scope === 'project' ? 'Your instructions for this project' : 'Your instructions for this workflow'
-    this.local = new OverrideEditor(opts.scope === 'system' ? { scope: 'system' } : { scope: opts.scope, project: '', workflow: '' }, {
-      label: localLabel,
-      hint: opts.scope === 'system' ? 'Applies to every project and workflow on this host: your general preferences and local environment facts. Kept on this host only, never in Git. Used from the next attempt; saving starts nothing.' : undefined,
-      placeholder: opts.scope === 'system' ? 'For example: write produced text in English unless a request asks otherwise.' : 'Instructions you want here but not in the repository.',
+    this.local = new BlockList(opts.scope === 'system' ? { scope: 'system' } : { scope: opts.scope, project: '', workflow: '' }, {
+      add: true,
+      empty: opts.scope === 'system' ? 'Nothing is set for all projects yet.' : 'Nothing is set only here.',
       onChange: () => this.changed(), onSaved: () => void this.reload(),
     })
+    const localHead = opts.scope === 'system' ? 'For all projects' : opts.scope === 'project' ? 'For this project, only in this environment' : 'For this workflow, only in this environment'
+    const localHint = opts.scope === 'system'
+      ? 'Applies to every project and workflow on this host: your instructions, and environment information agents such as cagent maintain. Each block names who manages it and who last edited it. Kept on this host only, never in Git. Every run of every project is given these, so keep them short. Used from the next attempt; saving starts nothing.'
+      : `Applies to ${opts.scope === 'project' ? 'every workflow of this project' : 'every run of this workflow'}. Kept on this host only, never in Git. Used from the next attempt; saving starts nothing.`
     this.body.hidden = true
     append(this.body, [
       opts.shared ? h('div.ctx-group.ctx-shared', h('h3', 'Shared with this project', h('span.small.muted', ' — in the repository; travels with the project')), opts.shared, this.ownBox) : null,
-      h('div.ctx-group.ctx-local', opts.scope === 'system' ? null : h('h3', 'Only in this environment', h('span.small.muted', ' — on this host, not in Git')), this.local.el),
-      opts.scope === 'system' ? null : h('div.ctx-group.ctx-inherited', h('h3', 'Inherited instructions', h('span.small.muted', ' — from wider scopes; they apply here too')), this.inheritedBox),
+      h('div.ctx-group.ctx-local', h('h3', localHead, opts.scope === 'system' ? null : h('span.small.muted', ' — on this host, not in Git')), h('p.small.muted.ctx-hint', localHint), this.local.el),
+      opts.scope === 'system' ? null : h('div.ctx-group.ctx-inherited', h('h3', 'Inherited', h('span.small.muted', ' — from wider scopes; they apply here too')), this.inheritedBox),
       this.preview])
     this.el = h(`section.ctx-section.ctx-scope-${key}`, { dataset: { contextScope: key }, 'aria-label': 'Context' }, h('div.ctx-head', this.toggle), this.body)
     this.toggle.setAttribute('aria-controls', this.body.id = `ctx-body-${key}`)
@@ -330,16 +519,16 @@ export class ContextSection {
     if (remember) storeOpenState(this.opts.scope, open)
   }
   // An entrance from elsewhere (a matrix link, a hero button): open, show,
-  // and put the keyboard on the local instruction.
+  // and put the keyboard on the local blocks.
   reveal(focusLocal = false, then?: () => void) {
     this.setOpen(true)
     this.el.scrollIntoView({ block: 'start' })
-    if (focusLocal) this.local.focus()
+    if (focusLocal) this.local.focusOrAdd()
     then?.()
   }
 
-  isDirty(): boolean { return this.local.isDirty() || [...this.wider.values()].some(w => w.editor.isDirty()) }
-  localEditor() { return this.local }
+  isDirty(): boolean { return this.local.isDirty() || [...this.wider.values()].some(w => w.isDirty()) }
+  localBlocks() { return this.local }
 
   // The workflow the section follows (the project is the editor's own).
   setWorkflow(workflow: string | null) {
@@ -356,9 +545,11 @@ export class ContextSection {
     try { this.view = await api.context(this.opts.wsId, this.workflow); this.loadError = '' } catch (e) { this.loadError = (e as Error).message }
     if (this.disposed) return
     if (this.view) {
-      const p = this.view.project
-      this.local.setTarget(this.opts.scope === 'project' ? { scope: 'project', project: p } : { scope: 'workflow', project: p, workflow: this.view.workflow ?? this.workflow! })
-      await Promise.all([this.local.refresh(), ...[...this.wider.values()].map(w => w.editor.refresh())])
+      const v = this.view
+      this.local.setTarget(this.opts.scope === 'project' ? { scope: 'project', project: v.project } : { scope: 'workflow', project: v.project, workflow: v.workflow ?? this.workflow! })
+      this.local.set(this.opts.scope === 'project' ? v.blocks.project : v.blocks.workflow ?? [])
+      this.widerList({ scope: 'system' }).set(v.blocks.system)
+      if (this.opts.scope === 'workflow') this.widerList({ scope: 'project', project: v.project }).set(v.blocks.project)
     }
     this.renderOwn()
     this.renderInherited()
@@ -381,8 +572,9 @@ export class ContextSection {
   updateSummary() {
     const bits: string[] = []
     if (this.opts.sharedSummary) bits.push(this.opts.sharedSummary())
-    const own = this.local.saved?.text ? 'local instructions set' : 'no local instructions'
-    bits.push(this.opts.scope === 'system' ? (this.local.saved?.text ? 'instructions for all projects set' : 'no instructions for all projects') : own)
+    const own = this.local.present()
+    const count = (l: BlockState[]) => { const i = l.filter(s => s.block?.kind === 'instruction').length, f = l.length - i; return [i ? `${i} instruction${i === 1 ? '' : 's'}` : '', f ? `${f} environment note${f === 1 ? '' : 's'}` : ''].filter(Boolean).join(', ') }
+    bits.push(own.length ? `${this.opts.scope === 'system' ? 'for all projects' : 'local'}: ${count(own)}` : this.opts.scope === 'system' ? 'nothing set for all projects' : 'no local blocks')
     if (this.opts.scope !== 'system' && this.view) {
       const inherited = this.inheritedSources().filter(s => s.delivery !== 'absent').length
       bits.push(`${inherited} inherited`)
@@ -400,20 +592,14 @@ export class ContextSection {
     return b.sources.filter(s => wider.includes(s.scope) && s.kind !== 'contract')
   }
 
-  private widerEditor(t: OverrideTarget, label: string): { editor: OverrideEditor; box: HTMLElement } {
+  private widerList(t: ScopeTarget): BlockList {
     const k = `${t.scope}:${t.project ?? ''}`
     let w = this.wider.get(k)
     if (!w) {
-      const editor = new OverrideEditor(t, {
-        label, wider: true,
-        hint: `You are editing a wider scope: this applies to ${scopeWords(t)}, not only here. Kept on this host only. Used from the next attempt; saving starts nothing.`,
-        onChange: () => this.changed(), onSaved: () => void this.reload(),
-      })
-      const box = h('div.ctx-wider', { hidden: true }, editor.el, h('button.link-btn.small', { type: 'button', onclick: () => { box.hidden = true; this.renderInherited() } }, 'Close (an unsaved draft is kept)'))
-      w = { editor, box }
+      w = new BlockList(t, { wider: true, empty: t.scope === 'system' ? 'Nothing is set for all projects.' : `Nothing local is set for project ${t.project}.`, onChange: () => this.changed(), onSaved: () => void this.reload() })
       this.wider.set(k, w)
-      void editor.refresh()
     }
+    w.setTarget(t)
     return w
   }
 
@@ -421,24 +607,17 @@ export class ContextSection {
     if (this.opts.scope === 'system') return
     const v = this.view
     if (!v) { this.inheritedBox.replaceChildren(h('p.small.muted', this.loadError ? `Not read: ${this.loadError}` : 'Loading…')); return }
-    const blocks: HTMLElement[] = []
-    for (const s of this.inheritedSources()) {
-      if (s.category === 'override') {
-        const t: OverrideTarget = s.scope === 'system' ? { scope: 'system' } : { scope: 'project', project: v.project }
-        const label = s.scope === 'system' ? 'Instructions for all projects' : `Instructions for project ${v.project}`
-        const w = this.widerEditor(t, label)
-        const action = h('button.small', { type: 'button', 'aria-expanded': String(!w.box.hidden), onclick: () => { w.box.hidden = !w.box.hidden; this.renderInherited(); if (!w.box.hidden) w.editor.focus() } },
-          w.box.hidden ? (s.scope === 'system' ? 'Edit instructions for all projects' : 'Edit project instructions') : 'Hide editor')
-        blocks.push(h('div.ctx-inherit-item', sourceBlock(s, { title: label, owner: s.scope === 'system' ? 'all projects · this host' : `project ${v.project} · this host`, action }),
-          w.editor.isDirty() && w.box.hidden ? h('p.small.warn-text', 'Unsaved draft — open the editor to save or discard it.') : null, w.box))
-      } else {
-        const owner = `project ${v.project} · repository`
-        const title = s.kind === 'intent' ? `Project purpose and goals` : `Project guide ${s.origin.file ?? s.title.replace(/^guide /, '')}`
-        const href = this.opts.projectHref?.()
-        blocks.push(h('div.ctx-inherit-item', sourceBlock(s, { title, owner, action: href ? h('a.button.small', { href }, 'Edit in the project') : null })))
-      }
+    const items: HTMLElement[] = []
+    const defaults = this.inheritedSources().filter(s => s.category === 'default')
+    for (const s of defaults) {
+      const owner = `project ${v.project} · repository`
+      const title = s.kind === 'intent' ? `Project purpose and goals` : `Project guide ${s.origin.file ?? s.title.replace(/^guide /, '')}`
+      const href = this.opts.projectHref?.()
+      items.push(h('div.ctx-inherit-item', sourceBlock(s, { title, owner, action: href ? h('a.button.small', { href }, 'Edit in the project') : null })))
     }
-    this.inheritedBox.replaceChildren(...(blocks.length ? blocks : [h('p.small.muted', 'Nothing is inherited.')]),
+    if (this.opts.scope === 'workflow') items.push(h('div.ctx-inherit-scope', h('h4.small', `Project ${v.project}, only in this environment`), this.widerList({ scope: 'project', project: v.project }).el))
+    items.push(h('div.ctx-inherit-scope', h('h4.small', 'All projects'), this.widerList({ scope: 'system' }).el))
+    this.inheritedBox.replaceChildren(...items,
       h('p.small.muted.d-only', 'Not shown: the execution host\'s common contract (composed before this context at claim) and each run\'s own input.'))
   }
 

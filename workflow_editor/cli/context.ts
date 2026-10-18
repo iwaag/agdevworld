@@ -15,7 +15,7 @@ wfe context list [<scope>] [--project <id>] [--workflow <id>] [--all]
 wfe context get <scope> <block> [--project <id>] [--workflow <id>]
 wfe context set <scope> <block> --base <revision>|new --by <name> [--project <id>] [--workflow <id>]
     [--file <path>|- | --text <text>] [--title <text>] [--kind instruction|information] [--manager <name>]
-    [--evidence <file.json>] [--consult <project>/<workflow>|none] [--detail <name>=<file>]... [--drop-detail <name>]...
+    [--evidence <file.json>|-|<json>] [--consult <project>/<workflow>|none] [--detail <name>=<file>]... [--drop-detail <name>]...
     [--run <project>/<workflow>/<run>] [--note <text>]
 wfe context check <scope> <block> --base <revision> --by <name> [--note <text>]
 wfe context refresh-failed <scope> <block> --detail <text> [--partial] --by <name>
@@ -57,6 +57,11 @@ Local context is a set of blocks per scope, each managed on its own:
   consult   <project>/<workflow> where to ask the manager (e.g. cagent/consult)
   details   named documents read on demand, never put in a prompt: each is
             context:<scope>/<block>/<name> (wfe context detail)
+
+Files you hand to set (--file, --evidence, --detail) are read once; keep them
+outside a run copy (e.g. under $TMPDIR) when they hold local facts: a run
+copy is committed and published, the store is not. --evidence also takes the
+JSON list itself, or - for standard input.
 
 get       a block, its revision (pass "base" as --base), manager, last editor,
           evidence, size and delivered section
@@ -218,10 +223,12 @@ export async function contextCommand(io: Io): Promise<number> {
       const id = needBlock()
       const file = io.opt('file'), text = io.opt('text')
       if (file !== undefined && text !== undefined) throw io.usage('set takes --file <path> (- for standard input) or --text <text>, not both')
-      const body = text ?? (file === undefined ? undefined : file === '-' ? await new Promise<string>((res, rej) => { let d = ''; process.stdin.setEncoding('utf8'); process.stdin.on('data', c => { d += c }); process.stdin.on('end', () => res(d)); process.stdin.on('error', rej) }) : await readFile(file, 'utf8'))
+      const stdin = () => new Promise<string>((res, rej) => { let d = ''; process.stdin.setEncoding('utf8'); process.stdin.on('data', c => { d += c }); process.stdin.on('end', () => res(d)); process.stdin.on('error', rej) })
       const ev = io.opt('evidence')
+      if (file === '-' && ev === '-') throw io.usage('only one of --file and --evidence can read standard input')
+      const body = text ?? (file === undefined ? undefined : file === '-' ? await stdin() : await readFile(file, 'utf8'))
       let evidence: unknown
-      if (ev !== undefined) { try { evidence = JSON.parse(ev === '-' ? '' : await readFile(ev, 'utf8')) } catch (e) { throw io.usage(`--evidence ${ev}: ${(e as Error).message}`) } }
+      if (ev !== undefined) { try { evidence = JSON.parse(ev === '-' ? await stdin() : ev.trimStart().startsWith('[') ? ev : await readFile(ev, 'utf8')) } catch (e) { throw io.usage(`--evidence ${ev.slice(0, 40)}: ${(e as Error).message}`) } }
       const details: { name: string; text: string }[] = []
       for (const d of io.opts('detail')) {
         const m = /^([^=]+)=(.+)$/.exec(d)

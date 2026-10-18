@@ -976,3 +976,32 @@ html[data-display="simple"] .run-context { border-radius: 14px; }
 .run-ctx-attempt { border-bottom: 1px dashed var(--line); padding: 6px 0; }
 .run-ctx-attempt p { margin: 2px 0; overflow-wrap: anywhere; }
 .ctx-toggle { white-space: normal; } .ctx-summary { flex: 1 1 12em; }
+
+/* Local context blocks (p14): one card per block; the kind and manager are
+   visible without switching to Detail. */
+.ctx-block-list { display: grid; gap: 8px; min-width: 0; }
+.ctx-blocks { display: grid; gap: 8px; min-width: 0; }
+.ctx-block { border: 1px solid var(--line); border-left: 4px solid var(--c-blue); border-radius: 8px; padding: 8px 10px; display: grid; gap: 6px; min-width: 0; background: var(--card); }
+.ctx-block[data-kind="information"] { border-left-color: var(--c-teal); background: #fbfefd; }
+.ctx-block.editing { box-shadow: 0 0 0 2px rgba(63, 111, 216, .15); }
+.ctx-block-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; flex-wrap: wrap; min-width: 0; }
+.ctx-block-title-row { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; min-width: 0; }
+.ctx-block-name { overflow-wrap: anywhere; }
+.chip.ctx-kind-instruction { background: var(--c-blue-bg); color: #2d4f9c; }
+.chip.ctx-kind-information { background: var(--c-teal-bg); color: #1f6e66; }
+.ctx-block-facts { display: flex; flex-wrap: wrap; gap: 4px 12px; min-width: 0; }
+.ctx-fact { overflow-wrap: anywhere; min-width: 0; }
+.ctx-block-content pre.ctx-text { margin: 0; }
+.ctx-block-content[hidden], .ctx-block-edit[hidden] { display: none; }
+.ctx-block-edit { display: grid; gap: 6px; min-width: 0; }
+.ctx-block-edit .field { display: grid; gap: 2px; }
+.ctx-block-edit input.ctx-block-title, .ctx-block-edit select { max-width: 100%; box-sizing: border-box; }
+.ctx-routes { margin: 4px 0 0; overflow-wrap: anywhere; }
+.ctx-block-detail ul { margin: 2px 0; padding-left: 18px; }
+.ctx-block-detail li { overflow-wrap: anywhere; }
+.ctx-theirs, .ctx-wider-note { margin: 0; flex-basis: 100%; }
+.ctx-inherit-scope { display: grid; gap: 6px; min-width: 0; }
+.ctx-inherit-scope > h4 { margin: 4px 0 0; }
+.ctx-cell-block { padding: 4px 0 6px; border-bottom: 1px dashed var(--line); overflow-wrap: anywhere; }
+.ctx-cell-block:last-child { border-bottom: 0; }
+.ctx-add { flex-wrap: wrap; }

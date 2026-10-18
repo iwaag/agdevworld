@@ -271,30 +271,46 @@ The WFE bundle is not the whole model prompt. Also present:
   authoring context is available (`wfe context show`, the Context overview's
   copy action), never verified as injected.
 
-## Where it is edited in the browser (p13 ex1)
+## Where it is edited in the browser (p13 ex1, p14)
 
 Context is part of each editor, in Simple and in Detail alike; a display
 switch changes how much provenance is shown, not what can be done.
 
+**Block cards (p14).** Every local block is a card of its own: its title,
+its kind (*Instruction* or *Environment information*), the scope it really
+lives in, *Managed by* and *Last edited by* (with the age and the producing
+run), for information its freshness (the oldest observation's age, partial
+or failed coverage, the latest check), a failed refresh, and its size (the
+body's lines — five or fewer for all projects — and the delivered bytes),
+then its content with links to its details and whom to ask. Detail adds the
+store file, revisions and section hash, the evidence references (a
+`context:` detail opens as text), the check and refresh records, and the
+whole history. Each card has its own Edit, Save, Remove and result; a
+draft survives refreshes, display switches and navigation prompts; a
+conflicting save shows what is saved now and offers *Use the saved text* or
+*Save mine over it*. Editing someone else's block says whose it is and
+that the edit stays in its history — ownership is visible, not enforced.
+
 | Editor | Context section |
 | --- | --- |
-| Home (`#/home/context`) | *Instructions for all projects* (the system override); no project is chosen |
-| Project (`#/ws/<ws>/context`) | *Shared with this project*: purpose, goals and `guides` of `project.yaml` (the editor's one draft and *Save project.yaml*), with each guide's content; *Your instructions for this project* (override); *Inherited instructions* (all projects), editable in place |
-| Workflow (`#/ws/<ws>/wf/<file>/context`) | *Shared with this project*: the intent and `execution.guides` (the editor's draft and Save); *Your instructions for this workflow*; inherited project purpose, goals, guides and instructions, and the instructions for all projects; *What a new run is given (saved settings)* |
-| Run (the *Context* card) | the original request (read only); *Instructions for this run* with *Add an instruction* (`instruction.receive`); *Used for this attempt*; *Changes for the next attempt*; *Settings for future attempts* (the workflow, project and system overrides, in place); Detail: every attempt |
+| Home (`#/home/context`) | *For all projects*: the system blocks (the Developer's instructions, cagent's cluster summary, …), *+ Add an instruction*, *+ Add environment information* |
+| Project (`#/ws/<ws>/context`) | *Shared with this project*: purpose, goals and `guides` of `project.yaml` (the editor's one draft and *Save project.yaml*), with each guide's content; *For this project, only in this environment* (the project's blocks); *Inherited*: the system blocks, editable in place |
+| Workflow (`#/ws/<ws>/wf/<file>/context`) | *Shared with this project*: the intent and `execution.guides` (the editor's draft and Save); the workflow's blocks; inherited project purpose, goals and guides, the project's blocks and the system blocks; *What a new run is given (saved settings)* |
+| Run (the *Context* card) | the original request (read only); *Instructions for this run* with *Add an instruction* (`instruction.receive`); *Used for this attempt* (each block by kind, title and manager); *Changes for the next attempt* (the blocks added, changed or removed, by title); *Settings for future attempts* (*Workflow context*, *Project context*, *Context for all projects*: the block lists in place); Detail: every attempt |
 
 - One value has one control: the intent and goals live only in Context;
   *Intent & approvals* shows the saved intent it approves.
-- Definition values save with their file; each override has its own Save.
+- Definition values save with their file; each block has its own Save.
   No single save writes both; each reports its own result. A view's
   navigation guard counts both kinds of draft, and a live refresh never
-  replaces a draft (a newer saved override is announced, and saving then
+  replaces a draft (a newer saved block is announced, and saving then
   asks which to keep).
 - Editing a wider scope from a narrower editor names the wider scope and
-  never creates a narrower override.
-- `#/context[/<ws>[/<workflow>]]` is the overview: the scope matrix, links
-  to the owning editor's section, a quick edit with the same editor, and
-  the resolved text.
+  never creates a narrower block. An inherited card names its scope.
+- `#/context[/<ws>[/<workflow>]]` is the overview: the scope matrix (each
+  local cell lists its blocks with kind, manager and last editor), links to
+  the owning editor's section, a quick edit with the same cards, and the
+  resolved text.
 
 ## Read surfaces
 
@@ -305,4 +321,4 @@ switch changes how much provenance is shown, not what can be done.
 | `GET api/workspaces/<ws>/runs/<wf>/<run>/context` | each attempt's recorded context, snapshot (or why unavailable) and delivery; the next attempt's bundle; the differences; what the session would do |
 | `wfe context show\|list\|get\|set\|check\|refresh-failed\|remove\|history\|detail\|run` | the same from the CLI (`--service` for another host) |
 
-Tests: `test/context.test.ts`.
+Tests: `test/context.test.ts`; browser: `checks/contextBlocks.ts` (p14), `checks/contextEditors.ts`, `checks/context.ts`.

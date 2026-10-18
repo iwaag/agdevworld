@@ -8,16 +8,17 @@
 // - "Add an instruction" records the existing instruction.receive op (the
 //   record a post in the request conversation or `wfe run instruct`
 //   makes): once, for this run, read by the executor at its next step.
-// - "Settings for future attempts" are the p13 overrides of the workflow,
-//   the project and all projects, edited in place with the same editor as
-//   the editors use. A save changes no attempt and sends nothing to the
-//   run; the next-attempt comparison is read again after it.
+// - "Settings for future attempts" are the local context blocks (p14) of
+//   the workflow, the project and all projects, edited in place with the
+//   same cards as the editors use. A save changes no attempt and sends
+//   nothing to the run; the next-attempt comparison is read again after it
+//   and names each block that differs.
 import type { RunRecord } from '../shared/run.ts'
 import type { ContextSource } from '../shared/context.ts'
 import { api, type RunContextView } from './api.ts'
 import { append, h, when } from './dom.ts'
 import { icon } from './icons.ts'
-import { fitRows, OverrideEditor, scopeWords } from './contextParts.ts'
+import { BlockList, fitRows, scopeWords } from './contextParts.ts'
 import type { OpResult } from './runSide.ts'
 
 export interface RunContextDeps {
@@ -31,8 +32,10 @@ export interface RunContextDeps {
 }
 
 const CHANGE_WORD: Record<string, string> = { added: 'added', removed: 'removed', changed: 'changed', delivery: 'delivery changed' }
-const scopeLabel = (s: Pick<ContextSource, 'scope' | 'category' | 'kind' | 'title' | 'origin'>) =>
-  s.kind === 'override' ? (s.scope === 'system' ? 'Instructions for all projects' : s.scope === 'project' ? 'Instructions for the project' : 'Instructions for the workflow')
+const SCOPE_OF: Record<string, string> = { system: 'All projects', project: 'Project', workflow: 'Workflow', run: 'Run' }
+const scopeLabel = (s: Pick<ContextSource, 'scope' | 'category' | 'kind' | 'title' | 'origin' | 'block'>) =>
+  s.kind === 'block' ? `${SCOPE_OF[s.scope]} ${s.block?.kind === 'information' ? 'environment information' : 'instruction'}: ${s.title}${s.block ? ` (managed by ${s.block.manager})` : ''}`
+  : s.kind === 'override' ? (s.scope === 'system' ? 'Instructions for all projects' : s.scope === 'project' ? 'Instructions for the project' : 'Instructions for the workflow')
     : s.kind === 'intent' ? (s.scope === 'project' ? 'Project purpose and goals' : 'Workflow purpose')
       : s.kind === 'guide' ? `${s.scope === 'project' ? 'Project' : 'Workflow'} guide ${s.origin.file ?? s.title.replace(/^guide /, '')}`
         : s.kind === 'contract' ? 'Common execution contract' : s.title
@@ -50,7 +53,7 @@ export class RunContextCard {
   private readonly settingsBox = h('div.run-settings')
   private readonly detailBox = h('details.run-ctx-detail.d-only')
   private readonly form: { root: HTMLElement; ta: HTMLTextAreaElement; send: HTMLButtonElement; name: HTMLInputElement; status: HTMLElement; note: HTMLElement }
-  private readonly editors = new Map<string, { editor: OverrideEditor; box: HTMLElement; button: HTMLButtonElement }>()
+  private readonly editors = new Map<string, { list: BlockList; box: HTMLElement; button: HTMLButtonElement }>()
   private rec: RunRecord | null = null
   private view: RunContextView | null = null
   private viewError = ''
@@ -98,7 +101,7 @@ export class RunContextCard {
   }
 
   // Unsent instruction text or an unsaved preference.
-  isDirty() { return this.form.ta.value.trim() !== '' || [...this.editors.values()].some(e => e.editor.isDirty()) }
+  isDirty() { return this.form.ta.value.trim() !== '' || [...this.editors.values()].some(e => e.list.isDirty()) }
 
   // Every refresh of the run view: cheap; the comparison is read again only
   // when the attempts change (or on request).
@@ -223,9 +226,9 @@ export class RunContextCard {
   private renderSettings() {
     const project = this.view?.next.project ?? null
     const targets: { key: string; label: string; target: { scope: 'workflow' | 'project' | 'system'; project?: string; workflow?: string } | null }[] = [
-      { key: 'workflow', label: 'Edit workflow instructions', target: project ? { scope: 'workflow', project, workflow: this.deps.workflow } : null },
-      { key: 'project', label: 'Edit project instructions', target: project ? { scope: 'project', project } : null },
-      { key: 'system', label: 'Edit instructions for all projects', target: { scope: 'system' } },
+      { key: 'workflow', label: 'Workflow context', target: project ? { scope: 'workflow', project, workflow: this.deps.workflow } : null },
+      { key: 'project', label: 'Project context', target: project ? { scope: 'project', project } : null },
+      { key: 'system', label: 'Context for all projects', target: { scope: 'system' } },
     ]
     if (this.deps.historical) { this.settingsBox.replaceChildren(h('p.small.muted', 'Open the current run to change settings.')); return }
     const row = h('div.row.tight.run-settings-buttons')
@@ -235,16 +238,11 @@ export class RunContextCard {
       let e = this.editors.get(t.key)
       if (!e) {
         const target = t.target
-        const editor = new OverrideEditor(target, {
-          label: target.scope === 'workflow' ? `Instructions for workflow ${this.deps.workflow}` : target.scope === 'project' ? `Instructions for project ${project}` : 'Instructions for all projects',
-          wider: true,
-          hint: `Applies to future attempts of ${target.scope === 'workflow' ? `every run of workflow ${this.deps.workflow}` : scopeWords(target)}, this run included, and to new runs. The attempt in progress keeps what it was given; saving starts nothing and sends nothing to this run. To steer this run now, add an instruction above.`,
-          onChange: () => this.renderSummary(),
-          onSaved: () => void this.loadView(),
-        })
-        const box = h('div.ctx-wider', { hidden: true }, editor.el)
-        const button = h('button', { type: 'button', 'aria-expanded': 'false', onclick: () => { box.hidden = !box.hidden; button.setAttribute('aria-expanded', String(!box.hidden)); button.classList.toggle('active', !box.hidden); if (!box.hidden) { void editor.refresh(); editor.focus() } } }, t.label) as HTMLButtonElement
-        e = { editor, box, button }
+        const list = new BlockList(target, { add: true, wider: true, empty: 'Nothing set here.', onChange: () => this.renderSummary(), onSaved: () => void this.loadView() })
+        const hint = h('p.small.muted.ctx-hint', `Applies to future attempts of ${target.scope === 'workflow' ? `every run of workflow ${this.deps.workflow}` : scopeWords(target)}, this run included, and to new runs. The attempt in progress keeps what it was given; saving starts nothing and sends nothing to this run. To steer this run now, add an instruction above.`)
+        const box = h('div.ctx-wider', { hidden: true, dataset: { settings: t.key } }, hint, list.el)
+        const button = h('button', { type: 'button', 'aria-expanded': 'false', onclick: () => { box.hidden = !box.hidden; button.setAttribute('aria-expanded', String(!box.hidden)); button.classList.toggle('active', !box.hidden); if (!box.hidden) void list.refresh() } }, t.label) as HTMLButtonElement
+        e = { list, box, button }
         this.editors.set(t.key, e)
       }
       row.append(e.button)

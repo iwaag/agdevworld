@@ -6,7 +6,7 @@ import type {
 import type { ApprovalState } from '../shared/canonical.ts'
 import type { ApprovalKind, Documentation, Project, Workflow } from '../shared/model.ts'
 import type { Catalog, NodeTemplate, TemplateContent } from '../shared/catalog.ts'
-import type { ContextBundle, ContextChange, AttemptContext, OverrideRevision, OverrideState } from '../shared/context.ts'
+import type { ContextBundle, ContextChange, AttemptContext, BlockKind, BlockRevision, BlockState, EvidenceRef, ScopeTarget } from '../shared/context.ts'
 
 // One run's execution on this host (server/exec.ts runView).
 export interface RunExecView {
@@ -125,8 +125,11 @@ export const api = {
   addExample: (example: string, by: string) => call<{ template: NodeTemplate }>('POST', `api/nodes/examples/${encodeURIComponent(example)}`, { by }),
   // Scoped context (p13, docs/context.md).
   context: (id: string, workflow?: string | null) => call<ContextMatrixView>('GET', `api/context?workspace=${encodeURIComponent(id)}${workflow ? `&workflow=${encodeURIComponent(workflow)}` : ''}`),
-  override: (scope: string, project?: string, workflow?: string) => call<{ state: OverrideState; revisions: (OverrideRevision & { text: string | null })[] }>('GET', `api/context/override?scope=${scope}${project ? `&project=${encodeURIComponent(project)}` : ''}${workflow ? `&workflow=${encodeURIComponent(workflow)}` : ''}`),
-  saveOverride: (body: { scope: string; project?: string; workflow?: string; text: string | null; base: string | null; by: string }) => call<{ ok: true; changed: boolean; state: OverrideState; revisions: (OverrideRevision & { text: string | null })[] }>('PUT', 'api/context/override', body),
+  // Local context blocks (p14).
+  blocks: (t: ScopeTarget) => call<{ blocks: BlockState[] }>('GET', `api/context/blocks?${scopeQuery(t)}`),
+  block: (t: ScopeTarget, id: string) => call<{ state: BlockState; revisions: BlockRevision[] }>('GET', `api/context/block?${scopeQuery(t)}&block=${encodeURIComponent(id)}`),
+  putBlock: (body: BlockWrite) => call<{ ok: true; changed: boolean; state: BlockState; revisions: BlockRevision[]; written: string }>('PUT', 'api/context/block', { ...body, via: 'browser' }),
+  detailUrl: (ref: string) => `api/context/detail?ref=${encodeURIComponent(ref)}&raw=1`,
   runContext: (id: string, workflow: string, run: string) => call<RunContextView>('GET', `${ws(id)}/runs/${encodeURIComponent(workflow)}/${encodeURIComponent(run)}/context`),
   eventsUrl: (id?: string) => (id ? `${ws(id)}/events` : 'api/events'),
 }
@@ -157,10 +160,12 @@ export interface DelegationView {
 export interface DelegationsView { ref: string; delegations: DelegationView[]; parent: null | { delegation: string; parent: { project: string; workflow: string; run: string; node: string }; accepts: string; workspace: string | null } }
 export interface IoEntryView { attempt: string; line: number; entries: { line: number; kind: string; head: string; body?: string }[]; io?: RunNotifyView['io'] }
 
-// Scoped context (p13, server/contextView.ts).
+// Scoped context (p13, p14; server/contextView.ts).
+const scopeQuery = (t: ScopeTarget) => `scope=${t.scope}${t.project ? `&project=${encodeURIComponent(t.project)}` : ''}${t.workflow ? `&workflow=${encodeURIComponent(t.workflow)}` : ''}`
+export interface BlockWrite extends ScopeTarget { op: 'set' | 'check' | 'refresh' | 'remove'; block: string; base: number; by: string; title?: string; kind?: BlockKind; manager?: string; body?: string; evidence?: EvidenceRef[]; note?: string }
 export interface ContextMatrixView {
   project: string; workflow: string | null; workflows: { id: string; name: string }[]
-  overrides: { system: OverrideState; project: OverrideState; workflow: OverrideState | null }
+  blocks: { system: BlockState[]; project: BlockState[]; workflow: BlockState[] | null }
   authoring: ContextBundle; execution: ContextBundle | null
   rendered: { authoring: string; execution: string | null }
 }

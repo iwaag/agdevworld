@@ -39,9 +39,6 @@ DESK_PREFIX = "front-desk-"
 
 #: The append-only topic prefix that introduction lives under.
 INTRO_PREFIX = "intro-"
-#: A project's own channel, and the channels its work is carried out in.
-PROJECT_PREFIX = "pj-"
-WORK_PREFIX = "work-"
 #: Zulip's own bots (Notification Bot and friends) live in this realm string.
 SYSTEM_REALM = "zulipinternal"
 
@@ -160,36 +157,17 @@ class Room:
         too, each row saying which (`front_desk` p4: a finished request is
         completed from the agent room, and finished means resolved).
 
-        Two kinds of board, because work lives in two places:
-
-        - a **project**: the `pj-<slug>` channel, plus the `work-<label>`
-          channels autolab opens for its tasks. Those are linked to the project
-          by their **channel folder**, not by their name — a project channel
-          files itself and its `work-` channels inherit the folder — which is
-          the only machine-readable link back.
-        - an **agent**: the instance's own channel, where forge's
-          `assetplan-`/`assetrun-` topics and every question put to an agent
-          live. Nothing in a `pj-` channel would ever show those.
-
-        `#front` belongs to whoever declares a prefix its topics carry — read
-        off the roster block of each live introduction, never guessed.
+        One board per live agent: the instance's own channel, where every
+        question put to an agent lives. `#front` belongs to whoever declares a
+        prefix its topics carry — read off the roster block of each live
+        introduction, never guessed.
 
         What counts as open is Zulip's `✔ ` rename and nothing else.
         """
         channels = self.mirror.channels()
         by_name = {channel.name: channel for channel in channels}
-        projects = {
-            channel.folder_id: channel.name
-            for channel in channels
-            if channel.name.startswith(PROJECT_PREFIX) and channel.folder_id is not None
-        }
         # (channel, kind, group) — `group` is what the row is filed under.
         watched: list[tuple] = []
-        for channel in sorted(channels, key=lambda c: c.name):
-            if channel.name.startswith(PROJECT_PREFIX):
-                watched.append((channel, "project", channel.name))
-            elif channel.name.startswith(WORK_PREFIX) and channel.folder_id in projects:
-                watched.append((channel, "project", projects[channel.folder_id]))
         intros = self.mirror.intros(AGENTS_CHANNEL, INTRO_PREFIX)
         live = {instance: intro for instance, intro in intros.items() if not intro.retired}
         # A retired agent's channel is not a board any more: its introduction

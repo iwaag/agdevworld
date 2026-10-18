@@ -33,7 +33,7 @@ export interface RoomAgent {
 export interface RoomWorkRow {
   channel: string
   topic: string
-  kind: 'project' | 'agent'
+  kind: 'agent'
   group: string
   stream_id: number
   // Zulip's ✔. Only present in a listing that asked for resolved topics too.
@@ -101,10 +101,8 @@ export async function loadRoomWork(includeResolved = false): Promise<RoomWork> {
   return await read<RoomWork>(includeResolved ? '/work?resolved=1' : '/work')
 }
 
-// The open topics filed under one agent's own channel. Project work is not
-// attributed to an agent: a `pj-` channel is the project's board, and which
-// agent is carrying which task there is not something a topic name can be
-// asked (topic vocabulary differs per agent; only `✔ ` is common).
+// The open topics filed under one agent's own channel (topic vocabulary
+// differs per agent; only `✔ ` is common).
 export function agentWork(work: RoomWork, instance: string): RoomWorkRow[] {
   return work.topics.filter((row) => row.kind === 'agent' && row.group === instance)
 }

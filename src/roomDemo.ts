@@ -41,12 +41,12 @@ const SCRIPT: Line[][] = [
      voiced: ['やっほー✨ ようこそ〜！💁‍♀️ ここの会話そのものはキャラなしで進むんだって。', '今日はなにする？🙆‍♀️💕'] }],
   [{ agent: 'front', speaker: 'Front', by: 'Front', sender_id: 15,
      meaning: report,
-     text: 'I asked autolab. Its plan is in #pj-ghtrends › workplan-trend9; see https://example.invalid/main/repos/example-awesome-tool.md',
-     voiced: ['親方に聞いてきたよ〜！計画は #pj-ghtrends › workplan-trend9 にあるって📝 https://example.invalid/main/repos/example-awesome-tool.md'] },
-   { agent: 'autolab', speaker: 'autolab-agstudio1', by: 'autolab-agstudio1', sender_id: 11,
+     text: 'I asked agecho. Its answer is in #agecho-agstudio1 › agechoplan-trend9; see https://example.invalid/main/repos/example-awesome-tool.md',
+     voiced: ['agecho に聞いてきたよ〜！答えは #agecho-agstudio1 › agechoplan-trend9 にあるって📝 https://example.invalid/main/repos/example-awesome-tool.md'] },
+   { agent: 'agecho', speaker: 'agecho-agstudio1', by: 'agecho-agstudio1', sender_id: 11,
      meaning: report,
-     text: 'Planned 2 tasks. Commit a99625f has the fetcher. I could not verify the GitHub token; if it is expired task 1 fails with HTTP 401.',
-     voiced: ['2つ計画した。フェッチャーはコミット a99625f。', 'GitHub トークンは確認できてない。切れてたら task 1 は HTTP 401 で落ちる。'] },
+     text: 'Planned 2 steps. Commit a99625f has the fetcher. I could not verify the GitHub token; if it is expired step 1 fails with HTTP 401.',
+     voiced: null },
    { agent: 'archsage', speaker: 'sage:arxiv', by: 'archsage', sender_id: 24,
      text: 'Three papers bear on this; none of them measures what you asked, which is itself worth a study.',
      voiced: null }],
@@ -54,8 +54,8 @@ const SCRIPT: Line[][] = [
      text: 'This reply is long on purpose, so that paging can be looked at. '.repeat(14).trim(),
      voiced: ['これはページ送りのテスト用にわざと長くしてあるやつだよ〜📖 '.repeat(10).trim()] },
    { agent: 'front', speaker: 'Front', by: 'Front', sender_id: 15, meaning: confirmation,
-     text: 'Shall I ask autolab to start task 1 now?',
-     voiced: ['親方に task 1 始めてもらっていい？🙏'] },
+     text: 'Shall I ask agecho to start step 1 now?',
+     voiced: ['agecho に step 1 始めてもらっていい？🙏'] },
    { agent: 'front', speaker: 'Front', by: 'Front', sender_id: 15, meaning: question,
      text: 'And which palette should the title screen use, A or B?',
      voiced: ['あとタイトル画面のパレット、A と B どっちにする？🎨'] }],
@@ -67,7 +67,7 @@ const SCRIPT: Line[][] = [
 
 // --- the demo's completion plan ------------------------------------------------
 
-const DEMO_FLAKY = 'topic:agforge-agstudio1/assetrun-title'
+const DEMO_FLAKY = 'topic:agtool-agstudio1/toolrun-title'
 const demoClosed = new Set<string>()
 let demoFailedOnce = false
 // The demo argue: ✔ after a close from the room, open again after a post.
@@ -88,14 +88,14 @@ function demoArguePlan(_id: string, closed: Set<string>): ClosePlan {
     topic: root.topic, channel: root.channel, root,
     scope: {
       root, kind: 'argue', closable: true, reason: '',
-      description: '#argue › argue-demo, an argue: the discussion only. A project, study or plan it opened stays open, and so does the conversation it was opened from',
+      description: '#argue › argue-demo, an argue: the discussion only. What it opened stays open, and so does the conversation it was opened from',
       parents: [], context: [], routine: null,
     },
     history: [],
     fingerprint: actions.map((one) => `${one.key}=${one.state}`).join('|'),
     status: { zulip_read: true, zulip_write: true, reason: '' },
     actions, counts: { ready: done ? 0 : 1, blocked: 0, done: done ? 1 : 0, kept: 0 }, blocked: [],
-    excluded: [{ channel: 'pj-demo', topic: 'workplan-setup-demo', reason: 'what the argue ended in stays open: closing an argue ends the discussion and nothing it opened' }],
+    excluded: [{ channel: 'agecho-agstudio1', topic: 'agechoplan-demo', reason: 'what the argue ended in stays open: closing an argue ends the discussion and nothing it opened' }],
     gaps: { truncated: false, unread: [], bounded: [], errors: [] },
     results: [], note: 'this ends the discussion; a post here resumes it',
   }
@@ -109,13 +109,10 @@ function demoPlan(id: string, closed: Set<string>, _failed: boolean): ClosePlan 
   const make = (kind: CloseKind, key: string, label: string, state: CloseState, reason: string): CloseAction =>
     ({ kind, key, label, state: closed.has(key) ? 'done' : state, reason: closed.has(key) ? 'closed in this session' : reason, detail: {} })
   const actions: CloseAction[] = [
-    make('work', 'work:demo-mission', 'G-13 Cover a new GitHub-trending repository', 'ready', 'every one of its 1 sub-works is completed'),
-    make('work', 'work:demo-task', 'G-14 Pick and summarize a new trending repo', 'done', 'already Done; closing it again changes nothing'),
-    make('work', 'work:demo-open', 'F2-31 Title картина, still rendering', 'blocked', '1 of 2 sub-works are not completed'),
-    make('topic', 'topic:pj-ghtrends/workplan-trend6', '#pj-ghtrends › workplan-trend6', 'ready', 'will be marked ✔'),
-    make('topic', DEMO_FLAKY, '#agforge-agstudio1 › assetrun-title', 'ready', 'will be marked ✔'),
-    make('channel', 'channel:work-g-13', '#work-g-13', 'ready', 'will be archived — every one of its 1 topics belongs to this conversation'),
-    make('channel', 'channel:work-g-9', '#work-g-9', 'kept', 'kept — the channel holds topics this conversation did not reach: workrun-task2-g-9'),
+    make('topic', 'topic:agecho-agstudio1/agechoplan-trend6', '#agecho-agstudio1 › agechoplan-trend6', 'ready', 'will be marked ✔'),
+    make('topic', 'topic:agecho-agstudio1/agechorun-trend6', '#agecho-agstudio1 › agechorun-trend6', 'done', 'already ✔'),
+    make('topic', 'topic:agnote-agstudio1/notes-title', '#agnote-agstudio1 › notes-title', 'blocked', 'this topic could not be read, so nothing here says it is finished'),
+    make('topic', DEMO_FLAKY, '#agtool-agstudio1 › toolrun-title', 'ready', 'will be marked ✔'),
     make('conversation', `topic:front/front-desk-${id}`, `#front › front-desk-${id}`, 'ready', 'will be marked ✔ once everything above is done'),
   ]
   const counts = {
@@ -137,7 +134,7 @@ function demoPlan(id: string, closed: Set<string>, _failed: boolean): ClosePlan 
     fingerprint: actions.map((one) => `${one.key}=${one.state}`).join('|'),
     status: { zulip_read: true, zulip_write: true, reason: '' },
     actions, counts, blocked: actions.filter((one) => one.state === 'blocked'),
-    excluded: [{ channel: 'pj-ghtrends', topic: 'workplan-trend5', reason: 'anchored to another request (front/front-desk-20260907-0900)' }],
+    excluded: [{ channel: 'agecho-agstudio1', topic: 'agechoplan-trend5', reason: 'anchored to another request (front/front-desk-20260907-0900)' }],
     gaps: { truncated: false, unread: [], bounded: [], errors: [] },
     results: [], note: 'this closes work; it does not stop a running agent',
   }
@@ -336,11 +333,7 @@ export function demoAdapter(room: RoomId, revision = 'demo'): RoomAdapter {
           continue
         }
         demoClosed.add(action.key)
-        results.push({
-          ...resultRow(action), outcome: 'applied',
-          note: action.kind === 'work' ? 'is Done'
-            : action.kind === 'channel' ? 'is archived' : 'is ✔',
-        })
+        results.push({ ...resultRow(action), outcome: 'applied', note: 'is ✔' })
       }
       const after = demoPlan(id, demoClosed, demoFailedOnce)
       return { ...after, results, applied: true, partial: results.some((one) => one.outcome === 'failed') || after.counts.blocked > 0 }

@@ -2,11 +2,11 @@ import { AGENTROOM_URL } from './endpoints'
 // Completing a request: the relay's shared operation, read and applied.
 //
 // One request is any conversation, `(channel, topic)` — a Front Desk
-// conversation, an ordinary `front-*` one, one run of a routine, an Autolab
-// `workplan-`, a Forge `assetplan-` (`front_desk` p4). The relay decides what
-// the request owns, what would change and why; this file carries those words
-// to the screens and sends back the fingerprint of the plan a human read.
-// Nothing here decides that a Work may be closed or that a channel is done.
+// conversation, an ordinary `front-*` one, one run of a routine, an argue
+// (`front_desk` p4). The relay decides what the request owns, what would
+// change and why; this file carries those words to the screens and sends back
+// the fingerprint of the plan a human read. Nothing here decides that a topic
+// may be closed.
 //
 // Two screens draw the same plan: the Front Desk's Phaser panel and the DOM
 // overlay the operation room and the agent room open. `planLines()` is the
@@ -14,17 +14,7 @@ import { AGENTROOM_URL } from './endpoints'
 
 const BASE = AGENTROOM_URL
 
-export type CompletionKind = 'work' | 'topic' | 'channel' | 'conversation'
-
-// One piece of a work record: an autolab task (a conversation of its own) or
-// a forge Sub-Work. `state` is in its own storage's vocabulary.
-export interface CompletionChild {
-  label: string
-  state: string
-  channel?: string
-  topic?: string
-  reached?: boolean
-}
+export type CompletionKind = 'topic' | 'conversation'
 export type CompletionState = 'ready' | 'done' | 'blocked' | 'kept'
 export type CompletionOutcome = 'applied' | 'already' | 'failed' | 'skipped'
 
@@ -52,14 +42,12 @@ export interface CompletionRef {
 }
 
 // A conversation this root was opened for, by its own root note. For an
-// execution topic the structural one (autolab's plan for a task, forge's
-// plan for a run) comes first and is the one to go to.
+// execution topic it is the one to go to.
 export interface CompletionParent extends CompletionRef {
   kind: string
   by: string
   by_id: number
   message_id: number
-  structural: boolean
 }
 
 export interface CompletionScope {
@@ -177,7 +165,7 @@ export async function loadCompletionHistory(root?: CompletionRef): Promise<{ his
 }
 
 // The event a screen fires once anything moved, so every view on the page
-// re-reads what it shows (a closed run is ✔, an archived channel is gone).
+// re-reads what it shows (a closed run is ✔).
 export const COMPLETED_EVENT = 'agdevworld:completed'
 export function announceCompleted(root: CompletionRef): void {
   window.dispatchEvent(new CustomEvent(COMPLETED_EVENT, { detail: root }))
@@ -208,12 +196,11 @@ export const TINT: Record<string, Tone> = {
   applied: 'ready', already: 'dim', failed: 'bad', skipped: 'warn',
 }
 const KIND: Record<string, string> = {
-  work: 'work', topic: 'topic', channel: 'channel', conversation: 'this request',
+  topic: 'topic', conversation: 'this request',
 }
 const ROOT_KIND: Record<string, string> = {
   desk: 'Front Desk conversation', front: 'Front conversation', 'routine-run': 'routine run',
-  workplan: 'Autolab request', assetplan: 'Forge request', workrun: 'Autolab task topic',
-  assetrun: 'Forge run topic', 'routine-guide': 'routine guide', intro: 'introduction',
+  'routine-guide': 'routine guide', intro: 'introduction',
   argue: 'argue', topic: 'conversation',
 }
 
@@ -276,7 +263,7 @@ export function planLines(plan: CompletionPlan, phase: PlanPhase): PlanLine[] {
   if (!scope.closable) {
     line(scope.reason, 'warn', 0, 'body')
     for (const parent of scope.parents) {
-      line(`→ ${parent.structural ? 'go to' : 'also served'} ${refLabel(parent)} (${rootKindLabel(parent.kind)}, by ${parent.by})`,
+      line(`→ go to ${refLabel(parent)} (${rootKindLabel(parent.kind)}, by ${parent.by})`,
            'accent', 8, 'body', parent)
     }
   } else if (scope.parents.length) {
@@ -286,9 +273,6 @@ export function planLines(plan: CompletionPlan, phase: PlanPhase): PlanLine[] {
     }
   }
   if (!plan.status.zulip_write) line(plan.status.reason, 'bad', 0, 'body')
-  // No Plane warning any more: since `refactor` p2 both agents keep their
-  // work record in the conversations, so there is no credential this panel
-  // could be missing and no row it could fail to read.
 
   const results = new Map<string, CompletionResult>(plan.results.map((one) => [one.key, one]))
   if (scope.closable) {
@@ -299,21 +283,6 @@ export function planLines(plan: CompletionPlan, phase: PlanPhase): PlanLine[] {
       line(`${MARK[state] ?? '·'} ${KIND[action.kind] ?? action.kind} · ${action.label}`,
            state === 'ready' ? 'ink' : tone, 0, 'body')
       line(result ? result.note : action.reason, tone, 18)
-      const unreached = (action.detail?.unreached_children as string[] | undefined) ?? []
-      if (unreached.length) {
-        line(`pieces of this work the request never reached: ${unreached.join(', ')}`, 'warn', 18)
-      }
-      // An autolab mission is made of conversations, and each one's state is
-      // the thing a reader is judging: `completed` is the run's word,
-      // `accepted` is a person's, and neither is the ✔ on the topic below.
-      for (const child of (action.detail?.children as CompletionChild[] | undefined) ?? []) {
-        if (action.detail?.source !== 'agautolab') continue
-        line(`${child.label} · ${child.state} — #${child.channel} › ${child.topic}`, 'muted', 18)
-      }
-      const visitors = (action.detail?.visitors as CompletionParent[] | undefined) ?? []
-      for (const visitor of visitors) {
-        line(`also served on behalf of ${refLabel(visitor)} (${visitor.by}) — that request is not touched`, 'dim', 18)
-      }
     }
   }
 

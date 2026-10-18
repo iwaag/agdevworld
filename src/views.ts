@@ -55,7 +55,7 @@ export type PanelSelection =
   // The agent room carries the agent's whole introduction and the open topics
   // of its own channel, so the popup renders without a second fetch.
   | { view: 'agent-room'; agent: RoomAgent; work: RoomWorkRow[] }
-  | { view: 'agent-room-board'; group: string; kind: 'project' | 'agent'; rows: RoomWorkRow[] }
+  | { view: 'agent-room-board'; group: string; kind: 'agent'; rows: RoomWorkRow[] }
   // The operation room carries the whole board beside the clicked row, because
   // a row's meaning depends on whether the relay could vouch for it at all.
   | { view: 'ops-row'; row: OpsRow; board: OpsBoard }
@@ -141,7 +141,6 @@ const WORKSPACE_ACTIVITY_UNKNOWN: PanelRowStatus = { emoji: '❓', color: 0xb7b5
 
 const AGENT_IDLE: PanelRowStatus = { emoji: '🟢', color: 0x67e8a5, label: 'NOTHING OPEN' }
 const AGENT_UNKNOWN: PanelRowStatus = { emoji: '❓', color: 0xb7b5d8, label: 'NO INTRO' }
-const TOPIC_PROJECT: PanelRowStatus = { emoji: '🧭', color: 0x9b8cff, label: 'PROJECT' }
 const TOPIC_AGENT: PanelRowStatus = { emoji: '💬', color: 0x70c7ff, label: 'AGENT' }
 
 function agentStatus(agent: RoomAgent, open: number): PanelRowStatus {
@@ -180,7 +179,7 @@ export function agentRoomViewConfig(onSelect: (selection: PanelSelection) => voi
         ? `${count} agents have introduced themselves` +
           (retired.length > 0 ? ` · ${retired.length} retired` : '')
         : withResolved ? `${count} boards with open or resolved work` : `${count} boards have work still open`,
-    footer: 'live from Zulip: introductions from #agents, open work from every project and agent channel',
+    footer: 'live from Zulip: introductions from #agents, open work from every agent channel',
     switchTo: { key: 'ops', label: 'operation room' },
     bind: (bound) => {
       api = bound
@@ -241,7 +240,7 @@ export function agentRoomViewConfig(onSelect: (selection: PanelSelection) => voi
       // at four columns and scales to fit came out unreadable — measured, in a
       // screenshot. The flat list the plan asks for lives one click away, in
       // the popup, which is where a list of 27 raw topic names is legible.
-      const boards = new Map<string, { kind: 'project' | 'agent'; rows: RoomWorkRow[] }>()
+      const boards = new Map<string, { kind: 'agent'; rows: RoomWorkRow[] }>()
       for (const row of foundWork.topics) {
         const board = boards.get(row.group) ?? { kind: row.kind, rows: [] }
         board.rows.push(row)
@@ -253,7 +252,7 @@ export function agentRoomViewConfig(onSelect: (selection: PanelSelection) => voi
           id: `board/${group}`,
           name: clipped(group, 24),
           status: {
-            ...(board.kind === 'project' ? TOPIC_PROJECT : TOPIC_AGENT),
+            ...TOPIC_AGENT,
             label: withResolved
               ? `${board.rows.filter((row) => !row.resolved).length} OPEN · ${board.rows.filter((row) => row.resolved).length} ✔`
               : `${board.rows.length} OPEN`,
@@ -269,7 +268,7 @@ export function agentRoomViewConfig(onSelect: (selection: PanelSelection) => voi
     onSelect: (row) => {
       const payload = row.payload as
         | { kind: 'agent'; agent: RoomAgent; work: RoomWorkRow[] }
-        | { kind: 'board'; group: string; board: { kind: 'project' | 'agent'; rows: RoomWorkRow[] } }
+        | { kind: 'board'; group: string; board: { kind: 'agent'; rows: RoomWorkRow[] } }
       if (payload.kind === 'agent') {
         onSelect({ view: 'agent-room', agent: payload.agent, work: payload.work })
         return

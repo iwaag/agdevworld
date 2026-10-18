@@ -21,7 +21,7 @@ from agentroom import progress as panel
 from agentroom.progress import HealthChecks, ObserverRecords, Progress, recovery_for
 
 ACK = "Message received. Please wait for the reply."
-DEV, FRONT, AUTOLAB, OBSERVER = 8, 15, 11, 23
+DEV, FRONT, AGECHO, OBSERVER = 8, 15, 11, 23
 BASE = 1_790_000_000
 
 
@@ -29,8 +29,8 @@ def build(realm_setup=None):
     realm = FakeRealm()
     realm.base_url = "https://zulip.invalid"
     realm.add_channel(5, "front")
-    realm.add_channel(6, "pj-demo")
-    realm.add_channel(7, "work-m1")
+    realm.add_channel(6, "agecho-demo")
+    realm.add_channel(7, "agecho-runs")
     ids = {}
     t = BASE
 
@@ -42,28 +42,19 @@ def build(realm_setup=None):
             ids[key] = ident
         return ident
 
-    # Request A: Front plans a mission with autolab; task 1 runs.
+    # Request A: Front asks agecho, which opens two runs; run 1 is working.
     say("front", "front-desk-a", "please build the thing", DEV, "Developer", "a")
     say("front", "front-desk-a", ACK, FRONT, "Front")
-    say("pj-demo", "workplan-a", f"[selfnote][rootchat] front/front-desk-a #{ids['a']} rel=work", FRONT, "Front")
-    say("pj-demo", "workplan-a", "@**autolab** please plan", FRONT, "Front")
-    say("pj-demo", "workplan-a", ACK, AUTOLAB, "autolab")
-    say("pj-demo", "workplan-a", "[selfnote][mission] demo", AUTOLAB, "autolab", "mission")
-    say("pj-demo", "workplan-a", "# plan", AUTOLAB, "autolab", "doc")
-    say("pj-demo", "workplan-a", f"[selfnote][doc] {ids['doc']}", AUTOLAB, "autolab")
-    say("work-m1", "workrun-task1", f"[selfnote][task] {ids['mission']}#1", AUTOLAB, "autolab", "task1")
-    say("work-m1", "workrun-task1", f"[selfnote][rootchat] pj-demo/workplan-a #{ids['mission']} rel=work", AUTOLAB, "autolab")
-    say("work-m1", "workrun-task1", "# task 1", AUTOLAB, "autolab")
-    say("work-m1", "workrun-task2", f"[selfnote][task] {ids['mission']}#2", AUTOLAB, "autolab", "task2")
-    say("work-m1", "workrun-task2", f"[selfnote][rootchat] pj-demo/workplan-a #{ids['mission']} rel=work", AUTOLAB, "autolab")
-    say("work-m1", "workrun-task2", "# task 2", AUTOLAB, "autolab")
-    say("pj-demo", "workplan-a", "[selfnote][state] started", AUTOLAB, "autolab")
-    say("work-m1", "workrun-task1", "Task 1 starts now.", AUTOLAB, "autolab")
-    say("work-m1", "workrun-task1", f"[selfnote][start] #{ids['mission']} for {FRONT} Front", AUTOLAB, "autolab")
-    say("work-m1", "workrun-task1", ACK, AUTOLAB, "autolab", "ack1")
-    say("front", "front-desk-a", "@**Developer** autolab is on it\n\n`ag-post intent=progress`", FRONT, "Front")
+    say("agecho-demo", "agechoplan-a", f"[selfnote][rootchat] front/front-desk-a #{ids['a']} rel=work", FRONT, "Front")
+    say("agecho-demo", "agechoplan-a", "@**agecho** please plan", FRONT, "Front", "ask")
+    say("agecho-demo", "agechoplan-a", ACK, AGECHO, "agecho")
+    say("agecho-demo", "agechoplan-a", "@**Front** planned; run 1 is starting", AGECHO, "agecho")
+    say("agecho-runs", "agechorun-1", f"[selfnote][rootchat] agecho-demo/agechoplan-a #{ids['ask']} rel=work", AGECHO, "agecho")
+    say("agecho-runs", "agechorun-1", "# run 1", AGECHO, "agecho", "run1")
+    say("agecho-runs", "agechorun-1", ACK, AGECHO, "agecho", "ack1")
+    say("front", "front-desk-a", "@**Developer** agecho is on it\n\n`ag-post intent=progress`", FRONT, "Front")
     # Request B, in another conversation, asks the same agent: a plain question.
-    say("front", "front-desk-b", "what does task 1 do?", DEV, "Developer", "b")
+    say("front", "front-desk-b", "what does run 1 do?", DEV, "Developer", "b")
     say("front", "front-desk-b", ACK, FRONT, "Front")
     say("front", "front-desk-b", "@**Developer** it builds.\n\n`ag-post intent=report`", FRONT, "Front")
     if realm_setup:
@@ -96,7 +87,7 @@ def observer_dir(tmp_path, *, held=None, incidents=()):
     (root / "incidents" / "held.json").write_text(json.dumps(held or {}))
     for record in incidents:
         (root / "incidents" / f"{record['key'].replace(':', '_')}.json").write_text(json.dumps(record))
-    (root / "health.toml").write_text('[owners."autolab"]\ncommand = ["probe"]\ntimeout = 5\n')
+    (root / "health.toml").write_text('[owners."agecho"]\ncommand = ["probe"]\ntimeout = 5\n')
     (root / "monitor-health.json").write_text(json.dumps({"interval_seconds": 60,
                                                           "cycle": {"completed_at": time.time()}}))
     return root
@@ -124,9 +115,9 @@ def test_each_request_is_its_own_card_with_its_own_tree(tmp_path):
     a, b = card_of(board, "front-desk-a"), card_of(board, "front-desk-b")
     assert (a["origin"], b["origin"]) == (ids["a"], ids["b"])
     assert a["state"] == "working" and b["state"] == "answered"
-    plan = a["root"]["children"][0]["children"][0] if a["root"]["children"][0]["kind"] != "plan" \
-        else a["root"]["children"][0]
-    assert plan["kind"] == "plan" and plan["meter"]["total"] == 2 and plan["meter"]["completed"] == 0
+    plan = a["root"]["children"][0]
+    assert (plan["channel"], plan["topic"]) == ("agecho-demo", "agechoplan-a")
+    assert [(u["channel"], u["topic"]) for u in plan["children"]] == [("agecho-runs", "agechorun-1")]
     assert b["root"]["children"] == [] and b["group"] == "recent"
     assert a["desk"] == "a" and a["links"][str(a["anchor"])].startswith("https://zulip.invalid/#narrow/")
 
@@ -135,27 +126,24 @@ def test_the_open_serving_of_a_probed_owner_is_checked_once_per_ttl(tmp_path):
     runner = Runner()
     progress, realm, ids, _ = board_for(tmp_path, runner)
     board = progress.board()
-    task = next(u for u in _units(card_of(board, "front-desk-a")) if u["kind"] == "task" and u["serial"] == 1)
-    assert task["execution"]["evidence"] == "confirmed" and task["display"]["state"] == "working"
-    assert len(runner.calls) == 1 and runner.calls[0][-6:] == ["--ack", str(ids["ack1"]), "--channel", "work-m1",
-                                                               "--topic", "workrun-task1"]
+    run = next(u for u in _units(card_of(board, "front-desk-a")) if u["topic"] == "agechorun-1")
+    assert run["execution"]["evidence"] == "confirmed" and run["display"]["state"] == "working"
+    assert len(runner.calls) == 1 and runner.calls[0][-6:] == ["--ack", str(ids["ack1"]), "--channel", "agecho-runs",
+                                                               "--topic", "agechorun-1"]
     progress.board(fresh=True)
     assert len(runner.calls) == 1  # within PROBE_TTL
-    # Task 2 waits for task 1: queued, never probed (no open serving).
-    task2 = next(u for u in _units(card_of(board, "front-desk-a")) if u["kind"] == "task" and u["serial"] == 2)
-    assert task2["display"]["state"] == "queued" and "after task 1" in task2["display"]["reason"]
 
 
 def test_a_failing_or_silent_probe_is_unknown_and_bounded(tmp_path, monkeypatch):
     progress, *_ = board_for(tmp_path, Runner(fail=True))
-    task = next(u for u in _units(card_of(progress.board(), "front-desk-a")) if u["kind"] == "task" and u["serial"] == 1)
-    assert task["display"]["state"] == "unknown" and "probe" in task["display"]["reason"]
+    run = next(u for u in _units(card_of(progress.board(), "front-desk-a")) if u["topic"] == "agechorun-1")
+    assert run["display"]["state"] == "unknown" and "probe" in run["display"]["reason"]
     monkeypatch.setattr(panel, "PROBE_BUDGET", 0.2)
     progress, *_ = board_for(tmp_path / "slow", Runner(slow=1.0))
     started = time.time()
-    task = next(u for u in _units(card_of(progress.board(), "front-desk-a")) if u["kind"] == "task" and u["serial"] == 1)
+    run = next(u for u in _units(card_of(progress.board(), "front-desk-a")) if u["topic"] == "agechorun-1")
     assert time.time() - started < 1.0
-    assert task["display"]["state"] == "unknown" and "did not answer" in task["display"]["reason"]
+    assert run["display"]["state"] == "unknown" and "did not answer" in run["display"]["reason"]
 
 
 def test_a_hold_and_observer_s_incidents_reach_their_own_card(tmp_path):
@@ -208,7 +196,7 @@ def test_a_stale_mirror_marks_every_card_last_known(tmp_path):
 def test_a_new_post_is_seen_on_the_next_board_after_the_refresh_bound(tmp_path, monkeypatch):
     progress, realm, ids, mirror = board_for(tmp_path)
     assert card_of(progress.board(), "front-desk-b")["state"] == "answered"
-    realm.post("front", "front-desk-b", "and task 2?", sender_id=DEV, sender_name="Developer", timestamp=BASE + 900)
+    realm.post("front", "front-desk-b", "and run 2?", sender_id=DEV, sender_name="Developer", timestamp=BASE + 900)
     pump(mirror)
     # The mirror's revision moved: the cached board is not reused.
     assert card_of(progress.board(), "front-desk-b")["state"] == "queued"
@@ -251,25 +239,25 @@ class QueueRunner(Runner):
         self.calls.append(command)
         return SimpleNamespace(stdout=json.dumps({
             "schema": "agag.health.v1", "observed_at": time.time(), "verdict": "queued",
-            "why": "queued 40 s (position 1 of 1) behind work-m1/workrun-task1, whose serving is running",
+            "why": "queued 40 s (position 1 of 1) behind agecho-runs/agechorun-1, whose serving is running",
             "subject": {"ack": 0, "queued": True},
-            "queue": {"ahead": [{"channel": "work-m1", "topic": "workrun-task1", "ack": 1, "verdict": "running"}]}}),
+            "queue": {"ahead": [{"channel": "agecho-runs", "topic": "agechorun-1", "ack": 1, "verdict": "running"}]}}),
             returncode=0)
 
 
 def test_a_queued_post_of_a_probed_owner_shows_the_listeners_own_answer(tmp_path):
     def second(realm, say, ids):
-        realm.add_channel(8, "pj-other")
+        realm.add_channel(8, "agecho-other")
         say("front", "front-desk-c", "plan the other thing", DEV, "Developer", "c")
-        say("pj-other", "workplan-c", f"[selfnote][rootchat] front/front-desk-c #{ids['c']} rel=work", FRONT, "Front")
-        say("pj-other", "workplan-c", "@**autolab** please plan the other thing", FRONT, "Front", "queued")
+        say("agecho-other", "agechoplan-c", f"[selfnote][rootchat] front/front-desk-c #{ids['c']} rel=work", FRONT, "Front")
+        say("agecho-other", "agechoplan-c", "@**agecho** please plan the other thing", FRONT, "Front", "queued")
 
     runner = QueueRunner()
     progress, realm, ids, _ = board_for(tmp_path, runner, setup=second)
     card = card_of(progress.board(), "front-desk-c")
-    plan = next(u for u in _units(card) if u["topic"] == "workplan-c")
+    plan = next(u for u in _units(card) if u["topic"] == "agechoplan-c")
     assert plan["display"]["state"] == "queued"
     assert plan["queue"]["state"] == "behind" and plan["queue"]["evidence"] == "confirmed"
-    assert plan["queue"]["post"] == ids["queued"] and "behind work-m1/workrun-task1" in plan["display"]["reason"]
+    assert plan["queue"]["post"] == ids["queued"] and "behind agecho-runs/agechorun-1" in plan["display"]["reason"]
     queued = [c for c in runner.calls if "--queued" in c]
     assert len(queued) == 1 and queued[0][queued[0].index("--ack") + 1] == "0"

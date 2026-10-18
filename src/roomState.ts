@@ -18,9 +18,7 @@ import { AGENTROOM_URL } from './endpoints'
 
 const BASE = AGENTROOM_URL
 
-// `project` is the Project Room (`project_room` p1): it stands in a room of
-// its own but is not one of the two adapter-driven dialogue rooms below.
-export type RoomId = 'front' | 'argue' | 'project'
+export type RoomId = 'front' | 'argue'
 
 export interface Citation {
   channel: string

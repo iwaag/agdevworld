@@ -1,8 +1,7 @@
 """The relay reaches no second system (`refactor` p2 step 4).
 
-`AGENTROOM_PLANE_ENV` existed for the one record this room read outside
-Zulip — forge's Plane Work — and forge's record is a conversation now. An
-import-graph assertion, which is stronger than a rejecting client: the code
+Every record this room reads is a Zulip conversation. An import-graph
+assertion, which is stronger than a rejecting client: the code
 cannot call Plane because the module is never loaded — and since `refactor`
 p3 there is no `agag.plane` to load.
 """
@@ -11,8 +10,7 @@ import subprocess
 import sys
 
 MODULES = ("agentroom.main", "agentroom.server", "agentroom.close",
-           "agentroom.closing", "agentroom.ops", "agentroom.forge",
-           "agentroom.autolab")
+           "agentroom.closing", "agentroom.ops")
 
 
 def test_no_relay_module_loads_the_plane_client():

@@ -85,9 +85,8 @@ and it has two modes:
   instance, its own channel, the first line of its introduction, and a badge
   counting the open topics in that channel. Clicking one shows the whole
   introduction as posted, its open topics, and the earlier introductions.
-- **open work** — one card per board: every `pj-<slug>` project (its own
-  channel plus the `work-<label>` channels filed in the same channel folder)
-  and every agent's own channel, each with its open count. Clicking one opens
+- **open work** — one card per board: every live agent's own channel (and
+  the `#front` topics its roster prefix claims), each with its open count. Clicking one opens
   the flat list of its unresolved topics, grouped by channel. The list is flat
   in the popup rather than on the grid because 94 cards in a four-column grid
   that scales to fit is unreadable — measured, in `agent_room` step 5.
@@ -98,8 +97,7 @@ Three things it deliberately does not do, all of them from the episode plan:
   `public/*.json` behind it; the relay reads Zulip per request and caches for
   30 s in memory only.
 - **No topic-name interpretation.** Open means the absence of Zulip's `✔ `
-  prefix and nothing else. `workplan-`/`assetplan-`/`workrun-` are each
-  agent's own vocabulary, and reading them here would make this view wrong
+  prefix and nothing else. Topic prefixes are each agent's own vocabulary, and reading them here would make this view wrong
   the first time an agent changed one.
 - **No harness, model or backend.** The introductions do not carry it and the
   view does not add it ("Agent ≠ Model").
@@ -161,8 +159,8 @@ The consequences are deliberate and temporary:
   `public/`, which never went through the assistant. Every other screen that
   read `/api/*` has since been deleted rather than repaired.
 
-Project starts (Gitea → Zulip) were also served here; they are agautolab-side
-only from now on (`agautolab/init_project.py`).
+Project starts (Gitea → Zulip) were also served here; managed projects are
+registered through the workflow editor now (see "The workflow editor").
 
 ## The retired `tasks / plane` and `autolab / now` views
 
@@ -186,147 +184,9 @@ it was reading sample data "until the route is restored". A view whose every
 action can only fail is not a feature waiting for a backend; it is a promise
 the application cannot keep.
 
-What autolab is doing is read from the realm instead — the agent room, the
-operation room, and autolab's own conversations, all of which are live. No
-replacement dashboard was built, and profile changes stay conversational.
-
-On the node's side, the gateway kept a **stub** `/status`, `/log`, `/jobs…`,
-`/projects`, `/game` and `/monitor` surface alive for exactly this browser
-caller (`agautolab/agent/gateway.py`); with the caller gone those routes are
-gone too. `POST /window` and `GET /healthz` are not: `/window` is a real
-conversational entrance that runs the `front` role and records the run, and
-`/healthz` is what the deployment probes. A dead browser caller does not make
-a whole service dead.
-
-## Managed cagent snapshots
-
-agdevworld reads completed `scan` artifacts through WFE's read-only run/file
-API. It neither submits conversational requests to the retired HTTP doors
-nor holds their human token. Cluster mutations belong to the managed
-`change` workflow. See *Cluster snapshot publication* below for refresh,
-selection and failure behavior.
-
-## Operation room dashboard (p5)
-
-`/` is the four-pane dashboard: routine list, latest three sessions above the
-conversation graph, and the selected routine's fire conversation on the right.
-`/?parts=shell` remains an alias. DOM scrolling, keyboard focus and selectable
-source evidence make it the default entrance. Phaser is loaded only for a world
-view, rather than being downloaded with the dashboard.
-
-`/?view=ops` opens the retained stalled-first Ops board. The existing six-view
-cycle remains available at `/?view=nodes`, and any existing view key may be
-selected directly. The older Phaser `routines` view is retained as a compact
-board with its existing detail popup; the dashboard is the primary routine
-workflow. Each world view links back to the dashboard. No eighth scene is added.
-`/?parts=graph` remains the standalone snapshot/explicit-refresh graph workbench.
-
-## Front Desk (`front_desk` p1)
-
-`/?view=frontdesk` is its own Phaser game rather than an eighth
-`PanelGridScene` view: the background fills the frame, Front's portrait
-stands in the lower left, the latest reply is the dialogue beside it, a prompt
-bar runs along the bottom and the history is a panel that can be shown or
-hidden. Everything visible is Phaser; the one DOM element is a hidden
-textarea under the bar, because a canvas cannot host an IME. The conversation
-is `#front` › `front-desk-<id>` (`?conv=<id>`; a new id is minted when none
-is given), which Front's existing `front-` sweep serves.
-
-Three things learned by looking rather than by design:
-
-- **Phaser's word wrap splits UTF-16 units.** A Japanese sentence is one
-  "word" to it and an emoji is two units, so `textLayout.ts` wraps with
-  `Intl.Segmenter` (words, then graphemes) and hands Phaser explicit lines.
-- **The Enter that confirms a composition is decided by the event**, not by a
-  flag of our own: `isComposing` / keyCode 229. A CDP probe that never sent
-  `compositionend` showed the flag version would have blocked sending forever.
-- **`?demo=1`** answers from a script in the Front Desk voice so the frame can
-  be checked without buying a run or needing the relay.
-
-`.local/deskshot.mjs` (ignored) is the CDP driver that types, presses keys,
-sets an IME composition, wheels and screenshots it.
-
-### Speech and its dialogue (`argue` p2)
-
-The discussion is plain; the character dialogue is Front's re-voicing of
-it, made afterwards and saved in a memo topic (see `agentroom/README.md` ›
-`presentation`). Every **agent post** is a reply to page through — Front's,
-and in an argue every specialist's. `view: dialogue ⇄ original` chooses what
-its turns are: the turns of a saved interpretation (each by one character of
-the revision the interpretation names, each citing its posts), or the post
-as written. A post with no usable rendering — still pending, failed, a
-speaker without a character such as `sage:arxiv` — is shown as written with
-the reason in the status line, so reading never waits for a rendering.
-**The composer always posts into the source conversation**, whichever view
-is on. `interpretation: …` steps through the saved interpretations (each
-keeps the faces of its own revision) and back to following the active
-settings; `reinterpret ⟳` asks Front for one at the settings current now and
-leaves the earlier ones alone. A 📎 source chip — in the box and in the
-history — opens the cited post as written, marked `◀ cited`.
-
-Front speaks from the lower left; any other speaker from a portrait and box
-in the upper left, the one not speaking dimmed with its last line. ▶/◀, a
-click on a box or the wheel step through pages, then turns, then replies; a
-reply that arrives while an earlier one is being read queues behind it with
-a `▶ n new replies waiting` chip, and a rendering that lands under the
-reader keeps their place. History rows are portrait, name (nickname) and
-text per turn, a user icon for the human, a common icon under its own label
-for a speaker the settings do not know, acks as receipt lines.
-
-In the Arguing Room `?argue=<anchor>` names the open argue by its anchor
-message id; with none, the history panel lists the argues and the first
-post in the bar opens a new one. There is no finish button there: an argue
-ends by Front's checked outcome.
-
-Faces, names and the background come from the settings revision: the active
-one for new content (`settings ⟳` re-reads it), and for a scene the revision
-it was written for, fetched by id and never swapped under the reader. A
-revision the relay no longer retains, or an image that fails to load, is
-said in the settings line and drawn with the current settings or the
-bundled fallback. Below 720px the frame stacks (collaborator, portrait,
-Front's box) and the history takes the whole width.
-
-### Settings repository (`front_desk` p2)
-
-Characters and rooms are content, not code: a Git repository
-(`settings.example.toml` names `iwaag/agdevworld-settings`) with a
-`manifest.toml` — display names, lore, portrait and background paths, and
-which agents speak as which character. `agentroom-settings sync` fetches it,
-checks the manifest and every file it names, and switches the active
-revision; every synced revision is kept under `.local/settings/revisions/`
-so a saved dialogue can still be drawn with the faces it was written for,
-and `.local/settings/current/` is the active one for agents that read lore
-as files. The relay serves it under `/settings` with the revision in every
-asset URL, so a replaced image never survives in a browser cache. Adding a
-character is a manifest entry and its files in that repository; the frontend
-is not rebuilt and the relay is not restarted. `agentroom/README.md` has the
-routes and the failure behaviour.
-
-### Two windows (`operation_room` p8)
-
-The dashboard holds no state of its own — every pane is the relay's memory
-re-read every 5 s (`/inflight` every 15 s) — so a second window follows the
-first without any wiring: instructions in one window on `/`, a monitoring
-window on `/?routine=<name>` beside it or on another display, the cost gauge
-in a third. Measured on the real system: the relay reflects a Zulip change
-before the HTTP reply reaches the browser that made it, and another window
-shows it on its next tick (1.6–3.7 s observed, 5 s worst case). A second
-window is 40 loopback requests a minute and zero Zulip calls.
-
-What is *not* shared, on purpose: the routine and session selection, the
-pending-fire card, and the display preferences until a reload (they live in
-`localStorage`, one copy per browser profile). Two things to know before
-leaving a monitoring window open:
-
-- Tick **Show resolved** in it. Under the default a ✔ removes the run being
-  watched from the list and says so; with it on, the chip turns `✔ resolved`.
-- The Phaser views (`?view=ops`, `?view=routines`) make no requests after
-  load — they refresh on ⟳ only. A monitoring window is the dashboard.
-
-And one thing about experiments on run topics: **✔ is free, un-✔ is not.**
-Un-resolving a `#front` run topic more than 60 s after its ✔ makes Zulip post
-a notification line into an unresolved topic, which Front serves as a paid
-run. Resolve-only measurements, or undo inside Zulip's 60 s grace period.
+Workflow runs are followed in the workflow editor (the agdev dashboard) and
+in their Zulip notifications instead. No replacement dashboard was built.
+The node-side gateway those screens called is retired as well.
 
 ### Progress panel (`progress_panel` p1)
 
@@ -336,7 +196,7 @@ conversation: the open conversation pinned, then active requests, then
 results of the last 24 h. It reads `GET /progress?current=<desk id>` every
 8 s while open (60 s closed, for the toggle's `✋`/`■` badges); the board is
 pyagag's `agag.progress` read of the relay's mirror, Observer's records and
-autolab's health checks (`agentroom/src/agentroom/progress.py`). Its open
+the health checks of the owners that expose one (`agentroom/src/agentroom/progress.py`). Its open
 state and expanded cards live in `localStorage`. It shares the right column
 with the history panel (one closes the other); on a narrow screen its toggle
 takes the button row's left end.
@@ -402,31 +262,6 @@ health and send tests intercept browser fetch; unit tests mock Zulip. Real chat
 verification is deliberate and at most one round trip, never automated posting.
 Rebuild the web image after frontend changes and kickstart the local relay job
 after relay code changes; verify event-queue health returns to live.
-
-## Project Room (`project_room` p1)
-
-`/?view=project` follows a project or a study from its purpose through its
-plans and runs, and talks in the selected one. It is a room of its own
-(`src/projectRoom.ts`, `src/scenes/ProjectRoomScene.ts`): the settings'
-`project` background under the shared tint (`src/scenes/roomTint.ts`, laid
-over the Front Desk and the Arguing Room too), the portrait of whoever
-answers in the selected conversation, and four DOM panels — projects and
-studies on the left, the selected project's purpose / setup / plans and runs
-in the centre, the selected document or plan on the right, the conversation
-and the composer below. The relay is the read model
-(`agentroom/README.md`, `/projects`, `/work/<anchor>`,
-`/projects/<key>/topics/<topic>`); `src/projectState.ts` carries its
-payloads and keeps two browser-local things: the read position per
-conversation (the pink "updated since you looked" dot) and the draft per
-conversation. `&demo=1` (`src/projectDemo.ts`) plays a fixture with no relay.
-
-Words the screen keeps apart: `work <state>` is autolab's recorded word
-(`started` proves no process); `reply <state>` is the ops engine's verdict
-for that conversation; task counts are counts, and `?` after one means the
-work channel is not mirrored. A document has no composer — it says where to
-take the discussion (Front) — and a ✔'d conversation is resumed only after a
-second press. URLs: `&project=<key>&plan=<anchor>` / `&run=<anchor>` /
-`&topic=<name>`.
 
 ## The workflow editor (`workflow_editor` p4/ex1)
 

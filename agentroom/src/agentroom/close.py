@@ -8,32 +8,17 @@ accepts as a root, named by channel and topic; the Front Desk's
 room's routine runs and the agent room's conversations are the others
 (`front_desk` p4).
 
-**The human's click is the acceptance.** Nothing here judges whether the
+**The human's click is the decision.** Nothing here judges whether the
 work was any good; it decides only whether each target is in a state this
-operation may move, and it decides that by counting:
+operation may move: a **topic** may be resolved when the walk actually read
+it. A topic known only by the note that named it is a gap, not a finished
+conversation.
 
-- a **work record** may be closed when its own agent's rule says it is
-  finished — autolab's mission when every one of its live tasks is
-  completed (`autolab.reason_not_finished`), forge's request when something
-  has been delivered (`forge.reason_not_accepted`). Two lifecycles, each the
-  writer's own and neither re-invented here. An already-accepted record is a
-  successful no-op; a cancelled or retired one is left exactly as it is;
-  anything else is **blocked**, says so, and holds its own conversations
-  open (`_hold_dependents`).
-- a **topic** may be resolved when the walk actually read it. A topic known
-  only by the note that named it is a gap, not a finished conversation.
-- a **channel** may be archived when it is `work-<label>` for a mission of
-  this conversation and every topic it actually holds is one of these
-  targets (`closing._channels`). The shared `#front`, project and agent
-  channels are never candidates.
-
-**Order matters and is fixed**: the work records first, then the related
-topics, then the dedicated channels, then the Front conversation itself.
-Resolving the Front topic last is what makes a half-finished run visible —
-if anything related is blocked or failed, the Front conversation **stays
-open**, which is the only way the screen can honestly say "partially
-closed". Records first is also what lets a failed acceptance hold back the
-conversations it is about in the same pass.
+**Order matters and is fixed**: the related topics first, then the selected
+conversation itself. Resolving it last is what makes a half-finished run
+visible — if anything related is blocked or failed, the selected
+conversation **stays open**, which is the only way the screen can honestly
+say "partially closed".
 
 **The browser never names a destination.** A request carries the selected
 conversation and the fingerprint of the preview the human looked at. Since
@@ -48,9 +33,8 @@ whatever moved is hydrated, and a plan that changed is a refusal with the
 fresh one rather than a write against a stale picture.
 
 **Retrying is re-running.** Every action is idempotent in the realm's own
-terms — a resolved topic resolves to `already`, an accepted record to
-`already` — so a second click after a partial failure repeats nothing and
-finishes what is left. The post-write answer is built from the results and
+terms — a resolved topic resolves to `already` — so a second click after a
+partial failure repeats nothing and finishes what is left. The post-write answer is built from the results and
 the mirror's confirmation of them, not from a third walk; a retry reads the
 copy, which now carries what was written. The operation record kept here is
 for the screen, not for correctness.
@@ -67,33 +51,9 @@ from dataclasses import dataclass, field
 from hashlib import sha256
 from typing import Any, Callable, Protocol
 
-from agag.acceptance import acceptance_note
-from agag.selfnote import note as selfnote
-from agag.zulip import ZulipClient, live_topic_name
+from agag.zulip import ZulipClient
 
-from .autolab import (
-    ALREADY_DONE,
-    MISSION_DONE,
-    MISSION_REPLACED,
-    Mission as AutolabMission,
-    STATE_TAG,
-    TASK_ACCEPTED,
-    TASK_CANCELLED,
-    Task as AutolabTask,
-    WORK_CHANNEL_PREFIX,
-    reason_not_finished,
-    work_channel_name,
-)
-from .closing import AUTOLAB_SOURCE, Discovery, Key, Realm, WorkTarget, discover
-from .forge import (
-    ALREADY_ACCEPTED,
-    REQUEST_ACCEPTED,
-    REQUEST_RETIRED,
-    STATE_TAG as FORGE_STATE_TAG,
-    Request as ForgeRequest,
-    Run as ForgeRun,
-    reason_not_accepted,
-)
+from .closing import Discovery, Key, Realm, discover
 from .frontdesk import FRONT_CHANNEL, ID_PATTERN, desk_topic
 from .room import bare_topic
 
@@ -114,8 +74,7 @@ CONFIRM_SECONDS = 5.0
 
 __all__ = [
     "ALREADY", "APPLIED", "Action", "BLOCKED", "Closer", "DONE", "FAILED", "KEPT",
-    "READY", "SCHEMA", "SKIPPED", "dependents", "fingerprint", "parse_key",
-    "plan_actions",
+    "READY", "SCHEMA", "SKIPPED", "fingerprint", "parse_key", "plan_actions",
 ]
 
 
@@ -141,7 +100,7 @@ def parse_key(channel: object, topic: object) -> Key | dict:
 class Action:
     """One thing this operation would do, or would not, and why."""
 
-    #: `work`, `topic`, `channel` or `conversation`.
+    #: `topic` or `conversation`.
     kind: str
     #: Stable across previews and retries: what a result is matched to.
     key: str
@@ -177,194 +136,22 @@ class Plan:
     zulip_calls: int = 0
 
 
-def _work_action(work: WorkTarget) -> Action:
-    """One work record, judged by its own agent's rule.
-
-    One question — *is this finished?* — and two different right answers,
-    because the two agents do different work. The rule is the writer's in
-    both cases and is never re-invented here.
-    """
-    return (_autolab_action(work) if work.source == AUTOLAB_SOURCE
-            else _forge_action(work))
-
-
-def _autolab_action(work: WorkTarget) -> Action:
-    """One autolab mission, judged from the conversations it is made of.
-
-    `autolab.reason_not_finished` is `agautolab.mission_done`'s rule, and
-    what this operation would *write* is what makes the three things the
-    plan asks to keep apart actually distinct in the record:
-
-    - a task is `completed` by the **run** that did it — execution success,
-      already written, never written here;
-    - a task becomes `accepted` and its mission `done` when the **human**
-      clicks — this operation, and the only thing that writes those words;
-    - the ✔ on each topic is neither: it closes the **conversation**, and it
-      happens afterwards as its own action.
-
-    A task orphaned from its mission is shown and never moved: accepting one
-    piece of a request nobody here can see the whole of is not this button's
-    decision to make.
-    """
-    detail = {**work.as_dict(),
-              "unreached_children": [row["label"] for row in work.children
-                                     if not row.get("reached", True)]}
-    label = f"{work.label} {work.title}".strip()
-    if work.role != "mission":
-        return Action("work", work.key, label, KEPT,
-                      f"kept — this task's mission ({work.parent_id}) is not part of this "
-                      "request, so nothing here decides whether it is accepted", detail)
-    tasks = [
-        AutolabTask(anchor_id=int(row.get("anchor_id") or 0), mission_id=work.anchor_id,
-                    serial=int(row.get("serial") or 0), channel=str(row.get("channel") or ""),
-                    topic=str(row.get("topic") or ""), state=str(row.get("state") or ""))
-        for row in work.children
-    ]
-    mission = AutolabMission(anchor_id=work.anchor_id, slug="", channel=work.channel,
-                             topic=work.topic, state=work.state)
-    reason = reason_not_finished(mission, tasks)
-    live = [task for task in tasks if task.state != TASK_CANCELLED]
-    if reason is None:
-        return Action("work", work.key, label, READY,
-                      f"every one of its {len(live)} tasks is finished; accepting them and "
-                      "marking the mission done", detail)
-    if reason == ALREADY_DONE:
-        return Action("work", work.key, label, DONE,
-                      "already done; closing it again changes nothing", detail)
-    if reason == "it is cancelled":
-        return Action("work", work.key, label, KEPT,
-                      "cancelled: this operation never moves a cancelled mission", detail)
-    if mission.state == MISSION_REPLACED:
-        return Action("work", work.key, label, KEPT, f"kept — {reason}", detail)
-    return Action("work", work.key, label, BLOCKED, reason, detail)
-
-
-def _forge_action(work: WorkTarget) -> Action:
-    """One forge request, judged from the conversations it is made of.
-
-    `forge.reason_not_accepted` is forge's lifecycle, not autolab's counting
-    rule: what finishes a request is that **something was delivered**, not
-    that every run of it completed. A second attempt after a failure is the
-    same request trying again.
-
-    What this operation would *write* keeps the same three things apart that
-    `refactor` p1 separated for autolab:
-
-    - the generation succeeded and the asset reached the requester — the
-      **run** said so, in both conversations, and it is never written here;
-    - a person accepted it — this operation, `[state] accepted`, and the only
-      thing that writes that word;
-    - the ✔ on each topic is neither, and happens afterwards.
-
-    A run orphaned from its request is shown and never moved.
-    """
-    detail = {**work.as_dict(), "unreached_children": []}
-    label = f"{work.label} {work.title}".strip()
-    if work.role != "request":
-        return Action("work", work.key, label, KEPT,
-                      f"kept — this run's request ({work.parent_id}) is not part of this "
-                      "request, so nothing here decides whether it is accepted", detail)
-    runs = [
-        ForgeRun(anchor_id=int(row.get("anchor_id") or 0), request_id=work.anchor_id,
-                 channel=str(row.get("channel") or ""), topic=str(row.get("topic") or ""),
-                 state=str(row.get("state") or ""))
-        for row in work.children
-    ]
-    request = ForgeRequest(anchor_id=work.anchor_id, stem=work.title, channel=work.channel,
-                           topic=work.topic, state=work.state)
-    reason = reason_not_accepted(request, runs)
-    if reason is None:
-        return Action("work", work.key, label, READY,
-                      "its asset was delivered; accepting it", detail)
-    if reason == ALREADY_ACCEPTED:
-        return Action("work", work.key, label, DONE,
-                      "already accepted; accepting it again changes nothing", detail)
-    if request.state == REQUEST_RETIRED:
-        return Action("work", work.key, label, KEPT, f"kept — {reason}", detail)
-    return Action("work", work.key, label, BLOCKED, reason, detail)
-
-
-def dependents(action: Action) -> set[str]:
-    """The action keys whose closure this work record decides.
-
-    A work record is the answer to *is this finished?*, and the
-    conversations it is made of are the place the unfinished part is still
-    being worked. So a blocked mission holds back its own plan topic, the
-    topic of every task under it, and the dedicated `work-` channel named
-    after it — closing those would archive a conversation somebody still has
-    to post in, which is the defect `refactor` p1 recorded and left standing.
-
-    Keys, not coordinates, because that is what a result row is matched to
-    and what `_apply` walks. A record names its channel by its label and by
-    the anchor id that *is* it; both are asked for, and a name that matches
-    no target simply holds nothing — forge keeps no dedicated channel, so
-    its requests hold their conversations and nothing else.
-    """
-    detail = action.detail
-    keys: set[str] = set()
-    pairs = [(str(detail.get("channel") or ""), str(detail.get("topic") or ""))]
-    pairs += [(str(row.get("channel") or ""), str(row.get("topic") or ""))
-              for row in detail.get("children") or []]
-    for channel, topic in pairs:
-        if channel and topic:
-            keys.add(f"topic:{channel}/{topic}")
-    label = str(detail.get("label") or "").strip()
-    if label:
-        keys.add(f"channel:{WORK_CHANNEL_PREFIX}{label}")
-    anchor_id = int(detail.get("anchor_id") or 0)
-    if anchor_id:
-        keys.add(f"channel:{work_channel_name(anchor_id)}")
-    return keys
-
-
-def _hold_dependents(actions: list[Action]) -> None:
-    """Keep open what a blocked work record is still about.
-
-    Only a `READY` target is moved, and only a topic or a channel: an
-    already-✔ topic stays `DONE` (there is nothing to hold), and the
-    selected request's own conversation is held by `_apply`'s rule instead,
-    because *anything* left undone keeps that one open. An independent
-    branch of the same request — another mission, forge's Work, a topic no
-    blocked record names — is untouched and still closes.
-    """
-    held: dict[str, str] = {}
-    for action in actions:
-        if action.kind != "work" or action.state != BLOCKED:
-            continue
-        for key in dependents(action):
-            held.setdefault(key, action.label)
-    for action in actions:
-        if action.state != READY or action.kind not in {"topic", "channel"}:
-            continue
-        label = held.get(action.key)
-        if label is None:
-            continue
-        action.state = KEPT
-        action.reason = (f"kept — {label} is not finished, so this stays open for the rest of "
-                         "the work; complete it and close the request again")
-
-
 def plan_actions(found: Discovery) -> list[Action]:
     """Every action, in the order execution applies them.
 
-    The work records first — so a blocked or failed one can hold back what
-    it is about — then the related topics, then the dedicated channels, then the selected request
-    itself, last so that anything left undone keeps it open.
+    The related topics first, then the selected request itself, last so
+    that anything left undone keeps it open.
 
     A root that may not be completed (an execution topic, a standing
     request, an introduction) is one blocked action carrying the scope's
     reason: the panel shows why, and there is nothing to approve.
-
-    A blocked work record then holds back what it is *about*
-    (`_hold_dependents`): unfinished work stays reachable, and its channel
-    is not archived out from under it.
     """
     scope = found.scope
     if not scope.closable:
         return [Action("conversation", f"topic:{found.root[0]}/{found.root[1]}",
                        f"#{found.root[0]} › {found.root[1]}", BLOCKED, scope.reason,
                        {"parents": scope.parents, "kind": scope.kind})]
-    actions: list[Action] = [_work_action(work) for work in found.works]
+    actions: list[Action] = []
 
     for node in found.topics:
         if (node.channel, node.topic) == found.root:
@@ -386,18 +173,6 @@ def plan_actions(found: Discovery) -> list[Action]:
         else:
             actions.append(Action("topic", key, label, READY, "will be marked ✔", node.as_dict()))
 
-    for row in found.channels:
-        key = f"channel:{row['channel']}"
-        label = f"#{row['channel']}"
-        if row.get("archived"):
-            actions.append(Action("channel", key, label, DONE, row["reason"], row))
-        elif row["archivable"]:
-            actions.append(Action("channel", key, label, READY,
-                                  f"will be archived — {row['reason']}", row))
-        else:
-            actions.append(Action("channel", key, label, KEPT,
-                                  f"kept — {row['reason']}", row))
-
     root = next((node for node in found.topics if (node.channel, node.topic) == found.root), None)
     key = f"topic:{found.root[0]}/{found.root[1]}"
     label = f"#{found.root[0]} › {found.root[1]}"
@@ -416,7 +191,6 @@ def plan_actions(found: Discovery) -> list[Action]:
     else:
         actions.append(Action("conversation", key, label, READY,
                               "will be marked ✔ once everything above is done", root.as_dict()))
-    _hold_dependents(actions)
     return actions
 
 
@@ -431,81 +205,11 @@ def fingerprint(actions: list[Action]) -> str:
 
     Only the parts a decision rests on: which targets, and what state each
     was in. A new post in a related topic is not a different decision; a
-    Work that has since been cancelled, or a target that has appeared, is.
+    topic that has since been resolved, or a target that has appeared, is.
     """
     material = "\n".join(f"{action.key}={action.state}" for action in sorted(
         actions, key=lambda one: one.key))
     return sha256(material.encode("utf-8")).hexdigest()[:16]
-
-
-def _accept_mission(client: ZulipClient, detail: dict) -> str:
-    """Write the human's acceptance into the conversations it is about.
-
-    One `[selfnote][state]` note per topic, and they say different things on
-    purpose: each finished task becomes `accepted`, and the mission becomes
-    `done`. Appended, never edited — the sequence of notes is the history of
-    the work, and this is the entry that says a person looked at it.
-
-    A selfnote, so nobody is served by it: writing the record must not buy a
-    run. Written under each topic's **live** name, because a task topic is
-    very often already resolved by the run that finished it, and a post
-    under the bare name of a ✔ topic opens a twin beside it.
-
-    A task that was cancelled is left alone: it was called off, and
-    accepting it would say a person approved work nobody did. Whatever
-    fails here raises, and `_apply` reports it against this one target.
-    """
-    moved = []
-    for row in detail.get("children") or []:
-        if str(row.get("state") or "") == TASK_CANCELLED:
-            continue
-        channel, topic = str(row.get("channel") or ""), str(row.get("topic") or "")
-        if not channel or not topic:
-            continue
-        client.send_to_channel(channel, live_topic_name(client, channel, topic),
-                               selfnote(STATE_TAG, TASK_ACCEPTED))
-        moved.append(str(row.get("label") or topic))
-    channel, topic = str(detail.get("channel") or ""), str(detail.get("topic") or "")
-    if not channel or not topic:
-        raise RuntimeError("this mission's conversation is not known, so nothing can be written")
-    live = live_topic_name(client, channel, topic)
-    # Whose decision it is, in the one shape every path writes
-    # (`agag.acceptance`, robust_workflow p3 step 3): the person pressing
-    # this door, with no post to point at — the press is the decision.
-    try:
-        me = client.whoami()
-    except Exception:  # noqa: BLE001 - the record without a name is still the record
-        me = {}
-    client.send_to_channel(channel, live, acceptance_note(0, int(me.get("user_id") or 0),
-                                                          str(me.get("full_name") or "")))
-    client.send_to_channel(channel, live, selfnote(STATE_TAG, MISSION_DONE))
-    accepted = f"; accepted {', '.join(moved)}" if moved else ""
-    return f"{detail.get('label')} is done{accepted}"
-
-
-def _accept_request(client: ZulipClient, detail: dict) -> str:
-    """Write the human's acceptance into the request it is about.
-
-    One `[selfnote][state] accepted` note, in the request's conversation.
-    Not in its runs: a run is an *attempt*, and a person accepting the asset
-    is saying something about the request, not about each try that led to
-    it. Appended, never edited, and a selfnote so nobody is served by it —
-    writing the record must not buy a run.
-
-    Written under the topic's **live** name, because a request's
-    conversation is often already resolved by the time somebody accepts it,
-    and a post under the bare name of a ✔ topic opens a twin beside it.
-    Whatever fails here raises, and `_apply` reports it against this one
-    target — and holds back the conversations it is about.
-    """
-    channel, topic = str(detail.get("channel") or ""), str(detail.get("topic") or "")
-    if not channel or not topic:
-        raise RuntimeError("this request's conversation is not known, so nothing can be written")
-    client.send_to_channel(channel, live_topic_name(client, channel, topic),
-                           selfnote(FORGE_STATE_TAG, REQUEST_ACCEPTED))
-    keys = [str(key) for key in (detail.get("results") or []) if str(key).strip()]
-    delivered = f"; its asset is {', '.join(keys)}" if keys else ""
-    return f"{detail.get('label')} is accepted{delivered}"
 
 
 @dataclass
@@ -556,7 +260,7 @@ class Closer:
         """What this door can do, before a button is drawn for it.
 
         A missing credential is said here rather than discovered on submit:
-        a preview that lists a Work it cannot move is a preview that lies.
+        a preview that lists a topic it cannot move is a preview that lies.
         """
         return {
             "zulip_read": self.reader_factory is not None,
@@ -666,17 +370,11 @@ class Closer:
 
     def _listings_of(self, found: Discovery) -> dict[str, frozenset[str]]:
         """The channels whose topic names the walk depends on: every channel
-        a reached conversation is in (the stem and seed rules read their
-        listings), the dedicated `work-` channel of each mission, and the
-        root's own — with the names the mirror holds for each now."""
+        a reached conversation is in (twin detection reads their listings)
+        and the root's own — with the names the mirror holds for each now."""
         channels = {found.root[0]}
         channels.update(node.channel for node in found.topics)
         channels.update(row["channel"] for row in found.excluded)
-        for work in found.works:
-            if work.source == AUTOLAB_SOURCE and work.anchor_id:
-                channels.add(work_channel_name(work.anchor_id))
-        for row in found.channels:
-            channels.add(row["channel"])
         return {channel: self._names_now(channel) for channel in sorted(channels)}
 
     def _names_now(self, channel: str) -> frozenset[str]:
@@ -930,39 +628,19 @@ class Closer:
         if action.kind in ("topic", "conversation"):
             found = mirror.topic(detail.get("channel", ""), detail.get("topic", ""))
             return bool(found) and all(t.resolved for t in found)
-        if action.kind == "channel":
-            found = mirror.channel(detail.get("channel", ""))
-            return found is None or found.archived
-        if action.kind == "work":
-            word = MISSION_DONE if detail.get("source") == AUTOLAB_SOURCE else REQUEST_ACCEPTED
-            tag = STATE_TAG if detail.get("source") == AUTOLAB_SOURCE else FORGE_STATE_TAG
-            notes = mirror.notes(tag=tag, channel=detail.get("channel", ""))
-            here = [n for n in notes if bare_topic(n.topic) == bare_topic(detail.get("topic", ""))]
-            return bool(here) and here[-1].value == word
         return False
 
     def _apply(self, client: ZulipClient, actions: list[Action]) -> list[dict]:
         """Run the ready actions in order. Nothing rolls back.
 
-        A failure stops nothing except the Front topic and whatever the
-        failed target was *about*: the other targets are independent of one
-        another, and leaving four of five closed with the fifth named is
-        more useful than leaving all five open. Two exceptions. A work
-        record whose acceptance failed holds back its own conversations and
-        its dedicated channel, the same rule the preview applies to one it
-        already knew was blocked — an unaccepted mission whose channel is
-        archived leaves its unfinished task nowhere to continue. And the
-        Front conversation, because its ✔ is the claim that the whole thing
-        is finished.
+        A failure stops nothing except the selected conversation: the other
+        targets are independent of one another, and leaving four of five
+        closed with the fifth named is more useful than leaving all five
+        open. The selected conversation is held because its ✔ is the claim
+        that the whole thing is finished.
         """
         results: list[dict] = []
         trouble = False
-        #: Targets a work record that failed *here* is still about. The
-        #: preview applied the same rule to what it already knew was
-        #: blocked; a write that fails mid-operation is the same fact
-        #: learned later, and the plan's order — work first — is what makes
-        #: acting on it possible without a second pass.
-        held: dict[str, str] = {}
         for action in actions:
             if action.state in {DONE, ALREADY}:
                 results.append(self._result(action, ALREADY, action.reason))
@@ -970,12 +648,6 @@ class Closer:
             if action.state in {BLOCKED, KEPT}:
                 trouble = trouble or action.state == BLOCKED
                 results.append(self._result(action, SKIPPED, action.reason))
-                continue
-            if action.key in held:
-                results.append(self._result(
-                    action, SKIPPED,
-                    f"kept open: {held[action.key]} could not be accepted, so the work it is "
-                    "about is not finished; retry once that is resolved"))
                 continue
             if action.kind == "conversation" and trouble:
                 results.append(self._result(
@@ -987,9 +659,6 @@ class Closer:
                 note = self._run(client, action)
             except Exception as error:  # noqa: BLE001 - reported per target, never raised
                 trouble = True
-                if action.kind == "work":
-                    for key in dependents(action):
-                        held.setdefault(key, action.label)
                 results.append(self._result(action, FAILED, f"{type(error).__name__}: {error}"))
                 continue
             results.append(self._result(action, APPLIED, note))
@@ -1001,14 +670,6 @@ class Closer:
                 "outcome": outcome, "note": note}
 
     def _run(self, client: ZulipClient, action: Action) -> str:
-        if action.kind == "work":
-            if action.detail.get("source") == AUTOLAB_SOURCE:
-                return _accept_mission(client, action.detail)
-            return _accept_request(client, action.detail)
-        if action.kind == "channel":
-            stream = client.stream_id(action.detail["channel"])
-            client.archive_channel(int(stream))
-            return f"#{action.detail['channel']} is archived"
         message_id = int(action.detail.get("last_post_id") or 0)
         if not message_id:
             raise RuntimeError("no message to rename: a topic is resolved by moving its posts")

@@ -426,9 +426,7 @@ function renderRoomAgent(agent: RoomAgent, open: RoomWorkRow[]): void {
       work.append(box)
     }
   }
-  // Project work is not attributed to an agent on purpose: a `pj-` channel is
-  // the project's board, and no topic name says whose task it is.
-  work.append(el('p', 'dp-summary-meta', 'project work is listed under its project, in the open-work mode; finish ✔ previews a request’s completion — an agent’s own plan here, a project’s workplan there'))
+  work.append(el('p', 'dp-summary-meta', 'finish ✔ previews a request’s completion'))
   body!.append(work)
 
   if (agent.history.length > 1) {
@@ -444,16 +442,16 @@ function renderRoomAgent(agent: RoomAgent, open: RoomWorkRow[]): void {
   }
 }
 
-function renderRoomBoard(group: string, kind: 'project' | 'agent', rows: RoomWorkRow[]): void {
+function renderRoomBoard(group: string, kind: 'agent', rows: RoomWorkRow[]): void {
   headerName.textContent = group
   headerKind.textContent = kind
   const open = rows.filter((row) => !row.resolved).length
   headerStatus.textContent = open === rows.length ? `${rows.length} OPEN` : `${open} OPEN · ${rows.length - open} ✔`
-  headerStatus.style.color = kind === 'project' ? '#9b8cff' : '#70c7ff'
+  headerStatus.style.color = '#70c7ff'
 
   // The flat list the plan asks for: channel name and raw topic name, nothing
-  // read into either. `workplan-`/`assetplan-`/`workrun-` are each agent's own
-  // vocabulary; the only thing interpreted anywhere here is Zulip's `✔ `.
+  // read into either. Topic prefixes are each agent's own vocabulary; the
+  // only thing interpreted anywhere here is Zulip's `✔ `.
   const byChannel = new Map<string, RoomWorkRow[]>()
   for (const row of rows) byChannel.set(row.channel, [...(byChannel.get(row.channel) ?? []), row])
 

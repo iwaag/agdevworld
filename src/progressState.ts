@@ -277,7 +277,7 @@ export function demoProgress(): ProgressSource & { at: (seconds: number) => void
   const link = (anchor: number) => `https://zulip.invalid/#narrow/near/${anchor}`
 
   const unit = (partial: Partial<ProgressUnit> & Pick<ProgressUnit, 'anchor' | 'kind' | 'label'>): ProgressUnit => ({
-    channel: 'demo', topic: partial.label, resolved: false, owner: 'autolab', serial: 0,
+    channel: 'demo', topic: partial.label, resolved: false, owner: 'agecho', serial: 0,
     work: { state: 'executing', record: null, detail: '' },
     execution: { serving: 'ended', ack: null, evidence: 'conversation', health: null },
     holder: 'owner', waiting_on: [], recovery: null,
@@ -297,13 +297,13 @@ export function demoProgress(): ProgressSource & { at: (seconds: number) => void
       waiting: 'a result was shown; waiting for Front\'s agreement',
     }[agreement ? 'waiting' : state] ?? state
     return unit({
-      anchor: 200 + serial, kind: 'task', label: `task 100#${serial}`, serial,
-      topic: `workrun-task${serial}-m100`, channel: 'work-m100',
+      anchor: 200 + serial, kind: 'task', label: `step ${serial}`, serial,
+      topic: `agechorun-${serial}-a`, channel: 'agecho-demo',
       work: { state: state === 'completed' ? 'done' : 'executing', record: state === 'completed' ? 'completed' : null, detail: '' },
       execution: state === 'working'
         ? { serving: 'open', ack: 300 + serial, evidence: 'confirmed', health: { verdict: 'running', why: 'work 4 s ago', observed_at: t - 6, age: 6, process: 'alive', last_work: 'tool Bash', last_work_at: t - 4, wait: null, unknowns: [] } }
         : { serving: state === 'queued' ? 'unknown' : 'ended', ack: null, evidence: 'conversation', health: null },
-      display: { state: shown, reason, next: agreement ? 'Front' : 'autolab' },
+      display: { state: shown, reason, next: agreement ? 'Front' : 'agecho' },
       awaiting_agreement: agreement,
       run: state === 'working' ? { determinate: null, activity: 'active', action: 'tool Bash — npm test', action_at: t - 4, action_age: 4, evidence: 'confirmed', observed_at: t - 6 } : null,
     })
@@ -324,8 +324,8 @@ export function demoProgress(): ProgressSource & { at: (seconds: number) => void
           segments: tasks.map((t) => t.awaiting_agreement ? 'awaiting_agreement' : t.display.state) }
     const planState: DisplayState = done ? 'completed' : planning ? 'planning' : 'waiting'
     const plan = unit({
-      anchor: 100, kind: 'plan', label: 'mission m100 (demo)', channel: 'pj-demo', topic: 'workplan-demo-a',
-      display: { state: planState, reason: done ? 'its record says done' : planning ? 'no task is known yet (its planner\'s serving is open)' : 'on work opened from it', next: 'autolab' },
+      anchor: 100, kind: 'plan', label: 'plan a (demo)', channel: 'agecho-demo', topic: 'agechoplan-demo-a',
+      display: { state: planState, reason: done ? 'its record says done' : planning ? 'no task is known yet (its planner\'s serving is open)' : 'on work opened from it', next: 'agecho' },
       meter, children: tasks,
     })
     const state: DisplayState = done ? 'completed' : planning ? 'planning' : working ? 'working' : agreement ? 'waiting' : 'working'
@@ -335,7 +335,7 @@ export function demoProgress(): ProgressSource & { at: (seconds: number) => void
     ]
     return {
       origin: 10, anchor: 10, observed_at: now(), state, reason: done ? 'every unit of work is finished by its record' : planning ? 'no task is known yet' : agreement ? 'a result was shown; waiting for Front\'s agreement' : 'health check: work 4 s ago (tool Bash)',
-      next: done ? '' : agreement ? 'Front' : 'autolab', focus: null, latest_work_at: now() - 4, stale: false, problem: '',
+      next: done ? '' : agreement ? 'Front' : 'agecho', focus: null, latest_work_at: now() - 4, stale: false, problem: '',
       stages, topic: 'front-desk-demo-a', live_topic: 'front-desk-demo-a', resolved: false, desk: 'demo-a',
       group: done ? 'recent' : 'active', last_at: now() - 4, observer_tracked: false, observer_held: false,
       links: { 10: link(10), 100: link(100), ...Object.fromEntries(tasks.map((t) => [t.anchor, link(t.anchor)])) },
@@ -348,13 +348,13 @@ export function demoProgress(): ProgressSource & { at: (seconds: number) => void
     const health = (verdict: string, age: number, wait: ProgressHealth['wait'] = null): ProgressHealth => ({ verdict, why: verdict === 'waiting' ? 'a named tool call inside its bound' : verdict === 'stopped' ? 'the process is gone and nothing was posted' : 'work 3 s ago', observed_at: t - age, age, process: verdict === 'stopped' ? 'exited' : 'alive', last_work: 'text', last_work_at: t - 40, wait, unknowns: [] })
     const wait = { kind: 'tool', name: 'Bash', detail: 'pytest -q tests/ (bound 600 s)', since: t - 95, bound_seconds: 600 }
     const table: Record<string, { display: ProgressUnit['display']; execution: ProgressUnit['execution']; run: ProgressRun | null; recovery: ProgressRecovery | null }> = {
-      working: { display: { state: 'working', reason: f.bNote ? `health check: work 3 s ago — ${f.bNote}` : 'health check: work 3 s ago', next: 'autolab' },
+      working: { display: { state: 'working', reason: f.bNote ? `health check: work 3 s ago — ${f.bNote}` : 'health check: work 3 s ago', next: 'agecho' },
         execution: { serving: 'open', ack: 520, evidence: 'confirmed', health: health('running', 5) },
         run: { determinate: null, activity: 'active', action: 'text', action_at: t - 3, action_age: 3, evidence: 'confirmed', observed_at: t - 5 }, recovery: f.bNote ? { kind: 'stopped', state: 'rescued', open: false } : null },
-      waiting: { display: { state: 'waiting', reason: 'on Bash — pytest -q tests/ (bound 600 s)', next: 'autolab' },
+      waiting: { display: { state: 'waiting', reason: 'on Bash — pytest -q tests/ (bound 600 s)', next: 'agecho' },
         execution: { serving: 'open', ack: 510, evidence: 'confirmed', health: health('waiting', 8, wait) },
         run: { determinate: null, activity: 'waiting', action: 'tool: Bash — pytest -q tests/ (bound 600 s)', action_at: t - 95, action_age: 95, evidence: 'confirmed', observed_at: t - 8 }, recovery: null },
-      stale: { display: { state: 'unknown', reason: 'the last health check is 6 min old', next: 'autolab' },
+      stale: { display: { state: 'unknown', reason: 'the last health check is 6 min old', next: 'agecho' },
         execution: { serving: 'open', ack: 510, evidence: 'stale', health: health('waiting', 360, wait) },
         run: { determinate: null, activity: 'unknown', action: 'last sign of work', action_at: t - 420, action_age: 420, evidence: 'stale', observed_at: t - 360 }, recovery: null },
       stopped: { display: { state: 'stopped', reason: 'health check: the process is gone and nothing was posted', next: 'Front' },
@@ -365,10 +365,10 @@ export function demoProgress(): ProgressSource & { at: (seconds: number) => void
         execution: { serving: 'ended', ack: 520, evidence: 'conversation', health: null }, run: null, recovery: null },
     }
     const row = table[f.b] ?? table.working
-    const taskB = unit({ anchor: 501, kind: 'task', label: 'task 500#1', serial: 1, channel: 'work-m500', topic: 'workrun-task1-m500',
+    const taskB = unit({ anchor: 501, kind: 'task', label: 'step 1', serial: 1, channel: 'agecho-demo', topic: 'agechorun-1-b',
       ...row, awaiting_agreement: f.b === 'awaiting_you' })
-    const plan = unit({ anchor: 500, kind: 'plan', label: 'mission m500 (demo)', channel: 'pj-demo', topic: 'workplan-demo-b',
-      display: { state: 'waiting', reason: 'on work opened from it', next: 'autolab' },
+    const plan = unit({ anchor: 500, kind: 'plan', label: 'plan b (demo)', channel: 'agecho-demo', topic: 'agechoplan-demo-b',
+      display: { state: 'waiting', reason: 'on work opened from it', next: 'agecho' },
       meter: { known: true, total: 1, completed: 0, working: f.b === 'awaiting_you' ? 0 : 1, awaiting_agreement: f.b === 'awaiting_you' ? 1 : 0, cancelled: 0, revisions: [{ doc: 505, at: started, total: 1 }], note: '', segments: [f.b === 'awaiting_you' ? 'awaiting_agreement' : row.display.state] },
       children: [taskB] })
     const asks = f.b === 'awaiting_you'
@@ -398,7 +398,7 @@ export function demoProgress(): ProgressSource & { at: (seconds: number) => void
         schema: 'ag.progress-board.v1', generated_at: now(), served_at: now(),
         source: { mirror: 'live', reason: 'live (demo)', last_event_at: now() - 2, revision: 1 },
         observer: { available: true, problems: [], monitor: { state: 'ok', reason: 'Observer\'s last look ended 20 s ago' } },
-        health: { owners: ['autolab-agstudio1'], probes_run: 3, note: 'only these owners expose execution health; every other owner is read from its conversation alone' },
+        health: { owners: ['agecho-agstudio1'], probes_run: 3, note: 'only these owners expose execution health; every other owner is read from its conversation alone' },
         bounds: { active_hours: 12, recent_hours: 24, recent_max: 6, max_cards: 16, refresh_seconds: 5 },
         cards, current,
         ...(current && !cards.some((c) => c.desk === current) ? { current_note: 'this conversation has no post yet, so it is not a request' } : {}),

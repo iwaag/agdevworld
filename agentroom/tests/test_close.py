@@ -1,11 +1,14 @@
-"""Closing a Front Desk conversation (`front_desk` p3 step 2).
+"""Closing a request (`front_desk` p3 step 2).
 
-Fixtures only. What is pinned: the order Plane → topics → channels → Front;
-the shared parent/child rule deciding each Work; an already-closed target
-being a successful no-op; a cancelled Work being left alone; a blocked
-target keeping the Front conversation open; a partial API failure reported
-per target and retried without repeating what worked; and a plan that
-changed since the preview refusing to write at all.
+Fixtures only. What is pinned: the order — related topics, then the
+selected conversation last; an already-resolved target being a successful
+no-op; an unreadable topic blocking and keeping the selected conversation
+open; a partial API failure reported per target and retried without
+repeating what worked; and a plan that changed since the preview refusing
+to write at all.
+
+The chain is a Front Desk conversation that served an agent's topic, which
+in turn served two nested topics of its own: one already ✔, one open.
 """
 
 import json
@@ -16,239 +19,168 @@ import pytest
 
 from conftest import empty_room
 from agentroom.close import (
-    ALREADY, APPLIED, BLOCKED, DONE, FAILED, KEPT, READY, SKIPPED, Closer, fingerprint,
-    plan_actions,
+    ALREADY, APPLIED, BLOCKED, DONE, FAILED, READY, SKIPPED, Closer,
 )
-from agentroom.closing import discover
-from agentroom.room import Room
 from agentroom.server import build_server
 
-from test_closing import (
-    ASSETPLAN_TOPIC, ASSETRUN_TOPIC, ASSET_KEY, AUTOLAB, AUTOLAB_BOT, DESK, DESK_TOPIC,
-    DEVELOPER, FORGE_BOT, FORGE_CHANNEL, FORGE_RUN, FORGE_RUN_LABEL, MISSION, MISSION_LABEL,
-    PLAN_TOPIC, PROJECT_CHANNEL, REQUEST, REQUEST_LABEL, ROOT, RUN_TOPIC, TASK, TASK_LABEL,
-    WORK_CHANNEL, chain_realm, post, selfnote,
-)
+DESK = "20260908-1600"
+DESK_TOPIC = f"front-desk-{DESK}"
+ROOT = ("front", DESK_TOPIC)
+FRONT_BOT, AGENT_BOT, DEVELOPER = 15, 11, 8
+AGENT = "agecho-agstudio1"
+AGENT_CHANNEL = AGENT
+PLAN_TOPIC = "agechoplan-x"
+DONE_TOPIC = "agechorun-x"
+OPEN_TOPIC = "agechonote-x"
+OTHER_CHANNEL = "agother-agstudio1"
+OTHER_TOPIC = "agotherplan-y"
 
 
-class WritingRealm:
-    """A read realm that also takes the two writes this operation makes."""
+def post(ident, content, *, sender_id=FRONT_BOT, sender="Front"):
+    return {"id": ident, "sender_id": sender_id, "sender_full_name": sender,
+            "sender_realm_str": "agdev", "timestamp": 1_800_000_000 + ident,
+            "content": content}
 
-    def __init__(self, realm, fail=()):
-        self.realm, self.fail = realm, set(fail)
-        self.resolved, self.archived, self.posted = [], [], []
-        self.next_id = 900
 
-    def __getattr__(self, name):
-        return getattr(self.realm, name)
+def selfnote(ident, tag, value, **kwargs):
+    return post(ident, f"[selfnote][{tag}] {value}", **kwargs)
+
+
+def agent(ident, content):
+    return post(ident, content, sender_id=AGENT_BOT, sender=AGENT)
+
+
+class Realm:
+    """Topic histories under whichever name each one actually has, and the
+    one write this operation makes: a resolve."""
+
+    def __init__(self, histories, topics, streams, fail=()):
+        self.histories = dict(histories)
+        self.topics = dict(topics)
+        self.streams = dict(streams)
+        self.fail = set(fail)
+        self.resolved = []
+
+    def topic_history(self, channel, topic, num_before=50):
+        if channel in self.fail:
+            raise ConnectionError("realm down")
+        return list(self.histories.get((channel, topic), []))
+
+    def stream_id(self, name):
+        if name not in self.streams:
+            raise KeyError(name)
+        return self.streams[name]
+
+    def channel_topics(self, stream_id):
+        for name, ident in self.streams.items():
+            if ident == stream_id:
+                if name in self.fail:
+                    raise ConnectionError("realm down")
+                return list(self.topics.get(name, []))
+        raise KeyError(stream_id)
+
+    def channels(self):
+        return [{"name": name, "stream_id": ident} for name, ident in self.streams.items()]
 
     def resolve_topic(self, message_id, topic):
         if topic in self.fail:
             raise ConnectionError("realm refused the rename")
         self.resolved.append((message_id, topic))
-        for (channel, name), history in list(self.realm.histories.items()):
-            if name.lstrip("✔ ") == topic:
-                self.realm.histories.pop((channel, name))
-                self.realm.histories[(channel, f"✔ {topic}")] = history
-                self.realm.topics[channel] = [
-                    f"✔ {topic}" if one.lstrip("✔ ") == topic else one
-                    for one in self.realm.topics.get(channel, [])
+        for (channel, name), history in list(self.histories.items()):
+            if name.removeprefix("✔ ") == topic:
+                self.histories.pop((channel, name))
+                self.histories[(channel, f"✔ {topic}")] = history
+                self.topics[channel] = [
+                    f"✔ {topic}" if one.removeprefix("✔ ") == topic else one
+                    for one in self.topics.get(channel, [])
                 ]
 
-    def send_to_channel(self, channel, topic, content):
-        """The write autolab's half of a completion makes: a state note in a
-        conversation, kept in the history so a second preview reads it back.
 
-        Posted **as the Developer**, because that is whose credential this
-        room writes with (`AGENTROOM_CHAT_ZULIP_ENV`) — and it is the whole
-        point of the acceptance: a person's word, not the agent's.
-        """
-        if channel in self.fail:
-            raise ConnectionError("realm refused the post")
-        self.next_id += 1
-        self.posted.append((channel, topic, content))
-        self.realm.histories.setdefault((channel, topic), []).append(
-            post(self.next_id, content, sender_id=DEVELOPER, sender="Developer"))
-        return self.next_id
+def chain(fail=()):
+    histories = {
+        ("front", DESK_TOPIC): [
+            post(1, "Please do the thing.", sender_id=DEVELOPER, sender="Developer"),
+            selfnote(2, "served", f"{AGENT_CHANNEL}/{PLAN_TOPIC} 1"),
+            post(3, "Done."),
+        ],
+        (AGENT_CHANNEL, PLAN_TOPIC): [
+            selfnote(10, "rootchat", f"front/{DESK_TOPIC}", sender_id=AGENT_BOT, sender=AGENT),
+            agent(11, "planned"),
+            selfnote(12, "served", f"{AGENT_CHANNEL}/{DONE_TOPIC} 1",
+                     sender_id=AGENT_BOT, sender=AGENT),
+            selfnote(13, "served", f"{AGENT_CHANNEL}/{OPEN_TOPIC} 1",
+                     sender_id=AGENT_BOT, sender=AGENT),
+        ],
+        (AGENT_CHANNEL, f"✔ {DONE_TOPIC}"): [
+            selfnote(20, "rootchat", f"{AGENT_CHANNEL}/{PLAN_TOPIC}",
+                     sender_id=AGENT_BOT, sender=AGENT),
+            agent(21, "ran"),
+        ],
+        (AGENT_CHANNEL, OPEN_TOPIC): [
+            selfnote(30, "rootchat", f"{AGENT_CHANNEL}/{PLAN_TOPIC}",
+                     sender_id=AGENT_BOT, sender=AGENT),
+            agent(31, "noted"),
+        ],
+    }
+    topics = {"front": [DESK_TOPIC],
+              AGENT_CHANNEL: [PLAN_TOPIC, f"✔ {DONE_TOPIC}", OPEN_TOPIC]}
+    streams = {"front": 24, AGENT_CHANNEL: 34, OTHER_CHANNEL: 40}
+    return Realm(histories, topics, streams, fail=fail)
 
-    def archive_channel(self, stream_id):
-        if stream_id in self.fail:
-            raise ConnectionError("not an administrator of this channel")
-        self.archived.append(stream_id)
-        # An archived channel leaves every listing, so a second attempt finds
-        # nothing to archive — which is what makes a retry a no-op here.
-        for name, ident in list(self.realm.streams.items()):
-            if ident == stream_id:
-                self.realm.streams.pop(name)
 
-
-def open_chain(**kwargs):
-    """The same chain with its forge half still open, so there is more than
-    one topic for this operation to resolve."""
-    realm = chain_realm(**kwargs)
-    for channel, topic in list(realm.histories):
-        if channel == FORGE_CHANNEL:
-            realm.histories[(channel, topic.removeprefix("✔ "))] = realm.histories.pop(
-                (channel, topic))
-    realm.topics[FORGE_CHANNEL] = [ASSETPLAN_TOPIC, ASSETRUN_TOPIC]
+def with_unreadable_branch(realm):
+    """The desk also served a topic in a channel nobody can read."""
+    realm.histories[("front", DESK_TOPIC)].insert(
+        2, selfnote(4, "served", f"{OTHER_CHANNEL}/{OTHER_TOPIC} 1"))
+    realm.fail.add(OTHER_CHANNEL)
     return realm
 
 
-def closer(realm=None, topics=None, write=True):
-    realm = realm if realm is not None else WritingRealm(chain_realm())
+def closer(realm=None, write=True):
+    realm = realm if realm is not None else chain()
     return Closer(
-        topics=(lambda: dict(topics or {})),
+        topics=dict,
         reader_factory=lambda: realm,
         writer_factory=(lambda: realm) if write else None,
-    ), realm, None
+    ), realm
+
+
+def resolved_topics(realm):
+    return [topic for _, topic in realm.resolved]
 
 
 # --- the preview -------------------------------------------------------------
 
 
-def test_the_plan_is_work_then_topics_then_channels_then_the_conversation():
-    door, _, _ = closer()
+def test_the_plan_is_topics_then_the_conversation():
+    door, _ = closer()
     found = door.plan(ROOT)
-    kinds = [action["kind"] for action in found["actions"]]
-    # Two work records: autolab's mission and forge's request, each with its
-    # execution conversation as a child of it and a topic row of its own.
-    assert kinds == ["work", "work", "topic", "topic", "topic", "topic",
-                     "channel", "conversation"]
+    assert [action["kind"] for action in found["actions"]] == [
+        "topic", "topic", "topic", "conversation"]
     assert found["actions"][-1]["key"] == f"topic:front/{DESK_TOPIC}"
 
 
-def test_a_mission_with_every_task_finished_is_ready_and_says_why():
-    door, _, _ = closer()
-    work = next(a for a in door.plan(ROOT)["actions"] if a["key"] == f"work:{MISSION_LABEL}")
-    assert work["state"] == READY
-    assert work["reason"] == ("every one of its 1 tasks is finished; accepting them and "
-                              "marking the mission done")
-
-
-def test_an_unfinished_task_blocks_its_mission():
-    """The counting rule is `agautolab.mission_done`'s, asked of the topics:
-    a second task topic with no state note is an unfinished task."""
-    realm = WritingRealm(chain_realm(
-        topics={WORK_CHANNEL: [f"✔ {RUN_TOPIC}", "workrun-task2-m10"]},
-        histories={(WORK_CHANNEL, "workrun-task2-m10"): [
-            selfnote(50, "task", f"{MISSION}#2", sender_id=AUTOLAB_BOT, sender=AUTOLAB),
-            selfnote(51, "rootchat", f"{PROJECT_CHANNEL}/{PLAN_TOPIC}",
-                     sender_id=AUTOLAB_BOT, sender=AUTOLAB),
-        ]}))
-    door, _, _ = closer(realm=realm)
-    found = door.plan(ROOT)
-    work = next(a for a in found["actions"] if a["key"] == f"work:{MISSION_LABEL}")
-    assert work["state"] == BLOCKED
-    assert work["reason"] == "task 2 of 2 is not finished"
-
-
-def test_a_delivered_forge_request_is_ready_and_says_why():
-    door, _, _ = closer()
-    work = next(a for a in door.plan(ROOT)["actions"] if a["key"] == f"work:{REQUEST_LABEL}")
-    assert (work["state"], work["reason"]) == (READY, "its asset was delivered; accepting it")
-
-
-def test_a_forge_request_with_nothing_delivered_is_blocked():
-    """forge's lifecycle, not autolab's counting rule: what finishes a
-    request is that something was delivered, not that every run completed."""
-    realm = WritingRealm(chain_realm())
-    realm.realm.histories[(FORGE_CHANNEL, f"✔ {ASSETPLAN_TOPIC}")].append(
-        selfnote(50, "state", "failed", sender_id=FORGE_BOT, sender="forge"))
-    door, _, _ = closer(realm=realm)
-    work = next(a for a in door.plan(ROOT)["actions"] if a["key"] == f"work:{REQUEST_LABEL}")
-    assert work["state"] == BLOCKED
-    assert work["reason"] == "its last attempt failed; run it again or retire it"
-
-
-def test_a_pending_generation_blocks_and_keeps_its_conversations_open():
-    """The plan's requirement seen end to end: unfinished generation stays
-    reachable, because a blocked record holds what it is about."""
-    realm = WritingRealm(open_chain())
-    realm.realm.histories[(FORGE_CHANNEL, ASSETRUN_TOPIC)].append(
-        selfnote(50, "state", "pending", sender_id=FORGE_BOT, sender="forge"))
-    realm.realm.histories[(FORGE_CHANNEL, ASSETPLAN_TOPIC)].append(
-        selfnote(51, "state", "planned", sender_id=FORGE_BOT, sender="forge"))
-    door, realm, _ = closer(realm=realm)
-
-    found = door.close(ROOT)
-
-    work = next(a for a in found["actions"] if a["key"] == f"work:{REQUEST_LABEL}")
-    assert work["state"] == BLOCKED and "a generation is still running" in work["reason"]
-    assert ASSETPLAN_TOPIC not in [topic for _, topic in realm.resolved]
-    assert ASSETRUN_TOPIC not in [topic for _, topic in realm.resolved]
-    # autolab's half is an independent branch and still closes.
-    assert PLAN_TOPIC in [topic for _, topic in realm.resolved]
-    assert found["partial"] is True
-
-
-def test_a_retired_request_is_another_request_and_is_not_touched():
-    realm = WritingRealm(chain_realm())
-    realm.realm.histories[(FORGE_CHANNEL, f"✔ {ASSETPLAN_TOPIC}")].append(
-        selfnote(50, "state", "retired", sender_id=FORGE_BOT, sender="forge"))
-    door, realm, _ = closer(realm=realm)
-    work = next(a for a in door.plan(ROOT)["actions"] if a["key"] == f"work:{REQUEST_LABEL}")
-    assert work["state"] == KEPT and "its replacement is the request to finish" in work["reason"]
-    door.close(ROOT)
-    assert all(topic != f"✔ {ASSETPLAN_TOPIC}" for _, topic, _ in realm.posted)
-
-
-def test_a_cancelled_mission_is_kept_exactly_as_it_is():
-    realm = WritingRealm(chain_realm())
-    realm.realm.histories[(PROJECT_CHANNEL, PLAN_TOPIC)].append(
-        selfnote(15, "state", "cancelled", sender_id=AUTOLAB_BOT, sender=AUTOLAB))
-    door, realm, _ = closer(realm=realm)
-    work = next(a for a in door.plan(ROOT)["actions"] if a["key"] == f"work:{MISSION_LABEL}")
-    assert work["state"] == KEPT and "never moves a cancelled mission" in work["reason"]
-    door.close(ROOT)
-    # forge's request is an independent record and is still accepted; the
-    # cancelled mission's own conversations are what nothing writes into.
-    assert all(channel != PROJECT_CHANNEL for channel, _, _ in realm.posted)
-    assert all(channel != WORK_CHANNEL for channel, _, _ in realm.posted)
-
-
-def test_a_replaced_mission_is_another_request_and_is_not_touched():
-    """`refactor` p2's boundary. The retired conversation is reachable from
-    the Front request that opened it — its notes still name it — and it is
-    excluded with that reason rather than closed alongside its replacement."""
-    realm = WritingRealm(chain_realm())
-    realm.realm.histories[(PROJECT_CHANNEL, PLAN_TOPIC)].append(
-        selfnote(15, "state", "replaced", sender_id=AUTOLAB_BOT, sender=AUTOLAB))
-    door, realm, _ = closer(realm=realm)
-
-    found = door.plan(ROOT)
-
-    assert all(a["key"] != f"work:{MISSION_LABEL}" for a in found["actions"])
-    retired = next(row for row in found["excluded"] if row["topic"] == PLAN_TOPIC)
-    assert "its replacement is the request to complete" in retired["reason"]
-    door.close(ROOT)
-    # Nothing of the retired mission moved: no state note, and its task topic
-    # was reached only through it.
-    assert realm.posted == []
-    assert all(topic != PLAN_TOPIC for _, topic in realm.resolved)
-
-
 def test_an_already_resolved_topic_is_a_no_op_not_a_target():
-    door, _, _ = closer()
+    door, _ = closer()
     found = door.plan(ROOT)
-    run = next(a for a in found["actions"] if a["key"].endswith("workrun-task1-m10"))
-    assert (run["state"], run["reason"]) == (DONE, "already ✔")
+    row = next(a for a in found["actions"] if a["key"].endswith(DONE_TOPIC))
+    assert (row["state"], row["reason"]) == (DONE, "already ✔")
 
 
 def test_a_topic_that_could_not_be_read_blocks_instead_of_resolving():
-    realm = WritingRealm(chain_realm(fail=("work-m10",)))
-    door, _, _ = closer(realm=realm)
+    door, _ = closer(realm=with_unreadable_branch(chain()))
     found = door.plan(ROOT)
-    run = next(a for a in found["actions"] if a["key"].endswith("workrun-task1-m10"))
-    assert run["state"] == BLOCKED and "could not be read" in run["reason"]
+    row = next(a for a in found["actions"] if a["key"].endswith(OTHER_TOPIC))
+    assert row["state"] == BLOCKED and "could not be read" in row["reason"]
 
 
 def test_the_preview_says_what_this_operation_is_not():
-    door, _, _ = closer()
+    door, _ = closer()
     assert door.plan(ROOT)["note"] == "this closes work; it does not stop a running agent"
 
 
 def test_an_unconfigured_write_credential_is_said_at_preview_time():
-    door, _, _ = closer(write=False)
+    door, _ = closer(write=False)
     found = door.plan(ROOT)
     assert found["status"]["zulip_write"] is False
     assert "no write credential" in found["status"]["reason"]
@@ -256,7 +188,7 @@ def test_an_unconfigured_write_credential_is_said_at_preview_time():
 
 
 def test_a_bad_conversation_id_is_refused_by_both_halves():
-    door, _, _ = closer()
+    door, _ = closer()
     assert "not a Front Desk conversation id" in door.plan(Closer.desk_key("../etc"))["error"]
     assert "not a Front Desk conversation id" in door.close(Closer.desk_key("../etc"))["error"]
 
@@ -265,146 +197,57 @@ def test_a_bad_conversation_id_is_refused_by_both_halves():
 
 
 def test_everything_closes_in_order_and_the_conversation_last():
-    door, realm, _ = closer(realm=WritingRealm(open_chain()))
+    door, realm = closer()
     found = door.close(ROOT)
     assert found["applied"] is True and found["partial"] is False
-    assert [topic for _, topic in realm.resolved] == [
-        PLAN_TOPIC, ASSETPLAN_TOPIC, ASSETRUN_TOPIC, DESK_TOPIC]
-    assert realm.archived == [122]
+    assert resolved_topics(realm) == [PLAN_TOPIC, OPEN_TOPIC, DESK_TOPIC]
     outcomes = {row["key"]: row["outcome"] for row in found["results"]}
-    assert outcomes[f"work:{MISSION_LABEL}"] == APPLIED
-    assert outcomes[f"work:{REQUEST_LABEL}"] == APPLIED
+    assert outcomes[f"topic:{AGENT_CHANNEL}/{DONE_TOPIC}"] == ALREADY
     assert outcomes[f"topic:front/{DESK_TOPIC}"] == APPLIED
 
 
-def test_accepting_a_forge_request_writes_the_word_where_the_work_happened():
-    """The three things stay distinct on forge's half too: the run said
-    `delivered`, this button says `accepted`, and the ✔ comes afterwards."""
-    door, realm, _ = closer(realm=WritingRealm(open_chain()))
-
-    found = door.close(ROOT)
-
-    assert (FORGE_CHANNEL, ASSETPLAN_TOPIC, "[selfnote][state] accepted") in realm.posted
-    # Not in the run topic: a run is an attempt, and a person accepts the
-    # request, not each try that led to it.
-    assert all(topic != ASSETRUN_TOPIC for _, topic, _ in realm.posted)
-    note = next(row for row in found["results"] if row["key"] == f"work:{REQUEST_LABEL}")
-    assert note["note"] == f"{REQUEST_LABEL} is accepted; its asset is {ASSET_KEY}"
-
-
-def test_an_accepted_request_is_a_no_op_the_second_time():
-    door, realm, _ = closer(realm=WritingRealm(open_chain()))
-    door.close(ROOT)
-    posted = len(realm.posted)
-    again = door.plan(ROOT)
-    work = next(a for a in again["actions"] if a["key"] == f"work:{REQUEST_LABEL}")
-    assert work["state"] == DONE and "already accepted" in work["reason"]
-    door.close(ROOT)
-    assert len(realm.posted) == posted
-
-
-def test_acceptance_is_written_into_the_conversations_it_is_about():
-    """The three things `refactor` p1 keeps apart, seen in one operation.
-
-    The task was `completed` by the run that did it; this button writes
-    `accepted` on the task and `done` on the mission — the human's word,
-    written where the work happened — and only then resolves the topics.
-    """
-    door, realm, _ = closer(realm=WritingRealm(open_chain()))
-
-    found = door.close(ROOT)
-
-    assert realm.posted == [
-        (WORK_CHANNEL, f"✔ {RUN_TOPIC}", "[selfnote][state] accepted"),
-        # Whose decision (robust_workflow p3 step 3): the person at the door,
-        # with no post to point at. This fake realm has no profile to read.
-        (PROJECT_CHANNEL, PLAN_TOPIC, "[selfnote][acceptance] #0 by 0"),
-        (PROJECT_CHANNEL, PLAN_TOPIC, "[selfnote][state] done"),
-        (FORGE_CHANNEL, ASSETPLAN_TOPIC, "[selfnote][state] accepted"),
-    ]
-    note = next(row for row in found["results"] if row["key"] == f"work:{MISSION_LABEL}")
-    assert note["note"] == f"{MISSION_LABEL} is done; accepted {TASK_LABEL}"
-    # The task topic was already ✔ when the run finished it, so the note goes
-    # in under the resolved name: a post under the bare name opens a twin.
-    assert all(topic != RUN_TOPIC for _, topic, _ in realm.posted)
-
-
 def test_a_blocked_target_keeps_the_front_conversation_open():
-    realm = WritingRealm(chain_realm(
-        topics={WORK_CHANNEL: [f"✔ {RUN_TOPIC}", "workrun-task2-m10"]},
-        histories={(WORK_CHANNEL, "workrun-task2-m10"): [
-            selfnote(50, "task", f"{MISSION}#2", sender_id=AUTOLAB_BOT, sender=AUTOLAB),
-            selfnote(51, "rootchat", f"{PROJECT_CHANNEL}/{PLAN_TOPIC}",
-                     sender_id=AUTOLAB_BOT, sender=AUTOLAB),
-        ]}))
-    door, realm, _ = closer(realm=realm)
+    door, realm = closer(realm=with_unreadable_branch(chain()))
     found = door.close(ROOT)
     assert found["partial"] is True
     front = next(row for row in found["results"] if row["key"] == f"topic:front/{DESK_TOPIC}")
     assert front["outcome"] == SKIPPED and "kept open" in front["note"]
-    assert DESK_TOPIC not in [topic for _, topic in realm.resolved]
+    assert DESK_TOPIC not in resolved_topics(realm)
+    # The readable branch still closes.
+    assert PLAN_TOPIC in resolved_topics(realm)
 
 
 def test_a_failed_target_is_reported_and_the_others_still_close():
-    realm = WritingRealm(open_chain(), fail=(ASSETRUN_TOPIC,))
-    door, realm, _ = closer(realm=realm)
+    door, realm = closer(realm=chain(fail=(OPEN_TOPIC,)))
     found = door.close(ROOT)
     assert found["partial"] is True
-    failed = next(row for row in found["results"] if row["key"].endswith(ASSETRUN_TOPIC))
+    failed = next(row for row in found["results"] if row["key"].endswith(OPEN_TOPIC))
     assert failed["outcome"] == FAILED and "realm refused" in failed["note"]
-    # The work records and the other topics went through; the Front topic did not.
-    assert PLAN_TOPIC in [topic for _, topic in realm.resolved]
-    assert DESK_TOPIC not in [topic for _, topic in realm.resolved]
-
-
-def test_a_channel_that_cannot_be_archived_is_reported_per_target():
-    realm = WritingRealm(open_chain(), fail=(122,))
-    door, realm, _ = closer(realm=realm)
-    found = door.close(ROOT)
-    row = next(one for one in found["results"] if one["kind"] == "channel")
-    assert row["outcome"] == FAILED and "administrator" in row["note"]
-
-
-def test_an_archived_channel_reads_as_done_rather_than_unreadable():
-    """The live run met this: an archived channel is gone from every listing,
-    so its topics stop being readable and the second preview must not report
-    this operation's own finished work as a gap."""
-    door, realm, _ = closer(realm=WritingRealm(open_chain()))
-    door.close(ROOT)
-    again = door.plan(ROOT)
-    row = next(one for one in again["actions"] if one["kind"] == "channel")
-    assert row["state"] == DONE
-    assert row["reason"] == "already archived: the realm no longer lists this channel"
-    assert again["counts"]["ready"] == 0
+    assert PLAN_TOPIC in resolved_topics(realm)
+    assert DESK_TOPIC not in resolved_topics(realm)
 
 
 def test_a_retry_finishes_what_is_left_and_repeats_nothing():
-    realm = WritingRealm(open_chain(), fail=(ASSETRUN_TOPIC,))
-    door, realm, _ = closer(realm=realm)
+    door, realm = closer(realm=chain(fail=(OPEN_TOPIC,)))
     door.close(ROOT)
-    # accepted the task, recorded whose acceptance, marked the mission done,
-    # accepted forge's request
-    assert len(realm.posted) == 4
+    assert resolved_topics(realm) == [PLAN_TOPIC]
     realm.fail.clear()
     again = door.close(ROOT)
     assert again["partial"] is False
-    # Both records were finished already, so neither was written again.
-    assert len(realm.posted) == 4
+    assert resolved_topics(realm) == [PLAN_TOPIC, OPEN_TOPIC, DESK_TOPIC]
     outcomes = {row["key"]: row["outcome"] for row in again["results"]}
-    assert outcomes[f"work:{MISSION_LABEL}"] == ALREADY
-    assert outcomes[f"topic:{PROJECT_CHANNEL}/{PLAN_TOPIC}"] == ALREADY
-    assert outcomes[f"topic:{FORGE_CHANNEL}/{ASSETRUN_TOPIC}"] == APPLIED
+    assert outcomes[f"topic:{AGENT_CHANNEL}/{PLAN_TOPIC}"] == ALREADY
+    assert outcomes[f"topic:{AGENT_CHANNEL}/{OPEN_TOPIC}"] == APPLIED
     assert outcomes[f"topic:front/{DESK_TOPIC}"] == APPLIED
-    assert door.records(ROOT) and len(door.records(ROOT)) == 2
+    assert len(door.records(ROOT)) == 2
 
 
 def test_closing_an_already_closed_conversation_writes_nothing():
-    door, realm, _ = closer(realm=WritingRealm(open_chain()))
+    door, realm = closer()
     door.close(ROOT)
-    resolved, posted, archived = len(realm.resolved), len(realm.posted), len(realm.archived)
+    resolved = len(realm.resolved)
     again = door.close(ROOT)
-    assert (len(realm.resolved), len(realm.posted), len(realm.archived)) == (
-        resolved, posted, archived)
+    assert len(realm.resolved) == resolved
     assert {row["outcome"] for row in again["results"]} <= {ALREADY, SKIPPED}
 
 
@@ -412,54 +255,42 @@ def test_closing_an_already_closed_conversation_writes_nothing():
 
 
 def test_a_plan_that_changed_since_the_preview_refuses_and_writes_nothing():
-    door, realm, _ = closer(realm=WritingRealm(open_chain()))
+    door, realm = closer()
     stale = door.plan(ROOT)["fingerprint"]
-    # A task opened after the human looked: the mission is no longer ready.
-    realm.realm.topics[WORK_CHANNEL] = [RUN_TOPIC, "workrun-task2-m10"]
-    realm.realm.histories[(WORK_CHANNEL, "workrun-task2-m10")] = [
-        selfnote(50, "task", f"{MISSION}#2", sender_id=AUTOLAB_BOT, sender=AUTOLAB),
-        selfnote(51, "rootchat", f"{PROJECT_CHANNEL}/{PLAN_TOPIC}",
-                 sender_id=AUTOLAB_BOT, sender=AUTOLAB),
+    # A topic opened after the human looked: a new target.
+    realm.topics[AGENT_CHANNEL].append("agechomore-x")
+    realm.histories[(AGENT_CHANNEL, "agechomore-x")] = [
+        selfnote(40, "rootchat", f"{AGENT_CHANNEL}/{PLAN_TOPIC}", sender_id=AGENT_BOT, sender=AGENT),
+        agent(41, "more"),
     ]
+    realm.histories[(AGENT_CHANNEL, PLAN_TOPIC)].append(
+        selfnote(42, "served", f"{AGENT_CHANNEL}/agechomore-x 1", sender_id=AGENT_BOT, sender=AGENT))
     found = door.close(ROOT, stale)
     assert found["refused"] is True and "nothing was closed" in found["error"]
-    assert realm.posted == [] and realm.resolved == [] and realm.archived == []
-    # The refusal carries the plan to approve instead.
+    assert realm.resolved == []
     assert found["fingerprint"] != stale
-    assert next(a for a in found["actions"] if a["key"] == f"work:{MISSION_LABEL}")["state"] == BLOCKED
+    assert any(a["key"].endswith("agechomore-x") for a in found["actions"])
 
 
 def test_the_fingerprint_ignores_a_new_post_and_notices_a_new_state():
-    door, _, _ = closer()
-    first = door.plan(ROOT)
-    realm = WritingRealm(chain_realm())
-    realm.realm.histories[(PROJECT_CHANNEL, PLAN_TOPIC)].append(post(99, "one more word"))
-    door_two, _, _ = closer(realm=realm)
-    assert door_two.plan(ROOT)["fingerprint"] == first["fingerprint"]
-    cancelled = WritingRealm(chain_realm())
-    cancelled.realm.histories[(PROJECT_CHANNEL, PLAN_TOPIC)].append(
-        selfnote(99, "state", "cancelled", sender_id=AUTOLAB_BOT, sender=AUTOLAB))
-    door_three, _, _ = closer(realm=cancelled)
-    assert door_three.plan(ROOT)["fingerprint"] != first["fingerprint"]
+    first = closer()[0].plan(ROOT)
+    chatty = chain()
+    chatty.histories[(AGENT_CHANNEL, PLAN_TOPIC)].append(agent(99, "one more word"))
+    assert closer(realm=chatty)[0].plan(ROOT)["fingerprint"] == first["fingerprint"]
+    moved = chain()
+    moved.resolve_topic(31, OPEN_TOPIC)
+    moved.resolved.clear()
+    assert closer(realm=moved)[0].plan(ROOT)["fingerprint"] != first["fingerprint"]
 
 
 def test_the_approved_fingerprint_is_optional():
-    door, realm, _ = closer()
+    door, realm = closer()
     assert door.close(ROOT, None)["applied"] is True
-    assert realm.posted == [
-        (WORK_CHANNEL, f"✔ {RUN_TOPIC}", "[selfnote][state] accepted"),
-        # Whose decision (robust_workflow p3 step 3): the person at the door,
-        # with no post to point at. This fake realm has no profile to read.
-        (PROJECT_CHANNEL, PLAN_TOPIC, "[selfnote][acceptance] #0 by 0"),
-        (PROJECT_CHANNEL, PLAN_TOPIC, "[selfnote][state] done"),
-        # Under the ✔ name it already wears: a post under the bare name of a
-        # resolved topic opens a twin beside the conversation.
-        (FORGE_CHANNEL, f"✔ {ASSETPLAN_TOPIC}", "[selfnote][state] accepted"),
-    ]
+    assert resolved_topics(realm) == [PLAN_TOPIC, OPEN_TOPIC, DESK_TOPIC]
 
 
 def test_two_clicks_do_not_both_close():
-    door, realm, _ = closer(realm=WritingRealm(open_chain()))
+    door, realm = closer()
     results = []
 
     def click():
@@ -470,10 +301,9 @@ def test_two_clicks_do_not_both_close():
         thread.start()
     for thread in threads:
         thread.join()
-    assert len(realm.posted) == 4
-    assert sum(1 for found in results
-               for row in found["results"]
-               if row["kind"] == "channel" and row["outcome"] == APPLIED) == 1
+    assert resolved_topics(realm) == [PLAN_TOPIC, OPEN_TOPIC, DESK_TOPIC]
+    assert sum(1 for found in results for row in found["results"]
+               if row["kind"] == "conversation" and row["outcome"] == APPLIED) == 1
 
 
 # --- the routes --------------------------------------------------------------
@@ -481,7 +311,7 @@ def test_two_clicks_do_not_both_close():
 
 @pytest.fixture()
 def relay():
-    door, realm, _ = closer(realm=WritingRealm(open_chain()))
+    door, realm = closer()
     server = build_server("127.0.0.1", 0, empty_room(), closer=door)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
@@ -504,13 +334,11 @@ def test_the_plan_route_reads_and_the_close_route_writes(relay):
     port, _, realm = relay
     status, found = request(port, "GET", f"/frontdesk/{DESK}/close-plan")
     assert status == 200 and found["topic"] == DESK_TOPIC and found["scope"]["kind"] == "desk"
-    assert realm.posted == [] and realm.resolved == []
+    assert realm.resolved == []
     status, applied = request(port, "POST", f"/frontdesk/{DESK}/close",
                               {"fingerprint": found["fingerprint"]})
     assert status == 200 and applied["applied"] is True
-    assert [content for _, _, content in realm.posted] == [
-        "[selfnote][state] accepted", "[selfnote][acceptance] #0 by 0", "[selfnote][state] done",
-        "[selfnote][state] accepted"]
+    assert resolved_topics(realm) == [PLAN_TOPIC, OPEN_TOPIC, DESK_TOPIC]
 
 
 def test_a_stale_approval_is_409_over_http(relay):
@@ -518,20 +346,18 @@ def test_a_stale_approval_is_409_over_http(relay):
     status, found = request(port, "POST", f"/frontdesk/{DESK}/close",
                             {"fingerprint": "0000000000000000"})
     assert status == 409 and found["refused"] is True
-    assert realm.posted == [] and realm.resolved == []
+    assert realm.resolved == []
 
 
 def test_the_close_route_takes_no_destinations(relay):
     """Whatever the browser sends beside the id and the fingerprint is
     ignored: the server closes what it derived, never what it was told."""
     port, _, realm = relay
-    status, found = request(port, "POST", f"/frontdesk/{DESK}/close",
-                            {"topics": ["front/front-desk-somebody-else"],
-                             "channels": ["general"]})
+    status, _ = request(port, "POST", f"/frontdesk/{DESK}/close",
+                        {"topics": ["front/front-desk-somebody-else"],
+                         "channels": ["general"]})
     assert status == 200
-    assert [topic for _, topic in realm.resolved] == [
-        "workplan-trend8", ASSETPLAN_TOPIC, ASSETRUN_TOPIC, DESK_TOPIC]
-    assert realm.archived == [122]
+    assert resolved_topics(realm) == [PLAN_TOPIC, OPEN_TOPIC, DESK_TOPIC]
 
 
 def test_a_bad_id_is_400_over_http(relay):
@@ -544,16 +370,12 @@ def test_the_answer_to_a_close_is_the_plan_as_it_now_stands():
     """p4 step 2, met in a browser fixture: a retry that carried the
     pre-write fingerprint was always refused. The answer's fingerprint is
     the post-write plan's, so 'try the rest again' approves what is left."""
-    realm = WritingRealm(open_chain(), fail=(ASSETRUN_TOPIC,))
-    door, realm, _ = closer(realm=realm)
+    door, realm = closer(realm=chain(fail=(OPEN_TOPIC,)))
     first = door.close(ROOT)
     assert first["partial"] is True
     by_key = {row["key"]: row for row in first["actions"]}
-    # What was done reads done; what failed is ready again; the root waits.
-    assert by_key[f"work:{MISSION_LABEL}"]["state"] == DONE
-    assert by_key["topic:pj-ghtrends/workplan-trend8"]["state"] == DONE
-    assert by_key["channel:work-m10"]["state"] == DONE
-    assert by_key[f"topic:{FORGE_CHANNEL}/{ASSETRUN_TOPIC}"]["state"] == READY
+    assert by_key[f"topic:{AGENT_CHANNEL}/{PLAN_TOPIC}"]["state"] == DONE
+    assert by_key[f"topic:{AGENT_CHANNEL}/{OPEN_TOPIC}"]["state"] == READY
     assert by_key[f"topic:front/{DESK_TOPIC}"]["state"] == READY
     assert first["counts"]["ready"] == 2
     assert first["fingerprint"] == door.plan(ROOT)["fingerprint"]
@@ -561,175 +383,6 @@ def test_the_answer_to_a_close_is_the_plan_as_it_now_stands():
     again = door.close(ROOT, first["fingerprint"])
     assert again.get("refused") is None and again["partial"] is False
     assert again["counts"]["ready"] == 0
-
-
-def test_a_target_the_close_made_unreadable_still_has_its_row():
-    """Archiving `work-m10` makes its task topic unreadable, so the plan as
-    it now stands has no row for either — the live p4 run lost the archived
-    channel from its own answer. The row stays, marked done, and the
-    fingerprint is still the fresh plan's."""
-    door, realm, _ = closer(realm=WritingRealm(open_chain()))
-    found = door.close(ROOT)
-    keys = [action["key"] for action in found["actions"]]
-    assert "channel:work-m10" in keys and "topic:work-m10/workrun-task1-m10" in keys
-    channel = next(a for a in found["actions"] if a["key"] == "channel:work-m10")
-    assert channel["state"] == DONE
-    assert found["fingerprint"] == door.plan(ROOT)["fingerprint"]
-    assert found["partial"] is False
-
-
-def test_the_acceptance_this_button_writes_is_visible_to_its_own_next_preview():
-    """`refactor` p1 step 4, met live. This room accepts with the **human's**
-    credential, and the record's other notes are read only from the record's
-    own author — so the acceptance landed and the next preview read the
-    mission as unfinished, which made a finished operation report `partial`.
-
-    `accepted` and `done` are a person's word by definition, so they are read
-    from anyone.
-    """
-    door, realm, _ = closer(realm=WritingRealm(open_chain()))
-
-    first = door.close(ROOT)
-    assert first["partial"] is False
-
-    again = door.plan(ROOT)
-    work = next((a for a in again["actions"] if a["kind"] == "work"
-                 and a["key"] == f"work:{MISSION_LABEL}"), None)
-    assert work is not None
-    assert work["state"] == DONE and "already done" in work["reason"]
-    assert again["counts"]["blocked"] == 0
-
-
-def test_the_forge_acceptance_is_visible_to_its_own_next_preview_too():
-    """The same seam on forge's half (`refactor` p2 step 4). The fixture
-    posts as the **Developer**, which is whose credential this room writes
-    with — accepting as the agent would hide the defect rather than test it.
-    """
-    door, realm, _ = closer(realm=WritingRealm(open_chain()))
-
-    first = door.close(ROOT)
-    assert first["partial"] is False
-    accepted = next(one for one in realm.posted if one[1] == ASSETPLAN_TOPIC)
-    assert accepted[2] == "[selfnote][state] accepted"
-    written = realm.realm.histories[(FORGE_CHANNEL, f"✔ {ASSETPLAN_TOPIC}")][-1]
-    assert written["sender_id"] == DEVELOPER
-
-    again = door.plan(ROOT)
-    work = next(a for a in again["actions"] if a["key"] == f"work:{REQUEST_LABEL}")
-    assert work["state"] == DONE and "already accepted" in work["reason"]
-    assert again["counts"]["blocked"] == 0
-
-
-# --- unfinished work stays reachable (`refactor` p2 step 1) -------------------
-
-
-def unfinished_chain(**kwargs):
-    """The same request with a second task nobody has finished.
-
-    forge's half is left open so there is an independent branch to watch:
-    an unfinished autolab task must not hold back a conversation no work
-    record of this request says anything about.
-    """
-    realm = open_chain(
-        topics={WORK_CHANNEL: [f"✔ {RUN_TOPIC}", "workrun-task2-m10"]},
-        histories={(WORK_CHANNEL, "workrun-task2-m10"): [
-            selfnote(50, "task", f"{MISSION}#2", sender_id=AUTOLAB_BOT, sender=AUTOLAB),
-            selfnote(51, "rootchat", f"{PROJECT_CHANNEL}/{PLAN_TOPIC}",
-                     sender_id=AUTOLAB_BOT, sender=AUTOLAB),
-            post(52, "# Summarize the second repo\n\nbody", sender_id=AUTOLAB_BOT, sender=AUTOLAB),
-        ]},
-        **kwargs)
-    return realm
-
-
-def test_an_unfinished_task_holds_back_its_own_conversations_and_channel():
-    """The defect `refactor` p1 recorded: the mission was blocked, the work
-    was not accepted — and the conversation the unfinished task lives in was
-    resolved anyway, then archived along with its channel."""
-    door, realm, _ = closer(realm=WritingRealm(unfinished_chain()))
-
-    found = door.plan(ROOT)
-
-    held = {a["key"]: a for a in found["actions"] if a["state"] == KEPT}
-    assert set(held) == {f"topic:{PROJECT_CHANNEL}/{PLAN_TOPIC}",
-                         f"topic:{WORK_CHANNEL}/workrun-task2-m10",
-                         f"channel:{WORK_CHANNEL}"}
-    assert all(f"{MISSION_LABEL} is not finished" in row["reason"] for row in held.values())
-
-
-def test_an_independent_branch_still_closes_while_a_mission_is_blocked():
-    door, realm, _ = closer(realm=WritingRealm(unfinished_chain()))
-
-    found = door.close(ROOT)
-
-    assert found["partial"] is True
-    # forge's Work is its own record and its conversations are its own; they
-    # close. The mission's do not, and neither does the request itself.
-    assert [topic for _, topic in realm.resolved] == [ASSETPLAN_TOPIC, ASSETRUN_TOPIC]
-    assert realm.archived == []
-    assert DESK_TOPIC not in [topic for _, topic in realm.resolved]
-
-
-def test_the_unfinished_conversation_is_still_usable_afterwards():
-    """Usable means two things the realm can be asked: the topic is not ✔,
-    so a post there is not a twin, and its channel still exists to post in."""
-    door, realm, _ = closer(realm=WritingRealm(unfinished_chain()))
-
-    door.close(ROOT)
-
-    assert (WORK_CHANNEL, "workrun-task2-m10") in realm.realm.histories
-    assert "workrun-task2-m10" in realm.realm.topics[WORK_CHANNEL]
-    assert realm.realm.streams[WORK_CHANNEL] == 122
-
-
-def test_an_acceptance_that_fails_during_apply_holds_the_same_targets():
-    """The preview said READY — the mission's tasks are all finished — and
-    the write failed anyway. The dependency rule is the same one, learned a
-    moment later, and the plan's fixed order is what makes acting on it
-    possible: the work record runs before anything it is about."""
-    realm = WritingRealm(open_chain(), fail=(PROJECT_CHANNEL,))
-    door, realm, _ = closer(realm=realm)
-
-    found = door.close(ROOT)
-
-    outcomes = {row["key"]: row for row in found["results"]}
-    assert outcomes[f"work:{MISSION_LABEL}"]["outcome"] == FAILED
-    for key in (f"topic:{PROJECT_CHANNEL}/{PLAN_TOPIC}", f"channel:{WORK_CHANNEL}"):
-        assert outcomes[key]["outcome"] == SKIPPED
-        assert "could not be accepted" in outcomes[key]["note"]
-    assert PLAN_TOPIC not in [topic for _, topic in realm.resolved]
-    assert realm.archived == []
-    assert found["partial"] is True
-
-
-def test_a_retry_after_a_failed_acceptance_finishes_the_request():
-    realm = WritingRealm(open_chain(), fail=(PROJECT_CHANNEL,))
-    door, realm, _ = closer(realm=realm)
-    door.close(ROOT)
-    realm.fail.clear()
-
-    again = door.close(ROOT)
-
-    assert again["partial"] is False
-    assert (PROJECT_CHANNEL, PLAN_TOPIC, "[selfnote][state] done") in realm.posted
-    assert PLAN_TOPIC in [topic for _, topic in realm.resolved]
-    assert realm.archived == [122]
-    assert DESK_TOPIC in [topic for _, topic in realm.resolved]
-
-
-def test_a_retry_after_the_unfinished_task_is_done_closes_everything():
-    realm = WritingRealm(unfinished_chain())
-    door, realm, _ = closer(realm=realm)
-    door.close(ROOT)
-    realm.realm.histories[(WORK_CHANNEL, "workrun-task2-m10")].append(
-        selfnote(53, "state", "completed", sender_id=AUTOLAB_BOT, sender=AUTOLAB))
-
-    again = door.close(ROOT)
-
-    assert again["partial"] is False
-    assert PLAN_TOPIC in [topic for _, topic in realm.resolved]
-    assert "workrun-task2-m10" in [topic for _, topic in realm.resolved]
-    assert realm.archived == [122]
 
 
 # --- the mirror confirms the writes (better_zulip_call p1 step 3) ---------------
@@ -740,7 +393,6 @@ def test_each_applied_write_is_confirmed_once_the_mirror_carries_it_back():
     what was written, and every applied result says whether it did."""
     import time as _time
 
-    from agag.mirror import Mirror
     from agag.mirror.testing import FakeRealm
     from agentroom.realm import MirrorRealm
     from conftest import mirror_over
@@ -749,7 +401,7 @@ def test_each_applied_write_is_confirmed_once_the_mirror_carries_it_back():
     realm.add_channel(35, "agents")
     realm.add_channel(5, "front")
     realm.post("front", "front-desk-1", "please do a thing", sender_id=DEVELOPER, sender_name="Developer", quiet=True)
-    realm.post("front", "front-desk-1", "done.", sender_id=FRONT_BOT if "FRONT_BOT" in globals() else 15,
+    realm.post("front", "front-desk-1", "done.", sender_id=FRONT_BOT,
                sender_name="Front", quiet=True)
     mirror = mirror_over(realm)
     mirror.start()  # the ingest thread applies what the writer changes
@@ -765,15 +417,6 @@ def test_each_applied_write_is_confirmed_once_the_mirror_carries_it_back():
             self.resolved.append((message_id, topic))
             if self.touch_realm:
                 realm.resolve("front", topic)
-
-        def send_to_channel(self, channel, topic, content):
-            return 999
-
-        def stream_id(self, name):
-            return 5
-
-        def archive_channel(self, stream_id):
-            return {}
 
     writer = Writer()
     door = Closer(topics=lambda: {}, reader_factory=lambda: MirrorRealm(mirror),

@@ -1,9 +1,8 @@
 // The Front Desk's completion panel: the preview, the click, the outcomes.
 //
-// A Front Desk conversation is rarely one topic — Front opens a workplan,
-// autolab plans a mission whose record is the conversation, with a `work-` channel
-// per mission, forge runs an `assetrun-` beside its `assetplan-`. This panel
-// is where a human sees all of that named before deciding it is finished,
+// A Front Desk conversation is rarely one topic — Front serves it in the
+// conversations of the agents it asks, and those open conversations of their
+// own. This panel is where a human sees all of that named before deciding it is finished,
 // and where they see what happened afterwards.
 //
 // **Nothing here decides anything.** Which targets exist, which may move and

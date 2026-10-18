@@ -86,9 +86,8 @@ writes only to this process's memory (see `POST /ops/confirm`).
 - `GET /agents` → the `intro-<instance>` topics of `#agents`, each with its
   latest introduction post and the topic's history, from the mirror. `[selfnote]` posts and
   lines, and Zulip's own notices, are removed here — the view never sees them.
-- `GET /work` → every **unresolved** topic of every `pj-<slug>` channel and of
-  the `work-<label>` channels filed in the same channel folder, flat, with the
-  project each belongs to. "Unresolved" is the absence of Zulip's `✔ `
+- `GET /work` → every **unresolved** topic of every live agent's own
+  channel, flat, with the instance each belongs to. "Unresolved" is the absence of Zulip's `✔ `
   prefix (`agag.zulip.RESOLVED_TOPIC_PREFIX`) and nothing else: topic naming
   differs per agent, resolution does not. `?resolved=1` lists the ✔ topics
   too, each row carrying `resolved` (`front_desk` p4): a finished request is
@@ -120,9 +119,8 @@ writes only to this process's memory (see `POST /ops/confirm`).
 
 - `GET /complete/plan?channel=…&topic=…`, `POST /complete` → what
   finishing one request would change, and doing it (`front_desk` p3, p4).
-  The **second** route that writes to the realm. Since `refactor` p2 both
-  agents keep their record in the conversations, so it is the only system it
-  writes to at all.
+  The **second** route that writes to the realm, and Zulip is the only
+  system it writes to.
   `GET /complete/history` is what this relay carried out.
   `GET /frontdesk/<id>/close-plan` and `POST /frontdesk/<id>/close` are the
   same operation with the Front Desk id naming the topic. See below.
@@ -132,12 +130,6 @@ writes only to this process's memory (see `POST /ops/confirm`).
 - `GET /frontdesk`, `GET /frontdesk/<id>`, `POST /frontdesk/<id>/post` → the
   Front Desk's conversations, one conversation's history, and a post into it
   as the Developer (`front_desk` p1). See below.
-- `GET /projects`, `GET /projects/<stream id | channel | slug>` → the Project
-  Room's read model: every project channel with its purpose documents,
-  setup, missions and tasks, or one project whole (`project_room` p1). See below.
-- `GET /work/<anchor>`, `POST /work/<anchor>/post`,
-  `GET|POST /projects/<key>/topics/<topic>[/post]` → a project conversation's
-  history and a comment into it (step 2). See below.
 
 - `POST /routines/<name>/start` → the other write (`refine_routine` p1):
   ask Front to run one routine, by posting the request as the Developer at
@@ -285,95 +277,6 @@ relation as **`presentation`** (below); `POST /frontdesk/<id>/render`
 `{revision?, token}` asks for another interpretation. The old `ag-dialogue`
 block inside a reply is not parsed any more.
 
-## `/projects` — the Project Room's read model (`project_room` p1)
-
-What a project or study *is for* and how far its work has got, read from the
-mirror (`projectroom.py`) with the reply state lifted from the ops engine.
-The channel is the project: `pj-<slug>`, keyed by its **stream id** (a
-channel name or a slug is accepted too); `kind` is `project` / `study` when
-the description says so (`agproject` writes it; autolab's `(study pattern)`
-marker counts) and `unknown` for older channels — never guessed.
-
-- `GET /projects` → `ag.projectroom.v1`: every project channel, live first
-  by latest activity, archived after. Each row: `kind`, `origin` (the argue
-  the description names, with its anchor when the mirror holds it),
-  `counts` (documents, setups, missions, open missions, unrecorded plans,
-  tasks and finished tasks, missions by recorded state), `tasks_read`
-  (whether every mission's work channel is mirrored), `latest`, `reply`
-  (the most urgent reply state on the project), `gaps`, and short rows of
-  its `documents`, `setups`, `missions` and `plans`.
-- `GET /projects/<key>` → one project whole. Four shapes of conversation,
-  told apart by what they carry, never by name alone:
-  - `documents` — `goal` and `researchplan-…` topics; the newest visible
-    post is the current text (`current.content`). A document is not
-    executable work, and `missions` on it is always `[]`: no
-    research-plan-to-mission relation is inferred from similar names.
-  - `setups` — `workplan-setup-…` conversations without a `[mission]`
-    note: workspace preparation, which plans no mission.
-  - `missions` — every conversation carrying a `[mission]` note
-    (`autolab.read_record`): `anchor`, `label`, `setup` (a setup-shaped
-    topic that did record a mission), `work` (autolab's recorded state, with
-    the caveat that `started` proves no process), `reply` (the ops engine's
-    verdict for that conversation), `document` (the current plan), `tasks`
-    with their own `state`, `document`, `reply` and `origins`, `task_counts`
-    (`total`, `live`, `finished`, `completed`, `accepted`, `cancelled`,
-    `open` — counts, never a percentage), `tasks_read` (incomplete when the
-    `work-m<anchor>` channel is archived or absent), `replaces` /
-    `replaced_by` (the recorded relation, by anchor id), `links` (URLs in
-    the source posts, filed as repository / report / zulip / other),
-    `origins` (`[rootchat]` notes), `gaps`.
-  - `plans` — `workplan-…` conversations with no `[mission]` note: planned
-    before the conversation became the record, or not answered yet.
-  - `orphan_tasks` — `[task]` notes whose mission is not in any project
-    channel, filed under the project their `work-` channel's folder names.
-
-  A resolved conversation is `done` as a *reply* state and keeps its
-  recorded *work* state beside it; a ✔ over a `planned` mission is a
-  `resolved-unfinished` gap, not a success. `gaps` on the project say
-  `setup-only`, `no-mission` (a research plan alone is not work),
-  `no-document`, `archived`.
-- While the mirror is stale every `reply.state` is `unknown` with the last
-  known one in `stale_state`, and the payload carries `stale: true`; without
-  an ops engine the reply state is `unknown`, never `quiet`. An archived
-  channel is listed with its description and nothing invented for the rest.
-  Repeated reads cost no Zulip call: the model is derived once per mirror
-  revision.
-
-### `/work/<anchor>` and `/projects/<key>/topics/<topic>` — talking in a project (step 2)
-
-`projecttalk.py`. The selected conversation's visible history, and a comment
-into **the conversation it belongs to**, as the Developer:
-
-- `GET /work/<anchor>` → `ag.projecttalk.v1`: the mission or task wearing
-  that anchor, located where the message is **now** — `destination`
-  (`channel`, `topic`, `live_topic`, `resolved`, `role` = `planning` for a
-  mission / `execution` for a task, `responsible` = the live instances whose
-  roster owns it, a `label`), `posts` (every real post, `kind` human / agent
-  / ack, no selfnote), `status` judged against the serving agent (`waiting`
-  / `received` / `answered` / `done` / `quiet`; `unknown` + `stale_state`
-  while the mirror is stale), the `record` row from `/projects/<key>`, the
-  project stub with its argue anchor, `zulip_url`.
-- `GET /projects/<key>/topics/<topic>` → an unrecorded conversation by name:
-  a document (`role: none`, `postable: false`, plus `front` = the Front Desk
-  and the origin argue as the path for discussing how to proceed), a setup or
-  a plan without a note (`role: planning`). A topic carrying a work record
-  answers with its `anchor` and asks to be read by it, so a reused name never
-  shows another mission's history.
-- `POST /work/<anchor>/post` `{text, token, resume?}` → a plan comment into
-  the mission's planning conversation, a run comment into the task's
-  execution conversation. The destination is resolved from the anchor at
-  send time: a renamed topic is followed, a reused name is never posted into,
-  a deleted anchor sends nothing. A ✔'d target answers **409**
-  `needs_resume: true` unless `resume: true` is sent, and then it is
-  un-resolved first and the answer says `resumed: true`.
-- `POST /projects/<key>/topics/<topic>/post` → the same into a setup or an
-  unrecorded plan. A document is refused (**403**) with the `front` path: a
-  post there would dispatch nothing and must not look as if it had.
-
-Same rules as the rooms' writes: once per `token` (a repeat returns the first
-result with `duplicate: true`), `403` for a refusal, `502` `uncertain: true`
-when Zulip did not confirm, never retried. Every post buys autolab a run.
-
 ## `/argues` — the Arguing Room (`argue` p2)
 
 A human starts, reads and continues an argue (`#argue › argue-<stem>`,
@@ -429,41 +332,17 @@ The same block in `/argues/<anchor>` and `/frontdesk/<id>`
 
 ## `/complete` — finishing a request (`front_desk` p3, p4)
 
-A request is rarely one topic: Front opens a workplan topic, autolab plans a
-mission there and opens a `work-m<id>` channel with one `workrun-` topic per
-task, forge runs an `assetrun-` beside its `assetplan-`. When the thing is
-done, all of that is still open — including the mission itself, which
-nothing ever closed. Two routes close it, in `closing.py` (what the targets
-*are*) and `close.py` (what would change, and doing it). The request is any
-conversation named by `channel` and `topic` (a ✔ name is read bare):
-
-Since `refactor` p1 (autolab) and p2 (forge) **both agents keep their record
-in the conversation**, and the `work` actions say whose. `autolab.py` reads
-the `[mission]`/`[task]`/`[state]` notes; `forge.py` reads the
-`[asset]`/`[assetrun]`/`[state]`/`[result]` ones. In both, a child belongs to
-its parent by the anchor **id** its note names, so a reused display name
-never hands one request another's work.
-
-**The two lifecycles are different and are not merged.** A mission is
-finished when every one of its live tasks is (`autolab.reason_not_finished`);
-a request is finished when something has been **delivered**
-(`forge.reason_not_accepted`) — a second attempt after a failure is the same
-request trying again, not another child that must also finish. A request
-whose run is still `pending` on a ComfyUI job is blocked, which is what keeps
-its conversations reachable.
-
-Completing writes the human's acceptance where the work happened —
-`accepted` on each finished task and `done` on the mission, `accepted` on the
-request (not on its runs: a run is an attempt, and a person accepts the
-request) — and only then resolves the topics. The three stay distinguishable
-on purpose: `completed`/`delivered` is the run's word, `accepted` is a
-person's, and the ✔ is neither — it closes the conversation. A mission that
-was **replaced**, or a request that was **retired**, is another request and is
-never closed alongside its replacement.
+A request is rarely one topic: Front serves it in the conversations of the
+agents it asks, and those open conversations of their own. When the thing is
+done, all of that is still open. Two routes close it, in `closing.py` (what
+the targets *are*) and `close.py` (what would change, and doing it). The
+request is any conversation named by `channel` and `topic` (a ✔ name is read
+bare). The human's click is the decision; nothing here judges whether the
+work was good, and closing writes nothing but the ✔ renames.
 
 - `GET /complete/plan?channel=…&topic=…` → `ag.completion.v1`: `root`, a
-  `scope` block, the ordered `actions`, each with a `kind` (`work`, `topic`,
-  `channel`, `conversation`), a stable `key`, a `state` (`ready`, `done`,
+  `scope` block, the ordered `actions`, each with a `kind` (`topic`,
+  `conversation`), a stable `key`, a `state` (`ready`, `done`,
   `blocked`, `kept`), the `reason` it is in that state and the `detail` it
   was decided from; plus `counts`, `excluded`, `gaps`, `status` (which
   credentials this relay has), `history` (this relay's earlier operations on
@@ -483,63 +362,44 @@ never closed alongside its replacement.
 
 **What a root is, and what it owns** (`closing.classify`, `Scope`,
 `_ownership`, p4). A conversation's *kind* is its name — `desk`, `front`,
-`routine-run`, `routine-standing`, `workplan`, `workrun`, `assetplan`,
-`assetrun`, `intro`, or `topic` — and only the request kinds (the first two,
-a run, a plan) may be completed. A task or run topic answers with its
-`scope.parents` and one blocked action; a standing request or an
-introduction is refused, because a ✔ there retires the routine or the agent.
-Whose a reached topic is comes from its root notes: all naming this request
-(or something it owns, or what the root itself was opened for) → owned;
-naming anything else → *anchored to another request*, excluded with the
-note's message id. An execution topic is decided by its **structural** home
-only (autolab's `workplan-` for a `workrun-`, forge's `assetplan-` for an
-`assetrun-`); other root notes there are Front's visits on behalf of another
-request and are carried as `visitors`, shown, never obeyed. A topic with no
-root note is owned when something owned reached it — unless it is itself a
-request, which no served note can claim. A routine run's `scope` also names
-its guide as `context`: untouched, and said so — and the conversation the
-run was requested from is its `parent`, which stays open.
+`routine-run`, `routine-guide`, `argue`, `intro`, or `topic` — and only the
+request kinds (desk, front, a run, an argue) may be completed. Any other
+topic carrying a root note is an execution topic: it answers with its
+`scope.parents` and one blocked action. A routine guide or an introduction
+is refused, because a ✔ there retires the routine or the agent. Whose a
+reached topic is comes from its root notes: all naming this request (or
+something it owns, or what the root itself was opened for) → owned; naming
+anything else → *anchored to another request*, excluded with the note's
+message id. A topic with no root note is owned when something owned reached
+it — unless it is itself a request, which no served note can claim. A
+routine run's `scope` also names its guide as `context`: untouched, and said
+so — and the conversation the run was requested from is its `parent`, which
+stays open. An argue's closure is the argue topic alone; what it led to is
+listed as excluded.
 
-The walk (`related_topics`) follows both link notes to a fixed point, reads
-every reached topic's unread home once (a plan Front never served is found
-through the task that names it), and reads the whole `work-<label>` channel
-of every owned autolab mission, because a plan carries no note naming its
-tasks. Every read is under both names; what could not be read is a gap.
+The walk (`related_topics`) follows both link notes to a fixed point and
+reads every reached topic's unread home once. Every read is under both
+names; what could not be read is a gap.
 
 How each target is decided:
 
-- **A Work** by the same completion rule `agautolab.mission_done` applies.
-  (It lived in `agag.plane.reason_not_completed` while there was a Plane
-  client; `refactor` p3 deleted that module and the rule stayed where the
-  records are.) Every live child completed → `ready`; already Done → `done`,
-  a successful no-op; cancelled → `kept`, untouched; unfinished children, or
-  a standalone Work with none, → `blocked`. A child the walk never reached is
-  listed as `unreached_children` and still counted.
 - **A topic** by whether it was actually read. `note-only` is a gap, not a
   finished conversation, and blocks. A topic whose channel the realm no
   longer lists is `kept`: its posts read fine and cannot be moved (a resolve
   is a PATCH the realm answers 400), and nothing there is open to anybody —
-  met live in p4 on a retired agent's archived channel.
-- **A channel** only when it is `work-<label>` for a mission of *this*
-  conversation and every topic it actually holds is one of these targets.
-  `#front`, project and agent channels are never candidates. An **archived**
-  channel is `done`, not a gap: archiving is what makes a channel unlistable,
-  so a second preview asks the realm's channel list which of the two it is
-  looking at.
-- **The Front conversation last**, and only if nothing above is blocked or
-  failed — a ✔ there is the claim that the whole thing is finished.
+  met live in p4 on a retired agent's archived channel. A ✔ topic with
+  posts under its bare name (an open twin) is resolved again to fold them in.
+- **The selected conversation last**, and only if nothing above is blocked
+  or failed — a ✔ there is the claim that the whole thing is finished.
 
 Nothing rolls back and nothing is retried automatically: every action is
-idempotent in the realm's own terms (a resolved topic → `already`, a mission
-already `done` → `already`), so clicking again after a partial failure
+idempotent in the realm's own terms (a resolved topic → `already`), so clicking again after a partial failure
 finishes what is left and repeats nothing.
 
 Credentials: the discovery reads the mirror (`OPSROOM_ZULIP_ENV`'s copy;
 a topic whose coverage is not complete — one in an archived channel, say —
 is hydrated once and kept) and the writes use `AGENTROOM_CHAT_ZULIP_ENV`
-(the Developer — the credential that already posts here).
-**`AGENTROOM_PLANE_ENV` is gone** (`refactor` p2 step 4): it existed for the
-one record this relay read outside Zulip, and there is none left. A missing
+(the Developer — the credential that already posts here). A missing
 write credential is reported in the preview's `status` rather than
 discovered on submit. After the writes the answer waits — at most
 `CONFIRM_SECONDS` (5) — for the mirror to carry them back as events, and
@@ -708,8 +568,7 @@ two rosters and produced 66 phantom stalled rows.
 
 **It subscribes to nothing.** The mirror's queue is registered for *all
 public streams*, so every public channel's events reach it whether or not
-the bot is in the channel — `work-` channels appear the moment autolab
-opens one. The relay makes no write of its own on the mirror's credential.
+the bot is in the channel — a new channel appears the moment it is opened. The relay makes no write of its own on the mirror's credential.
 
 **Served notes come from the mirror's notes index.** Every
 `[selfnote][served]` line in the realm is indexed as it is read or as it

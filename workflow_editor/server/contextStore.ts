@@ -112,7 +112,9 @@ export class ContextStore {
     for (const p of await names(dir)) {
       if (!p.isDirectory()) continue
       out.push(await this.read({ scope: 'project', project: p.name }))
-      for (const w of await names(join(dir, p.name, 'workflows'))) if (w.isFile() && w.name.endsWith('.md')) out.push(await this.read({ scope: 'workflow', project: p.name, workflow: w.name.slice(0, -3) }))
+      // A cleared override keeps only its revisions file.
+      const ids = new Set((await readdir(join(dir, p.name, 'workflows'), { withFileTypes: true }).catch(() => [])).filter(e => e.isFile()).map(e => /^(.+)\.md(\.revisions\.jsonl)?$/.exec(e.name)?.[1]).filter((n): n is string => !!n && ID_PATTERN.test(n)))
+      for (const w of [...ids].sort()) out.push(await this.read({ scope: 'workflow', project: p.name, workflow: w }))
     }
     return out.filter(s => s.text !== null || s.revisions > 0 || s.problem)
   }

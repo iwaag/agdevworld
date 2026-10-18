@@ -6,6 +6,8 @@ nodes): each has one execution slot, its own processes and its own disk.
 Code: `server/workers.ts` (configuration, node choice, record-copy
 alignment), `server/exec.ts` (the store), `server/workerApi.ts` (HTTP),
 `cli/remote.ts` (`wfe` on a remote worker). Fixtures: `test/workers.test.ts`.
+Deploying a worker on a PC: the `wfe_worker` profile of pj-clusterintent's
+ansible_agdev, and the recipe `nctl/docs/add-a-wfe-worker.md` there.
 
 ## Configuration
 

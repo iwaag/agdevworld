@@ -7,7 +7,9 @@ whole life, across all its attempts. A held run therefore keeps its plan,
 records and unfinished work without holding the project. Other runs of the
 same project work in their own copies, and nothing a run saves reaches a
 shared branch until it is integrated. The run contract is in
-[runs.md](runs.md).
+[runs.md](runs.md). A run performed by a remote execution node (project_migration p7)
+keeps this copy on the coordinator as its **record copy** and is worked in a
+copy of the worker's own; [workers.md](workers.md) says how the two relate.
 
 Code: `server/runspace.ts` (resolver, allocation, creation, index). The
 person's project workspace, the one in the registry, stays theirs. Editing

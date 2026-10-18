@@ -17,10 +17,12 @@ What you have:
   what each reads or changes.
 - `wfe context show`, run inside a project (`--workflow <id>` for one
   workflow), says what guidance applies to it and where each part comes
-  from: the project's and workflow's intent and guides, and the
-  Developer's local preferences for every project, this project and this
-  workflow (`wfe context --help`). The Developer keeps those preferences out
-  of Git on purpose: follow them, never copy their text into tracked files.
+  from: the project's and workflow's intent and guides, and the local
+  context blocks for every project, this project and this workflow — the
+  Developer's instructions and environment information other agents
+  maintain, each naming its manager and last editor (`wfe context --help`).
+  Local context stays out of Git on purpose: follow it, never copy its text
+  into tracked files.
 - `wfe run`, the same tool for workflow runs: it creates a run and records
   what happens in it, and `wfe run show` tells what is ready, what waits and
   for whom. `wfe run help` lists its subcommands; `wfe run help <subcommand>`

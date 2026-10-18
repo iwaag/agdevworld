@@ -1,8 +1,8 @@
 // Read views of scoped context (workflow_editor p13, docs/context.md) for the
 // browser and the CLI: the scope matrix of a project or workflow with the
 // bundles the same resolver produces, and a run's used-versus-next view.
-// Nothing here writes; edits go through ContextStore.write.
-import { contextChanges, renderContext, type AttemptContext, type ContextBundle, type ContextChange, type OverrideState } from '../shared/context.ts'
+// Nothing here writes; edits go through ContextStore (set, check, refreshFailed, remove).
+import { contextChanges, renderContext, type AttemptContext, type BlockState, type ContextBundle, type ContextChange } from '../shared/context.ts'
 import { configChanges, currentSession, runKey, type AttemptSettings, type RunRecord, type RunRef } from '../shared/run.ts'
 import { sessionPolicyOf, type Workflow } from '../shared/model.ts'
 import type { AccessContext } from './access.ts'
@@ -17,7 +17,8 @@ export interface ContextMatrix {
   project: string
   workflow: string | null
   workflows: { id: string; name: string }[]
-  overrides: { system: OverrideState; project: OverrideState; workflow: OverrideState | null }
+  // Every local block of the three scopes (removed ones too, for their history).
+  blocks: { system: BlockState[]; project: BlockState[]; workflow: BlockState[] | null }
   // What an authoring session of this project/workflow is given, and what
   // a new run of the workflow would be prepared with now (the common
   // contract is the execution host's, decided at claim).
@@ -43,10 +44,10 @@ export async function contextMatrix(ctx: AccessContext, ws: Workspace, workflowI
   return {
     project: authoring.project, workflow: workflow?.id ?? null,
     workflows: list.filter(w => w.id).map(w => ({ id: w.id!, name: w.name ?? w.id! })),
-    overrides: {
-      system: await store.read({ scope: 'system' }),
-      project: await store.read({ scope: 'project', project: authoring.project }),
-      workflow: workflow ? await store.read({ scope: 'workflow', project: authoring.project, workflow: workflow.id }) : null,
+    blocks: {
+      system: await store.blocks({ scope: 'system' }),
+      project: await store.blocks({ scope: 'project', project: authoring.project }),
+      workflow: workflow ? await store.blocks({ scope: 'workflow', project: authoring.project, workflow: workflow.id }) : null,
     },
     authoring, execution,
     rendered: { authoring: renderContext(authoring), execution: execution ? renderContext(execution) : null },

@@ -233,6 +233,13 @@ export class ExecStore {
   private one<T>(sql: string, ...a: (string | number | null)[]): T | undefined { return named('exec store', 'a read', () => this.db.prepare(sql).get(...a) as T | undefined) }
   private run(sql: string, ...a: (string | number | null)[]) { return named('exec store', 'a write', () => this.db.prepare(sql).run(...a)) }
 
+  // The run an attempt belongs to (<workspace>/<workflow>/<run>), for
+  // provenance of what an executing attempt writes elsewhere (p14 context).
+  attemptRun(id: string): string | null {
+    const a = this.one<{ workspace: string; workflow: string; run: string }>('SELECT workspace, workflow, run FROM attempts WHERE id = ?', id)
+    return a ? `${a.workspace}/${a.workflow}/${a.run}` : null
+  }
+
   async workspace(id: string): Promise<Workspace> {
     const reg = (await loadRegistry(this.ctx.registryFile)).workspaces.find(w => w.id === id)
     if (!reg) throw new RequestError(404, `workspace "${id}" is not registered`)

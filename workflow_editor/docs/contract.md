@@ -55,7 +55,7 @@ guides: [agent/guide.md]  # optional project guides (p13), inherited by every wo
 A workflow's own `execution.guides` add workflow-specific guides; a guide
 named by both is delivered once with both declarations. Project guides are
 read from the run's own copy at claim. The whole scoped context (intent,
-goals, guides, local overrides) is [context.md](context.md). Invalid
+goals, guides, local context blocks) is [context.md](context.md). Invalid
 declarations: `project-guide-path` (error), `project-guide-duplicate`
 (warning).
 

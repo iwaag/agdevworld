@@ -187,9 +187,10 @@ test('fresh policy (and an undeclared one): every attempt a new session; run on 
   {
     const { x, ws } = await setup('run')
     const req = await x.request({ workspace: ws.reg.id, workflow: 'keep', text: 'Build.', author: 'Test Person', receipt: 'sess-req-0004', via: 'browser' })
-    assert.deepEqual(await x.claim('fake', { ...OFFER, sessions: {} }), { idle: 'no queued job' })
+    // p7: the worker cannot serve it; the job waits for it with the reason.
+    assert.match((await x.claim('fake', { ...OFFER, sessions: {} }) as { idle: string }).idle, /waiting for worker local: the workflow's session policy is "run"/)
     const job = (await x.runView(ws.reg.id, req.ref)).jobs[0]
-    assert.equal(job.state, 'dropped')
+    assert.equal(job.state, 'queued')
     assert.match(job.note ?? '', /session policy is "run", but the host's default profile .* keeps no conversation/)
     assert.equal((await record(await runSpace(ws, req.ref), req.ref)).control.attempts, 0)
     x.close()

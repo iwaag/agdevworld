@@ -210,6 +210,13 @@ export function createHandler(config: ServiceConfig) {
         throw new RequestError(404, 'not found')
       }
 
+      // Execution nodes (project_migration p7, docs/workers.md): every worker's
+      // state, and the remote workers' protocol.
+      if (a === 'workers') {
+        const { workerRoute } = await import('./workerApi.ts')
+        return await workerRoute({ exec: needExec(), registryFile: config.registryFile, area }, req, res, parts.slice(2), url)
+      }
+
       // The code this service runs (an installed release names its agdevworld commit).
       if (a === 'version' && !wsId && method === 'GET') return send(res, 200, { ...codeVersion(), registry: config.registryFile })
 
@@ -414,7 +421,7 @@ export function createHandler(config: ServiceConfig) {
         if (!file && method === 'POST') {
           const input = await body(req) as Record<string, unknown>
           const predecessor = typeof input.predecessor === 'string' && input.predecessor ? await resolveRef(ws, input.predecessor) : undefined
-          const r = await needExec().request({ workspace: ws.reg.id, workflow: str(input.workflow, 'workflow'), text: str(input.text, 'the request text'), author: str(input.author, 'author'), receipt: str(input.receipt, 'receipt'), by: typeof input.by === 'string' ? input.by : undefined, via: 'browser', predecessor })
+          const r = await needExec().request({ workspace: ws.reg.id, workflow: str(input.workflow, 'workflow'), text: str(input.text, 'the request text'), author: str(input.author, 'author'), receipt: str(input.receipt, 'receipt'), by: typeof input.by === 'string' ? input.by : undefined, via: 'browser', predecessor, ...(typeof input.node === 'string' && input.node ? { node: input.node } : {}) })
           return send(res, r.duplicate ? 200 : 201, { ok: true, ...r })
         }
         const ref: RunRef = { workflow: parts[4] ?? '', run: parts[5] ?? '' }

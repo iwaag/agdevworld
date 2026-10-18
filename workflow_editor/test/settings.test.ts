@@ -132,7 +132,7 @@ test('a run is performed as the definition\'s agent; the host is recorded beside
   const { x, ws } = await setup()
   const r = await x.request({ workspace: ws.reg.id, workflow: 'make', text: 'Make a thing.', author: 'Test Person', receipt: 'settings-req-0001', via: 'browser' })
   const rec = (await readRun(ws, r.ref)).record!
-  assert.deepEqual(rec.executor, { name: 'ppt-agent', backend: null, host: 'autolab' })
+  assert.deepEqual(rec.executor, { name: 'ppt-agent', backend: null, host: 'autolab', node: 'local' })
   const [s] = await listRuns(ws)
   assert.equal(s.executor, 'ppt-agent')
   assert.equal(s.executorHost, 'autolab')
@@ -173,12 +173,14 @@ test('claim: the workflow\'s profile and guides are resolved, recorded with atte
 
 test('claim refuses what the host cannot launch as declared: an unknown profile, a missing guide', async () => {
   {
+    // project_migration p7: a profile the worker does not offer leaves the
+    // job waiting for it, with the reason; it is not dropped.
     const { x, ws } = await setup()
     await x.request({ workspace: ws.reg.id, workflow: 'make', text: 'Make.', author: 'Test Person', receipt: 'settings-req-0004', via: 'browser' })
     const c = await x.claim('fallback', { profiles: { stub: 'fake / m' } })
-    assert.deepEqual(c, { idle: 'no queued job' })
+    assert.match((c as { idle: string }).idle, /nothing local can take now: job 1 \(make\/run-001\): waiting for worker local: the workflow asks for execution profile "sonnet"/)
     const job = (await x.runView(ws.reg.id, { workflow: 'make', run: 'run-001' })).jobs[0]
-    assert.equal(job.state, 'dropped')
+    assert.equal(job.state, 'queued')
     assert.match(job.note ?? '', /asks for execution profile "sonnet", which this execution host does not offer \(stub\)/)
     const rec = (await readRun(ws, { workflow: 'make', run: 'run-001' })).record!
     assert.equal(rec.control.attempts, 0, 'nothing began')
@@ -214,12 +216,13 @@ test('a person resuming a held run may move it to another profile: later attempt
   const rec = (await readRun(ws, r.ref)).record!
   assert.equal(rec.control.attempt?.settings?.profile, 'stub')
   assert.equal(rec.definition.active ?? 'r1', 'r1', 'no revision: the definition is unchanged')
-  // A profile the host does not offer refuses the next claim, naming the resume.
+  // A profile the host does not offer makes the next job wait, naming the resume (p7: not dropped).
   await x.stop(ws, r.ref, 'Test Person', 'hold again', 'browser')
   await x.finished(c2.attempt.id, { code: null, signal: 'SIGTERM' })
   const again = await x.resume(ws, r.ref, 'Test Person', 'try the third', 'cli', undefined, { profile: 'opus' })
   assert.equal(again.record.control.profile?.previous, 'stub')
-  assert.deepEqual(await x.claim('fallback', OFFER), { idle: 'no queued job' })
+  assert.match((await x.claim('fallback', OFFER) as { idle: string }).idle, /waiting for worker local/)
+  assert.equal((await x.runView(ws.reg.id, r.ref)).jobs.at(-1)?.state, 'queued')
   const jobs = (await x.runView(ws.reg.id, r.ref)).jobs
   assert.match(jobs.at(-1)?.note ?? jobs[0].note ?? '', /resumed \(seq \d+, by Test Person\) on execution profile "opus", which this execution host does not offer/)
   x.close()

@@ -64,7 +64,7 @@ export interface ObservedRun {
   publication: { failed: CheckpointFact[]; attention: CheckpointFact[]; pending: CheckpointFact[] }
   integration: Record<'queued' | 'running' | 'failed' | 'refused' | 'attention', { id: number; decision: number; error: string | null; updated: string }[]>
   input: { kind: string; requester: string | null; source: unknown }
-  executor: { name: string; host: string } | null
+  executor: { name: string; host: string; node: string | null } | null // node (p7): the worker that performs it
   problems: { code: string; message: string }[]
   unavailable: Record<string, string>
   // p10 (docs/delegation.md): the run's delegations — present when it has any.
@@ -105,6 +105,10 @@ export interface Observation {
   host: string
   release: string | null
   executor: { state: string; heartbeatAt: string | null; ageSeconds: number | null; name: string | null; pid: number | null; detail: string | null; slot: { attempt: string; workspace: string; run: string; uid: string | null } | null; queued: number }
+  // project_migration p7: every execution node. `executor` above is the
+  // local worker's (what it always was); a remote worker's state is its last
+  // contact — `unavailable` means contact is lost, not that its work ended.
+  workers: { id: string; label: string; local: boolean; default: boolean; state: string; heartbeatAt: string | null; ageSeconds: number | null; detail: string; slot: { attempt: string; workspace: string; run: string; uid: string | null; stopRequested: string | null } | null; queued: number; waiting: { job: number; run: string; note: string }[]; profiles: string[] | null }[]
   workspaces: { id: string; available: boolean; problem: string | null }[]
   runs: ObservedRun[]
   problems: { code: string; message: string }[]
@@ -160,7 +164,7 @@ function waitingOf(r: RunRecord, job: JobRow | null): ObservedRun['waiting'] {
     if (ctl.hold.kind === 'stopped') return { reason: `held by ${ctl.hold.by}: ${ctl.hold.reason}`, responsible: `person:${ctl.hold.because?.from ?? ctl.hold.by}`, since: ctl.hold.since }
     return { reason: `held: ${ctl.hold.kind} (${ctl.hold.reason})`, responsible: 'recovery', since: ctl.hold.since }
   }
-  if (job) return { reason: `${job.kind} ${job.state} (${job.reason})`, responsible: 'executor', since: job.created }
+  if (job) return { reason: `${job.kind} ${job.state}${job.worker ? ` for ${job.worker}` : ''} (${job.note ?? job.reason})`, responsible: 'executor', since: job.created }
   for (const w of r.execution.waiting) {
     if ('question' in w.on) {
       const q = r.questions[w.on.question]
@@ -242,11 +246,15 @@ export class Observer {
     // Work ahead of each queued job: the slot's attempt, then earlier jobs.
     for (const r of runs) {
       if (!r.queue.job || r.queue.job.state !== 'queued' || !queue) continue
-      const queued = queue.jobs.filter(j => j.state === 'queued')
+      // Work ahead is the run's own worker's (p7): its slot, then its earlier jobs.
+      const worker = r.executor?.node ?? null
+      const own = (w: string | null) => !worker || (w ?? this.exec!.workers().default) === worker
+      const queued = queue.jobs.filter(j => j.state === 'queued' && own(j.worker))
+      const busy = queue.slots.find(a => own(a.worker)) ?? null
       const i = queued.findIndex(j => j.id === r.queue.job!.id)
       r.queue.position = i >= 0 ? i + 1 : null
       r.queue.ahead = [
-        ...(queue.busy ? [{ uid: uidOf(queue.busy.workspace, `${queue.busy.workflow}/${queue.busy.run}`), ref: `${queue.busy.workflow}/${queue.busy.run}`, workspace: queue.busy.workspace, kind: 'attempt' as const, state: queue.busy.state }] : []),
+        ...(busy ? [{ uid: uidOf(busy.workspace, `${busy.workflow}/${busy.run}`), ref: `${busy.workflow}/${busy.run}`, workspace: busy.workspace, kind: 'attempt' as const, state: busy.state }] : []),
         ...queued.slice(0, Math.max(0, i)).map(j => ({ uid: uidOf(j.workspace, `${j.workflow}/${j.run}`), ref: `${j.workflow}/${j.run}`, workspace: j.workspace, kind: 'job' as const, state: j.state })),
       ]
     }
@@ -255,8 +263,11 @@ export class Observer {
       executor: {
         state: state.state, heartbeatAt: hb?.at ?? null, ageSeconds: age === null ? null : Math.round(age * 10) / 10, name: hb?.name ?? null, pid: hb?.pid ?? null, detail: state.detail ?? null,
         slot: queue?.busy ? { attempt: queue.busy.id, workspace: queue.busy.workspace, run: `${queue.busy.workflow}/${queue.busy.run}`, uid: uidOf(queue.busy.workspace, `${queue.busy.workflow}/${queue.busy.run}`) } : null,
-        queued: queue ? queue.jobs.filter(j => j.state === 'queued').length : 0,
+        queued: queue ? queue.jobs.filter(j => j.state === 'queued' && (j.worker ?? this.exec!.localWorker) === this.exec!.localWorker).length : 0,
       },
+      workers: (queue?.workers ?? []).map(w => ({ id: w.id, label: w.label, local: w.local, default: w.default, state: w.state, heartbeatAt: w.at, ageSeconds: w.ageSeconds === null ? null : Math.round(w.ageSeconds * 10) / 10, detail: w.detail,
+        slot: w.busy ? { attempt: w.busy.attempt, workspace: w.busy.workspace, run: `${w.busy.workflow}/${w.busy.run}`, uid: uidOf(w.busy.workspace, `${w.busy.workflow}/${w.busy.run}`), stopRequested: w.busy.stopRequested } : null,
+        queued: w.queued.length, waiting: w.queued.filter(j => j.note).map(j => ({ job: j.id, run: `${j.workflow}/${j.run}`, note: j.note! })), profiles: w.profiles })),
       workspaces, runs, problems,
     }
   }
@@ -343,7 +354,7 @@ export class Observer {
       publication: { failed: [], attention: [], pending: [] },
       integration: { queued: [], running: [], failed: [], refused: [], attention: [] },
       input: { kind: r.input.kind, requester: r.input.requester ?? null, source: r.input.source ?? null },
-      executor: { name: r.executor.name, host: hostOf(r.executor) },
+      executor: { name: r.executor.name, host: hostOf(r.executor), node: this.exec ? this.exec.nodeOf(r) : r.executor.node ?? null },
       problems, unavailable,
     }
     if (!consistent) problems.push({ code: 'changing', message: `the record changed while it was read ${reads} times; its facts may straddle a transition` })
@@ -403,13 +414,19 @@ export class Observer {
     if (!out.queue.job) { const j = rows.jobs.find(x => x.state === 'queued' || x.state === 'claimed'); if (j) out.queue.job = { id: j.id, kind: j.kind, state: j.state, created: j.created, reason: j.reason, receipt: j.receipt } }
     const a: AttemptRow | undefined = rows.attempts.find(x => x.state !== 'ended') ?? rows.attempts.at(-1)
     if (a) {
-      const local = a.host === hostname()
+      const remote = this.exec?.isRemote(a.worker) ?? false
+      const local = !remote && a.host === hostname()
       const isOpen = a.state !== 'ended'
       const group = local && isOpen && a.pid && typeof groups !== 'string' ? groups.get(a.pid) ?? { members: 0, cpuSeconds: 0 } : null
       if (local && isOpen && typeof groups === 'string') out.unavailable['process.group'] = groups
-      if (!local) out.unavailable.process = `attempt ${a.id} runs on ${a.host}; its process and log are observable there only`
+      // A remote worker's process is its own (p7): its log is shipped here, its
+      // liveness is what the worker last reported.
+      if (remote) {
+        const w = this.exec!.workersState().find(x => x.id === a.worker)
+        if (isOpen) out.unavailable.process = `attempt ${a.id} runs on worker ${a.worker} (${a.host}); its process is that worker's to observe — last contact ${w?.at ?? 'never'}${w?.ageSeconds != null ? ` (${Math.round(w.ageSeconds)} s ago, ${w.state})` : ''}`
+      } else if (!local) out.unavailable.process = `attempt ${a.id} runs on ${a.host}; its process and log are observable there only`
       let log: ProcessFacts['log'] = null
-      if (local && a.log) {
+      if ((local || remote) && a.log) {
         const [act, facts] = await Promise.all([activityOf(a.log).catch(e => ({ problem: (e as Error).message, last: null, bytes: 0, count: null, unit: null })), logFacts(a.log).catch(() => null)])
         log = { last: act?.last ?? null, bytes: act?.bytes ?? 0, turns: act?.count ?? null, session: facts?.session ?? null, problem: act?.problem ?? null, openTool: facts?.openTool ?? null, ended: facts?.ended ?? null, backgroundStopped: facts?.backgroundStopped ?? 0, partial: facts?.partial ?? false }
       }

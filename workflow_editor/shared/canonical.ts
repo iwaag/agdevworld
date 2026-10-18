@@ -65,8 +65,9 @@ export function definitionProjection(w: Workflow) {
   // Execution and intake (p6) are part of what is approved when declared;
   // a workflow without them keeps the digest it had.
   // The session policy (agent_session p1) is projected when declared.
-  const execution = w.execution && (w.execution.agent || w.execution.profile || w.execution.guides.length || w.execution.session)
-    ? { execution: { agent: w.execution.agent, profile: w.execution.profile, guides: w.execution.guides.map(guideKey), ...(w.execution.session ? { session: w.execution.session } : {}) } } : {}
+  // The execution node (project_migration p7) likewise, only when declared.
+  const execution = w.execution && (w.execution.agent || w.execution.profile || w.execution.guides.length || w.execution.session || w.execution.node)
+    ? { execution: { agent: w.execution.agent, profile: w.execution.profile, guides: w.execution.guides.map(guideKey), ...(w.execution.session ? { session: w.execution.session } : {}), ...(w.execution.node ? { node: w.execution.node } : {}) } } : {}
   const intake = w.intake?.zulip ? { intake: { zulip: w.intake.zulip } } : {}
   // The three steps (p8/ex2) are projected when declared, so a default or
   // manual workflow keeps the digest it had.

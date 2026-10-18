@@ -49,6 +49,8 @@ export const CONFIRMS = ['result'] as const
 // person (default), or the parent run's agent when the author grants it.
 export const DELEGATE_ACCEPTS = ['person', 'parent'] as const
 export const PROFILE_PATTERN = /^[a-z0-9][a-z0-9_.-]{0,63}$/
+// An execution node (worker) id (project_migration p7): a logical name, not a host name.
+export const NODE_PATTERN = /^[a-z][a-z0-9-]{0,31}$/
 // How a run's attempts use harness conversations (agent_session p1):
 // `fresh` starts a new session for every attempt from the run's records and
 // files; `run` resumes the run's own retained session in each later attempt.
@@ -110,7 +112,7 @@ export interface Workflow {
   // representable and reported by validation ('' = the file declares none);
   // the three steps (p8/ex2) are booleans when the file has them.
   documentation: Documentation
-  execution: { agent: string; profile: string; guides: string[]; session?: string } // session: '' or absent = fresh (SESSION_POLICIES)
+  execution: { agent: string; profile: string; guides: string[]; session?: string; node?: string } // session: '' or absent = fresh (SESSION_POLICIES); node (project_migration p7): the execution node its runs are performed on, '' or absent = the project's or the area's default
   intake: { zulip: string }
   approvals: Partial<Record<ApprovalKind, ApprovalRecord>>
   layout: { nodes: Record<string, Point> }
@@ -135,6 +137,9 @@ export interface Project {
   // (a project-relative path, or <project>:<path>). A workflow's own
   // execution.guides add to them.
   guides?: string[]
+  // project_migration p7: the execution node this project's runs are
+  // performed on unless the workflow or the request names one.
+  execution?: { node?: string }
 }
 export interface LocalArea { path: string; description: string }
 
@@ -265,6 +270,7 @@ export function workflowFromData(raw: unknown): { workflow: Workflow; issues: Sh
   const execution = map(raw, 'execution', '$', issues)
   w.execution = { agent: text(execution, 'agent', '$.execution', issues), profile: text(execution, 'profile', '$.execution', issues), guides: stringList(execution, 'guides', '$.execution', issues) }
   if (execution.session !== undefined && execution.session !== null) w.execution.session = text(execution, 'session', '$.execution', issues)
+  if (execution.node !== undefined && execution.node !== null) w.execution.node = text(execution, 'node', '$.execution', issues)
   w.intake = { zulip: text(map(raw, 'intake', '$', issues), 'zulip', '$.intake', issues) }
   const approvals = map(raw, 'approvals', '$', issues)
   for (const [key, value] of Object.entries(approvals)) {
@@ -304,6 +310,10 @@ export function projectFromData(raw: unknown): { project: Project; issues: Shape
   p.intent = text(raw, 'intent', '$', issues)
   p.goals = stringList(raw, 'goals', '$', issues)
   if (raw.guides !== undefined && raw.guides !== null) p.guides = stringList(raw, 'guides', '$', issues)
+  if (raw.execution !== undefined && raw.execution !== null) {
+    const ex = map(raw, 'execution', '$', issues)
+    p.execution = ex.node !== undefined && ex.node !== null ? { node: text(ex, 'node', '$.execution', issues) } : {}
+  }
   p.areas = Object.entries(map(raw, 'areas', '$', issues)).flatMap(([path, v]) => {
     if (v === null || v === undefined) return [{ path, description: '' }]
     if (typeof v === 'string') return [{ path, description: v }]

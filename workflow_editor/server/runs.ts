@@ -469,7 +469,7 @@ export interface CreateRunOptions {
   // The agent identity. With `host`, the run is performed as the
   // definition's execution.agent (or as the host itself when none is
   // declared) and the host is recorded beside it (p6).
-  executor: Executor | { host: string }
+  executor: Executor | { host: string; node?: string }
   plan?: string
   predecessor?: RunRef
   // The idempotency key of the input (p6: the Zulip post), carried by
@@ -626,6 +626,11 @@ export async function createRunInCopy(ws: Workspace, o: CreateRunOptions & { rec
   const src = await sourceBundle(ws, o.workflow)
   const compiled = compile(src.files[src.root].workflow)
   if (!compiled.ok) throw new RequestError(422, `${src.root} cannot be executed: ${compiled.message}. Nothing was written.`, { code: compiled.code })
+  // An unknown execution node is refused before the copy is made (p7).
+  if ('host' in o.executor && o.area) {
+    const { chooseNode, loadWorkers } = await import('./workers.ts')
+    chooseNode(loadWorkers(o.area), { request: o.executor.node, workflow: src.files[src.root].workflow, project: (await ws.readProject().catch(() => ({ project: undefined }))).project })
+  }
   const { copy, workspace: into } = await prepareCopy(ws, { project, workflow: src.root, name: o.name, receipt: o.receipt }, env)
   const have = await readRun(into, copy.ref)
   if (have.record) return { ref: copy.ref, dir: runDir(copy.ref), record: have.record, files: [], existing: true }
@@ -634,6 +639,7 @@ export async function createRunInCopy(ws: Workspace, o: CreateRunOptions & { rec
 
 async function createRunUnlocked(ws: Workspace, o: CreateRunOptions): Promise<CreatedRun> {
   const host = 'host' in o.executor ? o.executor.host : undefined
+  const node = o.executor.node
   if (!host && !(o.executor as Executor).name?.trim()) throw new RequestError(400, 'the executor is required (--executor <name>): who performs the run')
   const { input, files } = inputOf(o.input)
   const dest = o.into ?? ws
@@ -663,7 +669,14 @@ async function createRunUnlocked(ws: Workspace, o: CreateRunOptions): Promise<Cr
   definition.effective = compiled.graph
   const graph: RunGraph = { nodes: compiled.graph.nodes, edges: compiled.graph.edges }
   const agent = src.files[src.root].workflow.execution.agent
-  const executor: Executor = host ? { name: agent || host, backend: null, host } : o.executor as Executor
+  // The execution node (project_migration p7): chosen once, at creation, for
+  // a run an execution host performs in an area with workers.
+  let chosen = node
+  if (host && o.area) {
+    const { chooseNode, loadWorkers } = await import('./workers.ts')
+    chosen = chooseNode(loadWorkers(o.area), { request: node, workflow: src.files[src.root].workflow, project: (await ws.readProject().catch(() => ({ project: undefined }))).project }).node
+  }
+  const executor: Executor = host ? { name: agent || host, backend: null, host, ...(chosen ? { node: chosen } : {}) } : o.executor as Executor
   const record = createRecord(project, ref, input, { ...o, executor }, definition, context, graph, o.receipt, o.storage)
   for (const [id, f] of Object.entries(src.files)) files[`${DEFINITION_DIR}/${id}.yaml`] = f.text
   if (o.plan !== undefined) files['plan.md'] = o.plan
@@ -671,7 +684,7 @@ async function createRunUnlocked(ws: Workspace, o: CreateRunOptions): Promise<Cr
 }
 
 function createRecord(project: string, ref: RunRef, input: RunInput, o: Pick<CreateRunOptions, 'predecessor' | 'by' | 'via' | 'now'> & { executor: Executor }, definition: DefinitionRef, context: RunState['context'], graph: RunGraph, receipt?: string, storage?: RunStorage): RunRecord {
-  const executor: Executor = { name: o.executor.name.trim(), backend: o.executor.backend?.trim() || null, ...(o.executor.host ? { host: o.executor.host } : {}) }
+  const executor: Executor = { name: o.executor.name.trim(), backend: o.executor.backend?.trim() || null, ...(o.executor.host ? { host: o.executor.host } : {}), ...(o.executor.node ? { node: o.executor.node } : {}) }
   try {
     return operate(null, {
       op: 'run.create', project, workflow: ref.workflow, run: ref.run, input, executor, predecessor: o.predecessor ?? null,

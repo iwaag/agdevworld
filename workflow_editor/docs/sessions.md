@@ -165,7 +165,7 @@ provider's cache is cold.
   permission for an immediate fresh retry; the next attempt's store check
   replaces a conversation that is really gone.
 - One writer per conversation: the harness does not refuse a second process
-  resuming the same session, so the one execution slot, attempt fencing and
+  resuming the same session, so the worker's execution slot, attempt fencing and
   "no launch while a process of the run lives" are what keep it single.
 
 ## Observation

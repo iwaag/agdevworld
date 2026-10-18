@@ -33,7 +33,7 @@ this run descending from that workflow). Then:
           dispatch: the node waits on the delegation.
   Then    the request is posted in the target workflow's Zulip channel as a
           new request topic; its intake creates the child run, which works in
-          this host's one execution slot. Nothing polls: end your attempt when
+          its worker's execution slot (one per worker). Nothing polls: end your attempt when
           only the child's work remains; its questions and its result resume
           this run.
 Write the request for someone who knows nothing of this run: what is wanted,

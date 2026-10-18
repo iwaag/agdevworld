@@ -108,7 +108,7 @@ test('a request topic: bots, strangers and run topics change nothing; the first 
   assert.deepEqual(rec.input.source, { kind: 'zulip', realm: REALM, message: request.id, stream: STREAM, topic: 'request-thing', sender: PERSON, senderName: 'Pat Person', at: new Date(request.timestamp * 1000).toISOString() })
   assert.equal(rec.input.author, 'Pat')
   assert.equal(rec.history[0].receipt, sourceReceipt(REALM, request.id))
-  assert.deepEqual(rec.executor, { name: 'maker', backend: null, host: 'autolab' })
+  assert.deepEqual(rec.executor, { name: 'maker', backend: null, host: 'autolab', node: 'local' })
   const jobs = (await x.runView(ws.reg.id, { workflow: 'make', run: 'run-001' })).jobs
   assert.equal(jobs.length, 1)
   assert.equal(jobs[0].receipt, `request:${sourceReceipt(REALM, request.id)}`)

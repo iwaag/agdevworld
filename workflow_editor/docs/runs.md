@@ -473,7 +473,7 @@ autolab, `agautolab.wfexec` — is queued. Two kinds of fact are kept apart:
 | Where | What |
 | --- | --- |
 | `run.json` (durable work record) | `control`: the open attempt (id, reason, backend), how the last one ended, a hold, a requested stop; the history of `attempt.begin`, `attempt.end`, `run.stop`, `run.resume` |
-| `<area>/.local/exec/exec.sqlite` (this host) | the queue, the one execution slot, each attempt's process id, times and log, publication checkpoints, the executor's heartbeat (`server/exec.ts`) |
+| `<area>/.local/exec/exec.sqlite` (the coordinator) | the queue, one execution slot per worker, each attempt's worker, process id, times and log, publication checkpoints, every worker's heartbeat (`server/exec.ts`, [workers.md](workers.md)) |
 
 **Activity (p8/ex2).** `GET runs/<wf>/<run>/exec` (and `wfe exec status
 <run>`) gives each attempt an `activity` summary read from its own log on

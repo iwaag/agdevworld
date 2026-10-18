@@ -12,7 +12,7 @@ import {
   CANDIDATE, INPUT_ID, OUTPUT_ID, SET_OBSERVATIONS, STAGINGS, outputNumber, parseRef,
   type ExternalOutput, type InputSet, type SetObservation, type ShareRef, type Staging,
 } from './shares.ts'
-import { ID_PATTERN, PROFILE_PATTERN, normalizeRepoPath, type Edge } from './model.ts'
+import { ID_PATTERN, NODE_PATTERN, PROFILE_PATTERN, normalizeRepoPath, type Edge } from './model.ts'
 import {
   DELEGATION_ID, DISPOSITIONS, EVENT_TYPES, WAKING, isOpenDelegation, latestResult, pendingEvents, questionEvent,
   type ChildRef, type Delegation, type DelegationEvent, type DelegationTarget, type ResultManifest, type TransportRef,
@@ -68,8 +68,15 @@ export interface RunInput {
 // `name` is the agent identity the run is performed as (p6: the workflow's
 // execution.agent); `host` the execution host that launches it, when that is
 // not the agent itself (autolab executing for ppt-agent).
-export interface Executor { name: string; backend: string | null; host?: string }
+// node (project_migration p7): the execution node (worker) that performs the
+// run's attempts, chosen at creation (request, workflow, project or area
+// default) and changed only by run.assign between attempts. Absent: the
+// area's default worker (records made before p7).
+export interface Executor { name: string; backend: string | null; host?: string; node?: string }
 export const hostOf = (e: Executor) => e.host ?? e.name
+export { NODE_PATTERN }
+// Who assigned the run's node, when it was not chosen at creation (p7).
+export interface NodeAssignment { node: string; previous: string | null; at: string; by: string; reason: string; seq: number }
 // What one attempt was launched with (p6), recorded with attempt.begin so its
 // behaviour can be explained later: the agent identity, the host's profile
 // and the backend it resolved to, and the guides composed into its
@@ -396,6 +403,7 @@ export interface RunState {
   outputs?: Record<string, ExternalOutput> // present once the first external output is published (project_migration p6)
   integrations?: IntegrationRecord[] // present once the first one completed (p9)
   recoveries?: Recovery[] // present once the first run.recover is recorded (observer p3)
+  assignments?: NodeAssignment[] // present once the first run.assign is recorded (project_migration p7)
   sessions?: SessionRecord[] // present once an attempt recorded its session (agent_session p1); the last open one is current
   delegations?: Record<string, Delegation> // present once the first dispatch is recorded (p10, docs/delegation.md)
   artifacts: Artifact[]
@@ -433,6 +441,10 @@ export type OpInput =
   // own copy. Nothing else changes: nodes, questions, holds and decisions
   // stay as they were; what it published before stays published.
   | { op: 'run.relocate'; storage: RunStorage; note: string }
+  // project_migration p7: the run is performed by another execution node
+  // from its next attempt on. Never automatic: recorded with who and why,
+  // only while no attempt is open.
+  | { op: 'run.assign'; node: string; reason: string }
   | { op: 'attempt.begin'; attempt: string; reason: string; backend?: string; settings?: AttemptSettings }
   | { op: 'attempt.end'; attempt: string; outcome: AttemptOutcome; detail?: string }
   // agent_session p1: what the harness reported of the open attempt's
@@ -484,7 +496,7 @@ export const CONTROL_OPS: readonly string[] = ['run.stop', 'run.resume', 'run.ca
 
 export const OPS = ['run.create', 'node.start', 'node.progress', 'node.wait', 'node.complete', 'node.fail', 'node.cancel',
   'question.ask', 'question.answer', 'question.take-up', 'question.withdraw', 'instruction.receive', 'instruction.ack', 'artifact.attach', 'run.cancel', 'run.decide',
-  'attempt.begin', 'attempt.end', 'run.stop', 'run.resume', 'presentation.register', 'presentation.observe', 'run.adjust', 'run.integrate', 'run.relocate', 'run.recover', 'attempt.session', 'attempt.context', 'session.retire',
+  'attempt.begin', 'attempt.end', 'run.stop', 'run.resume', 'presentation.register', 'presentation.observe', 'run.adjust', 'run.integrate', 'run.relocate', 'run.assign', 'run.recover', 'attempt.session', 'attempt.context', 'session.retire',
   'delegation.dispatch', 'delegation.bind', 'delegation.event', 'delegation.take-up', 'delegation.answer', 'delegation.instruct', 'delegation.dispose',
   'input.select', 'input.observe', 'output.publish', 'output.observe'] as const
 // The executor's own reports. While an attempt is open they must carry its
@@ -816,6 +828,7 @@ export function apply(prev: RunState | null, e: HistoryEntry | (OpInput & EntryM
     if (canonicalJson(ids) !== canonicalJson(Object.keys(graph.nodes).sort())) fail('graph', 'the nodes in run.create differ from the bundled definition')
     const eff = e.definition?.effective
     if (eff && canonicalJson({ nodes: eff.nodes, edges: eff.edges }) !== canonicalJson({ nodes: graph.nodes, edges: graph.edges })) fail('graph', 'the graph followed differs from the frozen effective graph')
+    if (e.executor?.node !== undefined && (typeof e.executor.node !== 'string' || !NODE_PATTERN.test(e.executor.node))) fail('shape', `executor.node "${String(e.executor.node)}" must match ${NODE_PATTERN.source}`)
     if (e.input?.source !== undefined) sourceOf(e.input.source) // checked, recorded as given
     if (e.input?.references !== undefined) {
       if (!Array.isArray(e.input.references)) fail('shape', 'input.references must be a list')
@@ -1331,6 +1344,16 @@ export function apply(prev: RunState | null, e: HistoryEntry | (OpInput & EntryM
       if (ctl.attempt) fail('attempt-open', `attempt ${ctl.attempt.id} is still open; a run moves only while nothing executes it`)
       text(e.note, 'a note on what moved')
       s.storage = validStorage(e.storage)
+      break
+    }
+    case 'run.assign': {
+      if (ctl.attempt) fail('attempt-open', `attempt ${ctl.attempt.id} is still open; a run changes its execution node only between attempts`)
+      const node = text(e.node, 'the execution node')
+      if (!NODE_PATTERN.test(node)) fail('shape', `node "${node}" must match ${NODE_PATTERN.source}`)
+      const previous = s.executor.node ?? null
+      if (previous === node) fail('state', `the run is already assigned to ${node}`)
+      s.executor = { ...s.executor, node }
+      s.assignments = [...(s.assignments ?? []), { node, previous, at, by, reason: text(e.reason, 'the reason'), seq: e.seq }]
       break
     }
     case 'run.integrate': {

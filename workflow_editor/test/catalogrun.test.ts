@@ -136,7 +136,7 @@ test('an empty catalog is an explicit empty snapshot; an unreadable one is said,
   // The briefs say each case.
   const x = s.x
   for (const [ref, re] of [[empty.ref, /node catalog was empty when this run was created/], [blind.ref, /could not be read when this run was created \(node-catalog.json is not valid JSON/]] as const) {
-    const brief = await x.brief(s.ws, ref, { id: 0, receipt: 'r', kind: 'start', workspace: 'p', workflow: ref.workflow, run: ref.run, reason: 'start', state: 'claimed', created: '', claimed: null, attempt: null, note: null })
+    const brief = await x.brief(s.ws, ref, { id: 0, receipt: 'r', kind: 'start', workspace: 'p', workflow: ref.workflow, run: ref.run, reason: 'start', state: 'claimed', created: '', claimed: null, attempt: null, note: null, worker: null })
     assert.match(brief, re)
   }
 })
@@ -145,7 +145,7 @@ test('a run created before catalogs is not given one after the fact', async () =
   const s = await setup()
   const old = await createRun(s.ws, { workflow: 'improve', executor: { host: 'autolab' }, by: 'Pat', via: 'cli', input: { kind: 'braindump', text: 'x', author: 'Pat' } })
   assert.equal(old.record.context.catalog, undefined)
-  const brief = await s.x.brief(s.ws, old.ref, { id: 0, receipt: 'r', kind: 'start', workspace: 'p', workflow: 'improve', run: old.ref.run, reason: 'start', state: 'claimed', created: '', claimed: null, attempt: null, note: null })
+  const brief = await s.x.brief(s.ws, old.ref, { id: 0, receipt: 'r', kind: 'start', workspace: 'p', workflow: 'improve', run: old.ref.run, reason: 'start', state: 'claimed', created: '', claimed: null, attempt: null, note: null, worker: null })
   assert.doesNotMatch(brief, /node catalog/)
   assert.equal((await runResponse(s.ws, old.ref)).catalog?.state, 'none')
   const lines: string[] = []

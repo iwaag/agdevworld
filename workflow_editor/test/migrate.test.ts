@@ -202,6 +202,6 @@ test('an interrupted migration continues: a copy reserved before a crash is fini
   assert.equal((await readRun(s.ws, r.held)).record!.storage?.branch, 'wfe/lab/experiment/run-001')
   assert.ok(await stat(join(copyDir(s.ws, r.held), 'tree', '.git')).then(() => true, () => false))
   // A refusal: the executor is reporting.
-  s.x.heartbeat('autolab', process.pid, 'idle')
+  s.x.heartbeat(s.x.localWorker, process.pid, 'idle')
   await assert.rejects(migrate(s.x, { by: 'x' }), /the executor reported within the last 45 s; stop it/)
 })

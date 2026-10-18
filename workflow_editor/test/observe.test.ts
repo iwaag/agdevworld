@@ -206,7 +206,7 @@ test('a missing copy is an observation problem, never a finished run; a stale he
   const { x, id, observer, ws } = await setup()
   const a = await request(x, id, 'observe-missing')
   await rename(join(copyDir(ws, a.ref), 'tree'), join(copyDir(ws, a.ref), 'tree-moved'))
-  x.heartbeat('autolab', 4242, 'idle')
+  x.heartbeat(x.localWorker, 4242, 'idle')
   x.db.prepare('UPDATE heartbeat SET at = ?').run(new Date(Date.now() - 600_000).toISOString())
   const o = await observer.observe()
   const r = runOf(o, a.ref)!

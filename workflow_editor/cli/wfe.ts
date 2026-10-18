@@ -33,6 +33,7 @@ export const PACKAGE = resolve(here, '..')
 export const CONTRACT = join(PACKAGE, 'docs', 'contract.md')
 export const RUN_CONTRACT = join(PACKAGE, 'docs', 'runs.md')
 
+let remoteLocal = false
 class UsageError extends Error {}
 class Refused extends Error { detail?: unknown; constructor(m: string, detail?: unknown) { super(m); this.detail = detail } }
 
@@ -332,14 +333,17 @@ policy a run plans, reports each node and reports the whole (docs/contract.md,
 "Documentation policy"); manual leaves documents to explicit instructions.
 Refuses an id already used by another workflow file. Writing the file by hand
 is equally valid; see docs/contract.md.`,
-  request: `wfe request <workflow> --braindump <file|-> --author <person> [--predecessor <run>] [--receipt <id>] [--workspace <id>]
+  request: `wfe request <workflow> --braindump <file|-> --author <person> [--predecessor <run>] [--node <worker>] [--receipt <id>] [--workspace <id>]
 
 A person's request to the executor (autolab): creates the run, in its own
 working copy, with their words as braindump.md and queues its start. The same
 receipt twice queues once. Other runs of the project — held, waiting or
 working — never refuse it (p9). --predecessor names an earlier run this one
 follows (reusing its plan, repairing or reversing it): the record keeps the
-link and the agent is told where that run's records and saved branch are.`,
+link and the agent is told where that run's records and saved branch are.
+--node chooses the execution node (worker) that performs the run, over the
+workflow's execution.node, the project's and the area's default
+(<area>/workers.json; docs/workers.md). The run keeps it for every attempt.`,
   share: `wfe share <subcommand> …   (shared areas on this host; docs/shares.md)
 
 list                       the shares this host has configured (<area>/shares.json) and
@@ -381,6 +385,11 @@ result-confirmation question; the answer binds that revision). Host settings:
 <area>/present.json {bind, publicBase, ports, answerBase}.`,
   exec: `wfe exec <subcommand> …   (the executor's interface; JSON output)
 
+Every subcommand acts for one execution node: --worker <id>, or the local
+worker of <area>/workers.json (docs/workers.md). A worker claims only jobs of
+runs assigned to it, has one slot of its own, and only it reports, stops or
+publishes its attempts.
+
 claim [--backend <text>] [--profiles-json <{name: backend}>] [--contract <name>=<sha256>]
       [--sessions-json <{profile: "explicit"}>]
                                   take the next queued job if the slot is free:
@@ -393,7 +402,10 @@ claim [--backend <text>] [--profiles-json <{name: backend}>] [--contract <name>=
                                   host does not offer, a missing guide, or the
                                   "run" session policy on a profile not in
                                   --sessions-json ('' = the host default)
-                                  drops the job with the reason
+                                  leaves the job waiting with the reason in its
+                                  note (it is the worker's to serve). --receipt:
+                                  the worker's id for this claim; the same
+                                  receipt again gets the same answer
 started <attempt> --pid <pid>     the attempt's process is running
 session <attempt> --attached <id> the harness reported this session id
 session <attempt> --missing [--detail <text>]
@@ -408,8 +420,8 @@ finished <attempt> --exit-code <n> [--signal <name>] [--lost]
                                   it (a failed launch, a session mismatch),
                                   which holds the run; --attached: a session id
                                   the harness reported and not yet recorded
-stops                             attempts to terminate (stop or cancel requested)
-heartbeat --pid <pid> [--name …] [--detail …]
+stops                             this worker's attempts to terminate (stop or cancel requested)
+heartbeat --pid <pid> [--detail …]
 reconcile [--holding <attempt>]   after a restart: gone processes become
                                   "unknown"; requests and answers that were not
                                   queued are queued again under their receipts.
@@ -417,8 +429,11 @@ reconcile [--holding <attempt>]   after a restart: gone processes become
                                   still owns keeps the slot (a launch it could
                                   not register or confirm stopped)
 publish <checkpoint id>           retry a publication; finished steps are kept
-status [<run>]                    the executor, or one run's attempts, jobs and
-                                  checkpoints
+status [<run>]                    the executor and the workers, or one run's
+                                  attempts, jobs and checkpoints
+workers                           every worker: last contact, slot, queue, offer
+adopt                             this worker's running attempts whose process
+                                  still lives (a restarted executor takes them back)
 State is <area>/.local/exec/exec.sqlite (this host only).`,
   intake: `wfe intake <subcommand> …   (requests from Zulip; the transport's interface, protocol 1)
 
@@ -952,6 +967,8 @@ async function cmdExec(p: Parsed): Promise<number> {
   const x = await openExec(p)
   json = true
   const num = (k: string) => { const v = opt(p, k); if (v === undefined || !/^-?\d+$/.test(v)) throw new UsageError(`--${k} <integer> is required`); return Number(v) }
+  // The worker this executor is (project_migration p7); the local one when not given.
+  const worker = () => opt(p, 'worker') ?? x.localWorker
   try {
     switch (sub) {
       case 'claim': {
@@ -960,30 +977,40 @@ async function cmdExec(p: Parsed): Promise<number> {
         const contract = opt(p, 'contract')
         const m = contract ? /^([^=]+)=([0-9a-f]{64})$/.exec(contract) : null
         if (contract && !m) throw new UsageError('--contract <name>=<sha256 of the contract text>')
-        out('', await x.claim(opt(p, 'backend') ?? null, { ...(profiles ? { profiles: JSON.parse(profiles) as Record<string, string> } : {}), ...(sessions ? { sessions: JSON.parse(sessions) as Record<string, 'explicit'> } : {}), ...(m ? { contract: { name: m[1], sha256: m[2] } } : {}) })); return 0
+        out('', await x.claim(opt(p, 'backend') ?? null, { ...(profiles ? { profiles: JSON.parse(profiles) as Record<string, string> } : {}), ...(sessions ? { sessions: JSON.parse(sessions) as Record<string, 'explicit'> } : {}), ...(m ? { contract: { name: m[1], sha256: m[2] } } : {}) }, { worker: worker(), receipt: opt(p, 'receipt') })); return 0
       }
-      case 'started': if (!arg) throw new UsageError('started <attempt> --pid <pid>'); x.started(arg, num('pid')); out('', { ok: true }); return 0
+      case 'started': if (!arg) throw new UsageError('started <attempt> --pid <pid>'); x.started(arg, num('pid'), worker()); out('', { ok: true }); return 0
       case 'finished': {
         if (!arg) throw new UsageError('finished <attempt> --exit-code <n> [--signal <name>]')
         const code = opt(p, 'exit-code') !== undefined ? num('exit-code') : null
-        const r = await x.finished(arg, { code, signal: opt(p, 'signal') ?? null, lost: p.flags.has('lost'), interrupted: opt(p, 'interrupted'), attached: opt(p, 'attached') })
+        const r = await x.finished(arg, { code, signal: opt(p, 'signal') ?? null, lost: p.flags.has('lost'), interrupted: opt(p, 'interrupted'), attached: opt(p, 'attached') }, worker())
         out('', { ok: true, ...r }); return 0
       }
       case 'session': {
         if (!arg || (!opt(p, 'attached') && !p.flags.has('missing'))) throw new UsageError('session <attempt> --attached <id> | --missing [--detail <text>]')
-        out('', { ok: true, ...await x.session(arg, opt(p, 'attached') ? { attached: opt(p, 'attached') } : { missing: opt(p, 'detail') ?? '' }) }); return 0
+        out('', { ok: true, ...await x.session(arg, opt(p, 'attached') ? { attached: opt(p, 'attached') } : { missing: opt(p, 'detail') ?? '' }, worker()) }); return 0
       }
       case 'context': {
         if (!arg || (!p.flags.has('delivered') && !p.flags.has('undelivered'))) throw new UsageError('context <attempt> --delivered | --undelivered [--detail <text>]')
-        out('', { ok: true, ...await x.contextDelivery(arg, { delivered: p.flags.has('delivered'), detail: opt(p, 'detail') }) }); return 0
+        out('', { ok: true, ...await x.contextDelivery(arg, { delivered: p.flags.has('delivered'), detail: opt(p, 'detail') }, worker()) }); return 0
       }
-      case 'stops': out('', x.stopsDue().map(a => ({ id: a.id, pid: a.pid, run: `${a.workflow}/${a.run}`, workspace: a.workspace, requested: a.stop_requested }))); return 0
-      case 'heartbeat': x.heartbeat(opt(p, 'name') ?? 'autolab', num('pid'), opt(p, 'detail') ?? ''); out('', { ok: true }); return 0
-      case 'reconcile': out('', { ok: true, notes: await x.reconcile(p.opts.get('holding') ?? []) }); return 0
+      case 'stops': out('', x.stopsDue(worker()).map(a => ({ id: a.id, pid: a.pid, run: `${a.workflow}/${a.run}`, workspace: a.workspace, requested: a.stop_requested }))); return 0
+      case 'heartbeat': x.heartbeat(worker(), num('pid'), opt(p, 'detail') ?? ''); out('', { ok: true }); return 0
+      case 'reconcile': {
+        if (x.isRemote(worker())) throw new UsageError(`reconcile runs on the coordinator for its local worker; ${worker()} reconciles its own attempts through its wfe`)
+        out('', { ok: true, notes: await x.reconcile(p.opts.get('holding') ?? []) }); return 0
+      }
+      // Execution nodes (p7): every worker's state, what it holds and what waits for it.
+      case 'workers': out('', { workers: x.workersState() }); return 0
+      // A restarted executor takes back the processes it left running (p7).
+      case 'adopt': {
+        const live = (pid: number | null) => { if (!pid) return false; try { process.kill(pid, 0); return true } catch (e) { return (e as NodeJS.ErrnoException).code === 'EPERM' } }
+        out('', x.workerDue(worker()).attempts.filter(a => a.state === 'running' && live(a.pid)).map(a => ({ id: a.id, pid: a.pid, log: a.log }))); return 0
+      }
       case 'publish': { if (!arg) throw new UsageError('publish <checkpoint id>'); out('', await x.publishCheckpoint(Number(arg))); return 0 }
       case 'status': {
         const ws = await workspace(p)
-        if (!arg) { out('', { executor: x.executorState() }); return 0 }
+        if (!arg) { out('', { executor: x.executorState(), workers: x.workersState() }); return 0 }
         const ref = await import('../server/runs.ts').then(m => m.resolveRef(ws, arg))
         out('', await x.runView(ws.reg.id, ref)); return 0
       }
@@ -992,7 +1019,7 @@ async function cmdExec(p: Parsed): Promise<number> {
     if (e instanceof RequestError) throw new Refused(e.message, e.detail)
     throw e
   } finally { x.close(); execStore = undefined }
-  throw new UsageError('wfe exec claim|started|session|context|finished|stops|heartbeat|reconcile|publish|status')
+  throw new UsageError('wfe exec claim|started|session|context|finished|stops|heartbeat|reconcile|publish|status|workers|adopt')
 }
 
 // Zulip coordination: the outbox and bindings of this host, for the
@@ -1173,8 +1200,8 @@ async function cmdRequest(p: Parsed): Promise<number> {
     const text = readFileSync(file === '-' ? 0 : resolve(file), 'utf8')
     const pred = opt(p, 'predecessor')
     const predecessor = pred ? await (await import('../server/runs.ts')).resolveRef(ws, pred) : undefined
-    const r = await x.request({ workspace: ws.reg.id, workflow, text, author, receipt, by: opt(p, 'by'), via: 'cli', predecessor })
-    out(`${r.duplicate ? 'Already requested (same receipt)' : 'Requested'}: run ${r.ref.workflow}/${r.ref.run} in ${ws.reg.id}; job ${r.job.id} is ${r.job.state}.`, r)
+    const r = await x.request({ workspace: ws.reg.id, workflow, text, author, receipt, by: opt(p, 'by'), via: 'cli', predecessor, node: opt(p, 'node') })
+    out(`${r.duplicate ? 'Already requested (same receipt)' : 'Requested'}: run ${r.ref.workflow}/${r.ref.run} in ${ws.reg.id}; job ${r.job.id} is ${r.job.state}${r.job.worker ? ` for execution node ${r.job.worker}` : ''}.`, r)
     return 0
   } catch (e) {
     if (e instanceof RequestError) throw new Refused(e.message, e.detail)
@@ -1271,7 +1298,17 @@ async function cmdObserve(p: Parsed): Promise<number> {
 async function cmdRuns(p: Parsed): Promise<number> {
   const [sub] = p.positional
   if (sub === 'migrate') return cmdMigrate(p)
-  if (sub !== 'index') throw new UsageError('usage: wfe runs index [--rebuild] [--workspace <id>] | wfe runs migrate [--dry-run] [--workspace <id>] --by <name>')
+  // project_migration p7: record the execution node of every unfinished run.
+  if (sub === 'assign-nodes') {
+    const by = opt(p, 'by'); if (!by) throw new UsageError('--by <name> is required')
+    const x = await openExec(p)
+    try {
+      const notes = await x.migrateNodes({ dryRun: p.flags.has('dry-run'), by })
+      out(notes.join('\n') || 'Every unfinished run has its execution node recorded.', { ok: true, notes })
+      return 0
+    } finally { x.close(); execStore = undefined }
+  }
+  if (sub !== 'index') throw new UsageError('usage: wfe runs index [--rebuild] [--workspace <id>] | wfe runs migrate [--dry-run] [--workspace <id>] --by <name> | wfe runs assign-nodes [--dry-run] --by <name>')
   const { inspectIndex } = await import('../server/runspace.ts')
   const ws = await workspace(p)
   const entries = await inspectIndex(ws, { rebuild: p.flags.has('rebuild') })
@@ -1381,6 +1418,12 @@ async function cmdVersion(): Promise<number> {
 }
 
 export async function main(argv: string[]): Promise<number> {
+  // On a remote worker (project_migration p7, docs/workers.md) wfe is the
+  // coordinator's client; only its shared areas are read here.
+  if (process.env.WFE_WORKER_AREA && !process.env.WFE_REGISTRY && !remoteLocal) {
+    const { remoteMain } = await import('./remote.ts')
+    return remoteMain(argv, a => { remoteLocal = true; return main(a) })
+  }
   let p: Parsed
   try { p = parse(argv) } catch (e) { console.error(`wfe: ${(e as Error).message}`); return 2 }
   json = p.flags.has('json')

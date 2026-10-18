@@ -271,7 +271,14 @@ commits are not merged in; the brief names them). Refused after cancellation.
 --because names the person's words it follows. --profile <name> moves the
 run to another of the execution host's profiles (which model serves it) for
 every later attempt; the agent, guides and access stay the definition's, and
-a profile the host does not offer refuses the next claim. Writes run.json.`,
+a profile the host does not offer makes the next job wait. Writes run.json.`,
+  assign: `wfe run assign <run> --node <worker> --reason <why> --by <name>
+
+The run is performed by another execution node (worker) from its next attempt
+on (docs/workers.md). Refused while an attempt is open. Recorded with who and
+why; nothing moves a run by itself. Its queued job waits for that worker. A
+session (execution.session: run) is not carried to another node: its next
+attempt starts a new one from the records. Writes run.json.`,
   access: `wfe run access <run> [--path <project-relative path>]
 
 Shows binding descriptions and the explicit target path. Readonly and
@@ -369,6 +376,7 @@ export function runIndex(): string {
   fail <run> <node>        record a failure
   cancel <run> [<node>]    discontinue a node or the run (final)
   stop / resume <run>      hold (work kept; others go on), resume a held run
+  assign <run>             perform the run on another execution node from its next attempt
   recover <run>            a recovering agent continues an interrupted/unknown hold (incident, attempt)
   session <run>            the run's harness sessions; --retire ends the current one
   events <run>             notification-worthy events (selection only)
@@ -722,6 +730,14 @@ export async function runCommand(c: RunCli): Promise<number> {
       const profile = c.opt('profile')
       const res = await wrap(() => c.exec().resume(ws, r, who, need(c, 'reason', 'the resume instruction: what the executor should do now'), 'cli', receipt, { because: because(), ...(profile ? { profile } : {}) }))
       return report(r, res.record, `Recorded: resumed${profile ? ` on profile ${profile}` : ''}.${res.job ? ` Queued job ${res.job.id} (${res.job.state}).` : ''}`)
+    }
+    case 'assign': {
+      const r = await ref()
+      const who = await recorder(r) ?? ''
+      if (!who) throw c.refused('who assigns the run? Pass --by <your name>')
+      const node = need(c, 'node', 'the execution node (worker) that performs the run from its next attempt')
+      const rec = await wrap(() => c.exec().assign(ws, r, node, who, need(c, 'reason', 'why the run moves'), 'cli'))
+      return report(r, rec, `Recorded: from its next attempt the run is performed by ${node}. Its queued job, if any, waits for ${node}.`)
     }
     case 'session': {
       const r = await ref()

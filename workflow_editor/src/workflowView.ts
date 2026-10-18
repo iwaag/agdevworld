@@ -90,7 +90,7 @@ export function renderWorkflowView(root: HTMLElement, wsId: string, file: string
     h('div.intent-col',
       h('div.panel-label', icon('intent', 'icon small'), 'Workflow intent (ground truth), as saved'),
       savedIntent,
-      h('p.small.muted', 'Everything else in the workflow is reviewed against this text. Approving it records the saved text and its digest. ', h('button.link-btn', { onclick: () => ctxSection.reveal(false, () => intentInput.focus({ preventScroll: true })) }, 'Edit it in Context'))),
+      h('p.small.muted', 'Everything else in the workflow is reviewed against this text. Approving it records the saved text and its digest. ', h('button.link-btn', { onclick: () => ctxSection.editShared(() => intentInput.focus({ preventScroll: true })) }, 'Edit it in Context'))),
     h('div.approval-col',
       h('div.panel-label', 'Approvals'),
       approvalRecords,
@@ -143,8 +143,8 @@ export function renderWorkflowView(root: HTMLElement, wsId: string, file: string
     h('label.field', h('span', 'Purpose (intent)'), intentInput),
     h('p.small.muted', 'Everything else in the workflow is reviewed against this text; runs and authors are given it.'),
     guidesEditor.el,
-    h('p.small.muted', 'Guides the project declares are given to every workflow already (Inherited instructions); list here only this workflow\'s own.'),
-    h('div.save-row', sharedSave, sharedState, h('span.small.muted', 'Writes the workflow file. Local instructions below save separately.')))
+    h('p.small.muted', 'Guides the project declares are given to every workflow already (Inherited); list here only this workflow\'s own.'),
+    h('div.save-row', sharedSave, sharedState, h('span.small.muted', 'Writes the workflow file.')))
   const ctxSection = new ContextSection({
     scope: 'workflow', wsId, shared: sharedControls,
     sharedSummary: () => { const w = draft ?? saved; return !w ? 'workflow not read' : [w.intent.trim() ? 'purpose set' : 'no purpose', `${w.execution.guides.length} guide${w.execution.guides.length === 1 ? '' : 's'}`].join(' · ') },

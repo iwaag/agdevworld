@@ -932,7 +932,6 @@ html[data-display="simple"] .project-grid > .boast { margin: 0 32px; border-radi
 .ctx-src-head .button, .ctx-src-head button { margin-left: auto; }
 .ctx-src p { margin: 0; overflow-wrap: anywhere; }
 .ctx-text { white-space: pre-wrap; overflow-wrap: anywhere; margin: 0; font-family: inherit; font-size: 13px; max-height: 18em; overflow: auto; }
-.ctx-inherited-list { display: grid; gap: 8px; }
 .ctx-inherit-item { display: grid; gap: 6px; }
 .ctx-wider { border-left: 3px solid var(--accent); padding: 6px 0 6px 12px; display: grid; gap: 6px; }
 .ctx-wider[hidden] { display: none; }
@@ -983,7 +982,7 @@ html[data-display="simple"] .run-context { border-radius: 14px; }
 .ctx-block-list { display: grid; min-width: 0; }
 .ctx-rows { display: grid; min-width: 0; }
 .ctx-row { display: flex; align-items: center; gap: 14px; padding: 12px 0; border-bottom: 1px solid #eef0f3; min-width: 0; }
-.ctx-rows > .ctx-row:last-child { border-bottom: 0; }
+.ctx-row[hidden] { display: none; }
 .ctx-row-icon { flex: none; display: inline-flex; }
 .ctx-row-icon .icon { width: 38px; height: 38px; padding: 8px; border-radius: 10px; background: var(--c-blue-bg); color: #3a5bb0; box-sizing: border-box; }
 .ctx-row[data-kind="information"] .ctx-row-icon .icon { background: var(--c-teal-bg); color: #1f6e66; }
@@ -999,7 +998,16 @@ html[data-display="simple"] .run-context { border-radius: 14px; }
 .ctx-row.editing .ctx-row-title::after { content: " — editing"; font-weight: 400; color: var(--muted); font-size: 13px; }
 .ctx-none { margin: 8px 0; }
 .ctx-group-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; min-width: 0; }
-.ctx-group-head > h3 { margin: 6px 0 0; font-size: 14px; }
+.ctx-group-head h3 { margin: 6px 0 0; font-size: 15px; }
+.ctx-group-title { display: flex; align-items: center; gap: 8px; min-width: 0; flex-wrap: wrap; }
+.ctx-group-note { font-weight: 400; color: var(--muted); font-size: 14px; }
+.ctx-help { position: relative; margin-top: 6px; }
+.ctx-help > summary { list-style: none; cursor: pointer; width: 20px; height: 20px; border-radius: 50%; border: 1px solid var(--line); color: var(--muted); font-size: 12px; font-weight: 600; display: inline-flex; align-items: center; justify-content: center; }
+.ctx-help > summary::-webkit-details-marker { display: none; }
+.ctx-help > p { position: absolute; z-index: 25; left: 0; top: calc(100% + 6px); width: min(420px, 78vw); margin: 0; padding: 10px 12px; background: var(--card); border: 1px solid var(--line); border-radius: 10px; box-shadow: 0 8px 24px rgba(20, 30, 50, .14); color: var(--text); font-weight: 400; }
+.ctx-inherited-more { justify-self: start; margin-top: 4px; }
+.ctx-inherited-more[hidden] { display: none; }
+.ctx-inherited-list { display: grid; min-width: 0; }
 .ctx-add { position: relative; display: inline-flex; }
 .ctx-add-button { display: inline-flex; align-items: center; gap: 6px; }
 .ctx-add-menu { position: absolute; right: 0; top: calc(100% + 4px); z-index: 30; background: var(--card); border: 1px solid var(--line); border-radius: 10px; box-shadow: 0 8px 24px rgba(20, 30, 50, .14); padding: 6px; display: grid; gap: 2px; min-width: 250px; }

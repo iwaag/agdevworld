@@ -83,7 +83,7 @@ export function renderProjectView(root: HTMLElement, wsId: string, opts: { conte
     guidesEditor.el,
     h('p.small.muted', 'Guides are files every workflow of the project is given (a project-relative path, or <project>:<path> for another managed project).'),
     sharedIssues,
-    h('div.save-row', sharedSave, sharedState, h('span.small.muted', 'Writes project.yaml in this workspace. Local instructions below save separately.')))
+    h('div.save-row', sharedSave, sharedState, h('span.small.muted', 'Writes project.yaml in this workspace.')))
   const context = new ContextSection({
     scope: 'project', wsId, shared: sharedControls,
     sharedSummary: () => { const p = draft ?? saved; return !p ? 'project.yaml not read' : [p.intent.trim() ? 'purpose set' : 'no purpose', `${p.goals.length} goal${p.goals.length === 1 ? '' : 's'}`, `${p.guides?.length ?? 0} guide${p.guides?.length === 1 ? '' : 's'}`].join(' · ') },
@@ -186,7 +186,7 @@ export function renderProjectView(root: HTMLElement, wsId: string, opts: { conte
       h('label.field', h('span', 'Id'), h('input', { value: d.id, disabled: !!saved?.id && saved.id !== '-', title: 'Stable identifier; edit the file to change it', oninput: (e: Event) => { d.id = (e.target as HTMLInputElement).value; touch() } })),
       h('label.field', h('span', 'Name'), h('input', { value: d.name, disabled: readonly, oninput: (e: Event) => { d.name = (e.target as HTMLInputElement).value; touch() } })),
       h('label.field', h('span', 'devdocs'), h('input', { value: d.devdocs ? `${d.devdocs} — ${d.devdocs === 'submodule' ? 'a repository of its own' : 'a folder of the project root repository'}` : '(not declared)', disabled: true, title: 'The devdocs storage mode is fixed at creation; it is not converted' })),
-      h('div.field', h('span', 'Purpose, goals and guides'), h('button.link-btn', { onclick: () => context.reveal() }, 'Edit them in Context')),
+      h('div.field', h('span', 'Purpose, goals and guides'), h('button.link-btn', { onclick: () => context.editShared() }, 'Edit them in Context')),
     )
     const issues = validateProject(d)
     card.append(

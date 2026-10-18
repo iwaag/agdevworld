@@ -80,7 +80,7 @@ export function renderedRows(text: string, columns = ROW_COLUMNS): number {
   }, 0)
 }
 // Short human guidance stays readable in the list; anything longer opens.
-export const inlineText = (kind: BlockKind | 'guide', text: string) => kind === 'instruction' && text.trim() !== '' && renderedRows(text.trim()) <= 3
+export const inlineText = (kind: BlockKind | 'guide', text: string) => kind === 'instruction' && text.trim() !== '' && renderedRows(text.trim()) <= 2
 
 // Ordinary prose for reading: paragraphs, lists, headings and `code`, built
 // as DOM text (never HTML from the text), so a body reads as text, not as a
@@ -397,7 +397,7 @@ export class BlockCard {
     const inline = b && !this.isDirty() && inlineText(b.kind, b.body) ? h('p.ctx-row-inline', b.body.trim()) : null
     this.rowIcon.replaceChildren(icon(kind === 'information' ? 'doc' : 'person', 'icon'))
     this.rowMain.replaceChildren(...[h('strong.ctx-row-title', title), inline].filter((x): x is HTMLElement => !!x),
-      metaLine([b ? h('span.ctx-row-manager', b.manager) : null, this.opts.showScope || this.opts.wider ? h('span.ctx-row-scope', scopeName(this.target)) : null, ...this.states()]))
+      metaLine([b ? h('span.ctx-row-manager', b.manager) : null, this.opts.showScope ? h('span.ctx-row-scope', scopeName(this.target)) : null, ...this.states()]))
     const edits = this.rowEdits()
     this.rowAction.textContent = edits ? 'Edit' : 'Open'
     this.rowAction.setAttribute('aria-label', `${edits ? 'Edit' : 'Open'} ${title}`)
@@ -599,7 +599,7 @@ export class BlockList {
     this.list.replaceChildren(
       ...(this.error ? [h('div.banner.error.small', `Cannot read these blocks now: ${this.error}`)] : []),
       ...shown.map(c => c.el), ...this.fresh.filter(c => c.isDirty() || c.isOpen()).map(c => c.el),
-      ...(!shown.length && !this.fresh.length ? [h('p.small.muted.ctx-none', !this.loaded ? 'Loading…' : this.opts.empty ?? 'None set.')] : []),
+      ...(!shown.length && !this.fresh.length && (this.opts.empty !== '' || !this.loaded) ? [h('p.small.muted.ctx-none', !this.loaded ? 'Loading…' : this.opts.empty ?? 'None set.')] : []),
       ...(removed.length ? [h('p.small.muted.d-only', `Removed blocks (history kept): ${removed.map(s => s.id).join(', ')}`)] : []))
   }
 }
@@ -646,18 +646,43 @@ export class ListEditor {
   }
 }
 
-// One wider-scope or repository-owned source, readable in place.
-export function sourceBlock(s: ContextSource, opts: { title?: string; owner?: string; action?: HTMLElement | null; open?: boolean } = {}): HTMLElement {
-  const excerpt = s.delivery === 'body' ? (s.text ?? '').trim() : ''
-  const state = s.delivery === 'body' ? null : s.delivery === 'absent' ? 'not set' : s.delivery === 'reference' ? `named, not included: ${s.reference ?? ''}` : `cannot be read: ${s.note ?? ''}`
-  const origin = [s.origin.file && (s.origin.project ? `${s.origin.project}:${s.origin.file}` : s.origin.file), s.origin.commit && `at ${s.origin.commit.slice(0, 12)}`, s.origin.revision !== undefined && `revision ${s.origin.revision}`, s.origin.updated && `${when(s.origin.updated.at)} by ${s.origin.updated.by}`, s.sha256 && `sha256 ${s.sha256.slice(0, 12)}`].filter(Boolean).join(' · ')
-  const long = excerpt.length > 280 || excerpt.split('\n').length > 6
-  return h(`div.ctx-src${s.delivery === 'error' ? '.problem' : ''}`, { dataset: { key: s.key } },
-    h('div.ctx-src-head', h('strong', opts.title ?? s.title), opts.owner ? h('span.chip.muted', opts.owner) : null, opts.action ?? null),
-    state ? h(`p.small${s.delivery === 'error' ? '.error-text' : '.muted'}`, state) : null,
-    excerpt ? (long ? h('details.ctx-src-text', { open: !!opts.open }, h('summary.small', excerpt.split('\n').find(l => l.trim())!.slice(0, 120)), h('pre.ctx-text', excerpt)) : h('pre.ctx-text', excerpt)) : null,
-    origin ? h('p.small.muted.d-only', origin) : null,
-    s.provenance.length > 1 ? h('p.small.muted.d-only', `declared by ${s.provenance.join(' and ')}; given once`) : null)
+// One repository-owned or wider-scope source (a purpose, a guide, the
+// preview of what a run is given) as a row, opened in the Reader. Kept by
+// key across reloads, so the row a person opened from stays focusable.
+type SourceLike = Pick<ContextSource, 'key' | 'kind' | 'delivery' | 'text' | 'reference' | 'note' | 'origin' | 'sha256' | 'provenance'>
+export class SourceItem {
+  readonly el: HTMLElement
+  private readonly panel = h('article.ctx-block.ctx-source-panel')
+  private readonly action: HTMLButtonElement
+  private s: SourceLike | null = null
+  private opts: { title: string; owner: string; edit?: HTMLElement | null; preformatted?: boolean } = { title: '', owner: '' }
+  constructor() {
+    this.action = h('button.ctx-row-action', { type: 'button', onclick: () => this.open() }, 'Open') as HTMLButtonElement
+    this.el = h('div.ctx-row.ctx-source-row', { dataset: { kind: 'source' } })
+  }
+  update(s: SourceLike, opts: SourceItem['opts']) {
+    this.s = s; this.opts = opts
+    this.el.dataset.key = s.key
+    const state = s.delivery === 'body' ? null : s.delivery === 'absent' ? h('span.ctx-row-state.muted', 'Not set') : s.delivery === 'reference' ? h('span.ctx-row-state.muted', 'Named, not included') : h('span.ctx-row-state.error', 'Cannot be read')
+    this.el.replaceChildren(h('span.ctx-row-icon', icon(s.kind === 'guide' ? 'doc' : 'intent', 'icon')),
+      h('div.ctx-row-main', h('strong.ctx-row-title', opts.title), metaLine([opts.owner, state])), this.action)
+    this.action.setAttribute('aria-label', `Open ${opts.title}`)
+    this.render()
+  }
+  private render() {
+    const s = this.s
+    if (!s) return
+    const text = s.delivery === 'body' ? (s.text ?? '').trim() : ''
+    const state = s.delivery === 'body' ? null : s.delivery === 'absent' ? 'Not set.' : s.delivery === 'reference' ? `Named, not included: ${s.reference ?? ''}` : `Cannot be read: ${s.note ?? ''}`
+    const origin = [s.origin.file && (s.origin.project ? `${s.origin.project}:${s.origin.file}` : s.origin.file), s.origin.commit && `at ${s.origin.commit.slice(0, 12)}`, s.origin.revision !== undefined && `revision ${s.origin.revision}`, s.origin.updated && `${when(s.origin.updated.at)} by ${s.origin.updated.by}`, s.sha256 && `sha256 ${s.sha256.slice(0, 12)}`].filter(Boolean).join(' · ')
+    fill(this.panel,
+      h('header.ctx-read-head', h('h2.ctx-read-title', { tabIndex: -1, dataset: { readerFocus: '' } }, this.opts.title), h('p.ctx-read-sub', this.opts.owner)),
+      state ? h(`p${s.delivery === 'error' ? '.error-text' : '.muted'}`, state) : null,
+      text ? (this.opts.preformatted ? h('pre.ctx-rendered', text) : h('div.ctx-read-body', prose(text))) : null,
+      this.opts.edit ? h('div.ctx-read-actions', this.opts.edit) : null,
+      origin || s.provenance.length > 1 ? h('div.d-only.ctx-block-detail', origin ? h('p.small.muted', origin) : null, s.provenance.length > 1 ? h('p.small.muted', `declared by ${s.provenance.join(' and ')}; given once`) : null) : null)
+  }
+  open() { reader.show(this, this.panel, { label: this.opts.title, opener: this.action }) }
 }
 
 // ---- the Context section -------------------------------------------------------
@@ -666,10 +691,10 @@ export type SectionScope = 'system' | 'project' | 'workflow'
 export interface ContextSectionOptions {
   scope: SectionScope
   wsId?: string
-  // The host's repository-owned controls (purpose, goals, guides), shown
-  // under "Shared with this project"; their draft and save are the host's.
+  // The host's repository-owned controls (purpose, goals, guides), opened
+  // from the "In the repository" row; their draft and save are the host's.
   shared?: HTMLElement
-  // A short description of the shared part for the summary line.
+  // A short description of the shared part for the summary and the row.
   sharedSummary?: () => string
   // Unsaved text in the host's shared controls (counted in the summary).
   sharedDirty?: () => boolean
@@ -681,6 +706,13 @@ export interface ContextSectionOptions {
 const OPEN_KEY = 'workflow-editor.context-open'
 const openState = (): Record<string, boolean> => { try { return JSON.parse(localStorage.getItem(OPEN_KEY) ?? '{}') as Record<string, boolean> } catch { return {} } }
 const storeOpenState = (k: string, v: boolean) => { try { localStorage.setItem(OPEN_KEY, JSON.stringify({ ...openState(), [k]: v })) } catch { /* per-viewer convenience only */ } }
+// Inherited rows shown before "Show all": short instructions always stay.
+const INHERITED_SHOWN = 4
+
+// "Only in this environment", once per section; the fuller explanation on request.
+function help(label: string, text: string): HTMLElement {
+  return h('details.ctx-help', h('summary', { 'aria-label': label, title: label }, '?'), h('p.small', text))
+}
 
 export class ContextSection {
   readonly el: HTMLElement
@@ -688,12 +720,18 @@ export class ContextSection {
   private readonly toggle: HTMLButtonElement
   private readonly summary = h('span.ctx-summary')
   private readonly body = h('div.ctx-body')
+  private readonly sharedRows = h('div.ctx-rows.ctx-shared-rows')
+  private readonly sharedAction: HTMLButtonElement
+  private readonly sharedRow: HTMLElement
+  private readonly sharedPanel: HTMLElement | null
   private readonly inheritedBox = h('div.ctx-inherited-list')
-  private readonly preview = h('div.ctx-preview')
-  private readonly ownBox = h('div.ctx-own')
+  private readonly inheritedMore: HTMLButtonElement
+  private inheritedAll = false
+  private readonly previewRows = h('div.ctx-rows.ctx-preview')
   private readonly local: BlockList
   // Blocks of wider scopes, edited in place; kept so drafts survive.
   private readonly wider = new Map<string, BlockList>()
+  private readonly sources = new Map<string, SourceItem>()
   private workflow: string | null = null
   private view: ContextMatrixView | null = null
   private loadError = ''
@@ -708,19 +746,28 @@ export class ContextSection {
       empty: opts.scope === 'system' ? 'Nothing is set for all projects yet.' : 'Nothing is set only here.',
       onChange: () => this.changed(), onSaved: () => void this.reload(),
     })
-    const localHead = opts.scope === 'system' ? 'For all projects' : opts.scope === 'project' ? 'For this project, only in this environment' : 'For this workflow, only in this environment'
-    const localHint = opts.scope === 'system'
-      ? 'Applies to every project and workflow on this host: your instructions, and environment information agents such as cagent maintain. Each block names who manages it and who last edited it. Kept on this host only, never in Git. Every run of every project is given these, so keep them short. Used from the next attempt; saving starts nothing.'
-      : `Applies to ${opts.scope === 'project' ? 'every workflow of this project' : 'every run of this workflow'}. Kept on this host only, never in Git. Used from the next attempt; saving starts nothing.`
+    const sharedTitle = opts.scope === 'workflow' ? 'Purpose and guides' : 'Purpose, goals and guides'
+    this.sharedAction = h('button.ctx-row-action', { type: 'button', 'aria-label': `Edit ${sharedTitle}`, onclick: () => this.editShared() }, 'Edit') as HTMLButtonElement
+    this.sharedRow = h('div.ctx-row.ctx-shared-row', { dataset: { kind: 'source' } })
+    this.sharedPanel = opts.shared ? h('article.ctx-block.ctx-shared-panel',
+      h('header.ctx-read-head', h('h2.ctx-read-title', { tabIndex: -1, dataset: { readerFocus: '' } }, sharedTitle),
+        h('p.ctx-read-sub', `In the repository · travels with the ${opts.scope === 'workflow' ? 'workflow' : 'project'} · saved with its file; local blocks save separately`)),
+      opts.shared) : null
+    this.inheritedMore = h('button.link-btn.ctx-inherited-more', { type: 'button', onclick: () => { this.inheritedAll = !this.inheritedAll; this.foldInherited() } }) as HTMLButtonElement
+    const localHead = opts.scope === 'system' ? 'For all projects' : opts.scope === 'project' ? 'For this project' : 'For this workflow'
+    const localHelp = opts.scope === 'system'
+      ? 'Applies to every project and workflow on this host: your instructions, and environment information agents such as cagent maintain. Kept on this host only, never in Git. Every run of every project is given these, so keep them short. A saved change is used from the next attempt; saving starts nothing.'
+      : `Applies to ${opts.scope === 'project' ? 'every workflow of this project' : 'every run of this workflow'}. Kept on this host only, never in Git. A saved change is used from the next attempt; saving starts nothing.`
     this.body.hidden = true
     append(this.body, [
-      opts.shared ? h('div.ctx-group.ctx-shared', h('h3', 'Shared with this project', h('span.small.muted', ' — in the repository; travels with the project')), opts.shared, this.ownBox) : null,
-      h('div.ctx-group.ctx-local', h('div.ctx-group-head', h('h3', localHead, opts.scope === 'system' ? null : h('span.small.muted', ' — on this host, not in Git')), this.local.addControl), h('p.small.muted.ctx-hint', localHint), this.local.el),
-      opts.scope === 'system' ? null : h('div.ctx-group.ctx-inherited', h('h3', 'Inherited', h('span.small.muted', ' — from wider scopes; they apply here too')), this.inheritedBox),
-      this.preview])
+      opts.shared ? h('div.ctx-group.ctx-shared', h('div.ctx-group-head', h('h3', 'In the repository', h('span.ctx-group-note', ' · travels with the project'))), this.sharedRows) : null,
+      h('div.ctx-group.ctx-local', h('div.ctx-group-head', h('div.ctx-group-title', h('h3', localHead, h('span.ctx-group-note', ' · only in this environment')), help('About these blocks', localHelp)), this.local.addControl), this.local.el),
+      opts.scope === 'system' ? null : h('div.ctx-group.ctx-inherited', h('div.ctx-group-head', h('h3', 'Inherited', h('span.ctx-group-note', ' · from wider scopes; they apply here too'))), this.inheritedBox, this.inheritedMore),
+      opts.scope === 'workflow' ? this.previewRows : null])
     this.el = h(`section.ctx-section.ctx-scope-${key}`, { dataset: { contextScope: key }, 'aria-label': 'Context' }, h('div.ctx-head', this.toggle), this.body)
     this.toggle.setAttribute('aria-controls', this.body.id = `ctx-body-${key}`)
     if (openState()[key]) this.setOpen(true, false)
+    this.renderShared()
     this.updateSummary()
   }
 
@@ -732,11 +779,18 @@ export class ContextSection {
     if (remember) storeOpenState(this.opts.scope, open)
   }
   // An entrance from elsewhere (a matrix link, a hero button): open, show,
-  // and put the keyboard on the local blocks.
-  reveal(focusLocal = false, then?: () => void) {
+  // and put the keyboard on the first row (never an empty new block).
+  reveal(focus = false, then?: () => void) {
     this.setOpen(true)
     this.el.scrollIntoView({ block: 'start' })
-    if (focusLocal) this.local.focusFirst()
+    if (focus) (this.body.querySelector<HTMLElement>('.ctx-row-action') ?? this.local.addControl.querySelector('button'))?.focus({ preventScroll: true })
+    then?.()
+  }
+  // The repository-owned controls, in the reading panel.
+  editShared(then?: () => void) {
+    if (!this.sharedPanel) return
+    this.setOpen(true)
+    reader.show(this, this.sharedPanel, { label: this.sharedPanel.querySelector('h2')!.textContent ?? 'Context', opener: this.sharedAction, onClose: () => this.renderSharedRow() })
     then?.()
   }
 
@@ -764,23 +818,41 @@ export class ContextSection {
       this.widerList({ scope: 'system' }).set(v.blocks.system)
       if (this.opts.scope === 'workflow') this.widerList({ scope: 'project', project: v.project }).set(v.blocks.project)
     }
-    this.renderOwn()
+    this.renderShared()
     this.renderInherited()
     this.renderPreview()
     this.updateSummary()
   }
 
-  // The content of this scope's own guides, as saved (the references are
-  // edited in the shared controls above).
-  private renderOwn() {
-    const v = this.view
-    if (!v || this.opts.scope === 'system') { this.ownBox.replaceChildren(); return }
-    const b = this.opts.scope === 'workflow' ? (v.execution ?? v.authoring) : v.authoring
-    const guides = b.sources.filter(s => s.scope === this.opts.scope && s.kind === 'guide')
-    this.ownBox.replaceChildren(...(guides.length ? [h('p.small.muted.ctx-own-head', 'Guide content, as saved:'), ...guides.map(s => sourceBlock(s, { title: `Guide ${s.origin.file ?? s.title.replace(/^guide /, '')}`, owner: s.origin.project ? `project ${s.origin.project} · repository` : 'repository' }))] : []))
+  private source(key: string): SourceItem {
+    let s = this.sources.get(key)
+    if (!s) { s = new SourceItem(); this.sources.set(key, s) }
+    return s
   }
 
-  private changed() { this.updateSummary(); this.renderPreviewNote(); this.opts.onDirty?.() }
+  // "In the repository": the host's controls behind one row, and the
+  // content of this scope's own guides, as saved.
+  private renderSharedRow() {
+    if (!this.opts.shared) return
+    const dirty = !!this.opts.sharedDirty?.()
+    const title = this.opts.scope === 'workflow' ? 'Purpose and guides' : 'Purpose, goals and guides'
+    this.sharedRow.replaceChildren(h('span.ctx-row-icon', icon('intent', 'icon')),
+      h('div.ctx-row-main', h('strong.ctx-row-title', title), metaLine([this.opts.sharedSummary?.() ?? null, dirty ? h('span.ctx-row-state.warn', 'Unsaved changes') : null])), this.sharedAction)
+  }
+  private renderShared() {
+    if (!this.opts.shared) return
+    this.renderSharedRow()
+    const v = this.view
+    const b = v ? (this.opts.scope === 'workflow' ? (v.execution ?? v.authoring) : v.authoring) : null
+    const guides = b?.sources.filter(s => s.scope === this.opts.scope && s.kind === 'guide') ?? []
+    this.sharedRows.replaceChildren(this.sharedRow, ...guides.map(s => {
+      const item = this.source(s.key)
+      item.update(s, { title: `Guide ${s.origin.file ?? s.title.replace(/^guide /, '')}`, owner: s.origin.project && s.origin.project !== v?.project ? `Project ${s.origin.project} · repository` : 'Repository' })
+      return item.el
+    }))
+  }
+
+  private changed() { this.updateSummary(); this.foldInherited(); this.opts.onDirty?.() }
 
   updateSummary() {
     const bits: string[] = []
@@ -794,6 +866,7 @@ export class ContextSection {
     }
     const dirty = this.isDirty() || !!this.opts.sharedDirty?.()
     this.summary.replaceChildren(h('span.small.muted', bits.join(' · ')), ...(dirty ? [h('span.small.warn-text.ctx-unsaved', ' · unsaved changes')] : []))
+    this.renderSharedRow()
   }
 
   // Sources of wider scopes as the next run (workflow) or authoring (project) sees them.
@@ -809,46 +882,61 @@ export class ContextSection {
     const k = `${t.scope}:${t.project ?? ''}`
     let w = this.wider.get(k)
     if (!w) {
-      w = new BlockList(t, { wider: true, empty: t.scope === 'system' ? 'Nothing is set for all projects.' : `Nothing local is set for project ${t.project}.`, onChange: () => this.changed(), onSaved: () => void this.reload() })
+      w = new BlockList(t, { wider: true, showScope: true, empty: '', onChange: () => this.changed(), onSaved: () => void this.reload() })
       this.wider.set(k, w)
     }
     w.setTarget(t)
     return w
   }
 
+  // One list: the project's defaults (workflow editor), then the wider
+  // scopes' blocks; each row names its scope.
   private renderInherited() {
     if (this.opts.scope === 'system') return
     const v = this.view
     if (!v) { this.inheritedBox.replaceChildren(h('p.small.muted', this.loadError ? `Not read: ${this.loadError}` : 'Loading…')); return }
-    const items: HTMLElement[] = []
-    const defaults = this.inheritedSources().filter(s => s.category === 'default')
-    for (const s of defaults) {
-      const owner = `project ${v.project} · repository`
-      const title = s.kind === 'intent' ? `Project purpose and goals` : `Project guide ${s.origin.file ?? s.title.replace(/^guide /, '')}`
-      const href = this.opts.projectHref?.()
-      items.push(h('div.ctx-inherit-item', sourceBlock(s, { title, owner, action: href ? h('a.button.small', { href }, 'Edit in the project') : null })))
+    const href = this.opts.projectHref?.()
+    const defaults = this.inheritedSources().filter(s => s.category === 'default').map(s => {
+      const item = this.source(s.key)
+      item.update(s, {
+        title: s.kind === 'intent' ? 'Project purpose and goals' : `Project guide ${s.origin.file ?? s.title.replace(/^guide /, '')}`,
+        owner: `Project ${v.project} · repository`,
+        edit: href ? h('a.button', { href }, 'Edit in the project') : null,
+      })
+      return item.el
+    })
+    const lists = [...(this.opts.scope === 'workflow' ? [this.widerList({ scope: 'project', project: v.project })] : []), this.widerList({ scope: 'system' })]
+    this.inheritedBox.replaceChildren(h('div.ctx-rows', ...defaults), ...lists.map(l => l.el))
+    const none = !defaults.length && lists.every(l => !l.present().length)
+    if (none) this.inheritedBox.append(h('p.small.muted.ctx-none', 'Nothing is inherited.'))
+    this.foldInherited()
+  }
+  // Many inherited rows fold behind "Show all"; a short instruction, a
+  // draft and the first few rows stay.
+  private foldInherited() {
+    const rows = [...this.inheritedBox.querySelectorAll<HTMLElement>('.ctx-row')]
+    let shown = 0, folded = 0
+    for (const r of rows) {
+      const keep = this.inheritedAll || rows.length <= INHERITED_SHOWN + 1 || !!r.querySelector('.ctx-row-inline') || r.classList.contains('editing') || shown < INHERITED_SHOWN
+      r.hidden = !keep
+      if (keep) shown++; else folded++
     }
-    if (this.opts.scope === 'workflow') items.push(h('div.ctx-inherit-scope', h('h4.small', `Project ${v.project}, only in this environment`), this.widerList({ scope: 'project', project: v.project }).el))
-    items.push(h('div.ctx-inherit-scope', h('h4.small', 'All projects'), this.widerList({ scope: 'system' }).el))
-    this.inheritedBox.replaceChildren(...items,
-      h('p.small.muted.d-only', 'Not shown: the execution host\'s common contract (composed before this context at claim) and each run\'s own input.'))
+    this.inheritedMore.hidden = !folded && !this.inheritedAll
+    this.inheritedMore.textContent = this.inheritedAll ? 'Show fewer' : `Show all ${rows.length} inherited`
   }
 
   // What a new run of the workflow is given now, from saved settings only.
-  private previewNote = h('p.small.ctx-preview-note')
+  private previewItem: SourceItem | null = null
   private renderPreview() {
     const v = this.view
-    if (this.opts.scope !== 'workflow' || !v?.execution) { this.preview.replaceChildren(); return }
-    const pre = h('pre.ctx-rendered', v.rendered.execution ?? '')
-    const overview = this.opts.wsId ? h('a.small', { href: `#/context/${encodeURIComponent(this.opts.wsId)}/${encodeURIComponent(v.workflow!)}` }, 'Scope overview') : null
-    this.preview.replaceChildren(h('details.ctx-preview-box', h('summary', 'What a new run is given (saved settings)'), this.previewNote, pre, h('p.small.muted.d-only', 'The same resolver as the claim; the execution host composes its common contract before this text.', ' ', overview)))
-    this.renderPreviewNote()
-  }
-  private renderPreviewNote() {
+    if (this.opts.scope !== 'workflow' || !v?.execution) { this.previewRows.replaceChildren(); return }
+    this.previewItem ??= new SourceItem()
     const pending = this.isDirty() || !!this.opts.sharedDirty?.()
-    this.previewNote.className = `small ctx-preview-note${pending ? ' warn-text' : ' muted'}`
-    this.previewNote.textContent = pending ? 'Saved context only: your unsaved changes are not included until you save them.' : 'Saved context: what the next run would be prepared with now.'
+    const overview = this.opts.wsId ? h('a.button', { href: `#/context/${encodeURIComponent(this.opts.wsId)}/${encodeURIComponent(v.workflow!)}` }, 'Scope overview') : null
+    this.previewItem.update({ key: 'preview/execution', kind: 'contract', delivery: 'body', text: v.rendered.execution ?? '', provenance: [], origin: {} },
+      { title: 'What a new run is given', owner: pending ? 'Saved settings only: unsaved changes are not included' : 'Saved settings · the same resolver as the claim', edit: overview, preformatted: true })
+    this.previewRows.replaceChildren(this.previewItem.el)
   }
 
-  dispose() { this.disposed = true }
+  dispose() { this.disposed = true; reader.closeFor(this) }
 }

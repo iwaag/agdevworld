@@ -344,7 +344,10 @@ export class BlockList {
   setTarget(t: ScopeTarget) {
     if (sameTarget(t, this.target)) return
     this.target = t
-    this.cards.clear(); this.fresh.length = 0; this.states = []; this.loaded = false
+    // Saved cards belong to the old scope; a new, unsaved card follows the
+    // list to its real scope (the first read names it), its draft kept.
+    this.cards.clear(); this.states = []; this.loaded = false
+    for (const c of this.fresh) c.setTarget(t)
     this.render()
   }
   focus() { (this.fresh[0] ?? [...this.cards.values()][0])?.focus() }
@@ -380,6 +383,7 @@ export class BlockList {
   }
 
   private render() {
+    for (const b of this.addRow.querySelectorAll('button')) { b.disabled = !this.loaded; b.title = this.loaded ? '' : 'Loading…' }
     const shown = this.states.filter(s => s.block || this.cards.get(s.id)?.isDirty()).map(s => this.cards.get(s.id)).filter((c): c is BlockCard => !!c)
     const removed = this.states.filter(s => !s.block && !this.cards.get(s.id)?.isDirty())
     this.list.replaceChildren(

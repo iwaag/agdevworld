@@ -1,25 +1,30 @@
-// p13 ex1 browser check: context inside the editors, as the person's tasks,
-// against a private fixture on this host's LAN name over plain HTTP. Needs
-// a built UI (`vite build`). Starts in Simple, as a fresh browser does.
+// p13 ex1 browser check, adapted to p14's context blocks: context inside the
+// editors, as the person's tasks, against a private fixture on this host's
+// LAN name over plain HTTP. Needs a built UI (`vite build`). Starts in
+// Simple, as a fresh browser does.
 //
 //   node checks/contextEditors.ts                 (Chromium, desktop)
 //   WFE_BROWSER=webkit node checks/contextEditors.ts
 //   WFE_NARROW=1 node checks/contextEditors.ts    (390 px)
 //
-// Journeys: a project-local instruction saved in the project editor and read
-// as inherited in the workflow editor; workflow intent and a local
-// instruction edited together (separate saves, mode switches, a live
-// refresh, navigation protection, a conflicting save); instructions for all
-// projects from Home and from a child editor; a run's request and attempt
-// context in Simple, a workflow preference changed from the run and the
-// next-attempt difference without starting anything; an additional
-// instruction recorded once; keyboard, labels and layout.
+// Journeys: a block for all projects added from Home (title, kind, manager
+// and last editor shown); a project-local block added in the project editor
+// and read as inherited, under its scope, in the workflow editor; workflow
+// intent and a new local block edited together (separate saves, mode
+// switches, a live refresh, navigation protection, a conflicting save of
+// the block keeping the draft with both recovery options); the block for
+// all projects edited in place from a child editor, the wider scope named;
+// a run's request and attempt context in Simple, a workflow block added
+// from the run's "Settings for future attempts" and the next-attempt
+// difference without starting anything; an additional instruction recorded
+// once and kept out of every block; keyboard, labels and layout.
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { createServer } from 'node:http'
 import { hostname, tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import type { Page } from 'playwright-core'
+import type { Locator, Page } from 'playwright-core'
+import type { ScopeTarget } from '../shared/context.ts'
 import { createHandler } from '../server/api.ts'
 import { ContextStore } from '../server/contextStore.ts'
 import { createProject } from '../server/create.ts'
@@ -29,7 +34,7 @@ import { Watcher } from '../server/watch.ts'
 import { check, done, open, shot } from './lib.ts'
 
 const narrow = !!process.env.WFE_NARROW
-const tag = `p13ex1-${process.env.WFE_BROWSER === 'webkit' ? 'webkit' : 'chromium'}${narrow ? '-narrow' : ''}`
+const tag = `p14ctx-${process.env.WFE_BROWSER === 'webkit' ? 'webkit' : 'chromium'}${narrow ? '-narrow' : ''}`
 const pkg = join(dirname(fileURLToPath(import.meta.url)), '..')
 const root = await mkdtemp(join(tmpdir(), 'wfe-ctx-editors-'))
 await writeFile(join(root, 'gitconfig'), '[user]\n\tname = Check\n\temail = c@example.invalid\n[init]\n\tdefaultBranch = main\n')
@@ -100,22 +105,34 @@ async function noHScroll(label: string) {
   check(over <= 1, `${label}: no horizontal page scroll (overflow ${over}${wide ? `: ${wide}` : ''})`)
 }
 const settle = (p: Page, ms = 400) => p.waitForTimeout(ms)
+const SYS: ScopeTarget = { scope: 'system' }
+const PRJ: ScopeTarget = { scope: 'project', project: 'p' }
+const WF: ScopeTarget = { scope: 'workflow', project: 'p', workflow: 'make' }
+// Fills a block card's edit box (a new block, or one opened with Edit).
+async function addBlock(card: Locator, title: string, text: string) {
+  await card.locator('.ctx-block-edit:not([hidden])').waitFor()
+  await card.locator('input.ctx-block-title').fill(title)
+  await card.locator('textarea.context-editor').fill(text)
+}
 
 try {
   await page.goto(`${base}#/`)
   await page.evaluate(() => localStorage.setItem('workflow-editor.actor', 'Check Person'))
 
-  // ---- 3: instructions for all projects from Home, no project chosen ----
+  // ---- 3: an instruction for all projects from Home, no project chosen ----
   await page.reload()
   const home = await openSection('system')
   check(await mode() === 'simple', 'Home starts in Simple and the Context section opens there')
-  check(/no instructions for all projects/.test(await home.locator('.ctx-summary').innerText()), 'Home\'s summary says no instructions for all projects are set')
-  await home.locator('textarea.context-editor').fill('Write produced text in English unless a request asks otherwise.')
+  check(/nothing set for all projects/.test(await home.locator('.ctx-summary').innerText()), 'Home\'s summary says nothing is set for all projects')
+  await home.locator('.ctx-local .ctx-add button:has-text("+ Add an instruction")').click()
+  const homeCard = home.locator('.ctx-local article.ctx-block').first()
+  await addBlock(homeCard, 'English by default', 'Write produced text in English unless a request asks otherwise.')
   check(/unsaved changes/.test(await home.locator('.ctx-summary').innerText()), 'an unsaved instruction shows in the summary')
-  await home.locator('.ctx-save-row button.primary').click()
-  await home.locator('.banner.ok').waitFor()
-  check(/Saved for all projects/.test(await home.locator('.banner.ok').innerText()) && /nothing was started/.test(await home.locator('.banner.ok').innerText()), 'saving names the scope and says nothing was started')
-  check((await store.read({ scope: 'system' })).text?.startsWith('Write produced text in English') === true, 'the system instruction is in the store')
+  await homeCard.locator('.ctx-save-row button.primary').click()
+  await homeCard.locator('.banner.ok').waitFor()
+  check(/Saved for all projects/.test(await homeCard.locator('.banner.ok').innerText()) && /nothing was started/.test(await homeCard.locator('.banner.ok').innerText()), 'saving names the scope and says nothing was started')
+  check((await store.read(SYS, 'english-by-default')).block?.body.startsWith('Write produced text in English') === true, 'the system instruction is a block in the store, its id from its title')
+  check(await homeCard.getAttribute('data-kind') === 'instruction' && /Managed by Check Person/.test(await homeCard.locator('.ctx-manager').innerText()) && /Last edited by Check Person/.test(await homeCard.locator('.ctx-editor').innerText()), 'the saved card says its kind, its manager and its last editor')
   check(await mode() === 'simple', 'saving kept Simple')
   await shot(page, `${tag}-home`)
   if (narrow) await noHScroll('Home')
@@ -125,15 +142,18 @@ try {
   const proj = await openSection('project')
   check(await mode() === 'simple', 'the project editor\'s Context opens in Simple')
   await page.waitForFunction(() => (document.querySelector('.ctx-shared textarea') as HTMLTextAreaElement | null)?.value)
-  await proj.locator('.ctx-inherited .ctx-src').first().waitFor()
+  await proj.locator('.ctx-inherited article.ctx-block').first().waitFor()
   check(await proj.locator('.ctx-shared textarea').inputValue() === 'Make small things well.', 'the purpose is editable in the section (one control)')
   check(await page.locator('textarea[aria-label="Project purpose"]').count() === 1, 'the purpose has exactly one editor in the page')
-  check(/Instructions for all projects/.test(await proj.locator('.ctx-inherited').innerText()) && /Write produced text in English/.test(await proj.locator('.ctx-inherited').innerText()), 'the system instruction is shown as inherited, with its scope named')
-  await proj.locator('.ctx-local textarea.context-editor').waitFor()
-  await proj.locator('.ctx-local textarea.context-editor').fill('P notes start with the line "Project: P".')
-  await proj.locator('.ctx-local .ctx-save-row button.primary').click()
-  await proj.locator('.ctx-local .banner.ok').waitFor()
-  check(/every workflow of project p/.test(await proj.locator('.ctx-local .banner.ok').innerText()), 'the project instruction is saved for every workflow of the project')
+  const projInherited = await proj.locator('.ctx-inherited').innerText()
+  check(/All projects/.test(projInherited) && /English by default/.test(projInherited) && /Write produced text in English/.test(projInherited), 'the system block is shown as inherited, under its scope')
+  await proj.locator('.ctx-local .ctx-add button:has-text("+ Add an instruction")').click()
+  const projCard = proj.locator('.ctx-local article.ctx-block').first()
+  await addBlock(projCard, 'P notes', 'P notes start with the line "Project: P".')
+  await projCard.locator('.ctx-save-row button.primary').click()
+  await projCard.locator('.banner.ok').waitFor()
+  check(/every workflow of project p/.test(await projCard.locator('.banner.ok').innerText()), 'the project instruction is saved for every workflow of the project')
+  check((await store.read(PRJ, 'p-notes')).block?.body.includes('Project: P') === true, 'the project block is in the store')
   // Typing while the view refreshes in the background keeps the keyboard and the caret.
   const purpose = proj.locator('.ctx-shared textarea')
   await purpose.click(); await page.keyboard.press('End'); await page.keyboard.type(' Draft words')
@@ -149,68 +169,84 @@ try {
   const wf = await openSection('workflow')
   check(await mode() === 'simple', 'the workflow editor\'s Context opens in Simple')
   await wf.locator('.ctx-inherited .ctx-src').first().waitFor()
+  await wf.locator('.ctx-inherited article.ctx-block').first().waitFor()
   const inherited = await wf.locator('.ctx-inherited').innerText()
-  check(/Instructions for project p/.test(inherited) && /Project: P/.test(inherited), 'the project instruction is read as inherited in the workflow')
+  check(/Project p, only in this environment/.test(inherited) && /P notes/.test(inherited) && /Project: P/.test(inherited), 'the project block is read as inherited in the workflow, its scope named')
   check(/Project purpose and goals/.test(inherited) && /Project guide agent\/guide\.md/.test(inherited), 'project purpose and guide are shown as inherited')
   check(await page.locator('.canvas').isVisible(), 'the graph stays on the page with Context open')
 
-  // ---- 2: workflow intent and a local instruction together ----
+  // ---- 2: workflow intent and a local block together ----
   const intent = wf.locator('.ctx-shared textarea')
   await intent.fill('Make one small, tested thing.')
-  const local = wf.locator('.ctx-local textarea.context-editor')
-  await local.fill('Make keeps a CHANGELOG entry.')
+  await wf.locator('.ctx-local .ctx-add button:has-text("+ Add an instruction")').click()
+  const wfCard = wf.locator('.ctx-local article.ctx-block').first()
+  await addBlock(wfCard, 'Changelog', 'Make keeps a CHANGELOG entry.')
+  const local = wfCard.locator('textarea.context-editor')
   check(/unsaved changes/.test(await wf.locator('.ctx-summary').innerText()), 'both drafts show as unsaved in the summary')
   // Display switches keep both drafts.
   await page.click('.display-toggle button[data-display="detail"]')
   await page.click('.display-toggle button[data-display="simple"]')
-  check(await intent.inputValue() === 'Make one small, tested thing.' && await local.inputValue() === 'Make keeps a CHANGELOG entry.', 'mode switches keep both drafts')
+  check(await intent.inputValue() === 'Make one small, tested thing.' && await local.inputValue() === 'Make keeps a CHANGELOG entry.' && await wfCard.locator('input.ctx-block-title').inputValue() === 'Changelog', 'mode switches keep both drafts (the new block\'s title and text)')
   // A live refresh: the project file changes on disk.
   await writeFile(y, (await readFile(y, 'utf8')).replace('Make small things well.', 'Make small things very well.'))
   await settle(page, 1800)
-  check(await intent.inputValue() === 'Make one small, tested thing.' && await local.inputValue() === 'Make keeps a CHANGELOG entry.', 'a live refresh keeps both drafts')
+  check(await intent.inputValue() === 'Make one small, tested thing.' && await local.inputValue() === 'Make keeps a CHANGELOG entry.' && await wfCard.locator('input.ctx-block-title').inputValue() === 'Changelog', 'a live refresh keeps both drafts')
   check(/very well/.test(await wf.locator('.ctx-inherited').innerText()), 'the refresh shows the project\'s new purpose as inherited')
-  // Navigation protection counts the local draft.
+  // Navigation protection counts the new block's draft.
   dialogs.length = 0
   page.once('dialog', d => void d.dismiss().catch(() => {}))
   await page.evaluate(() => { location.hash = '#/ws/p' })
   await settle(page)
   check(dialogs.some(m => /Discard unsaved changes/.test(m)), 'leaving with drafts asks first')
-  // Save the local instruction alone: the definition stays unsaved.
+  // Save the local block alone: the definition stays unsaved.
   await page.goto(`${base}#/ws/p/wf/make.yaml`).catch(() => {})
   await settle(page)
   const wf2 = await openSection('workflow')
   if (await wf2.locator('.ctx-shared textarea').inputValue() !== 'Make one small, tested thing.') await wf2.locator('.ctx-shared textarea').fill('Make one small, tested thing.')
-  if (await wf2.locator('.ctx-local textarea.context-editor').inputValue() !== 'Make keeps a CHANGELOG entry.') await wf2.locator('.ctx-local textarea.context-editor').fill('Make keeps a CHANGELOG entry.')
-  await wf2.locator('.ctx-local .ctx-save-row button.primary').click()
-  await wf2.locator('.ctx-local .banner.ok').waitFor()
-  check(/every run of workflow make/.test(await wf2.locator('.ctx-local .banner.ok').innerText()), 'the workflow instruction saves on its own, naming its scope')
+  // The guard may have let the page go (the shared dialog handler accepts):
+  // start the block again once the section has read its scope (a block
+  // started before that first read is dropped when the list learns its target).
+  await wf2.locator('.ctx-inherited article.ctx-block').first().waitFor()
+  await settle(page)
+  if (await wf2.locator('.ctx-local article.ctx-block.editing').count() === 0) await wf2.locator('.ctx-local .ctx-add button:has-text("+ Add an instruction")').click()
+  const wfCard2 = wf2.locator('.ctx-local article.ctx-block').first()
+  if (await wfCard2.locator('textarea.context-editor').inputValue() !== 'Make keeps a CHANGELOG entry.') await addBlock(wfCard2, 'Changelog', 'Make keeps a CHANGELOG entry.')
+  await wfCard2.locator('.ctx-save-row button.primary').click()
+  await wfCard2.locator('.banner.ok').waitFor()
+  check(/every run of workflow make/.test(await wfCard2.locator('.banner.ok').innerText()), 'the workflow block saves on its own, naming its scope')
+  check((await store.read(WF, 'changelog')).block?.body.trim() === 'Make keeps a CHANGELOG entry.', 'the workflow block is in the store')
   check(/Unsaved changes/.test(await wf2.locator('.ctx-shared .ctx-save-state').innerText()), 'the definition draft is still unsaved after the local save')
   check(/unsaved changes in project.yaml|Saved context only/.test(await wf2.locator('.ctx-preview-note').textContent() ?? ''), 'the preview says unsaved definition edits are not included')
   await wf2.locator('.ctx-shared button.primary:has-text("Save workflow")').click()
   await settle(page, 800)
   check(/Make one small, tested thing\./.test(await readFile(wfFile, 'utf8')), 'the definition saves through the workflow\'s own save')
-  // A conflicting save of the local instruction.
-  const cur = await store.read({ scope: 'workflow', project: 'p', workflow: 'make' })
-  await store.write({ scope: 'workflow', project: 'p', workflow: 'make' }, 'Edited elsewhere.', { by: 'Other', base: cur.sha256 })
-  await wf2.locator('.ctx-local textarea.context-editor').fill('My later edit.')
-  await wf2.locator('.ctx-local .ctx-save-row button.primary').click()
-  await wf2.locator('.ctx-local .ctx-conflict').waitFor()
-  check(/Edited elsewhere\./.test(await wf2.locator('.ctx-local .ctx-conflict').innerText()) && await wf2.locator('.ctx-local textarea.context-editor').inputValue() === 'My later edit.', 'a conflicting save is refused, shows what is saved, keeps the draft')
+  // A conflicting save: someone else saves the block after the person started editing it.
+  await wfCard2.locator('button:has-text("Edit")').click()
+  await wfCard2.locator('textarea.context-editor').fill('My later edit.')
+  const cur = await store.read(WF, 'changelog')
+  await store.set(WF, 'changelog', { body: 'Edited elsewhere.' }, { by: 'Other', base: cur.base })
+  await wfCard2.locator('.ctx-save-row button.primary').click()
+  await wfCard2.locator('.ctx-conflict').waitFor()
+  check(/Other changed this block/.test(await wfCard2.locator('.banner.error').innerText()) && /Edited elsewhere\./.test(await wfCard2.locator('.ctx-conflict').innerText()) && await wfCard2.locator('textarea.context-editor').inputValue() === 'My later edit.', 'a conflicting save is refused, names who saved, shows what is saved, keeps the draft')
+  check(await wfCard2.locator('button:has-text("Use the saved text (discard mine)")').count() === 1 && await wfCard2.locator('button:has-text("Save mine over it")').count() === 1, 'the conflict offers both ways out')
   await shot(page, `${tag}-workflow-conflict`)
-  await wf2.locator('.ctx-local button:has-text("Save mine over it")').click()
-  await wf2.locator('.ctx-local .banner.ok').waitFor()
-  check((await store.read({ scope: 'workflow', project: 'p', workflow: 'make' })).text?.trim() === 'My later edit.', 'saving over it after seeing the conflict works')
+  await wfCard2.locator('button:has-text("Save mine over it")').click()
+  await wfCard2.locator('.banner.ok').waitFor()
+  check((await store.read(WF, 'changelog')).block?.body.trim() === 'My later edit.', 'saving over it after seeing the conflict works')
 
-  // ---- 3 (child editor): instructions for all projects from the workflow ----
-  await wf2.locator('button:has-text("Edit instructions for all projects")').click()
-  const widerBox = wf2.locator('.ctx-wider:not([hidden])')
-  await widerBox.waitFor()
-  check(/wider scope: this applies to all projects/.test(await widerBox.innerText()), 'editing from a child editor names the wider scope')
-  await widerBox.locator('textarea.context-editor').fill('Write produced text in English unless a request asks otherwise.\nKeep notes short.')
-  await widerBox.locator('.ctx-save-row button.primary').click()
-  await widerBox.locator('.banner.ok').waitFor()
-  check(/Saved for all projects/.test(await widerBox.locator('.banner.ok').innerText()) && /every affected run/.test(await widerBox.locator('.banner.ok').innerText()), 'saving the wider scope says it affects every affected run')
-  check((await store.read({ scope: 'workflow', project: 'p', workflow: 'make' })).text?.trim() === 'My later edit.', 'no narrower override was created by the wider save')
+  // ---- 3 (child editor): the block for all projects edited from the workflow ----
+  const sysCard = wf2.locator('.ctx-inherited article.ctx-block[data-scope="system"]', { hasText: 'English by default' })
+  check(/All projects/.test(await sysCard.locator('xpath=ancestor::div[contains(@class,"ctx-inherit-scope")]').locator('h4').innerText()) && /all projects/.test(await sysCard.locator('.ctx-block-scope').innerText()), 'the inherited block names its scope: all projects')
+  await sysCard.locator('button:has-text("Edit")').click()
+  await sysCard.locator('.ctx-block-edit:not([hidden])').waitFor()
+  check(/wider scope: this applies to all projects/.test(await sysCard.locator('.ctx-wider-note').innerText()), 'editing from a child editor names the wider scope')
+  await sysCard.locator('textarea.context-editor').fill('Write produced text in English unless a request asks otherwise.\nKeep notes short.')
+  await sysCard.locator('.ctx-save-row button.primary').click()
+  await sysCard.locator('.banner.ok').waitFor()
+  check(/Saved for all projects/.test(await sysCard.locator('.banner.ok').innerText()) && /every affected run/.test(await sysCard.locator('.banner.ok').innerText()), 'saving the wider scope says it affects every affected run')
+  check((await store.read(SYS, 'english-by-default')).block?.body.includes('Keep notes short.') === true, 'the wider save changed the system block')
+  const wfBlocks = (await store.blocks(WF)).filter(s => s.block)
+  check(wfBlocks.length === 1 && wfBlocks[0].block?.body.trim() === 'My later edit.', 'no narrower block was created by the wider save')
   check(await mode() === 'simple', 'all of it happened in Simple')
   await shot(page, `${tag}-workflow`)
   if (narrow) await noHScroll('workflow editor')
@@ -226,19 +262,24 @@ try {
   await card.locator('.run-used strong').waitFor()
   const used = await card.locator('.run-used').innerText()
   check(/Attempt \S+ — Prepared/.test(used) && /delivered to the agent/.test(used), 'the attempt\'s context and its delivery are said in Simple')
-  check(/Instructions for all projects/.test(used) === false, 'the attempt lists what it was given then (no instruction for all projects existed)')
-  check(/Settings changed since attempt/.test(await card.locator('.run-next').innerText()) && /Instructions for all projects/.test(await card.locator('.run-next').innerText()), 'settings saved since are shown as changes for the next attempt')
-  await card.locator('.run-settings button:has-text("Edit workflow instructions")').click()
-  const wbox = card.locator('.run-settings .ctx-wider:not([hidden])')
+  check(/All projects instruction/.test(used) === false, 'the attempt lists what it was given then (no block for all projects existed)')
+  check(/Settings changed since attempt/.test(await card.locator('.run-next').innerText()) && /All projects instruction: English by default/.test(await card.locator('.run-next').innerText()), 'blocks saved since are shown, by name, as changes for the next attempt')
+  await card.locator('.run-settings button:has-text("Workflow context")').click()
+  const wbox = card.locator('.run-settings .ctx-wider[data-settings="workflow"]:not([hidden])')
   await wbox.waitFor()
   check(/future attempts of every run of workflow make, this run included/.test(await wbox.innerText()) && /sends nothing to this run/.test(await wbox.innerText()), 'editing a preference from a run says it applies to future attempts of all affected runs and sends nothing')
+  await wbox.locator('article.ctx-block').first().waitFor()
+  check(/Changelog/.test(await wbox.innerText()), 'the workflow\'s blocks are listed in the run\'s settings')
   await page.locator('.node').first().click()
   const selected = await page.locator('.node.selected').getAttribute('data-id')
-  await wbox.locator('textarea.context-editor').fill('Make keeps a CHANGELOG entry, dated.')
-  await wbox.locator('.ctx-save-row button.primary').click()
+  await wbox.locator('.ctx-add button:has-text("+ Add an instruction")').click()
+  const runCard = wbox.locator('article.ctx-block.editing').first()
+  await addBlock(runCard, 'Dated entries', 'Date every CHANGELOG entry.')
+  await runCard.locator('.ctx-save-row button.primary').click()
   await wbox.locator('.banner.ok').waitFor()
-  await page.waitForFunction(() => /Instructions for the workflow/.test(document.querySelector('.run-next')?.textContent ?? ''), null, { timeout: 8000 }).catch(() => {})
-  check(/Instructions for the workflow/.test(await card.locator('.run-next').innerText()), 'the saved workflow preference shows as a next-attempt change')
+  check((await store.read(WF, 'dated-entries')).block?.body.trim() === 'Date every CHANGELOG entry.', 'the preference saved from the run is a workflow block')
+  await page.waitForFunction(() => /Workflow instruction: Dated entries/.test(document.querySelector('.run-next')?.textContent ?? ''), null, { timeout: 8000 }).catch(() => {})
+  check(/Workflow instruction: Dated entries/.test(await card.locator('.run-next').innerText()), 'the saved workflow preference shows as a next-attempt change')
   check(await card.locator('.run-used').innerText() === used, 'what the current attempt was given is unchanged')
   const after = await runJson()
   check(after.record.seq === before.record.seq && after.record.history.filter(e => e.op === 'attempt.begin').length === before.record.history.filter(e => e.op === 'attempt.begin').length, 'saving a preference recorded nothing in the run and started no attempt')
@@ -254,7 +295,8 @@ try {
   const recd = await runJson()
   const ins = Object.values(recd.record.instructions ?? {})
   check(ins.length === 1 && ins[0].text === 'Use plain words in the summary.' && ins[0].from === 'Check Person', 'the instruction is recorded once, with whose words it is')
-  check(!(await store.read({ scope: 'workflow', project: 'p', workflow: 'make' })).text?.includes('plain words'), 'the instruction is not a preference: no override holds it')
+  const anyBlock = [...await store.blocks(SYS), ...await store.blocks(PRJ), ...await store.blocks(WF)]
+  check(!anyBlock.some(s => s.block?.body.includes('plain words')), 'the instruction is not a preference: no block holds it')
   check(!/plain words/.test(await card.locator('.run-next').innerText()), 'and it is not listed among next-attempt settings')
   check(await card.locator('textarea[aria-label="Instruction for this run"]').inputValue() === '', 'the sent text leaves the form')
 
@@ -263,7 +305,7 @@ try {
   await page.keyboard.press('Enter')
   check(await card.locator('.ctx-toggle').getAttribute('aria-expanded') === 'false', 'the section toggles from the keyboard')
   await page.keyboard.press('Enter')
-  const unlabelled = await page.evaluate(() => [...document.querySelectorAll('.ctx-section textarea, .ctx-section input')].filter(e => !(e.getAttribute('aria-label') || (e.id && document.querySelector(`label[for="${e.id}"]`)) || e.closest('label'))).length)
+  const unlabelled = await page.evaluate(() => [...document.querySelectorAll('.ctx-section textarea, .ctx-section input, .ctx-section select')].filter(e => !(e.getAttribute('aria-label') || (e.id && document.querySelector(`label[for="${e.id}"]`)) || e.closest('label'))).length)
   check(unlabelled === 0, `every context control has a label (${unlabelled} without)`)
   await page.click('.display-toggle button[data-display="detail"]')
   await card.locator('.run-ctx-detail > summary').click()
@@ -290,6 +332,7 @@ try {
   // Matrix links reach the editors' sections.
   await page.goto(`${base}#/context/p/make`)
   await page.waitForSelector('.ctx-table')
+  check(/P notes/.test(await page.locator('.ctx-override[data-scope="project"]').innerText()) && /Changelog/.test(await page.locator('.ctx-override[data-scope="workflow"]').innerText()), 'the matrix lists each scope\'s blocks')
   await page.click('.ctx-override[data-scope="project"] a.button')
   await section('project').waitFor()
   await settle(page, 600)
@@ -298,7 +341,7 @@ try {
   check(false, `the journey ran to its end (${(e as Error).message.split('\n')[0]})`)
   await shot(page, `${tag}-failure`).catch(() => {})
 } finally {
-  const unexpected = failed.filter(f => !/^409 .*api\/context\/override/.test(f) && !/^404 .*api\/boast\/p\?/.test(f))
+  const unexpected = failed.filter(f => !/^409 .*api\/context\/block/.test(f) && !/^404 .*api\/boast\/p\?/.test(f))
   check(unexpected.length === 0, `no failed request but the expected conflict${unexpected.length ? `: ${unexpected.join(' | ')}` : ''}`)
   // WebKit reports a fetch cut short by page.reload() as an access-control failure.
   const errs = errors.filter(e => !/status of (404|409)/.test(e) && !/due to access control checks/.test(e))

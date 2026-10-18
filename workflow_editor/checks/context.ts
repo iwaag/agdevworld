@@ -1,19 +1,24 @@
-// p13 browser check: the Context view and a run's context, against a private
-// fixture on this host's LAN name over plain HTTP. Needs a built UI (`vite build`).
+// p13 browser check, adapted to p14's context blocks: the Context view and a
+// run's context, against a private fixture on this host's LAN name over
+// plain HTTP. Needs a built UI (`vite build`).
 //
 //   node checks/context.ts            (Chromium)
 //   WFE_BROWSER=webkit node checks/context.ts
+//   WFE_NARROW=1 node checks/context.ts   (390 px throughout; the last step is 390 px in any case)
 //
 // Checks: entrances from home, project and workflow views; the matrix with
-// defaults and overrides; editing with the unsaved marker; save with its
-// next-attempt explanation and revision history; a conflicting edit;
-// clearing; the resolved preview and the copy action; the run view's
-// used-versus-next comparison with a changed source marked; a narrow layout.
+// defaults and each scope's local blocks; adding a workflow block in Quick
+// edit with the unsaved marker; save with its next-attempt explanation and
+// the block's revision history; a conflicting edit of the block and taking
+// the saved text; removing the block; the resolved preview and the copy
+// action; the run view's used-versus-next comparison with a changed source
+// marked; a narrow layout.
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { createServer } from 'node:http'
 import { hostname, tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import type { ScopeTarget } from '../shared/context.ts'
 import { createHandler } from '../server/api.ts'
 import { ContextStore } from '../server/contextStore.ts'
 import { createProject } from '../server/create.ts'
@@ -51,7 +56,8 @@ const y = join(dir, 'project.yaml')
 await writeFile(y, `${await readFile(y, 'utf8')}guides: [agent/guide.md]\n`)
 await gitOk(dir, ['add', '-A']); await gitOk(dir, ['commit', '-q', '-m', 'workflow'])
 const store = new ContextStore(area)
-await store.write({ scope: 'system' }, 'Write deliverables in English unless asked otherwise.', { by: 'Check', base: null })
+const WF: ScopeTarget = { scope: 'workflow', project: 'p', workflow: 'make' }
+await store.set({ scope: 'system' }, 'english', { title: 'English deliverables', kind: 'instruction', body: 'Write deliverables in English unless asked otherwise.' }, { by: 'Check', base: 0 })
 const x = new ExecStore({ registryFile: registry, area })
 const req = await x.request({ workspace: 'p', workflow: 'make', text: 'Make it.', author: 'Check', receipt: 'ctx-check-0001', via: 'browser' })
 const claim = await x.claim('check', { profiles: {}, contract: { name: 'wfrun/guide.md', sha256: 'c'.repeat(64) } })
@@ -68,7 +74,8 @@ const host = process.env.WFE_LAN_HOST ?? (hostname().endsWith('.local') ? hostna
 const base = `http://${host}:${port}/`
 console.log(`fixture service at ${base}`)
 
-const { browser, page, errors } = await open(1400, 1000)
+const narrow = !!process.env.WFE_NARROW
+const { browser, page, errors } = await open(narrow ? 390 : 1400, narrow ? 844 : 1000)
 const failed: string[] = []
 page.on('response', r => { if (r.status() >= 400) failed.push(`${r.status()} ${r.url()}`) })
 try {
@@ -87,33 +94,41 @@ try {
   const matrix = await page.locator('.ctx-table').innerText()
   check(/Project P: intent and goals/.test(matrix) && /guide agent\/guide\.md/.test(matrix) && /Make: intent/.test(matrix), 'defaults: project intent and goals, the project guide, the workflow intent')
   check(/declared by project\.yaml guides and workflow execution\.guides; delivered once/.test(matrix), 'a guide declared twice is one source')
-  check(/Write deliverables in English/.test(matrix), 'the system override is shown')
+  check(/English deliverables/.test(await page.locator('.ctx-override[data-scope="system"]').innerText()) && /managed by Check/.test(await page.locator('.ctx-override[data-scope="system"]').innerText()), 'the system block is listed in its cell, with its manager')
   check(/runs are created, not pre-authored/.test(matrix), 'the run column says there is no run default')
-  await shot(page, 'p13-context-matrix')
+  await shot(page, 'p14-context-matrix')
 
-  // Edit the workflow override.
-  await page.fill('input[aria-label="Revision author"]', 'Check Person')
-  await page.fill('textarea.context-editor', 'Make runs keep a CHANGELOG entry.')
+  // Add a workflow block in Quick edit.
+  const quick = page.locator('.ctx-edit')
+  await quick.locator('.ctx-add button:has-text("+ Add an instruction")').click()
+  const card = quick.locator('article.ctx-block').first()
+  await card.locator('input.ctx-block-title').fill('Changelog')
+  await card.locator('input[aria-label="Revision author"]').fill('Check Person')
+  await card.locator('textarea.context-editor').fill('Make runs keep a CHANGELOG entry.')
   check(await page.locator('text=Unsaved changes').count() === 1, 'an unsaved edit is marked')
-  await page.click('button.primary:has-text("Save")')
-  await page.waitForSelector('.banner.ok')
-  const saved = await page.locator('.banner.ok').innerText()
+  await card.locator('.ctx-save-row button.primary:has-text("Save")').click()
+  await card.locator('.banner.ok').waitFor()
+  const saved = await card.locator('.banner.ok').innerText()
   check(/next attempt/.test(saved) && /nothing was started/i.test(saved), 'saving says it applies to the next attempt and starts nothing')
+  check((await store.read(WF, 'changelog')).block?.body.trim() === 'Make runs keep a CHANGELOG entry.', 'the block is in the store under an id from its title')
   await page.waitForFunction(() => /Make runs keep a CHANGELOG entry/.test(document.querySelector('.ctx-rendered')?.textContent ?? ''), null, { timeout: 5000 }).catch(() => {})
-  check(/Make runs keep a CHANGELOG entry/.test(await page.locator('.ctx-rendered').innerText()), 'the resolved preview includes the new override')
-  await page.click('summary:has-text("Revision history")')
-  check(/revision 1/.test(await page.locator('.ctx-revisions').innerText()) && /Check Person/.test(await page.locator('.ctx-revisions').innerText()), 'revision history names the author')
+  check(/Make runs keep a CHANGELOG entry/.test(await page.locator('.ctx-rendered').innerText()), 'the resolved preview includes the new block')
+  check(/Changelog/.test(await page.locator('.ctx-override[data-scope="workflow"]').innerText()), 'the matrix lists the new block in its cell')
+  await card.locator('summary:has-text("Revision history")').click()
+  await card.locator('.ctx-revisions').waitFor()
+  check(/revision 1/.test(await card.locator('.ctx-revisions').innerText()) && /Check Person/.test(await card.locator('.ctx-revisions').innerText()), 'revision history names the author')
 
-  // A conflicting edit: someone else saves first.
-  const cur = await store.read({ scope: 'workflow', project: 'p', workflow: 'make' })
-  await store.write({ scope: 'workflow', project: 'p', workflow: 'make' }, 'Edited elsewhere.', { by: 'Other', base: cur.sha256 })
-  await page.fill('textarea.context-editor', 'My later edit.')
-  await page.click('button.primary:has-text("Save")')
-  await page.waitForSelector('.ctx-conflict')
-  check(/someone saved this instruction/.test(await page.locator('.banner.error').innerText()) && /Edited elsewhere\./.test(await page.locator('.ctx-conflict').innerText()), 'a conflicting edit is refused and shows what is saved now')
-  await shot(page, 'p13-context-conflict')
-  await page.click('button:has-text("Use the saved text (discard mine)")')
-  check(await page.inputValue('textarea.context-editor') === 'Edited elsewhere.\n', 'loading the current revision replaces the draft')
+  // A conflicting edit: someone else saves after the person started editing.
+  await card.locator('button:has-text("Edit")').click()
+  await card.locator('textarea.context-editor').fill('My later edit.')
+  const cur = await store.read(WF, 'changelog')
+  await store.set(WF, 'changelog', { body: 'Edited elsewhere.' }, { by: 'Other', base: cur.base })
+  await card.locator('.ctx-save-row button.primary:has-text("Save")').click()
+  await card.locator('.ctx-conflict').waitFor()
+  check(/Other changed this block/.test(await card.locator('.banner.error').innerText()) && /Edited elsewhere\./.test(await card.locator('.ctx-conflict').innerText()), 'a conflicting edit is refused and shows what is saved now')
+  await shot(page, 'p14-context-conflict')
+  await card.locator('button:has-text("Use the saved text (discard mine)")').click()
+  check(/Edited elsewhere\./.test(await card.locator('.ctx-block-content pre.ctx-text').innerText()) && !(await card.getAttribute('class'))?.includes('editing') && await card.locator('textarea.context-editor').inputValue() === 'Edited elsewhere.\n', 'taking the saved text replaces the draft and closes the edit box')
 
   // Copy.
   await page.click('button:has-text("Authoring")')
@@ -131,17 +146,17 @@ try {
   const run = await page.locator('.run-context').innerText()
   check(/Attempt \S+ — Prepared/.test(run) && /delivered to the agent/.test(run), 'the attempt\'s context and its delivery are shown')
   check(/Changes for the next attempt/.test(run) && /This attempt keeps what it was given/.test(run), 'the next attempt is labelled as not yet applied')
-  check(await page.locator('.run-next .pill.ctx-change-added').count() >= 1, 'the added workflow override is marked')
+  check(await page.locator('.run-next .pill.ctx-change-added').count() >= 1 && /Workflow instruction: Changelog/.test(await page.locator('.run-next').innerText()), 'the added workflow block is marked, by name')
   check(/Add an instruction for this run/.test(run), 'current-run steering is offered as an instruction')
   // Cleared: the source is marked removed once.
-  const cur2 = await store.read({ scope: 'workflow', project: 'p', workflow: 'make' })
-  await store.write({ scope: 'workflow', project: 'p', workflow: 'make' }, null, { by: 'Check', base: cur2.sha256 })
+  const cur2 = await store.read(WF, 'changelog')
+  await store.remove(WF, 'changelog', { by: 'Check', base: cur2.base })
   await page.click('.display-toggle button[data-display="detail"]')
   await page.click('.run-ctx-detail > summary')
   await page.click('.run-ctx-detail button:has-text("Read again")')
   await page.waitForTimeout(800)
   check(await page.locator('.run-next .pill.ctx-change-removed').count() === 0, 'a source absent in both the last attempt and now is not marked')
-  await shot(page, 'p13-run-context')
+  await shot(page, 'p14-run-context')
 
   // Narrow layout.
   await page.setViewportSize({ width: 390, height: 844 })
@@ -150,8 +165,8 @@ try {
   const over = await page.evaluate(() => document.scrollingElement!.scrollWidth - window.innerWidth)
   const wide = over > 1 ? await page.evaluate(() => [...document.querySelectorAll('body *')].filter(e => e.getBoundingClientRect().right > window.innerWidth + 1).slice(0, 6).map(e => `${e.tagName.toLowerCase()}.${[...e.classList].join('.')}`).join(', ')) : ''
   check(over <= 1, `no horizontal page scroll at 390px (overflow ${over}${wide ? `: ${wide}` : ''})`)
-  await shot(page, 'p13-context-narrow')
-  const unexpected = failed.filter(f => !/^409 .*api\/context\/override/.test(f) && !/^404 .*api\/boast\/p\?/.test(f)) // the conflict on purpose; the fixture has no Boast page
+  await shot(page, 'p14-context-narrow')
+  const unexpected = failed.filter(f => !/^409 .*api\/context\/block/.test(f) && !/^404 .*api\/boast\/p\?/.test(f)) // the conflict on purpose; the fixture has no Boast page
   check(unexpected.length === 0, `no failed request but the expected conflict${unexpected.length ? `: ${unexpected.join(' | ')}` : ''}`)
   check(errors.filter(e => !/status of (404|409)/.test(e)).length === 0, `no console error besides those requests${errors.length ? ` (${errors.filter(e => !/status of (404|409)/.test(e)).join(' | ')})` : ''}`)
 } finally {

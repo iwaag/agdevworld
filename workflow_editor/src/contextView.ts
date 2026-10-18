@@ -1,17 +1,16 @@
-// Context (workflow_editor p13, docs/context.md): the scope matrix of a
-// project (and one of its workflows) — what is kept as a default in the
-// project's repositories and what is the Developer's local override, at each
-// scope — with the override editor, its revision history, and the bundle the
-// same resolver as execution produces. #/context/<workspace>[/<workflow>].
-import { sourceLabel, type ContextBundle, type ContextSource, type OverrideRevision, type OverrideState } from '../shared/context.ts'
-import { api, ApiError, type ContextMatrixView } from './api.ts'
+// Context overview (workflow_editor p13, p13 ex1; docs/context.md): the
+// scope matrix of a project (and one of its workflows) — what is kept as a
+// default in the project's repositories and what is the Developer's local
+// override, at each scope — with links to the editor that owns each cell,
+// the same override editor the editors use, and the bundle the same
+// resolver as execution produces. #/context/<workspace>[/<workflow>].
+import { sourceLabel, type ContextBundle, type ContextSource, type OverrideState, type OverrideTarget } from '../shared/context.ts'
+import { api, type ContextMatrixView } from './api.ts'
 import { append, h, when } from './dom.ts'
 import type { ViewHandle } from './main.ts'
 import { displayToggle } from './displayMode.ts'
-
-const ACTOR_KEY = 'workflow-editor.actor'
-const stored = () => { try { return localStorage.getItem(ACTOR_KEY) ?? '' } catch { return '' } }
-const store = (v: string) => { try { localStorage.setItem(ACTOR_KEY, v) } catch { /* per-viewer convenience only */ } }
+import { OverrideEditor } from './contextParts.ts'
+import { keepingFocus } from './createWorkflow.ts'
 
 type Scope = 'system' | 'project' | 'workflow'
 const DELIVERY: Record<string, string> = { body: 'included', reference: 'reference', absent: 'not set', error: 'unreadable' }
@@ -44,76 +43,49 @@ export function sourceRow(s: ContextSource, link?: string | null): HTMLElement {
     s.delivery === 'reference' && s.reference ? h('div.small.muted', `named, not included: ${s.reference}`) : null)
 }
 
+export const projectContextHref = (wsId: string) => `#/ws/${encodeURIComponent(wsId)}/context`
+export const workflowContextHref = (wsId: string, workflow: string) => `#/ws/${encodeURIComponent(wsId)}/wf/${encodeURIComponent(`${workflow}.yaml`)}/context`
+export const systemContextHref = '#/home/context'
+
+// The overview (p13 ex1): routine editing is in Home, the project and the
+// workflow editors; this page compares scopes side by side, links to the
+// editor that owns each cell, and keeps the same editor for a quick change.
 export function renderContextView(root: HTMLElement, wsId: string, workflowId?: string): ViewHandle {
   let view: ContextMatrixView | null = null
   let loadError = ''
   let selected: Scope = workflowId ? 'workflow' : 'project'
-  let draft = '' // the editor's text
-  let base: OverrideState | null = null // the override as last read (what a save replaces)
-  let revisions: (OverrideRevision & { text: string | null })[] = []
-  let message: HTMLElement | null = null
   let preview: 'execution' | 'authoring' = workflowId ? 'execution' : 'authoring'
-  let busy = false
   let disposed = false
+  const editors = new Map<Scope, OverrideEditor>()
 
   const agdevworld = location.pathname.startsWith('/wfe/') ? '/' : 'http://localhost:8093/'
   const header = h('header.topbar', h('div.crumbs', h('a.back-to-world', { href: agdevworld }, '← agdevworld'), h('span.sep', '|'),
     h('a', { href: '#/' }, 'agdev'), h('span.sep', '/'), h('a', { href: `#/ws/${encodeURIComponent(wsId)}` }, wsId),
-    workflowId ? [h('span.sep', '/'), h('span', workflowId)] : null, h('span.sep', '/'), h('span.muted', 'Context')),
-    h('div.top-actions', h('button', { onclick: () => void load(true) }, 'Refresh'), displayToggle()))
+    workflowId ? [h('span.sep', '/'), h('span', workflowId)] : null, h('span.sep', '/'), h('span.muted', 'Context overview')),
+    h('div.top-actions', h('button', { onclick: () => void load() }, 'Refresh'), displayToggle()))
   const main = h('main.context-view')
+  const editorSlot = h('section.card.ctx-edit')
   root.append(header, main)
-  const by = h('input', { 'aria-label': 'Your name', placeholder: 'your name', value: stored(), oninput: () => store(by.value.trim()) })
-  const textarea = h('textarea.context-editor', { rows: 10, spellcheck: false, 'aria-label': 'Override text', oninput: () => { draft = textarea.value; renderButtons() } }) as HTMLTextAreaElement
-  const buttons = h('div.row.tight')
 
-  const target = (s: Scope) => s === 'system' ? { scope: s } : s === 'project' ? { scope: s, project: view!.project } : { scope: s, project: view!.project, workflow: view!.workflow! }
+  const target = (s: Scope): OverrideTarget => s === 'system' ? { scope: s } : s === 'project' ? { scope: s, project: view!.project } : { scope: s, project: view!.project, workflow: view!.workflow! }
   const overrideOf = (s: Scope): OverrideState | null => !view ? null : s === 'system' ? view.overrides.system : s === 'project' ? view.overrides.project : view.overrides.workflow
-  const dirty = () => !!base && draft !== (base.text ?? '')
-
-  async function load(keepDraft = false) {
-    try { view = await api.context(wsId, workflowId ?? null); loadError = '' } catch (e) { loadError = (e as Error).message }
-    if (view) await select(selected, keepDraft)
-    if (!disposed) render()
-  }
-  async function select(s: Scope, keepDraft = false) {
-    if (s === 'workflow' && !view?.workflow) s = 'project'
-    selected = s
-    const t = target(s)
-    const r = await api.override(t.scope, (t as { project?: string }).project, (t as { workflow?: string }).workflow).catch(e => { loadError = (e as Error).message; return null })
-    if (!r) return
-    base = r.state; revisions = r.revisions
-    if (!keepDraft) { draft = r.state.text ?? ''; textarea.value = draft }
-  }
-
-  async function save(text: string | null) {
-    if (!by.value.trim()) { message = h('div.banner.error', 'Enter your name: every revision records who wrote it.'); render(); return }
-    busy = true; render()
-    try {
-      const t = target(selected)
-      const r = await api.saveOverride({ ...t, text, base: base?.sha256 ?? null, by: by.value.trim() })
-      message = h('div.banner.ok', r.changed ? `${text === null ? 'Cleared' : 'Saved'} revision ${r.revisions.at(-1)?.rev}. It applies to the next attempt of affected runs and to authoring sessions that read it. Nothing was started or resumed, and no attempt in progress changes; to steer a run now, send it an instruction from its run view's Conversation, or wfe run instruct.` : 'Unchanged: that is already the saved text.')
-      base = r.state; revisions = r.revisions; draft = r.state.text ?? ''; textarea.value = draft
-      view = await api.context(wsId, workflowId ?? null).catch(() => view)
-    } catch (e) {
-      const conflict = e instanceof ApiError && (e.detail as { code?: string } | undefined)?.code === 'context-conflict'
-      const cur = conflict ? (e.detail as { current: OverrideState }).current : null
-      message = h('div.banner.error', (e as Error).message,
-        cur ? h('div.ctx-conflict', h('p.small', `Now saved${cur.updated ? ` (${when(cur.updated.at)}, ${cur.updated.by})` : ''}:`), h('pre.small', cur.text ?? '(not set)'),
-          h('div.row.tight',
-            h('button', { onclick: () => { base = cur; draft = cur.text ?? ''; textarea.value = draft; message = null; render() } }, 'Load it (discard my edit)'),
-            h('button', { onclick: () => { base = cur; message = null; void save(text) } }, 'Save mine over it'))) : null)
+  const dirty = () => [...editors.values()].some(e => e.isDirty())
+  const ownerHref = (s: Scope) => s === 'system' ? systemContextHref : s === 'project' ? projectContextHref(wsId) : workflowContextHref(wsId, view!.workflow!)
+  const editorOf = (s: Scope) => {
+    let e = editors.get(s)
+    if (!e) {
+      e = new OverrideEditor(target(s), { label: s === 'system' ? 'Instructions for all projects' : s === 'project' ? `Instructions for project ${view!.project}` : `Instructions for workflow ${view!.workflow}`, onSaved: () => void load(), onChange: () => {} })
+      editors.set(s, e)
+      void e.refresh()
     }
-    busy = false
-    render()
+    return e
   }
 
-  function renderButtons() {
-    buttons.replaceChildren(
-      h('button.primary', { disabled: busy || !dirty(), onclick: () => void save(draft) }, 'Save'),
-      h('button', { disabled: busy || !dirty(), onclick: () => { draft = base?.text ?? ''; textarea.value = draft; renderButtons() } }, 'Discard changes'),
-      h('button.danger', { disabled: busy || !base?.text, onclick: () => { if (confirm('Clear this override? Its contribution is removed; inherited defaults stay.')) void save(null) } }, 'Clear'),
-      ...(dirty() ? [h('span.small.warn-text', 'Unsaved changes')] : []))
+  async function load() {
+    try { view = await api.context(wsId, workflowId ?? null); loadError = '' } catch (e) { loadError = (e as Error).message }
+    if (view && selected === 'workflow' && !view.workflow) selected = 'project'
+    if (view) await Promise.all([...editors.values()].map(e => e.refresh()))
+    if (!disposed) render()
   }
 
   // The scope matrix: columns are scopes, rows are storage.
@@ -121,43 +93,33 @@ export function renderContextView(root: HTMLElement, wsId: string, workflowId?: 
     const all = new Map<string, ContextSource>()
     for (const s of [...(v.execution?.sources ?? []), ...v.authoring.sources]) if (!all.has(s.key) || s.applies.length > all.get(s.key)!.applies.length) all.set(s.key, s)
     const of = (scope: string, category: string) => [...all.values()].filter(s => s.scope === scope && s.category === category && s.scope !== 'run')
-    const link = (s: ContextSource) => s.key === 'project/intent' ? `#/ws/${encodeURIComponent(wsId)}` : s.key === 'workflow/intent' && v.workflow ? `#/ws/${encodeURIComponent(wsId)}/wf/${encodeURIComponent(`${v.workflow}.yaml`)}` : null
+    const link = (s: ContextSource) => s.scope === 'project' && s.category === 'default' ? projectContextHref(wsId) : s.scope === 'workflow' && s.category === 'default' && v.workflow ? workflowContextHref(wsId, v.workflow) : null
     const overrideCell = (s: Scope) => {
       const o = overrideOf(s)
       if (!o) return h('td.ctx-cell.muted', 'choose a workflow')
-      return h(`td.ctx-cell.ctx-override${selected === s ? '.selected' : ''}`,
-        h('div.ctx-source-head', h(`span.pill.ctx-${o.problem ? 'error' : o.text === null ? 'absent' : 'body'}`, o.problem ? 'unreadable' : o.text === null ? 'not set' : 'set'), h('code.small', o.file)),
+      return h(`td.ctx-cell.ctx-override${selected === s ? '.selected' : ''}`, { dataset: { scope: s } },
+        h('div.ctx-source-head', h(`span.pill.ctx-${o.problem ? 'error' : o.text === null ? 'absent' : 'body'}`, o.problem ? 'unreadable' : o.text === null ? 'not set' : 'set'), h('code.small.d-only', o.file)),
         o.text !== null ? h('div.small.muted', o.revision !== null ? `revision ${o.revision} · ${when(o.updated!.at)} by ${o.updated!.by}` : 'edited outside WFE') : null,
         o.text ? h('div.ctx-excerpt.small', o.text.length > 160 ? `${o.text.slice(0, 160)}…` : o.text) : null,
-        h('button.small', { disabled: selected === s, onclick: () => { if (dirty() && !confirm('Discard the unsaved override text?')) return; message = null; void select(s).then(render) } }, selected === s ? 'Editing below' : 'Edit'))
+        h('div.row.tight', h('a.button.small', { href: ownerHref(s), title: 'Open the editor where this instruction belongs' }, s === 'system' ? 'Open in Home' : s === 'project' ? 'Open in the project' : 'Open in the workflow'),
+          h('button.small', { disabled: selected === s, onclick: () => { selected = s; render() } }, selected === s ? 'Editing below' : 'Quick edit')))
     }
     const defaults = (scope: Scope) => h('td.ctx-cell', of(scope, 'default').length ? of(scope, 'default').map(s => sourceRow(s, link(s))) : h('span.muted.small', scope === 'workflow' && !v.workflow ? 'choose a workflow' : 'none'))
     return h('section.card.ctx-matrix',
       h('div.card-head', h('h2', 'Scope matrix'), h('label.small', 'Workflow ', h('select', { onchange: (e: Event) => { const id = (e.target as HTMLSelectElement).value; location.hash = `#/context/${encodeURIComponent(wsId)}${id ? `/${encodeURIComponent(id)}` : ''}` } },
         h('option', { value: '', selected: !v.workflow }, '(project only)'), ...v.workflows.map(w => h('option', { value: w.id, selected: w.id === v.workflow }, w.name === w.id ? w.id : `${w.name} (${w.id})`))))),
-      h('p.small.muted', 'Scope says how widely a source applies, not which one wins: an explicit request or a more specific instruction refines a general one. Defaults live in the project\'s repositories; overrides are your local settings in this WFE area, never in Git.'),
+      h('p.small.muted', 'An overview for comparing scopes. Each instruction is edited where you work on its object: Home for all projects, the project editor, the workflow editor. Scope says how widely a source applies, not which one wins: an explicit request or a more specific instruction refines a general one.'),
       h('div.ctx-table-wrap', h('table.ctx-table',
         h('thead', h('tr', h('th', ''), h('th', 'System', h('div.small.muted', 'every project')), h('th', 'Project', h('div.small.muted', v.project)), h('th', 'Workflow', h('div.small.muted', v.workflow ?? '—')), h('th', 'Run', h('div.small.muted', 'each run')))),
         h('tbody',
-          h('tr', h('th', 'Default', h('div.small.muted', 'repository-owned')), defaults('system'), defaults('project'), defaults('workflow'), h('td.ctx-cell.muted.small', 'none: runs are created, not pre-authored')),
-          h('tr', h('th', 'Override', h('div.small.muted', 'local, not in Git')), overrideCell('system'), overrideCell('project'), overrideCell('workflow'), h('td.ctx-cell.small', h('span.muted', 'run input: the request, answers and instructions, in each run\'s view (Context shows what an attempt was given)')))))))
+          h('tr', h('th', 'Shared', h('div.small.muted', 'in the repository')), defaults('system'), defaults('project'), defaults('workflow'), h('td.ctx-cell.muted.small', 'none: runs are created, not pre-authored')),
+          h('tr', h('th', 'Local', h('div.small.muted', 'this host, not in Git')), overrideCell('system'), overrideCell('project'), overrideCell('workflow'), h('td.ctx-cell.small', h('span.muted', 'run input: the request and later instructions, in each run\'s view')))))))
   }
 
   function editor(): HTMLElement {
-    const label = selected === 'system' ? 'System override — every project in this area' : selected === 'project' ? `Project override — ${view!.project}, every workflow` : `Workflow override — ${view!.project}/${view!.workflow}, its runs and its authoring`
-    renderButtons()
-    return h('section.card.ctx-edit',
-      h('h2', label),
-      base?.problem ? h('div.banner.error', base.problem) : null,
-      base?.external ? h('div.banner.warn', 'The file was edited outside WFE since its last recorded revision; saving keeps that content as a revision first.') : null,
-      textarea,
-      h('div.row.tight', h('label.small', 'Saving as ', by), h('span.small.muted', base?.sha256 ? `replaces ${base.sha256.slice(0, 12)}` : 'nothing saved yet')),
-      buttons,
-      h('p.small.muted', 'Changes affect the next attempt of affected runs (a run whose session policy is run starts a new session then); an attempt in progress keeps what it was given. Saving starts nothing.'),
-      h('details.ctx-history', h('summary.small', `Revision history (${revisions.length})`),
-        revisions.length ? h('ol.ctx-revisions', { reversed: true }, ...[...revisions].reverse().map(r => h('li',
-          h('div.small', h('strong', `revision ${r.rev}`), ` · ${when(r.at)} · ${r.by}${r.external ? ' (found edited outside WFE)' : ''} · ${r.sha256 ? r.sha256.slice(0, 12) : 'removed'}`),
-          r.text !== null ? h('pre.small', r.text) : h('p.small.muted', 'removed')))) : h('p.small.muted', 'No revision yet.')))
+    const e = editorOf(selected)
+    editorSlot.replaceChildren(h('h2', 'Quick edit'), e.el)
+    return editorSlot
   }
 
   function resolved(v: ContextMatrixView): HTMLElement {
@@ -172,7 +134,7 @@ export function renderContextView(root: HTMLElement, wsId: string, workflowId?: 
         h(`button.panel-toggle${preview === 'authoring' ? '.active' : ''}`, { onclick: () => { preview = 'authoring'; render() } }, 'Authoring'))),
       !b ? h('p.muted', 'Choose a workflow to see what its next run would be prepared with.') : [
         h('p.small.muted', preview === 'execution'
-          ? 'What a new run of this workflow would be prepared with now, by the same resolver as the claim. The common execution contract is the execution host\'s and is composed before this text at claim; a run reads its defaults from its own copy, made from the committed project.'
+          ? 'Saved settings: what a new run of this workflow would be prepared with now, by the same resolver as the claim. The common execution contract is the execution host\'s and is composed before this text at claim; a run reads its defaults from its own copy, made from the committed project.'
           : 'Guidance for a workflow author: available to copy, not injected. WFE does not launch IDE sessions, so nothing here is verified as delivered to one.'),
         h('div.ctx-sources', b.sources.filter(s => s.scope !== 'run').map(s => h('div.ctx-line', h('span.chip', sourceLabel(s)), deliveryPill(s)))),
         h('div.row.tight', h('button', { onclick: async () => { status.textContent = await copyText(text ?? '', pre) } }, 'Copy text'),
@@ -183,10 +145,12 @@ export function renderContextView(root: HTMLElement, wsId: string, workflowId?: 
 
   function render() {
     if (disposed) return
-    main.replaceChildren()
-    if (loadError) main.append(h('div.banner.error', loadError))
-    if (!view) { main.append(h('p.muted', loadError ? '' : 'Loading…')); return }
-    append(main, [message, matrix(view), editor(), resolved(view)])
+    keepingFocus(main, () => {
+      main.replaceChildren()
+      if (loadError) main.append(h('div.banner.error', loadError))
+      if (!view) { main.append(h('p.muted', loadError ? '' : 'Loading…')); return }
+      append(main, [matrix(view), editor(), resolved(view)])
+    })
   }
   void load()
   return { dispose: () => { disposed = true }, isDirty: dirty }
@@ -228,17 +192,20 @@ export function runContextPanel(wsId: string, workflow: string, run: string, con
   return box
 }
 
-// #/context without a project: the system override is edited from any
-// project's matrix; choose one (the system scope is this WFE area).
+// #/context without a project: the instructions for all projects (the
+// system scope is this WFE area, no project is needed), and the projects
+// whose matrices compare the other scopes.
 export function renderContextChooser(root: HTMLElement): ViewHandle {
   const agdevworld = location.pathname.startsWith('/wfe/') ? '/' : 'http://localhost:8093/'
   const main = h('main.context-view')
-  root.append(h('header.topbar', h('div.crumbs', h('a.back-to-world', { href: agdevworld }, '← agdevworld'), h('span.sep', '|'), h('a', { href: '#/' }, 'agdev'), h('span.sep', '/'), h('span.muted', 'Context')), h('div.top-actions', displayToggle())), main)
-  main.append(h('p.muted', 'Loading…'))
-  void api.workspaces().then(r => main.replaceChildren(h('section.card',
-    h('h2', 'Context'),
-    h('p', 'The system override (every project in this area) and each project\'s and workflow\'s defaults and overrides are shown in one matrix per project. Choose a project:'),
-    h('ul.ctx-projects', r.workspaces.filter(w => w.observed.available).map(w => h('li', h('a', { href: `#/context/${encodeURIComponent(w.id)}` }, w.label || w.id), h('span.small.muted', ` ${w.id}`)))))))
-    .catch(e => main.replaceChildren(h('div.banner.error', (e as Error).message)))
-  return { dispose: () => {}, isDirty: () => false }
+  const system = new OverrideEditor({ scope: 'system' }, { label: 'Instructions for all projects', onChange: () => {} })
+  const list = h('section.card', h('h2', 'Projects'), h('p.muted', 'Loading…'))
+  root.append(h('header.topbar', h('div.crumbs', h('a.back-to-world', { href: agdevworld }, '← agdevworld'), h('span.sep', '|'), h('a', { href: '#/' }, 'agdev'), h('span.sep', '/'), h('span.muted', 'Context overview')), h('div.top-actions', displayToggle())), main)
+  main.append(h('section.card.ctx-edit', h('h2', 'All projects'), system.el), list)
+  void system.refresh()
+  void api.workspaces().then(r => list.replaceChildren(h('h2', 'Projects'),
+    h('p', 'Each project\'s scope matrix compares its shared and local instructions with its workflows\'. Choose a project:'),
+    h('ul.ctx-projects', r.workspaces.filter(w => w.observed.available).map(w => h('li', h('a', { href: `#/context/${encodeURIComponent(w.id)}` }, w.label || w.id), h('span.small.muted', ` ${w.id}`))))))
+    .catch(e => list.replaceChildren(h('div.banner.error', (e as Error).message)))
+  return { dispose: () => {}, isDirty: () => system.isDirty() }
 }

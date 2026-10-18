@@ -898,3 +898,50 @@ html[data-display="simple"] .project-grid > .boast { margin: 0 32px; border-radi
 .ctx-line { flex-wrap: wrap; max-width: 100%; }
 .ctx-line .chip { white-space: normal; overflow-wrap: anywhere; }
 .ctx-resolved code { overflow-wrap: anywhere; }
+
+/* Context inside the editors (p13 ex1): one collapsible section per object. */
+.ctx-section { background: var(--card); border: 1px solid var(--line); border-radius: 12px; min-width: 0; box-sizing: border-box; }
+.ctx-head { display: flex; align-items: center; gap: 8px; }
+.ctx-toggle { flex: 1; display: flex; align-items: baseline; gap: 10px; text-align: left; background: none; border: 0; padding: 10px 14px; cursor: pointer; color: var(--text); min-width: 0; flex-wrap: wrap; border-radius: 12px; }
+.ctx-toggle:hover { background: #f6f7f9; }
+.ctx-toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.ctx-toggle .ctx-caret { transform: rotate(-90deg); transition: transform .12s; align-self: center; }
+.ctx-section.open .ctx-toggle .ctx-caret { transform: none; }
+.ctx-title { font-weight: 650; font-size: 15px; }
+.ctx-summary { min-width: 0; overflow-wrap: anywhere; }
+.ctx-body { padding: 4px 14px 14px; display: grid; gap: 14px; }
+.ctx-body[hidden] { display: none; }
+.ctx-group { display: grid; gap: 8px; min-width: 0; }
+.ctx-group > h3 { margin: 6px 0 0; font-size: 14px; }
+.ctx-group + .ctx-group { border-top: 1px solid var(--line); padding-top: 10px; }
+.ctx-override { display: grid; gap: 6px; min-width: 0; }
+.ctx-label { font-weight: 600; font-size: 13px; }
+.ctx-hint { margin: 0; }
+.ctx-save-row { flex-wrap: wrap; align-items: center; }
+.ctx-by-label { display: inline-flex; gap: 4px; align-items: center; }
+.ctx-by { width: 9em; }
+.ctx-status:empty { display: none; }
+.ctx-status .banner { margin: 0; }
+.ctx-meta { margin: 0; overflow-wrap: anywhere; }
+.ctx-list { margin: 0; padding-left: 22px; display: grid; gap: 4px; }
+.ctx-list li { display: flex; gap: 6px; align-items: center; }
+.ctx-list li input { flex: 1; min-width: 0; }
+.ctx-src { border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; background: #fbfbfa; display: grid; gap: 4px; min-width: 0; }
+.ctx-src.problem { border-color: #e2a7a2; background: var(--error-bg); }
+.ctx-src-head { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; font-size: 13px; }
+.ctx-src-head .button, .ctx-src-head button { margin-left: auto; }
+.ctx-src p { margin: 0; overflow-wrap: anywhere; }
+.ctx-text { white-space: pre-wrap; overflow-wrap: anywhere; margin: 0; font-family: inherit; font-size: 13px; max-height: 18em; overflow: auto; }
+.ctx-inherited-list { display: grid; gap: 8px; }
+.ctx-inherit-item { display: grid; gap: 6px; }
+.ctx-wider { border-left: 3px solid var(--accent); padding: 6px 0 6px 12px; display: grid; gap: 6px; }
+.ctx-wider[hidden] { display: none; }
+.ctx-preview-box summary { cursor: pointer; font-size: 13px; font-weight: 600; }
+.ctx-preview-note { margin: 6px 0; }
+.ctx-shared .field textarea { width: 100%; box-sizing: border-box; }
+.ctx-shared .save-row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+@media (max-width: 640px) {
+  .ctx-toggle { padding: 10px 12px; }
+  .ctx-body { padding: 4px 12px 12px; }
+  .ctx-src-head .button, .ctx-src-head button { margin-left: 0; }
+}

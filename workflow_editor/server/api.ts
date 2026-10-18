@@ -246,9 +246,9 @@ export function createHandler(config: ServiceConfig) {
         throw new RequestError(404, 'not found')
       }
 
-      // ---- scoped context (p13, docs/context.md): the matrix, overrides, history ----
+      // ---- scoped context (p13, p14; docs/context.md): the matrix, blocks, details ----
       if (a === 'context') {
-        const { ContextStore, overrideTarget } = await import('./contextStore.ts')
+        const { ContextStore, applyBlockOp, scopeTarget } = await import('./contextStore.ts')
         const store = new ContextStore(area)
         const q = (k: string) => url.searchParams.get(k) || undefined
         if (!wsId && method === 'GET') {
@@ -256,20 +256,29 @@ export function createHandler(config: ServiceConfig) {
           const ws = await workspace(str(q('workspace'), 'workspace'))
           return send(res, 200, await contextMatrix({ registryFile: config.registryFile, area, gitea: config.gitea, giteaProblem: config.giteaProblem }, ws, q('workflow') ?? null))
         }
-        if (wsId === 'overrides' && !b && method === 'GET') return send(res, 200, { overrides: await store.list() })
-        if (wsId === 'override' && !b) {
+        // Blocks of one scope, or of every scope (?all=1).
+        if (wsId === 'blocks' && !b && method === 'GET') {
+          if (q('all')) return send(res, 200, { blocks: await store.all() })
+          return send(res, 200, { blocks: await store.blocks(scopeTarget(str(q('scope'), 'scope'), q('project'), q('workflow'))) })
+        }
+        if (wsId === 'block' && !b) {
           if (method === 'GET') {
-            const t = overrideTarget(str(q('scope'), 'scope'), q('project'), q('workflow'))
-            return send(res, 200, { state: await store.read(t), revisions: await store.history(t) })
+            const t = scopeTarget(str(q('scope'), 'scope'), q('project'), q('workflow'))
+            const id = str(q('block'), 'block')
+            return send(res, 200, { state: await store.read(t, id), revisions: await store.history(t, id) })
           }
           if (method === 'PUT') {
             const input = await body(req) as Record<string, unknown>
-            const t = overrideTarget(str(input.scope, 'scope'), typeof input.project === 'string' ? input.project : undefined, typeof input.workflow === 'string' ? input.workflow : undefined)
-            if (input.text !== null && typeof input.text !== 'string') throw new RequestError(400, 'text is the override (text), or null to clear it')
-            if (input.base !== null && typeof input.base !== 'string') throw new RequestError(400, 'base is the sha256 of the content you read, or null when there was none')
-            const r = await store.write(t, input.text as string | null, { by: str(input.by, 'by'), base: input.base as string | null, note: typeof input.note === 'string' ? input.note : undefined })
-            return send(res, 200, { ok: true, ...r, revisions: await store.history(t) })
+            if (typeof input.op !== 'string' || typeof input.scope !== 'string' || typeof input.block !== 'string') throw new RequestError(400, '{op, scope, project?, workflow?, block, base, by, …} (docs/context.md)')
+            const r = await applyBlockOp(store, { ...(input as unknown as import('./contextStore.ts').BlockOpInput), via: typeof input.via === 'string' ? input.via : 'http' }, config.exec ? id => config.exec!.attemptRun(id) : undefined)
+            return send(res, 200, { ok: true, ...r, revisions: await store.history(r.state.target, r.state.id) })
           }
+        }
+        // A block's detail by its logical reference; ?raw=1 as text.
+        if (wsId === 'detail' && !b && method === 'GET') {
+          const d = await store.detail(str(q('ref'), 'ref'))
+          if (q('raw')) { res.writeHead(200, { 'content-type': `${d.name.endsWith('.json') ? 'application/json' : 'text/plain'}; charset=utf-8`, 'cache-control': 'no-store' }); res.end(d.text); return }
+          return send(res, 200, d)
         }
         throw new RequestError(404, `no route for ${method} ${url.pathname}`)
       }

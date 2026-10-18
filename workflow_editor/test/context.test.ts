@@ -378,3 +378,51 @@ test('service: a writer without the area reaches its store through the HTTP API,
     x.close()
   }
 })
+
+test('CLI: a writer on another host (no area, no registry) goes through --service; the local CLI writes the area\'s store; both name where they wrote', async () => {
+  const { registry, area, store, x } = await setup()
+  const { execFile } = await import('node:child_process')
+  const cli = join(import.meta.dirname, '..', 'cli', 'wfe.ts')
+  const elsewhere = await mkdtemp(join(root, 'other-host-'))
+  const run = (args: string[], env: Record<string, string | undefined>) => new Promise<{ code: number; out: string; err: string }>(res => {
+    const e: NodeJS.ProcessEnv = { ...process.env, ...env }
+    for (const k of Object.keys(env)) if (env[k] === undefined) delete e[k]
+    execFile(process.execPath, [cli, 'context', ...args], { cwd: elsewhere, env: e }, (err, out, er) => res({ code: err ? (err as { code?: number }).code ?? 1 : 0, out, err: er }))
+  })
+  const server = createServer(createHandler({ registryFile: registry, area, allowedOrigins: [], exec: x }))
+  await new Promise<void>(r => server.listen(0, '127.0.0.1', r))
+  const url = `http://127.0.0.1:${(server.address() as { port: number }).port}/`
+  try {
+    await writeFile(join(elsewhere, 'ev.json'), JSON.stringify(ev()))
+    await writeFile(join(elsewhere, 'hosts.md'), 'agpc: CUDA\n')
+    const noArea = { WFE_REGISTRY: undefined, WFE_AREA: undefined, WFE_SERVICE: url, WFE_ATTEMPT: undefined }
+    const a = await run(['set', 'system', 'cluster', '--base', 'new', '--title', 'Cluster summary', '--kind', 'information', '--manager', 'cagent', '--text', 'agpc has a CUDA GPU.', '--evidence', 'ev.json', '--detail', 'hosts.md=hosts.md', '--consult', 'cagent/consult', '--by', 'cagent-agent', '--run', 'cagent/context/run-003', '--json'], noArea)
+    assert.equal(a.code, 0, a.err + a.out)
+    const j = JSON.parse(a.out) as { changed: boolean; written: string; state: { base: number } }
+    assert.equal(j.changed, true)
+    assert.equal((await store.read(SYS, 'cluster')).block!.editor.via, 'cli')
+    // Unchanged republication through the service: no revision.
+    const again = await run(['set', 'system', 'cluster', '--base', String(j.state.base), '--text', 'agpc has a CUDA GPU.', '--by', 'cagent-agent', '--json'], noArea)
+    assert.equal(JSON.parse(again.out).changed, false)
+    const stale = await run(['set', 'system', 'cluster', '--base', '0', '--text', 'other', '--by', 'x'], noArea)
+    assert.notEqual(stale.code, 0)
+    assert.match(stale.err + stale.out, /changed since it was read/)
+    const d = await run(['detail', 'context:system/cluster/hosts.md'], noArea)
+    assert.equal(d.out, 'agpc: CUDA\n')
+    const g = await run(['get', 'system', 'cluster'], noArea)
+    assert.match(g.out, /information, "Cluster summary", managed by cagent, last edited by cagent-agent/)
+    // A project write needs its project named, locally and remotely.
+    const np = await run(['set', 'project', 'x', '--base', 'new', '--title', 't', '--kind', 'instruction', '--text', 'b', '--by', 'x'], noArea)
+    assert.match(np.err + np.out, /--project <id> is required/)
+    // The local CLI (the launcher's area) writes the same store.
+    const loc = await run(['check', 'system', 'cluster', '--base', String(j.state.base), '--by', 'iwaag', '--json'], { WFE_REGISTRY: registry, WFE_AREA: area, WFE_SERVICE: undefined, WFE_ATTEMPT: undefined })
+    assert.equal(loc.code, 0, loc.err + loc.out)
+    assert.match(JSON.parse(loc.out).written, /context store of the WFE area/)
+    assert.equal((await store.read(SYS, 'cluster')).block!.checked!.by, 'iwaag')
+    const h = await run(['history', 'system', 'cluster'], noArea)
+    assert.match(h.out, /revision 2 .* check +iwaag \[bookkeeping\]/)
+  } finally {
+    await new Promise<void>(r => server.close(() => r()))
+    x.close()
+  }
+})

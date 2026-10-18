@@ -134,6 +134,14 @@ try {
   await proj.locator('.ctx-local .ctx-save-row button.primary').click()
   await proj.locator('.ctx-local .banner.ok').waitFor()
   check(/every workflow of project p/.test(await proj.locator('.ctx-local .banner.ok').innerText()), 'the project instruction is saved for every workflow of the project')
+  // Typing while the view refreshes in the background keeps the keyboard and the caret.
+  const purpose = proj.locator('.ctx-shared textarea')
+  await purpose.click(); await page.keyboard.press('End'); await page.keyboard.type(' Draft words')
+  await writeFile(join(dir, 'agent', 'guide.md'), '# P guide\nFacts of P, refreshed.\n')
+  await settle(page, 2200)
+  const kept = await page.evaluate(() => { const a = document.activeElement as HTMLTextAreaElement | null; return { label: a?.getAttribute('aria-label'), at: a?.selectionStart, len: a?.value.length } })
+  check(kept.label === 'Project purpose' && kept.at === kept.len, `a background refresh keeps focus and caret in the purpose (${JSON.stringify(kept)})`)
+  await purpose.fill('Make small things well.')
   await shot(page, `${tag}-project`)
   if (narrow) await noHScroll('project editor')
 

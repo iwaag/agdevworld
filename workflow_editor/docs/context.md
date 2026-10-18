@@ -2,7 +2,7 @@
 
 What WFE gives an agent besides a run's own records, from which scope, and
 from whose storage. One resolver (`server/context.ts`) serves every consumer:
-a run's claim, the "next attempt" preview, the browser's Context view,
+a run's claim, the "next attempt" preview, the browser's editors and Context overview,
 `wfe context` and an authoring session. Tool usage is in `wfe context --help`.
 
 ## The matrix
@@ -103,8 +103,9 @@ an override explains purpose and usage.
    once.
 5. **Saving an override** affects the next attempt of each affected run. It
    never interrupts or changes an open attempt, and it starts or resumes
-   nothing. Steering current work is `wfe run instruct` (the run view's
-   additional instruction).
+   nothing. Steering current work is an additional instruction (the run
+   view's *Add an instruction for this run*, a post in the request
+   conversation, or `wfe run instruct`).
 6. **Delegation.** A child run resolves its own project and workflow: the
    parent's overrides do not reach it; its request carries the delegated
    work explicitly.
@@ -130,8 +131,33 @@ The WFE bundle is not the whole model prompt. Also present:
   not hold such files (the installed authoring entry is therefore in
   `<area>/authoring/`, not an ancestor of any run copy);
 - an IDE session's own configuration. WFE does not launch IDE sessions: the
-  authoring context is available (`wfe context show`, the Context view's copy
-  action), never verified as injected.
+  authoring context is available (`wfe context show`, the Context overview's
+  copy action), never verified as injected.
+
+## Where it is edited in the browser (p13 ex1)
+
+Context is part of each editor, in Simple and in Detail alike; a display
+switch changes how much provenance is shown, not what can be done.
+
+| Editor | Context section |
+| --- | --- |
+| Home (`#/home/context`) | *Instructions for all projects* (the system override); no project is chosen |
+| Project (`#/ws/<ws>/context`) | *Shared with this project*: purpose, goals and `guides` of `project.yaml` (the editor's one draft and *Save project.yaml*), with each guide's content; *Your instructions for this project* (override); *Inherited instructions* (all projects), editable in place |
+| Workflow (`#/ws/<ws>/wf/<file>/context`) | *Shared with this project*: the intent and `execution.guides` (the editor's draft and Save); *Your instructions for this workflow*; inherited project purpose, goals, guides and instructions, and the instructions for all projects; *What a new run is given (saved settings)* |
+| Run (the *Context* card) | the original request (read only); *Instructions for this run* with *Add an instruction* (`instruction.receive`); *Used for this attempt*; *Changes for the next attempt*; *Settings for future attempts* (the workflow, project and system overrides, in place); Detail: every attempt |
+
+- One value has one control: the intent and goals live only in Context;
+  *Intent & approvals* shows the saved intent it approves.
+- Definition values save with their file; each override has its own Save.
+  No single save writes both; each reports its own result. A view's
+  navigation guard counts both kinds of draft, and a live refresh never
+  replaces a draft (a newer saved override is announced, and saving then
+  asks which to keep).
+- Editing a wider scope from a narrower editor names the wider scope and
+  never creates a narrower override.
+- `#/context[/<ws>[/<workflow>]]` is the overview: the scope matrix, links
+  to the owning editor's section, a quick edit with the same editor, and
+  the resolved text.
 
 ## Read surfaces
 

@@ -7,9 +7,11 @@ export async function openSettings(page: Page) {
   if (!(await page.getByLabel('New binding key').isVisible())) await page.getByRole('button', { name: 'Workflow settings' }).click()
 }
 
-// Intent & approvals (p8): the authoritative intent and both approvals, behind one entry.
+// The intent is edited in the workflow's Context section (p13 ex1); the
+// approvals stay behind Intent & approvals (p8). Opens both.
 export async function openIntent(page: Page) {
-  if (!(await page.getByLabel('Workflow intent').isVisible())) await page.getByRole('button', { name: 'Intent & approvals' }).click()
+  if (!(await page.getByLabel('Workflow intent').isVisible())) await page.locator('.ctx-section[data-context-scope="workflow"] .ctx-toggle').click()
+  if (!(await page.getByRole('button', { name: 'Approve intent' }).isVisible())) await page.getByRole('button', { name: 'Intent & approvals' }).click()
 }
 
 // An inspector group (p8: Appearance, Repositories, Connections), opened if closed.

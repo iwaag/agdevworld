@@ -19,6 +19,7 @@ import { h, when } from './dom.ts'
 import { icon } from './icons.ts'
 import { renderInspector } from './inspector.ts'
 import { displayToggle, isSimple, onDisplay, setDisplay } from './displayMode.ts'
+import { ContextSection, ListEditor } from './contextParts.ts'
 import { autoArrange, completeLayout, freeSlot, type DisplayMode } from '../shared/layout.ts'
 import type { ViewHandle } from './main.ts'
 
@@ -35,7 +36,7 @@ const TYPE_HINT: Record<string, string> = {
   delegate: 'Entrust work to another workflow and use its result',
 }
 
-export function renderWorkflowView(root: HTMLElement, wsId: string, file: string): ViewHandle {
+export function renderWorkflowView(root: HTMLElement, wsId: string, file: string, opts: { context?: boolean } = {}): ViewHandle {
   let resp: WorkflowResponse | null = null
   let saved: Workflow | null = null // last valid content read from disk
   let draft: Workflow | null = null
@@ -82,11 +83,14 @@ export function renderWorkflowView(root: HTMLElement, wsId: string, file: string
   const approvalRecords = h('div.approval-records')
   const approvalNote = h('p.small.muted')
   const approvalErrorEl = h('p.error.small')
+  // The intent is edited in Context (p13 ex1); this panel shows the saved
+  // text it approves.
+  const savedIntent = h('pre.ctx-text.saved-intent')
   const intentPanel = h('section.intent-panel.d-only#intent-panel', { hidden: true, 'aria-label': 'Intent and approvals' },
     h('div.intent-col',
-      h('label.panel-label', { htmlFor: 'intent' }, icon('intent', 'icon small'), 'Workflow intent (ground truth)'),
-      intentInput,
-      h('p.small.muted', 'Everything else in the workflow is reviewed against this text. Approving it records the saved text and its digest.')),
+      h('div.panel-label', icon('intent', 'icon small'), 'Workflow intent (ground truth), as saved'),
+      savedIntent,
+      h('p.small.muted', 'Everything else in the workflow is reviewed against this text. Approving it records the saved text and its digest. ', h('button.link-btn', { onclick: () => ctxSection.reveal(false, () => intentInput.focus({ preventScroll: true })) }, 'Edit it in Context'))),
     h('div.approval-col',
       h('div.panel-label', 'Approvals'),
       approvalRecords,
@@ -126,14 +130,34 @@ export function renderWorkflowView(root: HTMLElement, wsId: string, file: string
   canvas.el.append(hint)
   const rawView = h('pre.raw')
   // Scoped context of this workflow (p13): its defaults and the local overrides.
-  const contextLink = h('a.button.d-only', { href: `#/context/${encodeURIComponent(wsId)}`, title: 'What runs and authors of this workflow are given: defaults and your local preferences, by scope' }, 'Context')
+  const contextLink = h('a.button.d-only', { href: `#/context/${encodeURIComponent(wsId)}`, title: 'Compare this workflow\'s instructions with the project\'s and all projects\', side by side' }, 'Context overview')
   const body = h('main.wf-body', h('div.canvas-col', toolbar, canvas.el, rawView), inspector)
+
+  // Context (p13 ex1): the workflow's purpose and guides (this view's one
+  // draft and Save) and its local instructions, with what it inherits from
+  // the project and from all projects; shown in both modes.
+  const guidesEditor = new ListEditor({ label: 'Guides', item: 'Guide', placeholder: 'agent/guide.md, or <project>:<path>', addLabel: 'Add guide', onInput: (v, structural) => { if (draft) { draft.execution.guides = v; update(structural) } } })
+  const sharedSave = h('button.primary', { onclick: () => void save() }, 'Save workflow')
+  const sharedState = h('span.ctx-save-state')
+  const sharedControls = h('div.ctx-workflow-shared',
+    h('label.field', h('span', 'Purpose (intent)'), intentInput),
+    h('p.small.muted', 'Everything else in the workflow is reviewed against this text; runs and authors are given it.'),
+    guidesEditor.el,
+    h('p.small.muted', 'Guides the project declares are given to every workflow already (Inherited instructions); list here only this workflow\'s own.'),
+    h('div.save-row', sharedSave, sharedState, h('span.small.muted', 'Writes the workflow file. Local instructions below save separately.')))
+  const ctxSection = new ContextSection({
+    scope: 'workflow', wsId, shared: sharedControls,
+    sharedSummary: () => { const w = draft ?? saved; return !w ? 'workflow not read' : [w.intent.trim() ? 'purpose set' : 'no purpose', `${w.execution.guides.length} guide${w.execution.guides.length === 1 ? '' : 's'}`].join(' · ') },
+    sharedDirty: () => dirty(),
+    projectHref: () => `#/ws/${encodeURIComponent(wsId)}/context`,
+  })
 
   root.append(
     h('header.app-header', crumbs, h('div.top-actions', contextLink, refreshButton, saveStateEl, saveButton, displayToggle())),
     h('section.title-band',
       h('div.title-main', nameInput, purpose, fileLine),
       h('div.title-side', approvalPills, h('div.title-actions', simpleApproval, validation, intentToggle, settingsToggle))),
+    ctxSection.el,
     intentPanel,
     banners,
     body,
@@ -151,7 +175,7 @@ export function renderWorkflowView(root: HTMLElement, wsId: string, file: string
     intentPanel.hidden = !open
     intentToggle.setAttribute('aria-expanded', String(open))
     intentToggle.classList.toggle('active', open)
-    if (open) intentInput.focus({ preventScroll: true })
+    if (open) approverInput.focus({ preventScroll: true })
   }
 
   function openSettings(from: HTMLElement, section?: string) {
@@ -249,7 +273,7 @@ export function renderWorkflowView(root: HTMLElement, wsId: string, file: string
       // A refresh that keeps the draft does not rebuild the inspector while
       // someone is typing in it; it is rebuilt on the next selection or edit.
       const typing = inspector.contains(document.activeElement)
-      if (opts.contextOnly) { update(!typing); return }
+      if (opts.contextOnly) { update(!typing); void ctxSection.reload(); return }
       const changedOnDisk = r.rev !== rev
       const before = draft
       rev = r.rev
@@ -270,6 +294,7 @@ export function renderWorkflowView(root: HTMLElement, wsId: string, file: string
       }
       const replaced = draft !== before
       update(replaced || !typing, replaced)
+      if (changedOnDisk) void ctxSection.reload()
     } catch (e) {
       notice = (e as Error).message
       update(true)
@@ -361,6 +386,7 @@ export function renderWorkflowView(root: HTMLElement, wsId: string, file: string
       externalChange = false
       saveState = `Saved ${new Date().toLocaleTimeString()}`
       await load({ contextOnly: true })
+      void ctxSection.reload()
     } catch (e) {
       saveError = `Save failed: ${(e as Error).message}. The draft is kept; retry when resolved.`
       update(false)
@@ -497,7 +523,13 @@ export function renderWorkflowView(root: HTMLElement, wsId: string, file: string
     // The purpose preview: the intent's first line; the whole text is in the panel.
     // The intent's first paragraph (a hard-wrapped sentence reads as one).
     const first = draft.intent.trim().split(/\n\s*\n/)[0]?.split('\n').map(x => x.trim()).join(' ')
-    purpose.replaceChildren(first ? h('span', { title: draft.intent }, first) : h('span.warn-text', 'No intent yet — write it under Intent & approvals.'))
+    purpose.replaceChildren(first ? h('span', { title: draft.intent }, first) : h('span.warn-text', 'No purpose yet — write it in Context.'))
+    if (savedIntent.textContent !== (saved?.intent ?? '')) savedIntent.textContent = saved?.intent ?? ''
+    guidesEditor.set(draft.execution.guides, readonly())
+    sharedSave.disabled = readonly() || !dirty()
+    sharedState.textContent = saveStateEl.textContent
+    ctxSection.setWorkflow(saved?.id || draft.id || null)
+    ctxSection.updateSummary()
     const issues = validateWorkflow(draft, context())
     const errors = issues.filter(i => i.severity === 'error'), warnings = issues.filter(i => i.severity === 'warning')
     validation.hidden = false
@@ -521,6 +553,7 @@ export function renderWorkflowView(root: HTMLElement, wsId: string, file: string
     saveButton.disabled = readonly() || !dirty()
     saveStateEl.textContent = saveError ? 'Save failed' : problem ? 'Read-only' : dirty() ? 'Unsaved changes' : (saveState || 'Saved')
     saveStateEl.className = `save-state${saveError ? ' error' : dirty() ? ' dirty' : ''}`
+    sharedState.textContent = saveError ? 'Save failed — see the banner above' : saveStateEl.textContent
     if (selection?.kind === 'node' && !draft.nodes[selection.id]) selection = null
     if (selection?.kind === 'edge' && !draft.edges[selection.index]) selection = null
     if (selection?.kind === 'step' && !effective?.nodes[selection.id]) selection = null
@@ -577,9 +610,10 @@ export function renderWorkflowView(root: HTMLElement, wsId: string, file: string
   renderCrumbs()
   void load({})
   void loadProjectName()
+  if (opts.context) requestAnimationFrame(() => ctxSection.reveal(false))
 
   return {
-    dispose: () => { disposed = true; offDisplay(); stream.close(); canvas.dispose(); window.removeEventListener('keydown', onKey); document.removeEventListener('pointerdown', onOutside) },
-    isDirty: dirty,
+    dispose: () => { disposed = true; offDisplay(); stream.close(); canvas.dispose(); ctxSection.dispose(); window.removeEventListener('keydown', onKey); document.removeEventListener('pointerdown', onOutside) },
+    isDirty: () => dirty() || ctxSection.isDirty(),
   }
 }

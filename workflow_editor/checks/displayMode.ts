@@ -225,6 +225,8 @@ try {
   await page.getByLabel('Node description').fill('Implementation draft')
   await toggle(page, 'detail')
   await page.locator('.panel-toggle', { hasText: 'Intent & approvals' }).click()
+  // The intent is edited in Context (p13 ex1), the approver in Intent & approvals.
+  if (!(await page.getByLabel('Workflow intent').isVisible())) await page.locator('.ctx-section[data-context-scope="workflow"] .ctx-toggle').click()
   await page.getByLabel('Workflow intent').fill('An intent draft.')
   await page.getByLabel('Approver').fill('Draft Approver')
   await toggle(page, 'simple'); await toggle(page, 'detail')
@@ -244,7 +246,7 @@ try {
   await page.locator('.project-meta input').nth(1).fill('Sample app (renamed draft)')
   await toggle(page, 'simple'); await sleep(100)
   check(await page.getByLabel('Request text').inputValue() === 'A request drafted in Simple', 'the request draft is the same field in both modes')
-  check(/Unsaved changes in Project settings/.test(await page.locator('.project-hero').innerText()), 'Simple\'s hero says Project settings hold unsaved changes')
+  check(/Unsaved changes in project\.yaml/.test(await page.locator('.project-hero').innerText()), 'Simple\'s hero says project.yaml holds unsaved changes')
   await toggle(page, 'detail')
   check(await page.locator('.project-meta input').nth(1).inputValue() === 'Sample app (renamed draft)' && await page.locator('.project-meta .save-row button.primary').isEnabled(), 'the settings draft is still there to save')
   await page.evaluate(() => window.scrollTo(0, 600)); await sleep(50)

@@ -98,7 +98,8 @@ try {
   await page.click('button.primary:has-text("Save")')
   await page.waitForSelector('.banner.ok')
   const saved = await page.locator('.banner.ok').innerText()
-  check(/next attempt/.test(saved) && /Nothing was started/.test(saved), 'saving says it applies to the next attempt and starts nothing')
+  check(/next attempt/.test(saved) && /nothing was started/i.test(saved), 'saving says it applies to the next attempt and starts nothing')
+  await page.waitForFunction(() => /Make runs keep a CHANGELOG entry/.test(document.querySelector('.ctx-rendered')?.textContent ?? ''), null, { timeout: 5000 }).catch(() => {})
   check(/Make runs keep a CHANGELOG entry/.test(await page.locator('.ctx-rendered').innerText()), 'the resolved preview includes the new override')
   await page.click('summary:has-text("Revision history")')
   check(/revision 1/.test(await page.locator('.ctx-revisions').innerText()) && /Check Person/.test(await page.locator('.ctx-revisions').innerText()), 'revision history names the author')
@@ -109,9 +110,9 @@ try {
   await page.fill('textarea.context-editor', 'My later edit.')
   await page.click('button.primary:has-text("Save")')
   await page.waitForSelector('.ctx-conflict')
-  check(/changed since it was read/.test(await page.locator('.banner.error').innerText()) && /Edited elsewhere\./.test(await page.locator('.ctx-conflict').innerText()), 'a conflicting edit is refused and shows what is saved now')
+  check(/someone saved this instruction/.test(await page.locator('.banner.error').innerText()) && /Edited elsewhere\./.test(await page.locator('.ctx-conflict').innerText()), 'a conflicting edit is refused and shows what is saved now')
   await shot(page, 'p13-context-conflict')
-  await page.click('button:has-text("Load it (discard my edit)")')
+  await page.click('button:has-text("Use the saved text (discard mine)")')
   check(await page.inputValue('textarea.context-editor') === 'Edited elsewhere.\n', 'loading the current revision replaces the draft')
 
   // Copy.

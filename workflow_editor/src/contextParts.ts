@@ -288,6 +288,7 @@ export class ContextSection {
   private readonly body = h('div.ctx-body')
   private readonly inheritedBox = h('div.ctx-inherited-list')
   private readonly preview = h('div.ctx-preview')
+  private readonly ownBox = h('div.ctx-own')
   private readonly local: OverrideEditor
   // Editors of wider scopes, opened from an inherited instruction; kept so
   // closing and reopening one keeps its draft.
@@ -302,7 +303,7 @@ export class ContextSection {
     const key = opts.scope
     this.toggle = h('button.ctx-toggle', { type: 'button', 'aria-expanded': 'false', onclick: () => this.setOpen(this.body.hidden === true) },
       icon('caret', 'icon small ctx-caret'), h('span.ctx-title', 'Context'), this.summary) as HTMLButtonElement
-    const localLabel = opts.scope === 'system' ? 'Instructions for all projects' : 'Only in this environment'
+    const localLabel = opts.scope === 'system' ? 'Instructions for all projects' : opts.scope === 'project' ? 'Your instructions for this project' : 'Your instructions for this workflow'
     this.local = new OverrideEditor(opts.scope === 'system' ? { scope: 'system' } : { scope: opts.scope, project: '', workflow: '' }, {
       label: localLabel,
       hint: opts.scope === 'system' ? 'Applies to every project and workflow on this host: your general preferences and local environment facts. Kept on this host only, never in Git. Used from the next attempt; saving starts nothing.' : undefined,
@@ -311,7 +312,7 @@ export class ContextSection {
     })
     this.body.hidden = true
     append(this.body, [
-      opts.shared ? h('div.ctx-group.ctx-shared', h('h3', 'Shared with this project', h('span.small.muted', ' — in the repository; travels with the project')), opts.shared) : null,
+      opts.shared ? h('div.ctx-group.ctx-shared', h('h3', 'Shared with this project', h('span.small.muted', ' — in the repository; travels with the project')), opts.shared, this.ownBox) : null,
       h('div.ctx-group.ctx-local', opts.scope === 'system' ? null : h('h3', 'Only in this environment', h('span.small.muted', ' — on this host, not in Git')), this.local.el),
       opts.scope === 'system' ? null : h('div.ctx-group.ctx-inherited', h('h3', 'Inherited instructions', h('span.small.muted', ' — from wider scopes; they apply here too')), this.inheritedBox),
       this.preview])
@@ -330,10 +331,11 @@ export class ContextSection {
   }
   // An entrance from elsewhere (a matrix link, a hero button): open, show,
   // and put the keyboard on the local instruction.
-  reveal(focusLocal = false) {
+  reveal(focusLocal = false, then?: () => void) {
     this.setOpen(true)
     this.el.scrollIntoView({ block: 'start' })
     if (focusLocal) this.local.focus()
+    then?.()
   }
 
   isDirty(): boolean { return this.local.isDirty() || [...this.wider.values()].some(w => w.editor.isDirty()) }
@@ -358,9 +360,20 @@ export class ContextSection {
       this.local.setTarget(this.opts.scope === 'project' ? { scope: 'project', project: p } : { scope: 'workflow', project: p, workflow: this.view.workflow ?? this.workflow! })
       await Promise.all([this.local.refresh(), ...[...this.wider.values()].map(w => w.editor.refresh())])
     }
+    this.renderOwn()
     this.renderInherited()
     this.renderPreview()
     this.updateSummary()
+  }
+
+  // The content of this scope's own guides, as saved (the references are
+  // edited in the shared controls above).
+  private renderOwn() {
+    const v = this.view
+    if (!v || this.opts.scope === 'system') { this.ownBox.replaceChildren(); return }
+    const b = this.opts.scope === 'workflow' ? (v.execution ?? v.authoring) : v.authoring
+    const guides = b.sources.filter(s => s.scope === this.opts.scope && s.kind === 'guide')
+    this.ownBox.replaceChildren(...(guides.length ? [h('p.small.muted.ctx-own-head', 'Guide content, as saved:'), ...guides.map(s => sourceBlock(s, { title: `Guide ${s.origin.file ?? s.title.replace(/^guide /, '')}`, owner: s.origin.project ? `project ${s.origin.project} · repository` : 'repository' }))] : []))
   }
 
   private changed() { this.updateSummary(); this.renderPreviewNote(); this.opts.onDirty?.() }

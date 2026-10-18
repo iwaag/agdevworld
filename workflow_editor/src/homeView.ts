@@ -10,6 +10,7 @@ import { append, h, when } from './dom.ts'
 import { displayToggle, showDetail } from './displayMode.ts'
 import { icon } from './icons.ts'
 import type { ViewHandle } from './main.ts'
+import { ContextSection } from './contextParts.ts'
 
 export function diagnosticList(diags: Diagnostic[]): HTMLElement | null {
   if (!diags.length) return null
@@ -18,7 +19,7 @@ export function diagnosticList(diags: Diagnostic[]): HTMLElement | null {
 
 const CATEGORY_LABEL: Record<string, string> = { devdocs: 'devdocs', study: 'study', wedo: 'wedo', other: 'other' }
 
-export function renderHomeView(root: HTMLElement): ViewHandle {
+export function renderHomeView(root: HTMLElement, opts: { context?: boolean } = {}): ViewHandle {
   let data: DashboardResponse | null = null
   let loadError = ''
   let busy = ''
@@ -30,8 +31,12 @@ export function renderHomeView(root: HTMLElement): ViewHandle {
   // loopback agdev origin.
   const agdevworld = location.pathname.startsWith('/wfe/') ? '/' : 'http://localhost:8093/'
   const header = h('header.topbar', h('div.crumbs', h('a.back-to-world', { href: agdevworld, title: 'agdevworld operation room' }, '← agdevworld'), h('span.sep', '|'), h('strong', 'agdev'), h('span.sep', '/'), h('span.muted', 'Dashboard')),
-    h('div.top-actions', h('a.button', { href: '#/nodes', title: 'The activities you expect as distinct workflow nodes (your node catalog)' }, 'User nodes'), h('a.button', { href: '#/context', title: 'Preferences for every project, a project or a workflow, and what runs are given' }, 'Context'), h('span.live-state.muted.small.d-only'), h('button.d-only', { onclick: () => void load() }, 'Refresh'), displayToggle()))
-  const main = h('main.dashboard')
+    h('div.top-actions', h('a.button', { href: '#/nodes', title: 'The activities you expect as distinct workflow nodes (your node catalog)' }, 'User nodes'), h('a.button.d-only', { href: '#/context', title: 'Compare the instructions of every scope side by side' }, 'Context overview'), h('span.live-state.muted.small.d-only'), h('button.d-only', { onclick: () => void load() }, 'Refresh'), displayToggle()))
+  // Instructions for all projects (p13 ex1): in both modes, above the
+  // projects; kept outside what re-renders so its draft is never replaced.
+  const context = new ContextSection({ scope: 'system' })
+  const content = h('div.dash-content')
+  const main = h('main.dashboard', context.el, content)
   root.append(header, main)
 
   // Inputs outlive re-renders so nothing typed is lost.
@@ -51,6 +56,7 @@ export function renderHomeView(root: HTMLElement): ViewHandle {
   }
 
   async function load() {
+    void context.reload()
     try { data = await api.dashboard(); loadError = '' } catch (e) { loadError = (e as Error).message }
     if (!disposed) render()
   }
@@ -242,7 +248,7 @@ export function renderHomeView(root: HTMLElement): ViewHandle {
     }
   }
   function renderInto() {
-    main.replaceChildren(renderSimple(), h('div.dash-detail.d-only', renderStatus(), h('div.dash-grid', h('div.col', renderProjects(), renderRepositories()), renderEntrances())))
+    content.replaceChildren(renderSimple(), h('div.dash-detail.d-only', renderStatus(), h('div.dash-grid', h('div.col', renderProjects(), renderRepositories()), renderEntrances())))
   }
 
   // The registry may change from the CLI or another view; the page follows
@@ -255,5 +261,6 @@ export function renderHomeView(root: HTMLElement): ViewHandle {
 
   render()
   void load()
-  return { dispose: () => { disposed = true; stream.close(); clearInterval(timer) }, isDirty: () => false }
+  if (opts.context) requestAnimationFrame(() => context.reveal(true))
+  return { dispose: () => { disposed = true; context.dispose(); stream.close(); clearInterval(timer) }, isDirty: () => context.isDirty() }
 }

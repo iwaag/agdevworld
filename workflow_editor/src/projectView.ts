@@ -12,6 +12,7 @@ import { icon } from './icons.ts'
 import type { ViewHandle } from './main.ts'
 import { ago, runHash, STATE_LABEL } from './runCommon.ts'
 import { boastPanel } from './boastPanel.ts'
+import { ContextSection, fitRows, ListEditor } from './contextParts.ts'
 
 const GROUPS: { key: RepositoryStatus['category'][]; title: string }[] = [
   { key: ['root', 'devdocs'], title: 'Fixed repositories' },
@@ -46,7 +47,7 @@ export function statusChips(r: RepositoryStatus): HTMLElement[] {
 
 const repoIcon = (r: RepositoryStatus) => icon(r.category === 'study' ? 'study' : r.category === 'wedo' ? 'do' : r.category === 'devdocs' ? 'doc' : r.category === 'root' ? 'folder' : 'repo', 'icon repo-icon')
 
-export function renderProjectView(root: HTMLElement, wsId: string): ViewHandle {
+export function renderProjectView(root: HTMLElement, wsId: string, opts: { context?: boolean } = {}): ViewHandle {
   let data: ProjectResponse | null = null
   let saved: Project | null = null
   let draft: Project | null = null
@@ -66,6 +67,41 @@ export function renderProjectView(root: HTMLElement, wsId: string): ViewHandle {
   let runsError = ''
 
   const dirty = () => !!draft && !!saved && JSON.stringify(draft) !== JSON.stringify(saved)
+
+  // Context (p13 ex1): the project's purpose, goals and guides (project.yaml,
+  // this view's one draft and save) and its local instructions, in a section
+  // shown in both modes. The controls are built once and fed from the draft.
+  const intentInput = h('textarea', { rows: 4, 'aria-label': 'Project purpose', placeholder: 'Why the project exists. Every workflow and run of the project is given this.', disabled: true, oninput: () => { if (draft) { draft.intent = intentInput.value; fitRows(intentInput, 3, 12); touch() } } }) as HTMLTextAreaElement
+  const goalsEditor = new ListEditor({ label: 'Goals', item: 'Goal', placeholder: 'A goal of the project', addLabel: 'Add goal', onInput: (v, structural) => { if (draft) { draft.goals = v; touch(structural) } } })
+  const guidesEditor = new ListEditor({ label: 'Guides', item: 'Guide', placeholder: 'agent/guide.md, or <project>:<path>', addLabel: 'Add guide', onInput: (v, structural) => { if (draft) { draft.guides = v.length ? v : undefined; touch(structural) } } })
+  const sharedSave = h('button.primary', { onclick: () => void save() }, 'Save project.yaml')
+  const sharedState = h('span.ctx-save-state')
+  const sharedIssues = h('ul.issues')
+  const sharedControls = h('div.ctx-project-shared',
+    h('label.field', h('span', 'Purpose'), intentInput),
+    goalsEditor.el,
+    guidesEditor.el,
+    h('p.small.muted', 'Guides are files every workflow of the project is given (a project-relative path, or <project>:<path> for another managed project).'),
+    sharedIssues,
+    h('div.save-row', sharedSave, sharedState, h('span.small.muted', 'Writes project.yaml in this workspace. Local instructions below save separately.')))
+  const context = new ContextSection({
+    scope: 'project', wsId, shared: sharedControls,
+    sharedSummary: () => { const p = draft ?? saved; return !p ? 'project.yaml not read' : [p.intent.trim() ? 'purpose set' : 'no purpose', `${p.goals.length} goal${p.goals.length === 1 ? '' : 's'}`, `${p.guides?.length ?? 0} guide${p.guides?.length === 1 ? '' : 's'}`].join(' · ') },
+    sharedDirty: () => dirty(),
+    onDirty: () => renderHeroState(),
+  })
+  function syncShared(fromDisk: boolean) {
+    const d = draft
+    const readonly = !d || !!data?.problem
+    intentInput.disabled = readonly
+    if (d && (fromDisk || document.activeElement !== intentInput) && intentInput.value !== d.intent) { intentInput.value = d.intent; fitRows(intentInput, 3, 12) }
+    goalsEditor.set(d?.goals ?? [], readonly)
+    guidesEditor.set(d?.guides ?? [], readonly)
+    sharedSave.disabled = readonly || !dirty()
+    sharedState.replaceChildren(saveError ? h('span.error', saveError) : dirty() ? 'Unsaved changes' : saveState || (d ? 'Saved' : ''))
+    sharedIssues.replaceChildren(...(d ? validateProject(d).filter(i => ['intent', 'goals', 'guides'].includes(i.field ?? '')).map(i => h(`li.${i.severity}`, i.message)) : []))
+    context.updateSummary()
+  }
   // Kept across renders: run progress refreshes only this card.
   const runsCard = h('section.card.runs-card')
 
@@ -75,9 +111,10 @@ export function renderProjectView(root: HTMLElement, wsId: string): ViewHandle {
   const boast = boastPanel()
   const heroSlot = h('div.slot')
   const bodySlot = h('div.slot', h('p.muted', 'Loading project…'))
-  const main = h('main.project-grid', heroSlot, boast.el, bodySlot)
+  const main = h('main.project-grid', heroSlot, context.el, boast.el, bodySlot)
   root.append(header, main)
 
+  let contextRead = false
   interface LoadOpts { workspaces?: boolean; force?: boolean; refresh?: boolean }
   // Loads run one at a time; a forced reload discards the draft, any other
   // keeps it and flags a change on disk.
@@ -88,11 +125,15 @@ export function renderProjectView(root: HTMLElement, wsId: string): ViewHandle {
       const changedOnDisk = !!data && data.rev !== p.rev
       data = p
       if (w) workspaces = w.workspaces
+      let replaced = false
       if (!dirty() || opts.force) {
         saved = p.project ? structuredClone(p.project) : null
         draft = p.project ? structuredClone(p.project) : null
         externalChange = false
+        replaced = true
       } else if (changedOnDisk) externalChange = true
+      syncShared(replaced)
+      if (changedOnDisk || !contextRead || opts.refresh) { contextRead = true; void context.reload() }
       if (accessWorkflow) accessData = await api.workflow(wsId, accessWorkflow).catch(() => null)
       render()
     } catch (e) {
@@ -111,7 +152,7 @@ export function renderProjectView(root: HTMLElement, wsId: string): ViewHandle {
         h('span.pill.ok.d-only', icon('check', 'icon small'), `workspace ${wsId}`)),
       h('div.top-actions',
         connected ? null : h('span.pill.warn', { title: 'Changes on disk are not shown until the editor service is reachable again; the view re-reads everything then.' }, 'Not connected — not live'),
-        h('a.button', { href: `#/context/${encodeURIComponent(wsId)}`, title: 'What runs and authors of this project are given: defaults and your local preferences, by scope' }, 'Context'),
+        h('a.button.d-only', { href: `#/context/${encodeURIComponent(wsId)}`, title: 'Compare this project\'s instructions with all projects\' and its workflows\', side by side' }, 'Context overview'),
         h('button.d-only', { title: 'Re-read the project and the repositories\' Git state now', onclick: () => void load({ workspaces: true, refresh: true }) }, 'Refresh'),
         h('label.ws-label.d-only', 'Workspace ', select),
         displayToggle()),
@@ -145,13 +186,8 @@ export function renderProjectView(root: HTMLElement, wsId: string): ViewHandle {
       h('label.field', h('span', 'Id'), h('input', { value: d.id, disabled: !!saved?.id && saved.id !== '-', title: 'Stable identifier; edit the file to change it', oninput: (e: Event) => { d.id = (e.target as HTMLInputElement).value; touch() } })),
       h('label.field', h('span', 'Name'), h('input', { value: d.name, disabled: readonly, oninput: (e: Event) => { d.name = (e.target as HTMLInputElement).value; touch() } })),
       h('label.field', h('span', 'devdocs'), h('input', { value: d.devdocs ? `${d.devdocs} — ${d.devdocs === 'submodule' ? 'a repository of its own' : 'a folder of the project root repository'}` : '(not declared)', disabled: true, title: 'The devdocs storage mode is fixed at creation; it is not converted' })),
-      h('label.field', h('span', 'Intent'), h('textarea', { rows: 4, value: d.intent, disabled: readonly, oninput: (e: Event) => { d.intent = (e.target as HTMLTextAreaElement).value; touch() } })),
+      h('div.field', h('span', 'Purpose, goals and guides'), h('button.link-btn', { onclick: () => context.reveal() }, 'Edit them in Context')),
     )
-    const goals = h('ol.goals')
-    d.goals.forEach((g, i) => goals.append(h('li',
-      h('input', { value: g, disabled: readonly, 'aria-label': `Goal ${i + 1}`, oninput: (e: Event) => { d.goals[i] = (e.target as HTMLInputElement).value; touch() } }),
-      h('button.icon-btn', { title: 'Remove goal', disabled: readonly, onclick: () => { d.goals.splice(i, 1); touch(true) } }, '×'))))
-    card.append(h('div.field', h('span', 'Goals'), goals, h('button.ghost', { disabled: readonly, onclick: () => { d.goals.push(''); touch(true) } }, '+ Add goal')))
     const issues = validateProject(d)
     card.append(
       h('ul.issues', issues.map(i => h(`li.${i.severity}`, i.message))),
@@ -166,6 +202,8 @@ export function renderProjectView(root: HTMLElement, wsId: string): ViewHandle {
   function touch(rerender = false) {
     saveState = ''
     if (rerender) render(); else updateSaveRow()
+    syncShared(false)
+    renderHeroState()
   }
   function updateSaveRow() {
     const btn = main.querySelector<HTMLButtonElement>('.project-meta .save-row button')
@@ -185,9 +223,11 @@ export function renderProjectView(root: HTMLElement, wsId: string): ViewHandle {
       saveState = `Saved ${new Date().toLocaleTimeString()}`
       externalChange = false
       await load({})
+      void context.reload()
     } catch (e) {
       saveError = `Save failed: ${(e as Error).message}. Your edits are kept; retry when resolved.`
       render()
+      syncShared(false)
     }
   }
 
@@ -460,8 +500,13 @@ export function renderProjectView(root: HTMLElement, wsId: string): ViewHandle {
         h('h1', p?.name || p?.id || data?.project?.id || 'Project'),
         intent ? h('p.hero-purpose', { title: intent }, first) : h('p.hero-purpose.muted', data?.problem ? 'project.yaml cannot be read.' : 'No purpose written yet.'),
         data?.problem ? h('p.tile-state.error', icon('alert', 'icon'), 'project.yaml cannot be used — see Project settings') : issues ? h('p.tile-state.warn', icon('alert', 'icon'), 'This project is incomplete — see Project settings') : null,
-        dirty() ? h('p.tile-state.warn', icon('alert', 'icon'), 'Unsaved changes in Project settings') : null),
-      h('div.hero-actions', h('button', { onclick: openSettings }, icon('settings', 'icon small'), 'Project settings')))
+        heroState),
+      h('div.hero-actions', h('button', { onclick: () => context.reveal(true) }, icon('intent', 'icon small'), 'Purpose & instructions'), h('button', { onclick: openSettings }, icon('settings', 'icon small'), 'Project settings')))
+  }
+  const heroState = h('div.hero-state')
+  function renderHeroState() {
+    heroState.replaceChildren(...(dirty() || context.isDirty() ? [h('p.tile-state.warn', icon('alert', 'icon'), dirty() && context.isDirty() ? 'Unsaved changes in project.yaml and in local instructions' : dirty() ? 'Unsaved changes in project.yaml' : 'Unsaved local instructions')] : []))
+    context.updateSummary()
   }
 
   // The hero follows the settings draft when Simple is shown again; nothing
@@ -476,6 +521,7 @@ export function renderProjectView(root: HTMLElement, wsId: string): ViewHandle {
     renderRuns()
     keepingFocus(main, () => {
       heroSlot.replaceChildren(hero = renderHero())
+      renderHeroState()
       bodySlot.replaceChildren(
         h('div.col.d-only', renderProjectCard(), renderRepos()),
         h('div.col.project-work', renderWorkspaces(), runsCard, renderWorkflows()))
@@ -505,11 +551,12 @@ export function renderProjectView(root: HTMLElement, wsId: string): ViewHandle {
   })
 
   void load({ workspaces: true, force: true })
+  if (opts.context) requestAnimationFrame(() => context.reveal(false))
   void loadRuns({})
   renderRuns()
   return {
-    dispose: () => { disposed = true; offDisplay(); stream.close(); boast.dispose() },
-    isDirty: dirty,
+    dispose: () => { disposed = true; offDisplay(); stream.close(); boast.dispose(); context.dispose() },
+    isDirty: () => dirty() || context.isDirty(),
   }
 }
 

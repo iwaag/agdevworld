@@ -854,3 +854,47 @@ html[data-display="simple"] .project-grid > .boast { margin: 0 32px; border-radi
 .boast-manual-box { background: var(--card); border-radius: 12px; padding: 16px 18px; width: min(560px, 100%); display: flex; flex-direction: column; gap: 8px; box-shadow: 0 8px 30px rgba(0,0,0,.2); }
 .boast-manual-text { width: 100%; font-family: ui-monospace, Menlo, monospace; font-size: 13px; }
 @media (max-width: 640px) { .boast-actions { margin-left: 0; } .boast-frame { height: 70vh; } }
+
+/* Scoped context (p13): the matrix, the override editor, a run's attempts. */
+.context-view { padding: 16px 24px; display: grid; gap: 16px; max-width: 1280px; }
+.ctx-table-wrap { overflow-x: auto; }
+.ctx-table { border-collapse: collapse; width: 100%; min-width: 760px; table-layout: fixed; }
+.ctx-table th, .ctx-table td { border: 1px solid var(--line); padding: 8px; vertical-align: top; text-align: left; }
+.ctx-table thead th { background: var(--paper); font-size: 13px; }
+.ctx-table tbody th { width: 110px; font-size: 13px; }
+.ctx-cell { display: table-cell; }
+.ctx-cell.ctx-override.selected { outline: 2px solid var(--accent); outline-offset: -2px; }
+.ctx-source { padding: 4px 0 6px; border-bottom: 1px dashed var(--line); overflow-wrap: anywhere; }
+.ctx-source:last-child { border-bottom: 0; }
+.ctx-source-head { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; font-size: 13px; }
+.ctx-excerpt { white-space: pre-wrap; background: var(--paper); border-radius: 6px; padding: 4px 6px; margin: 4px 0; max-height: 7em; overflow: hidden; }
+.pill.ctx-body { border-color: #3c6a50; color: #2f7a52; background: rgba(47, 138, 91, .12); }
+.pill.ctx-reference { border-color: #4a6aa8; color: #3b5c9c; background: rgba(60, 100, 180, .1); }
+.pill.ctx-absent { color: var(--muted); }
+.pill.ctx-error, .pill.ctx-change-removed { border-color: #a33; color: #a33; background: rgba(170, 50, 50, .1); }
+.pill.ctx-change-added, .pill.ctx-change-changed, .pill.ctx-change-delivery { border-color: #8a6d1f; color: #8a6d1f; background: rgba(200, 150, 30, .15); }
+.ctx-source.ctx-added, .ctx-source.ctx-changed, .ctx-source.ctx-delivery { background: rgba(200, 150, 30, .08); }
+.ctx-source.ctx-removed { background: rgba(170, 50, 50, .06); text-decoration: line-through; }
+.context-editor { width: 100%; box-sizing: border-box; font-family: ui-monospace, Menlo, monospace; font-size: 13px; }
+.ctx-rendered { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 420px; overflow: auto; background: var(--paper); border: 1px solid var(--line); border-radius: 8px; padding: 10px; font-size: 12px; }
+.ctx-revisions pre, .ctx-conflict pre { white-space: pre-wrap; background: var(--paper); padding: 4px 6px; border-radius: 6px; }
+.ctx-sources { display: flex; flex-wrap: wrap; gap: 6px; margin: 6px 0; }
+.ctx-line { display: inline-flex; gap: 4px; align-items: center; }
+.context-manual { width: 100%; }
+.error-text { color: var(--error); }
+.warn-text { color: var(--warn); }
+.ctx-run h4 { margin: 10px 0 4px; font-size: 13px; }
+@media (max-width: 720px) {
+  .context-view { padding: 12px 16px; }
+}
+.context-view > * { min-width: 0; }
+.context-view { grid-template-columns: minmax(0, 1fr); }
+@media (max-width: 720px) {
+  .topbar:has(+ .context-view) { flex-wrap: wrap; gap: 6px; }
+  .topbar:has(+ .context-view) .crumbs { flex-wrap: wrap; font-size: 16px; gap: 6px; min-width: 0; }
+}
+.context-view { min-width: 0; width: 100%; box-sizing: border-box; }
+.ctx-table-wrap { max-width: 100%; }
+.ctx-line { flex-wrap: wrap; max-width: 100%; }
+.ctx-line .chip { white-space: normal; overflow-wrap: anywhere; }
+.ctx-resolved code { overflow-wrap: anywhere; }

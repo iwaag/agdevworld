@@ -121,7 +121,7 @@ function originWords(s: ContextSource): string {
 // still lists it). The executor puts this after its common contract.
 export function renderContext(b: ContextBundle, opts: { snapshot?: string } = {}): string {
   const lines = [
-    `# Context (${b.purpose === 'execution' ? `run ${b.project}/${b.workflow}/${b.run}` : `authoring ${b.project}${b.workflow ? `/${b.workflow}` : ''}`}; WFE context ${b.fingerprint.slice(7, 19)}${opts.snapshot ? `, snapshot ${opts.snapshot}` : ''})`,
+    `# Context (${b.purpose === 'execution' ? (b.run ? `run ${b.project}/${b.workflow}/${b.run}` : `a new run of ${b.project}/${b.workflow}`) : `authoring ${b.project}${b.workflow ? `/${b.workflow}` : ''}`}; WFE context ${b.fingerprint.slice(7, 19)}${opts.snapshot ? `, snapshot ${opts.snapshot}` : ''})`,
     '',
     'WFE resolved these sources for you by scope: system (every project), project (every workflow of this project), workflow (every run of this workflow). A default is kept in the project\'s repositories; an override is the Developer\'s local setting, not in Git. Scope says how widely a source applies, not which one wins: an explicit request or a more specific instruction refines a general one. A reference is named, not included; read it when it matters.',
   ]

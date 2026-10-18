@@ -111,6 +111,7 @@ export function renderProjectView(root: HTMLElement, wsId: string): ViewHandle {
         h('span.pill.ok.d-only', icon('check', 'icon small'), `workspace ${wsId}`)),
       h('div.top-actions',
         connected ? null : h('span.pill.warn', { title: 'Changes on disk are not shown until the editor service is reachable again; the view re-reads everything then.' }, 'Not connected — not live'),
+        h('a.button', { href: `#/context/${encodeURIComponent(wsId)}`, title: 'What runs and authors of this project are given: defaults and your local preferences, by scope' }, 'Context'),
         h('button.d-only', { title: 'Re-read the project and the repositories\' Git state now', onclick: () => void load({ workspaces: true, refresh: true }) }, 'Refresh'),
         h('label.ws-label.d-only', 'Workspace ', select),
         displayToggle()),

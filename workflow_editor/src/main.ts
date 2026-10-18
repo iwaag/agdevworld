@@ -1,7 +1,8 @@
 // Hash routes: #/ (projects, create and register), #/nodes (user nodes, p7/ex1), #/ws/<workspace>
 // (project editor), #/ws/<workspace>/wf/<file> (workflow editor) and
 // #/ws/<workspace>/run/<workflow>/<run>[/at/<devdocs commit>] (run view) and
-// #/ws/<workspace>/run/<workflow>/<run>/io/<attempt>/<line> (one IO entry in full, p10).
+// #/ws/<workspace>/run/<workflow>/<run>/io/<attempt>/<line> (one IO entry in full, p10)
+// and #/context/<workspace>[/<workflow>] (scoped context, p13).
 import './styles.css'
 import { renderHomeView } from './homeView.ts'
 import { renderNodesView } from './nodesView.ts'
@@ -9,6 +10,7 @@ import { renderProjectView } from './projectView.ts'
 import { renderRunView } from './runView.ts'
 import { renderIoEntry } from './ioEntryView.ts'
 import { renderWorkflowView } from './workflowView.ts'
+import { renderContextChooser, renderContextView } from './contextView.ts'
 
 const app = document.getElementById('app')!
 let dispose: (() => void) | undefined
@@ -32,6 +34,8 @@ function route() {
     current = renderRunView(app, parts[1], parts[3], parts[4], parts[5] === 'at' ? parts[6] : undefined)
   } else if (parts[0] === 'ws' && parts[1] && parts[2] === 'wf' && parts[3]) {
     current = renderWorkflowView(app, parts[1], parts[3])
+  } else if (parts[0] === 'context') {
+    current = parts[1] ? renderContextView(app, parts[1], parts[2]) : renderContextChooser(app)
   } else if (parts[0] === 'nodes') {
     current = renderNodesView(app)
   } else if (parts[0] === 'ws' && parts[1]) {

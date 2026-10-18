@@ -125,10 +125,12 @@ export function renderWorkflowView(root: HTMLElement, wsId: string, file: string
   const hint = h('div.canvas-hint.d-only', 'Select a card to inspect it. Drag a card to move it, its right handle onto another card to connect; drag the background to pan.')
   canvas.el.append(hint)
   const rawView = h('pre.raw')
+  // Scoped context of this workflow (p13): its defaults and the local overrides.
+  const contextLink = h('a.button.d-only', { href: `#/context/${encodeURIComponent(wsId)}`, title: 'What runs and authors of this workflow are given: defaults and your local preferences, by scope' }, 'Context')
   const body = h('main.wf-body', h('div.canvas-col', toolbar, canvas.el, rawView), inspector)
 
   root.append(
-    h('header.app-header', crumbs, h('div.top-actions', refreshButton, saveStateEl, saveButton, displayToggle())),
+    h('header.app-header', crumbs, h('div.top-actions', contextLink, refreshButton, saveStateEl, saveButton, displayToggle())),
     h('section.title-band',
       h('div.title-main', nameInput, purpose, fileLine),
       h('div.title-side', approvalPills, h('div.title-actions', simpleApproval, validation, intentToggle, settingsToggle))),
@@ -465,6 +467,7 @@ export function renderWorkflowView(root: HTMLElement, wsId: string, file: string
   }
 
   function update(rebuildInspector: boolean, fromDisk = false) {
+    if (draft?.id || saved?.id) contextLink.setAttribute('href', `#/context/${encodeURIComponent(wsId)}/${encodeURIComponent(saved?.id || draft!.id)}`)
     if (disposed) return
     renderCrumbs()
     renderModeSwitch()

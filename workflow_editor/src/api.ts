@@ -6,6 +6,7 @@ import type {
 import type { ApprovalState } from '../shared/canonical.ts'
 import type { ApprovalKind, Documentation, Project, Workflow } from '../shared/model.ts'
 import type { Catalog, NodeTemplate, TemplateContent } from '../shared/catalog.ts'
+import type { ContextBundle, ContextChange, AttemptContext, OverrideRevision, OverrideState } from '../shared/context.ts'
 
 // One run's execution on this host (server/exec.ts runView).
 export interface RunExecView {
@@ -122,6 +123,11 @@ export const api = {
   updateTemplate: (id: string, body: TemplateBody & { expectRevision: number }) => call<{ template: NodeTemplate; changed: boolean }>('PUT', `api/nodes/${encodeURIComponent(id)}`, body),
   deleteTemplate: (id: string, revision: number, by: string) => call<{ ok: true }>('DELETE', `api/nodes/${encodeURIComponent(id)}?revision=${revision}&by=${encodeURIComponent(by)}`),
   addExample: (example: string, by: string) => call<{ template: NodeTemplate }>('POST', `api/nodes/examples/${encodeURIComponent(example)}`, { by }),
+  // Scoped context (p13, docs/context.md).
+  context: (id: string, workflow?: string | null) => call<ContextMatrixView>('GET', `api/context?workspace=${encodeURIComponent(id)}${workflow ? `&workflow=${encodeURIComponent(workflow)}` : ''}`),
+  override: (scope: string, project?: string, workflow?: string) => call<{ state: OverrideState; revisions: (OverrideRevision & { text: string | null })[] }>('GET', `api/context/override?scope=${scope}${project ? `&project=${encodeURIComponent(project)}` : ''}${workflow ? `&workflow=${encodeURIComponent(workflow)}` : ''}`),
+  saveOverride: (body: { scope: string; project?: string; workflow?: string; text: string | null; base: string | null; by: string }) => call<{ ok: true; changed: boolean; state: OverrideState; revisions: (OverrideRevision & { text: string | null })[] }>('PUT', 'api/context/override', body),
+  runContext: (id: string, workflow: string, run: string) => call<RunContextView>('GET', `${ws(id)}/runs/${encodeURIComponent(workflow)}/${encodeURIComponent(run)}/context`),
   eventsUrl: (id?: string) => (id ? `${ws(id)}/events` : 'api/events'),
 }
 
@@ -150,3 +156,17 @@ export interface DelegationView {
 }
 export interface DelegationsView { ref: string; delegations: DelegationView[]; parent: null | { delegation: string; parent: { project: string; workflow: string; run: string; node: string }; accepts: string; workspace: string | null } }
 export interface IoEntryView { attempt: string; line: number; entries: { line: number; kind: string; head: string; body?: string }[]; io?: RunNotifyView['io'] }
+
+// Scoped context (p13, server/contextView.ts).
+export interface ContextMatrixView {
+  project: string; workflow: string | null; workflows: { id: string; name: string }[]
+  overrides: { system: OverrideState; project: OverrideState; workflow: OverrideState | null }
+  authoring: ContextBundle; execution: ContextBundle | null
+  rendered: { authoring: string; execution: string | null }
+}
+export interface RunContextView {
+  run: string
+  attempts: { attempt: string; began: string; reason: string; recorded: AttemptContext | null; legacy?: { path: string; sha256: string }[]; delivery: { event: string; at: string; detail?: string } | null; snapshot: (ContextBundle & { rendered: string }) | null; unavailable?: string }[]
+  next: ContextBundle; nextRendered: string; changes: ContextChange[]
+  session: { policy: string; current: string | null; next: string }
+}

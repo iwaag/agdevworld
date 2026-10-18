@@ -15,6 +15,7 @@
 //
 // runView.ts keeps the server snapshot and the operations; this module reads
 // the data it is given and asks the view to act.
+import { runContextPanel } from './contextView.ts'
 import type { RunOpResponse, RunResponse } from '../shared/api.ts'
 import { effectiveOf, holderOf, isOpen, questionState, runKey, situation, type Because, type Question, type RunRecord } from '../shared/run.ts'
 import { reportStep } from '../shared/compile.ts'
@@ -212,6 +213,8 @@ export class RunSide {
   private readonly coordination = section('coordination', h('div.sec-body'))
   private readonly result = section('result', h('div.sec-body'))
   private readonly delegations = section('delegations', h('div.sec-body')) // p10
+  private readonly contextSec = section('context', h('div.sec-body')) // p13
+  private ctxPanel: (HTMLElement & { ensure?: () => void }) | null = null
   private readonly decide: { root: HTMLElement; evidence: Owned<HTMLInputElement>; accept: HTMLButtonElement; reject: HTMLButtonElement; cancel: HTMLButtonElement; busy: boolean }
   private readonly history = section('history', h('ol.history', { reversed: true }))
   private historyShown = ''
@@ -288,16 +291,16 @@ export class RunSide {
     }, 'Cancel run')
     this.decide = { root: h('div.decide', evidence.el, h('div.row.tight', accept, reject, cancel), evidence.status), evidence, accept, reject, cancel, busy: false }
 
-    this.disclosures = [this.questions, this.instructions, this.delegations, this.presentations, this.shared, this.definition, this.catalog, this.related, this.files, this.execution, this.coordination, this.result, this.history]
+    this.disclosures = [this.questions, this.instructions, this.delegations, this.presentations, this.shared, this.definition, this.catalog, this.related, this.files, this.execution, this.coordination, this.contextSec, this.result, this.history]
     for (const sec of this.disclosures) {
       sec.root.classList.add('d-only')
       this.setOpen(sec, this.opened[sec.key] ?? false)
-      sec.toggle.addEventListener('click', () => { this.setOpen(sec, sec.content.hidden === true); this.opened[sec.key] = !sec.content.hidden; storeOpen(this.opened) })
+      sec.toggle.addEventListener('click', () => { this.setOpen(sec, sec.content.hidden === true); this.opened[sec.key] = !sec.content.hidden; storeOpen(this.opened); if (sec === this.contextSec && !sec.content.hidden) this.ctxPanel?.ensure?.() })
     }
     this.focus.append(this.focusDisplay, this.focusQuestions, this.holdSlot, this.decideSlot, this.focusLinks)
     this.el.dataset.keepScroll = 'run-side'
     this.el.append(this.placeholder, this.actorRow, this.sideHint, this.fileCard,
-      ...[this.selected, this.questions, this.instructions, this.delegations, this.presentations, this.shared, this.definition, this.catalog, this.related, this.files, this.execution, this.coordination, this.result, this.history].map(s => s.root))
+      ...[this.selected, this.questions, this.instructions, this.delegations, this.presentations, this.shared, this.definition, this.catalog, this.related, this.files, this.execution, this.coordination, this.contextSec, this.result, this.history].map(s => s.root))
   }
 
   // ---- what the view reads --------------------------------------------------
@@ -345,6 +348,7 @@ export class RunSide {
     const sec = this.disclosures.find(s => s.key === key)
     if (!sec || sec.root.hidden) return
     this.setOpen(sec, true)
+    if (sec === this.contextSec) this.ctxPanel?.ensure?.()
     sec.root.scrollIntoView({ block: 'start' })
     if (focus === 'adjust' && this.adjust.root.isConnected) { this.adjust.root.open = true; this.adjust.ta.el.focus({ preventScroll: true }) }
   }
@@ -425,7 +429,7 @@ export class RunSide {
     this.data = d
     const r = d.shown
     const rec = r?.record
-    const sections = [this.selected, this.questions, this.instructions, this.delegations, this.presentations, this.shared, this.definition, this.catalog, this.related, this.files, this.execution, this.coordination, this.result, this.history]
+    const sections = [this.selected, this.questions, this.instructions, this.delegations, this.presentations, this.shared, this.definition, this.catalog, this.related, this.files, this.execution, this.coordination, this.contextSec, this.result, this.history]
     if (!r || !rec) {
       setText(this.placeholder, d.resp?.problem ? 'No usable record.' : 'Loading…')
       show(this.placeholder, true)
@@ -441,6 +445,14 @@ export class RunSide {
     show(this.actorRow, !d.rev)
     show(this.sideHint, !(d.selection && rec.nodes[d.selection]) && !d.viewing)
     for (const s of [this.questions, this.definition, this.catalog, this.files, this.history]) show(s.root, true)
+    // Context (p13): what each attempt was given, the next attempt now; read on demand.
+    show(this.contextSec.root, !d.rev)
+    if (!d.rev && !this.ctxPanel) {
+      setText(this.contextSec.title, 'Context — what attempts were given')
+      this.ctxPanel = runContextPanel(d.wsId, rec.workflow, rec.run, () => this.data.notifyView?.request?.url ?? null)
+      ;(this.contextSec.content.children[0] as HTMLElement).replaceChildren(this.ctxPanel)
+      if (!this.contextSec.content.hidden) this.ctxPanel.ensure?.()
+    }
     this.updateSelected(rec)
     this.updateQuestions(rec)
     this.updateInstructions(rec)

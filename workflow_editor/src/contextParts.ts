@@ -51,12 +51,12 @@ export function ago(at: string, now = Date.now()): string {
   return s < 90 ? 'just now' : s < 5400 ? `${Math.round(s / 60)} min ago` : s < 172800 ? `${Math.round(s / 3600)} h ago` : `${Math.round(s / 86400)} days ago`
 }
 const KIND_WORD: Record<BlockKind, string> = { instruction: 'Instruction', information: 'Environment information' }
-// The oldest observation the block's evidence rests on, and the worst status.
-export function freshness(evidence: EvidenceRef[]): { oldest: string | null; unknownTime: boolean; worst: EvidenceRef['status'] | null } {
+// The newest and the oldest observation the block's evidence rests on, and the worst status.
+export function freshness(evidence: EvidenceRef[]): { newest: string | null; oldest: string | null; unknownTime: boolean; worst: EvidenceRef['status'] | null } {
   const times = evidence.map(e => e.observed).filter((t): t is string => !!t).sort()
   const order = ['ok', 'unknown', 'partial', 'failed'] as const
   const worst = evidence.reduce<EvidenceRef['status'] | null>((w, e) => (w === null || order.indexOf(e.status) > order.indexOf(w) ? e.status : w), null)
-  return { oldest: times[0] ?? null, unknownTime: evidence.some(e => !e.observed), worst }
+  return { newest: times.at(-1) ?? null, oldest: times[0] ?? null, unknownTime: evidence.some(e => !e.observed), worst }
 }
 // A system block reaches every run of every project: a few short lines.
 const SYSTEM_LINES = 5
@@ -236,7 +236,7 @@ export class BlockCard {
     ]
     if (b.kind === 'information') {
       bits.push(!b.evidence.length ? h('span.warn-text.ctx-fresh', 'no evidence recorded')
-        : h(`span.ctx-fresh${f.worst === 'failed' || f.worst === 'partial' ? '.warn-text' : ''}`, f.oldest ? `observed ${ago(f.oldest)}` : 'observation time not known', f.worst && f.worst !== 'ok' ? ` · ${f.worst}` : ''))
+        : h(`span.ctx-fresh${f.worst === 'failed' || f.worst === 'partial' ? '.warn-text' : ''}`, f.newest ? `observed ${ago(f.newest)}${f.oldest !== f.newest ? ` (oldest evidence ${ago(f.oldest!)})` : ''}` : 'observation time not known', f.worst && f.worst !== 'ok' ? ` · ${f.worst}` : ''))
       if (b.checked) bits.push(h('span.muted.ctx-checked', `checked ${ago(b.checked.at)} by ${b.checked.by}`))
     }
     if (b.refresh) bits.push(h('span.error-text.ctx-refresh', icon('alert', 'icon small'), ` refresh ${b.refresh.outcome} ${ago(b.refresh.at)}: ${b.refresh.detail}`))
@@ -255,7 +255,7 @@ export class BlockCard {
     this.content.hidden = false
     const text = b.body.trim()
     const lines = text.split('\n')
-    const long = lines.length > 6 || text.length > 480
+    const long = lines.length > 8 || text.length > 900
     fill(this.content, long ? h('details.ctx-src-text', h('summary.small', lines.find(l => l.trim())!.slice(0, 140)), h('pre.ctx-text', text)) : h('pre.ctx-text', text),
       b.details.length || b.consult ? h('p.small.ctx-routes', b.details.length ? ['Details: ', ...b.details.flatMap((d, i) => [i ? ', ' : '', h('a', { href: api.detailUrl(`context:${this.scopePath()}/${b.id}/${d.name}`), target: '_blank', rel: 'noopener' }, d.name)])] : null,
         b.details.length && b.consult ? ' · ' : null, b.consult ? `Ask ${b.manager}: ${b.consult}` : null) : null)

@@ -279,7 +279,8 @@ switch changes how much provenance is shown, not what can be done.
 **Block cards (p14).** Every local block is a card of its own: its title,
 its kind (*Instruction* or *Environment information*), the scope it really
 lives in, *Managed by* and *Last edited by* (with the age and the producing
-run), for information its freshness (the oldest observation's age, partial
+run), for information its freshness (the newest observation's age and the oldest
+evidence's, partial
 or failed coverage, the latest check), a failed refresh, and its size (the
 body's lines — five or fewer for all projects — and the delivered bytes),
 then its content with links to its details and whom to ask. Detail adds the

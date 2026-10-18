@@ -74,7 +74,7 @@ export function renderContextView(root: HTMLElement, wsId: string, workflowId?: 
   const editorOf = (s: Scope) => {
     let e = editors.get(s)
     if (!e) {
-      e = new BlockList(target(s), { add: true, wider: s !== 'workflow', onSaved: () => void load() })
+      e = new BlockList(target(s), { wider: s !== 'workflow', onSaved: () => void load() })
       editors.set(s, e)
     }
     const b = blocksOf(s)
@@ -121,7 +121,7 @@ export function renderContextView(root: HTMLElement, wsId: string, workflowId?: 
 
   function editor(): HTMLElement {
     const e = editorOf(selected)
-    editorSlot.replaceChildren(h('h2', 'Quick edit'), e.el)
+    editorSlot.replaceChildren(h('div.card-head', h('h2', 'Quick edit'), e.addControl), e.el)
     return editorSlot
   }
 
@@ -165,10 +165,10 @@ export function renderContextView(root: HTMLElement, wsId: string, workflowId?: 
 export function renderContextChooser(root: HTMLElement): ViewHandle {
   const agdevworld = location.pathname.startsWith('/wfe/') ? '/' : 'http://localhost:8093/'
   const main = h('main.context-view')
-  const system = new BlockList({ scope: 'system' }, { add: true })
+  const system = new BlockList({ scope: 'system' })
   const list = h('section.card', h('h2', 'Projects'), h('p.muted', 'Loading…'))
   root.append(h('header.topbar', h('div.crumbs', h('a.back-to-world', { href: agdevworld }, '← agdevworld'), h('span.sep', '|'), h('a', { href: '#/' }, 'agdev'), h('span.sep', '/'), h('span.muted', 'Context overview')), h('div.top-actions', displayToggle())), main)
-  main.append(h('section.card.ctx-edit', h('h2', 'All projects'), system.el), list)
+  main.append(h('section.card.ctx-edit', h('div.card-head', h('h2', 'All projects'), system.addControl), system.el), list)
   void system.refresh()
   void api.workspaces().then(r => list.replaceChildren(h('h2', 'Projects'),
     h('p', 'Each project\'s scope matrix compares its shared and local context with its workflows\'. Choose a project:'),

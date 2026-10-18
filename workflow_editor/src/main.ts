@@ -13,6 +13,7 @@ import { renderRunView } from './runView.ts'
 import { renderIoEntry } from './ioEntryView.ts'
 import { renderWorkflowView } from './workflowView.ts'
 import { renderContextChooser, renderContextView } from './contextView.ts'
+import { closeReader } from './contextParts.ts'
 
 const app = document.getElementById('app')!
 let dispose: (() => void) | undefined
@@ -28,6 +29,7 @@ function route() {
   }
   lastHash = location.hash
   dispose?.(); current = undefined
+  closeReader()
   const parts = location.hash.replace(/^#\/?/, '').split('/').filter(Boolean).map(decodeURIComponent)
   app.replaceChildren()
   if (parts[0] === 'ws' && parts[1] && parts[2] === 'run' && parts[3] && parts[4] && parts[5] === 'io' && parts[6] && parts[7]) {

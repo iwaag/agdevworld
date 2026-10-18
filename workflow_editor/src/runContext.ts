@@ -238,9 +238,9 @@ export class RunContextCard {
       let e = this.editors.get(t.key)
       if (!e) {
         const target = t.target
-        const list = new BlockList(target, { add: true, wider: true, empty: 'Nothing set here.', onChange: () => this.renderSummary(), onSaved: () => void this.loadView() })
+        const list = new BlockList(target, { wider: true, empty: 'Nothing set here.', onChange: () => this.renderSummary(), onSaved: () => void this.loadView() })
         const hint = h('p.small.muted.ctx-hint', `Applies to future attempts of ${target.scope === 'workflow' ? `every run of workflow ${this.deps.workflow}` : scopeWords(target)}, this run included, and to new runs. The attempt in progress keeps what it was given; saving starts nothing and sends nothing to this run. To steer this run now, add an instruction above.`)
-        const box = h('div.ctx-wider', { hidden: true, dataset: { settings: t.key } }, hint, list.el)
+        const box = h('div.ctx-wider', { hidden: true, dataset: { settings: t.key } }, h('div.ctx-group-head', hint, list.addControl), list.el)
         const button = h('button', { type: 'button', 'aria-expanded': 'false', onclick: () => { box.hidden = !box.hidden; button.setAttribute('aria-expanded', String(!box.hidden)); button.classList.toggle('active', !box.hidden); if (!box.hidden) void list.refresh() } }, t.label) as HTMLButtonElement
         e = { list, box, button }
         this.editors.set(t.key, e)

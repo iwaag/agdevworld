@@ -246,6 +246,34 @@ export function createHandler(config: ServiceConfig) {
         throw new RequestError(404, 'not found')
       }
 
+      // ---- scoped context (p13, docs/context.md): the matrix, overrides, history ----
+      if (a === 'context') {
+        const { ContextStore, overrideTarget } = await import('./contextStore.ts')
+        const store = new ContextStore(area)
+        const q = (k: string) => url.searchParams.get(k) || undefined
+        if (!wsId && method === 'GET') {
+          const { contextMatrix } = await import('./contextView.ts')
+          const ws = await workspace(str(q('workspace'), 'workspace'))
+          return send(res, 200, await contextMatrix({ registryFile: config.registryFile, area, gitea: config.gitea, giteaProblem: config.giteaProblem }, ws, q('workflow') ?? null))
+        }
+        if (wsId === 'overrides' && !b && method === 'GET') return send(res, 200, { overrides: await store.list() })
+        if (wsId === 'override' && !b) {
+          if (method === 'GET') {
+            const t = overrideTarget(str(q('scope'), 'scope'), q('project'), q('workflow'))
+            return send(res, 200, { state: await store.read(t), revisions: await store.history(t) })
+          }
+          if (method === 'PUT') {
+            const input = await body(req) as Record<string, unknown>
+            const t = overrideTarget(str(input.scope, 'scope'), typeof input.project === 'string' ? input.project : undefined, typeof input.workflow === 'string' ? input.workflow : undefined)
+            if (input.text !== null && typeof input.text !== 'string') throw new RequestError(400, 'text is the override (text), or null to clear it')
+            if (input.base !== null && typeof input.base !== 'string') throw new RequestError(400, 'base is the sha256 of the content you read, or null when there was none')
+            const r = await store.write(t, input.text as string | null, { by: str(input.by, 'by'), base: input.base as string | null, note: typeof input.note === 'string' ? input.note : undefined })
+            return send(res, 200, { ok: true, ...r, revisions: await store.history(t) })
+          }
+        }
+        throw new RequestError(404, `no route for ${method} ${url.pathname}`)
+      }
+
       // ---- the agdev dashboard and resources (p4) ----
       if (a === 'agdev') {
         if (!wsId && method === 'GET') return send(res, 200, await dashboard(agdev))
@@ -385,6 +413,8 @@ export function createHandler(config: ServiceConfig) {
         if (!ref.workflow || !ref.run || (parts.length > 7 && sub !== 'checkpoints' && sub !== 'presentations')) throw new RequestError(404, 'not found')
         if (!sub && method === 'GET') return send(res, 200, await runResponse(ws, ref, { rev: url.searchParams.get('rev') || undefined }))
         if (sub === 'exec' && method === 'GET') return send(res, 200, await needExec().runView(ws.reg.id, ref))
+        // What each attempt was prepared with and the next attempt now (p13, docs/context.md).
+        if (sub === 'context' && method === 'GET') return send(res, 200, await (await import('./contextView.ts')).runContextView(needExec(), ws, ref))
         // A full check of an input set's or output's bytes, on a person's
         // request (project_migration p6): the result is recorded as a host fact.
         if (sub === 'verify' && method === 'POST') {

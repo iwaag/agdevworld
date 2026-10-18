@@ -12,13 +12,15 @@
 // recorded end becomes `unknown`, a non-zero exit `interrupted`; both hold the
 // run until a person resumes it. A request or answer sent twice (same
 // receipt) is queued once.
-import { createHash, randomBytes, randomUUID } from 'node:crypto'
+import { randomBytes, randomUUID } from 'node:crypto'
 import { existsSync, mkdirSync, readFileSync } from 'node:fs'
-import { lstat, readFile, realpath } from 'node:fs/promises'
 import { hostname } from 'node:os'
 import { join } from 'node:path'
 import type { DatabaseSync } from 'node:sqlite'
-import { guideRef, normalizeRepoPath, sessionPolicyOf } from '../shared/model.ts'
+import { sessionPolicyOf, type Workflow } from '../shared/model.ts'
+import { attemptContext, renderContext, type AttemptContext } from '../shared/context.ts'
+import { contextErrors, resolveContext } from './context.ts'
+import { ContextStore } from './contextStore.ts'
 import { configChanges, currentSession, unverifiedReason, unverifiedSession, describeSteps, effectiveOf, holderOf, hostOf, pendingInstructions, runKey, sameConfig, sessionConfig, situation, type AttemptSession, type AttemptSettings, type BecauseRef, type RecoveryAgent, type RunRecord, type RunRef } from '../shared/run.ts'
 import { git } from './git.ts'
 import { docStepsOf } from '../shared/compile.ts'
@@ -36,7 +38,6 @@ import { DelegateStore } from './delegate.ts'
 import { delegationState, isOpenDelegation, pendingEvents } from '../shared/delegation.ts'
 import { named, openStore, transaction } from './sqlite.ts'
 import { briefedSteps, changeLines, newStepLines, pendingAnswerLines, stateLines } from './continuation.ts'
-import { inside } from './files.ts'
 import { RequestError, Workspace } from './workspace.ts'
 
 export const EXECUTOR = 'autolab'
@@ -52,13 +53,16 @@ export const EXECUTOR = 'autolab'
 // here keeps no conversation the host can resume: the `run` policy is
 // refused for it, and `fresh` attempts carry no session id.
 export interface HostOffer { profiles?: Record<string, string>; contract?: { name: string; sha256: string }; sessions?: Record<string, 'explicit'> }
-// What one attempt is launched with: the recorded settings plus the guide
-// texts the host composes into the prompt (the texts are not recorded; their
-// hashes are).
+// What one attempt is launched with: the recorded settings plus the context
+// text the host composes into the prompt.
 // session: the conversation this attempt is launched in (agent_session p1);
 // a resumed session gets a continuation prompt, a new one the whole bootstrap.
-export interface AttemptExecution { agent: string; profile: string | null; backend: string | null; guides: { path: string; sha256: string; text: string }[]; session?: AttemptSession }
-const sha256 = (b: string | Buffer) => createHash('sha256').update(b).digest('hex')
+// context (workflow_editor p13, docs/context.md): the scoped context the
+// attempt is prepared with, resolved once at claim and persisted as a local
+// snapshot; `text` is the snapshot's rendered section, the exact bytes the
+// host composes after its common contract (only identities and hashes are
+// recorded in run.json).
+export interface AttemptExecution { agent: string; profile: string | null; backend: string | null; context: AttemptContext & { text: string }; session?: AttemptSession }
 
 // What the run's frozen documentation policy asks of this attempt (p5): the
 // policy, and for every documentation step that is running or ready, its
@@ -181,6 +185,13 @@ export interface AttemptRow { id: string; job: number; workspace: string; workfl
 // saved, its steps the per-repository journal.
 export interface IntegrationRow { id: number; workspace: string; workflow: string; run: string; decision: number; state: 'queued' | 'running' | 'superseded' | IntegrationState; created: string; updated: string; steps: string; error: string | null; requested_by: string }
 export interface CheckpointRow { id: number; workspace: string; workflow: string; run: string; kind: string; attempt: string | null; state: 'pending' | 'published' | 'nothing' | 'attention' | 'failed'; created: string; updated: string; steps: string; error: string | null; baseline: string | null; mode: 'run-copy' | null }
+
+// The workflow definition in force for a run: its active adjusted revision
+// (p7), or the frozen root definition.
+export function activeWorkflow(rec: RunRecord, bundle: import('./runs.ts').Bundle): Workflow | undefined {
+  const rev = rec.definition.active ? bundle.revisions?.find(x => x.revision === rec.definition.active)?.workflow : undefined
+  return rev ?? bundle.entries[rec.definition.root]?.workflow
+}
 
 export class ExecStore {
   readonly db: DatabaseSync
@@ -309,7 +320,7 @@ export class ExecStore {
       if (rec.cancelled) { drop('the run is cancelled'); continue }
       if (rec.control.hold) { drop(`the run is held (${rec.control.hold.kind}); a person resumes it`); continue }
       if (rec.control.attempt) { drop(`attempt ${rec.control.attempt.id} is still open in run.json`); continue }
-      const execution = await this.execution(space, rec, reading.bundle.entries[rec.definition.root]?.workflow?.execution, backend, offer)
+      const execution = await this.execution(space, rec, activeWorkflow(rec, reading.bundle), backend, offer)
       if ('refused' in execution) { drop(execution.refused); continue }
       const session = this.sessionFor(rec, execution, sessionPolicyOf(reading.bundle.entries[rec.definition.root]?.workflow?.execution), offer)
       if ('refused' in session) { drop(session.refused); continue }
@@ -335,7 +346,7 @@ export class ExecStore {
         // The run's catalog snapshot (p7/ex1): every attempt is given the same one.
         const cat = rec.context?.catalog
         const catalog = cat ? (cat.state === 'supplied' ? { state: 'supplied' as const, sha256: cat.sha256, templates: cat.templates } : { state: 'unavailable' as const }) : undefined
-        const settings: AttemptSettings = { agent: execution.agent, profile: execution.profile, backend: execution.backend, contract: offer.contract ?? null, guides: execution.guides.map(g => ({ path: g.path, sha256: g.sha256 })), ...(catalog ? { catalog } : {}), ...(execution.session ? { session: execution.session } : {}) }
+        const settings: AttemptSettings = { agent: execution.agent, profile: execution.profile, backend: execution.backend, contract: offer.contract ?? null, context: { snapshot: execution.context.snapshot, fingerprint: execution.context.fingerprint, sources: execution.context.sources }, ...(catalog ? { catalog } : {}), ...(execution.session ? { session: execution.session } : {}) }
         await runOp(space, ref, { op: 'attempt.begin', attempt: id, reason: job.kind, ...(execution.backend ? { backend: execution.backend } : {}), settings }, { by: this.executor, via: 'exec' })
       } catch (e) {
         this.run('UPDATE attempts SET state = \'ended\', ended = ?, outcome = \'refused\' WHERE id = ?', now(), id)
@@ -350,14 +361,16 @@ export class ExecStore {
 
   // The settings an attempt of this run is launched with (p6), from the
   // run's frozen definition: the agent it is performed as, the host profile
-  // the workflow asks for, and its guides as they are in the workspace now
-  // (by content hash). A profile the host does not offer, or a guide that is
-  // missing, refuses the job with the reason instead of launching something
-  // else.
-  async execution(ws: Workspace, rec: RunRecord, ex: { agent: string; profile: string; guides: string[] } | undefined, backend: string | null, offer: HostOffer): Promise<AttemptExecution | { refused: string }> {
+  // the workflow asks for, and its scoped context (p13): resolved from the
+  // run's copy, its definition in force and this area's overrides, and saved
+  // as the snapshot the attempt is prepared with. A profile the host does
+  // not offer, or a configured source that cannot be read, refuses the job
+  // with the reason instead of launching something else.
+  async execution(ws: Workspace, rec: RunRecord, workflow: Workflow | undefined, backend: string | null, offer: HostOffer): Promise<AttemptExecution | { refused: string }> {
     // A profile a person chose when resuming (project_migration p6 ex2)
     // replaces the definition's for every later attempt.
     const resumed = rec.control?.profile
+    const ex = workflow?.execution
     const profile = resumed?.name || ex?.profile || null
     let chosen = backend
     if (profile && offer.profiles) {
@@ -365,42 +378,51 @@ export class ExecStore {
       if (!(profile in offer.profiles)) return { refused: `${asker} "${profile}", which this execution host does not offer (${Object.keys(offer.profiles).sort().join(', ')})` }
       chosen = offer.profiles[profile]
     }
-    const guides: AttemptExecution['guides'] = []
-    for (const g of ex?.guides ?? []) {
-      // A guide of another managed project (project_migration p4): read
-      // from that project's committed default branch through project
-      // access, recorded as <project>:<path> by content hash.
-      const other = guideRef(g)
-      if (other.project) {
-        if (!other.path || other.path === '.') return { refused: `guide "${g}" is not <project>:<path>` }
-        try {
-          const { committedText } = await import('./access.ts')
-          const r = await committedText({ registryFile: this.ctx.registryFile, area: this.ctx.area, gitea: this.ctx.gitea, giteaProblem: this.ctx.gitea ? undefined : 'no Gitea setting', refresh: true }, other.project, other.path)
-          guides.push({ path: `${other.project}:${other.path}`, sha256: r.sha256, text: r.text })
-          continue
-        } catch (e) {
-          return { refused: `guide ${g} of project ${other.project} cannot be read: ${(e as Error).message}` }
-        }
-      }
-      const path = normalizeRepoPath(g)
-      if (!path || path === '.') return { refused: `guide "${g}" is not a project-relative path` }
-      try {
-        const abs = await inside(ws.root, path)
-        const l = await lstat(abs)
-        if (!l.isFile() || l.isSymbolicLink() || !(await realpath(abs)).startsWith(await realpath(ws.root))) return { refused: `guide ${path} is not a regular file of the workspace` }
-        const bytes = await readFile(abs)
-        guides.push({ path, sha256: sha256(bytes), text: bytes.toString('utf8') })
-      } catch (e) {
-        return { refused: `guide ${path} cannot be read in workspace ${ws.reg.id}: ${(e as Error).message}` }
-      }
-    }
-    return { agent: rec.executor.name, profile, backend: chosen, guides }
+    const bundle = await resolveContext(this.accessContext(), { purpose: 'execution', ws, workflow: workflow ?? null, run: rec, contract: offer.contract ?? null, host: this.executor })
+    const errors = contextErrors(bundle)
+    if (errors.length) return { refused: `the run's context cannot be prepared: ${errors.join('; ')}` }
+    const text = renderContext(bundle)
+    const saved = await new ContextStore(this.ctx.area).saveSnapshot(bundle, text)
+    return { agent: rec.executor.name, profile, backend: chosen, context: { ...attemptContext(bundle, saved.id), text } }
+  }
+
+  accessContext(): import('./access.ts').AccessContext {
+    return { registryFile: this.ctx.registryFile, area: this.ctx.area, gitea: this.ctx.gitea, giteaProblem: this.ctx.gitea ? undefined : 'no Gitea setting' }
+  }
+
+  // The context the next attempt of a run would be prepared with now, and
+  // the one each earlier attempt was (p13): read-only; nothing is saved or
+  // queued. The common contract is the host's at claim; the last attempt's
+  // is shown for it.
+  async nextContext(ws: Workspace, ref: RunRef) {
+    const space = await runSpace(ws, ref)
+    const reading = await readRun(space, ref)
+    const rec = reading.record
+    if (!rec) throw new RequestError(409, `run ${runKey(ref)} cannot be read: ${reading.problem?.message ?? 'no record'}`)
+    const last = [...rec.history].reverse().find(e => e.op === 'attempt.begin' && (e as { settings?: AttemptSettings }).settings?.contract) as { settings?: AttemptSettings } | undefined
+    return { record: rec, bundle: await resolveContext(this.accessContext(), { purpose: 'execution', ws: space, workflow: activeWorkflow(rec, reading.bundle) ?? null, run: rec, contract: last?.settings?.contract ?? null, host: this.executor }) }
+  }
+
+  // Whether the prepared context reached the launched process (p13), as
+  // the execution host saw it. Fenced like every executor report.
+  async contextDelivery(attempt: string, report: { delivered: boolean; detail?: string }) {
+    const a = this.attemptRow(attempt)
+    if (!a) throw new RequestError(404, `no attempt ${attempt}`)
+    const ws = await this.workspace(a.workspace)
+    const ref = { workflow: a.workflow, run: a.run }
+    const space = await runSpace(ws, ref)
+    const rec = (await readRun(space, ref)).record
+    const c = rec?.control.attempt?.id === attempt ? rec.control.attempt.settings?.context : undefined
+    if (!c) throw new RequestError(409, `attempt ${attempt} is not open with a prepared context`, { code: 'attempt-stale' })
+    await runOp(space, ref, { op: 'attempt.context', attempt, event: report.delivered ? 'delivered' : 'undelivered', snapshot: c.snapshot, ...(report.detail ? { detail: report.detail } : {}), receipt: `context:${attempt}:${report.delivered ? 'delivered' : 'undelivered'}` } as never, { by: this.executor, via: 'exec' })
+    return { snapshot: c.snapshot, event: report.delivered ? 'delivered' : 'undelivered' }
   }
 
   // The session an attempt is launched in (agent_session p1), from the run's
   // frozen policy, its recorded sessions and what the host's harness can do.
   // `run` resumes the current session when it was created under the same
-  // configuration (agent, profile, backend, contract, guides); otherwise a
+  // configuration (agent, profile, backend, contract, context fingerprint
+  // and sources); otherwise a
   // new one replaces it, and the reason is recorded. `run` on a profile
   // whose harness keeps no resumable conversation is refused: it never
   // silently becomes fresh. Ids are minted here (UUIDs) for harnesses that
@@ -414,7 +436,7 @@ export class ExecStore {
     // A session whose harness reported another id is never reused by itself.
     const unverified = unverifiedSession(rec)
     if (unverified) return { refused: unverifiedReason(unverified, runKey({ workflow: rec.workflow, run: rec.run })) }
-    const now = sessionConfig({ ...ex, contract: offer.contract ?? null })
+    const now = sessionConfig({ agent: ex.agent, profile: ex.profile, backend: ex.backend, contract: offer.contract ?? null, context: ex.context })
     if (cur && cur.id && sameConfig(cur.config, now)) return { policy, mode: 'resume', id: cur.id }
     const last = rec.sessions?.at(-1)
     const replaces = cur
@@ -554,7 +576,7 @@ export class ExecStore {
     lines.push(...pendingAnswerLines(r), ...instructionBrief(r), ...delegationBrief(r))
     lines.push(...await shareBrief(ws, ref, r, { by: this.executor }))
     lines.push(...newStepLines(r, briefedSteps(r, sinceBootstrap(r, attempts.slice(0, -1)))))
-    lines.push('', `Unchanged and not repeated: the contract, the guides, the node catalog (wfe run nodes ${runKey(ref)}) and the documentation policy you were given. This is the record at seq ${r.seq}; wfe run state ${runKey(ref)} --since ${r.seq} shows what is recorded after it, wfe run show ${runKey(ref)} the full record.`)
+    lines.push('', `Unchanged and not repeated: the contract, the context (the same bundle, fingerprint ${currentSession(r)?.config.context?.fingerprint.slice(7, 19) ?? 'not recorded'}), the node catalog (wfe run nodes ${runKey(ref)}) and the documentation policy you were given. This is the record at seq ${r.seq}; wfe run state ${runKey(ref)} --since ${r.seq} shows what is recorded after it, wfe run show ${runKey(ref)} the full record.`)
     return lines.join('\n')
   }
 

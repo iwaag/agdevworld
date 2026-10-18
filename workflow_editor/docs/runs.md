@@ -494,7 +494,7 @@ connected, finished, cancelled. A history view states none of them.
 
 **Where an attempt works (p9).** `wfe exec claim` hands the executor the
 logical workspace (`workspace`) and the directory the agent works in
-(`cwd`): the run's own copy. The run's guides are read from the copy, and
+(`cwd`): the run's own copy. The run's project defaults are read from the copy, and
 the brief names the copy, its branch and the project workspace (the
 person's; local resources are read from there by name).
 
@@ -504,8 +504,9 @@ confirmation*). `wfe exec claim` takes what the host offers (`--profiles-json`,
 `--contract <name>=<sha256>`), resolves the run's settings from its frozen
 definition (the profile from a person's resume when one was chosen, *Holds*
 above) and records them with `attempt.begin` (`settings`: agent, profile,
-backend, contract and guides by hash); the host composes the prompt from the
-common contract, the guides it was handed and the brief.
+backend, contract and the context bundle by snapshot id and hashes); the host
+composes the prompt from the common contract, the context text it was handed
+(the snapshot's exact bytes, [context.md](context.md)) and the brief.
 
 **Sessions (agent_session p1).** Which harness conversation an attempt
 runs in is the run's frozen session policy (`fresh` or `run`), resolved at

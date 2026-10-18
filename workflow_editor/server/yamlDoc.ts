@@ -108,7 +108,7 @@ export const WORKFLOW_SHAPE = record({
   layout: record({ nodes: dict(record({ x: scalar, y: scalar }, true)) }),
 })
 // Goals are sentences: a new goals list is written one item per line.
-export const PROJECT_SHAPE = record({ schema: scalar, id: scalar, name: scalar, devdocs: scalar, intent: scalar, goals: list(scalar, true) })
+export const PROJECT_SHAPE = record({ schema: scalar, id: scalar, name: scalar, devdocs: scalar, intent: scalar, goals: list(scalar, true), guides: list(scalar, true) })
 
 const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b)
 
@@ -268,7 +268,7 @@ export function workflowForWrite(w: Workflow): Record<string, unknown> {
 }
 
 export function projectForWrite(p: Project): Record<string, unknown> {
-  return { schema: p.schema, id: p.id, name: p.name, devdocs: p.devdocs, intent: p.intent, goals: p.goals }
+  return { schema: p.schema, id: p.id, name: p.name, devdocs: p.devdocs, intent: p.intent, goals: p.goals, guides: p.guides?.length ? p.guides : undefined }
 }
 
 export function renderWorkflow(doc: Document, w: Workflow): string {

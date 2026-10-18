@@ -210,6 +210,11 @@ export function validateProject(p: Project): Issue[] {
     else if ([...seen].some(o => path.startsWith(`${o}/`) || o.startsWith(`${path}/`))) issues.push(err('area-nested', `Local area "${path}" is inside, or contains, another local area.`, { field: 'areas' }))
     seen.add(path)
   }
+  ;(p.guides ?? []).forEach((g, i) => {
+    const { path } = guideRef(g)
+    if (path === null || path === '.') issues.push(err('guide-path', `guides[${i}] "${g}" must be a project-relative file path without "..", or <project>:<path> for a file of another managed project.`, { field: 'guides' }))
+  })
+  if (new Set((p.guides ?? []).map(guideKey)).size !== (p.guides ?? []).length) issues.push(warn('guide-duplicate', 'guides lists a guide twice.', { field: 'guides' }))
   return issues
 }
 

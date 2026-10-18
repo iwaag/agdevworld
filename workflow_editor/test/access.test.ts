@@ -4,6 +4,7 @@
 // pins or at its upstream tip, with provenance, explicit failure states, and
 // without touching any workspace. Runs: the live record beside the published
 // snapshot.
+import { emptyWorkflow } from '../shared/model.ts'
 import { after, before, test } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdir, mkdtemp, readFile, rename, rm, writeFile } from 'node:fs/promises'
@@ -381,15 +382,18 @@ test('the CLI reads with no project of its own; --json carries the failure state
 test('a guide of another managed project is read at claim from its committed default branch, by hash; an unreadable one refuses', async () => {
   const x = new ExecStore({ registryFile: s.registry, area: s.area, gitea: s.ctx.gitea as unknown as ConstructorParameters<typeof ExecStore>[0]['gitea'] })
   try {
-    const rec = { executor: { name: 'archsage-agent', host: 't' } } as unknown as Parameters<ExecStore['execution']>[1]
-    const ok = await x.execution(s.ws, rec, { agent: 'archsage-agent', profile: '', guides: ['b:devdocs/README.md'] }, null, {})
+    const rec = { executor: { name: 'archsage-agent', host: 't' }, workflow: 'w', run: 'run-001', input: { kind: 'braindump', file: 'braindump.md', author: 'P' }, control: {} } as unknown as Parameters<ExecStore['execution']>[1]
+    const wf = (guides: string[]) => { const w = emptyWorkflow('w', 'W'); w.execution = { agent: 'archsage-agent', profile: '', guides }; return w }
+    const ok = await x.execution(s.ws, rec, wf(['b:devdocs/README.md']), null, {})
     assert.ok(!('refused' in ok), JSON.stringify(ok))
     if ('refused' in ok) return
-    assert.deepEqual(ok.guides.map(g => [g.path, g.text]), [['b:devdocs/README.md', 'b devdocs\n']])
-    assert.match(ok.guides[0].sha256, /^[0-9a-f]{64}$/)
-    const missing = await x.execution(s.ws, rec, { agent: '', profile: '', guides: ['b:agent/none.md'] }, null, {})
-    assert.ok('refused' in missing && /guide b:agent\/none\.md of project b cannot be read: .*does not exist/.test(missing.refused), JSON.stringify(missing))
-    const unknown = await x.execution(s.ws, rec, { agent: '', profile: '', guides: ['nosuch:agent/g.md'] }, null, {})
+    const g = ok.context.sources.find(c => c.key === 'guide/b:devdocs/README.md')
+    assert.ok(g && g.scope === 'workflow' && g.delivery === 'body', JSON.stringify(ok.context.sources))
+    assert.match(g!.sha256 ?? '', /^[0-9a-f]{64}$/)
+    assert.match(ok.context.text, /## Workflow default — guide b:devdocs\/README\.md \(b:devdocs\/README\.md, at [0-9a-f]{12}\)\n\nb devdocs/)
+    const missing = await x.execution(s.ws, rec, wf(['b:agent/none.md']), null, {})
+    assert.ok('refused' in missing && /guide\/b:agent\/none\.md: cannot be read from project b: .*does not exist/.test(missing.refused), JSON.stringify(missing))
+    const unknown = await x.execution(s.ws, rec, wf(['nosuch:agent/g.md']), null, {})
     assert.ok('refused' in unknown && /not registered/.test(unknown.refused))
   } finally { x.close() }
 })

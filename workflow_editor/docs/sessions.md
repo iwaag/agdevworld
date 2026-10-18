@@ -31,9 +31,9 @@ and resumes exactly that id; `''` is the host's default profile):
 - `fresh`: a new session; on an explicit-id profile under a new UUID,
   otherwise without an id.
 - `run`: resume the current session when it was created under the same
-  configuration — agent, profile, backend, common contract and project guides
-  by hash. Otherwise a new session (new UUID) replaces it, and the reason
-  says what changed (`configuration changed: guide agent/g.md changed`), or
+  configuration — agent, profile, backend, common contract by hash and the
+  context fingerprint with its effective sources ([context.md](context.md)). Otherwise a new session (new UUID) replaces it, and the reason
+  says what changed (`configuration changed: context guide/agent/g.md changed`), or
   that the previous one was retired or ended. A profile chosen at a resume
   ([runs.md](runs.md), *Holds*) is such a change: the next session is new.
 
@@ -50,7 +50,7 @@ One entry per session, portable identities only (transcripts stay in the
 execution host's harness store):
 
 `{id, policy, began, attempt (that created it), attempts[], config {agent,
-profile, backend, contract, guides}, state: open|replaced|retired, attached?,
+profile, backend, contract, context {fingerprint, sources}} (guides before p13), state: open|replaced|retired, attached?,
 attachedIn?, mismatch?, ended? {at, by, reason}}`. The last `open` entry is
 the run's current session.
 
@@ -93,8 +93,8 @@ the end's detail.
 
 ## Continuation
 
-A new session gets the whole bootstrap: the common contract, the project
-guides and the brief. Since agent_session p1 ex2 the brief always names the
+A new session gets the whole bootstrap: the common contract, the scoped
+context and the brief. Since agent_session p1 ex2 the brief always names the
 original input and the current `plan.md`, and it gives every pending answer
 in full. A replacement session therefore reconstructs the original
 requirement and the agreed plan, and not only the run's first attempt does.
@@ -132,7 +132,7 @@ decides. The continuation then holds:
   record.
 
 Nothing else is repeated: identity paths, the node catalog, the
-documentation policy, contract and guides. They are unchanged, or the
+documentation policy, contract and context. They are unchanged, or the
 session would have been replaced. Nothing tells the agent to read the whole
 run. `wfe run state <run> [--since <seq>]` is the compact read: the same
 state and pending input, plus the entries after a seq. `wfe run show`

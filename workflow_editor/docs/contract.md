@@ -45,7 +45,19 @@ goals:
 areas:                   # optional local areas (project_migration p1)
   study/study-notes: {description: Literature surveys kept in this repository}
   lab: Experiments and tools   # text is the description
+guides: [agent/guide.md]  # optional project guides (p13), inherited by every workflow
 ```
+
+### Project guides (workflow_editor p13)
+
+`guides` lists guide files every workflow of the project inherits, in the
+`execution.guides` notation (a project-relative path, or `<project>:<path>`).
+A workflow's own `execution.guides` add workflow-specific guides; a guide
+named by both is delivered once with both declarations. Project guides are
+read from the run's own copy at claim. The whole scoped context (intent,
+goals, guides, local overrides) is [context.md](context.md). Invalid
+declarations: `project-guide-path` (error), `project-guide-duplicate`
+(warning).
 
 ### Local areas (project_migration p1)
 
@@ -229,8 +241,8 @@ workflow.
 - **Settings are resolved when it is placed**, since an adjustment never
   changes bindings or execution (`server/basics.ts`): the union of the
   bindings of the project's valid workflows, each path editable; the agent and profile all of them
-  agree on, and the project-wide `agent/guide.md` when that file exists.
-  Workflow-specific guides are not inferred or copied. A project without valid
+  agree on. No guide is copied (p13): the project's guides are declared once
+  in `project.yaml` `guides` and inherited. A project without valid
   workflows (a new one) binds its root editable and every submodule and
   local area editable. Newly created workflows, including freework, declare
   `intake: {zulip: requests}` by default.
@@ -257,7 +269,7 @@ intake. Credentials never appear here: they are host configuration.
 execution:
   agent: ppt-agent            # the identity runs are performed as (default: the execution host's name)
   profile: sonnet             # one of the execution host's profiles (default: the host's)
-  guides: [agent/guide.md, agent/create.md]   # project-relative; added after the common contract
+  guides: [agent/create.md]   # this workflow's own guides; the project's come from project.yaml (p13)
                               # or <project>:<path>, a file of another managed project (project_migration p4)
   session: run                # fresh (default) | run: later attempts resume the run's session (docs/sessions.md)
 intake:
@@ -271,10 +283,11 @@ nodes:
 - A run records `executor: {name: <agent>, host: <execution host>}` at
   creation; the host owns its queue, attempts and publication.
 - Each attempt reads `execution` from the run's **frozen** definition. The
-  guides are read from the workspace at claim and recorded by hash with
-  `attempt.begin` (`settings`), with the profile, the backend it resolved to
-  and the host's common contract. A profile the host does not offer, or a
-  guide that cannot be read, drops the job with the reason; nothing else is
+  guides are resolved at claim into the run's context bundle
+  ([context.md](context.md)) and recorded by hash with `attempt.begin`
+  (`settings.context`), with the profile, the backend it resolved to and the
+  host's common contract. A profile the host does not offer, or a configured
+  context source that cannot be read, drops the job with the reason; nothing else is
   launched instead. A person resuming a held run may name another profile
   for later attempts ([runs.md](runs.md), *Holds*); the definition itself is
   not changed.

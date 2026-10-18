@@ -130,6 +130,11 @@ export interface Project {
   // locally instead of as a shared repository). A workflow may bind them like
   // a submodule. Read from the file only; the editor never rewrites them.
   areas?: LocalArea[]
+  // Project guides (workflow_editor p13, docs/context.md): guide files every
+  // workflow of the project inherits once, in the execution.guides notation
+  // (a project-relative path, or <project>:<path>). A workflow's own
+  // execution.guides add to them.
+  guides?: string[]
 }
 export interface LocalArea { path: string; description: string }
 
@@ -298,6 +303,7 @@ export function projectFromData(raw: unknown): { project: Project; issues: Shape
   p.devdocs = text(raw, 'devdocs', '$', issues)
   p.intent = text(raw, 'intent', '$', issues)
   p.goals = stringList(raw, 'goals', '$', issues)
+  if (raw.guides !== undefined && raw.guides !== null) p.guides = stringList(raw, 'guides', '$', issues)
   p.areas = Object.entries(map(raw, 'areas', '$', issues)).flatMap(([path, v]) => {
     if (v === null || v === undefined) return [{ path, description: '' }]
     if (typeof v === 'string') return [{ path, description: v }]

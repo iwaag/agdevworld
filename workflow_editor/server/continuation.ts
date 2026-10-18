@@ -23,7 +23,7 @@ import { runDir } from './runs.ts'
 export const DELTA_LINES = 30
 // Executor bookkeeping: the previous attempt's end is stated on its own
 // line, and the new attempt's begin is this one.
-const BOOKKEEPING = new Set(['attempt.begin', 'attempt.session', 'attempt.end'])
+const BOOKKEEPING = new Set(['attempt.begin', 'attempt.session', 'attempt.context', 'attempt.end'])
 
 const one = (t: string, n: number) => { const l = String(t ?? '').split('\n')[0]; return l.length > n || String(t ?? '').includes('\n') ? `${l.slice(0, n)}…` : l }
 const indent = (t: string, pad = '    ') => t.split('\n').map(l => `${pad}${l}`)

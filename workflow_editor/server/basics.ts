@@ -13,8 +13,10 @@
 //   (p11: a basic workflow inherits no readonly declaration); a project with
 //   no valid workflow (a new one) binds its root, every submodule and local
 //   area editable;
-// - execution: the agent and profile every valid workflow agrees on, and
-//   a project guide at agent/guide.md when present; otherwise left to the execution host;
+// - execution: the agent and profile every valid workflow agrees on;
+//   otherwise left to the execution host. No guides of its own: project
+//   guidance is declared once in project.yaml (guides) and every workflow
+//   inherits it (workflow_editor p13, docs/context.md);
 // - intake: requests, as for every newly created workflow.
 //
 // Placing never overwrites: a workflow with the id, or a file with the
@@ -76,10 +78,10 @@ function keyFor(path: string, taken: Record<string, unknown>, wanted?: string): 
   for (let n = 2; ; n++) if (!(`${base}-${n}` in taken)) return `${base}-${n}`
 }
 
-// Use the conventional project-wide guide, never infer one from a workflow.
-async function projectGuides(ws: Workspace): Promise<string[]> {
-  try { return (await stat(join(ws.root, 'agent', 'guide.md'))).isFile() ? ['agent/guide.md'] : [] }
-  catch (e) { if ((e as NodeJS.ErrnoException).code === 'ENOENT') return []; throw e }
+// Project guidance is project.yaml's (p13): named in the notes, never copied.
+async function projectGuideNote(ws: Workspace): Promise<string> {
+  const g = (await ws.readProject().catch(() => ({ project: undefined }))).project?.guides ?? []
+  return g.length ? `project guides inherited from project.yaml: ${g.join(', ')}` : 'no project guides declared in project.yaml'
 }
 
 // Resolves the settings from the project's valid workflows (see the head).
@@ -97,8 +99,7 @@ export async function resolveSettings(ws: Workspace): Promise<BasicSettings> {
   }
   if (!valid.length) {
     const s = newProjectSettings(repos.filter(r => r.kind === 'submodule' || (r.kind === 'directory' && r.path !== 'devdocs')).map(r => r.path))
-    s.execution.guides = await projectGuides(ws)
-    if (s.execution.guides.length) s.notes.push('project guide: agent/guide.md')
+    s.notes.push(await projectGuideNote(ws))
     if (skipped.length) s.notes.push(`not learned from: ${skipped.join(', ')}`)
     return s
   }
@@ -118,9 +119,8 @@ export async function resolveSettings(ws: Workspace): Promise<BasicSettings> {
   // Execution: what every workflow agrees on.
   const same = (f: (w: Workflow) => string) => { const v = valid.map(f); return v.every(x => x === v[0]) ? v[0] : '' }
   const agent = same(w => w.execution.agent), profile = same(w => w.execution.profile)
-  const guides = await projectGuides(ws)
-  notes.push(`execution: ${agent ? `agent ${agent}` : 'the host\'s agent'}${profile ? `, profile ${profile}` : ''}${guides.length ? `, guides ${guides.join(', ')}` : ', no project guide'}`)
-  return { repositories, execution: { agent, profile, guides }, notes }
+  notes.push(`execution: ${agent ? `agent ${agent}` : 'the host\'s agent'}${profile ? `, profile ${profile}` : ''}`, await projectGuideNote(ws))
+  return { repositories, execution: { agent, profile, guides: [] }, notes }
 }
 
 export type BasicStatus = 'added' | 'would-add' | 'present' | 'conflict' | 'unplaceable' | 'covered'

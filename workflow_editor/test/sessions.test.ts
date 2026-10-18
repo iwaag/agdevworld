@@ -207,7 +207,7 @@ test('replacement: a changed guide, a retirement and a missing conversation each
   await x.afterAnswer(space, req.ref, 'q1')
   const c2 = await claim(x)
   assert.equal(c2.execution.session?.mode, 'new')
-  assert.match(c2.execution.session?.replaces?.reason ?? '', /configuration changed: guide agent\/g\.md changed/)
+  assert.match(c2.execution.session?.replaces?.reason ?? '', /configuration changed: context guide\/agent\/g\.md changed/)
   // The attempt is interrupted (build left running); resumed, its session is missing on the host: replaced before launch.
   x.started(c2.attempt.id, process.pid)
   await report(space, req.ref, c2.attempt.id, { op: 'question.take-up', question: 'q1' })
@@ -244,7 +244,7 @@ test('replacement: a changed guide, a retirement and a missing conversation each
   await x.retireSession(space, req.ref, 'Test Person', 'clean start', 'cli')
   rec = await record(space, req.ref)
   assert.equal(rec.sessions!.at(-1)!.state, 'retired')
-  const next = x.sessionFor(rec, { agent: 'autolab', profile: null, backend: 'claude_code / anthropic/claude-sonnet-5', guides: [] }, 'run', OFFER)
+  const next = x.sessionFor(rec, { agent: 'autolab', profile: null, backend: 'claude_code / anthropic/claude-sonnet-5', context: { snapshot: `ctx-${'0'.repeat(24)}`, fingerprint: `sha256:${'0'.repeat(64)}`, sources: [], text: '' } }, 'run', OFFER)
   assert.ok(!('refused' in next) && next.mode === 'new')
   assert.match((next as { replaces?: { reason: string } }).replaces?.reason ?? '', /^retired: clean start/)
   x.close()
@@ -282,7 +282,7 @@ test('mismatch (p1 ex1): the attempt ends interrupted with both ids kept; claim,
   await assert.rejects(x.resume(space, req.ref, 'Test Person', 'go on', 'cli'), refusal)
   await assert.rejects(x.recover(space, req.ref, { incident: 'i-1', attempt: c1.attempt.id, reason: 'looked', by: 'Observer', via: 'cli' }), refusal)
   // Claim's own choice refuses it too (a held run's job is dropped earlier, for the hold).
-  const choice = x.sessionFor(rec, { agent: 'autolab', profile: null, backend: 'claude_code / anthropic/claude-sonnet-5', guides: [] }, 'run', OFFER)
+  const choice = x.sessionFor(rec, { agent: 'autolab', profile: null, backend: 'claude_code / anthropic/claude-sonnet-5', context: { snapshot: `ctx-${'0'.repeat(24)}`, fingerprint: `sha256:${'0'.repeat(64)}`, sources: [], text: '' } }, 'run', OFFER)
   assert.ok('refused' in choice)
   assert.match(choice.refused, /unverified.*wfe run session keep\/run-001 --retire/)
   // Retired after a look: a recovery is permitted and starts a new session.

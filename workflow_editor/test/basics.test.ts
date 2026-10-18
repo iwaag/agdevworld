@@ -101,7 +101,7 @@ test('an existing project: dry run, then added once with settings learned from i
   // Every path an existing workflow binds, editable (p11: no inherited
   // readonly); keys from the first file (by name) that bound it.
   assert.deepEqual(w.repositories, { root: { path: '.', access: 'editable' }, lab: { path: 'lab', access: 'editable' }, study: { path: 'study/notes', access: 'editable' } })
-  assert.deepEqual(w.execution, { agent: 'proj-agent', profile: 'sonnet', guides: ['agent/guide.md'] })
+  assert.deepEqual(w.execution, { agent: 'proj-agent', profile: 'sonnet', guides: [] }, 'project guidance is inherited from project.yaml, not copied (p13)')
   assert.deepEqual(validateWorkflow(w, { repositories: await p.ws.repositories() }).filter(i => i.severity === 'error'), [])
   const text = await readFile(file(p.dir), 'utf8')
   const [again] = await placeBasics(p.ws)
@@ -119,9 +119,8 @@ test('settings: disagreeing agents use the host; project guidance does not depen
   const t = await readFile(join(p.dir, 'devdocs', 'workflows', 'learn.yaml'), 'utf8')
   await writeFile(join(p.dir, 'devdocs', 'workflows', 'learn.yaml'), t.replace('agent: proj-agent', 'agent: other-agent').replace('agent/guide.md, ', ''))
   const s = await resolveSettings(p.ws)
-  assert.deepEqual(s.execution, { agent: '', profile: 'sonnet', guides: ['agent/guide.md'] })
-  await rm(join(p.dir, 'agent', 'guide.md'))
-  assert.deepEqual((await resolveSettings(p.ws)).execution.guides, [])
+  assert.deepEqual(s.execution, { agent: '', profile: 'sonnet', guides: [] }, 'p13: project guidance is project.yaml\'s, inherited, never copied')
+  assert.ok(s.notes.includes('no project guides declared in project.yaml'), s.notes.join('; '))
 })
 
 test('conflicts and what cannot be placed are reported with their reason, nothing replaced', async () => {
@@ -187,12 +186,14 @@ test('the Free work template makes the same definition under another id', async 
 })
 
 
-test('a single workflow-specific guide is not inherited; the project guide works even without valid workflows', async () => {
+test('a basic workflow copies no guide; project.yaml guides are named as inherited (p13)', async () => {
   const p = await existing()
   await rm(join(p.dir, 'devdocs', 'workflows', 'learn.yaml'))
-  await rm(join(p.dir, 'agent', 'guide.md'))
-  assert.deepEqual((await resolveSettings(p.ws)).execution.guides, [], 'neither make.md nor its missing guide.md is project guidance')
+  assert.deepEqual((await resolveSettings(p.ws)).execution.guides, [], 'neither make.md nor guide.md becomes a copied guide')
   await rm(join(p.dir, 'devdocs', 'workflows', 'make.yaml'))
-  await writeFile(join(p.dir, 'agent', 'guide.md'), 'Common project guidance.\n')
-  assert.deepEqual((await resolveSettings(p.ws)).execution.guides, ['agent/guide.md'])
+  const y = join(p.dir, 'project.yaml')
+  await writeFile(y, `${await readFile(y, 'utf8')}guides: [agent/guide.md]\n`)
+  const s = await resolveSettings(p.ws)
+  assert.deepEqual(s.execution.guides, [])
+  assert.ok(s.notes.includes('project guides inherited from project.yaml: agent/guide.md'), s.notes.join('; '))
 })

@@ -23,6 +23,7 @@ import { setupArea } from './setup.ts'
 import { runCommand, runIndex } from './run.ts'
 import { NODES_HELP, nodesCommand } from './nodes.ts'
 import { PROJECTS_HELP, projectsCommand } from './projects.ts'
+import { CONTEXT_HELP, contextCommand } from './context.ts'
 import { codeVersion } from '../server/version.ts'
 import { assertNotRetired, assertWorkspaceAllowed, loadBoundary, retiredByUrl } from '../server/boundary.ts'
 
@@ -38,7 +39,7 @@ class Refused extends Error { detail?: unknown; constructor(m: string, detail?: 
 // ---- arguments ---------------------------------------------------------------
 
 interface Parsed { positional: string[]; opts: Map<string, string[]>; flags: Set<string> }
-const FLAGS = new Set(['json', 'help', 'resume', 'h', 'new', 'history', 'no-gitea', 'reuse', 'lost', 'uncertain', 'found', 'complete', 'not-posted', 'ok', 'about-plan', 'all', 'dry-run', 'commit', 'push', 'status', 'rebuild', 'allow-live-executor', 'terminal', 'missing', 'retire', 'upstream', 'published', 'regex', 'ignore-case', 'refresh', 'quick', 'verify-all']) // p7: present stop --all, run adjust --dry-run
+const FLAGS = new Set(['json', 'help', 'resume', 'h', 'new', 'history', 'no-gitea', 'reuse', 'lost', 'uncertain', 'found', 'complete', 'not-posted', 'ok', 'about-plan', 'all', 'dry-run', 'commit', 'push', 'status', 'rebuild', 'allow-live-executor', 'terminal', 'missing', 'retire', 'upstream', 'published', 'regex', 'ignore-case', 'refresh', 'quick', 'verify-all', 'rendered', 'delivered', 'undelivered']) // p7: present stop --all, run adjust --dry-run
 function parse(argv: string[]): Parsed {
   const p: Parsed = { positional: [], opts: new Map(), flags: new Set() }
   for (let i = 0; i < argv.length; i++) {
@@ -171,6 +172,7 @@ status     whether the page is published on the project's main (or, with
 reference  the optional technical reference (docs/boast.md): paths,
            publication sources, media, browser capabilities, messages`,
   nodes: NODES_HELP,
+  context: CONTEXT_HELP,
   projects: PROJECTS_HELP,
   create: `wfe create <dir> --name <name> [--id <id>] [--intent <text>] [--goal <text>]... [--devdocs directory|submodule] [--devdocs-source <path|url>] [--resume]
 
@@ -561,6 +563,8 @@ Projects and workspaces
   present <subcommand>      presentations of a run's result: register, start, status, stop, reconcile
   share <subcommand>        shared areas on this host: list, resolve, ls, verify (docs/shares.md)
   boast [status] <project>  a project's Boast page (boast/index.html): published or previewed; reference
+  context <subcommand>      scoped context: show (sources for authoring or a run, and where each comes
+                            from), get|set|clear|history (the local overrides), run (used vs next)
 
 Workflows (by file name or id)
   workflow new <id>         create devdocs/workflows/<id>.yaml from the template
@@ -962,6 +966,10 @@ async function cmdExec(p: Parsed): Promise<number> {
         if (!arg || (!opt(p, 'attached') && !p.flags.has('missing'))) throw new UsageError('session <attempt> --attached <id> | --missing [--detail <text>]')
         out('', { ok: true, ...await x.session(arg, opt(p, 'attached') ? { attached: opt(p, 'attached') } : { missing: opt(p, 'detail') ?? '' }) }); return 0
       }
+      case 'context': {
+        if (!arg || (!p.flags.has('delivered') && !p.flags.has('undelivered'))) throw new UsageError('context <attempt> --delivered | --undelivered [--detail <text>]')
+        out('', { ok: true, ...await x.contextDelivery(arg, { delivered: p.flags.has('delivered'), detail: opt(p, 'detail') }) }); return 0
+      }
       case 'stops': out('', x.stopsDue().map(a => ({ id: a.id, pid: a.pid, run: `${a.workflow}/${a.run}`, workspace: a.workspace, requested: a.stop_requested }))); return 0
       case 'heartbeat': x.heartbeat(opt(p, 'name') ?? 'autolab', num('pid'), opt(p, 'detail') ?? ''); out('', { ok: true }); return 0
       case 'reconcile': out('', { ok: true, notes: await x.reconcile(p.opts.get('holding') ?? []) }); return 0
@@ -977,7 +985,7 @@ async function cmdExec(p: Parsed): Promise<number> {
     if (e instanceof RequestError) throw new Refused(e.message, e.detail)
     throw e
   } finally { x.close(); execStore = undefined }
-  throw new UsageError('wfe exec claim|started|session|finished|stops|heartbeat|reconcile|publish|status')
+  throw new UsageError('wfe exec claim|started|session|context|finished|stops|heartbeat|reconcile|publish|status')
 }
 
 // Zulip coordination: the outbox and bindings of this host, for the
@@ -1297,7 +1305,19 @@ const COMMANDS: Record<string, (p: Parsed) => Promise<number>> = {
   runs: cmdRuns, observe: cmdObserve, projects: cmdProjects, run: cmdRun, delegate: cmdDelegate, present: cmdPresent, share: cmdShare, project: cmdProject, repo: cmdRepo, dashboard: cmdDashboard, exec: cmdExec, request: cmdRequest, notify: cmdNotify, intake: cmdIntake,
   create: cmdCreate, register: cmdRegister, list: cmdList, status: cmdStatus, validate: cmdValidate,
   approve: cmdApprove, arrange: cmdArrange, 'add-repo': cmdAddRepo, workflow: cmdWorkflow, serve: cmdServe, setup: cmdSetup,
-  version: cmdVersion, nodes: cmdNodes, boast: cmdBoast,
+  version: cmdVersion, nodes: cmdNodes, boast: cmdBoast, context: cmdContext,
+}
+
+// Scoped context (workflow_editor p13, docs/context.md).
+async function cmdContext(p: Parsed): Promise<number> {
+  return contextCommand({
+    positional: p.positional, opt: k => opt(p, k), flag: k => p.flags.has(k), out,
+    usage: m => new UsageError(m), refused: (m, d) => new Refused(m, d),
+    area: () => areaDir(p),
+    access: async () => { const g = await giteaOf(p); return { registryFile: registryFile(p), area: areaDir(p), gitea: g, giteaProblem: g ? undefined : `no Gitea setting at ${giteaFile(p)}` } },
+    workspace: () => workspace(p), exec: () => openExec(p),
+    resolveRun: async (ws, text) => (await import('../server/runs.ts')).resolveRef(ws, text),
+  })
 }
 
 // Project access (project_migration p4): reads of any managed project.

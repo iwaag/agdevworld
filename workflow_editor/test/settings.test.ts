@@ -153,12 +153,14 @@ test('claim: the workflow\'s profile and guides are resolved, recorded with atte
   assert.equal(c.execution.agent, 'ppt-agent')
   assert.equal(c.execution.profile, 'sonnet')
   assert.equal(c.execution.backend, 'claude_code / anthropic/claude-sonnet-5', 'the workflow\'s profile, not the host default')
-  assert.deepEqual(c.execution.guides.map(g => [g.path, g.sha256, g.text.split('\n')[0]]), [['agent/guide.md', hash('# p agent\nFacts of the project.\n'), '# p agent'], ['agent/make.md', hash('# make runs\n'), '# make runs']])
+  const guides = c.execution.context.sources.filter(g => g.key.startsWith('guide/'))
+  assert.deepEqual(guides.map(g => [g.key, g.scope, g.sha256]), [['guide/agent/guide.md', 'workflow', hash('# p agent\nFacts of the project.\n')], ['guide/agent/make.md', 'workflow', hash('# make runs\n')]])
+  assert.match(c.execution.context.text, /## Workflow default — guide agent\/guide\.md[^\n]*\n\n# p agent\nFacts of the project\./)
   assert.match(c.brief, /you perform this run as ppt-agent; the execution host autolab launched you/)
   const rec = (await readRun(ws, r.ref)).record!
   assert.deepEqual(rec.control.attempt?.settings, {
     agent: 'ppt-agent', profile: 'sonnet', backend: 'claude_code / anthropic/claude-sonnet-5', contract: OFFER.contract,
-    guides: [{ path: 'agent/guide.md', sha256: hash('# p agent\nFacts of the project.\n') }, { path: 'agent/make.md', sha256: hash('# make runs\n') }],
+    context: { snapshot: c.execution.context.snapshot, fingerprint: c.execution.context.fingerprint, sources: c.execution.context.sources }, // p13: identities and hashes; the text is the local snapshot's
     catalog: { state: 'supplied', sha256: (rec.context.catalog as { sha256: string }).sha256, templates: 2 }, // p7/ex1: the run's snapshot
     session: { policy: 'fresh', mode: 'new', id: null }, // agent_session p1: undeclared = fresh; this offer names no session-capable profile
   })
@@ -186,7 +188,7 @@ test('claim refuses what the host cannot launch as declared: an unknown profile,
     const { x, ws } = await setup(false)
     await x.request({ workspace: ws.reg.id, workflow: 'make', text: 'Make.', author: 'Test Person', receipt: 'settings-req-0005', via: 'browser' })
     assert.deepEqual(await x.claim('fallback', OFFER), { idle: 'no queued job' })
-    assert.match((await x.runView(ws.reg.id, { workflow: 'make', run: 'run-001' })).jobs[0].note ?? '', /guide agent\/guide\.md cannot be read/)
+    assert.match((await x.runView(ws.reg.id, { workflow: 'make', run: 'run-001' })).jobs[0].note ?? '', /guide\/agent\/guide\.md: agent\/guide\.md cannot be read/)
     x.close()
   }
 })

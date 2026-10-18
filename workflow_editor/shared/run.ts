@@ -3,6 +3,7 @@
 // Shared by the service, the CLI and the browser; it touches no files.
 // See docs/runs.md for the contract.
 import { canonicalJson } from './canonical.ts'
+import { contextChanges, changeWords, type AttemptContext, type ContextDelivery } from './context.ts'
 import { docStepsOf, type EffectiveGraph, type StepSpec } from './compile.ts'
 import type { DocSteps } from './model.ts'
 import type { AttemptCatalog, CatalogContext } from './catalog.ts'
@@ -77,7 +78,11 @@ export const hostOf = (e: Executor) => e.host ?? e.name
 // catalog (p7/ex1): the run's node-catalog snapshot this attempt was given.
 // session (agent_session p1): the run's session policy and the harness
 // conversation this attempt was launched in.
-export interface AttemptSettings { agent: string; profile: string | null; backend: string | null; contract: { name: string; sha256: string } | null; guides: { path: string; sha256: string }[]; catalog?: AttemptCatalog; session?: AttemptSession }
+// context (workflow_editor p13, docs/context.md): the scoped context bundle
+// it was prepared with — the local snapshot's opaque id, the fingerprint
+// and each source's identity and hash, never override text or a host path.
+// Attempts before p13 recorded only `guides` (the workflow's guides by hash).
+export interface AttemptSettings { agent: string; profile: string | null; backend: string | null; contract: { name: string; sha256: string } | null; guides?: { path: string; sha256: string }[]; context?: AttemptContext; catalog?: AttemptCatalog; session?: AttemptSession }
 // How an attempt uses a harness conversation (agent_session p1,
 // docs/sessions.md). `mode` new: a session created for this attempt, under
 // `id` when the host's harness takes a caller-chosen id (null otherwise:
@@ -113,23 +118,36 @@ export interface SessionRecord {
 // was instructed with and runs as. A later attempt with another
 // configuration starts a new session (an old conversation does not learn
 // new instructions by itself).
-export interface SessionConfig { agent: string; profile: string | null; backend: string | null; contract: { name: string; sha256: string } | null; guides: { path: string; sha256: string }[] }
-export function sessionConfig(st: Pick<AttemptSettings, 'agent' | 'profile' | 'backend' | 'contract' | 'guides'>): SessionConfig {
-  return { agent: st.agent, profile: st.profile ?? null, backend: st.backend ?? null, contract: st.contract ? { name: st.contract.name, sha256: st.contract.sha256 } : null, guides: [...st.guides].map(g => ({ path: g.path, sha256: g.sha256 })).sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0)) }
+export interface SessionConfig { agent: string; profile: string | null; backend: string | null; contract: { name: string; sha256: string } | null; guides?: { path: string; sha256: string }[]; context?: { fingerprint: string; sources: { key: string; delivery: ContextDelivery; sha256: string | null }[] } }
+type ConfigInput = Pick<AttemptSettings, 'agent' | 'profile' | 'backend' | 'contract' | 'guides' | 'context'>
+// The context part of a configuration: the effective sources (no run input,
+// no common contract — compared by its own hash) by identity and content.
+// Metadata-only changes of a source leave it as it was.
+const effectiveContext = (c: AttemptContext) => ({ fingerprint: c.fingerprint, sources: c.sources.filter(x => x.scope !== 'run' && x.key !== 'system/contract').map(x => ({ key: x.key, delivery: x.delivery, sha256: x.sha256 ?? null })).sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0)) })
+export function sessionConfig(st: ConfigInput | SessionConfig): SessionConfig {
+  const base = { agent: st.agent, profile: st.profile ?? null, backend: st.backend ?? null, contract: st.contract ? { name: st.contract.name, sha256: st.contract.sha256 } : null }
+  const c = st.context
+  if (c) return { ...base, context: 'snapshot' in c ? effectiveContext(c as AttemptContext) : c }
+  return { ...base, guides: [...(st.guides ?? [])].map(g => ({ path: g.path, sha256: g.sha256 })).sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0)) }
 }
 export const sameConfig = (a: SessionConfig, b: SessionConfig) => canonicalJson(sessionConfig(a)) === canonicalJson(sessionConfig(b))
 // What differs between a session's configuration and an attempt's, in words.
-export function configChanges(was: SessionConfig | undefined, now: Pick<AttemptSettings, 'agent' | 'profile' | 'backend' | 'contract' | 'guides'>): string[] {
+export function configChanges(was: SessionConfig | undefined, nowIn: ConfigInput | SessionConfig): string[] {
   if (!was) return ['the configuration it was created under is not recorded']
+  const now = sessionConfig(nowIn)
   const out: string[] = []
   if (was.agent !== now.agent) out.push(`agent ${was.agent} → ${now.agent}`)
   if ((was.profile ?? null) !== (now.profile ?? null)) out.push(`profile ${was.profile ?? '(host default)'} → ${now.profile ?? '(host default)'}`)
   if ((was.backend ?? null) !== (now.backend ?? null)) out.push(`backend ${was.backend ?? '(unknown)'} → ${now.backend ?? '(unknown)'}`)
   if ((was.contract?.sha256 ?? null) !== (now.contract?.sha256 ?? null)) out.push(`common contract ${was.contract?.name ?? ''} changed`)
-  const g = (l: { path: string; sha256: string }[]) => new Map(l.map(x => [x.path, x.sha256]))
-  const a = g(was.guides), b = g(now.guides)
-  for (const [path, h] of b) if (!a.has(path)) out.push(`guide ${path} added`); else if (a.get(path) !== h) out.push(`guide ${path} changed`)
-  for (const path of a.keys()) if (!b.has(path)) out.push(`guide ${path} removed`)
+  if (was.context && now.context) out.push(...contextChanges(was.context.sources, now.context.sources).map(c => `context ${changeWords(c)}`))
+  else if (!was.context && now.context) out.push('context: the session was created before scoped context (it was given guides only)')
+  else {
+    const g = (l: { path: string; sha256: string }[]) => new Map(l.map(x => [x.path, x.sha256]))
+    const a = g(was.guides ?? []), b = g(now.guides ?? [])
+    for (const [path, h] of b) if (!a.has(path)) out.push(`guide ${path} added`); else if (a.get(path) !== h) out.push(`guide ${path} changed`)
+    for (const path of a.keys()) if (!b.has(path)) out.push(`guide ${path} removed`)
+  }
   return out
 }
 export const currentSession = (s: Pick<RunState, 'sessions'>): SessionRecord | null => { const l = s.sessions?.at(-1); return l && l.state === 'open' ? l : null }
@@ -422,6 +440,11 @@ export type OpInput =
   // launched in it (`replaced`: the resumed session is missing on the host;
   // `id` is the new one).
   | { op: 'attempt.session'; attempt: string; event: 'attached' | 'replaced'; id: string | null; reason?: string }
+  // workflow_editor p13: whether the prepared context reached the launched
+  // process (`delivered`: the prompt carrying it was written to the
+  // harness; `undelivered`: the launch failed before that). Delivery is not
+  // proof that the agent read or used it.
+  | { op: 'attempt.context'; attempt: string; event: 'delivered' | 'undelivered'; snapshot: string; detail?: string }
   // A person or a recovering agent ends the run's current session; the next
   // attempt starts a new one from the records.
   | { op: 'session.retire'; reason: string; because?: BecauseRef }
@@ -461,7 +484,7 @@ export const CONTROL_OPS: readonly string[] = ['run.stop', 'run.resume', 'run.ca
 
 export const OPS = ['run.create', 'node.start', 'node.progress', 'node.wait', 'node.complete', 'node.fail', 'node.cancel',
   'question.ask', 'question.answer', 'question.take-up', 'question.withdraw', 'instruction.receive', 'instruction.ack', 'artifact.attach', 'run.cancel', 'run.decide',
-  'attempt.begin', 'attempt.end', 'run.stop', 'run.resume', 'presentation.register', 'presentation.observe', 'run.adjust', 'run.integrate', 'run.relocate', 'run.recover', 'attempt.session', 'session.retire',
+  'attempt.begin', 'attempt.end', 'run.stop', 'run.resume', 'presentation.register', 'presentation.observe', 'run.adjust', 'run.integrate', 'run.relocate', 'run.recover', 'attempt.session', 'attempt.context', 'session.retire',
   'delegation.dispatch', 'delegation.bind', 'delegation.event', 'delegation.take-up', 'delegation.answer', 'delegation.instruct', 'delegation.dispose',
   'input.select', 'input.observe', 'output.publish', 'output.observe'] as const
 // The executor's own reports. While an attempt is open they must carry its
@@ -725,13 +748,25 @@ function attemptSettings(v: unknown): AttemptSettings {
   const o = v as Record<string, unknown>
   const hash = (h: unknown, what: string) => (typeof h === 'string' && /^[0-9a-f]{64}$/.test(h) ? h : fail('shape', `${what}: sha256 must be 64 hex digits`))
   const contract = o.contract === null || o.contract === undefined ? null : isObj(o.contract) ? { name: text((o.contract as Record<string, unknown>).name, 'the contract name'), sha256: hash((o.contract as Record<string, unknown>).sha256, 'the contract') } : fail('shape', 'settings.contract must be {name, sha256}')
-  if (!Array.isArray(o.guides)) fail('shape', 'settings.guides must be a list')
-  const guides = (o.guides as unknown[]).map((g, i) => {
+  if (o.guides !== undefined && !Array.isArray(o.guides)) fail('shape', 'settings.guides must be a list')
+  if (o.guides === undefined && o.context === undefined) fail('shape', 'settings name their context (or, before p13, their guides)')
+  const guides = o.guides === undefined ? undefined : (o.guides as unknown[]).map((g, i) => {
     if (!isObj(g)) return fail('shape', `settings.guides[${i}] must be {path, sha256}`)
     const path = normalizeRepoPath(String((g as Record<string, unknown>).path ?? ''))
     if (!path || path === '.') fail('shape', `settings.guides[${i}] path must be project-relative`)
     return { path: path!, sha256: hash((g as Record<string, unknown>).sha256, `settings.guides[${i}]`) }
   })
+  let context: AttemptContext | undefined
+  if (o.context !== undefined) {
+    const c = o.context as Record<string, unknown>
+    if (!isObj(c) || typeof c.snapshot !== 'string' || !/^ctx-[0-9a-f]{24}$/.test(c.snapshot) || typeof c.fingerprint !== 'string' || !/^sha256:[0-9a-f]{64}$/.test(c.fingerprint) || !Array.isArray(c.sources)) fail('shape', 'settings.context must be {snapshot: ctx-<hex>, fingerprint: sha256:<hex>, sources}')
+    const sources = (c.sources as unknown[]).map((x, i) => {
+      const y = x as Record<string, unknown>
+      if (!isObj(y) || typeof y.key !== 'string' || !['system', 'project', 'workflow', 'run'].includes(y.scope as string) || !['default', 'override', 'input'].includes(y.category as string) || !['body', 'reference', 'absent', 'error'].includes(y.delivery as string)) return fail('shape', `settings.context.sources[${i}] must be {key, scope, category, delivery, sha256?}`)
+      return { key: y.key, scope: y.scope, category: y.category, delivery: y.delivery, ...(y.sha256 !== undefined ? { sha256: hash(y.sha256, `settings.context.sources[${i}]`) } : {}) } as AttemptContext['sources'][number]
+    })
+    context = { snapshot: c.snapshot as string, fingerprint: c.fingerprint as string, sources }
+  }
   let catalog: AttemptCatalog | undefined
   if (o.catalog !== undefined) {
     const c = o.catalog as Record<string, unknown>
@@ -755,7 +790,7 @@ function attemptSettings(v: unknown): AttemptSettings {
     const reconstruct = x.reconstruct === undefined ? undefined : text(x.reconstruct, 'settings.session.reconstruct')
     session = { policy: x.policy as 'fresh' | 'run', mode: x.mode as 'new' | 'resume', id, ...(replaces ? { replaces } : {}), ...(reconstruct ? { reconstruct } : {}) }
   }
-  return { agent: text(o.agent, 'settings.agent'), profile: optText(o.profile, 'settings.profile') || null, backend: optText(o.backend, 'settings.backend') || null, contract, guides, ...(catalog ? { catalog } : {}), ...(session ? { session } : {}) }
+  return { agent: text(o.agent, 'settings.agent'), profile: optText(o.profile, 'settings.profile') || null, backend: optText(o.backend, 'settings.backend') || null, contract, ...(guides ? { guides } : {}), ...(context ? { context } : {}), ...(catalog ? { catalog } : {}), ...(session ? { session } : {}) }
 }
 
 function emptyNode(): NodeRecord {
@@ -1130,6 +1165,16 @@ export function apply(prev: RunState | null, e: HistoryEntry | (OpInput & EntryM
         s.sessions!.push({ id, policy: cur!.policy, began: at, attempt: e.attempt, attempts: [e.attempt], config: sessionConfig(st), state: 'open' })
         if (st.session) { const { reconstruct: _, ...rest } = st.session; st.session = { ...rest, mode: 'new', id, replaces: { id: cur!.id, reason } } }
       } else fail('shape', 'event must be attached or replaced')
+      break
+    }
+    case 'attempt.context': {
+      live()
+      if (!ctl.attempt || ctl.attempt.id !== e.attempt) fail('attempt-stale', `attempt ${String(e.attempt)} is not open (${ctl.attempt ? `${ctl.attempt.id} is` : 'none is'}); its context delivery is recorded only while it is open`)
+      const c = ctl.attempt!.settings?.context
+      if (!c) fail('state', `attempt ${e.attempt} was not prepared with a context bundle`)
+      if (c!.snapshot !== e.snapshot) fail('shape', `attempt ${e.attempt} was prepared with snapshot ${c!.snapshot}, not ${String(e.snapshot)}`)
+      if (e.event !== 'delivered' && e.event !== 'undelivered') fail('shape', 'event must be delivered or undelivered')
+      optText(e.detail, 'detail')
       break
     }
     case 'session.retire': {

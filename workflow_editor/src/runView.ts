@@ -28,6 +28,7 @@ import { live } from './live.ts'
 import { patchContent } from './patch.ts'
 import { activeWorkflow, ago, chip, fact, line, nodeLabel, nodeLink, runHash, runTitle, STATE_LABEL } from './runCommon.ts'
 import { outcome, RefreshCoordinator, type Outcome, type RefreshKind } from './runRefresh.ts'
+import { RunContextCard } from './runContext.ts'
 import { RunSide, integrationStatus, type OpResult } from './runSide.ts'
 import { approvalOf } from './integrationState.ts'
 import { ActivityView, describeActivity } from './runActivity.ts'
@@ -88,13 +89,19 @@ export function renderRunView(root: HTMLElement, wsId: string, workflow: string,
   const graphHead = h('div.graph-head')
   const legend = h('div.run-legend.d-only')
   const side = new RunSide({ record, adjust, notice }, stored(ACTOR_KEY, ''))
+  // What the run was asked and told, and what its attempts were given (p13 ex1).
+  const ctxCard = new RunContextCard({
+    wsId, workflow, run, historical: !!rev,
+    actor: () => side.actorName, setActor: n => { side.setActor(n); if (n) store(ACTOR_KEY, n) },
+    record: (op, done) => record(op, done),
+  })
   const graphCard = h('section.graph-card', graphHead, canvas.el, legend)
 
   root.append(
     h('header.app-header.run-top', crumbs, h('div.top-actions', liveState, refreshButton, displayToggle())),
     summary, details, banners,
     h('main.run-body',
-      h('div.run-col', side.focus, graphCard),
+      h('div.run-col', side.focus, ctxCard.el, graphCard),
       side.el),
   )
 
@@ -292,7 +299,7 @@ export function renderRunView(root: HTMLElement, wsId: string, workflow: string,
       case 'close-file': fileRequest++; viewing = null; renderSide(true); break
       case 'goto-question': side.revealQuestion(d.question!); break
       case 'goto-resume': side.revealResume(); break
-      case 'goto-section': setDisplay('detail'); side.revealSection(d.section!, d.focus); break
+      case 'goto-section': if (d.section === 'context') { ctxCard.reveal(d.focus === 'instruct' ? 'instruct' : undefined); break } setDisplay('detail'); side.revealSection(d.section!, d.focus); break
       case 'more-details': setDisplay('detail'); side.revealSelected(); break
       case 'records': setDisplay('detail'); side.revealRecords(); break
       case 'present-start': void presentation(d.presentation!, 'start'); break
@@ -560,6 +567,7 @@ export function renderRunView(root: HTMLElement, wsId: string, workflow: string,
     // The side first: in Simple it decides whether the canvas has its width
     // when the graph is framed for the first time.
     renderSide()
+    if (shown?.record) ctxCard.update(shown.record)
     renderCanvas()
   }
 
@@ -591,7 +599,7 @@ export function renderRunView(root: HTMLElement, wsId: string, workflow: string,
   void refresh.request('full')
   void loadProjectName()
   return {
-    dispose: () => { disposed = true; activity.dispose(); offDisplay(); root.removeEventListener('click', onClick); fileRequest++; refresh.dispose(); stream?.close(); canvas.dispose(); clearInterval(clock); clearInterval(execTimer) },
-    isDirty: () => side.isDirty(),
+    dispose: () => { disposed = true; ctxCard.dispose(); activity.dispose(); offDisplay(); root.removeEventListener('click', onClick); fileRequest++; refresh.dispose(); stream?.close(); canvas.dispose(); clearInterval(clock); clearInterval(execTimer) },
+    isDirty: () => side.isDirty() || ctxCard.isDirty(),
   }
 }

@@ -92,7 +92,7 @@ try {
   await shot(page, 'p13-context-matrix')
 
   // Edit the workflow override.
-  await page.fill('input[aria-label="Your name"]', 'Check Person')
+  await page.fill('input[aria-label="Revision author"]', 'Check Person')
   await page.fill('textarea.context-editor', 'Make runs keep a CHANGELOG entry.')
   check(await page.locator('text=Unsaved changes').count() === 1, 'an unsaved edit is marked')
   await page.click('button.primary:has-text("Save")')
@@ -123,22 +123,24 @@ try {
   check(/Copied|selected below/.test(copied) || await page.locator('textarea.context-manual').count() > 0, 'copying works or falls back to a selected text')
   check(/not injected/.test(await page.locator('.ctx-resolved').innerText()), 'authoring context is labelled as available, not injected')
 
-  // The run view: used by the attempt vs next.
+  // The run view: used by the attempt vs next (the Context card, p13 ex1).
   await page.goto(`${base}#/ws/p/run/make/${req.ref.run}`)
-  await page.waitForSelector('[data-section="context"] .sec-toggle', { timeout: 15_000 })
-  await page.click('[data-section="context"] .sec-toggle')
-  await page.waitForSelector('.ctx-run h4', { timeout: 15_000 })
-  const run = await page.locator('.ctx-run').innerText()
-  check(/Used by attempt a/.test(run) && /prompt delivered/.test(run), 'the attempt\'s context and its delivery are shown')
-  check(/Next attempt with current settings/.test(run) && /Not yet applied/.test(run), 'the next attempt is labelled as not yet applied')
-  check(await page.locator('.ctx-run .pill.ctx-change-added').count() >= 1, 'the added workflow override is marked')
-  check(/wfe run instruct/.test(run), 'current-run steering is pointed at the instruction route')
+  await page.waitForSelector('.run-context .ctx-toggle', { timeout: 15_000 })
+  if (await page.getAttribute('.run-context .ctx-toggle', 'aria-expanded') !== 'true') await page.click('.run-context .ctx-toggle')
+  await page.waitForSelector('.run-used strong', { timeout: 15_000 })
+  const run = await page.locator('.run-context').innerText()
+  check(/Attempt \S+ — Prepared/.test(run) && /delivered to the agent/.test(run), 'the attempt\'s context and its delivery are shown')
+  check(/Changes for the next attempt/.test(run) && /This attempt keeps what it was given/.test(run), 'the next attempt is labelled as not yet applied')
+  check(await page.locator('.run-next .pill.ctx-change-added').count() >= 1, 'the added workflow override is marked')
+  check(/Add an instruction for this run/.test(run), 'current-run steering is offered as an instruction')
   // Cleared: the source is marked removed once.
   const cur2 = await store.read({ scope: 'workflow', project: 'p', workflow: 'make' })
   await store.write({ scope: 'workflow', project: 'p', workflow: 'make' }, null, { by: 'Check', base: cur2.sha256 })
-  await page.click('.ctx-run button:has-text("Refresh")')
+  await page.click('.display-toggle button[data-display="detail"]')
+  await page.click('.run-ctx-detail > summary')
+  await page.click('.run-ctx-detail button:has-text("Read again")')
   await page.waitForTimeout(800)
-  check(await page.locator('.ctx-run .pill.ctx-change-removed').count() === 0, 'a source absent in both the last attempt and now is not marked')
+  check(await page.locator('.run-next .pill.ctx-change-removed').count() === 0, 'a source absent in both the last attempt and now is not marked')
   await shot(page, 'p13-run-context')
 
   // Narrow layout.

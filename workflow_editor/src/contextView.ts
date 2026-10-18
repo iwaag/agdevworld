@@ -156,42 +156,6 @@ export function renderContextView(root: HTMLElement, wsId: string, workflowId?: 
   return { dispose: () => { disposed = true }, isDirty: dirty }
 }
 
-// A run's context (p13): what each attempt was prepared with and whether its
-// prompt was delivered, the next attempt with the current settings, and what
-// differs. Loaded when asked; nothing here writes.
-export function runContextPanel(wsId: string, workflow: string, run: string, conversation: () => string | null): HTMLElement {
-  const box = h('div.ctx-run')
-  let loaded = false
-  async function load() {
-    loaded = true
-    box.replaceChildren(h('p.small.muted', 'Loading…'))
-    let v
-    try { v = await api.runContext(wsId, workflow, run) } catch (e) { box.replaceChildren(h('div.banner.error', (e as Error).message), h('button', { onclick: () => void load() }, 'Try again')); return }
-    const last = [...v.attempts].reverse().find(a => a.recorded)
-    const changed = new Map(v.changes.map(c => [c.key, c.change]))
-    const conv = conversation()
-    const att = v.attempts.at(-1)
-    box.replaceChildren(
-      h('div.row.tight', h('a', { href: `#/context/${encodeURIComponent(wsId)}/${encodeURIComponent(workflow)}` }, 'Edit preferences for this workflow'), h('button.small', { onclick: () => void load() }, 'Refresh')),
-      h('h4', `Used by attempt ${att?.attempt ?? '—'}`),
-      !att ? h('p.small.muted', 'No attempt has begun.')
-        : att.snapshot ? h('div', h('p.small.muted', `${when(att.began)} · snapshot ${att.recorded!.snapshot} · ${att.delivery ? `prompt ${att.delivery.event} ${when(att.delivery.at)}${att.delivery.detail ? ` — ${att.delivery.detail}` : ''} (delivery, not proof it was read)` : 'delivery not recorded'}`),
-          ...att.snapshot.sources.filter(s => s.scope !== 'run').map(s => sourceRow(s)),
-          h('details', h('summary.small', 'The exact text given'), h('pre.ctx-rendered', att.snapshot.rendered)))
-          : h('div', h('p.small.muted', `Unavailable: ${att.unavailable}`), ...(att.legacy ?? []).map(g => h('div.small', `guide ${g.path} ${g.sha256.slice(0, 12)}`)), ...(att.recorded?.sources ?? []).map(s => h('div.small', `${s.key} — ${DELIVERY[s.delivery]}${s.sha256 ? ` ${s.sha256.slice(0, 12)}` : ''} (recorded identity only)`))),
-      h('h4', 'Next attempt with current settings'),
-      h('p.small.muted', v.changes.length ? 'Not yet applied to any attempt. Marked: what differs from the last prepared attempt.' : last ? 'Same sources as the last prepared attempt.' : 'Not yet applied to any attempt.'),
-      ...v.next.sources.filter(s => s.scope !== 'run').map(s => { const row = sourceRow(s); const c = changed.get(s.key); if (c) { row.classList.add(`ctx-${c}`); row.querySelector('.ctx-source-head')!.append(h(`span.pill.ctx-change-${c}`, c)) } return row }),
-      ...v.changes.filter(c => c.change === 'removed' && !v.next.sources.some(s => s.key === c.key)).map(c => h('div.ctx-source.ctx-removed', h('div.ctx-source-head', h('span.pill.ctx-change-removed', 'removed'), h('span', c.title ?? c.key)))),
-      h('p.small', `Session: ${v.session.next}`),
-      h('p.small.muted', 'Preferences reach the next attempt only. To steer the work now, send an instruction: ', conv ? h('a', { href: conv, target: '_blank', rel: 'noopener' }, 'post in the Conversation') : h('span', 'post in the run\'s request conversation'), `, or wfe run instruct ${workflow}/${run} --instruction "…". Nothing is sent or started from here.`),
-      h('details', h('summary.small', 'The text the next attempt would get'), h('pre.ctx-rendered', v.nextRendered)))
-  }
-  box.append(h('button.small', { onclick: () => void load() }, 'Show context'))
-  ;(box as HTMLElement & { ensure?: () => void }).ensure = () => { if (!loaded) void load() }
-  return box
-}
-
 // #/context without a project: the instructions for all projects (the
 // system scope is this WFE area, no project is needed), and the projects
 // whose matrices compare the other scopes.

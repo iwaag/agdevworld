@@ -74,7 +74,7 @@ export class OverrideEditor {
     this.opts = opts
     this.ta = h('textarea.context-editor', { rows: 3, spellcheck: false, placeholder: opts.placeholder ?? 'Instructions agents should follow, in your words.', disabled: true }) as HTMLTextAreaElement
     this.ta.addEventListener('input', () => { fitRows(this.ta); this.renderButtons(); this.opts.onChange?.() })
-    this.by = h('input.ctx-by', { 'aria-label': 'Your name', placeholder: 'your name', value: storedActor(), size: 12, oninput: () => storeActor(this.by.value.trim()) }) as HTMLInputElement
+    this.by = h('input.ctx-by', { 'aria-label': 'Revision author', placeholder: 'your name', value: storedActor(), size: 12, oninput: () => storeActor(this.by.value.trim()) }) as HTMLInputElement
     const id = `ctx-${Math.random().toString(36).slice(2, 9)}`
     this.ta.id = id
     this.el = h('div.ctx-override', { dataset: { scope: target.scope } },

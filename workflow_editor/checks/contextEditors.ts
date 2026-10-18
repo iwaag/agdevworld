@@ -72,7 +72,6 @@ await x.contextDelivery(claim.attempt.id, { delivered: true })
 x.started(claim.attempt.id, process.pid)
 await x.finished(claim.attempt.id, { code: 0, signal: null })
 const runId = req.ref.run
-void runId // the run journeys (Step 3)
 
 const watcher = new Watcher(500, { gitIntervalMs: 1000, registryFile: registry })
 const srv = createServer(createHandler({ registryFile: registry, area, allowedOrigins: [], distDir: join(pkg, 'dist'), watcher, exec: x }))
@@ -97,7 +96,7 @@ async function openSection(scope: string) {
 }
 async function noHScroll(label: string) {
   const over = await page.evaluate(() => document.scrollingElement!.scrollWidth - window.innerWidth)
-  const wide = over > 1 ? await page.evaluate(() => [...document.querySelectorAll('body *')].filter(e => e.getBoundingClientRect().right > window.innerWidth + 1).slice(0, 6).map(e => `${e.tagName.toLowerCase()}.${[...e.classList].join('.')}`).join(', ')) : ''
+  const wide = over > 1 ? await page.evaluate(() => [...document.querySelectorAll('body *')].filter(e => e.getBoundingClientRect().right > window.innerWidth + 1).slice(0, 6).map(e => `${e.tagName.toLowerCase()}.${[...e.classList].join('.')}${e.parentElement ? ` in ${e.parentElement.className}` : ''} "${(e.textContent ?? '').slice(0, 30)}"`).join(', ')) : ''
   check(over <= 1, `${label}: no horizontal page scroll (overflow ${over}${wide ? `: ${wide}` : ''})`)
 }
 const settle = (p: Page, ms = 400) => p.waitForTimeout(ms)
@@ -207,6 +206,78 @@ try {
   check(await mode() === 'simple', 'all of it happened in Simple')
   await shot(page, `${tag}-workflow`)
   if (narrow) await noHScroll('workflow editor')
+
+  // ---- 4: a run's request and attempt context, a preference for the next attempt ----
+  const runJson = async () => (await (await fetch(`${base}api/workspaces/p/runs/make/${runId}`)).json()) as { record: { seq: number; history: { op: string }[]; instructions?: Record<string, { text: string; from: string }>; control: { attempt: unknown } } }
+  const before = await runJson()
+  await page.goto(`${base}#/ws/p/run/make/${runId}`)
+  const card = await openSection('run')
+  check(await mode() === 'simple', 'the run\'s Context opens in Simple')
+  await card.locator('.run-request-text').waitFor()
+  check(/Make a tiny tool\.\nKeep it under fifty lines\./.test(await card.locator('.run-request-text').innerText()), 'the original request is readable in place')
+  await card.locator('.run-used strong').waitFor()
+  const used = await card.locator('.run-used').innerText()
+  check(/Attempt \S+ — Prepared/.test(used) && /delivered to the agent/.test(used), 'the attempt\'s context and its delivery are said in Simple')
+  check(/Instructions for all projects/.test(used) === false, 'the attempt lists what it was given then (no instruction for all projects existed)')
+  check(/Settings changed since attempt/.test(await card.locator('.run-next').innerText()) && /Instructions for all projects/.test(await card.locator('.run-next').innerText()), 'settings saved since are shown as changes for the next attempt')
+  await card.locator('.run-settings button:has-text("Edit workflow instructions")').click()
+  const wbox = card.locator('.run-settings .ctx-wider:not([hidden])')
+  await wbox.waitFor()
+  check(/future attempts of every run of workflow make, this run included/.test(await wbox.innerText()) && /sends nothing to this run/.test(await wbox.innerText()), 'editing a preference from a run says it applies to future attempts of all affected runs and sends nothing')
+  await page.locator('.node').first().click()
+  const selected = await page.locator('.node.selected').getAttribute('data-id')
+  await wbox.locator('textarea.context-editor').fill('Make keeps a CHANGELOG entry, dated.')
+  await wbox.locator('.ctx-save-row button.primary').click()
+  await wbox.locator('.banner.ok').waitFor()
+  await page.waitForFunction(() => /Instructions for the workflow/.test(document.querySelector('.run-next')?.textContent ?? ''), null, { timeout: 8000 }).catch(() => {})
+  check(/Instructions for the workflow/.test(await card.locator('.run-next').innerText()), 'the saved workflow preference shows as a next-attempt change')
+  check(await card.locator('.run-used').innerText() === used, 'what the current attempt was given is unchanged')
+  const after = await runJson()
+  check(after.record.seq === before.record.seq && after.record.history.filter(e => e.op === 'attempt.begin').length === before.record.history.filter(e => e.op === 'attempt.begin').length, 'saving a preference recorded nothing in the run and started no attempt')
+  check(await page.locator('.node.selected').getAttribute('data-id') === selected, 'the graph selection is kept through the preference save')
+  await shot(page, `${tag}-run`)
+  if (narrow) await noHScroll('run view')
+
+  // ---- 5: an instruction for this run, recorded once ----
+  await card.locator('textarea[aria-label="Instruction for this run"]').fill('Use plain words in the summary.')
+  await card.locator('button:has-text("Send to this run")').click()
+  await card.locator('.run-instruct-form .banner.ok').waitFor({ timeout: 10_000 })
+  await card.locator('.run-instruction[data-instruction="i1"]').waitFor({ timeout: 10_000 })
+  const recd = await runJson()
+  const ins = Object.values(recd.record.instructions ?? {})
+  check(ins.length === 1 && ins[0].text === 'Use plain words in the summary.' && ins[0].from === 'Check Person', 'the instruction is recorded once, with whose words it is')
+  check(!(await store.read({ scope: 'workflow', project: 'p', workflow: 'make' })).text?.includes('plain words'), 'the instruction is not a preference: no override holds it')
+  check(!/plain words/.test(await card.locator('.run-next').innerText()), 'and it is not listed among next-attempt settings')
+  check(await card.locator('textarea[aria-label="Instruction for this run"]').inputValue() === '', 'the sent text leaves the form')
+
+  // ---- 6: keyboard and labels ----
+  await card.locator('.ctx-toggle').focus()
+  await page.keyboard.press('Enter')
+  check(await card.locator('.ctx-toggle').getAttribute('aria-expanded') === 'false', 'the section toggles from the keyboard')
+  await page.keyboard.press('Enter')
+  const unlabelled = await page.evaluate(() => [...document.querySelectorAll('.ctx-section textarea, .ctx-section input')].filter(e => !(e.getAttribute('aria-label') || (e.id && document.querySelector(`label[for="${e.id}"]`)) || e.closest('label'))).length)
+  check(unlabelled === 0, `every context control has a label (${unlabelled} without)`)
+  await page.click('.display-toggle button[data-display="detail"]')
+  await card.locator('.run-ctx-detail > summary').click()
+  check(/Attempt \S+/.test(await card.locator('.run-ctx-detail').innerText()) && /snapshot ctx-/.test(await card.locator('.run-ctx-detail').innerText()), 'Detail adds every attempt with its snapshot and provenance')
+  await page.click('.display-toggle button[data-display="simple"]')
+
+  // ---- edge states: an unavailable snapshot, no attempt yet, a cancelled run ----
+  const { readdir, rm: rmFile } = await import('node:fs/promises')
+  const snaps = join(area, '.local', 'contexts', 'snapshots')
+  for (const f of await readdir(snaps)) await rmFile(join(snaps, f))
+  await page.goto(`${base}#/ws/p`); await page.goto(`${base}#/ws/p/run/make/${runId}`)
+  const card2 = await openSection('run')
+  await card2.locator('.run-used strong').waitFor()
+  check(/exact context is unavailable/.test(await card2.locator('.run-used').innerText()), 'a deleted snapshot is said to be unavailable, nothing invented')
+  const req2 = await x.request({ workspace: 'p', workflow: 'make', text: 'A second request.', author: 'Check', receipt: 'ctx-ed-0002', via: 'browser' })
+  await page.goto(`${base}#/ws/p/run/make/${req2.ref.run}`)
+  const card3 = await openSection('run')
+  await page.waitForFunction(() => /No attempt has started yet/.test(document.querySelector('.run-used')?.textContent ?? ''), null, { timeout: 10_000 }).catch(() => {})
+  check(/No attempt has started yet/.test(await card3.locator('.run-used').innerText()) && /first attempt will be prepared/.test(await card3.locator('.run-next').innerText()), 'a run before its first attempt says so')
+  await fetch(`${base}api/workspaces/p/runs/make/${req2.ref.run}/ops`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ op: 'run.cancel', reason: 'check', by: 'Check' }) })
+  await page.waitForFunction(() => /cancelled: it takes no more instructions/.test(document.querySelector('.run-context')?.textContent ?? ''), null, { timeout: 10_000 }).catch(() => {})
+  check(/cancelled: it takes no more instructions/.test(await card3.innerText()) && await card3.locator('textarea[aria-label="Instruction for this run"]').isHidden(), 'a cancelled run offers no instruction form and says why')
 
   // Matrix links reach the editors' sections.
   await page.goto(`${base}#/context/p/make`)

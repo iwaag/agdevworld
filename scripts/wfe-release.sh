@@ -15,6 +15,7 @@
 #   <area>/service/releases/<agdevworld commit>/   workflow_editor/ at that commit, built and checked, RELEASE.json
 #   <area>/service/current -> releases/<commit>    what the service (launchd) and the launcher run
 #   <area>/bin/wfe                                 the launcher (autolab's executor and its agents use it)
+#   <area>/authoring/AGENTS.md, CLAUDE.md          the authoring entry for an IDE agent (p13), refreshed on activation
 #
 # The service and the launcher both run service/current, so one symlink switch
 # moves them together. Activation
@@ -75,6 +76,14 @@ SH
   chmod +x "$AREA/bin/wfe.new" && mv -f "$AREA/bin/wfe.new" "$AREA/bin/wfe"
 }
 
+# The area's authoring entry (workflow_editor p13): <area>/authoring/AGENTS.md
+# and CLAUDE.md from the release's template, with the published editor URL
+# (present.json answerBase, else the service URL). Never above the workspaces.
+write_authoring() {
+  pub=$(node -e 'try{const c=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));console.log(c.answerBase||"")}catch{console.log("")}' "$AREA/present.json")
+  WFE_REGISTRY="$AREA/registry.json" node "$SERVICE/current/cli/wfe.ts" setup "$AREA" --installed-url "${pub:-$URL/}" || echo "note: the authoring entry was not refreshed" >&2
+}
+
 switch_to() { ln -sfn "releases/$1" "$SERVICE/current.new" && mv -fh "$SERVICE/current.new" "$SERVICE/current"; }
 
 restart() {
@@ -110,6 +119,7 @@ activate() {
   restart
   if healthy "$SHA"; then
     echo "healthy: the service and bin/wfe run agdevworld $SHA"
+    write_authoring
     return 0
   fi
   echo "health check failed for $SHA within ${HEALTH}s" >&2

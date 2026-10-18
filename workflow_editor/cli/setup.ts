@@ -32,7 +32,16 @@ export const RUN_PROMPT = 'Execute workflow <workflow id> of project <project id
 const fill = (text: string, vars: Record<string, string>) => text.replace(/\{\{([A-Z_]+)\}\}/g, (_, k: string) => vars[k] ?? `{{${k}}}`)
 const sh = (s: string) => `'${s.replace(/'/g, `'\\''`)}'`
 
-export async function setupArea(area: string, opts: { port: number }): Promise<SetupResult> {
+const LOCAL_PROJECTS = 'Projects live beneath this directory, each in its own Git repository\n  (`pj-<id>/`). This directory is not a project. `sources/` holds the local\n  repositories that projects use as submodules.'
+
+// installed (workflow_editor p13): the operating area's authoring entry,
+// written to <area>/authoring/ by the release script. It uses the area's
+// installed launcher, service and docs (through service/current), creates
+// nothing else, and sits beside the project workspaces rather than above
+// them: an AGENTS.md or CLAUDE.md in an ancestor of a run copy would be read
+// by every executing agent's harness.
+export async function setupArea(area: string, opts: { port: number; installed?: { url: string } }): Promise<SetupResult> {
+  if (opts.installed) return setupInstalled(area, opts.installed.url)
   const files: SetupResult['files'] = []
   const launcher = join(area, 'wfe')
   const registry = join(area, 'registry.json')
@@ -53,7 +62,7 @@ export async function setupArea(area: string, opts: { port: number }): Promise<S
   }
 
   // Generated files: rewritten from the templates unless edited by hand.
-  const vars = { AREA: area, WFE: launcher, URL: url, SERVE: serve, CONTRACT: join(pkg, 'docs', 'contract.md'), RUN_CONTRACT: join(pkg, 'docs', 'runs.md') }
+  const vars = { AREA: area, WFE: launcher, URL: url, SERVE: serve, CONTRACT: join(pkg, 'docs', 'contract.md'), RUN_CONTRACT: join(pkg, 'docs', 'runs.md'), PROJECTS: LOCAL_PROJECTS }
   const generated = async (path: string, body: string, opts2: { stamp?: boolean; mode?: number } = {}) => {
     const text = opts2.stamp === false ? body : `${STAMP}\n${body}`
     const current = await readTextOrNull(path)
@@ -101,4 +110,26 @@ export async function setupArea(area: string, opts: { port: number }): Promise<S
     'No project or run was created. START.md in the area repeats these steps.',
   ].join('\n')
   return { area, launcher, url, serve, files, prompt: FIRST_PROMPT, runPrompt: RUN_PROMPT, summary }
+}
+
+async function setupInstalled(area: string, url: string): Promise<SetupResult> {
+  const files: SetupResult['files'] = []
+  const dir = join(area, 'authoring')
+  const launcher = join(area, 'bin', 'wfe')
+  const docs = join(area, 'service', 'current', 'docs')
+  const vars = { AREA: dir, WFE: launcher, URL: url, SERVE: 'the area\'s service (launchd com.agdev.wfe-service); nothing to start', CONTRACT: join(docs, 'contract.md'), RUN_CONTRACT: join(docs, 'runs.md'),
+    PROJECTS: `Projects are the workspaces of this operating area, \`${area}/pj-<id>/\` (\`wfe list\`), each in its own Git repository. This directory is only the entry; it is not a project.` }
+  const generated = async (path: string, body: string) => {
+    const text = `${STAMP}\n${body}`
+    const current = await readTextOrNull(path)
+    if (current === text) { files.push({ path, status: 'unchanged' }); return }
+    if (current !== null && !current.startsWith(STAMP)) { files.push({ path, status: 'kept', note: 'edited by hand (no generated stamp)' }); return }
+    await mkdir(dirname(path), { recursive: true })
+    await writeFile(path, text)
+    files.push({ path, status: 'written' })
+  }
+  await generated(join(dir, 'AGENTS.md'), fill(await readFile(join(templates, 'AGENTS.md'), 'utf8'), vars))
+  await generated(join(dir, 'CLAUDE.md'), '@AGENTS.md\n')
+  const summary = [`Authoring entry: ${dir}`, ...files.map(f => `  ${f.status.padEnd(9)} ${f.path}${f.note ? ` (${f.note})` : ''}`), `Tool: ${launcher} help`, `Browser: ${url}`].join('\n')
+  return { area: dir, launcher, url, serve: vars.SERVE, files, prompt: FIRST_PROMPT, runPrompt: RUN_PROMPT, summary }
 }

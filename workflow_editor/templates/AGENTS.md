@@ -15,6 +15,12 @@ What you have:
   adds submodules, creates workflows, and runs validation, approvals and
   auto-arrange. `wfe help` lists the commands, and `wfe <command> --help` says
   what each reads or changes.
+- `wfe context show`, run inside a project (`--workflow <id>` for one
+  workflow), says what guidance applies to it and where each part comes
+  from: the project's and workflow's intent and guides, and the
+  Developer's local preferences for every project, this project and this
+  workflow (`wfe context --help`). The Developer keeps those preferences out
+  of Git on purpose: follow them, never copy their text into tracked files.
 - `wfe run`, the same tool for workflow runs: it creates a run and records
   what happens in it, and `wfe run show` tells what is ready, what waits and
   for whom. `wfe run help` lists its subcommands; `wfe run help <subcommand>`
@@ -22,11 +28,10 @@ What you have:
 
 ## Facts
 
-- Projects live beneath this directory, each in its own Git repository
-  (`pj-<id>/`). This directory is not a project. `sources/` holds the local
-  repositories that projects use as submodules.
+- {{PROJECTS}}
 - The definition files are the authority. `project.yaml` at a project root
-  holds the id, name, devdocs storage mode, intent and goals. devdocs is a
+  holds the id, name, devdocs storage mode, intent, goals and the project
+  guides every workflow inherits (`guides`). devdocs is a
   folder of the project root repository (`devdocs: directory`, the default
   for new projects) or a repository of its own (`devdocs: submodule`); the
   mode is fixed at creation and `wfe status` reports a declaration that

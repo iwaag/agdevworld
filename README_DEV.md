@@ -456,8 +456,11 @@ imported commit).
   (which both the launchd service and `bin/wfe` run, so they move together),
   rewrites `bin/wfe`, restarts `com.agdev.wfe-service` and requires the service
   (`GET /wfe/api/version`) and the launcher (`wfe version`) to report the
-  commit. A failed health check reports the selected release and exits with
-  an error; it does not restore an older version. `deploy` = build + activate;
+  commit. A healthy activation then refreshes the area's authoring entry,
+  `authoring/AGENTS.md` and `CLAUDE.md` (`wfe setup <area> --installed-url`,
+  workflow_editor p13), beside the workspaces and never above them, so no
+  executing agent's harness loads it. A failed health check reports the
+  selected release and exits with an error; it does not restore an older version. `deploy` = build + activate;
   `status` reports the current release, service, launcher and open attempts.
 - **Operating boundary.** The editor never registers, creates, requests,
   claims or opens a workspace on system code, releases or control data, and

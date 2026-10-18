@@ -535,7 +535,13 @@ port), an empty registry if none exists, and sources/. It never creates or
 changes a project or a run, keeps an existing registry, the projects and
 everything else in the area, and keeps a generated file whose first-line stamp
 was removed. Prints the directory, the tool, the service command, the URL, a
-first authoring prompt and the prompt for executing a workflow.`,
+first authoring prompt and the prompt for executing a workflow.
+
+--installed-url <url> (workflow_editor p13): the operating area's authoring
+entry instead, written by the release script: <area>/authoring/AGENTS.md and
+CLAUDE.md, using <area>/bin/wfe, the installed docs and the published editor
+URL. It sits beside the workspaces, never above them, so executing agents'
+harnesses do not load it.`,
 }
 
 function index(p: Parsed): string {
@@ -789,7 +795,8 @@ async function cmdWorkflow(p: Parsed): Promise<number> {
 async function cmdSetup(p: Parsed): Promise<number> {
   const [dir] = p.positional
   if (!dir) throw new UsageError('setup needs the area directory')
-  const r = await setupArea(resolve(dir), { port: port(p) })
+  const installed = opt(p, 'installed-url')
+  const r = await setupArea(resolve(dir), { port: port(p), ...(installed ? { installed: { url: installed } } : {}) })
   out(r.summary, r)
   return r.files.some(f => f.status === 'error') ? 1 : 0
 }

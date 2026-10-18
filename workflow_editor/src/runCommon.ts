@@ -3,6 +3,7 @@
 // listeners; links and buttons name their action in data-action and the
 // view handles them in one place (runView.ts), reading its state then.
 import type { RunResponse } from '../shared/api.ts'
+import type { RunExecView } from './api.ts'
 import { holderOf, runDisplayTitle, type RunRecord } from '../shared/run.ts'
 import { h, when } from './dom.ts'
 
@@ -16,6 +17,22 @@ export function ago(at: string | null | undefined, now = Date.now()): string {
   if (!at) return '—'
   const s = Math.max(0, Math.round((now - Date.parse(at)) / 1000))
   return s < 90 ? `${s} s ago` : s < 5400 ? `${Math.round(s / 60)} min ago` : s < 172800 ? `${Math.round(s / 3600)} h ago` : `${Math.round(s / 86400)} d ago`
+}
+
+// The execution node that performs a run (project_migration p7), as the
+// coordinator last heard from it. `remote`: its process and live files are on
+// that worker; the coordinator shows what it reported and published.
+// Contact lost is said as such, never as an ended process.
+export interface NodeFacts { node: string; label: string; remote: boolean; state: 'available' | 'unavailable' | 'unknown'; contact: string; line: string; tone: 'ok' | 'warn' | 'muted' }
+export function nodeFacts(rec: RunRecord, ev: RunExecView | null | undefined): NodeFacts | null {
+  const workers = ev?.workers
+  if (!workers?.length) return null
+  const node = rec.executor.node ?? workers.find(w => w.default)?.id
+  const w = workers.find(x => x.id === node)
+  if (!node || !w) return node ? { node, label: node, remote: true, state: 'unknown', contact: 'not a worker of this area', line: `Execution node ${node}: not a worker of this area`, tone: 'warn' } : null
+  const contact = !w.at ? 'never reported' : w.state === 'available' ? `last contact ${ago(w.at)}` : `contact lost — last ${ago(w.at)}`
+  const line = `Execution node: ${w.id}${w.label && w.label !== w.id ? ` (${w.label})` : ''} — ${w.state === 'available' ? 'available' : w.state === 'unavailable' ? 'unavailable' : 'not reported yet'}, ${contact}`
+  return { node: w.id, label: w.label, remote: !w.local, state: w.state, contact, line, tone: w.state === 'available' ? 'ok' : 'warn' }
 }
 
 export const runHash = (ws: string, ref: string, rev?: string) =>

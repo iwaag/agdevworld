@@ -26,7 +26,7 @@ import { h, when } from './dom.ts'
 import { icon } from './icons.ts'
 import { live } from './live.ts'
 import { patchContent } from './patch.ts'
-import { activeWorkflow, ago, chip, fact, line, nodeLabel, nodeLink, runHash, runTitle, STATE_LABEL } from './runCommon.ts'
+import { activeWorkflow, ago, chip, fact, line, nodeFacts, nodeLabel, nodeLink, runHash, runTitle, STATE_LABEL } from './runCommon.ts'
 import { outcome, RefreshCoordinator, type Outcome, type RefreshKind } from './runRefresh.ts'
 import { RunContextCard } from './runContext.ts'
 import { RunSide, integrationStatus, type OpResult } from './runSide.ts'
@@ -134,7 +134,7 @@ export function renderRunView(root: HTMLElement, wsId: string, workflow: string,
   // A host batch whose facts differ only in the executor's heartbeat time
   // displays nothing new and touches nothing; otherwise only the parts that
   // show host facts are brought up to date. A full batch updates the view.
-  const hostFacts = () => JSON.stringify([execView && { ...execView, executor: { ...execView.executor, at: undefined } }, execError, notifyView, presentViews, delegView])
+  const hostFacts = () => JSON.stringify([execView && { ...execView, executor: { ...execView.executor, at: undefined }, workers: execView.workers?.map(w => ({ ...w, at: undefined, ageSeconds: undefined })) }, execError, notifyView, presentViews, delegView])
   function applyBatch(b: Batch, kind: RefreshKind) {
     const before = resp
     if (b.run?.ok) { resp = b.run.value; loadError = ''; if (b.run.value.record) shown = b.run.value } else if (b.run) loadError = b.run.error
@@ -365,7 +365,8 @@ export function renderRunView(root: HTMLElement, wsId: string, workflow: string,
     const appr = rev ? null : approvalOf(rec, execView, r?.place, q => !!q.presentation || (!!q.node && wf?.nodes[q.node]?.confirms === 'result'))
     const sit = situation(rec)
     const open = execView?.attempts.find(a => a.state !== 'ended')
-    const process = rev ? '' : open ? (open.alive === true ? ' · process alive' : open.alive === false ? (open.pid ? ' · process not seen alive' : ' · launching') : ' · on another host') : ''
+    const nf = rev ? null : nodeFacts(rec, execView)
+    const process = rev ? '' : open ? (open.alive === true ? ' · process alive' : open.alive === false ? (open.pid ? ' · process not seen alive' : ' · launching') : nf?.remote ? ` · on ${nf.node}${nf.state === 'available' ? '' : ' (contact lost)'}` : ' · on another host') : ''
     patchContent(titleFacts,
       chip(ex.state, ex.state === 'completed' ? '✓ Completed' : ex.state === 'stopped' ? 'Nothing can proceed' : STATE_LABEL[ex.state] ?? ex.state),
       appr?.chip ? h(`span.decision-chip.${appr.tone === 'ok' ? 'ok' : appr.tone === 'error' ? 'error' : appr.tone === 'warn' ? 'warn' : 'none'}`, { dataset: { approval: appr.kind }, title: last ? `latest decision: ${last.decision} by ${last.by}, ${when(last.at)}${last.confirmation ? ` (from ${last.confirmation.question})` : ''}${appr.integration ? ` · ${appr.integration.text}` : ''}` : appr.chip }, appr.chip)
@@ -448,6 +449,7 @@ export function renderRunView(root: HTMLElement, wsId: string, workflow: string,
       h('div.run-facts',
         fact('Input', input.kind === 'braindump' ? `braindump.md — the words of ${input.author}${input.recordedBy ? `, recorded by ${input.recordedBy}` : ''}` : `request.md — by ${input.requester}${input.onBehalfOf ? ` on behalf of ${input.onBehalfOf}` : ''}`),
         fact('Executor', `${rec.executor.name} · ${backendFact(rec.executor.backend, rev || !execView ? null : execView.attempts)}`, 'executor'),
+        rec.executor.node || execView?.workers?.length ? fact('Execution node', `${rec.executor.node ?? `${execView?.workers?.find(w => w.default)?.id ?? '—'} (the area's default)`}${rec.assignments?.length ? ` — assigned by ${rec.assignments.at(-1)!.by} (seq ${rec.assignments.at(-1)!.seq}): ${rec.assignments.at(-1)!.reason}` : ''}`, 'node') : null,
         rec.control.profile ? fact('Profile', `${rec.control.profile.name} — chosen by ${rec.control.profile.by} when resuming (seq ${rec.control.profile.seq}), instead of ${rec.control.profile.previous ?? 'the definition\'s'}`, 'resumed-profile') : null,
         fact('Created', when(rec.created)), fact('Started', rec.started ? when(rec.started) : '—'), fact('Ended', rec.ended ? when(rec.ended) : '—'),
         fact('Last recorded update', `${when(rec.updated)} (${ago(rec.updated)})`, 'last-update'),

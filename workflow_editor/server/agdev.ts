@@ -25,6 +25,7 @@ export interface AgdevContext {
   gitea?: Gitea
   giteaProblem?: string // why there is no Gitea (unconfigured, unreadable setting)
   executor?: () => Promise<DashboardResponse['executor']>
+  workers?: () => Promise<NonNullable<DashboardResponse['workers']>>
 }
 
 const needGitea = (ctx: AgdevContext): Gitea => {
@@ -216,6 +217,7 @@ export async function dashboard(ctx: AgdevContext): Promise<DashboardResponse> {
     at, registry: { path: ctx.registryFile, exists: reg.exists },
     gitea: g ? { state: 'ok', url: g.url, owner: g.owner } : { state: 'unconfigured', error: ctx.giteaProblem },
     executor: ctx.executor ? await ctx.executor().catch(e => ({ state: 'unknown' as const, detail: (e as Error).message })) : { state: 'not-configured' },
+    ...(ctx.workers ? { workers: await ctx.workers().catch(() => []) } : {}),
     projects: [], repositories: [], unlinkedWorkspaces: [],
   }
   // Gitea observation of every registered repository, by id.

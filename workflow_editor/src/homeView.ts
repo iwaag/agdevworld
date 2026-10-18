@@ -185,7 +185,9 @@ export function renderHomeView(root: HTMLElement, opts: { context?: boolean } = 
     const ex = data.executor
     append(bar, [
       h(`span.chip.${g.state === 'ok' ? 'ok' : 'error'}`, { title: g.error ?? '' }, g.state === 'ok' ? `Gitea ${g.url} (owner ${g.owner})` : g.state === 'unconfigured' ? `Gitea not configured: ${g.error ?? ''}` : `Gitea unreachable: ${g.error ?? ''}`),
-      h(`span.chip.${ex.state === 'available' ? 'ok' : ex.state === 'not-configured' ? 'muted' : 'warn'}`, { title: ex.detail ?? '' }, `execution host: ${ex.state}${ex.detail ? ` — ${ex.detail}` : ''}`),
+      // One chip per execution node when the area has several (p7).
+      ...((data.workers?.length ?? 0) > 1 ? data.workers!.map(w => h(`span.chip.worker-chip.${w.state === 'available' ? 'ok' : 'warn'}`, { title: `${w.label}${w.at ? ` · last contact ${when(w.at)}` : ''}`, dataset: { worker: w.id } }, `${w.id}: ${w.state === 'unknown' ? 'never reported' : w.state === 'unavailable' ? `contact lost (${w.at ? when(w.at) : '—'})` : w.detail.replace(`${w.id}; `, '')}`))
+        : [h(`span.chip.${ex.state === 'available' ? 'ok' : ex.state === 'not-configured' ? 'muted' : 'warn'}`, { title: ex.detail ?? '' }, `execution host: ${ex.state}${ex.detail ? ` — ${ex.detail}` : ''}`)]),
       h('span.muted.small', `registry ${data.registry.path}${data.registry.exists ? '' : ' (not created yet)'} · read ${when(data.at)}`),
     ])
     return bar

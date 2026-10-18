@@ -25,7 +25,7 @@ import { stepFacts, stepLabel } from './inspector.ts'
 import { h, when } from './dom.ts'
 import { icon } from './icons.ts'
 import { patchContent } from './patch.ts'
-import { activeWorkflow, ago, chip, descendants, fileLink, nodeLabel, nodeLink, runHash, topoOrder } from './runCommon.ts'
+import { activeWorkflow, ago, chip, descendants, fileLink, nodeFacts, nodeLabel, nodeLink, runHash, topoOrder } from './runCommon.ts'
 import { approvalOf, integrationStatus, type Approval } from './integrationState.ts'
 export { integrationStatus }
 
@@ -633,8 +633,9 @@ export class RunSide {
     const ex = rec.execution
     const d = this.data
     const open = d.execView?.attempts.find(a => a.state !== 'ended')
+    const nf = nodeFacts(rec, d.execView)
     const host = d.execError ? `this host's execution facts could not be read (${d.execError})`
-      : open ? (open.alive === true ? `attempt ${open.id}: process ${open.pid} alive on this host` : open.alive === false ? (open.pid ? `attempt ${open.id}: process ${open.pid} not seen alive` : `attempt ${open.id} launching`) : `attempt ${open.id} runs on another host`)
+      : open ? (open.alive === true ? `attempt ${open.id}: process ${open.pid} alive on this host` : open.alive === false ? (open.pid ? `attempt ${open.id}: process ${open.pid} not seen alive` : `attempt ${open.id} launching`) : nf?.remote ? `attempt ${open.id} runs on ${nf.node} (${nf.contact})` : `attempt ${open.id} runs on another host`)
         : rec.control.attempt ? `attempt ${rec.control.attempt.id} is open in the record; this host shows no process for it` : 'no attempt is open'
     const steps = ex.active.map(n => { const st = effectiveOf(rec)?.nodes[n]?.step; return h('li', { dataset: { key: `act:${n}` } }, st?.kind === 'report' ? h('span', 'Writing ', nodeLink(n, name(n))) : nodeLink(n, name(n)), rec.nodes[n].notes.at(-1) ? h('span.muted.small', ` — ${rec.nodes[n].notes.at(-1)!.text.split('\n')[0].slice(0, 140)}`) : null) })
     const sit = situation(rec)
@@ -642,7 +643,8 @@ export class RunSide {
     return h('div.active-block',
       steps.length ? h('ul.active-list', ...steps) : h('p.small.muted', 'No node is recorded as running.'),
       seen ? h(`p.s-only.observation.${tone}`, icon(tone === 'ok' ? 'play' : tone === 'warn' ? 'alert' : 'history', 'icon small'), seen) : null,
-      h('p.small.executor-line.d-only', `Executor: ${host}${d.execView ? ` · executor ${d.execView.executor.state}` : ''}`),
+      h('p.small.executor-line.d-only', `Executor: ${host}${d.execView && !nf?.remote ? ` · executor ${d.execView.executor.state}` : ''}`),
+      nf?.remote ? h(`p.small.node-line.${nf.tone === 'ok' ? 'muted' : 'warn-text'}`, nf.line, open && nf.state !== 'available' ? '. Its process may still be working; nothing is decided from the silence.' : '') : null,
       h('div.row.tight.focus-actions', h('button', { title: STOP_TITLE, dataset: { action: 'stop-run' }, disabled: this.frozen || !!rec.control.hold || !!rec.control.stop || sit === 'completed' }, icon('stop', 'icon tiny'), 'Stop'),
         rec.control.stop ? h('span.small.warn-text', `Stop requested by ${rec.control.stop.by}${becauseText(rec.control.stop.because)}; waiting for the process to end, then its work is saved.`) : null))
   }
@@ -660,6 +662,8 @@ export class RunSide {
     if (d.connected === false) return ['warn', 'Not connected: what runs now is not known']
     if (d.execError) return ['warn', 'This host\'s execution facts cannot be read']
     if (!d.execView) return ['muted', 'Checking the executor…']
+    const nf = nodeFacts(rec, d.execView)
+    if (open && nf?.remote) return nf.state === 'available' ? ['ok', `Working on ${nf.node}`] : ['warn', `Working on ${nf.node}, but contact is lost (${nf.contact})`]
     if (open) return open.alive === true ? ['ok', 'The executor is working on this host'] : open.alive === false ? (open.pid ? ['warn', 'No executor process is seen'] : ['muted', 'The executor is starting']) : ['muted', 'The executor runs on another host']
     if (rec.control.attempt) return ['warn', 'No executor process is seen for the open attempt']
     return rec.execution.active.length ? ['warn', 'Recorded as running, but no attempt is open'] : ['muted', 'No attempt is open']
@@ -1133,7 +1137,8 @@ export class RunSide {
       stopped: 'Stopped (held) — its work is kept; resumes only when you resume it', interrupted: 'Interrupted — a recovery agent or you look at the working tree, then continue it', unknown: 'Unknown — the process was lost; a recovery agent or you look, then continue it',
       completed: 'Completed', cancelled: 'Cancelled', 'not-started': 'Not started', idle: 'Idle',
     }
-    const process = open ? (open.alive === true ? `process ${open.pid} alive` : open.alive === false ? (open.pid ? `process ${open.pid} not seen alive` : 'launching') : 'process on another host') : ''
+    const nf = nodeFacts(rec, ev)
+    const process = open ? (open.alive === true ? `process ${open.pid} alive` : open.alive === false ? (open.pid ? `process ${open.pid} not seen alive` : 'launching') : nf?.remote ? `process ${open.pid ?? '(not registered yet)'} on ${nf.node}` : 'process on another host') : ''
     const frozen = this.frozen || !!rec.cancelled
     patchContent(this.execution.content.children[0] as HTMLElement,
       h('div.row.tight', h(`span.chip.sit-${sit}`, SIT[sit] ?? sit), process ? h('span.muted.small', process) : null),
@@ -1141,18 +1146,19 @@ export class RunSide {
       // Recoveries (observer p3): who continued the run, for which incident.
       ...(rec.recoveries ?? []).slice(-3).map(r => h('p.small.muted', `Continued by recovery: ${r.by}${r.agent ? ` (${r.agent.workflow}/${r.agent.run})` : ''}, ${when(r.at)}, incident ${r.incident}, after attempt ${r.attempt} (${r.lifted ?? 'continuation nothing had queued'}): ${sentence(r.reason)}`)),
       d.execError ? h('div.banner.warn', `Execution facts of this host could not be read: ${d.execError}`) : null,
-      ev ? h('p.small.muted', `Executor: ${ev.executor.state}${ev.executor.detail ? ` — ${ev.executor.detail}` : ''}`) : null,
+      ev && !nf?.remote ? h('p.small.muted', `Executor: ${ev.executor.state}${ev.executor.detail ? ` — ${ev.executor.detail}` : ''}`) : null,
+      nf ? h(`p.small.node-line.${nf.tone === 'ok' ? 'muted' : 'warn-text'}`, { dataset: { node: nf.node } }, nf.line, open && nf.remote && nf.state !== 'available' ? '. Its attempt stays open and assigned; its process may still be working.' : '') : null,
       this.sessionLine(rec),
       // Where the run's work is kept (p9, docs/storage.md).
-      d.resp?.place?.kind === 'run-copy' ? h('p.small.muted.run-place', `Work: this run's own copy of the project, saved to branch ${d.resp.place.branch ?? '(unknown)'} — not on the project's shared branch until it is integrated.`) : null,
+      d.resp?.place?.kind === 'run-copy' ? h('p.small.muted.run-place', `Work: this run's own copy of the project, saved to branch ${d.resp.place.branch ?? '(unknown)'} — not on the project's shared branch until it is integrated.${nf?.remote ? ` It is worked on ${nf.node}: files here are its last published checkpoint and the documents it uploaded; ${open ? 'live changes there are not shown until its attempt ends' : 'nothing is newer there'}.` : ''}`) : null,
       h('div.row.tight', h('button', { disabled: frozen || !!rec.control.hold || !!rec.control.stop || sit === 'completed', title: STOP_TITLE, dataset: { action: 'stop-run' } }, 'Stop')))
     const queued = ev?.jobs.filter(j => j.state === 'queued' || j.state === 'claimed') ?? []
     patchContent(this.execMore,
-      queued.length ? h('p.small', 'Queued: ', ...queued.map(j => `${j.kind} (${j.state}) — ${j.reason}`)) : null,
+      queued.length ? h('p.small', 'Queued: ', ...queued.map(j => `${j.kind} (${j.state}${j.worker ? ` for ${j.worker}` : ''}) — ${j.note ?? j.reason}`)) : null,
       ev?.attempts.length ? h('h4', `Attempts (${ev.attempts.length})`) : null,
       ev?.attempts.length ? h('ul.attempts', ...ev.attempts.slice().reverse().map(a => h('li.small', { dataset: { key: `at:${a.id}` } },
         h('code', a.id), ` ${a.state === 'ended' ? `${a.outcome}${a.exit_code !== null ? ` (exit ${a.exit_code})` : a.signal ? ` (${a.signal})` : ''}` : a.state}`,
-        h('span.muted', ` · ${when(a.began)}${a.ended ? ` → ${when(a.ended)}` : ''}${a.backend ? ` · ${a.backend}` : ''}${a.stop_requested ? ' · stop requested' : ''}`),
+        h('span.muted', ` · ${when(a.began)}${a.ended ? ` → ${when(a.ended)}` : ''}${a.worker ? ` · on ${a.worker}` : ''}${a.backend ? ` · ${a.backend}` : ''}${a.stop_requested ? (a.state === 'ended' ? ' · stop requested' : ' · stop pending until the worker confirms the end') : ''}`),
         h('span.muted.attempt-session', sessionOfAttempt(rec, a.id)),
         h('span.muted.attempt-activity', a.activity === undefined ? '' : a.activity === null ? ' · activity observed on its host only' : a.activity.problem ? ` · output cannot be read (${a.activity.problem})` : a.activity.unit === 'turn' ? ` · ${a.activity.count} turn${a.activity.count === 1 ? '' : 's'}${a.activity.last ? `, last output ${when(a.activity.last)}` : ''}` : a.activity.last ? ` · output last written ${when(a.activity.last)} (not counted: not stream-json)` : ' · no output')))) : null,
       ev?.checkpoints.length ? h('h4', 'Publication') : null,

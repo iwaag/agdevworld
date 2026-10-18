@@ -266,6 +266,8 @@ export interface DashboardResponse {
   registry: { path: string; exists: boolean }
   gitea: { state: 'ok' | 'unconfigured' | 'unreachable'; url?: string; owner?: string; error?: string }
   executor: { state: 'available' | 'unavailable' | 'unknown' | 'not-configured'; detail?: string; at?: string }
+  // project_migration p7: every execution node (worker) and its last contact.
+  workers?: { id: string; label: string; local: boolean; state: 'available' | 'unavailable' | 'unknown'; at: string | null; detail: string }[]
   projects: DashboardProject[]
   repositories: DashboardRepository[]
   // Workspaces registered without a project entry (local-only projects).

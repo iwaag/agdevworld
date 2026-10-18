@@ -106,7 +106,7 @@ export function createHandler(config: ServiceConfig) {
   void import('./shares.ts').then(m => m.setShareArea(area))
   const texts = (v: unknown) => Array.isArray(v) && v.every(x => typeof x === 'string')
 
-  const agdev: AgdevContext = { registryFile: config.registryFile, area, gitea: config.gitea, giteaProblem: config.giteaProblem, executor: config.exec ? async () => config.exec!.executorState() : undefined }
+  const agdev: AgdevContext = { registryFile: config.registryFile, area, gitea: config.gitea, giteaProblem: config.giteaProblem, executor: config.exec ? async () => config.exec!.executorState() : undefined, workers: config.exec ? async () => config.exec!.workersState().map(w => ({ id: w.id, label: w.label, local: w.local, state: w.state, at: w.at, detail: w.detail })) : undefined }
   const needExec = () => { if (!config.exec) throw new RequestError(503, 'execution is not configured on this service'); return config.exec }
   const str = (v: unknown, what: string) => { if (typeof v !== 'string' || !v.trim()) throw new RequestError(400, `${what} is required`); return v.trim() }
   const category = (v: unknown): RepoCategory => { if (!REPO_CATEGORIES.includes(v as RepoCategory)) throw new RequestError(400, `category must be one of ${REPO_CATEGORIES.join(', ')}`); return v as RepoCategory }

@@ -125,7 +125,7 @@ export async function contextCommand(io: Io): Promise<number> {
       const base = baseArg === 'none' ? null : /^[0-9a-f]{12,64}$/.test(baseArg) && cur.sha256?.startsWith(baseArg) ? cur.sha256 : baseArg
       try {
         const r = await store.write(t, text, { by, base, note: io.opt('note') })
-        io.out(r.changed ? `${sub === 'set' ? 'Saved' : 'Cleared'} ${overrideFile(t)}: ${stateLine(r.state)}.\nIt applies to the next attempt of affected runs and to authoring sessions that read it; nothing was started or resumed.` : `Unchanged: ${stateLine(r.state)}.`, { ok: true, ...r })
+        io.out(r.changed ? `${sub === 'set' ? 'Saved' : 'Cleared'} ${stateLine(r.state)}.\nIt applies to the next attempt of affected runs and to authoring sessions that read it; nothing was started or resumed.` : `Unchanged: ${stateLine(r.state)}.`, { ok: true, ...r })
         return 0
       } catch (e) {
         const d = (e as { detail?: unknown }).detail

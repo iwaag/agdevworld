@@ -206,6 +206,16 @@ export interface ControlMeta { because?: BecauseRef; attempt?: string }
 const controlMeta = (m: ControlMeta) => ({ ...(m.because ? { because: m.because } : {}), ...(m.attempt ? { attempt: m.attempt } : {}) })
 const now = () => new Date().toISOString()
 const posixJoin = posix.join
+// The end the executor's launch gate wrote beside an attempt's log
+// (`exit <code>` / `signal <name>`, project_migration p7), or null.
+function exitFile(file: string): { code: number | null; signal: string | null } | null {
+  let t: string
+  try { t = readFileSync(file, 'utf8').trim() } catch { return null }
+  const [kind, v] = t.split(/\s+/)
+  if (kind === 'exit' && /^\d+$/.test(v ?? '')) return { code: Number(v), signal: null }
+  if (kind === 'signal' && v) return { code: null, signal: v }
+  return null
+}
 const alive = (pid: number | null) => { if (!pid) return false; try { process.kill(pid, 0); return true } catch (e) { return (e as NodeJS.ErrnoException).code === 'EPERM' } }
 
 export interface ExecContext { registryFile: string; area: string; gitea?: Gitea; executor?: string }
@@ -1168,7 +1178,9 @@ export class ExecStore {
       if (!this.localPid(a) || holding.includes(a.id)) continue // a remote worker judges its own (p7)
       const stale = a.state === 'launching' ? Date.now() - Date.parse(a.began) > 120_000 : !alive(a.pid)
       if (!stale) continue
-      const r = await this.finished(a.id, { code: null, signal: null, lost: true }).catch(e => ({ outcome: `not recorded: ${(e as Error).message}` }))
+      // How it ended, when the executor's launch gate could record it (p7).
+      const ended = a.state === 'running' && a.log ? exitFile(`${a.log}.exit`) : null
+      const r = await this.finished(a.id, ended ?? { code: null, signal: null, lost: true }).catch(e => ({ outcome: `not recorded: ${(e as Error).message}` }))
       notes.push(`attempt ${a.id} (${a.workflow}/${a.run}): process gone; recorded ${r.outcome}`)
     }
     const reg = await loadRegistry(this.ctx.registryFile)

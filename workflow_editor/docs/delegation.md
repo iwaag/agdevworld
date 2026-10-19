@@ -239,7 +239,22 @@ not taken up is `interrupted`, like an exit with work left ready.
   queues it from the record. Every relay entry carries the receipt
   `delegation:<uid>:<child seq>:<type>`, so it is recorded once.
 - **No polling inside attempts.** Waiting ends the attempt and frees the
-  slot; the child runs in that slot; its events queue the parent.
+  slot; the child runs in that slot; its events queue the parent. The wait
+  lasts as long as the child does — minutes or days — because it is the
+  parent's record, not a process; a retained harness session is optional
+  continuity for the next attempt ([sessions.md](sessions.md)), never what
+  keeps the wait.
+- **The parent's graph around the wait.** The attempt that dispatches ends
+  with every other node it started completed, failed or waiting; a node left
+  running is an interruption however normal the wait (front/converse/run-027:
+  the talk node beside its delegate node, held twice). What is done with the
+  result is a node after the delegate node; an adjustment that adds both can
+  complete the running node at the same time (`wfe run adjust
+  --completing`). `wfe delegate request` names nodes still running.
+- **A completed child is told once** (project_migration p8 ex1): when the
+  attempt that completed its execution ended (documentation steps reopen and
+  recomplete it within one attempt), under the completing entry's receipt.
+  A child reopened and completed again later is a new result.
 
 ## Operations
 

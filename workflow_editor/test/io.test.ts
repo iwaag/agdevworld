@@ -15,6 +15,7 @@ import { gitOk } from '../server/git.ts'
 import { IntakeStore } from '../server/intake.ts'
 import { NotifyStore } from '../server/notify.ts'
 import { loadRegistry } from '../server/registry.ts'
+import { runOp } from '../server/runs.ts'
 import { Workspace } from '../server/workspace.ts'
 
 let root = ''
@@ -224,7 +225,10 @@ test('one IO channel per run: attempts, entries and boundaries in order; positio
   // Appended lines: only they are relayed.
   await appendFile(log, [said('Second thought, public.'), ''].join('\n'))
   await new Promise(r => setTimeout(r, 10))
-  await s.x.finished(c.attempt.id, { code: 0, signal: null }) // nothing started yet: a plain exit
+  // A plain exit: the work waits (an attempt that records nothing of its
+  // work is an interruption since project_migration p8 ex1).
+  for (const op of [{ op: 'node.start', node: 'build' }, { op: 'node.wait', node: 'build', reason: 'a render', holder: 'renderer', external: 'render-1' }]) await runOp(s.ws, ref, { ...op, attempt: c.attempt.id } as never, { by: 'agent', via: 'cli' })
+  await s.x.finished(c.attempt.id, { code: 0, signal: null })
   sent = io(await pass(s))
   assert.equal(sent.filter(m => /Second thought/.test(m.content)).length, 1)
   assert.ok(!sent.some(m => /Starting with the record/.test(m.content)), 'earlier lines are not sent again')

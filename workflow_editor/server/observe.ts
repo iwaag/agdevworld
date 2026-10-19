@@ -393,7 +393,7 @@ export class Observer {
           else {
             child = { uid: d.child.uid, workspace: d.child.workspace, ref: `${cref.workflow}/${cref.run}`, situation: situation(c), execution: c.execution.state, waitingFor: c.execution.waiting.map(w => w.holder), hold: c.control.hold?.kind ?? null, failed: c.execution.failed }
             const recorded = new Set(r.history.map(h => h.receipt).filter(Boolean))
-            if (isOpenDelegation(d) && !r.cancelled) unrelayed = childFacts(d.uid, c, 0).filter(f => !recorded.has(f.receipt)).map(f => ({ type: f.event.type, childSeq: f.event.child.seq, at: f.event.child.at, wakes: WAKING.has(f.event.type) }))
+            if (isOpenDelegation(d) && !r.cancelled) unrelayed = childFacts(d.uid, c, 0).filter(f => !recorded.has(f.receipt)).map(f => ({ type: f.event.type, childSeq: f.event.child.seq, at: f.due, wakes: WAKING.has(f.event.type) }))
           }
         }
         let delivery: DelegationFacts['delivery'] = null

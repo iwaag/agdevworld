@@ -49,7 +49,7 @@ pending, unrelayed, delivery, problem}]`:
 | --- | --- |
 | `child` | `{uid, workspace, ref, situation, execution, waitingFor, hold, failed}` read from the child's own record, or null before it exists |
 | `pending` | facts relayed to this run that wake it and are not taken up (`{n, type, at}`) |
-| `unrelayed` | facts of the child's history not yet recorded on this run (`{type, childSeq, at, wakes}`): a growing list means the relay is not running |
+| `unrelayed` | facts of the child's history not yet recorded on this run (`{type, childSeq, at, wakes}`; `at` is when the child's history made the fact tellable — a completion, when the attempt that completed it ended): a growing list means the relay is not running |
 | `delivery` | before a child exists: the request delivery's state in the notifier's journal (`ready`, `sending`, `failed`, `unresolved`, "may have been posted", `sent`, `queued`, `not-queued`) |
 
 A delegate node's wait names its responsible party: `delegation:<child

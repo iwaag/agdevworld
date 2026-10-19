@@ -833,7 +833,7 @@ export class ExecStore {
     const ref = { workflow: a.workflow, run: a.run }
     let rec: RunRecord | undefined
     try {
-      rec = (await runOp(ws, ref, { op: 'attempt.end', attempt, outcome: outcome as 'exited', detail, waits: 'defer-ready' }, { by: this.executor, via: 'exec' })).record
+      rec = (await runOp(ws, ref, { op: 'attempt.end', attempt, outcome: outcome as 'exited', detail, waits: 'defer-ready', explain: 'cause' }, { by: this.executor, via: 'exec' })).record
     } catch (e) {
       rec = (await readRun(ws, ref)).record // already ended, or unreadable: keep what is there
       if (!rec) throw e

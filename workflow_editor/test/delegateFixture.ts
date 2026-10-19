@@ -106,18 +106,32 @@ export async function setup(o: { parent?: string; kid?: string } = {}) {
     enabled: true, zulipUrl: `https://${REALM}`, viewBase: null, since: '2026-01-01T00:00:00.000Z', person: 'Pat',
     intake: { enabled: true, since: '2026-01-01T00:00:00.000Z', projects: {}, requesters: [{ id: PERSON, name: 'Pat' }] },
   }))
-  const x = new ExecStore({ registryFile: registry, area })
-  const n = new NotifyStore({ area, registryFile: registry, exec: x })
-  await n.due()
+  const { x, n, i } = await stores(area, registry)
   for (const [key, id] of [['folder:par', 100], ['folder:kid', 101], ['channel:par/use', PARENT_STREAM], ['channel:kid/make', KID_STREAM]] as const) n.recordTarget(key, { zulipId: id })
-  // The request topic of a question posted there (what the notifier's sent deliveries record).
-  const i = new IntakeStore({ area, registryFile: registry, exec: x, notify: n, posted: n.postedLookup() })
-  n.intake = i
   const regs = (await loadRegistry(registry)).workspaces
   const par = new Workspace(regs.find(w => w.project === 'par')!)
   const kid = new Workspace(regs.find(w => w.project === 'kid')!)
   const zulip = new Zulip(n, i)
   return { area, registry, x, n, i, par, kid, zulip }
+}
+
+async function stores(area: string, registry: string) {
+  const x = new ExecStore({ registryFile: registry, area })
+  const n = new NotifyStore({ area, registryFile: registry, exec: x })
+  await n.due()
+  // The request topic of a question posted there (what the notifier's sent deliveries record).
+  const i = new IntakeStore({ area, registryFile: registry, exec: x, notify: n, posted: n.postedLookup() })
+  n.intake = i
+  return { x, n, i }
+}
+
+// The coordinator restarted (project_migration p8 ex1): every store closed
+// and opened again on the same area; the transport keeps its posts.
+export async function restart(s: S): Promise<S> {
+  s.i.close(); s.n.close(); s.x.close()
+  const { x, n, i } = await stores(s.area, s.registry)
+  s.zulip.n = n; s.zulip.i = i
+  return { ...s, x, n, i }
 }
 
 // The transport, in-process: what the notifier hands out is posted (or

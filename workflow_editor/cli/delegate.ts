@@ -36,6 +36,13 @@ this run descending from that workflow). Then:
           its worker's execution slot (one per worker). Nothing polls: end your attempt when
           only the child's work remains; its questions and its result resume
           this run.
+  Ending  an attempt with any other node still recorded as running holds
+          the run as interrupted, however normal the wait (front/converse/
+          run-027: its talk node). Complete such a node when its own part is
+          done, and give what is done with the child's result a node after
+          the delegate node (wfe run adjust; --completing completes the
+          running node in the same change). The output names nodes still
+          running.
 Write the request for someone who knows nothing of this run: what is wanted,
 the constraints, what you need back and in what form.
 One delegation per delegate node at a time. To replace a failed or rejected
@@ -226,7 +233,11 @@ export async function delegateCommand(c: RunCli): Promise<number> {
       const original = c.opt('original') ? readFileSync(resolve(c.opt('original')!), 'utf8') : undefined
       const rec = await record(r)
       const res = await wrap(() => store.dispatch(ws, r, node, { request: text, original, predecessor: c.opt('replaces'), by: recorder(rec), via: 'cli', ...meta() }))
-      return after(res.record, res.delegation, `${res.duplicate ? 'Already dispatched (same request); nothing changed.' : `Dispatched ${res.delegation.id}: ${node} → ${res.delegation.target.project}/${res.delegation.target.workflow} (workspace ${res.delegation.target.workspace}).`} The request is posted in that workflow's channel; its intake creates the child.${res.notes.length ? `\n${res.notes.join('\n')}` : ''}\nWhen only the child's work remains, end your attempt: its questions and its result resume this run.`)
+      const running = res.record.execution.active
+      const next = running.length
+        ? `Still recorded as running: ${running.join(', ')}. Ending the attempt now would hold this run as interrupted: complete ${running.length === 1 ? 'it' : 'them'} (or fail, or wait on something) first; work that needs the child's result belongs in a node after ${node}.`
+        : 'When only the child\'s work remains, end your attempt: its questions and its result resume this run.'
+      return after(res.record, res.delegation, `${res.duplicate ? 'Already dispatched (same request); nothing changed.' : `Dispatched ${res.delegation.id}: ${node} → ${res.delegation.target.project}/${res.delegation.target.workflow} (workspace ${res.delegation.target.workspace}).`} The request is posted in that workflow's channel; its intake creates the child.${res.notes.length ? `\n${res.notes.join('\n')}` : ''}\n${next}`)
     }
     case 'list': {
       const rec = await record(await ref())

@@ -347,6 +347,19 @@ export interface Execution {
 export const ATTEMPT_OUTCOMES = ['exited', 'stopped', 'interrupted', 'unknown'] as const
 export type AttemptOutcome = typeof ATTEMPT_OUTCOMES[number]
 export type HoldKind = 'stopped' | 'interrupted' | 'unknown'
+// Why an attempt's end held the run (project_migration p8 ex1), recorded on
+// holds derived from entries that ask for it (`attempt.end` `explain:
+// cause`); the hold's reason keeps the full sentence. `left-running` and
+// `left-ready`: work the attempt left; `nothing-recorded`: it ended with no
+// work ever recorded (agops recover/run-013…025 ran, recovered their target
+// and recorded nothing of their own); `missed-event`: a child's fact it was
+// launched for and did not take up; `process`: the executor saw the process
+// fail (`detail`); `lost`: the process was gone and its outcome is unknown.
+export type HoldCause =
+  | { code: 'left-running' | 'left-ready' | 'nothing-recorded'; nodes: string[] }
+  | { code: 'missed-event'; events: { delegation: string; n: number; type: string }[] }
+  | { code: 'process'; detail: string }
+  | { code: 'lost' }
 // The person's words a recorder acted on (p9): when an agent stops, resumes
 // or cancels a run because of an answer or an instruction, it records the
 // operation as itself and names them here.
@@ -355,7 +368,7 @@ export interface Control {
   attempt: { id: string; reason: string; began: string; backend: string | null; settings?: AttemptSettings } | null // the open attempt; backend: what served it (Agent ≠ Model)
   attempts: number
   last: { id: string; outcome: AttemptOutcome; ended: string; detail: string; backend: string | null } | null
-  hold: { kind: HoldKind; since: string; by: string; reason: string; because?: Because } | null // nothing resumes it but run.resume
+  hold: { kind: HoldKind; since: string; by: string; reason: string; because?: Because; cause?: HoldCause } | null // nothing resumes it but run.resume
   stop: { at: string; by: string; reason: string; because?: Because } | null // stop requested; not yet confirmed by the attempt's end
   // The execution profile a person chose when resuming (project_migration
   // p6 ex2): later attempts resolve it instead of the definition's. Which
@@ -453,7 +466,9 @@ export type OpInput =
   // `waits` (project_migration p8): ready work beside a wait is left for the
   // attempt the wait's answer starts. Absent on entries written before, which
   // replay as they were decided.
-  | { op: 'attempt.end'; attempt: string; outcome: AttemptOutcome; detail?: string; waits?: 'defer-ready' }
+  // `explain` (project_migration p8 ex1): a hold this end derives records its
+  // structured cause; absent on entries written before, which replay as they were.
+  | { op: 'attempt.end'; attempt: string; outcome: AttemptOutcome; detail?: string; waits?: 'defer-ready'; explain?: 'cause' }
   // agent_session p1: what the harness reported of the open attempt's
   // session (`attached`: its id), or a replacement before anything was
   // launched in it (`replaced`: the resumed session is missing on the host;
@@ -1219,6 +1234,7 @@ export function apply(prev: RunState | null, e: HistoryEntry | (OpInput & EntryM
       if (!ctl.attempt || ctl.attempt.id !== e.attempt) fail('attempt-stale', `attempt ${String(e.attempt)} is not open (${ctl.attempt ? `${ctl.attempt.id} is` : 'none is'})`)
       if (!(ATTEMPT_OUTCOMES as readonly string[]).includes(e.outcome)) fail('shape', `outcome must be one of ${ATTEMPT_OUTCOMES.join(', ')}`)
       const detail = optText(e.detail, 'detail')
+      if (e.explain !== undefined && e.explain !== 'cause') fail('shape', 'explain is "cause" or absent')
       // An exit is a normal end only when nothing is left as running and
       // the remaining work waits on someone; anything else needs a person to
       // look and resume (side effects may have happened after the last record).
@@ -1230,24 +1246,35 @@ export function apply(prev: RunState | null, e: HistoryEntry | (OpInput & EntryM
       const ex = summarize(s, graph)
       let outcome: AttemptOutcome = e.outcome
       let why = detail
+      let cause: HoldCause | undefined = outcome === 'unknown' ? { code: 'lost' } : outcome === 'interrupted' ? { code: 'process', detail: detail || 'the process did not end normally' } : undefined
       const deferred = e.waits === 'defer-ready' && ex.waiting.length > 0
       if (outcome === 'exited' && !s.cancelled && ex.state === 'in-progress' && (ex.active.length || (ex.ready.length && !deferred))) {
         outcome = 'interrupted'
         why = `the executor exited with ${ex.active.length ? `${ex.active.join(', ')} recorded as running` : `${ex.ready.join(', ')} ready and nothing waiting`}${detail ? `; ${detail}` : ''}`
+        cause = ex.active.length ? { code: 'left-running', nodes: ex.active } : { code: 'left-ready', nodes: ex.ready }
+      }
+      // An attempt after which nothing of the run's work is recorded (p8 ex1,
+      // new entries only): the work it did is in no record.
+      if (e.explain === 'cause' && outcome === 'exited' && !s.cancelled && ex.state === 'not-started' && ex.ready.length && !Object.values(s.delegations ?? {}).length && !Object.values(s.questions).some(q => !q.takenUp && !q.withdrawn)) {
+        outcome = 'interrupted'
+        why = `the executor exited with nothing of the run's work recorded (${ex.ready.join(', ')} never started)${detail ? `; ${detail}` : ''}`
+        cause = { code: 'nothing-recorded', nodes: ex.ready }
       }
       // A child's fact that was waiting for this attempt and was not taken
       // up (p10): like work left ready. One that arrived during it queues
       // the next attempt instead.
-      const missed = Object.values(s.delegations ?? {}).filter(isOpenDelegation).flatMap(d => pendingEvents(d).filter(x => x.during !== e.attempt).map(x => `${d.id} ${x.type} #${x.n}`))
+      const missedEvents = Object.values(s.delegations ?? {}).filter(isOpenDelegation).flatMap(d => pendingEvents(d).filter(x => x.during !== e.attempt).map(x => ({ delegation: d.id, n: x.n, type: x.type })))
+      const missed = missedEvents.map(x => `${x.delegation} ${x.type} #${x.n}`)
       if (outcome === 'exited' && !s.cancelled && missed.length) {
         outcome = 'interrupted'
         why = `the executor exited without taking up delegation event${missed.length === 1 ? '' : 's'} ${missed.join(', ')}${detail ? `; ${detail}` : ''}`
+        cause = { code: 'missed-event', events: missedEvents }
       }
       if (ctl.stop && outcome !== 'unknown') outcome = 'stopped'
       ctl.last = { id: ctl.attempt!.id, outcome, ended: at, detail: why, backend: ctl.attempt!.backend }
       ctl.attempt = null
       // A stop is the person's: the hold names who stopped and why.
-      if (!s.cancelled && outcome !== 'exited') ctl.hold = outcome === 'stopped' && ctl.stop ? { kind: 'stopped', since: at, by: ctl.stop.by, reason: ctl.stop.reason, ...(ctl.stop.because ? { because: ctl.stop.because } : {}) } : { kind: outcome as HoldKind, since: at, by, reason: why || outcome }
+      if (!s.cancelled && outcome !== 'exited') ctl.hold = outcome === 'stopped' && ctl.stop ? { kind: 'stopped', since: at, by: ctl.stop.by, reason: ctl.stop.reason, ...(ctl.stop.because ? { because: ctl.stop.because } : {}) } : { kind: outcome as HoldKind, since: at, by, reason: why || outcome, ...(e.explain === 'cause' && cause && outcome !== 'stopped' ? { cause } : {}) }
       ctl.stop = null
       break
     }

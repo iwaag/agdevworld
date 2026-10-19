@@ -115,15 +115,35 @@ export const latestResult = (d: Pick<Delegation, 'events'>) => [...d.events].rev
 // One fact of the child's history the parent is told, with its receipt
 // (`delegation:<uid>:<child seq>:<type>`: recorded once however often the
 // relay passes). `manifest` is added by the file layer for `completed`.
-export interface ChildFact { receipt: string; event: Omit<DelegationEvent, 'n' | 'at' | 'seq' | 'during' | 'wakes' | 'takenUp'> }
+// `due`: when the child's history made it tellable (a completion: when the
+// attempt that completed it ended), for readers judging a delay.
+export interface ChildFact { receipt: string; event: Omit<DelegationEvent, 'n' | 'at' | 'seq' | 'during' | 'wakes' | 'takenUp'>; due: string }
+// A completed execution is told once the child's attempt that completed it
+// has ended (or at once when it was completed outside an attempt), under the
+// completing entry's identity: documentation steps reopen and recomplete
+// the execution within one attempt, and front/converse/run-027 was told the
+// one result of jevlab study/run-002 five times (project_migration p8 ex1).
+// Reopened and completed again after that is a new result.
 export function childFacts(uid: string, child: RunRecord, sinceSeq = 0): ChildFact[] {
   const out: ChildFact[] = []
   const graph = child.definition.revisions?.at(-1)?.effective ?? child.definition.effective
+  let open = false // an attempt of the child is open
+  let completing: { seq: number; at: string; by: string; text: string } | null = null // the latest entry that completed the execution
+  let told = 0 // the completing entry last told
   for (const h of child.history) {
+    if (h.op === 'attempt.begin') open = true
+    if (h.op === 'attempt.end') open = false
+    const exec = h.change.execution?.[1]
+    if (exec === 'completed') completing = { seq: h.seq, at: h.at, by: h.by, text: String((h as unknown as { outcome?: unknown }).outcome ?? 'every node completed') }
+    else if (exec) completing = null
+    if (completing && !open && completing.seq !== told) {
+      told = completing.seq
+      if (h.seq > sinceSeq) out.push({ receipt: `delegation:${uid}:${completing.seq}:completed`, event: { type: 'completed', child: { seq: completing.seq, at: completing.at, by: completing.by }, text: completing.text }, due: h.at })
+    }
     if (h.seq <= sinceSeq) continue
     const at = { seq: h.seq, at: h.at, by: h.by }
     const push = (type: DelegationEventType, text: string, extra: Partial<ChildFact['event']> = {}) =>
-      out.push({ receipt: `delegation:${uid}:${h.seq}:${type}`, event: { type, child: at, text, ...extra } })
+      out.push({ receipt: `delegation:${uid}:${h.seq}:${type}`, event: { type, child: at, text, ...extra }, due: h.at })
     const e = h as unknown as Record<string, unknown>
     if (h.op === 'question.ask') {
       const q = child.questions[e.question as string]
@@ -144,7 +164,6 @@ export function childFacts(uid: string, child: RunRecord, sinceSeq = 0): ChildFa
     if (h.op === 'run.decide') push('decided', String(e.evidence ?? e.note ?? ''), { decision: e.decision as string })
     if (h.op === 'run.integrate') push('integrated', 'the accepted result was integrated into the child project\'s shared branches')
     if (h.op === 'run.cancel') push('cancelled', String(e.reason ?? ''))
-    if (h.change.execution?.[1] === 'completed') push('completed', String(e.outcome ?? 'every node completed'))
   }
   return out
 }

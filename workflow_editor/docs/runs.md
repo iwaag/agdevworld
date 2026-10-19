@@ -542,6 +542,29 @@ ended: `exited`, `stopped`, `interrupted` or `unknown`. An exit that leaves a
 node recorded as running, or ready work with nothing waiting on a person, is
 recorded as `interrupted`, never as success.
 
+A wait is the record's, not a process's: the attempt that records it ends,
+frees its slot, and the answer, the child's fact or the external result
+starts a new attempt (project_migration p8 ex1). Every node the attempt
+started is completed, failed or waiting when it ends; a node left running
+beside a normal wait still holds the run as interrupted
+(front/converse/run-027: its talk node beside a delegation). Work that needs
+what is awaited is a node after the waiting one.
+
+**Why a hold was derived** (project_migration p8 ex1). Ends recorded since
+then carry `explain: cause`, and the hold they derive keeps a structured
+`cause` beside its sentence `reason`:
+
+| `cause.code` | Meaning |
+| --- | --- |
+| `left-running` (`nodes`) | the attempt ended with these nodes recorded as running |
+| `left-ready` (`nodes`) | ready work and nothing waiting |
+| `nothing-recorded` (`nodes`) | the attempt ended with none of the run's work ever recorded (no node started, nothing asked, nothing delegated) |
+| `missed-event` (`events`: `{delegation, n, type}`) | a child's fact the attempt was launched for was not taken up |
+| `process` (`detail`) | the execution host saw the process end abnormally |
+| `lost` | the process was gone; its outcome is unknown |
+
+Older holds have no `cause`; readers fall back to the sentence.
+
 **Holds.** `stopped`, `interrupted` and `unknown` hold the run: nothing
 begins until a person records `run.resume` with an instruction (after looking
 at the run's files — side effects may have happened after the last record).

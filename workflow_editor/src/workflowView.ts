@@ -41,6 +41,9 @@ export function renderWorkflowView(root: HTMLElement, wsId: string, file: string
   let saved: Workflow | null = null // last valid content read from disk
   let draft: Workflow | null = null
   let rev: string | null = null
+  // The revision the draft was made from: a save names it, so a file changed
+  // on disk meanwhile is not overwritten (project_migration p8).
+  let draftRev: string | null = null
   let problem: FileProblem | undefined
   let externalChange = false
   let saveError = ''
@@ -283,6 +286,7 @@ export function renderWorkflowView(root: HTMLElement, wsId: string, file: string
         saved = cloneWorkflow(r.workflow)
         if (!wasDirty || opts.force || !draft) {
           if (opts.force || !draft || canonicalJson(draft) !== canonicalJson(r.workflow)) draft = cloneWorkflow(r.workflow)
+          draftRev = r.rev
           externalChange = false; saveError = ''
         } else if (changedOnDisk) externalChange = true // e.g. edited while the stream was down
         if (opts.force) saveState = 'Reloaded from disk'
@@ -380,8 +384,9 @@ export function renderWorkflowView(root: HTMLElement, wsId: string, file: string
     saveButton.disabled = true
     saveStateEl.textContent = 'Saving…'
     try {
-      const r = await api.saveWorkflow(wsId, file, draft)
+      const r = await api.saveWorkflow(wsId, file, draft, draftRev)
       rev = r.rev
+      draftRev = r.rev
       saved = cloneWorkflow(draft)
       externalChange = false
       saveState = `Saved ${new Date().toLocaleTimeString()}`

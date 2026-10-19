@@ -523,9 +523,10 @@ export class IntakeStore {
     return 'ok'
   }
 
-  // What follows an applied post: a request's start, an answer's resumption
-  // (both queued by receipt, so twice is once). An instruction waits in the
-  // run for the next node boundary.
+  // What follows an applied post: a request's start, an answer's resumption,
+  // an instruction's continuation of a run nobody executes (all queued by
+  // receipt, so twice is once). An executing attempt reads an instruction at
+  // its next node boundary.
   private async followUp(row: MessageRow): Promise<'ok'> {
     const c = JSON.parse(row.classification!) as Classification
     const applied = JSON.parse(row.applied!) as RunRef & { seq: number }
@@ -537,6 +538,11 @@ export class IntakeStore {
       if (rec && !rec.cancelled && rec.control.attempts === 0) this.exec.enqueue(ws.reg.id, ref, 'start', `request:${sourceReceipt(row.realm, row.id)}`, 'start: the person\'s request (Zulip)')
     }
     if (this.exec && c.kind === 'answer') await this.exec.afterAnswer(ws, ref, c.question)
+    if (this.exec && c.kind === 'instruction') {
+      const rec = (await readRun(ws, ref)).record
+      const id = Object.values(rec?.instructions ?? {}).find(i => i.source?.kind === 'zulip' && i.source.message === row.id)?.id
+      if (id) await this.exec.afterInstruction(ws, ref, id)
+    }
     this.move(row, 'done')
     return 'ok'
   }

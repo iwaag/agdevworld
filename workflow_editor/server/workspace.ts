@@ -51,6 +51,14 @@ async function publication(dir: string): Promise<RepositoryStatus['publication']
 
 async function isDir(p: string) { try { return (await stat(p)).isDirectory() } catch { return false } }
 
+// A save that names the revision it was made from is refused when the file
+// moved on since (code `definition-conflict`, detail: the current revision).
+function staleBase(file: string, base: string | null | undefined, current: string | null) {
+  if (base === undefined || base === null) return
+  const now = current === null ? null : textHash(current)
+  if (now !== base) throw new RequestError(409, `${file} changed since revision ${base} was read (now ${now ?? 'absent'}); read it again and reapply the change`, { code: 'definition-conflict', rev: now })
+}
+
 export class Workspace {
   readonly reg: Registration
   // Set by the service when the watcher vouches that Git state has not
@@ -247,9 +255,13 @@ export class Workspace {
     }
   }
 
-  async saveProject(project: Project): Promise<{ rev: string; text: string }> {
+  // `base` (project_migration p8): the revision the writer read. A file that
+  // changed since is not overwritten: the refusal names the current revision,
+  // so the writer reads it again instead of replacing someone else's edit.
+  async saveProject(project: Project, base?: string | null): Promise<{ rev: string; text: string }> {
     const path = await inside(this.root, 'project.yaml')
     const current = await readTextOrNull(path)
+    staleBase('project.yaml', base, current)
     let text: string
     if (current === null) {
       text = newProjectText({ ...project, schema: project.schema || PROJECT_SCHEMA })
@@ -383,9 +395,10 @@ export class Workspace {
 
   // Saves a draft. Refuses to write over a file that is currently malformed or
   // unsupported: the stale rendering in the UI must not replace it.
-  async saveWorkflow(file: string, workflow: Workflow): Promise<{ rev: string; text: string }> {
+  async saveWorkflow(file: string, workflow: Workflow, base?: string | null): Promise<{ rev: string; text: string }> {
     const read = await this.readWorkflowFile(file)
     if (read.text === null) throw new RequestError(409, `${file} no longer exists; create it again or restore it`)
+    staleBase(file, base, read.text)
     const parsed = parseWorkflow(read.text)
     if (!parsed.ok) throw new RequestError(409, `${file} on disk cannot be read (${parsed.problem.message}); fix the file before saving from the editor`, parsed.problem)
     const text = renderWorkflow(parsed.doc, workflow)

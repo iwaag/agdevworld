@@ -91,7 +91,7 @@ export const api = {
     call<CreateProjectResult>('POST', 'api/projects', input, [422]),
   register: (path: string, id?: string) => call<RegisterResponse>('POST', 'api/workspaces', { path, id }, [422]),
   project: (id: string, refresh = false) => call<ProjectResponse>('GET', `${ws(id)}/project${refresh ? '?refresh=1' : ''}`),
-  saveProject: (id: string, project: Project) => call<SaveResponse>('PUT', `${ws(id)}/project`, { project }),
+  saveProject: (id: string, project: Project, base?: string | null) => call<SaveResponse>('PUT', `${ws(id)}/project`, { project, ...(base ? { base } : {}) }),
   addSubmodule: (id: string, path: string, url: string) => call<AddSubmoduleResponse>('POST', `${ws(id)}/submodules`, { path, url }, [422]),
   addNewRepository: (id: string, path: string) => call<AddSubmoduleResponse>('POST', `${ws(id)}/submodules`, { path, create: true }, [422]),
   // documentation: a policy name or a whole declaration; absent, the template's (p8/ex2).
@@ -99,7 +99,7 @@ export const api = {
     call<{ file: string }>('POST', `${ws(id)}/workflows`, { id: wid, name, template, ...(typeof documentation === 'string' ? { policy: documentation } : documentation ? { documentation } : {}) }),
   workflowTemplates: (id: string) => call<{ id: string; name: string; description: string; documentation: Documentation }[]>('GET', `${ws(id)}/workflow-templates`),
   workflow: (id: string, file: string, refresh = false) => call<WorkflowResponse>('GET', `${wf(id, file)}${refresh ? '?refresh=1' : ''}`),
-  saveWorkflow: (id: string, file: string, workflow: Workflow) => call<SaveResponse>('PUT', wf(id, file), { workflow }),
+  saveWorkflow: (id: string, file: string, workflow: Workflow, base?: string | null) => call<SaveResponse>('PUT', wf(id, file), { workflow, ...(base ? { base } : {}) }),
   approve: (id: string, file: string, kind: ApprovalKind, approver: string) =>
     call<SaveResponse & { state: ApprovalState }>('POST', `${wf(id, file)}/approve`, { kind, approver }),
   runs: (id: string) => call<RunSummary[]>('GET', `${ws(id)}/runs`),

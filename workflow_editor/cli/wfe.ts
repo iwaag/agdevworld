@@ -307,6 +307,19 @@ Local file transport is enabled for this command only. The submodule is
 staged in the project root, not committed.
 Exit 0 added; 1 failed (what Git left behind is reported; nothing is reset).`,
   workflow: `wfe workflow new <id> [--name <name>] [--policy default|manual|custom [--steps plan,reports,final]] [--template <id>] [--workspace <id>]
+wfe workflow show <workflow> [--workspace <id>]
+wfe workflow save <workflow> --file <yaml|-> --base <rev> [--workspace <id>]
+
+show prints the definition file as it is on disk and its revision (the
+content hash the editor shows). save writes a changed definition the way the
+editor's Save does — the file only, never a commit — after checking that the
+file is still at --base: a file someone changed since (in the editor or on
+disk) is not overwritten; the refusal names its current revision (exit 1,
+code definition-conflict), so read it again and reapply the change. The new
+text must parse as a workflow (ag.workflow.v2); the file's own comments and
+key order are kept where the model did not change. Validation issues are
+reported, never a reason to refuse (wfe validate); approvals are records
+(wfe approve).
 
 wfe workflow basics [--dry-run] [--commit [--push]] [--workspace <id> | --all]
 
@@ -334,6 +347,17 @@ policy a run plans, reports each node and reports the whole (docs/contract.md,
 Refuses an id already used by another workflow file. Writing the file by hand
 is equally valid; see docs/contract.md.`,
   request: `wfe request <workflow> --braindump <file|-> --author <person> [--predecessor <run>] [--node <worker>] [--receipt <id>] [--workspace <id>]
+wfe request <workflow> --request <file|-> [--requester <agent>] [--entrusted-by <ref>] [--on-behalf-of <person>] [--original <file>] [--predecessor <run>] [--node <worker>] [--receipt <id>] [--workspace <id>]
+
+--request is an agent's request (the run's request.md): what the agent wrote,
+not a person's words. From an executing attempt the requester is that run's
+agent, it is entrusted by that run, and the receipt is derived from the
+attempt and the text, so the same command retried finds the same run instead
+of creating a second. --on-behalf-of names the person served; --original
+keeps the words the request was derived from (the run's original-input.md),
+so a rewritten request never replaces what was actually said. Use a
+delegate node instead (wfe run adjust, docs/delegation.md) when your own work
+waits for the result and judges it.
 
 A person's request to the executor (autolab): creates the run, in its own
 working copy, with their words as braindump.md and queues its start. The same
@@ -503,6 +527,13 @@ agautolab.wfnotify does, with its own credentials.`,
   project: `wfe project register <owner>/<name>
 wfe project obtain <project id>
 wfe project unregister <project id>
+wfe project show [--workspace <id>]
+wfe project save --file <yaml|-> --base <rev> [--workspace <id>]
+
+show      prints project.yaml (intent, goals, guides, areas, execution) and its
+          revision. save writes a changed project.yaml like the project
+          editor's Save (the file only, no commit), refused with code
+          definition-conflict when the file is no longer at --base.
 
 register  records a project root that exists on Gitea (its project.yaml must be
           ag.project.v2), its devdocs repository in submodule mode, and the
@@ -714,6 +745,50 @@ async function cmdApprove(p: Parsed): Promise<number> {
   }
 }
 
+// Reading and writing a definition as the editor does (project_migration p8):
+// the file's text and revision, and a save checked against the revision the
+// writer read, so an agent's edit never replaces an edit it did not see.
+async function definitionCommand(p: Parsed, kind: 'workflow' | 'project', sub: 'show' | 'save', name?: string): Promise<number> {
+  const ws = await workspace(p)
+  const { parseProject, parseWorkflow } = await import('../server/yamlDoc.ts')
+  const { textHash } = await import('../server/files.ts')
+  let file = 'project.yaml', text: string | null
+  if (kind === 'workflow') {
+    if (!name) throw new UsageError(`workflow ${sub} needs <workflow>`)
+    file = await workflowFile(ws, name)
+    text = (await ws.readWorkflowFile(file)).text
+  } else text = (await ws.readProject()).text
+  if (sub === 'show') {
+    if (text === null) throw new Refused(`${file} does not exist in ${ws.reg.id}`)
+    const rev = textHash(text)
+    out(`# ${ws.reg.id} ${kind === 'workflow' ? `devdocs/workflows/${file}` : file} — revision ${rev}\n${text}`, { ok: true, workspace: ws.reg.id, file, rev, text })
+    return 0
+  }
+  const source = opt(p, 'file'), base = opt(p, 'base')
+  if (!source) throw new UsageError(`${kind} save needs --file <yaml|->: the whole new definition`)
+  if (!base) throw new UsageError(`${kind} save needs --base <rev>: the revision you read (wfe ${kind} show)`)
+  const next = readFileSync(source === '-' ? 0 : resolve(source), 'utf8')
+  try {
+    if (kind === 'workflow') {
+      const parsed = parseWorkflow(next)
+      if (!parsed.ok) throw new Refused(`the new definition does not parse: ${parsed.problem.message}`, parsed.problem)
+      const saved = await ws.saveWorkflow(file, parsed.model, base)
+      const issues = validateWorkflowIssues(await ws.workflowResponse(file))
+      out([`${saved.rev === base ? 'Unchanged' : 'Saved'}: devdocs/workflows/${file} (revision ${saved.rev}); not committed.`, ...issues.map(issueLine)].join('\n'), { ok: true, workspace: ws.reg.id, file, rev: saved.rev, changed: saved.rev !== base, issues })
+    } else {
+      const parsed = parseProject(next)
+      if (!parsed.ok) throw new Refused(`the new project.yaml does not parse: ${parsed.problem.message}`, parsed.problem)
+      const saved = await ws.saveProject(parsed.model, base)
+      out(`${saved.rev === base ? 'Unchanged' : 'Saved'}: project.yaml (revision ${saved.rev}); not committed.`, { ok: true, workspace: ws.reg.id, file, rev: saved.rev, changed: saved.rev !== base })
+    }
+    return 0
+  } catch (e) {
+    if (e instanceof RequestError) throw new Refused(e.message, e.detail)
+    throw e
+  }
+}
+const validateWorkflowIssues = (r: { issues?: Issue[] }): Issue[] => r.issues ?? []
+
 async function cmdArrange(p: Parsed): Promise<number> {
   const [name] = p.positional
   if (!name) throw new UsageError('arrange needs <workflow>')
@@ -779,6 +854,7 @@ async function cmdWorkflow(p: Parsed): Promise<number> {
     out([o.dryRun ? 'Dry run: nothing written.' : '', ...lines].filter(Boolean).join('\n'), results)
     return results.some(r => r.status === 'conflict' || r.publishError) ? 1 : 0
   }
+  if (sub === 'show' || sub === 'save') return definitionCommand(p, 'workflow', sub, id)
   if (sub === 'templates') {
     const { WORKFLOW_TEMPLATES } = await import('../server/templates.ts')
     out(WORKFLOW_TEMPLATES.map(t => `${t.id.padEnd(12)} ${t.name} — ${t.description}`).join('\n'), WORKFLOW_TEMPLATES)
@@ -1186,21 +1262,55 @@ async function cmdIntake(p: Parsed): Promise<number> {
   throw new UsageError('wfe intake status|messages|due|receive|process|transport|retry|protocol')
 }
 
+// The run of an executing attempt: its project and the agent it records as.
+async function readRunRecord(x: ExecStore, row: { workspace: string; workflow: string; run: string }): Promise<{ project: string; agent: string } | null> {
+  try {
+    const ws = await x.workspace(row.workspace)
+    const rec = (await (await import('../server/runs.ts')).readRun(ws, { workflow: row.workflow, run: row.run })).record
+    return rec ? { project: rec.project, agent: rec.executor.name } : null
+  } catch { return null }
+}
+function entrustRef(text: string): import('../shared/run.ts').EntrustRef {
+  if (text.startsWith('file:')) return { kind: 'file', path: text.slice(5) }
+  if (text.startsWith('note:')) return { kind: 'note', text: text.slice(5) }
+  const m = /^(?:([a-z0-9][a-z0-9_.-]*)\/)?([a-z0-9][a-z0-9_.-]*)\/(run-[a-z0-9][a-z0-9_.-]*)$/.exec(text)
+  if (m) return { kind: 'run', workflow: m[2], run: m[3], ...(m[1] ? { project: m[1] } : {}) }
+  throw new UsageError(`--entrusted-by "${text}" must be [<project>/]<workflow>/<run>, file:<path> or note:<text>`)
+}
+
 // A person's request: their words become the run's braindump.md, and the
-// executor is queued.
+// executor is queued. An agent's request: its request.md (p8).
 async function cmdRequest(p: Parsed): Promise<number> {
   const [workflow] = p.positional
   if (!workflow) throw new UsageError('request needs a workflow')
-  const file = opt(p, 'braindump'); if (!file) throw new UsageError('--braindump <file|-> is required: the person\'s words')
-  const author = opt(p, 'author'); if (!author) throw new UsageError('--author <person> is required')
-  const receipt = opt(p, 'receipt') ?? `cli-${Date.now()}-${process.pid}`
+  const file = opt(p, 'braindump'), requestFile = opt(p, 'request')
+  if (!!file === !!requestFile) throw new UsageError('give exactly one of --braindump <file|-> (a person\'s words) or --request <file|-> (an agent\'s request)')
+  const author = opt(p, 'author'); if (file && !author) throw new UsageError('--author <person> is required: whose words the braindump holds')
   const ws = await workspace(p)
   const x = await openExec(p)
   try {
-    const text = readFileSync(file === '-' ? 0 : resolve(file), 'utf8')
+    const text = readFileSync((file ?? requestFile) === '-' ? 0 : resolve((file ?? requestFile)!), 'utf8')
+    // An executing attempt requesting work (project_migration p8): its run's
+    // agent is the requester and its run what entrusted the request, and the
+    // same command retried by that attempt is the same request.
+    const attempt = process.env.WFE_ATTEMPT
+    const row = attempt ? x.attemptRow(attempt) : undefined
+    const own = row && row.state !== 'ended' ? (await readRunRecord(x, row)) : null
+    const { createHash } = await import('node:crypto')
+    const receipt = opt(p, 'receipt') ?? (own ? `attempt:${attempt}:${createHash('sha256').update(`${ws.reg.id}\n${workflow}\n${text}`).digest('hex').slice(0, 24)}` : `cli-${Date.now()}-${process.pid}`)
+    let input: Parameters<ExecStore['request']>[0]['input']
+    if (requestFile) {
+      const requester = opt(p, 'requester') ?? own?.agent
+      if (!requester) throw new UsageError('--requester <agent> is required outside an executing attempt: the agent that wrote the request')
+      const by = opt(p, 'entrusted-by')
+      const entrustedBy = by ? entrustRef(by) : own ? { kind: 'run' as const, project: own.project, workflow: row!.workflow, run: row!.run } : undefined
+      if (!entrustedBy) throw new UsageError('--entrusted-by is required outside an executing attempt: <project>/<workflow>/<run>, note:<text> or file:<path>')
+      const original = opt(p, 'original')
+      input = { kind: 'request', text, requester, entrustedBy, ...(opt(p, 'on-behalf-of') ? { onBehalfOf: opt(p, 'on-behalf-of') } : {}), ...(original ? { original: readFileSync(original === '-' ? 0 : resolve(original), 'utf8') } : {}) }
+    }
     const pred = opt(p, 'predecessor')
     const predecessor = pred ? await (await import('../server/runs.ts')).resolveRef(ws, pred) : undefined
-    const r = await x.request({ workspace: ws.reg.id, workflow, text, author, receipt, by: opt(p, 'by'), via: 'cli', predecessor, node: opt(p, 'node') })
+    const r = await x.request({ workspace: ws.reg.id, workflow, text, author: author ?? input?.requester ?? '', receipt, by: opt(p, 'by') ?? own?.agent, via: 'cli', predecessor, node: opt(p, 'node'), ...(input ? { input } : {}) })
     out(`${r.duplicate ? 'Already requested (same receipt)' : 'Requested'}: run ${r.ref.workflow}/${r.ref.run} in ${ws.reg.id}; job ${r.job.id} is ${r.job.state}${r.job.worker ? ` for execution node ${r.job.worker}` : ''}.`, r)
     return 0
   } catch (e) {
@@ -1239,7 +1349,8 @@ async function cmdProject(p: Parsed): Promise<number> {
     out([`Unregistered project ${r.project.id}.`, ...r.workspaces.map(w => `  workspace ${w.id} (${w.path}; the folder is kept)`), ...r.repositories.map(e => `  repository ${e.key} ${e.gitea.owner}/${e.gitea.name} (on Gitea it is kept)`)].join('\n'), { ok: true, ...r })
     return 0
   }
-  throw new UsageError('wfe project register <owner>/<name> | obtain <project id> | unregister <project id>')
+  if (sub === 'show' || sub === 'save') return definitionCommand(p, 'project', sub)
+  throw new UsageError('wfe project register <owner>/<name> | obtain <project id> | unregister <project id> | show | save --file <yaml> --base <rev>')
 }
 
 async function cmdRepo(p: Parsed): Promise<number> {

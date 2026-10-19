@@ -202,8 +202,10 @@ function sinceBootstrap(r: RunRecord, attempts: string[]): string[] {
   return out
 }
 
-export interface ControlMeta { because?: BecauseRef; attempt?: string }
-const controlMeta = (m: ControlMeta) => ({ ...(m.because ? { because: m.because } : {}), ...(m.attempt ? { attempt: m.attempt } : {}) })
+// `operator` (project_migration p8): the executing attempt of another run
+// that performs this control act (an agent operating the run, as a person would).
+export interface ControlMeta { because?: BecauseRef; attempt?: string; operator?: { run: string; attempt: string } }
+const controlMeta = (m: ControlMeta) => ({ ...(m.because ? { because: m.because } : {}), ...(m.attempt ? { attempt: m.attempt } : {}), ...(m.operator ? { operator: m.operator } : {}) })
 const now = () => new Date().toISOString()
 const posixJoin = posix.join
 // The end the executor's launch gate wrote beside an attempt's log
@@ -333,15 +335,18 @@ export class ExecStore {
   // or working run keeps its own copy; the execution slots (one per worker,
   // p7) are the only
   // thing requests share.
-  async request(o: { workspace: string; workflow: string; text: string; author: string; receipt: string; by?: string; via: string; predecessor?: RunRef; node?: string }): Promise<{ job: JobRow; ref: RunRef; duplicate: boolean }> {
+  // `input` (project_migration p8): an agent's request instead of a person's
+  // words — the run's request.md, with its requester, what entrusted it, the
+  // person it serves and the original words it was derived from.
+  async request(o: { workspace: string; workflow: string; text: string; author: string; receipt: string; by?: string; via: string; predecessor?: RunRef; node?: string; input?: Extract<import('./runs.ts').CreateRunOptions['input'], { kind: 'request' }> }): Promise<{ job: JobRow; ref: RunRef; duplicate: boolean }> {
     if (!/^[A-Za-z0-9:._/#-]{8,200}$/.test(o.receipt)) throw new RequestError(400, 'a request needs a receipt id (8–200 of A-Z a-z 0-9 : . _ / # -)')
     const seen = this.one<JobRow>('SELECT * FROM jobs WHERE receipt = ?', `request:${o.receipt}`)
     if (seen) return { job: seen, ref: { workflow: seen.workflow, run: seen.run }, duplicate: true }
     const ws = await this.workspace(o.workspace)
     // The run gets its own working copy (p9); the same receipt finds it again.
     const env = this.ctx.gitea ? await this.ctx.gitea.gitEnv() : {}
-    const created = await createRunInCopy(ws, { workflow: o.workflow, input: { kind: 'braindump', text: o.text, author: o.author, recordedBy: o.by }, executor: { host: this.executor, ...(o.node ? { node: o.node } : {}) }, by: o.by ?? o.author, via: o.via, area: this.ctx.area, receipt: `request:${o.receipt}`, ...(o.predecessor ? { predecessor: o.predecessor } : {}) }, env)
-    const job = this.enqueue(ws.reg.id, created.ref, 'start', `request:${o.receipt}`, 'start: the person\'s request', this.nodeOf(created.record))
+    const created = await createRunInCopy(ws, { workflow: o.workflow, input: o.input ?? { kind: 'braindump', text: o.text, author: o.author, recordedBy: o.by }, executor: { host: this.executor, ...(o.node ? { node: o.node } : {}) }, by: o.by ?? o.author, via: o.via, area: this.ctx.area, receipt: `request:${o.receipt}`, ...(o.predecessor ? { predecessor: o.predecessor } : {}) }, env)
+    const job = this.enqueue(ws.reg.id, created.ref, 'start', `request:${o.receipt}`, o.input ? `start: ${o.input.requester}'s request` : 'start: the person\'s request', this.nodeOf(created.record))
     return { job, ref: created.ref, duplicate: false }
   }
 
@@ -369,6 +374,20 @@ export class ExecStore {
     if (!q || !q.answers.length || q.takenUp || q.withdrawn) return null
     if (!r.execution.waiting.some(w => 'question' in w.on && w.on.question === question)) return null
     return this.enqueue(ws.reg.id, ref, 'resume', `answer:${ws.reg.id}/${runKey(ref)}/${question}/${q.answers.length - 1}`, `resume: answer ${q.answers.length - 1} to ${question} recorded`, this.nodeOf(r))
+  }
+
+  // After an instruction is recorded (project_migration p8): a run nobody is
+  // executing now — waiting on a question, a delegation or an external result,
+  // or left with ready work — is continued so its agent reads the instruction
+  // at once instead of at whatever wakes it next. One job per instruction; a
+  // held, cancelled, completed or executing run is left as it is (the open
+  // attempt reads it at its next boundary, a hold waits for its resume).
+  async afterInstruction(ws: Workspace, ref: RunRef, instruction: string): Promise<JobRow | null> {
+    const r = (await readRun(ws, ref)).record
+    if (!r || hostOf(r.executor) !== this.executor || r.cancelled || r.control.hold || r.control.attempt) return null
+    const ins = r.instructions?.[instruction]
+    if (!ins || ins.ack || r.execution.state === 'completed') return null
+    return this.enqueue(ws.reg.id, ref, 'resume', `instruction:${ws.reg.id}/${runKey(ref)}/${instruction}`, `resume: instruction ${instruction} received`, this.nodeOf(r))
   }
 
   // The parent's continuation for a delegation fact (p10): one job per fact.

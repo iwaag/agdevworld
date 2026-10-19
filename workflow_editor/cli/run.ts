@@ -602,9 +602,36 @@ export async function runCommand(c: RunCli): Promise<number> {
   // instruct). Outside an attempt, a run the execution host performs is
   // recorded only under a name given with --by: no default puts the agent's
   // name on someone else's act.
+  // An executing attempt of *another* run (project_migration p8): an agent
+  // operating this run from its own work — answering, instructing, stopping,
+  // resuming, deciding — as a person does from the run view. It records as
+  // its own run's agent, never as this run's, and its attempt is not this
+  // run's fencing (the entry names it as `agent`).
+  const foreignOf = async (r: RunRef): Promise<{ actor: string; run: string; attempt: string } | null> => {
+    if (!attempt) return null
+    let row: ReturnType<ExecStore['attemptRow']>
+    try { row = c.exec().attemptRow(attempt) } catch { return null }
+    if (!row || (row.workspace === ws.reg.id && row.workflow === r.workflow && row.run === r.run)) return null
+    if (row.state === 'ended') throw c.refused(`attempt ${attempt} (of ${row.workspace} ${row.workflow}/${row.run}) has ended; an ended attempt records nothing`)
+    const own = await wrap(async () => readRun(await c.exec().workspace(row.workspace), { workflow: row.workflow, run: row.run }))
+    const actor = own.record?.executor.name
+    if (!actor) throw c.refused(`the run of attempt ${attempt} (${row.workspace} ${row.workflow}/${row.run}) cannot be read`)
+    return { actor, run: `${row.workspace}/${row.workflow}/${row.run}`, attempt }
+  }
+  // The attempt fencing and provenance a control act on `r` carries: this
+  // run's own attempt, or the other run's attempt named as `agent`.
+  const controlOf = async (r: RunRef) => {
+    const f = await foreignOf(r)
+    return f ? { operator: { run: f.run, attempt: f.attempt } } : { attempt }
+  }
   const recorder = async (r: RunRef): Promise<string | undefined> => {
     const rec = (await wrap(() => readRun(ws, r))).record
     if (!rec) return by
+    const foreign = await foreignOf(r)
+    if (foreign) {
+      if (by?.trim() && by.trim() !== foreign.actor) throw c.refused(`this process is attempt ${attempt} of ${foreign.actor} (${foreign.run}); it records as ${foreign.actor}, not as ${by.trim()}. Name whose words it acts on instead: --from <person> (answer, instruct), --because (stop, resume, cancel).`)
+      return foreign.actor
+    }
     if (attempt) {
       if (by?.trim() && by.trim() !== rec.executor.name) throw c.refused(`this process is attempt ${attempt} of ${rec.executor.name}; it records as ${rec.executor.name}, not as ${by.trim()}. Name the person's words instead: --because answer:<q>[:<n>] or instruction:<i> (stop, resume, cancel), --from <person> (answer, instruct).`)
       return rec.executor.name
@@ -621,7 +648,8 @@ export async function runCommand(c: RunCli): Promise<number> {
   }
   const op = async (input: OpInput, what: (rec: RunRecord) => string, r?: RunRef, after?: (target: RunRef, rec: RunRecord) => Promise<string | null>) => {
     const target = r ?? await ref()
-    const meta = { ...(attempt && EXECUTOR_OPS.includes(input.op) ? { attempt } : {}), ...(receipt ? { receipt } : {}) }
+    const foreign = await foreignOf(target)
+    const meta = { ...(attempt && !foreign && EXECUTOR_OPS.includes(input.op) ? { attempt } : {}), ...(receipt ? { receipt } : {}), ...(foreign ? { operator: { run: foreign.run, attempt: foreign.attempt } } : {}) }
     const who = await recorder(target)
     const res = await wrap(() => runOp(ws, target, { ...input, ...meta }, { by: who, via: 'cli', expectSeq }))
     const extra = after ? await wrap(() => after(target, res.record)) : null
@@ -714,21 +742,24 @@ export async function runCommand(c: RunCli): Promise<number> {
         : (async () => {
           const r = await ref()
           const who = await recorder(r) ?? (await wrap(() => readRun(ws, r))).record?.executor.name ?? ''
-          const { record: rec, cleanup } = await wrap(() => c.exec().cancel(ws, r, who, need(c, 'reason', 'why the run is discontinued'), 'cli', { because: because(), attempt }))
+          const ctl = await controlOf(r)
+          const { record: rec, cleanup } = await wrap(() => c.exec().cancel(ws, r, who, need(c, 'reason', 'why the run is discontinued'), 'cli', { because: because(), ...ctl }))
           const bad = cleanup.filter(x => !x.ok)
           return report(r, rec, `Recorded: the run is cancelled. An executing attempt is terminated by the executor; nothing it reports afterwards is recorded.${cleanup.length ? `\nPresentations: ${cleanup.map(x => `${x.presentation} ${x.ok ? 'stopped' : `NOT STOPPED (${x.detail}); retry: wfe present stop ${runKey(r)} --all`}`).join('; ')}` : ''}${bad.length ? '' : ''}`)
         })()
     case 'stop': {
       const r = await ref()
       const who = await recorder(r) ?? (await wrap(() => readRun(ws, r))).record?.executor.name ?? ''
-      const rec = await wrap(() => c.exec().stop(ws, r, who, need(c, 'reason', 'why it stops'), 'cli', { because: because(), attempt }))
+      const ctl = await controlOf(r)
+      const rec = await wrap(() => c.exec().stop(ws, r, who, need(c, 'reason', 'why it stops'), 'cli', { because: because(), ...ctl }))
       return report(r, rec, rec.control.stop ? `Stop requested; attempt ${rec.control.attempt?.id} ends when the executor confirms its process is gone. The run then waits for a resume.` : 'Recorded: the run is stopped. Nothing resumes it until a person does (wfe run resume).')
     }
     case 'resume': {
       const r = await ref()
       const who = await recorder(r) ?? (await wrap(() => readRun(ws, r))).record?.executor.name ?? ''
       const profile = c.opt('profile')
-      const res = await wrap(() => c.exec().resume(ws, r, who, need(c, 'reason', 'the resume instruction: what the executor should do now'), 'cli', receipt, { because: because(), ...(profile ? { profile } : {}) }))
+      const { operator } = await controlOf(r) as { operator?: { run: string; attempt: string } }
+      const res = await wrap(() => c.exec().resume(ws, r, who, need(c, 'reason', 'the resume instruction: what the executor should do now'), 'cli', receipt, { because: because(), ...(operator ? { operator } : {}), ...(profile ? { profile } : {}) }))
       return report(r, res.record, `Recorded: resumed${profile ? ` on profile ${profile}` : ''}.${res.job ? ` Queued job ${res.job.id} (${res.job.state}).` : ''}`)
     }
     case 'assign': {
@@ -801,7 +832,14 @@ export async function runCommand(c: RunCli): Promise<number> {
     case 'instruct': {
       const from = c.opt('from') ?? by
       if (!from?.trim()) throw c.usage('--from <person> (or --by) is required: whose instruction it is')
-      return op({ op: 'instruction.receive', text: need(c, 'instruction', 'the instruction'), from }, rec => `Recorded instruction ${Object.keys(rec.instructions ?? {}).at(-1)}; ${rec.executor.name} reads it at the next node boundary.`)
+      return op({ op: 'instruction.receive', text: need(c, 'instruction', 'the instruction'), from }, rec => `Recorded instruction ${Object.keys(rec.instructions ?? {}).at(-1)}; ${rec.executor.name} reads it at the next node boundary.`, undefined,
+        async (t, rec) => {
+          const id = Object.keys(rec.instructions ?? {}).at(-1)
+          const job = id ? await c.exec().afterInstruction(ws, t, id) : null
+          if (job) return `Nobody was executing the run: queued job ${job.id} (${job.state}) so it reads the instruction now.`
+          if (rec.execution.state === 'completed' && !rec.control.attempt) return 'The run is completed: nothing executes it for this instruction. New work for it is a new request naming it as --predecessor.'
+          return rec.control.hold ? `The run is held (${rec.control.hold.kind}); it reads the instruction when resumed.` : null
+        })
     }
     case 'ack': {
       const ids = args.slice(1)
@@ -1025,12 +1063,12 @@ export async function runCommand(c: RunCli): Promise<number> {
         // Recorded by the executing attempt; its end publishes it.
         const index = c.opt('index') !== undefined ? Number(c.opt('index')) : undefined
         const target = await ref()
-        const meta = { ...(attempt ? { attempt } : {}), ...(receipt ? { receipt } : {}) }
+        const meta = { ...await controlOf(target), ...(receipt ? { receipt } : {}) }
         const res = await wrap(async () => runOp(ws, target, { op: 'run.decide', decision, question, answer: index, note: c.opt('note'), ...meta }, { by: await recorder(target), via: 'cli', expectSeq }))
         const d = res.record.decisions.at(-1)!
         return report(target, res.record, res.duplicate ? 'Already recorded (same receipt); nothing changed.' : `Recorded: result ${decision}, from ${d.confirmation?.from}'s answer to ${question} (${d.evidence}). Execution is ${res.record.execution.state}; the two are separate records.`)
       }
-      if (!by?.trim()) throw c.usage('--by is required: the person who decides')
+      if (!by?.trim() && !(await foreignOf(await ref()))) throw c.usage('--by is required: who decides (an agent operating this run from its own attempt records as itself)')
       return op({ op: 'run.decide', decision, evidence: need(c, 'evidence', 'what the decision rests on'), note: c.opt('note') }, () => `Recorded: ${decision} by ${by}.`, undefined,
         async (t, rec) => { if (hostOf(rec.executor) !== c.exec().executor) return null; const cp = await c.exec().afterDecision(ws, t, decision); return `Publication checkpoint ${cp.id}: ${cp.state}${cp.error ? ` — ${cp.error}` : ''}` })
     }

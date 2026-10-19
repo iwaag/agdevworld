@@ -500,7 +500,7 @@ async function nextRunId(ws: Workspace, workflow: string): Promise<string> {
 }
 
 function validEntrust(e: EntrustRef): EntrustRef {
-  if (e.kind === 'run') { const r = validRunRef(e, 'entrustedBy'); return e.node ? { kind: 'run', ...r, node: e.node } : { kind: 'run', ...r } }
+  if (e.kind === 'run') { const r = validRunRef(e, 'entrustedBy'); return { kind: 'run', ...r, ...(e.node ? { node: e.node } : {}), ...(typeof e.project === 'string' && e.project ? { project: e.project } : {}) } }
   if (e.kind === 'file') {
     const p = normalizeRepoPath(e.path)
     if (!p || p === '.') throw new RequestError(400, `entrustedBy file "${e.path}" must be a project-relative path`)

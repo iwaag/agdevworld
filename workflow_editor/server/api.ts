@@ -408,7 +408,7 @@ export function createHandler(config: ServiceConfig) {
         if (method === 'GET') return send(res, 200, await ws.projectResponse())
         if (method === 'PUT') {
           const input = await body(req) as Record<string, unknown>
-          const saved = await ws.saveProject(asProject(input.project))
+          const saved = await ws.saveProject(asProject(input.project), typeof input.base === 'string' ? input.base : undefined)
           config.watcher?.noteOwnWrite(ws, 'project.yaml', saved.rev)
           return send(res, 200, { ok: true, ...saved })
         }
@@ -515,7 +515,11 @@ export function createHandler(config: ServiceConfig) {
         if (sub === 'ops' && method === 'POST') {
           const input = await body(req) as Record<string, unknown>
           // Attempts and presentation facts are the execution host's; adjustments have their own route.
-          const offered = OPS.filter(o => o !== 'run.create' && !o.startsWith('attempt.') && !o.startsWith('presentation.') && !o.startsWith('input.') && !o.startsWith('output.') && (o as string) !== 'run.adjust' && (o as string) !== 'run.integrate' && (o as string) !== 'run.relocate' && (o as string) !== 'run.recover')
+          // Delegations, assignment and session retirement are made by their
+          // domain operations (target resolution, worker and process checks:
+          // wfe delegate, wfe run assign|session), never as a bare record
+          // (project_migration p8).
+          const offered = OPS.filter(o => o !== 'run.create' && !o.startsWith('attempt.') && !o.startsWith('presentation.') && !o.startsWith('input.') && !o.startsWith('output.') && !o.startsWith('delegation.') && !(['run.adjust', 'run.integrate', 'run.relocate', 'run.recover', 'run.assign', 'session.retire'] as string[]).includes(o))
           if (!(offered as readonly string[]).includes(input.op as string)) throw new RequestError(400, `op must be one of ${offered.join(', ')} (attempts and presentation facts are the execution host's)`)
           const by = typeof input.by === 'string' ? input.by : ''
           if (!by.trim()) throw new RequestError(400, 'by is required: the name of who records this')
@@ -536,6 +540,7 @@ export function createHandler(config: ServiceConfig) {
           // reconcile, browser decisions were never published).
           if (x && hostOf(r.record.executor) === x.executor) {
             if (op.op === 'question.answer') extra.job = await x.afterAnswer(ws, ref, String(op.question)) // persisted first, then queued
+            if (op.op === 'instruction.receive') { const id = Object.keys(r.record.instructions ?? {}).at(-1); if (id) extra.job = await x.afterInstruction(ws, ref, id) }
             if (op.op === 'run.decide' && !r.duplicate) extra.checkpoint = await x.afterDecision(ws, ref, String(op.decision)).catch(e => ({ state: 'failed', error: (e as Error).message }))
           }
           return send(res, 200, { ok: true, seq: r.record.seq, record: r.record, ...extra })
@@ -576,7 +581,7 @@ export function createHandler(config: ServiceConfig) {
         if (method === 'GET') return send(res, 200, await ws.workflowResponse(file))
         if (method === 'PUT') {
           const input = await body(req) as Record<string, unknown>
-          const saved = await ws.saveWorkflow(file, asWorkflow(input.workflow))
+          const saved = await ws.saveWorkflow(file, asWorkflow(input.workflow), typeof input.base === 'string' ? input.base : undefined)
           config.watcher?.noteOwnWrite(ws, `devdocs/workflows/${file}`, saved.rev)
           return send(res, 200, { ok: true, ...saved })
         }

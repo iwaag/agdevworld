@@ -43,7 +43,9 @@ const fail = (code: string, message: string): never => { throw new RunError(code
 // project's records the project is implicit; `run.json` names it.
 export interface RunRef { workflow: string; run: string }
 export type EntrustRef =
-  | { kind: 'run'; workflow: string; run: string; node?: string }
+  // `project` (project_migration p8): a run of another project, e.g. the
+  // conversational run of Front that wrote the request.
+  | { kind: 'run'; workflow: string; run: string; node?: string; project?: string }
   | { kind: 'file'; path: string }
   | { kind: 'note'; text: string }
   // p10 (docs/delegation.md): a child created from a delegation's request.
@@ -511,7 +513,12 @@ export const pendingInstructions = (s: Pick<RunState, 'instructions'>): Instruct
 // Every entry may carry `attempt` (the executor's launch) and `receipt` (an
 // idempotency key: a retransmitted request with the same receipt is not
 // recorded twice).
-export interface EntryMeta { attempt?: string; receipt?: string }
+// `operator` (project_migration p8): the executing attempt of *another* run
+// that recorded this entry — an agent operating this run from its own work,
+// as a person does from the run view. `by` is that run's agent; `attempt`
+// stays this run's own attempt fencing and is never the other run's.
+export interface OperatorRef { run: string; attempt: string }
+export interface EntryMeta { attempt?: string; receipt?: string; operator?: OperatorRef }
 
 // What one entry changed, kept in the entry for readers of the raw history.
 export interface Change {
@@ -1075,8 +1082,9 @@ export function apply(prev: RunState | null, e: HistoryEntry | (OpInput & EntryM
       break
     }
     case 'instruction.receive': {
-      // Received, not read: no node changes, nothing is interrupted. A
-      // completed run is over: input for it needs a new request.
+      // Received, not read: no node changes, nothing is interrupted. On a
+      // completed run it is kept for an attempt that reopens work; nothing
+      // continues the run for it (server/exec.ts afterInstruction).
       live()
       const all = s.instructions ?? {}
       const id = e.instruction || `i${Object.keys(all).length + 1}`
@@ -1749,7 +1757,8 @@ export function operate(record: RunRecord | null, input: OpInput & EntryMeta, ct
     if (dup.op !== input.op) fail('receipt-reused', `receipt ${input.receipt} already recorded ${dup.op} at seq ${dup.seq}`)
     return record! // a retransmission: already recorded, nothing changes
   }
-  for (const k of ['attempt', 'receipt'] as const) if (input[k] === undefined || input[k] === null) delete input[k]
+  for (const k of ['attempt', 'receipt', 'operator'] as const) if (input[k] === undefined || input[k] === null) delete input[k]
+  if (input.operator !== undefined && (!isObj(input.operator) || typeof input.operator.run !== 'string' || typeof input.operator.attempt !== 'string')) fail('shape', 'operator is {run, attempt}: the other run whose executing attempt records this')
   const seq = (record?.seq ?? 0) + 1
   if (ctx.expectSeq !== undefined && ctx.expectSeq !== (record?.seq ?? 0)) {
     fail('outdated', `the run changed since it was read (now at ${record?.seq ?? 0}, expected ${ctx.expectSeq}); reload and retry`)

@@ -49,6 +49,9 @@ const repoIcon = (r: RepositoryStatus) => icon(r.category === 'study' ? 'study' 
 
 export function renderProjectView(root: HTMLElement, wsId: string, opts: { context?: boolean } = {}): ViewHandle {
   let data: ProjectResponse | null = null
+  // The revision the draft was made from: a save names it, so a file changed
+  // on disk meanwhile is not overwritten (project_migration p8).
+  let draftRev: string | null = null
   let saved: Project | null = null
   let draft: Project | null = null
   let externalChange = false
@@ -129,6 +132,7 @@ export function renderProjectView(root: HTMLElement, wsId: string, opts: { conte
       if (!dirty() || opts.force) {
         saved = p.project ? structuredClone(p.project) : null
         draft = p.project ? structuredClone(p.project) : null
+        draftRev = p.rev
         externalChange = false
         replaced = true
       } else if (changedOnDisk) externalChange = true
@@ -218,7 +222,7 @@ export function renderProjectView(root: HTMLElement, wsId: string, opts: { conte
     if (!draft) return
     saveError = ''
     try {
-      await api.saveProject(wsId, draft)
+      await api.saveProject(wsId, draft, draftRev)
       saved = structuredClone(draft)
       saveState = `Saved ${new Date().toLocaleTimeString()}`
       externalChange = false

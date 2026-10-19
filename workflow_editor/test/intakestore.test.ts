@@ -187,7 +187,9 @@ test('an answer is recorded with its real sender and source, once, and the resum
   assert.equal(rec.nodes.scope.state, 'waiting', 'recorded, not taken up')
   const jobs = (await s.x.runView(s.ws.reg.id, ref)).jobs.filter(j => j.kind === 'resume')
   assert.equal(jobs.length, 1, 'the resumption is queued once')
-  assert.match(jobs[0].receipt, /^answer:/)
+  // The earlier post's instruction already continued the run (project_migration
+  // p8: an instruction wakes a run nobody executes); the answer joins that job.
+  assert.match(jobs[0].receipt, /^(answer|instruction):/)
   // The full source is on the answer that the intake applied (the hand-made one above has none).
   const again = post({ id: 2006, topicFirst, content: 'Actually blue-green.' })
   receive(s.i, [again])

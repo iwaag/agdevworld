@@ -368,10 +368,20 @@ what it will do. Each instruction is acknowledged once.
 Acknowledgment is a record, not a gate (p11): no transition waits for an
 unacknowledged instruction, and the `instructions-pending` refusal no longer
 exists. Receipt (`instruction.receive`) holds the run's lock like every
-operation, so the order is the history's. `instruction.receive` is refused on
-a completed execution (code `run-completed`); the intake explains that a new
-request topic is needed. A post still in transit is not claimed to have
-reached the run.
+operation, so the order is the history's. A Zulip post for a completed
+execution is not applied (the intake explains that a new request topic is
+needed); an instruction recorded on a completed run directly is kept for an
+attempt that reopens work, and nothing continues the run for it. A post still
+in transit is not claimed to have reached the run.
+
+**An instruction continues a run nobody executes** (project_migration p8).
+After it is recorded, a run with no open attempt and no hold that is not
+completed or cancelled — waiting on a question, a delegation or an external
+result, or left with ready work — gets a continuation job (receipt
+`instruction:<workspace>/<workflow>/<run>/<id>`), so its agent reads the
+instruction now rather than at whatever wakes it next. An open attempt reads it
+at its next node boundary; a held run when it is resumed. Every entrance does
+this: `wfe run instruct`, the run view, the Zulip intake.
 
 Completed nodes can be started again and the graph revised (`wfe run
 adjust`), so an instruction that changes completed work is incorporated like

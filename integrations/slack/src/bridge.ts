@@ -34,6 +34,10 @@ export interface Who { team: string; developer: string; botUser: string; botId: 
 
 const HUMAN_SUBTYPES = new Set([undefined, 'file_share', 'thread_broadcast', 'me_message'])
 const rootOf = (m: SlackMessage) => m.thread_ts ?? m.ts
+// Slack stores a post with emoji as :shortcodes: and & escaped (seen live,
+// slack_connect p1 step 3): texts are compared without either.
+const bare = (t: string) => t.replace(/:[a-z0-9_+-]+:/g, '').replace(/\p{Extended_Pictographic}\uFE0F?/gu, '').replace(/&amp;/g, '&').replace(/\s+/g, ' ').trim()
+export const sameText = (stored: string, sent: string) => bare(stored) === bare(sent)
 
 // What a DM event is to the integration. Only the configured Developer's
 // own words in the configured workspace become WFE input; bots (this one
@@ -245,7 +249,7 @@ export class Bridge {
   // integration's own Slack posts are not sent back.
   render(t: ThreadRow, v: WfeView, fresh: WfeMessage[]) {
     const out: Parameters<Store['enqueue']>[0][] = []
-    const desk = `<${this.config.deskUrl}&conv=${encodeURIComponent(t.conv)}|Front Desk で会話全体を見る>`
+    const desk = `<${this.config.deskUrl.replace(/&/g, '&amp;')}&amp;conv=${encodeURIComponent(t.conv)}|Front Desk で会話全体を見る>`
     fresh.forEach((m, i) => {
       if (m.role === 'person') {
         if (m.via?.startsWith('slack') || this.store.one('SELECT 1 FROM posts WHERE conv = ? AND wfe_message = ? AND origin = \'slack\'', t.conv, m.id)) return
@@ -353,7 +357,7 @@ export class Bridge {
       try {
         const msgs = o.thread ? await this.slack.replies(o.channel, o.thread, from) : await this.slack.history(o.channel, from)
         found = msgs.find(m => m.metadata?.event_payload?.key === o.key)
-          ?? msgs.find(m => (m.user === this.me.botUser || (!!this.me.botId && m.bot_id === this.me.botId)) && m.text === o.text && !this.store.postOf(o.channel, m.ts))
+          ?? msgs.find(m => (m.user === this.me.botUser || (!!this.me.botId && m.bot_id === this.me.botId)) && sameText(m.text ?? '', o.text) && !this.store.postOf(o.channel, m.ts))
       } catch (e) {
         this.store.mark(o.id, 'unknown', { checks: 1, error: `cannot reconcile: ${(e as Error).message}` })
         continue

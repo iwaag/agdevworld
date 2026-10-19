@@ -9,7 +9,7 @@ import assert from 'node:assert/strict'
 import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { Bridge, type SlackEvent } from '../src/bridge.ts'
+import { Bridge, sameText, type SlackEvent } from '../src/bridge.ts'
 import type { Config } from '../src/config.ts'
 import { chunk } from '../src/format.ts'
 import { SlackCallError, type SlackApi, type SlackMessage } from '../src/slack.ts'
@@ -234,4 +234,9 @@ test('a long answer is cut the same way every time, and a code fence never spans
     assert.ok(p.length <= 3500)
     assert.equal((p.match(/^```/gm) ?? []).length % 2, 0, 'every part has balanced fences')
   }
+})
+
+test('a stored post is recognised by its text although Slack rewrote its emoji and escapes', () => {
+  assert.ok(sameText(':white_check_mark: *結果* · <http://h/?view=frontdesk&amp;conv=1|desk>', '✅ *結果* · <http://h/?view=frontdesk&conv=1|desk>'))
+  assert.ok(!sameText(':white_check_mark: *結果* one', '✅ *結果* two'))
 })

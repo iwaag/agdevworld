@@ -605,6 +605,25 @@ export class NotifyStore {
         this.run('UPDATE runs SET scan_seq = max(scan_seq, ?), updated = ? WHERE key = ?', rec.seq, now(), key)
       })
     }
+    const repaired: string[] = []
+    // An open delegation's post whose outbox row is missing although the
+    // cursor passed its entry (project_migration p8 ex1: a lost or removed
+    // row) is queued again from the record, under the same id, so the
+    // transport's marker search finds a post that did go out.
+    for (const d of Object.values(rec.delegations ?? {})) {
+      if (d.disposition || d.closed) continue
+      const owed = [...(d.child ? [] : [{ seq: d.dispatched.seq, type: 'delegation-request' as const, index: 0 }]),
+        ...d.answers.map(a => ({ seq: a.seq, type: 'delegation-answer' as const, index: a.n, question: a.question })),
+        ...d.instructions.map(i => ({ seq: i.seq, type: 'delegation-instruction' as const, index: i.n }))]
+      for (const o of owed) {
+        const id = `${key}#${o.seq}:${o.type}@${d.id}`
+        if (this.one('SELECT 1 FROM outbox WHERE id = ?', id) || this.one('SELECT 1 FROM delivery_events WHERE event = ?', id)) continue
+        const h = rec.history.find(x => x.seq === o.seq)
+        if (!h) continue
+        const ev: DelegationOutEvent = { id, seq: o.seq, type: o.type, at: h.at, by: h.by, critical: true, parent: { workspace: ws.reg.id, project: rec.project, workflow: rec.workflow, run: rec.run }, delegation: d.id, uid: d.uid, index: o.index, ...('question' in o ? { question: o.question } : {}) }
+        if (insert(id, o.seq, o.type, true, ev, this.delegationThread(ws.reg.id, rec, d))) { this.run('UPDATE outbox SET uncertain = 1 WHERE id = ?', id); repaired.push(id) }
+      }
+    }
     // The delegation conversations follow their child once it is bound.
     for (const d of Object.values(rec.delegations ?? {})) if (d.child) this.run('UPDATE runs SET bound = ?, updated = ? WHERE kind = \'delegation\' AND request = ? AND bound IS NULL', d.child.run, now(), d.uid)
     // Publication: failures and their recovery, and details that became
@@ -634,7 +653,7 @@ export class NotifyStore {
         })
       }
     }
-    return added.map(id => `queued ${id}`)
+    return added.map(id => repaired.includes(id) ? `queued ${id} again (its outbox row was missing)` : `queued ${id}`)
   }
 
   // An attempt of the run is open, or its last checkpoint is not settled.
@@ -820,9 +839,13 @@ export class NotifyStore {
       const d2 = r2 && !r2.problem ? this.destination(r2) : null
       if (!d2 || !sameDest(d2, dest)) return null
       const t = now()
-      const did = Number(this.run(`INSERT INTO deliveries (run_key, kind, ord, events, content, marker, unpublished, stream_id, channel, topic, tried, state, claim, owner, created, updated)
-        VALUES (?, 'message', ?, ?, ?, ?, ?, ?, ?, ?, '[]', 'ready', ?, ?, ?, ?)`, r.key, batch[0].ord, JSON.stringify(batch.map(o => o.id)), rendered.content, rendered.marker,
-      rendered.unpublished.length ? JSON.stringify(rendered.unpublished) : null, dest.streamId, dest.channel, dest.topic, claim, s.owner, t, t).lastInsertRowid)
+      // An event queued again after its row was lost (p8 ex1) may have gone
+      // out already: its delivery looks for its marker since the event first.
+      const unsure = batch.filter(o => o.uncertain)
+      const since = unsure.length ? unsure.map(o => (JSON.parse(o.event) as { at?: string }).at ?? o.created).sort()[0] : null
+      const did = Number(this.run(`INSERT INTO deliveries (run_key, kind, ord, events, content, marker, unpublished, stream_id, channel, topic, tried, state, claim, owner, created, updated, uncertain, first_began)
+        VALUES (?, 'message', ?, ?, ?, ?, ?, ?, ?, ?, '[]', 'ready', ?, ?, ?, ?, ?, ?)`, r.key, batch[0].ord, JSON.stringify(batch.map(o => o.id)), rendered.content, rendered.marker,
+      rendered.unpublished.length ? JSON.stringify(rendered.unpublished) : null, dest.streamId, dest.channel, dest.topic, claim, s.owner, t, t, unsure.length ? 1 : 0, since).lastInsertRowid)
       batch.forEach((o, i) => this.run('INSERT INTO delivery_events (event, delivery, pos) VALUES (?, ?, ?)', o.id, did, i))
       return did
     })

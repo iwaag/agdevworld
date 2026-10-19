@@ -42,8 +42,9 @@ workspace: a monitor never merges them and never guesses which is live.
 ## Delegations (p10)
 
 A run with delegations ([delegation.md](delegation.md)) carries
-`delegations: [{id, uid, node, state, target, dispatchedAt, closed, child,
-pending, unrelayed, delivery, problem}]`:
+`delegations: [{id, uid, node, state, target, dispatchedAt, closed, childUid,
+child, pending, unrelayed, delivery, problem}]` (`childUid`: the bound child,
+also when its record cannot be read here):
 
 | Field | Content |
 | --- | --- |
@@ -94,9 +95,9 @@ One run:
 | `seq`, `updated` | the record's last sequence and its time |
 | `situation` | `shared/run.ts` `situation()` (`executing`, `stopping`, `awaiting-person`, `stopped`, `interrupted`, `unknown`, `completed`, `cancelled`, `not-started`, `idle`) |
 | `execution` | `state`, `ready`, `active`, `failed`, `blocked`, `waiting: [{node, on, holder, since, deadline}]` (`deadline`: an external wait's declared latest time, `wfe run wait --deadline`) |
-| `hold` | `{kind, since, by, reason, because, human}` — `human` is true for `stopped` (a person's or a person's words) and false for the executor-derived `interrupted`/`unknown` |
+| `hold` | `{kind, since, by, reason, because, human, cause}` — `human` is true for `stopped` (a person's or a person's words) and false for the executor-derived `interrupted`/`unknown`; `cause` is the structured cause of a hold derived since project_migration p8 ex1 ([runs.md](runs.md), *Why a hold was derived*), null before |
 | `stop`, `cancelled` | as recorded |
-| `attempts` | `{count, beganSeq, open: {id, began, reason, backend, agent} \| null, last: {id, outcome, ended, detail} \| null}` — `beganSeq` is the sequence of the latest `attempt.begin` |
+| `attempts` | `{count, beganSeq, open: {id, began, reason, backend, agent} \| null, last: {id, outcome, ended, detail} \| null, ends: [{attempt, seq, at, outcome, held, cause, recovered}]}` — `beganSeq` is the sequence of the latest `attempt.begin`; `ends` (p8 ex1) the last five attempt ends with the hold each derived, its cause and whether a recovery followed it |
 | `session` | agent_session p1, from the record ([sessions.md](sessions.md)): `{policy: fresh \| run, current: {id, began, attempts, attached, mismatch} \| null, count, ended: [{id, state, at, by, reason}]}` (the last three replaced or retired). A session is a conversation, not a process: it proves no liveness and its age is no stall timer |
 | `process` | the open (or last) attempt's host facts: `{attempt, state: launching \| running \| ended, host, local, pid, alive, began, ended, exit, signal, outcome, stopRequested, session: {id, resumed} \| null (from the record), group: {members, cpuSeconds} \| null, log: {last, bytes, turns, session, problem, openTool: {name, since, timeoutSeconds, summary} \| null, ended: {subtype, stopReason} \| null, backgroundStopped, partial}}`; `alive`/`group`/`log` are `null` with a reason in `unavailable` when not observable here. `log.ended` is the harness's own end of the session; `backgroundStopped` counts background tasks the harness reported stopped (they die with the session); `partial` says the tail did not reach the log's start |
 | `queue` | `{job: {id, kind, state, created, reason, receipt} \| null, position, ahead: [{uid, kind, state}]}` |

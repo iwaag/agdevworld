@@ -1250,6 +1250,24 @@ export class ExecStore {
           const j = await this.afterDelegation(ws, ref)
           if (j && !jobs.some(x => x.id === j.id)) notes.push(`${w.id} ${s.ref}: resume for a relayed delegation fact queued again`)
         }
+        // An instruction for a run nobody executes, whose continuation was
+        // lost (project_migration p8 ex1): queued again under its receipt.
+        for (const ins of Object.values(rec.instructions ?? {})) {
+          if (ins.ack) continue
+          const j = await this.afterInstruction(ws, ref, ins.id)
+          if (j && !jobs.some(x => x.id === j.id)) notes.push(`${w.id} ${s.ref}: resume for instruction ${ins.id} queued again`)
+        }
+        // A resume or recovery recorded after the last attempt ended whose
+        // job was lost (p8 ex1): the record says the run continues, so it does.
+        const lastEnd = [...rec.history].reverse().find(h => h.op === 'attempt.end')
+        const lift = [...rec.history].reverse().find(h => h.op === 'run.resume' || (h.op as string) === 'run.recover')
+        if (lift && (!lastEnd || lift.seq > lastEnd.seq) && rec.execution.state !== 'completed' && !jobs.some(x => x.state === 'queued' || x.state === 'claimed')) {
+          const receipt = lift.op === 'run.resume' ? `resume:${w.id}/${s.ref}/${lift.seq}` : `recover:${w.id}/${s.ref}/${String((lift as { incident?: string }).incident)}/${String((lift as { attempt?: string }).attempt)}`
+          if (!this.one<JobRow>('SELECT * FROM jobs WHERE receipt = ?', receipt)) {
+            this.enqueue(w.id, ref, 'resume', receipt, `${lift.op === 'run.resume' ? 'resume' : 'recover'}: queued again (its job was lost after seq ${lift.seq})`, this.nodeOf(rec))
+            notes.push(`${w.id} ${s.ref}: ${lift.op} at seq ${lift.seq} queued again`)
+          }
+        }
       }
     }
     // Delegations: indexed from their records, then relayed (p10).

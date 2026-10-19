@@ -16,7 +16,7 @@ import { execFile } from 'node:child_process'
 import { hostname } from 'node:os'
 import { promisify } from 'node:util'
 import { canonicalJson } from '../shared/canonical.ts'
-import { EXECUTOR_OPS, hostOf, questionState, runKey, situation, type RunRecord, type RunRef } from '../shared/run.ts'
+import { EXECUTOR_OPS, hostOf, questionState, replay, runKey, situation, type HoldCause, type RunRecord, type RunRef } from '../shared/run.ts'
 import { DEFAULT_LANE, sessionPolicyOf } from '../shared/model.ts'
 import { laneOn } from './workers.ts'
 import { activityOf, logFacts } from './activity.ts'
@@ -48,10 +48,14 @@ export interface ObservedRun {
   updated: string | null
   situation: string | null
   execution: { state: string; ready: string[]; active: string[]; failed: string[]; blocked: string[]; waiting: { node: string; on: unknown; holder: string; since: string | null; deadline: string | null }[] } | null
-  hold: { kind: string; since: string; by: string; reason: string; because: unknown; human: boolean } | null
+  // `cause` (project_migration p8 ex1): why the attempt's end held the run, when its entry recorded it.
+  hold: { kind: string; since: string; by: string; reason: string; because: unknown; human: boolean; cause: HoldCause | null } | null
   stop: unknown
   cancelled: unknown
-  attempts: { count: number; beganSeq: number | null; open: { id: string; began: string; reason: string; backend: string | null; agent: string | null } | null; last: { id: string; outcome: string; ended: string; detail: string } | null }
+  // `ends` (p8 ex1): the last attempt ends, oldest first, each with the
+  // hold it derived (and its cause) and whether a recovery followed it — what
+  // tells a cause that keeps coming back from one seen once.
+  attempts: { count: number; beganSeq: number | null; open: { id: string; began: string; reason: string; backend: string | null; agent: string | null } | null; last: { id: string; outcome: string; ended: string; detail: string } | null; ends?: AttemptEnd[] }
   // agent_session p1: the run's frozen session policy and its sessions, from
   // the record (a session is a conversation, not a process: it says nothing
   // about liveness and its age is no stall timer).
@@ -77,6 +81,7 @@ export interface ObservedRun {
 // unbound dispatch).
 export interface DelegationFacts {
   id: string; uid: string; node: string; state: string; target: string; dispatchedAt: string; closed: boolean
+  childUid: string | null // the bound child's uid, also when its record cannot be read here (p8 ex1)
   child: { uid: string; workspace: string; ref: string; situation: string | null; execution: string | null; waitingFor: string[]; hold: string | null; failed: string[] } | null
   pending: { n: number; type: string; at: string }[]
   unrelayed: { type: string; childSeq: number; at: string; wakes: boolean }[]
@@ -191,6 +196,26 @@ function waitingOf(r: RunRecord, job: JobRow | null): ObservedRun['waiting'] {
 }
 
 function nodeSince(r: RunRecord, node: string): string | null { return r.nodes[node]?.updated ?? null }
+
+export interface AttemptEnd { attempt: string; seq: number; at: string; outcome: string; held: string | null; cause: HoldCause | null; recovered: boolean }
+// The last five attempt ends; a hold's cause is replayed only for the
+// latest (the state keeps only the current hold), older ones carry their
+// entry's outcome.
+function attemptEnds(r: RunRecord): AttemptEnd[] {
+  const ends = r.history.filter(h => h.op === 'attempt.end').slice(-5)
+  return ends.map((h, i) => {
+    const next = ends[i + 1]?.seq ?? Infinity
+    const e = h as unknown as { attempt: string; outcome: string }
+    const held = h.change.hold?.[1] ?? null
+    const cause = !held ? null : h.seq === [...r.history].reverse().find(x => x.change.hold?.[1])?.seq && r.control.hold ? r.control.hold.cause ?? null : causeAt(r, h.seq)
+    return { attempt: e.attempt, seq: h.seq, at: h.at, outcome: held ?? e.outcome, held, cause, recovered: r.history.some(x => (x.op as string) === 'run.recover' && x.seq > h.seq && x.seq < next) }
+  })
+}
+function causeAt(r: RunRecord, seq: number): HoldCause | null {
+  const eff = r.definition.effective
+  if (!eff) return null
+  try { return replay(r.history.slice(0, seq), { nodes: eff.nodes, edges: eff.edges }).state.control.hold?.cause ?? null } catch { return null }
+}
 
 // The last report the run's agent made itself (an executor operation in its name).
 function progressOf(r: RunRecord): ObservedRun['progress'] {
@@ -337,13 +362,14 @@ export class Observer {
         state: r.execution.state, ready: r.execution.ready, active: r.execution.active, failed: r.execution.failed, blocked: r.execution.blocked,
         waiting: r.execution.waiting.map(w => ({ node: w.node, on: w.on, holder: w.holder, since: nodeSince(r, w.node), deadline: r.nodes[w.node]?.wait?.deadline ?? null })),
       },
-      hold: hold ? { kind: hold.kind, since: hold.since, by: hold.by, reason: hold.reason, because: hold.because ?? null, human: hold.kind === 'stopped' } : null,
+      hold: hold ? { kind: hold.kind, since: hold.since, by: hold.by, reason: hold.reason, because: hold.because ?? null, human: hold.kind === 'stopped', cause: hold.cause ?? null } : null,
       stop: r.control.stop, cancelled: r.cancelled,
       attempts: {
         count: r.control.attempts,
         beganSeq: [...r.history].reverse().find(e => e.op === 'attempt.begin')?.seq ?? null,
         open: r.control.attempt ? { id: r.control.attempt.id, began: r.control.attempt.began, reason: r.control.attempt.reason, backend: r.control.attempt.backend, agent: r.control.attempt.settings?.agent ?? r.executor.name } : null,
         last: r.control.last ? { id: r.control.last.id, outcome: r.control.last.outcome, ended: r.control.last.ended, detail: r.control.last.detail } : null,
+        ends: attemptEnds(r),
       },
       session: sessionFacts(r, policy),
       process: null,
@@ -403,7 +429,7 @@ export class Observer {
           delivery = row ? { state: row.dstate ? `${row.dstate}${row.uncertain ? ' (may have been posted)' : ''}` : row.ostate === 'sent' ? 'sent' : 'queued', error: row.error, message: row.message, since: row.created } : { state: 'not-queued', error: null, message: null, since: d.dispatched.at }
         }
         out.push({
-          id: d.id, uid: d.uid, node: d.node, state: delegationState(d), target: `${d.target.project}/${d.target.workflow}`, dispatchedAt: d.dispatched.at, closed: !isOpenDelegation(d),
+          id: d.id, uid: d.uid, node: d.node, state: delegationState(d), target: `${d.target.project}/${d.target.workflow}`, dispatchedAt: d.dispatched.at, closed: !isOpenDelegation(d), childUid: d.child?.uid ?? null,
           child, pending: d.events.filter(e => e.wakes && !e.takenUp).map(e => ({ n: e.n, type: e.type, at: e.at })), unrelayed, delivery, problem,
         })
       }

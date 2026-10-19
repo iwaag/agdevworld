@@ -27,7 +27,8 @@ import type { DatabaseSync } from 'node:sqlite'
 import type { ConversationSource } from '../shared/intake.ts'
 import { runKey, situation, type RunRecord, type RunRef } from '../shared/run.ts'
 import type { ExecStore } from './exec.ts'
-import { readRun } from './runs.ts'
+import { nodeNames, readRun } from './runs.ts'
+import { runStatus, type RunStatus } from '../shared/status.ts'
 import { openStore, transaction } from './sqlite.ts'
 import { RequestError } from './workspace.ts'
 
@@ -262,17 +263,25 @@ export class ConversationStore {
     const rows = this.messages(conv)
     const links = this.links(conv)
     const asking = pendingQuestions(rows)
-    const runs: { key: string; workspace: string; workflow: string; run: string; relation: string; url: string | null; situation: string; execution: string; title: string | null; waiting: string[]; problem?: string }[] = []
-    for (const key of [...new Set(links.map(l => l.run))]) {
+    // The runs linked to its messages, and the entrance's own run of each
+    // message (relation `turn`), with the shared status reading (p8 ex1).
+    const runs: { key: string; workspace: string; workflow: string; run: string; relation: string; url: string | null; situation: string; execution: string; title: string | null; waiting: string[]; status: RunStatus | null; problem?: string }[] = []
+    const turns = rows.filter(m => m.role === 'person' && m.dispatch_run).map(m => m.dispatch_run!)
+    const cfg = loadConversationConfig(this.area)
+    const person = 'disabled' in cfg ? null : cfg.person
+    for (const key of [...new Set([...links.map(l => l.run), ...turns])]) {
       const { workspace, ref } = parseRunName(key)
-      const rel = links.filter(l => l.run === key).map(l => l.relation)
+      const rel = [...links.filter(l => l.run === key).map(l => l.relation), ...(turns.includes(key) ? ['turn'] : [])]
       const entry = { key, workspace, workflow: ref.workflow, run: ref.run, relation: [...new Set(rel)].join(', '), url: url(key) }
       try {
         if (!this.exec) throw new Error('execution is not configured here')
-        const rec = (await readRun(await this.exec.workspace(workspace), ref)).record as RunRecord | null
+        const reading = await readRun(await this.exec.workspace(workspace), ref)
+        const rec = reading.record as RunRecord | null
         if (!rec) throw new Error('the run cannot be read')
-        runs.push({ ...entry, situation: situation(rec), execution: rec.execution.state, title: null, waiting: rec.execution.waiting.map(w => w.node) })
-      } catch (e) { runs.push({ ...entry, situation: 'unknown', execution: 'unknown', title: null, waiting: [], problem: (e as Error).message }) }
+        const job = this.exec.runRows(workspace, ref).jobs.find(j => j.state === 'queued' || j.state === 'claimed') ?? null
+        const status = runStatus(rec, { names: nodeNames(reading.bundle, rec), job: job && { state: job.state as 'queued' | 'claimed', reason: job.reason }, person })
+        runs.push({ ...entry, situation: situation(rec), execution: rec.execution.state, title: null, waiting: rec.execution.waiting.map(w => w.node), status })
+      } catch (e) { runs.push({ ...entry, situation: 'unknown', execution: 'unknown', title: null, waiting: [], status: null, problem: (e as Error).message }) }
     }
     const message = (m: MessageRow): Message => ({
       id: m.id, role: m.role, author: m.author, text: m.text, at: m.at, via: m.via, re: JSON.parse(m.re) as number[], kind: m.kind, run: m.run ?? m.dispatch_run, runUrl: (m.run ?? m.dispatch_run) ? url((m.run ?? m.dispatch_run)!) : null, question: m.question,

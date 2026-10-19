@@ -331,6 +331,35 @@ and the run is `completed` only when `_final-report` is.
 - Error codes: `document-missing`, `document-path`, `document-empty`,
   `plan-not-agreed`.
 
+### Status in short (project_migration p8 ex1)
+
+`shared/status.ts` `runStatus()` is the one reading every view and API
+uses: a state, a label and a short reason (`text` = `label · reason`),
+the waits behind it each with its target and what continues it, the hold
+with its cause, and the full sentence as `detail`. It is recomputed from
+the record — and, where the reader has them, the execution host's job for
+the run, a child's current situation and node names — never stored.
+
+| Situation | Text (examples) |
+| --- | --- |
+| a question to the run's person | `Waiting · Your answer` (to someone else: `Waiting · Answer from <them>`) |
+| a delegation | `Waiting · jevlab study result`; a child known paused or interrupted is said in it (`… (child interrupted)`) |
+| an external wait | `Waiting · <its reason>` (`(overdue)` past its deadline) |
+| the executor's move, a job queued | `Queued · Waiting for an execution slot` (`Starting` once claimed) |
+| the executor's move, no host facts | `Continuing · Answer to q1 arrived`, `… Result from jevlab study arrived` |
+| the executor's move, nothing queued (host facts) | `Stalled · …; nothing queued to continue it` |
+| a person's stop | `Paused · <their recorded reason>` |
+| an interruption | `Interrupted · Talk node left running at exit` (from the hold's cause; older holds from their sentence) |
+| a lost process | `Unknown · Process lost; outcome unconfirmed` |
+| running | `Working · On <node>`; `Stopping · Stop requested by <who>` |
+| failed, done, cancelled | `Failed · <node> failed`, `Done · Every step completed` / `Result accepted`, `Cancelled · <reason>` |
+
+Several waits read as the first (a person's, then a delegation, then an
+external result) with `(+n more)`; each stays in `waits`. A hold is the
+status even while a question is also pending: an answer alone never
+resumes a held run. `Watching` is not used: nothing in WFE watches on a
+run's behalf.
+
 ### Waiting
 
 A waiting node records `wait: {reason, holder, on}` where `on` is

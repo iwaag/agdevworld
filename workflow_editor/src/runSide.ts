@@ -27,6 +27,7 @@ import { icon } from './icons.ts'
 import { patchContent } from './patch.ts'
 import { activeWorkflow, ago, chip, descendants, fileLink, nodeFacts, nodeLabel, nodeLink, runHash, topoOrder } from './runCommon.ts'
 import { approvalOf, integrationStatus, type Approval } from './integrationState.ts'
+import { viewStatus } from './runStatus.ts'
 export { integrationStatus }
 
 // Who a hold or a stop acted for (p9): the person's words named by the recorder.
@@ -85,7 +86,7 @@ const setText = (el: HTMLElement, text: string) => { if (el.textContent !== text
 const show = (el: HTMLElement, on: boolean) => { if (el.hidden === on) el.hidden = !on }
 const setDisabled = (el: HTMLButtonElement, off: boolean) => { if (el.disabled !== off) el.disabled = off }
 // A delegated child's situation in plain words (p10).
-const CHILD_WORDS: Record<string, string> = { executing: 'working', stopping: 'stopping', 'awaiting-person': 'waiting for an answer', stopped: 'stopped by a person', interrupted: 'interrupted', unknown: 'interrupted (execution lost)', completed: 'done', cancelled: 'cancelled', 'not-started': 'queued to start', idle: 'between steps' }
+const CHILD_WORDS: Record<string, string> = { executing: 'working', stopping: 'stopping', 'awaiting-person': 'waiting for an answer', 'awaiting-delegation': 'waiting for its own delegation', 'awaiting-external': 'waiting for an external result', due: 'continuing', stopped: 'paused by a person', interrupted: 'interrupted', unknown: 'interrupted (execution lost)', completed: 'done', cancelled: 'cancelled', 'not-started': 'queued to start', idle: 'between steps' }
 const childWords = (s?: string) => (s ? CHILD_WORDS[s] ?? s : 'not readable here')
 const list = (xs: string[]) => xs.filter(x => !x.startsWith('_')).join(', ') || '—'
 // Recorded text as one sentence: its own final stop, or one added.
@@ -487,24 +488,30 @@ export class RunSide {
     const accepted = last?.decision === 'accepted'
     const hold = rec.control.hold
     const isReview = (q: Question) => !!q.presentation || (!!q.node && wf?.nodes[q.node]?.confirms === 'result')
+    // The shared short reading (p8 ex1): the head says it; the sentences behind it are details.
+    const st = viewStatus(rec, { names: Object.fromEntries(Object.keys(rec.nodes).map(id => [id, name(id)])), exec: d.execView, delegations: d.delegView })
     let kind: string, head: string, lead: string | Node
+    let more: Node | null = null
     if (d.rev) { kind = 'history'; head = 'A recorded state'; lead = h('span', h('span.d-only', `As committed at ${d.rev.slice(0, 10)}: what`), h('span.s-only', 'What'), ' was recorded then, read-only. This host\'s live facts and the operations are not shown.') }
     else if (rec.cancelled) { kind = 'cancelled'; head = 'Cancelled'; lead = h('span', `${rec.cancelled.by}`, h('span.d-only', `, ${when(rec.cancelled.at)}`), `: ${rec.cancelled.reason}`) }
     else if (asking.length) {
       const review = asking.some(isReview)
       kind = review ? 'review' : 'question'
       head = review ? 'Ready for your review' : asking.length > 1 ? `${asking.length} questions wait for your answer` : 'A question waits for your answer'
-      lead = review ? h('span', 'Open the review, then answer below.', h('span.d-only', ' Your answer is recorded; the executor records the decision when it takes the answer up.'))
+      // A hold stays the run's state while a question waits too: an answer alone never resumes it (p8 ex1).
+      lead = hold ? h('span', `${rec.executor.name} asked. Your answer is recorded, but the run is ${st.text.toLowerCase()} and continues only when it is resumed.`)
+        : review ? h('span', 'Open the review, then answer below.', h('span.d-only', ' Your answer is recorded; the executor records the decision when it takes the answer up.'))
         : this.hosted() ? h('span', `${rec.executor.name} asked.`, h('span.s-only', ' Your answer lets it continue.'), h('span.d-only', ' Your answer is recorded in run.json, and this host queues the executor to continue the run.'))
           : h('span', `${rec.executor.name} asked.`, h('span.s-only', ' Recording your answer does not wake it.'), h('span.d-only', ' Your answer is recorded in run.json and does not wake the executor — tell it where you work with it.'))
-    } else if (answerable.length) {
-      kind = 'answered'; head = 'Your answer is recorded'
+    } else if (answerable.length && !hold) {
+      kind = 'answered'; head = st.state === 'waiting' ? 'Your answer is recorded' : st.text
       lead = h('span', `${rec.executor.name} has not taken it up yet: the next move is theirs.`, h('span.d-only', ' Recording an answer does not wake the executor.'))
     } else if (hold) {
-      kind = 'held'; head = `Held (${hold.kind})`
+      kind = 'held'; head = st.text
       // observer p3: an interrupted or unknown hold is also Observer's to take to a recovery agent; a stop is only the person's.
-      const recovery = hold.kind === 'stopped' ? 'nothing of it runs until it is resumed with an instruction' : 'Observer asks a recovery agent to look and continue it (or you resume it with an instruction)'
-      lead = h('span', `${hold.by}${becauseText(hold.because)}`, h('span.d-only', `, ${when(hold.since)}`), `: ${sentence(hold.reason)} Its plan and work are kept, and ${recovery}. Other requests in this project can run meanwhile.`)
+      const recovery = hold.kind === 'stopped' ? 'Nothing of it runs until it is resumed with an instruction.' : 'Observer asks a recovery agent to look and continue it, or you resume it with an instruction.'
+      lead = h('span', hold.kind === 'stopped' ? `Stopped by ${hold.by}${becauseText(hold.because)}` : 'Its last attempt ended so', h('span.d-only', `, ${when(hold.since)}`), '. ', recovery)
+      more = h('details.hold-detail.small', h('summary', 'Details'), h('p', `${hold.by}${becauseText(hold.because)}: ${sentence(hold.reason)}`), h('p.muted', 'Its plan and work are kept in its own copy; other requests in this project can run meanwhile.'))
     }
     else if (ex.failed.length) {
       kind = 'failed'; head = `${ex.failed.map(name).join(', ')} failed`
@@ -523,22 +530,23 @@ export class RunSide {
     else if (accepted && ex.state !== 'completed') { kind = 'accepted'; head = 'Accepted — cleanup is still running'; lead = h('span', 'The result was accepted', last!.confirmation ? h('span.d-only', ` from ${last!.confirmation.question}`) : null, '; the run completes after its remaining steps.') }
     else if (ex.state === 'completed') { kind = 'completed'; head = !last ? 'Completed' : accepted ? (this.approval?.kind === 'integrated' ? 'Completed, accepted and integrated' : this.approval?.kind === 'integrating' ? 'Accepted — integrating' : 'Completed and accepted') : 'Completed — result rejected'; lead = !last ? 'Work completed. Reviews and decisions can be recorded independently of integration.' : h('span', `${last.decision === 'accepted' ? 'Accepted' : 'Rejected'}${last.confirmation ? ` from ${last.confirmation.from}'s answer` : ` by ${last.by}`}`, h('span.d-only', `${last.confirmation ? ` (${last.confirmation.question}, recorded by ${last.by})` : ''}, ${when(last.at)}`), '.') }
     else if (ex.active.length || rec.control.attempt) { kind = 'working'; head = 'Work in progress'; lead = this.observation(rec)[0] === 'warn' ? 'Recorded as in progress, but this host does not see the work running: look below.' : 'Nothing is needed from you now.' }
-    else if (ex.state === 'not-started') { kind = 'not-started'; head = 'Not started'; lead = `Waiting for ${rec.executor.name} to start.` }
+    else if (ex.state === 'not-started') { kind = 'not-started'; head = st.text; lead = `Waiting for ${rec.executor.name} to start.` }
     // A delegate node waits on its child (p10): the next move is the child's, or this run's agent's when a fact came back.
     else if (ex.waiting.some(w => 'delegation' in w.on)) {
       const w = ex.waiting.find(x => 'delegation' in x.on)!
       const dl = d.delegView?.delegations.find(x => x.id === (w.on as { delegation: string }).delegation)
       kind = 'delegated'
-      head = dl?.pending.length ? `${rec.executor.name} has news from ${dl.target.project}/${dl.target.workflow}` : `Waiting for ${dl ? `${dl.target.project}/${dl.target.workflow}` : w.holder}`
+      head = st.text
       lead = dl?.pending.length ? 'The delegated run asked or delivered something; this run continues when the executor takes it up.' : dl?.child ? h('span', `Its child ${dl.child.workflow}/${dl.child.run} is ${childWords(dl.childNow?.situation)}. `, h('a', { href: `#/ws/${encodeURIComponent(dl.child.workspace)}/run/${encodeURIComponent(dl.child.workflow)}/${encodeURIComponent(dl.child.run)}` }, 'Open the child run'), '.') : 'The request is on its way to that workflow\'s channel; its intake creates the child.'
     }
-    else { kind = 'idle'; head = 'Waiting for the executor'; lead = ex.ready.length ? `Ready to start: ${ex.ready.map(name).join(', ')}.` : 'Nothing is running and nothing is ready.' }
+    else if (st.state === 'waiting') { kind = 'waiting'; head = st.text; lead = st.waits.map(x => `${x.text}: ${x.condition}.`).join(' ') }
+    else { kind = 'idle'; head = st.state === 'idle' ? 'Waiting for the executor' : st.text; lead = ex.ready.length ? `Ready to start: ${ex.ready.map(name).join(', ')}.` : 'Nothing is running and nothing is ready.' }
     if (this.focus.dataset.kind !== kind) this.focus.dataset.kind = kind
 
     // The situation's icon, large: what kind of task this is before any word is read (p8/ex1).
-    const FOCUS_ICON: Record<string, string> = { delegated: 'delegate', reaccept: 'alert', integration: 'alert', review: 'present', question: 'question', answered: 'history', held: 'stop', failed: 'alert', accepted: 'check', completed: 'check', cancelled: 'stop', working: 'play', history: 'history', 'not-started': 'play', idle: 'play' }
+    const FOCUS_ICON: Record<string, string> = { delegated: 'delegate', waiting: 'history', reaccept: 'alert', integration: 'alert', review: 'present', question: 'question', answered: 'history', held: 'stop', failed: 'alert', accepted: 'check', completed: 'check', cancelled: 'stop', working: 'play', history: 'history', 'not-started': 'play', idle: 'play' }
     const done = kind === 'completed' && last?.decision === 'rejected' ? 'failed' : kind === 'completed' && !last ? 'pending' : kind
-    const blocks: (Node | null)[] = [h('div.focus-top', h(`span.focus-icon.tone-${done}`, icon(FOCUS_ICON[kind] ?? 'flag', 'icon')), h('div.focus-words', h('h2.focus-head', head), h('p.focus-lead', lead)))]
+    const blocks: (Node | null)[] = [h('div.focus-top', h(`span.focus-icon.tone-${done}`, icon(FOCUS_ICON[kind] ?? 'flag', 'icon')), h('div.focus-words', h('h2.focus-head', { dataset: { status: st.state } }, head), h('p.focus-lead', lead), more))]
     // The one-click review, while it is served (p7); otherwise what became of it.
     if (!d.rev) blocks.push(this.reviewLink(rec, kind))
     if (kind === 'working' || kind === 'accepted') blocks.push(this.activeBlock(rec, name))

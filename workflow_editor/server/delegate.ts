@@ -453,6 +453,7 @@ export class DelegateStore {
 export async function delegationsView(store: DelegateStore, ws: Workspace, ref: RunRef) {
   const { delegationState } = await import('../shared/delegation.ts')
   const { holderOf, situation } = await import('../shared/run.ts')
+  const { runStatus } = await import('../shared/status.ts')
   const { NotifyStore } = await import('./notify.ts')
   const rec = (await readRun(await runSpace(ws, ref), ref)).record
   if (!rec) throw new RequestError(409, `run ${runKey(ref)} cannot be read`)
@@ -464,12 +465,14 @@ export async function delegationsView(store: DelegateStore, ws: Workspace, ref: 
       const links = c ? await n.runStatusOf(d.child!.project, c.space.shared, { workflow: d.child!.workflow, run: d.child!.run }).then(st => ({ conversation: st.request?.url ?? null, progress: st.topic?.url ?? null, io: st.io?.url ?? null }), () => null) : null
       delegations.push({
         ...d, state: delegationState(d), pending: pendingEvents(d).map(e => e.n),
-        childNow: c ? { situation: situation(c.record), execution: c.record.execution.state, seq: c.record.seq, waiting: c.record.execution.waiting.map(w => ({ node: w.node, holder: holderOf(c.record, w.node) })), decisions: c.record.decisions.length, links } : null,
+        childNow: c ? { situation: situation(c.record), execution: c.record.execution.state, seq: c.record.seq, waiting: c.record.execution.waiting.map(w => ({ node: w.node, holder: holderOf(c.record, w.node) })), decisions: c.record.decisions.length, links, hold: c.record.control.hold?.kind ?? null, status: runStatus(c.record) } : null,
       })
     }
+    // The parent's own reading with its children as they are now (p8 ex1).
+    const status = runStatus(rec, { children: Object.fromEntries(delegations.filter(d => d.childNow).map(d => [d.id, { situation: d.childNow!.situation, hold: d.childNow!.hold, execution: d.childNow!.execution, run: d.child?.run ?? null }])) })
     const ent = rec.input.entrustedBy
     // A child names its parent; the parent's workspace here, for a link.
     const parentWs = ent?.kind === 'delegation' ? (await loadRegistry(store.ctx.registryFile)).workspaces.find(w => w.project === ent.parent.project)?.id ?? null : null
-    return { ref: runKey(ref), delegations, parent: ent?.kind === 'delegation' ? { ...ent, workspace: parentWs } : null }
+    return { ref: runKey(ref), delegations, status, parent: ent?.kind === 'delegation' ? { ...ent, workspace: parentWs } : null }
   } finally { n.close() }
 }

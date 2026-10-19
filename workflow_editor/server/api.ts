@@ -467,7 +467,7 @@ export function createHandler(config: ServiceConfig) {
       // Runs (docs/runs.md): GET runs, GET runs/<wf>/<run>[?rev=], GET runs/<wf>/<run>/file?path=,
       // POST runs/<wf>/<run>/ops {op, …, by, expectSeq}.
       if (b === 'runs') {
-        if (!file && method === 'GET') return send(res, 200, await listRuns(ws))
+        if (!file && method === 'GET') return send(res, 200, await listRuns(ws, undefined, config.exec ? ref => config.exec!.runRows(ws.reg.id, ref).jobs : undefined))
         // A person's request: the run with their words, queued for the executor.
         if (!file && method === 'POST') {
           const input = await body(req) as Record<string, unknown>

@@ -93,7 +93,7 @@ One run:
 | `identity` | the table above |
 | `source` | `{state: ok \| unreadable \| copy-missing \| copy-damaged \| copy-creating, problem, location: copy \| workspace, readAt, reads, consistent}` — `reads` is how many times the record was read to get a consistent snapshot; `consistent: false` means it kept changing and the facts may straddle a transition |
 | `seq`, `updated` | the record's last sequence and its time |
-| `situation` | `shared/run.ts` `situation()` (`executing`, `stopping`, `awaiting-person`, `stopped`, `interrupted`, `unknown`, `completed`, `cancelled`, `not-started`, `idle`) |
+| `situation` | `shared/run.ts` `situation()` (`executing`, `stopping`, `awaiting-person`, `awaiting-delegation`, `awaiting-external`, `due`, `stopped`, `interrupted`, `unknown`, `completed`, `cancelled`, `not-started`, `idle`). Since project_migration p8 ex1 a wait is named by whose move it is, and `due` is the executor's move the record owes (an answer or a child's fact not taken up, an instruction not read, work left ready); whether a job is queued for it is `queue.job` |
 | `execution` | `state`, `ready`, `active`, `failed`, `blocked`, `waiting: [{node, on, holder, since, deadline}]` (`deadline`: an external wait's declared latest time, `wfe run wait --deadline`) |
 | `hold` | `{kind, since, by, reason, because, human, cause}` — `human` is true for `stopped` (a person's or a person's words) and false for the executor-derived `interrupted`/`unknown`; `cause` is the structured cause of a hold derived since project_migration p8 ex1 ([runs.md](runs.md), *Why a hold was derived*), null before |
 | `stop`, `cancelled` | as recorded |

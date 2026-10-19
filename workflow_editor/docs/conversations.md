@@ -96,7 +96,7 @@ is the only one pending.
 | Route | |
 | --- | --- |
 | `GET api/conversations` | the conversations, newest first, with the last message |
-| `GET api/conversations/<id>[?since=<id>]` | messages, links, the linked runs as their records say now (situation, execution, waits, run view URL), pending questions; 404 for an id not created yet |
+| `GET api/conversations/<id>[?since=<id>]` | messages, links, the linked runs and each message's own entrance run (relation `turn`) as their records say now (situation, execution, waits, `status` — the shared short reading, [runs.md](runs.md) *Status in short* — and run view URL), pending questions; 404 for an id not created yet |
 | `POST api/conversations/<id>/messages {text, token, re?, via?, author?}` | the person's message, then its turn. Answers `{sent, duplicate, reopened, message, run}`. The author is the configured person unless `author` names another (an automated trial actor); a client other than the page names `via` |
 | `POST api/conversations/<id>/close` | closes the conversation (runs continue) |
 

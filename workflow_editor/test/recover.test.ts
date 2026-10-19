@@ -172,7 +172,7 @@ test('from a recovery run\'s attempt the actor is that run\'s agent with its run
   const r = res.record.recoveries!.at(-1)!
   assert.equal(r.by, 'recovery-agent')
   assert.deepEqual(r.agent, { workspace: id, workflow: 'recover', run: rr.run, attempt: rc.attempt.id })
-  assert.equal(situation(res.record), 'idle', 'not held; its continuation is queued behind the recovery run in the slot')
+  assert.equal(situation(res.record), 'due', 'not held; the executor\'s move — its continuation is queued behind the recovery run in the slot')
   assert.equal(res.job?.state, 'queued')
   // The recovery run ends; the continuation takes the slot.
   await x.finished(rc.attempt.id, { code: 0, signal: null })

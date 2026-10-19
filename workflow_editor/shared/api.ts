@@ -169,6 +169,8 @@ export interface RunSummary {
   executorHost?: string // the execution host that launches it (p6)
   pendingInstructions?: number // received and not acknowledged (p6)
   decision?: 'accepted' | 'rejected'
+  hold?: { kind: string; by: string } // a hold in force (p8 ex1)
+  status?: import('./status.ts').RunStatus // the shared reading (p8 ex1, shared/status.ts)
 }
 
 export interface RunFile { name: string; size: number; modified: string }

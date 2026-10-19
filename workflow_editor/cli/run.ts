@@ -13,6 +13,7 @@ import {
 } from '../server/runs.ts'
 import { RequestError, type Workspace } from '../server/workspace.ts'
 import { humanBytes } from '../shared/shares.ts'
+import { runStatus } from '../shared/status.ts'
 import { sourceLabel } from '../shared/intake.ts'
 import { runSpace } from '../server/runspace.ts'
 import { integrationStatus } from '../shared/approval.ts'
@@ -473,6 +474,7 @@ export function describeRun(r: RunResponse, opts: { history?: boolean; url?: str
   }
   const ex = rec.execution
   lines.push(`Run ${r.ref} — ${ex.state}   (${r.dir})`)
+  if (!r.revInfo) lines.push(`Status: ${runStatus(rec).text}`)
   if (opts.url) lines.push(`Browser: ${opts.url}`)
   const i = rec.input
   lines.push(i.kind === 'braindump'
@@ -696,7 +698,7 @@ export async function runCommand(c: RunCli): Promise<number> {
       const runs = await wrap(() => listRuns(ws, args[0]))
       const human = runs.length === 0 ? `No runs${args[0] ? ` of ${args[0]}` : ''} in this project.` : runs.map(s => s.problem
         ? `${s.ref.padEnd(32)} CANNOT BE USED  ${s.problem.code ?? s.problem.kind}: ${s.problem.message}`
-        : `${s.ref.padEnd(32)} ${String(s.execution).padEnd(12)} ${Object.entries(s.counts ?? {}).filter(([, n]) => n).map(([k, n]) => `${n} ${k}`).join(', ')}  updated ${s.updated}${s.ready?.length ? `\n${' '.repeat(33)}ready: ${s.ready.join(', ')}` : ''}${s.waiting?.length ? `\n${' '.repeat(33)}waiting: ${s.waiting.map(w => `${w.node} (next move: ${w.holder})`).join(', ')}` : ''}${s.failed?.length ? `\n${' '.repeat(33)}failed: ${s.failed.join(', ')}` : ''}${s.decision ? `\n${' '.repeat(33)}decision: ${s.decision}` : ''}`).join('\n')
+        : `${s.ref.padEnd(32)} ${String(s.execution).padEnd(12)} ${Object.entries(s.counts ?? {}).filter(([, n]) => n).map(([k, n]) => `${n} ${k}`).join(', ')}  updated ${s.updated}${s.status && s.status.state !== 'done' ? `\n${' '.repeat(33)}${s.status.text}` : ''}${s.ready?.length ? `\n${' '.repeat(33)}ready: ${s.ready.join(', ')}` : ''}${s.waiting?.length ? `\n${' '.repeat(33)}waiting: ${s.waiting.map(w => `${w.node} (next move: ${w.holder})`).join(', ')}` : ''}${s.failed?.length ? `\n${' '.repeat(33)}failed: ${s.failed.join(', ')}` : ''}${s.decision ? `\n${' '.repeat(33)}decision: ${s.decision}` : ''}`).join('\n')
       c.out(human, { workspace: ws.reg.id, runs })
       return 0
     }

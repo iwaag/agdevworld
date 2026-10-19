@@ -141,7 +141,7 @@ test('run policy: a new session under a minted id, resumed by that id after the 
   // record still names the run's retained session.
   const observer = new Observer(x, x.ctx.registryFile)
   const waiting = (await observer.observe()).runs.find(o => o.identity.run === req.ref.run)!
-  assert.equal(waiting.situation, 'awaiting-person')
+  assert.equal(waiting.situation, 'due', 'the answer is recorded: the executor\'s move (project_migration p8 ex1)')
   assert.deepEqual(waiting.session && { policy: waiting.session.policy, id: waiting.session.current?.id, attempts: waiting.session.current?.attempts.length }, { policy: 'run', id: sid, attempts: 1 })
   assert.equal(waiting.process?.alive, false, 'a retained session is not a live process')
   const c2 = await claim(x)

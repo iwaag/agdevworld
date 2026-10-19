@@ -106,7 +106,7 @@ export async function conversationCommand(c: ConversationCli): Promise<number> {
           for (const l of links) lines.push(`    → ${l.relation} ${l.run}${l.relation === 'turn' ? '' : ` by ${l.by}: ${l.note}`}`)
           if (m.dispatch && m.dispatch.state !== 'started') lines.push(`    ! turn not started (${m.dispatch.state}${m.dispatch.error ? `: ${m.dispatch.error}` : ''})`)
         }
-        lines.push('', 'Runs:', ...v.runs.map(r => `  ${r.key} — ${r.situation} (${r.execution})${r.waiting.length ? `, waiting at ${r.waiting.join(', ')}` : ''}; linked as ${r.relation}${r.url ? `; ${r.url}` : ''}${r.problem ? `; ${r.problem}` : ''}`))
+        lines.push('', 'Runs:', ...v.runs.map(r => `  ${r.key} — ${r.status?.text ?? r.situation} (${r.situation}, ${r.execution})${r.waiting.length ? `, waiting at ${r.waiting.join(', ')}` : ''}; linked as ${r.relation}${r.url ? `; ${r.url}` : ''}${r.problem ? `; ${r.problem}` : ''}`))
         lines.push(`Waiting for the person: ${v.asking.length ? v.asking.map(n => `#${n}`).join(', ') : 'nothing'}`)
         c.out(lines.join('\n'), v)
         return 0

@@ -191,7 +191,7 @@ test('an interruption, a person\'s hold and an answered question are told apart;
   await report(ws, a.ref, c3.attempt.id, { op: 'node.wait', node: 'scope', reason: 'render on the GPU node', holder: 'comfyui', external: 'comfyui:prompt/abc', deadline: '2026-10-14T06:00:00Z' })
   await x.finished(c3.attempt.id, { code: 0, signal: null })
   r = runOf(await observer.observe(), a.ref)!
-  assert.equal(r.situation, 'awaiting-person')
+  assert.equal(r.situation, 'awaiting-external', 'an external wait is told apart from a person\'s (project_migration p8 ex1)')
   assert.equal(r.execution?.waiting[0].deadline, '2026-10-14T06:00:00.000Z')
   assert.equal(r.waiting?.responsible, 'external:comfyui:prompt/abc')
   // The person stops the run: a human hold.

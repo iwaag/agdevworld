@@ -440,8 +440,17 @@ export function renderProjectView(root: HTMLElement, wsId: string, opts: { conte
   }
 
   // A run's state as one recognizable icon and word (Simple; Detail keeps the chips).
+  // The badge reads the shared status (project_migration p8 ex1): a wait on
+  // a child or an external result is not the person's, and a hold shows.
   function runState(r: RunSummary): HTMLElement {
     if (r.problem) return h('span.run-badge.error', icon('alert', 'icon'), 'Cannot be read')
+    const st = r.status
+    if (st) {
+      if (st.state === 'waiting') return st.waits.some(w => w.kind === 'person' && w.text === 'Your answer') ? h('span.run-badge.attention', icon('question', 'icon'), 'Waits for you') : h('span.run-badge.active', icon('history', 'icon'), 'Waiting')
+      if (st.state === 'paused' || st.state === 'interrupted' || st.state === 'unknown') return h('span.run-badge.warn', icon('stop', 'icon'), st.label)
+      if (st.state === 'queued' || st.state === 'due') return h('span.run-badge.active', icon('play', 'icon'), st.label)
+      if (st.state === 'stalled') return h('span.run-badge.error', icon('alert', 'icon'), st.label)
+    }
     if (r.waiting?.length) return h('span.run-badge.attention', icon('question', 'icon'), 'Waits for you')
     if (r.failed?.length) return h('span.run-badge.error', icon('alert', 'icon'), 'Failed')
     const s = r.execution ?? 'problem'
@@ -471,6 +480,7 @@ export function renderProjectView(root: HTMLElement, wsId: string, opts: { conte
           h('strong.run-list-title', r.title || wfName(r.workflow)),
           h('span.run-list-workflow', r.workflowName || wfName(r.workflow)),
           h('span.muted.small.d-only', r.ref),
+          r.status && r.status.state !== 'done' ? h(`p.run-status.tone-${r.status.tone}`, { title: r.status.detail ?? r.status.text, dataset: { status: r.status.state } }, r.status.text) : null,
           h('span.muted.small.s-only', `updated ${ago(r.updated)}`),
           h('span.muted.small.d-only', r.problem ? r.dir : `${r.input === 'request' ? 'request' : 'braindump'} · ${r.executor} · updated ${ago(r.updated)}`),
           h('div.chips.d-only',

@@ -31,6 +31,9 @@ export interface ActivityInput {
   waitingFor: string | null // who holds the next move when the run waits on a person
   failed: string[]
   holdKind: string | null
+  // The shared short reading (shared/status.ts, project_migration p8 ex1):
+  // what a run that is not working is waiting for, or why it is held.
+  status?: { state: string; text: string } | null
 }
 
 const plural = (n: number, w: string) => `${n} ${w}${n === 1 ? '' : 's'}`
@@ -41,7 +44,7 @@ export function describeActivity(i: ActivityInput): ActivityLine | null {
   const doing = i.active.length ? `Working on ${i.active[0]}${i.active.length > 1 ? ` and ${i.active.length - 1} more` : ''}` : 'Between steps'
   if (i.state === 'cancelled' || i.situation === 'cancelled') return { tone: 'muted', text: 'Cancelled' }
   if (i.state === 'completed') return { tone: 'done', text: 'Finished' }
-  if (i.holdKind) return { tone: 'held', text: 'Held', note: 'its work is kept; nothing runs until it is resumed' }
+  if (i.holdKind) return { tone: 'held', text: i.status?.text ?? 'Held', note: 'its work is kept; nothing runs until it is resumed' }
   if (i.situation === 'stopping') return { tone: 'warn', text: 'Stopping', note: 'waiting for the session to end' }
   if (i.execError) return { tone: 'warn', text: i.active.length ? doing : 'Activity unknown', note: 'this host\'s execution facts cannot be read' }
   const open = i.exec?.attempts.find(a => a.state !== 'ended')
@@ -57,10 +60,11 @@ export function describeActivity(i: ActivityInput): ActivityLine | null {
     if (!act?.last) line.note = 'no output yet'
     return line
   }
-  if (i.situation === 'awaiting-person' || i.waitingFor) return { tone: 'waiting', text: i.waitingFor ? `Waiting for ${i.waitingFor}` : 'Waiting for a person' }
-  if (i.failed.length) return { tone: 'warn', text: `${i.failed[0]} failed` }
   const queued = i.exec?.jobs.some(j => j.state === 'queued' || j.state === 'claimed')
-  if (queued) return { tone: 'quiet', text: 'Queued', note: 'starts when the executor is free' }
+  if (queued) return { tone: 'quiet', text: i.status?.state === 'queued' ? i.status.text : 'Queued', note: 'starts when the executor is free' }
+  if (i.status && ['waiting', 'due', 'stalled'].includes(i.status.state)) return { tone: i.status.state === 'stalled' ? 'warn' : 'waiting', text: i.status.text }
+  if (i.situation.startsWith('awaiting-') || i.waitingFor) return { tone: 'waiting', text: i.waitingFor ? `Waiting for ${i.waitingFor}` : 'Waiting for a person' }
+  if (i.failed.length) return { tone: 'warn', text: `${i.failed[0]} failed` }
   if (!i.exec) return { tone: 'muted', text: 'Checking the executor' }
   if (i.state === 'not-started') return { tone: 'muted', text: 'Not started' }
   return { tone: 'muted', text: 'Waiting for the executor' }

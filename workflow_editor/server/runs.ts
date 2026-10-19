@@ -16,6 +16,7 @@ import {
   type BundleEntry, type DefinitionRef, type DocumentEvidence, type EntrustRef, type Executor, type OpInput, type RepoContext, type RunGraph,
   type EntryMeta, type RunInput, type RunRecord, type RunRef, type RunState, type RunStorage,
 } from '../shared/run.ts'
+import { runStatus } from '../shared/status.ts'
 import type { SourceRef } from '../shared/intake.ts'
 import { atomicWrite, inside, readTextOrNull } from './files.ts'
 import { MANIFEST_KIND } from '../shared/review.ts'
@@ -293,10 +294,19 @@ export async function runRefs(ws: Workspace, workflow?: string): Promise<RunRef[
   return out.slice(0, MAX_RUNS)
 }
 
-export function summaryOf(ref: RunRef, reading: Pick<Reading, 'record' | 'problem' | 'bundle'>): RunSummary {
+// Node labels of the run's definition in force, for status words.
+export function nodeNames(bundle: Reading['bundle'], r: RunRecord): Record<string, string> {
+  const wf = bundle.revisions?.at(-1)?.workflow ?? bundle.entries[r.definition.root]?.workflow
+  return Object.fromEntries(Object.entries(wf?.nodes ?? {}).filter(([, n]) => n.name).map(([id, n]) => [id, n.name!]))
+}
+
+// `jobs` (project_migration p8 ex1): the run's jobs on the execution host,
+// when the caller has them; the status then tells queued from owed.
+export function summaryOf(ref: RunRef, reading: Pick<Reading, 'record' | 'problem' | 'bundle'>, jobs?: { state: string; reason: string }[]): RunSummary {
   const base: RunSummary = { ref: runKey(ref), workflow: ref.workflow, run: ref.run, dir: runDir(ref) }
   const r = reading.record
   if (!r) return { ...base, problem: reading.problem }
+  const job = jobs ? jobs.find(j => j.state === 'queued' || j.state === 'claimed') ?? null : undefined
   const workflowName = reading.bundle.revisions?.at(-1)?.workflow.name ?? reading.bundle.entries[r.definition.root]?.workflow?.name
   return {
     title: runDisplayTitle(r, workflowName), workflowName,
@@ -304,6 +314,8 @@ export function summaryOf(ref: RunRef, reading: Pick<Reading, 'record' | 'proble
     waiting: r.execution.waiting.map(w => ({ node: w.node, holder: holderText(r, w.node) })), ready: r.execution.ready, failed: r.execution.failed,
     input: r.input.kind, executor: r.executor.name, executorHost: hostOf(r.executor), pendingInstructions: Object.values(r.instructions ?? {}).filter(i => !i.ack).length,
     decision: r.decisions.at(-1)?.decision,
+    hold: r.control.hold ? { kind: r.control.hold.kind, by: r.control.hold.by } : undefined,
+    status: runStatus(r, { names: nodeNames(reading.bundle, r), ...(job !== undefined ? { job: job && { state: job.state as 'queued' | 'claimed', reason: job.reason } } : {}) }),
   }
 }
 
@@ -317,10 +329,10 @@ function holderText(r: RunRecord, node: string): string {
   return w.holder
 }
 
-export async function listRuns(ws: Workspace, workflow?: string): Promise<RunSummary[]> {
+export async function listRuns(ws: Workspace, workflow?: string, jobsOf?: (ref: RunRef) => { state: string; reason: string }[]): Promise<RunSummary[]> {
   const refs = await runRefs(ws, workflow)
   return Promise.all(refs.map(async ref => {
-    try { return summaryOf(ref, await readRun(ws, ref)) } catch (e) {
+    try { return summaryOf(ref, await readRun(ws, ref), jobsOf?.(ref)) } catch (e) {
       // A run whose working copy cannot be used is listed with its problem.
       if (e instanceof RequestError) return summaryOf(ref, { problem: { kind: 'unreadable', message: e.message, code: 'run-copy' }, bundle: { entries: {} } })
       throw e

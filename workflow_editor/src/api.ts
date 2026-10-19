@@ -160,7 +160,7 @@ export interface DelegationView {
   disposition: { kind: string; note: string; manifest: string | null; at: string; by: string } | null
   closed: { reason: string; at: string } | null
   pending: number[]
-  childNow: { situation: string; execution: string; seq: number; waiting: { node: string; holder: string }[]; decisions: number; links: { conversation: string | null; progress: string | null; io: string | null } | null } | null
+  childNow: { situation: string; execution: string; seq: number; waiting: { node: string; holder: string }[]; decisions: number; links: { conversation: string | null; progress: string | null; io: string | null } | null; hold?: string | null; status?: import('../shared/status.ts').RunStatus } | null
 }
 export interface DelegationsView { ref: string; delegations: DelegationView[]; parent: null | { delegation: string; parent: { project: string; workflow: string; run: string; node: string }; accepts: string; workspace: string | null } }
 export interface IoEntryView { attempt: string; line: number; entries: { line: number; kind: string; head: string; body?: string }[]; io?: RunNotifyView['io'] }

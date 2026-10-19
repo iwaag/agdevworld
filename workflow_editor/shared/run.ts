@@ -1815,16 +1815,42 @@ export const runKey = (r: RunRef) => `${r.workflow}/${r.run}`
 
 // The run's situation as the views state it. `executing` means an attempt is
 // open in the record; whether its process is alive is said separately by
-// the execution host.
-export type Situation = 'executing' | 'stopping' | 'awaiting-person' | 'stopped' | 'interrupted' | 'unknown' | 'completed' | 'cancelled' | 'not-started' | 'idle'
-export function situation(s: Pick<RunState, 'control' | 'execution' | 'cancelled'>): Situation {
+// the execution host. Waits are told apart by whose move they are
+// (project_migration p8 ex1): a person's answer, a child run's work, an
+// external result — and `due` when the record owes the executor the next
+// move (an answer or a child's fact not taken up, an instruction not read,
+// work left ready). Short words and reasons: shared/status.ts.
+export type Situation = 'executing' | 'stopping' | 'awaiting-person' | 'awaiting-delegation' | 'awaiting-external' | 'due' | 'stopped' | 'interrupted' | 'unknown' | 'completed' | 'cancelled' | 'not-started' | 'idle'
+export function situation(s: Pick<RunState, 'control' | 'execution' | 'cancelled'> & Partial<Pick<RunState, 'questions' | 'delegations' | 'instructions'>>): Situation {
   if (s.cancelled) return 'cancelled'
   if (s.control.attempt) return s.control.stop ? 'stopping' : 'executing'
   if (s.control.hold) return s.control.hold.kind
   if (s.execution.state === 'completed') return 'completed'
-  if (s.execution.waiting.length) return 'awaiting-person'
   if (s.execution.state === 'not-started') return 'not-started'
+  if (dueReason(s)) return 'due'
+  const on = s.execution.waiting.map(w => w.on)
+  if (on.some(o => 'question' in o)) return 'awaiting-person'
+  if (on.some(o => 'delegation' in o)) return 'awaiting-delegation'
+  if (on.length) return 'awaiting-external'
   return 'idle'
+}
+
+// Why the executor owes the run its next move, from the record alone; null
+// when the next move is someone else's (or nobody's).
+export function dueReason(s: Pick<RunState, 'execution'> & Partial<Pick<RunState, 'questions' | 'delegations' | 'instructions'>>): string | null {
+  for (const w of s.execution.waiting) {
+    if ('question' in w.on) { const q = s.questions?.[w.on.question]; if (q && questionState(q) === 'answered') return `answer to ${q.id} arrived` }
+  }
+  for (const d of Object.values(s.delegations ?? {})) {
+    const e = isOpenDelegation(d) ? pendingEvents(d)[0] : undefined
+    if (e) return `${e.type === 'completed' ? 'result' : e.type} from ${d.target.project} ${d.target.workflow} arrived`
+  }
+  const ins = Object.values(s.instructions ?? {}).find(i => !i.ack)
+  if (ins && s.execution.state !== 'completed') return `instruction ${ins.id} arrived`
+  const and = (xs: string[]) => xs.length <= 2 ? xs.join(' and ') : `${xs.slice(0, -1).join(', ')} and ${xs.at(-1)}`
+  if (s.execution.ready.length && !s.execution.waiting.length) return `${and(s.execution.ready)} ready`
+  if (s.execution.active.length) return `${and(s.execution.active)} recorded as running`
+  return null
 }
 
 // ---- coordination events (p4 selection, p5 delivery) ----------------------------------

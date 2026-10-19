@@ -952,7 +952,9 @@ export class FrontDeskScene extends Phaser.Scene {
     const waiting = pendingFor(requests, viewer)
     const held = overtakenFor(requests, viewer)
     const choice = this.correlation
-    if (this.conversationId === null || (waiting.length === 0 && held.length === 0 && choice.kind === 'auto')) return
+    // The conversation's unfinished work and why it stands (project_migration p8 ex1).
+    const work = this.detail?.conversation.status.work ?? []
+    if (this.conversationId === null || (waiting.length === 0 && held.length === 0 && choice.kind === 'auto' && work.length === 0)) return
     const { x, y, width } = this.dialogueRect
     const limit = x + width - (this.queueButton.visible ? this.queueButton.width + 24 : 14)
     let chipX = x
@@ -994,6 +996,15 @@ export class FrontDeskScene extends Phaser.Scene {
     if (held.length) {
       place(this.text(0, 0, `📩 ${held.map((row) => `#${row.id}`).join(', ')} was asked before your newer post was read — Front answers that first`,
         MONO, 10.5, COLOR.muted).setBackgroundColor('#1b2030').setPadding(7, 4, 7, 4))
+    }
+    // A held run stays visible beside a question: answering alone does not resume it.
+    for (const item of work.slice(0, 3)) {
+      const tone = item.status.tone === 'held' || item.status.tone === 'warn' ? COLOR.warn : item.status.tone === 'waiting' ? COLOR.accent2 : COLOR.muted
+      const icon = item.status.tone === 'held' ? '⏸' : item.status.tone === 'warn' ? '⚠' : item.status.state === 'working' ? '▶' : '⏳'
+      const chip = this.text(0, 0, `${icon} ${item.key.split('/').slice(1).join('/')} · ${item.status.text}`, MONO, 10.5, tone)
+        .setBackgroundColor('#1b2030').setPadding(7, 4, 7, 4)
+      if (item.url) chip.setInteractive({ useHandCursor: true }).on('pointerup', () => window.open(item.url!, '_blank', 'noopener'))
+      if (!place(chip)) break
     }
   }
 

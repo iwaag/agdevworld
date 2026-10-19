@@ -849,9 +849,7 @@ export class ExecStore {
     if ((rec.execution.state === 'completed' || accepted) && rec.storage) await this.queueIntegration(ws, ref, this.executor).catch(() => null)
     // An answer may have arrived while the attempt was still running.
     let resumeJob: JobRow | null = null
-    if (kind === 'awaiting-person') {
-      for (const w of rec.execution.waiting) if ('question' in w.on) resumeJob = resumeJob ?? await this.afterAnswer(ws, ref, w.on.question)
-    }
+    for (const w of rec.execution.waiting) if ('question' in w.on) resumeJob = resumeJob ?? await this.afterAnswer(ws, ref, w.on.question)
     // A child's fact relayed while the attempt ran (p10) queues the next one.
     if (!resumeJob && Object.values(rec.delegations ?? {}).some(d => isOpenDelegation(d) && pendingEvents(d).length)) resumeJob = await this.afterDelegation(ws, ref)
     return { outcome: rec.control.last?.outcome ?? outcome, checkpoint, resumeJob }

@@ -122,6 +122,19 @@ pre { white-space: pre-wrap; font-size: 12px; background: rgba(0,0,0,.05); paddi
 .chip.ok, .chip.approval.approved { background: var(--ok-bg); color: var(--ok); }
 .chip.approval.stale { background: var(--warn-bg); color: var(--warn); }
 .chip.approval.unapproved { background: #eef0f3; color: var(--muted); }
+/* The run's status in short (project_migration p8 ex1, shared/status.ts). */
+.status-chip { font-size: 12.5px; font-weight: 600; border-radius: 6px; padding: 2px 8px; background: #eef0f3; color: #3b424c; white-space: normal; }
+.status-chip.tone-working, .status-chip.tone-queued { background: #e3f2fa; color: #0d5f8a; }
+.status-chip.tone-waiting { background: #f3eefb; color: #5b3d8f; }
+.status-chip.tone-held { background: var(--warn-bg); color: var(--warn); }
+.status-chip.tone-warn { background: var(--error-bg); color: var(--error); }
+.status-chip.tone-done { background: var(--ok-bg); color: var(--ok); }
+.status-chip.tone-muted { color: var(--muted); }
+.run-status { font-size: 12.5px; margin: 2px 0 0; }
+.run-status.tone-held, .run-status.tone-warn { color: var(--warn); }
+.run-status.tone-waiting { color: #5b3d8f; }
+details.hold-detail { margin-top: 6px; }
+details.hold-detail summary { cursor: pointer; color: var(--muted); }
 .access-badge { font-size: 12px; border-radius: 6px; padding: 3px 9px; color: #fff; }
 .access-badge.readonly { background: #4a525e; }
 .access-badge.editable { background: #c99a2e; }

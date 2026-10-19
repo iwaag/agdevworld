@@ -17,7 +17,7 @@ const UNKNOWN_BLOCKS = 10 * MINUTE // later posts in its thread wait this long f
 const MAX_SENDS = 3 // sends of one row (a resend only after it was found absent)
 const MAX_CHECKS = 20 // reconciliation attempts before an unknown row is left to the operator
 const RETENTION = 90 * DAY // the free plan hides older history
-const ACTIVE = new Set(['executing', 'stopping', 'not-started'])
+const ACTIVE = new Set(['executing', 'stopping', 'not-started', 'due'])
 export const RECEIVED_REACTION = 'inbox_tray'
 
 export type Classified =

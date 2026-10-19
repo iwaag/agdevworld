@@ -150,8 +150,12 @@ export interface RoomPost {
   meaning?: PostMeaning | null
   // The run an agent message started or reports on, with its WFE run view
   // (project_migration p8): drawn as a small link, never folded into content.
-  run?: { key: string; url: string }
+  run?: { key: string; url: string; status?: RunStatusWords | null }
 }
+
+// A run's status in short, as WFE's shared reading gives it
+// (workflow_editor shared/status.ts; project_migration p8 ex1).
+export interface RunStatusWords { state: string; label: string; reason: string; text: string; tone: string }
 
 export type RoomState = 'waiting' | 'received' | 'answered' | 'asking' | 'done' | 'quiet' | 'unknown'
 
@@ -159,6 +163,8 @@ export interface RoomStatus {
   state: RoomState
   since: number | null
   evidence: string
+  // The conversation's unfinished work, each run with its short status (p8 ex1).
+  work?: { key: string; url: string | null; status: RunStatusWords }[]
 }
 
 export interface RoomRow {
@@ -235,8 +241,8 @@ export interface RoomAdapter {
 }
 
 // The chip a post's run is drawn as: small, after the post's own links.
-export function runLink(run: { key: string; url: string }): { label: string; url: string } {
-  return { label: `work: ${run.key} ↗`, url: run.url }
+export function runLink(run: { key: string; url: string; status?: RunStatusWords | null }): { label: string; url: string } {
+  return { label: `work: ${run.key}${run.status ? ` — ${run.status.text}` : ''} ↗`, url: run.url }
 }
 
 export function submitToken(): string {
@@ -405,7 +411,7 @@ interface WfeDetail {
   conversation: { id: string; title: string; created: string; updated: string; state: 'open' | 'closed' }
   messages: WfeMessage[]
   links: { message: number; run: string; relation: string; note: string; by: string; at: string }[]
-  runs: { key: string; workspace: string; workflow: string; run: string; situation: string; execution: string; url: string; relation: string }[]
+  runs: { key: string; workspace: string; workflow: string; run: string; situation: string; execution: string; url: string; relation: string; status?: RunStatusWords | null }[]
   asking: number[]
 }
 
@@ -499,7 +505,20 @@ function wfeRequests(found: WfeDetail): RoomRequests {
 
 // Where the conversation stands (project_migration p8): read from the
 // messages WFE holds, the dispatch of the person's newest message included.
+// The conversation's work that is not done, newest first, with its status.
+function wfeWork(found: WfeDetail): RoomStatus['work'] {
+  return found.runs.filter(r => r.status && !['done', 'cancelled'].includes(r.status.state))
+    .sort((a, b) => b.run.localeCompare(a.run))
+    .map(r => ({ key: r.key, url: r.url ? absolute(r.url) : null, status: r.status! }))
+}
+
 function wfeStatus(found: WfeDetail | null): RoomStatus {
+  const status = wfeStatusOnly(found)
+  const work = found ? wfeWork(found) : []
+  return work?.length ? { ...status, work } : status
+}
+
+function wfeStatusOnly(found: WfeDetail | null): RoomStatus {
   const messages = found?.messages ?? []
   if (!found || messages.length === 0) return { state: 'quiet', since: null, evidence: 'nothing posted yet' }
   const last = messages[messages.length - 1]
@@ -516,11 +535,12 @@ function wfeStatus(found: WfeDetail | null): RoomStatus {
   return { state: 'answered', since: epoch(last.at), evidence: 'Front replied' }
 }
 
-function wfeRunLink(message: WfeMessage, found: WfeDetail): { key: string; url: string } | undefined {
+function wfeRunLink(message: WfeMessage, found: WfeDetail): RoomPost['run'] {
   const key = message.run ?? message.dispatch?.run ?? null
   if (!key) return undefined
-  const url = message.runUrl ?? found.runs.find((one) => one.key === key)?.url ?? null
-  return url ? { key, url: absolute(url) } : undefined
+  const run = found.runs.find((one) => one.key === key)
+  const url = message.runUrl ?? run?.url ?? null
+  return url ? { key, url: absolute(url), status: run?.status ?? null } : undefined
 }
 
 // Whether the desk last saw a conversation closed: a post to it reopens it

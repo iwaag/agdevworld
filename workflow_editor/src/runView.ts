@@ -32,6 +32,7 @@ import { RunContextCard } from './runContext.ts'
 import { RunSide, integrationStatus, type OpResult } from './runSide.ts'
 import { approvalOf } from './integrationState.ts'
 import { ActivityView, describeActivity } from './runActivity.ts'
+import { viewStatus } from './runStatus.ts'
 import { displayToggle, isSimple, onDisplay, setDisplay } from './displayMode.ts'
 import type { ViewHandle } from './main.ts'
 
@@ -41,6 +42,7 @@ function store(key: string, value: string) { try { localStorage.setItem(key, val
 
 const SITUATION: Record<string, string> = {
   executing: 'Executor: executing', stopping: 'Executor: stop requested', 'awaiting-person': 'Executor: idle, waiting for a person',
+  'awaiting-delegation': 'Executor: idle, waiting for a delegated run', 'awaiting-external': 'Executor: idle, waiting for an external result', due: 'Executor: its move (continuation owed)',
   stopped: 'Executor: held (stopped)', interrupted: 'Executor: held (interrupted)', unknown: 'Executor: unknown — look before resuming',
   completed: 'Executor: idle', cancelled: 'Executor: idle (cancelled)', 'not-started': 'Executor: not started', idle: 'Executor: idle',
 }
@@ -349,10 +351,11 @@ export function renderRunView(root: HTMLElement, wsId: string, workflow: string,
     const ex = rec.execution
     const wf = activeWorkflow(r, rec)
     const t = runTitle(rec, wf?.name)
+    const st = viewStatus(rec, { names: Object.fromEntries(Object.keys(rec.nodes).map(n => [n, label(rec, n)])), exec: execView, delegations: delegView })
     activity.update(describeActivity({
       rev: !!rev, connected, execError: !!execError, exec: execView, situation: situation(rec), state: ex.state,
       active: ex.active.map(n => label(rec, n)), waitingFor: ex.waiting.length ? holderOf(rec, ex.waiting[0].node) : null,
-      failed: ex.failed.map(n => label(rec, n)), holdKind: rec.control.hold?.kind ?? null,
+      failed: ex.failed.map(n => label(rec, n)), holdKind: rec.control.hold?.kind ?? null, status: rev ? null : st,
     }))
     patchContent(titleMain,
       h('h1.run-name', { title: t.title }, t.title),
@@ -371,7 +374,8 @@ export function renderRunView(root: HTMLElement, wsId: string, workflow: string,
       chip(ex.state, ex.state === 'completed' ? '✓ Completed' : ex.state === 'stopped' ? 'Nothing can proceed' : STATE_LABEL[ex.state] ?? ex.state),
       appr?.chip ? h(`span.decision-chip.${appr.tone === 'ok' ? 'ok' : appr.tone === 'error' ? 'error' : appr.tone === 'warn' ? 'warn' : 'none'}`, { dataset: { approval: appr.kind }, title: last ? `latest decision: ${last.decision} by ${last.by}, ${when(last.at)}${last.confirmation ? ` (from ${last.confirmation.question})` : ''}${appr.integration ? ` · ${appr.integration.text}` : ''}` : appr.chip }, appr.chip)
         : rev && last ? h(`span.decision-chip.${last.decision === 'accepted' ? 'ok' : 'error'}`, last.decision === 'accepted' ? 'Accepted' : 'Rejected') : null,
-      rev ? null : h(`span.chip.d-only.sit-${sit}`, { title: 'What runs now: this host\'s execution facts, separate from the recorded node states' }, `${sit === 'awaiting-person' && !ex.waiting.some(w => !('delegation' in w.on)) ? 'Executor: idle, waiting for a delegated run' : SITUATION[sit] ?? sit}${process}`))
+      rev ? null : h(`span.status-chip.d-only.tone-${st.tone}`, { dataset: { status: st.state }, title: st.detail ?? st.text }, st.text),
+      rev ? null : h(`span.chip.d-only.sit-${sit}`, { title: 'What runs now: this host\'s execution facts, separate from the recorded node states' }, `${SITUATION[sit] ?? sit}${process}`))
     const src = r!.sources.find(s => s.workflow === rec.definition.root)
     openDefinition.hidden = !src?.file
     if (src?.file) {
@@ -524,7 +528,7 @@ export function renderRunView(root: HTMLElement, wsId: string, workflow: string,
     for (const d of delegView?.delegations ?? []) {
       const st = status[d.node]
       if (!st) continue
-      const CHILD: Record<string, string> = { executing: 'child working', stopping: 'child stopping', 'awaiting-person': 'child waiting', stopped: 'child stopped', interrupted: 'child interrupted', unknown: 'child interrupted', completed: 'child done', cancelled: 'child cancelled', 'not-started': 'child queued', idle: 'child queued' }
+      const CHILD: Record<string, string> = { executing: 'child working', stopping: 'child stopping', 'awaiting-person': 'child waiting', 'awaiting-delegation': 'child waiting', 'awaiting-external': 'child waiting', due: 'child continuing', stopped: 'child paused', interrupted: 'child interrupted', unknown: 'child interrupted', completed: 'child done', cancelled: 'child cancelled', 'not-started': 'child queued', idle: 'child queued' }
       const child = d.childNow ? CHILD[d.childNow.situation] ?? `child ${d.childNow.situation}` : d.child ? 'child' : 'request on its way'
       const base = rec.nodes[d.node]?.state === 'waiting' ? 'Waiting' : st.label
       status[d.node] = { ...st, label: `${base} · ${d.pending.length ? 'news to take up' : d.disposition ? d.disposition.kind : child}`, title: `${st.title}\nDelegation ${d.id} to ${d.target.project}/${d.target.workflow}: ${d.state}${d.child ? `; child ${d.child.workflow}/${d.child.run}` : ''}` }

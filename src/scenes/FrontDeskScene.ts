@@ -68,7 +68,7 @@ import { FrontDeskSettings } from '../frontDeskSettings'
 import { LABEL_STYLE, labelOf, overtakenFor, pendingFor, requestOf, shortText, type PostLabel } from '../postMeaning'
 import { ProgressPanel } from '../progressPanel'
 import { demoProgress, relayProgress } from '../progressState'
-import { AUTO, ago, clock, submitToken, type Citation, type Correlation, type PostMeaning, type RoomAdapter, type RoomDetail, type RoomRow } from '../roomState'
+import { AUTO, ago, clock, runLink, submitToken, type Citation, type Correlation, type PostMeaning, type RoomAdapter, type RoomDetail, type RoomRow } from '../roomState'
 import { assetUrl, type SettingsCharacter, type SettingsManifest } from '../settingsState'
 import { linksIn, paginate, wrapText, type FoundLink, type Measure } from '../textLayout'
 import { ROOM_TINT_ALPHA, ROOM_TINT_COLOR } from './roomTint'
@@ -790,9 +790,9 @@ export class FrontDeskScene extends Phaser.Scene {
     } else if (this.detail.health.state !== 'live') {
       this.health.setText(`⚠ UNKNOWN — ${this.detail.health.reason}; last known history`).setColor(COLOR.warn)
     } else {
-      const chat = this.detail.chat.configured ? 'you post as the Developer' : (this.detail.chat.reason ?? 'chat read-only')
+      const chat = this.detail.chat.configured ? `you post as ${this.detail.chat.as ?? 'the Developer'}` : (this.detail.chat.reason ?? 'chat read-only')
       const known = conversation?.known === 'read' ? ' · read from Zulip' : conversation?.known === 'unknown' ? ' · history unknown' : ''
-      this.health.setText(`relay live · ${chat}${known}${conversation?.resolved ? ' · ✔ resolved' : ''}`).setColor(COLOR.live)
+      this.health.setText(`${this.adapter.words.live ?? 'relay live'} · ${chat}${known}${conversation?.resolved ? ' · ✔ resolved' : ''}`).setColor(COLOR.live)
     }
     const view = this.manifestInView()
     const parts = [this.settings.summary()]
@@ -1324,7 +1324,8 @@ export class FrontDeskScene extends Phaser.Scene {
           }
         }
       }
-      const links = linksIn(post.content)
+      // The run the message names, after its own links (project_migration p8).
+      const links = [...linksIn(post.content), ...(post.run ? [runLink(post.run)] : [])]
       if (links.length) {
         for (const link of links) {
           const chip = this.text(textX, y + cursor, `🔗 ${link.label}`, MONO, 10.5, COLOR.accent2)
@@ -1448,6 +1449,9 @@ export class FrontDeskScene extends Phaser.Scene {
   private canReinterpret(): { ok: boolean; why: string } {
     const shown = this.detail?.conversation.presentation
     if (this.conversationId === null) return { ok: false, why: 'nothing is open' }
+    // A room with no presentation block re-voices nothing (the desk since
+    // project_migration p8): the paid button stays off rather than failing after.
+    if (this.detail && !this.detail.conversation.presentation) return { ok: false, why: 'retired — posts are shown as written' }
     if (this.asking) return { ok: false, why: 'asking…' }
     if (this.sending) return { ok: false, why: 'a post is on its way' }
     if (!this.settings.activeRevision) return { ok: false, why: 'no settings revision is active' }

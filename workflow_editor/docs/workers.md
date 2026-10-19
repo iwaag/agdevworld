@@ -2,10 +2,11 @@
 
 One **coordinator** — the WFE service of an area and its execution store —
 keeps every run's record. Runs are performed by **workers** (execution
-nodes): each has one execution slot, its own processes and its own disk.
+nodes): each has one execution slot (plus the slots of the lanes it
+declares, p8), its own processes and its own disk.
 Code: `server/workers.ts` (configuration, node choice, record-copy
 alignment), `server/exec.ts` (the store), `server/workerApi.ts` (HTTP),
-`cli/remote.ts` (`wfe` on a remote worker). Fixtures: `test/workers.test.ts`.
+`cli/remote.ts` (`wfe` on a remote worker). Fixtures: `test/workers.test.ts`, `test/lanes.test.ts`.
 Deploying a worker on a PC: the `wfe_worker` profile of pj-clusterintent's
 ansible_agdev, and the recipe `nctl/docs/add-a-wfe-worker.md` there.
 
@@ -16,7 +17,7 @@ ansible_agdev, and the recipe `nctl/docs/add-a-wfe-worker.md` there.
 ```json
 { "default": "studio",
   "workers": {
-    "studio": { "local": true, "label": "the coordinator's host" },
+    "studio": { "local": true, "label": "the coordinator's host", "lanes": { "conversation": 1 } },
     "gpupc":  { "label": "the GPU PC", "tokenFile": "workers/gpupc.token" } } }
 ```
 
@@ -28,6 +29,9 @@ ansible_agdev, and the recipe `nctl/docs/add-a-wfe-worker.md` there.
   default).
 - Every other worker reaches the coordinator over HTTP with its token.
 - No file: one local worker, `local`.
+- `lanes` (optional, p8): extra lanes of the worker, name → capacity (see
+  "Lanes" below). The `default` lane is always there with one slot and is
+  not declared.
 
 On a remote worker, `<worker area>/worker.json`:
 
@@ -69,9 +73,41 @@ elsewhere. A record without a node (made before p7) is read as the default's;
   its harness cannot keep, a dispatch that could not be published. It is
   not dropped and not given to another worker. A run that is cancelled,
   held or already open still has its job dropped, as before.
-- One open attempt per run (the record) and per worker (the store).
+- One open attempt per run (the record) and per worker lane (the store):
+  without declared lanes, one per worker, as before p8.
 - A claim may carry the worker's receipt: the same receipt again gets the
   same answer (a lost answer is not a second attempt).
+
+## Lanes (project_migration p8)
+
+A conversational project (a Front answering the Developer) cannot wait for
+a specialist attempt that holds its worker's one slot for an hour. A worker
+may therefore declare extra lanes in `workers.json`
+(`"lanes": { "conversation": 1 }`); each lane has slots of its own.
+
+- A workflow names its lane with `execution.lane: <name>` (the project's
+  `execution.lane` is the fallback; same pattern as node ids). It is part of
+  the approved definition and frozen into the run at creation as
+  `executor.lane`; absent means `default` and is not recorded.
+- A claim is made in one lane: `wfe exec claim --lane <name>` (HTTP: `lane`
+  in the claim body); without it, `default`. It is idle while that lane's
+  open attempts reach its capacity, and takes only jobs whose run is claimed
+  in that lane *on this worker*: the run's `executor.lane` when the worker
+  declares it, else `default` — a lane the worker does not offer is served
+  by its default lane, so no run waits for a lane nobody declared. A claim in
+  a lane the worker does not declare is refused (`lane-unknown`).
+- The attempt row records its lane (`lane`, NULL = default; store
+  version 4). `wfe exec adopt` answers each attempt with its lane, so a
+  restarted executor hands it back to that lane's loop.
+- Views: a worker's `busy` (observation: `slot`) stays its default lane's
+  attempt; `slots` lists every open attempt with its lane and `lanes` the
+  capacities.
+- The executor (autolab `wfexec`, setting `lanes = ["conversation"]`) runs
+  one claim loop per lane; heartbeat, reconcile (`--holding` with every
+  lane's attempts), notifications and intake stay with the default lane's.
+- Only the local worker serves extra lanes for now: a remote worker's
+  bookkeeping (`state.json`) is kept by one executor process at a time, and
+  its `wfe exec claim --lane` is refused.
 
 ## Reports and their owner
 

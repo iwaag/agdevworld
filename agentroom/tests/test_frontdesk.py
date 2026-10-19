@@ -326,12 +326,11 @@ def test_the_three_routes_answer_over_http(tmp_path):
         assert status == 200 and [r["id"] for r in board["conversations"]] == ["20260908-1600"]
         status, found = http("GET", "/frontdesk/20260908-1600")
         assert status == 200 and found["conversation"]["latest_reply"]["content"] == "yo✨"
-        status, refused = http("POST", "/frontdesk/20260908-1600/post", {"text": "hi", "token": ""})
-        assert status == 403 and refused["sent"] is False
-        status, sent = http("POST", "/frontdesk/20260908-1600/post", {"text": "hi", "token": "t1"})
-        assert status == 200 and sent["sent"] is True and client.sent == [("front", DESK, "hi")]
-        status, again = http("POST", "/frontdesk/20260908-1600/post", {"text": "hi", "token": "t1"})
-        assert status == 200 and again["duplicate"] is True and len(client.sent) == 1
+        # The desk's writes are retired with the legacy Front (project_migration
+        # p8): the history stays readable, nothing is posted.
+        status, retired = http("POST", "/frontdesk/20260908-1600/post", {"text": "hi", "token": "t1"})
+        assert status == 410 and retired["sent"] is False and client.sent == []
+        assert http("POST", "/frontdesk/20260908-1600/render", {"token": "t2"})[0] == 410
         status, bad = http("GET", "/frontdesk/..%2Fetc")
         assert status == 400
     finally:

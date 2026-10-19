@@ -57,6 +57,19 @@ WRITE_ROUTES = ("/ops/confirm", "/chat", "/routines/<name>/start", "/frontdesk/<
                 "/contexts", "/contexts/register", "/contexts/<id>", "/contexts/<id>/publish")
 
 
+
+# Writes that reached the legacy Front listener through Zulip (#front desk
+# posts and re-voicing requests, argues, routine chat and starts), retired
+# with it in project_migration p8.
+def retired_write(path: str) -> bool:
+    if path == "/chat" or path == "/argues":
+        return True
+    if path.startswith("/frontdesk/") and (path.endswith("/post") or path.endswith("/render")):
+        return True
+    if path.startswith("/argues/") and not path.endswith("/close"):
+        return True
+    return path.startswith("/routines/") and path.endswith("/start")
+
 def make_handler(room: Room, ops: Ops | None = None, chat: Chat | None = None,
                  cost: Cost | None = None, budget: Budget | None = None,
                  desk: FrontDesk | None = None, settings: Settings | None = None,
@@ -608,6 +621,18 @@ def make_handler(room: Room, ops: Ops | None = None, chat: Chat | None = None,
             path = urlparse(self.path).path.rstrip("/") or "/"
             if path == "/contexts" or path.startswith("/contexts/"):
                 self._contexts_post(path)
+                return
+            if retired_write(path):
+                # The legacy Front listener is retired (project_migration p8):
+                # nothing serves a post into #front, an argue or a routine run
+                # any more, so a write here would buy nobody's answer. The
+                # conversation with Front is the WFE conversation store.
+                self._write_json(410, {
+                    "sent": False, "uncertain": False,
+                    "error": "retired (project_migration p8): talk to Front in the Front Desk, "
+                             "which now posts to the WFE conversations (/wfe/api/conversations); "
+                             "these Zulip conversations stay readable as history",
+                })
                 return
             if path == "/chat":
                 self._chat()

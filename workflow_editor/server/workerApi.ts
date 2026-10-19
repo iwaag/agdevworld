@@ -137,7 +137,7 @@ export async function workerRoute(cfg: WorkerRouteConfig, req: IncomingMessage, 
     }
     case 'POST claim': {
       const b = await json(req)
-      return send(res, 200, await x.claim(typeof b.backend === 'string' ? b.backend : null, (b.offer ?? {}) as HostOffer, { worker, receipt: typeof b.receipt === 'string' ? b.receipt : undefined, facts: (b.facts ?? {}) as WorkerFacts }))
+      return send(res, 200, await x.claim(typeof b.backend === 'string' ? b.backend : null, (b.offer ?? {}) as HostOffer, { worker, receipt: typeof b.receipt === 'string' ? b.receipt : undefined, facts: (b.facts ?? {}) as WorkerFacts, lane: typeof b.lane === 'string' ? b.lane : undefined }))
     }
     case 'POST started': { const b = await json(req); x.started(str(b.attempt, 'attempt'), Number(b.pid), worker); return send(res, 200, { ok: true }) }
     case 'POST finished': {

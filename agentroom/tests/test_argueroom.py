@@ -329,12 +329,11 @@ def test_the_routes_answer_over_http():
         assert call("GET", "/argues")[1]["argues"][0]["anchor"] == anchor
         assert call("GET", f"/argues/{anchor}")[1]["argue"]["topic"] == "argue-far"
         assert call("GET", "/argues/424242")[0] == 404
-        status, found = call("POST", f"/argues/{anchor}/post", {"text": "over http", "token": "h1"})
-        assert status == 200 and found["sent"]
-        assert call("POST", f"/argues/{anchor}/post", {"text": "over http"})[0] == 403
-        status, found = call("POST", "/argues", {"stem": "http-made", "text": "a new desire", "token": "h2"})
-        assert status == 200 and found["topic"] == "argue-http-made"
-        assert call("POST", f"/argues/{anchor}/render", {"token": "h3"})[1]["settings_revision"] == REV_A
+        # Argues are retired with the legacy Front (project_migration p8):
+        # readable, never written.
+        assert call("POST", f"/argues/{anchor}/post", {"text": "over http", "token": "h1"})[0] == 410
+        assert call("POST", "/argues", {"stem": "http-made", "text": "a new desire", "token": "h2"})[0] == 410
+        assert call("POST", f"/argues/{anchor}/render", {"token": "h3"})[0] == 410
         assert "/argues/<anchor>/post" in call("GET", "/")[1]["post"]
     finally:
         server.shutdown()
@@ -381,9 +380,8 @@ def test_closing_an_argue_from_the_room_is_the_shared_door_keyed_by_anchor():
         status, again = call("GET", f"/argues/{anchor}/close-plan")
         assert again["actions"][0]["state"] == "done" and again["actions"][0]["reason"] == "already ✔"
         assert call("POST", f"/argues/{anchor}/close", {"fingerprint": "stale"})[0] == 409
-        # And the room's own post resumes it, as before.
-        status, found = call("POST", f"/argues/{anchor}/post", {"text": "one more thought", "token": "c1"})
-        assert status == 200 and found["resumed"]
+        # Posting to resume it is retired (project_migration p8).
+        assert call("POST", f"/argues/{anchor}/post", {"text": "one more thought", "token": "c1"})[0] == 410
         assert "/argues/<anchor>/close" in call("GET", "/")[1]["post"]
     finally:
         server.shutdown()

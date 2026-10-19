@@ -15,6 +15,7 @@
 //   - the compact current state, at the seq the snapshot was taken.
 // Later input is found at node boundaries (`wfe run state`) and by the
 // write-time refusals, as before.
+import { sourceLabel } from '../shared/intake.ts'
 import { effectiveOf, holderOf, questionState, replay, runKey, type HistoryEntry, type Question, type RunRecord } from '../shared/run.ts'
 import { delegationBrief, instructionBrief } from './exec.ts'
 import { runDir } from './runs.ts'
@@ -44,7 +45,7 @@ export function pendingAnswerLines(r: RunRecord): string[] {
   return ['', `Answers recorded and not yet taken up (${all.length}), exact text; wfe run take-up <run> <question> records that you read one:`,
     ...all.flatMap(({ q, index }) => {
       const a = q.answers[index]
-      return [`- ${q.id} answer ${index} from ${a.from}${a.by !== a.from ? ` (recorded by ${a.by})` : ''} via ${a.via} at ${a.at}${a.source ? ` (Zulip message ${a.source.message})` : ''}; your question${q.node ? ` from ${q.node}` : ''}: "${one(q.text, 160)}"`, ...indent(a.text)]
+      return [`- ${q.id} answer ${index} from ${a.from}${a.by !== a.from ? ` (recorded by ${a.by})` : ''} via ${a.via} at ${a.at}${a.source ? ` (${sourceLabel(a.source)})` : ''}; your question${q.node ? ` from ${q.node}` : ''}: "${one(q.text, 160)}"`, ...indent(a.text)]
     })]
 }
 

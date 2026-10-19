@@ -21,6 +21,7 @@ import { fileURLToPath } from 'node:url'
 import { existsSync } from 'node:fs'
 import { createHandler } from './api.ts'
 import { Gitea, loadGiteaSetting } from './gitea.ts'
+import { ConversationStore } from './conversations.ts'
 import { ExecStore } from './exec.ts'
 import { Watcher } from './watch.ts'
 
@@ -48,6 +49,7 @@ let gitea: Gitea | undefined, giteaProblem: string | undefined
 if (existsSync(giteaFile)) {
   try { gitea = new Gitea(await loadGiteaSetting(giteaFile)) } catch (e) { giteaProblem = (e as Error).message }
 } else giteaProblem = `no Gitea setting at ${giteaFile}`
+const exec = new ExecStore({ registryFile, area, gitea })
 const handler = createHandler({
   registryFile,
   area,
@@ -55,7 +57,7 @@ const handler = createHandler({
   distDir: serveDist ? join(pkg, 'dist') : undefined,
   watcher: new Watcher(pollMs, { gitIntervalMs: gitPollMs, registryFile }),
   gitea, giteaProblem,
-  exec: new ExecStore({ registryFile, area, gitea }),
+  exec, conversations: new ConversationStore({ area, exec }),
 })
 
 const server = createServer((req, res) => void handler(req, res))

@@ -99,7 +99,7 @@ const approval = record({ digest: scalar, approver: scalar, at: scalar })
 export const WORKFLOW_SHAPE = record({
   schema: scalar, id: scalar, name: scalar, intent: scalar,
   documentation: record({ policy: scalar, plan: scalar, reports: scalar, final: scalar }),
-  execution: record({ agent: scalar, profile: scalar, guides: list(scalar), session: scalar, node: scalar }),
+  execution: record({ agent: scalar, profile: scalar, guides: list(scalar), session: scalar, node: scalar, lane: scalar }),
   intake: record({ zulip: scalar }),
   repositories: dict(record({ path: scalar, access: scalar, integrate: scalar }, true)),
   nodes: dict(record({ type: scalar, name: scalar, confirms: scalar, appearance: record({ icon: scalar, color: scalar }, true), description: scalar, repositories: list(scalar), workflow: scalar, project: scalar, accepts: scalar, template: record({ id: scalar, revision: scalar, expectation: scalar }) })),
@@ -108,7 +108,7 @@ export const WORKFLOW_SHAPE = record({
   layout: record({ nodes: dict(record({ x: scalar, y: scalar }, true)) }),
 })
 // Goals are sentences: a new goals list is written one item per line.
-export const PROJECT_SHAPE = record({ schema: scalar, id: scalar, name: scalar, devdocs: scalar, intent: scalar, goals: list(scalar, true), guides: list(scalar, true), execution: record({ node: scalar }, true) })
+export const PROJECT_SHAPE = record({ schema: scalar, id: scalar, name: scalar, devdocs: scalar, intent: scalar, goals: list(scalar, true), guides: list(scalar, true), execution: record({ node: scalar, lane: scalar }, true) })
 
 const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b)
 
@@ -262,13 +262,13 @@ export function workflowForWrite(w: Workflow): Record<string, unknown> {
   for (const [k, a] of Object.entries(w.approvals)) if (a) approvals[k] = a
   return {
     schema: w.schema, id: w.id, name: w.name, intent: w.intent,
-    documentation: w.documentation, execution: { agent: w.execution.agent, profile: w.execution.profile, guides: w.execution.guides, session: w.execution.session || undefined, node: w.execution.node || undefined }, intake: w.intake, repositories: Object.fromEntries(Object.entries(w.repositories).map(([k, b]) => [k, { path: b.path, access: b.access, integrate: b.integrate || undefined }])), nodes, edges: w.edges,
+    documentation: w.documentation, execution: { agent: w.execution.agent, profile: w.execution.profile, guides: w.execution.guides, session: w.execution.session || undefined, node: w.execution.node || undefined, lane: w.execution.lane || undefined }, intake: w.intake, repositories: Object.fromEntries(Object.entries(w.repositories).map(([k, b]) => [k, { path: b.path, access: b.access, integrate: b.integrate || undefined }])), nodes, edges: w.edges,
     approvals, layout: w.layout,
   }
 }
 
 export function projectForWrite(p: Project): Record<string, unknown> {
-  return { schema: p.schema, id: p.id, name: p.name, devdocs: p.devdocs, intent: p.intent, goals: p.goals, guides: p.guides?.length ? p.guides : undefined, execution: p.execution?.node ? { node: p.execution.node } : undefined }
+  return { schema: p.schema, id: p.id, name: p.name, devdocs: p.devdocs, intent: p.intent, goals: p.goals, guides: p.guides?.length ? p.guides : undefined, execution: p.execution?.node || p.execution?.lane ? { node: p.execution.node || undefined, lane: p.execution.lane || undefined } : undefined }
 }
 
 export function renderWorkflow(doc: Document, w: Workflow): string {

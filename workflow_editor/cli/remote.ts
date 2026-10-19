@@ -276,6 +276,12 @@ async function execCommand(c: WorkerConfig, p: Parsed): Promise<unknown> {
   const s = await readState(c)
   switch (sub) {
     case 'claim': {
+      // Lanes (project_migration p8) are served by the local worker only for
+      // now: this worker's bookkeeping (state.json, one pending claim) is
+      // read and rewritten by one executor at a time, and two lanes claiming
+      // at once would lose each other's attempts.
+      const lane = opt(p, 'lane')
+      if (lane && lane !== 'default') throw new Failure(`${c.worker} is a remote worker; extra lanes ("${lane}") are served on the local worker only (docs/workers.md, "Lanes")`)
       const profiles = opt(p, 'profiles-json'), sessions = opt(p, 'sessions-json'), contract = opt(p, 'contract')
       const m = contract ? /^([^=]+)=([0-9a-f]{64})$/.exec(contract) : null
       const offer = { ...(profiles ? { profiles: JSON.parse(profiles) } : {}), ...(sessions ? { sessions: JSON.parse(sessions) } : {}), ...(m ? { contract: { name: m[1], sha256: m[2] } } : {}) }
@@ -328,8 +334,8 @@ async function execCommand(c: WorkerConfig, p: Parsed): Promise<unknown> {
     }
     case 'reconcile': return { ok: true, notes: await reconcile(c, s, p.opts.get('holding') ?? []) }
     case 'adopt': {
-      const due = (await call(c, 'GET', 'due')).json as { attempts: { id: string; pid: number | null; state: string }[] }
-      return due.attempts.filter(a => a.state === 'running' && pidAlive(a.pid) && s.attempts[a.id]).map(a => ({ id: a.id, pid: a.pid, log: s.attempts[a.id].log }))
+      const due = (await call(c, 'GET', 'due')).json as { attempts: { id: string; pid: number | null; state: string; lane?: string | null }[] }
+      return due.attempts.filter(a => a.state === 'running' && pidAlive(a.pid) && s.attempts[a.id]).map(a => ({ id: a.id, pid: a.pid, log: s.attempts[a.id].log, lane: a.lane ?? 'default' }))
     }
     case 'status': case 'workers': return (await fetch(new URL('api/workers', c.coordinator)).then(r => r.json()))
   }

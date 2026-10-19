@@ -1,7 +1,8 @@
 // Execution management on this host (p4): the queue, the execution slots,
 // execution attempts, publication checkpoints and the executors' heartbeats.
 // Since project_migration p7 this host is the coordinator of several
-// execution nodes (workers, server/workers.ts): one slot per worker, each
+// execution nodes (workers, server/workers.ts): one slot per worker (and,
+// since p8, the extra slots of the lanes it declares), each
 // job claimed only by the worker its run is assigned to, every report fenced
 // by the attempt and the worker that owns it.
 //
@@ -21,7 +22,7 @@ import { existsSync, mkdirSync, readFileSync } from 'node:fs'
 import { hostname } from 'node:os'
 import { join, posix } from 'node:path'
 import type { DatabaseSync } from 'node:sqlite'
-import { sessionPolicyOf, type Workflow } from '../shared/model.ts'
+import { DEFAULT_LANE, sessionPolicyOf, type Workflow } from '../shared/model.ts'
 import { attemptContext, renderContext, type AttemptContext } from '../shared/context.ts'
 import { contextErrors, resolveContext } from './context.ts'
 import { ContextStore } from './contextStore.ts'
@@ -43,7 +44,7 @@ import { delegationState, isOpenDelegation, pendingEvents } from '../shared/dele
 import { named, openStore, transaction } from './sqlite.ts'
 import { briefedSteps, changeLines, newStepLines, pendingAnswerLines, stateLines } from './continuation.ts'
 import { RequestError, Workspace } from './workspace.ts'
-import { alignRecordCopy, isLocalNode, loadWorkers, nodeOfRecord, workerTree, type WorkersConfig } from './workers.ts'
+import { alignRecordCopy, isLocalNode, laneOn, loadWorkers, nodeOfRecord, workerTree, type WorkersConfig } from './workers.ts'
 
 export const EXECUTOR = 'autolab'
 
@@ -58,8 +59,12 @@ export const EXECUTOR = 'autolab'
 // here keeps no conversation the host can resume: the `run` policy is
 // refused for it, and `fresh` attempts carry no session id.
 // What the views say about one worker (p7).
+// `busy` is the default lane's slot (what it was before p8); `slots` every
+// open attempt of the worker with its lane, `lanes` the capacity per lane.
 export interface WorkerState { id: string; label: string; local: boolean; default: boolean; state: 'available' | 'unavailable' | 'unknown'; at: string | null; ageSeconds: number | null; pid: number | null; reported: string | null; detail: string
   busy: { attempt: string; workspace: string; workflow: string; run: string; state: string; stopRequested: string | null } | null
+  slots: { attempt: string; workspace: string; workflow: string; run: string; state: string; stopRequested: string | null; lane: string }[]
+  lanes: Record<string, number>
   queued: { id: number; workspace: string; workflow: string; run: string; kind: string; note: string | null }[]
   profiles: string[] | null; facts: WorkerFacts | null }
 export interface HostOffer { profiles?: Record<string, string>; contract?: { name: string; sha256: string }; sessions?: Record<string, 'explicit'> }
@@ -72,8 +77,8 @@ export interface WorkerFacts { label?: string; root?: string; host?: Record<stri
 export interface WorkerView { worker: string; root: string; facts: WorkerFacts }
 // Options of a claim (p7): which worker claims (default: the local one), the
 // worker's own receipt for this claim (a retransmitted claim gets the same
-// answer) and its facts.
-export interface ClaimOptions { worker?: string; receipt?: string; facts?: WorkerFacts }
+// answer) and its facts; p8: the lane it claims in (default: `default`).
+export interface ClaimOptions { worker?: string; receipt?: string; facts?: WorkerFacts; lane?: string }
 // The repositories a remote worker materializes (p7): per repository of the
 // copy, its run branch at the commit the coordinator published at dispatch.
 export interface DispatchRepo { path: string; kind: string; initialized: boolean; branch: string | null; target: string | null; base: string | null; head: string | null; url: string | null }
@@ -223,7 +228,7 @@ const alive = (pid: number | null) => { if (!pid) return false; try { process.ki
 export interface ExecContext { registryFile: string; area: string; gitea?: Gitea; executor?: string }
 
 export interface JobRow { id: number; receipt: string; kind: 'start' | 'resume'; workspace: string; workflow: string; run: string; reason: string; state: 'queued' | 'claimed' | 'done' | 'dropped'; created: string; claimed: string | null; attempt: string | null; note: string | null; worker: string | null }
-export interface AttemptRow { id: string; job: number; workspace: string; workflow: string; run: string; host: string; pid: number | null; state: 'launching' | 'running' | 'ended'; began: string; ended: string | null; exit_code: number | null; signal: string | null; outcome: string | null; log: string | null; stop_requested: string | null; backend: string | null; baseline: string | null; worker: string | null; claim: string | null; response: string | null }
+export interface AttemptRow { id: string; job: number; workspace: string; workflow: string; run: string; host: string; pid: number | null; state: 'launching' | 'running' | 'ended'; began: string; ended: string | null; exit_code: number | null; signal: string | null; outcome: string | null; log: string | null; stop_requested: string | null; backend: string | null; baseline: string | null; worker: string | null; claim: string | null; response: string | null; lane: string | null }
 // One integration of an accepted result (p9, server/integrate.ts): queued
 // when the acceptance exists, carried out once the run is completed and
 // saved, its steps the per-repository journal.
@@ -285,6 +290,11 @@ export class ExecStore {
         db.prepare('DELETE FROM heartbeat WHERE name = ?').run(local)
         db.prepare('UPDATE heartbeat SET name = ?').run(local)
       },
+    }, {
+      // project_migration p8: worker lanes. The lane an attempt was claimed
+      // in; NULL is the default lane, which every attempt so far held.
+      version: 4,
+      up: db => db.exec('ALTER TABLE attempts ADD COLUMN lane TEXT'),
     }])
   }
   // The workers of this area (p7), read from <area>/workers.json when it changes.
@@ -338,14 +348,15 @@ export class ExecStore {
   // `input` (project_migration p8): an agent's request instead of a person's
   // words — the run's request.md, with its requester, what entrusted it, the
   // person it serves and the original words it was derived from.
-  async request(o: { workspace: string; workflow: string; text: string; author: string; receipt: string; by?: string; via: string; predecessor?: RunRef; node?: string; input?: Extract<import('./runs.ts').CreateRunOptions['input'], { kind: 'request' }> }): Promise<{ job: JobRow; ref: RunRef; duplicate: boolean }> {
+  // `source`: where the person's words were said (a conversation message, p8).
+  async request(o: { workspace: string; workflow: string; text: string; author: string; receipt: string; by?: string; via: string; predecessor?: RunRef; node?: string; source?: import('../shared/intake.ts').SourceRef; input?: Extract<import('./runs.ts').CreateRunOptions['input'], { kind: 'request' }> }): Promise<{ job: JobRow; ref: RunRef; duplicate: boolean }> {
     if (!/^[A-Za-z0-9:._/#-]{8,200}$/.test(o.receipt)) throw new RequestError(400, 'a request needs a receipt id (8–200 of A-Z a-z 0-9 : . _ / # -)')
     const seen = this.one<JobRow>('SELECT * FROM jobs WHERE receipt = ?', `request:${o.receipt}`)
     if (seen) return { job: seen, ref: { workflow: seen.workflow, run: seen.run }, duplicate: true }
     const ws = await this.workspace(o.workspace)
     // The run gets its own working copy (p9); the same receipt finds it again.
     const env = this.ctx.gitea ? await this.ctx.gitea.gitEnv() : {}
-    const created = await createRunInCopy(ws, { workflow: o.workflow, input: o.input ?? { kind: 'braindump', text: o.text, author: o.author, recordedBy: o.by }, executor: { host: this.executor, ...(o.node ? { node: o.node } : {}) }, by: o.by ?? o.author, via: o.via, area: this.ctx.area, receipt: `request:${o.receipt}`, ...(o.predecessor ? { predecessor: o.predecessor } : {}) }, env)
+    const created = await createRunInCopy(ws, { workflow: o.workflow, input: o.input ?? { kind: 'braindump', text: o.text, author: o.author, recordedBy: o.by, ...(o.source ? { source: o.source } : {}) }, executor: { host: this.executor, ...(o.node ? { node: o.node } : {}) }, by: o.by ?? o.author, via: o.via, area: this.ctx.area, receipt: `request:${o.receipt}`, ...(o.predecessor ? { predecessor: o.predecessor } : {}) }, env)
     const job = this.enqueue(ws.reg.id, created.ref, 'start', `request:${o.receipt}`, o.input ? `start: ${o.input.requester}'s request` : 'start: the person\'s request', this.nodeOf(created.record))
     return { job, ref: created.ref, duplicate: false }
   }
@@ -413,18 +424,29 @@ export class ExecStore {
   // its note: it is neither dropped nor given to another worker. A remote
   // worker's claim publishes the run's branches first (dispatch), carries the
   // repositories to materialize (`copy`) and a brief written for its own copy.
-  async claim(backend: string | null, offer: HostOffer = {}, o: ClaimOptions = {}): Promise<{ job: JobRow; attempt: AttemptRow; workspace: Registration; cwd: string; ref: RunRef; brief: string; continuation: string | null; execution: AttemptExecution; worker: string; copy?: DispatchRepo[] } | { idle: string }> {
+  // Lanes (project_migration p8): a claim is made in one lane of the worker
+  // and is idle while that lane's slots are all held; it takes only the jobs
+  // whose run is claimed in that lane there (laneOn: the lane its record
+  // names when the worker offers it, else `default`), so a conversation is
+  // answered while a long attempt holds the default slot, and the default
+  // lane behaves exactly as the one slot of before.
+  async claim(backend: string | null, offer: HostOffer = {}, o: ClaimOptions = {}): Promise<{ job: JobRow; attempt: AttemptRow; workspace: Registration; cwd: string; ref: RunRef; brief: string; continuation: string | null; execution: AttemptExecution; worker: string; lane: string; copy?: DispatchRepo[] } | { idle: string }> {
     const cfg = this.workers()
     const worker = o.worker ?? cfg.local
     if (!cfg.workers[worker]) throw new RequestError(404, `worker "${worker}" is not a worker of this area (${Object.keys(cfg.workers).sort().join(', ')})`, { code: 'worker-unknown' })
     const remote = this.isRemote(worker)
+    const lane = o.lane ?? DEFAULT_LANE
+    const capacity = cfg.workers[worker].lanes[lane]
+    if (!capacity) throw new RequestError(400, `worker "${worker}" has no lane "${lane}" (${Object.keys(cfg.workers[worker].lanes).sort().join(', ')}); declare it in workers.json`, { code: 'lane-unknown' })
+    const laneHeld = () => this.all<AttemptRow>('SELECT * FROM attempts WHERE state != \'ended\' AND worker = ? AND coalesce(lane, ?) = ? ORDER BY began', worker, DEFAULT_LANE, lane)
+    const where = lane === DEFAULT_LANE ? '' : ` in lane ${lane}`
     if (o.receipt) {
       const again = this.one<AttemptRow>('SELECT * FROM attempts WHERE worker = ? AND claim = ?', worker, o.receipt)
       if (again?.response && again.state === 'launching') return JSON.parse(again.response)
       if (again) return { idle: `claim ${o.receipt} was answered with attempt ${again.id}, which is ${again.state}` }
     }
-    const busy = this.one<AttemptRow>('SELECT * FROM attempts WHERE state != \'ended\' AND worker = ?', worker)
-    if (busy) return { idle: `the slot${remote ? ` of ${worker}` : ''} is held by attempt ${busy.id} (${busy.workspace} ${busy.workflow}/${busy.run})` }
+    const held = laneHeld()
+    if (held.length >= capacity) return { idle: `the slot${capacity > 1 ? 's' : ''}${remote ? ` of ${worker}` : ''}${where} ${capacity > 1 ? 'are' : 'is'} held by ${held.map(b => `attempt ${b.id} (${b.workspace} ${b.workflow}/${b.run})`).join(', ')}` }
     const waiting: string[] = []
     for (const job of this.all<JobRow>('SELECT * FROM jobs WHERE state = \'queued\' ORDER BY id')) {
       const ref = { workflow: job.workflow, run: job.run }
@@ -439,6 +461,8 @@ export class ExecStore {
       const node = this.nodeOf(rec)
       if (job.worker !== node) this.run('UPDATE jobs SET worker = ? WHERE id = ?', node, job.id)
       if (node !== worker) continue
+      // Another lane's job is left to that lane's claims, untouched (p8).
+      if (laneOn(cfg.workers[worker], rec.executor.lane) !== lane) continue
       // One execution mode (p9): a run works in its own copy. A run recorded
       // in the project workspace before p9 is migrated first.
       if (!space.copyOf) { drop(`the run has no working copy of its own (recorded before p9); migrate it first (wfe runs migrate --workspace ${job.workspace})`); continue }
@@ -465,10 +489,10 @@ export class ExecStore {
       const id = `a${Date.now().toString(36)}-${randomBytes(3).toString('hex')}`
       const label = remote ? (o.facts?.label || cfg.workers[worker].label) : hostname()
       const claimed = this.tx(() => {
-        if (this.one('SELECT 1 FROM attempts WHERE state != \'ended\' AND worker = ?', worker)) return false
+        if (laneHeld().length >= capacity) return false
         const r = this.run('UPDATE jobs SET state = \'claimed\', claimed = ?, attempt = ? WHERE id = ? AND state = \'queued\'', now(), id, job.id)
         if (Number(r.changes) !== 1) return false
-        this.run('INSERT INTO attempts (id, job, workspace, workflow, run, host, state, began, backend, worker, claim) VALUES (?, ?, ?, ?, ?, ?, \'launching\', ?, ?, ?, ?)', id, job.id, job.workspace, job.workflow, job.run, label, now(), execution.backend, worker, o.receipt ?? null)
+        this.run('INSERT INTO attempts (id, job, workspace, workflow, run, host, state, began, backend, worker, claim, lane) VALUES (?, ?, ?, ?, ?, ?, \'launching\', ?, ?, ?, ?, ?)', id, job.id, job.workspace, job.workflow, job.run, label, now(), execution.backend, worker, o.receipt ?? null, lane === DEFAULT_LANE ? null : lane)
         return true
       })
       if (!claimed) return { idle: 'another executor claimed it first' }
@@ -487,11 +511,11 @@ export class ExecStore {
       this.run('UPDATE attempts SET baseline = ?, log = ? WHERE id = ?', JSON.stringify(base), join(this.logsDir, `${id}.jsonl`), id)
       const view: WorkerView | null = remote ? { worker, root: workerTree(o.facts?.root ?? '', job.workspace, ref), facts: o.facts ?? {} } : null
       const continuation = execution.session?.mode === 'resume' && !execution.session.reconstruct ? await this.continuation(space, ref, job, view) : null
-      const answer = { job: this.one<JobRow>('SELECT * FROM jobs WHERE id = ?', job.id)!, attempt: this.attemptRow(id)!, workspace: ws.reg, cwd: space.root, ref, brief: await this.brief(space, ref, job, view), continuation, execution, worker, ...(remote ? { copy: await this.dispatchCopy(ws, ref) } : {}) }
+      const answer = { job: this.one<JobRow>('SELECT * FROM jobs WHERE id = ?', job.id)!, attempt: this.attemptRow(id)!, workspace: ws.reg, cwd: space.root, ref, brief: await this.brief(space, ref, job, view), continuation, execution, worker, lane, ...(remote ? { copy: await this.dispatchCopy(ws, ref) } : {}) }
       if (remote) this.run('UPDATE attempts SET response = ? WHERE id = ?', JSON.stringify({ ...answer, attempt: { ...answer.attempt, response: null } }), id)
       return answer
     }
-    return { idle: waiting.length ? `nothing ${worker} can take now: ${waiting.join('; ')}` : 'no queued job' }
+    return { idle: waiting.length ? `nothing ${worker}${where} can take now: ${waiting.join('; ')}` : `no queued job${where}` }
   }
 
   // What a remote worker materializes for a run (p7): every repository of
@@ -1259,13 +1283,17 @@ export class ExecStore {
     return Object.values(cfg.workers).map(w => {
       const hb = this.one<{ name: string; at: string; pid: number | null; detail: string; offer: string | null }>('SELECT * FROM heartbeat WHERE name = ?', w.id)
       const age = hb ? (Date.now() - Date.parse(hb.at)) / 1000 : null
-      const busy = this.one<AttemptRow>('SELECT * FROM attempts WHERE state != \'ended\' AND worker = ? ORDER BY began LIMIT 1', w.id) ?? null
+      const open = this.all<AttemptRow>('SELECT * FROM attempts WHERE state != \'ended\' AND worker = ? ORDER BY began', w.id)
+      const busy = open.find(a => !a.lane || a.lane === DEFAULT_LANE) ?? null
+      const extra = open.filter(a => a !== busy)
       const jobs = this.all<JobRow>('SELECT * FROM jobs WHERE state = \'queued\' AND coalesce(worker, ?) = ? ORDER BY id', cfg.default, w.id)
       const offered = hb?.offer ? JSON.parse(hb.offer) as { offer?: HostOffer; facts?: WorkerFacts } : null
       const state = !hb ? 'unknown' as const : age! < 45 ? 'available' as const : 'unavailable' as const
-      const detail = `${w.id}${busy ? `; executing ${busy.workflow}/${busy.run} (${busy.id})` : '; idle'}${jobs.length ? `; ${jobs.length} queued` : ''}`
+      const detail = `${w.id}${busy ? `; executing ${busy.workflow}/${busy.run} (${busy.id})` : '; idle'}${extra.map(a => `; ${a.lane ?? DEFAULT_LANE} lane: ${a.workflow}/${a.run} (${a.id})`).join('')}${jobs.length ? `; ${jobs.length} queued` : ''}`
       return { id: w.id, label: w.label, local: w.local, default: cfg.default === w.id, state, at: hb?.at ?? null, ageSeconds: age, pid: hb?.pid ?? null, reported: hb?.detail ?? null, detail,
         busy: busy ? { attempt: busy.id, workspace: busy.workspace, workflow: busy.workflow, run: busy.run, state: busy.state, stopRequested: busy.stop_requested } : null,
+        slots: open.map(a => ({ attempt: a.id, workspace: a.workspace, workflow: a.workflow, run: a.run, state: a.state, stopRequested: a.stop_requested, lane: a.lane ?? DEFAULT_LANE })),
+        lanes: { ...w.lanes },
         queued: jobs.map(j => ({ id: j.id, workspace: j.workspace, workflow: j.workflow, run: j.run, kind: j.kind, note: j.note })),
         profiles: offered?.offer?.profiles ? Object.keys(offered.offer.profiles).sort() : null, facts: offered?.facts ?? null }
     })
@@ -1283,11 +1311,12 @@ export class ExecStore {
   // The host facts of the whole queue: the attempt holding the slot, the
   // queued and claimed jobs in claim order, and the heartbeat.
   // `busy` and `heartbeat` are the local worker's (what they were before
-  // p7); `slots` has every open attempt, `workers` every worker.
+  // p7; `busy` is its default lane's slot, p8); `slots` has every open
+  // attempt of every lane, `workers` every worker.
   queueView(): { busy: AttemptRow | null; slots: AttemptRow[]; jobs: JobRow[]; heartbeat: { name: string; at: string; pid: number | null; detail: string } | null; workers: WorkerState[] } {
     const local = this.localWorker
     return this.readSnapshot(() => ({
-      busy: this.one<AttemptRow>('SELECT * FROM attempts WHERE state != \'ended\' AND coalesce(worker, ?) = ? ORDER BY began LIMIT 1', local, local) ?? null,
+      busy: this.one<AttemptRow>('SELECT * FROM attempts WHERE state != \'ended\' AND coalesce(worker, ?) = ? AND coalesce(lane, ?) = ? ORDER BY began LIMIT 1', local, local, DEFAULT_LANE, DEFAULT_LANE) ?? null,
       slots: this.all<AttemptRow>('SELECT * FROM attempts WHERE state != \'ended\' ORDER BY began'),
       jobs: this.all<JobRow>('SELECT * FROM jobs WHERE state IN (\'queued\', \'claimed\') ORDER BY id'),
       heartbeat: this.one<{ name: string; at: string; pid: number | null; detail: string }>('SELECT name, at, pid, detail FROM heartbeat WHERE name = ?', local) ?? null,

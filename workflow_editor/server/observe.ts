@@ -17,7 +17,8 @@ import { hostname } from 'node:os'
 import { promisify } from 'node:util'
 import { canonicalJson } from '../shared/canonical.ts'
 import { EXECUTOR_OPS, hostOf, questionState, runKey, situation, type RunRecord, type RunRef } from '../shared/run.ts'
-import { sessionPolicyOf } from '../shared/model.ts'
+import { DEFAULT_LANE, sessionPolicyOf } from '../shared/model.ts'
+import { laneOn } from './workers.ts'
 import { activityOf, logFacts } from './activity.ts'
 import type { AttemptRow, ExecStore, JobRow } from './exec.ts'
 import { loadRegistry, observe as observeRegistration } from './registry.ts'
@@ -64,7 +65,7 @@ export interface ObservedRun {
   publication: { failed: CheckpointFact[]; attention: CheckpointFact[]; pending: CheckpointFact[] }
   integration: Record<'queued' | 'running' | 'failed' | 'refused' | 'attention', { id: number; decision: number; error: string | null; updated: string }[]>
   input: { kind: string; requester: string | null; source: unknown }
-  executor: { name: string; host: string; node: string | null } | null // node (p7): the worker that performs it
+  executor: { name: string; host: string; node: string | null; lane: string } | null // node (p7): the worker that performs it; lane (p8): the lane its record names (`default` when none)
   problems: { code: string; message: string }[]
   unavailable: Record<string, string>
   // p10 (docs/delegation.md): the run's delegations — present when it has any.
@@ -108,7 +109,7 @@ export interface Observation {
   // project_migration p7: every execution node. `executor` above is the
   // local worker's (what it always was); a remote worker's state is its last
   // contact — `unavailable` means contact is lost, not that its work ended.
-  workers: { id: string; label: string; local: boolean; default: boolean; state: string; heartbeatAt: string | null; ageSeconds: number | null; detail: string; slot: { attempt: string; workspace: string; run: string; uid: string | null; stopRequested: string | null } | null; queued: number; waiting: { job: number; run: string; note: string }[]; profiles: string[] | null }[]
+  workers: { id: string; label: string; local: boolean; default: boolean; state: string; heartbeatAt: string | null; ageSeconds: number | null; detail: string; slot: { attempt: string; workspace: string; run: string; uid: string | null; stopRequested: string | null } | null; slots: { attempt: string; workspace: string; run: string; uid: string | null; stopRequested: string | null; lane: string }[]; lanes: Record<string, number>; queued: number; waiting: { job: number; run: string; note: string }[]; profiles: string[] | null }[]
   workspaces: { id: string; available: boolean; problem: string | null }[]
   runs: ObservedRun[]
   problems: { code: string; message: string }[]
@@ -250,7 +251,9 @@ export class Observer {
       const worker = r.executor?.node ?? null
       const own = (w: string | null) => !worker || (w ?? this.exec!.workers().default) === worker
       const queued = queue.jobs.filter(j => j.state === 'queued' && own(j.worker))
-      const busy = queue.slots.find(a => own(a.worker)) ?? null
+      // The slot ahead is the one of the lane the run is claimed in (p8).
+      const lane = worker ? laneOn(this.exec!.workers().workers[worker], r.executor?.lane) : DEFAULT_LANE
+      const busy = queue.slots.find(a => own(a.worker) && (a.lane ?? DEFAULT_LANE) === lane) ?? null
       const i = queued.findIndex(j => j.id === r.queue.job!.id)
       r.queue.position = i >= 0 ? i + 1 : null
       r.queue.ahead = [
@@ -267,6 +270,8 @@ export class Observer {
       },
       workers: (queue?.workers ?? []).map(w => ({ id: w.id, label: w.label, local: w.local, default: w.default, state: w.state, heartbeatAt: w.at, ageSeconds: w.ageSeconds === null ? null : Math.round(w.ageSeconds * 10) / 10, detail: w.detail,
         slot: w.busy ? { attempt: w.busy.attempt, workspace: w.busy.workspace, run: `${w.busy.workflow}/${w.busy.run}`, uid: uidOf(w.busy.workspace, `${w.busy.workflow}/${w.busy.run}`), stopRequested: w.busy.stopRequested } : null,
+        // Every open attempt with its lane (p8); `slot` stays the default lane's.
+        slots: w.slots.map(a => ({ attempt: a.attempt, workspace: a.workspace, run: `${a.workflow}/${a.run}`, uid: uidOf(a.workspace, `${a.workflow}/${a.run}`), stopRequested: a.stopRequested, lane: a.lane })), lanes: w.lanes,
         queued: w.queued.length, waiting: w.queued.filter(j => j.note).map(j => ({ job: j.id, run: `${j.workflow}/${j.run}`, note: j.note! })), profiles: w.profiles })),
       workspaces, runs, problems,
     }
@@ -354,7 +359,7 @@ export class Observer {
       publication: { failed: [], attention: [], pending: [] },
       integration: { queued: [], running: [], failed: [], refused: [], attention: [] },
       input: { kind: r.input.kind, requester: r.input.requester ?? null, source: r.input.source ?? null },
-      executor: { name: r.executor.name, host: hostOf(r.executor), node: this.exec ? this.exec.nodeOf(r) : r.executor.node ?? null },
+      executor: { name: r.executor.name, host: hostOf(r.executor), node: this.exec ? this.exec.nodeOf(r) : r.executor.node ?? null, lane: r.executor.lane ?? DEFAULT_LANE },
       problems, unavailable,
     }
     if (!consistent) problems.push({ code: 'changing', message: `the record changed while it was read ${reads} times; its facts may straddle a transition` })

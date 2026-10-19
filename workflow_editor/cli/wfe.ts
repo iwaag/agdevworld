@@ -24,6 +24,7 @@ import { runCommand, runIndex } from './run.ts'
 import { NODES_HELP, nodesCommand } from './nodes.ts'
 import { PROJECTS_HELP, projectsCommand } from './projects.ts'
 import { CONTEXT_HELP, contextCommand } from './context.ts'
+import { CONVERSATION_HELP, conversationCommand } from './conversation.ts'
 import { codeVersion } from '../server/version.ts'
 import { assertNotRetired, assertWorkspaceAllowed, loadBoundary, retiredByUrl } from '../server/boundary.ts'
 
@@ -174,6 +175,7 @@ reference  the optional technical reference (docs/boast.md): paths,
            publication sources, media, browser capabilities, messages`,
   nodes: NODES_HELP,
   context: CONTEXT_HELP,
+  conversation: CONVERSATION_HELP,
   projects: PROJECTS_HELP,
   create: `wfe create <dir> --name <name> [--id <id>] [--intent <text>] [--goal <text>]... [--devdocs directory|submodule] [--devdocs-source <path|url>] [--resume]
 
@@ -415,7 +417,7 @@ runs assigned to it, has one slot of its own, and only it reports, stops or
 publishes its attempts.
 
 claim [--backend <text>] [--profiles-json <{name: backend}>] [--contract <name>=<sha256>]
-      [--sessions-json <{profile: "explicit"}>]
+      [--sessions-json <{profile: "explicit"}>] [--lane <name>]
                                   take the next queued job if the slot is free:
                                   records attempt.begin with the settings it is
                                   launched with (agent, profile → backend, the
@@ -429,7 +431,9 @@ claim [--backend <text>] [--profiles-json <{name: backend}>] [--contract <name>=
                                   leaves the job waiting with the reason in its
                                   note (it is the worker's to serve). --receipt:
                                   the worker's id for this claim; the same
-                                  receipt again gets the same answer
+                                  receipt again gets the same answer. --lane:
+                                  claim in that lane of the worker (default:
+                                  "default"; docs/workers.md, "Lanes")
 started <attempt> --pid <pid>     the attempt's process is running
 session <attempt> --attached <id> the harness reported this session id
 session <attempt> --missing [--detail <text>]
@@ -615,6 +619,8 @@ Projects and workspaces
   present <subcommand>      presentations of a run's result: register, start, status, stop, reconcile
   share <subcommand>        shared areas on this host: list, resolve, ls, verify (docs/shares.md)
   boast [status] <project>  a project's Boast page (boast/index.html): published or previewed; reference
+  conversation <subcommand> the entrance's conversations: list, show, reply, link, post (p8;
+                            docs/conversations.md)
   context <subcommand>      scoped context: show (sources for authoring or a run, and where each comes
                             from), get|set|clear|history (the local overrides), run (used vs next)
 
@@ -1053,7 +1059,7 @@ async function cmdExec(p: Parsed): Promise<number> {
         const contract = opt(p, 'contract')
         const m = contract ? /^([^=]+)=([0-9a-f]{64})$/.exec(contract) : null
         if (contract && !m) throw new UsageError('--contract <name>=<sha256 of the contract text>')
-        out('', await x.claim(opt(p, 'backend') ?? null, { ...(profiles ? { profiles: JSON.parse(profiles) as Record<string, string> } : {}), ...(sessions ? { sessions: JSON.parse(sessions) as Record<string, 'explicit'> } : {}), ...(m ? { contract: { name: m[1], sha256: m[2] } } : {}) }, { worker: worker(), receipt: opt(p, 'receipt') })); return 0
+        out('', await x.claim(opt(p, 'backend') ?? null, { ...(profiles ? { profiles: JSON.parse(profiles) as Record<string, string> } : {}), ...(sessions ? { sessions: JSON.parse(sessions) as Record<string, 'explicit'> } : {}), ...(m ? { contract: { name: m[1], sha256: m[2] } } : {}) }, { worker: worker(), receipt: opt(p, 'receipt'), lane: opt(p, 'lane') })); return 0
       }
       case 'started': if (!arg) throw new UsageError('started <attempt> --pid <pid>'); x.started(arg, num('pid'), worker()); out('', { ok: true }); return 0
       case 'finished': {
@@ -1074,14 +1080,19 @@ async function cmdExec(p: Parsed): Promise<number> {
       case 'heartbeat': x.heartbeat(worker(), num('pid'), opt(p, 'detail') ?? ''); out('', { ok: true }); return 0
       case 'reconcile': {
         if (x.isRemote(worker())) throw new UsageError(`reconcile runs on the coordinator for its local worker; ${worker()} reconciles its own attempts through its wfe`)
-        out('', { ok: true, notes: await x.reconcile(p.opts.get('holding') ?? []) }); return 0
+        const notes = await x.reconcile(p.opts.get('holding') ?? [])
+        // Conversation messages whose turn could not be started yet (p8).
+        const { ConversationStore } = await import('../server/conversations.ts')
+        const cs = new ConversationStore({ area: areaDir(p), exec: x })
+        try { notes.push(...(await cs.dispatchDue()).filter(n => !n.includes(': not started — no '))) } finally { cs.close() }
+        out('', { ok: true, notes }); return 0
       }
       // Execution nodes (p7): every worker's state, what it holds and what waits for it.
       case 'workers': out('', { workers: x.workersState() }); return 0
       // A restarted executor takes back the processes it left running (p7).
       case 'adopt': {
         const live = (pid: number | null) => { if (!pid) return false; try { process.kill(pid, 0); return true } catch (e) { return (e as NodeJS.ErrnoException).code === 'EPERM' } }
-        out('', x.workerDue(worker()).attempts.filter(a => a.state === 'running' && live(a.pid)).map(a => ({ id: a.id, pid: a.pid, log: a.log }))); return 0
+        out('', x.workerDue(worker()).attempts.filter(a => a.state === 'running' && live(a.pid)).map(a => ({ id: a.id, pid: a.pid, log: a.log, lane: a.lane ?? 'default' }))); return 0
       }
       case 'publish': { if (!arg) throw new UsageError('publish <checkpoint id>'); out('', await x.publishCheckpoint(Number(arg))); return 0 }
       case 'status': {
@@ -1460,7 +1471,16 @@ const COMMANDS: Record<string, (p: Parsed) => Promise<number>> = {
   runs: cmdRuns, observe: cmdObserve, projects: cmdProjects, run: cmdRun, delegate: cmdDelegate, present: cmdPresent, share: cmdShare, project: cmdProject, repo: cmdRepo, dashboard: cmdDashboard, exec: cmdExec, request: cmdRequest, notify: cmdNotify, intake: cmdIntake,
   create: cmdCreate, register: cmdRegister, list: cmdList, status: cmdStatus, validate: cmdValidate,
   approve: cmdApprove, arrange: cmdArrange, 'add-repo': cmdAddRepo, workflow: cmdWorkflow, serve: cmdServe, setup: cmdSetup,
-  version: cmdVersion, nodes: cmdNodes, boast: cmdBoast, context: cmdContext,
+  version: cmdVersion, nodes: cmdNodes, boast: cmdBoast, context: cmdContext, conversation: cmdConversation,
+}
+
+// The entrance's conversations (project_migration p8, docs/conversations.md).
+async function cmdConversation(p: Parsed): Promise<number> {
+  return conversationCommand({
+    positional: p.positional, opt: k => opt(p, k), opts: k => p.opts.get(k) ?? [], out,
+    usage: m => new UsageError(m), refused: (m, d) => new Refused(m, d),
+    exec: () => openExec(p), area: () => areaDir(p),
+  })
 }
 
 // Scoped context (workflow_editor p13, docs/context.md).

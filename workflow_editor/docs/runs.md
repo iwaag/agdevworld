@@ -587,7 +587,11 @@ answer. Recording an answer, taking it up, completing the node and accepting
 the result remain separate records.
 
 **One slot (p9).** One attempt executes at a time on this host; other jobs
-wait in the queue. Nothing else is shared:
+wait in the queue. Since p7 that is one slot per worker, and since
+project_migration p8 a worker may declare extra **lanes** — slots of their
+own for runs whose workflow names that lane, e.g. a conversation answered
+while a long attempt holds the default slot ([workers.md](workers.md),
+"Lanes"). Nothing else is shared:
 
 - Every run works in its own copy, so no run reserves its project. A held, a
   waiting or a working run never refuses another request (until p9, a begun

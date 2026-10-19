@@ -7,7 +7,7 @@ import { contextChanges, changeWords, type AttemptContext, type ContextDelivery 
 import { docStepsOf, type EffectiveGraph, type StepSpec } from './compile.ts'
 import type { DocSteps } from './model.ts'
 import type { AttemptCatalog, CatalogContext } from './catalog.ts'
-import { INSTRUCTION_RESPONSES, type SourceRef } from './intake.ts'
+import { INSTRUCTION_RESPONSES, sourceLabel, type SourceRef } from './intake.ts'
 import {
   CANDIDATE, INPUT_ID, OUTPUT_ID, SET_OBSERVATIONS, STAGINGS, outputNumber, parseRef,
   type ExternalOutput, type InputSet, type SetObservation, type ShareRef, type Staging,
@@ -74,7 +74,9 @@ export interface RunInput {
 // run's attempts, chosen at creation (request, workflow, project or area
 // default) and changed only by run.assign between attempts. Absent: the
 // area's default worker (records made before p7).
-export interface Executor { name: string; backend: string | null; host?: string; node?: string }
+// lane (project_migration p8): the worker lane its attempts are claimed in,
+// frozen at creation like the node; absent = `default`.
+export interface Executor { name: string; backend: string | null; host?: string; node?: string; lane?: string }
 export const hostOf = (e: Executor) => e.host ?? e.name
 export { NODE_PATTERN }
 // Who assigned the run's node, when it was not chosen at creation (p7).
@@ -674,7 +676,8 @@ export function sourceOf(v: unknown): SourceRef {
   if (!isObj(v)) return fail('shape', 'a source must be an object')
   const o = v as Record<string, unknown>
   const int = (x: unknown, what: string) => (typeof x === 'number' && Number.isInteger(x) && x > 0 ? x : fail('shape', `source.${what} must be a positive integer`))
-  if (o.kind !== 'zulip') fail('shape', 'source.kind must be zulip')
+  if (o.kind === 'conversation') return { kind: 'conversation', conversation: text(o.conversation, 'source.conversation'), message: int(o.message, 'message'), author: text(o.author, 'source.author'), at: text(o.at, 'source.at') }
+  if (o.kind !== 'zulip') fail('shape', 'source.kind must be zulip or conversation')
   return { kind: 'zulip', realm: text(o.realm, 'source.realm'), message: int(o.message, 'message'), stream: int(o.stream, 'stream'), topic: text(o.topic, 'source.topic'), sender: int(o.sender, 'sender'), senderName: text(o.senderName, 'source.senderName'), at: text(o.at, 'source.at') }
 }
 
@@ -836,6 +839,7 @@ export function apply(prev: RunState | null, e: HistoryEntry | (OpInput & EntryM
     const eff = e.definition?.effective
     if (eff && canonicalJson({ nodes: eff.nodes, edges: eff.edges }) !== canonicalJson({ nodes: graph.nodes, edges: graph.edges })) fail('graph', 'the graph followed differs from the frozen effective graph')
     if (e.executor?.node !== undefined && (typeof e.executor.node !== 'string' || !NODE_PATTERN.test(e.executor.node))) fail('shape', `executor.node "${String(e.executor.node)}" must match ${NODE_PATTERN.source}`)
+    if (e.executor?.lane !== undefined && (typeof e.executor.lane !== 'string' || !NODE_PATTERN.test(e.executor.lane))) fail('shape', `executor.lane "${String(e.executor.lane)}" must match ${NODE_PATTERN.source}`)
     if (e.input?.source !== undefined) sourceOf(e.input.source) // checked, recorded as given
     if (e.input?.references !== undefined) {
       if (!Array.isArray(e.input.references)) fail('shape', 'input.references must be a list')
@@ -1341,7 +1345,7 @@ export function apply(prev: RunState | null, e: HistoryEntry | (OpInput & EntryM
       // the parent's person's, relayed with their words.
       s.decisions.push({
         decision: e.decision, by, at, note: optText(e.note, 'note'),
-        evidence: optText(e.evidence, 'evidence') || `${q.id} answer ${index} from ${a.from}${a.source ? ` (Zulip message ${a.source.message})` : ''}, confirming ${q.output ? `output ${q.output.id} (${q.output.digest.slice(7, 19)})${q.presentation ? ` and presentation ${q.presentation.id}` : ''}` : q.presentation ? `presentation ${q.presentation.id} (revision ${q.presentation.revision.slice(7, 19)}, ${asked.length} files)` : asked.map(x => `${x.path} (${x.sha256.slice(0, 12)})`).join(', ')}`,
+        evidence: optText(e.evidence, 'evidence') || `${q.id} answer ${index} from ${a.from}${a.source ? ` (${sourceLabel(a.source)})` : ''}, confirming ${q.output ? `output ${q.output.id} (${q.output.digest.slice(7, 19)})${q.presentation ? ` and presentation ${q.presentation.id}` : ''}` : q.presentation ? `presentation ${q.presentation.id} (revision ${q.presentation.revision.slice(7, 19)}, ${asked.length} files)` : asked.map(x => `${x.path} (${x.sha256.slice(0, 12)})`).join(', ')}`,
         confirmation: { question: q.id, answer: index, from: a.from, ...(a.source ? { source: a.source } : {}), subject: asked, ...(q.presentation ? { presentation: q.presentation } : {}), ...(q.output ? { output: q.output } : {}) },
         ...revisionOf(e),
       })

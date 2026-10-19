@@ -13,6 +13,7 @@ import {
 } from '../server/runs.ts'
 import { RequestError, type Workspace } from '../server/workspace.ts'
 import { humanBytes } from '../shared/shares.ts'
+import { sourceLabel } from '../shared/intake.ts'
 import { runSpace } from '../server/runspace.ts'
 import { integrationStatus } from '../shared/approval.ts'
 import type { ExecStore } from '../server/exec.ts'
@@ -155,7 +156,7 @@ revision; the answer then binds that revision only. --output <o> presents an
 external output (wfe run publish): its bytes on the share are verified against
 its manifest in full, and the manifest is recorded as a subject, alone or
 with a presentation (a preview of it). Writes run.json.`,
-  answer: `wfe run answer <run> <question> --answer <text> [--from <person>]
+  answer: `wfe run answer <run> <question> --answer <text> [--from <person>] [--source-message <conversation>:<id>]
 
 Records an answer to that question. The waiting node stays waiting until the
 answer is taken up (take-up). --from names who gave the answer when someone
@@ -174,7 +175,7 @@ The person's additional instructions to this run (p6): each one's text, who
 gave it and where, the nodes running when it arrived, and whether it was
 acknowledged and how. Received is not read: the executor can acknowledge
 each (wfe run ack) whenever it reads them. Reads only.`,
-  instruct: `wfe run instruct <run> --instruction <text> [--from <person>]
+  instruct: `wfe run instruct <run> --instruction <text> [--from <person>] [--source-message <conversation>:<id>]
 
 Records a person's additional instruction to the run (the same record a post
 in its Zulip request topic becomes): it changes no node and interrupts
@@ -556,7 +557,7 @@ function adjustText(r: AdjustResult, ref: string): string {
 
 function instructionLines(i: Instruction): string[] {
   return [
-    `  ${i.id} ${i.ack ? `acknowledged (${i.ack.response})` : 'received'} from ${i.from}${i.by !== i.from ? `, recorded by ${i.by}` : ''} via ${i.via} at ${i.at}${i.source ? ` (Zulip message ${i.source.message} in "${i.source.topic}")` : ''}${i.during.length ? `; arrived while ${i.during.join(', ')} ran` : ''}: ${first(i.text, 400)}`,
+    `  ${i.id} ${i.ack ? `acknowledged (${i.ack.response})` : 'received'} from ${i.from}${i.by !== i.from ? `, recorded by ${i.by}` : ''} via ${i.via} at ${i.at}${i.source ? ` (${sourceLabel(i.source)})` : ''}${i.during.length ? `; arrived while ${i.during.join(', ')} ran` : ''}: ${first(i.text, 400)}`,
     ...(i.ack ? [`     ${i.ack.by}${i.ack.attempt ? ` (attempt ${i.ack.attempt})` : ''} at ${i.ack.at}: ${first(i.ack.note, 300)}`] : []),
   ]
 }
@@ -645,6 +646,17 @@ export async function runCommand(c: RunCli): Promise<number> {
     const m = /^(answer|instruction):([a-z0-9]+)(?::(\d+))?$/.exec(v)
     if (!m) throw c.usage('--because is answer:<question>[:<answer index>] or instruction:<instruction id>')
     return m[1] === 'answer' ? { kind: 'answer', question: m[2], ...(m[3] ? { answer: Number(m[3]) } : {}) } : { kind: 'instruction', instruction: m[2] }
+  }
+  // Where the person's words an answer or instruction carries were said
+  // (project_migration p8): a conversation message, by reference.
+  const sourceMessage = async (): Promise<{ source?: import('../shared/intake.ts').SourceRef }> => {
+    const v = c.opt('source-message')
+    if (!v) return {}
+    const m = /^([a-z0-9][a-z0-9-]{0,47}):#?(\d+)$/.exec(v)
+    if (!m) throw c.usage('--source-message is <conversation>:<message id>')
+    const { ConversationStore } = await import('../server/conversations.ts')
+    const store = new ConversationStore({ area: c.area() })
+    try { return { source: await wrap(async () => store.source(m[1], Number(m[2]))) } } finally { store.close() }
   }
   const op = async (input: OpInput, what: (rec: RunRecord) => string, r?: RunRef, after?: (target: RunRef, rec: RunRecord) => Promise<string | null>) => {
     const target = r ?? await ref()
@@ -809,7 +821,7 @@ export async function runCommand(c: RunCli): Promise<number> {
     }
     case 'answer': {
       if (!args[1]) throw c.usage('<question> is required')
-      return op({ op: 'question.answer', question: args[1], text: need(c, 'answer', 'the answer text'), from: c.opt('from') }, () => `Recorded an answer to ${args[1]}. A node waiting on it keeps waiting until the answer is taken up.`, undefined,
+      return op({ op: 'question.answer', question: args[1], text: need(c, 'answer', 'the answer text'), from: c.opt('from'), ...await sourceMessage() }, () => `Recorded an answer to ${args[1]}. A node waiting on it keeps waiting until the answer is taken up.`, undefined,
         async (t, rec) => { if (hostOf(rec.executor) !== c.exec().executor) return null; const j = await c.exec().afterAnswer(ws, t, args[1]); return j ? `The executor resumes the run (job ${j.id}, ${j.state}).` : 'The run is not resumed automatically now (held, executing, or not waiting on this question).' })
     }
     case 'take-up': {
@@ -832,7 +844,7 @@ export async function runCommand(c: RunCli): Promise<number> {
     case 'instruct': {
       const from = c.opt('from') ?? by
       if (!from?.trim()) throw c.usage('--from <person> (or --by) is required: whose instruction it is')
-      return op({ op: 'instruction.receive', text: need(c, 'instruction', 'the instruction'), from }, rec => `Recorded instruction ${Object.keys(rec.instructions ?? {}).at(-1)}; ${rec.executor.name} reads it at the next node boundary.`, undefined,
+      return op({ op: 'instruction.receive', text: need(c, 'instruction', 'the instruction'), from, ...await sourceMessage() }, rec => `Recorded instruction ${Object.keys(rec.instructions ?? {}).at(-1)}; ${rec.executor.name} reads it at the next node boundary.`, undefined,
         async (t, rec) => {
           const id = Object.keys(rec.instructions ?? {}).at(-1)
           const job = id ? await c.exec().afterInstruction(ws, t, id) : null

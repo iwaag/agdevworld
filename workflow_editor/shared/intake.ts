@@ -35,7 +35,13 @@ export function sourceReceipt(realm: string, messageId: number): string {
 
 // Where a recorded input came from: kept with the answer or instruction it
 // became, so it can always be traced back to the post.
-export interface SourceRef { kind: 'zulip'; realm: string; message: number; stream: number; topic: string; sender: number; senderName: string; at: string }
+export interface ZulipSource { kind: 'zulip'; realm: string; message: number; stream: number; topic: string; sender: number; senderName: string; at: string }
+// A message of a conversation (project_migration p8, docs/conversations.md):
+// the person's words as they were said at the entrance.
+export interface ConversationSource { kind: 'conversation'; conversation: string; message: number; author: string; at: string }
+export type SourceRef = ZulipSource | ConversationSource
+// How a source is named to a reader.
+export const sourceLabel = (s: SourceRef) => s.kind === 'zulip' ? `Zulip message ${s.message} in "${s.topic}"` : `conversation ${s.conversation} message #${s.message}`
 
 // ---- topics ------------------------------------------------------------------------
 

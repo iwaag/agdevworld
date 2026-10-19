@@ -9,7 +9,7 @@ import { join, sep } from 'node:path'
 import type { FileProblem, RelatedRun, RunFile, RunResponse, RunSummary, SourceComparison } from '../shared/api.ts'
 import { approvalStates, canonicalJson, semanticDigest } from '../shared/canonical.ts'
 import { authoredNode, COMPILER_VERSION, compile, isGenerated, type EffectiveGraph, type StepSpec } from '../shared/compile.ts'
-import { docSteps, ID_PATTERN, normalizeRepoPath, type Workflow } from '../shared/model.ts'
+import { DEFAULT_LANE, docSteps, ID_PATTERN, normalizeRepoPath, type Workflow } from '../shared/model.ts'
 import { validateWorkflow } from '../shared/validate.ts'
 import {
   activeRevision, checkRecord, documentPath, graphOfState, hostOf, operate, presentationFolder, runDisplayTitle, type AdjustSource, type AdjustDiff, graphDiff, RUN_ID, RunError, runFolder, RUNS_ROOT, runKey, validRunRef, type Presentation,
@@ -671,12 +671,17 @@ async function createRunUnlocked(ws: Workspace, o: CreateRunOptions): Promise<Cr
   const agent = src.files[src.root].workflow.execution.agent
   // The execution node (project_migration p7): chosen once, at creation, for
   // a run an execution host performs in an area with workers.
+  // The worker lane (p8) is frozen beside it; the default lane is not recorded.
   let chosen = node
+  let lane: string | undefined
   if (host && o.area) {
-    const { chooseNode, loadWorkers } = await import('./workers.ts')
-    chosen = chooseNode(loadWorkers(o.area), { request: node, workflow: src.files[src.root].workflow, project: (await ws.readProject().catch(() => ({ project: undefined }))).project }).node
+    const { chooseLane, chooseNode, loadWorkers } = await import('./workers.ts')
+    const project = (await ws.readProject().catch(() => ({ project: undefined }))).project
+    chosen = chooseNode(loadWorkers(o.area), { request: node, workflow: src.files[src.root].workflow, project }).node
+    const l = chooseLane({ workflow: src.files[src.root].workflow, project })
+    if (l !== DEFAULT_LANE) lane = l
   }
-  const executor: Executor = host ? { name: agent || host, backend: null, host, ...(chosen ? { node: chosen } : {}) } : o.executor as Executor
+  const executor: Executor = host ? { name: agent || host, backend: null, host, ...(chosen ? { node: chosen } : {}), ...(lane ? { lane } : {}) } : o.executor as Executor
   const record = createRecord(project, ref, input, { ...o, executor }, definition, context, graph, o.receipt, o.storage)
   for (const [id, f] of Object.entries(src.files)) files[`${DEFINITION_DIR}/${id}.yaml`] = f.text
   if (o.plan !== undefined) files['plan.md'] = o.plan
@@ -684,7 +689,7 @@ async function createRunUnlocked(ws: Workspace, o: CreateRunOptions): Promise<Cr
 }
 
 function createRecord(project: string, ref: RunRef, input: RunInput, o: Pick<CreateRunOptions, 'predecessor' | 'by' | 'via' | 'now'> & { executor: Executor }, definition: DefinitionRef, context: RunState['context'], graph: RunGraph, receipt?: string, storage?: RunStorage): RunRecord {
-  const executor: Executor = { name: o.executor.name.trim(), backend: o.executor.backend?.trim() || null, ...(o.executor.host ? { host: o.executor.host } : {}), ...(o.executor.node ? { node: o.executor.node } : {}) }
+  const executor: Executor = { name: o.executor.name.trim(), backend: o.executor.backend?.trim() || null, ...(o.executor.host ? { host: o.executor.host } : {}), ...(o.executor.node ? { node: o.executor.node } : {}), ...(o.executor.lane ? { lane: o.executor.lane } : {}) }
   try {
     return operate(null, {
       op: 'run.create', project, workflow: ref.workflow, run: ref.run, input, executor, predecessor: o.predecessor ?? null,

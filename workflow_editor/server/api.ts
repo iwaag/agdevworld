@@ -34,7 +34,9 @@ export interface ServiceConfig {
   gitea?: Gitea
   giteaProblem?: string
   exec?: ExecStore // this host's execution management (queue, attempts, publication)
+  conversations?: import('./conversations.ts').ConversationStore // the entrance's conversations (p8)
 }
+
 
 // Requests forwarded by agdevworld's same-origin route carry this header
 // (set by its nginx). Through that route the service offers the agdev and
@@ -207,6 +209,37 @@ export function createHandler(config: ServiceConfig) {
         }
         if (b === 'c' && file) return await x.serveCommitted(req, res, ctx, wsId, file, parts.slice(5).join('/'), slash)
         if (b === 'w' && file) return await x.serveWorktree(req, res, ctx, wsId, file, parts.slice(5).join('/'), slash)
+        throw new RequestError(404, 'not found')
+      }
+
+      // Conversations (project_migration p8, docs/conversations.md): the
+      // person's continuing conversation with the entrance. A post is the
+      // person's words (the page is the person's, as every editor write is);
+      // the entrance's replies are written by its runs through the CLI.
+      if (a === 'conversations') {
+        const cs = config.conversations
+        if (!cs) throw new RequestError(503, 'conversations are not configured on this service')
+        const cfg = cs.config()
+        if (!wsId && method === 'GET') {
+          return send(res, 200, { person: 'disabled' in cfg ? null : cfg.person, entrance: 'disabled' in cfg ? null : cfg.entrance, disabled: 'disabled' in cfg ? cfg.disabled : null, conversations: cs.list().map(c => ({
+            id: c.id, title: c.title, created: c.created, updated: c.updated, state: c.state, count: c.count,
+            last: c.last ? { at: c.last.at, role: c.last.role, author: c.last.author, text: c.last.text.slice(0, 300) } : null,
+          })) })
+        }
+        if (wsId && !b && method === 'GET') {
+          const since = Number(url.searchParams.get('since') ?? 0)
+          return send(res, 200, { person: 'disabled' in cfg ? null : cfg.person, ...await cs.view(wsId, { viewBase: (await import('./conversations.ts')).viewBaseOf(area), since: Number.isInteger(since) ? since : 0 }) })
+        }
+        if (wsId && b === 'messages' && method === 'POST') {
+          if ('disabled' in cfg) throw new RequestError(503, cfg.disabled)
+          const input = await body(req) as Record<string, unknown>
+          const re = input.re === undefined ? [] : input.re
+          if (!Array.isArray(re) || !re.every(n => Number.isInteger(n))) throw new RequestError(400, 're is a list of message ids')
+          const r = await cs.post(wsId, { text: str(input.text, 'text'), author: cfg.person, token: str(input.token, 'token'), re: re as number[] })
+          const v = await cs.view(wsId, { viewBase: (await import('./conversations.ts')).viewBaseOf(area) })
+          return send(res, 200, { sent: true, duplicate: r.duplicate, reopened: r.reopened, message: v.messages.find(m => m.id === r.message.id), run: r.message.dispatch_run })
+        }
+        if (wsId && b === 'close' && method === 'POST') return send(res, 200, { ok: true, conversation: cs.closeConversation(wsId) })
         throw new RequestError(404, 'not found')
       }
 

@@ -17,7 +17,7 @@
 // Nothing here reads the relay or draws: it is arithmetic over what the relay
 // already said.
 
-import type { Citation, PostMeaning, Presentation, Rendering, RoomPost } from './roomState'
+import { runLink, type Citation, type PostMeaning, type Presentation, type Rendering, type RoomPost } from './roomState'
 import { linksIn, type FoundLink } from './textLayout'
 
 export type ViewMode = 'dialogue' | 'original'
@@ -69,7 +69,9 @@ function original(post: RoomPost): PlayTurn {
 
 export function replyOf(post: RoomPost, presentation: Presentation | null, mode: ViewMode, wanted: string | null): PlayReply {
   const base = {
-    message_id: post.message_id, at: post.at, content: post.content, links: linksIn(post.content),
+    message_id: post.message_id, at: post.at, content: post.content,
+    // A run the post names is one more chip (project_migration p8).
+    links: [...linksIn(post.content), ...(post.run ? [runLink(post.run)] : [])],
     speaker: post.speaker, agent: post.agent, meaning: post.meaning ?? null,
   }
   if (mode === 'original' || !presentation) {

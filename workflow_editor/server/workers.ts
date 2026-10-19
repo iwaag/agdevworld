@@ -6,11 +6,17 @@
 // (server/workerApi.ts); its `wfe` forwards (cli/remote.ts).
 //
 // <area>/workers.json:
-//   { "default": "<id>", "workers": { "<id>": { "local": true, "label": "…" }, "<id>": { "tokenFile": "…" } } }
+//   { "default": "<id>", "workers": { "<id>": { "local": true, "label": "…", "lanes": { "conversation": 1 } }, "<id>": { "tokenFile": "…" } } }
 // No file: one local worker, `local`, which is also the default.
+//
+// Lanes (project_migration p8): every worker has one slot in the `default`
+// lane; `lanes` declares extra named slots (name → how many attempts may be
+// open in it at once), so a conversational run can be answered while a long
+// attempt holds the default slot. A run claims in the lane its definition
+// names when its worker offers that lane, else in `default`.
 import { existsSync, readFileSync, statSync } from 'node:fs'
 import { dirname, isAbsolute, join, posix, resolve } from 'node:path'
-import { NODE_PATTERN, type Project, type Workflow } from '../shared/model.ts'
+import { DEFAULT_LANE, LANE_PATTERN, NODE_PATTERN, type Project, type Workflow } from '../shared/model.ts'
 import type { RunRef } from '../shared/run.ts'
 import { readFile } from 'node:fs/promises'
 import { atomicWrite } from './files.ts'
@@ -23,25 +29,37 @@ import { RequestError, type Workspace } from './workspace.ts'
 
 export const WORKERS_FILE = 'workers.json'
 
-export interface WorkerSetting { id: string; local: boolean; label: string; tokenFile: string | null }
+// `lanes`: capacity per lane, `default` (1) always included.
+export interface WorkerSetting { id: string; local: boolean; label: string; tokenFile: string | null; lanes: Record<string, number> }
 export interface WorkersConfig { file: string | null; default: string; local: string; workers: Record<string, WorkerSetting> }
 
 const cache = new Map<string, { mtime: number; config: WorkersConfig }>()
 
 export function loadWorkers(area: string): WorkersConfig {
   const file = join(area, WORKERS_FILE)
-  if (!existsSync(file)) return { file: null, default: 'local', local: 'local', workers: { local: { id: 'local', local: true, label: 'this host', tokenFile: null } } }
+  if (!existsSync(file)) return { file: null, default: 'local', local: 'local', workers: { local: { id: 'local', local: true, label: 'this host', tokenFile: null, lanes: { [DEFAULT_LANE]: 1 } } } }
   const { mtimeMs } = statSync(file)
   const hit = cache.get(file)
   if (hit && hit.mtime === mtimeMs) return hit.config
   let raw: unknown
   try { raw = JSON.parse(readFileSync(file, 'utf8')) } catch (e) { throw new RequestError(500, `${file} cannot be read: ${(e as Error).message}`) }
-  const o = (raw ?? {}) as { default?: unknown; workers?: Record<string, { local?: unknown; label?: unknown; tokenFile?: unknown }> }
+  const o = (raw ?? {}) as { default?: unknown; workers?: Record<string, { local?: unknown; label?: unknown; tokenFile?: unknown; lanes?: unknown }> }
   const workers: Record<string, WorkerSetting> = {}
   for (const [id, w] of Object.entries(o.workers ?? {})) {
     if (!NODE_PATTERN.test(id)) throw new RequestError(500, `${file}: worker id "${id}" must match ${NODE_PATTERN.source}`)
     const tokenFile = typeof w?.tokenFile === 'string' && w.tokenFile ? (isAbsolute(w.tokenFile) ? w.tokenFile : resolve(dirname(file), w.tokenFile)) : null
-    workers[id] = { id, local: w?.local === true, label: typeof w?.label === 'string' ? w.label : id, tokenFile }
+    const lanes: Record<string, number> = { [DEFAULT_LANE]: 1 }
+    if (w?.lanes !== undefined && w.lanes !== null) {
+      if (typeof w.lanes !== 'object' || Array.isArray(w.lanes)) throw new RequestError(500, `${file}: worker "${id}": "lanes" must map lane names to capacities`)
+      for (const [lane, n] of Object.entries(w.lanes as Record<string, unknown>)) {
+        // The default lane is the worker's one slot of before p8; it is not resized.
+        if (lane === DEFAULT_LANE) throw new RequestError(500, `${file}: worker "${id}": the "${DEFAULT_LANE}" lane always has one slot; declare only extra lanes`)
+        if (!LANE_PATTERN.test(lane)) throw new RequestError(500, `${file}: worker "${id}": lane "${lane}" must match ${LANE_PATTERN.source}`)
+        if (typeof n !== 'number' || !Number.isInteger(n) || n < 1) throw new RequestError(500, `${file}: worker "${id}": lane "${lane}" needs a capacity of 1 or more`)
+        lanes[lane] = n
+      }
+    }
+    workers[id] = { id, local: w?.local === true, label: typeof w?.label === 'string' ? w.label : id, tokenFile, lanes }
   }
   const locals = Object.values(workers).filter(w => w.local)
   if (locals.length !== 1) throw new RequestError(500, `${file}: exactly one worker must be "local" (the one sharing the coordinator's files); found ${locals.length}`)
@@ -63,6 +81,19 @@ export function chooseNode(cfg: WorkersConfig, o: { request?: string | null; wor
         : { node: cfg.default, from: 'default' as const }
   if (!cfg.workers[pick.node]) throw new RequestError(400, `execution node "${pick.node}" (from the ${pick.from}) is not a worker of this area (${Object.keys(cfg.workers).sort().join(', ')})`, { code: 'node-unknown' })
   return pick
+}
+
+// The lane a new run's attempts are claimed in (project_migration p8): the
+// workflow's, the project's, else the default lane. Not checked against the
+// worker: a lane the worker does not offer is served by its default lane
+// (laneOn), so a run never waits for a lane nobody declared.
+export function chooseLane(o: { workflow?: Workflow | null; project?: Project | null }): string {
+  return o.workflow?.execution.lane || o.project?.execution?.lane || DEFAULT_LANE
+}
+// The lane a run is claimed in on a worker: the one its record names when the
+// worker offers it, else `default`.
+export function laneOn(w: WorkerSetting | undefined, lane: string | null | undefined): string {
+  return lane && w?.lanes[lane] ? lane : DEFAULT_LANE
 }
 
 // The node that performs a run: the one its record names, else the area's

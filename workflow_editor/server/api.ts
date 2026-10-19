@@ -1,7 +1,7 @@
 // HTTP routes of the local service. JSON in, JSON out; the UI is one client.
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { mkdir, readFile, stat } from 'node:fs/promises'
-import { dirname, extname, isAbsolute, join, normalize, sep } from 'node:path'
+import { basename, dirname, extname, isAbsolute, join, normalize, sep } from 'node:path'
 import type { RepositoryStatus, WorkspaceSummary, WorkspacesResponse } from '../shared/api.ts'
 import { APPROVAL_KINDS, type ApprovalKind, type Documentation, type Project, type Workflow } from '../shared/model.ts'
 import { addNewRepository, createProject } from './create.ts'
@@ -99,6 +99,17 @@ function asProject(v: unknown): Project {
 const MIME: Record<string, string> = {
   '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8',
   '.svg': 'image/svg+xml', '.json': 'application/json', '.ico': 'image/x-icon', '.png': 'image/png',
+}
+// What a project's or run's file is served as for a reader's browser (p8):
+// media plays and text shows; anything else downloads.
+const RAW_MIME: Record<string, string> = {
+  ...MIME, '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.gif': 'image/gif', '.webp': 'image/webp',
+  '.wav': 'audio/wav', '.mp3': 'audio/mpeg', '.ogg': 'audio/ogg', '.flac': 'audio/flac', '.mp4': 'video/mp4', '.webm': 'video/webm',
+  '.md': 'text/plain; charset=utf-8', '.txt': 'text/plain; charset=utf-8', '.yaml': 'text/plain; charset=utf-8', '.pdf': 'application/pdf',
+}
+function sendRaw(res: ServerResponse, path: string, bytes: Buffer) {
+  res.writeHead(200, { 'content-type': RAW_MIME[extname(path).toLowerCase()] ?? 'application/octet-stream', 'content-length': bytes.length, 'content-disposition': `inline; filename="${basename(path).replace(/"/g, '')}"` })
+  res.end(bytes)
 }
 
 export function createHandler(config: ServiceConfig) {
@@ -274,6 +285,8 @@ export function createHandler(config: ServiceConfig) {
         if (!b) return send(res, 200, await x.show(ctx, wsId, ro))
         if (b === 'tree' && !file) return send(res, 200, await x.tree(ctx, wsId, q('path') ?? '.', { ...ro, depth: num('depth'), max: num('max') }))
         if (b === 'file' && !file) return send(res, 200, x.serializable(await x.read(ctx, wsId, str(q('path'), 'path'), { ...ro, maxBytes: num('maxBytes') })))
+        // The file's bytes as the browser shows them (p8): a link a reader opens.
+        if (b === 'raw' && !file) { const r = await x.read(ctx, wsId, str(q('path'), 'path'), ro); return sendRaw(res, q('path')!, r.bytes!) }
         if (b === 'search' && !file) return send(res, 200, await x.search(ctx, wsId, str(q('q'), 'q'), q('path') ?? '.', { ...ro, max: num('max'), regex: q('regex') === '1', ignoreCase: q('i') === '1' }))
         if (b === 'runs') {
           const published = q('published') === '1'
@@ -282,6 +295,7 @@ export function createHandler(config: ServiceConfig) {
           if (!run) throw new RequestError(404, 'not found')
           if (!sub) return send(res, 200, await x.run(ctx, wsId, `${wf}/${run}`, { ...ro, published }))
           if (sub === 'file') return send(res, 200, x.serializable(await x.runFile(ctx, wsId, `${wf}/${run}`, str(q('path'), 'path'), { ...ro, published, maxBytes: num('maxBytes') })))
+          if (sub === 'raw') { const r = await x.runFile(ctx, wsId, `${wf}/${run}`, str(q('path'), 'path'), { ...ro, published }); return sendRaw(res, q('path')!, r.bytes!) }
         }
         throw new RequestError(404, 'not found')
       }

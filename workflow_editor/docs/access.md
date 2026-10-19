@@ -20,6 +20,7 @@ Code: `server/access.ts`. The CLI is `wfe projects …` (`cli/projects.ts`,
 | Runs | `wfe projects runs <project> [<workflow>] [--published]` | `GET api/projects/<project>/runs?workflow=&published=1` |
 | One run | `wfe projects run <project> <wf>/<run> [--published]` | `GET api/projects/<project>/runs/<wf>/<run>` |
 | A run's file | `wfe projects run <project> <wf>/<run> --file <path> [--published]` | `GET api/projects/<project>/runs/<wf>/<run>/file?path=` |
+| The bytes, for a browser (p8: a link a reader opens — images and audio play, text shows) | — | `GET api/projects/<project>/raw?path=`, `GET api/projects/<project>/runs/<wf>/<run>/raw?path=[&published=1]` |
 
 **Targets.** `<project>` is a registered project id. A registered repository
 that no project needs to use is addressed as `repo:<owner>/<name>` or

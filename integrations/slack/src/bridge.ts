@@ -48,6 +48,11 @@ export function classify(ev: SlackEvent, team: string | null, who: Who): Classif
   if (team && team !== who.team) return { action: 'ignore', reason: `another workspace (${team})` }
   if (ev.subtype === 'message_changed') {
     const m = ev.message, before = ev.previous_message
+    // A deleted root that has replies stays as a tombstone (seen live, slack_connect p1 step 3).
+    if (m?.subtype === 'tombstone') {
+      if (!before || before.user !== who.developer || before.bot_id) return { action: 'ignore', reason: 'a deletion of a message not the Developer\'s' }
+      return { action: 'notice', notice: 'delete', target: rootOf(before) }
+    }
     if (!m || m.user !== who.developer || m.bot_id) return { action: 'ignore', reason: 'a change to a message not the Developer\'s' }
     if (!m.edited || (before && before.text === m.text)) return { action: 'ignore', reason: 'not an edit of the text (thread or unfurl update)' }
     return { action: 'notice', notice: 'edit', target: rootOf(m) }

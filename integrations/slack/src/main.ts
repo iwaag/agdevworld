@@ -178,7 +178,7 @@ async function run(config: Config, store: Store, bridge: Bridge): Promise<number
   socket.on('connected', () => {
     state('connected')
     store.set('live:last-connect', new Date().toISOString())
-    bridge.backfill('reconnected').then(() => bridge.tick(), e => log(`backfill failed: ${(e as Error).message}`))
+    bridge.backfill('reconnected').then(() => { store.set('live:last', String(Date.now())); return bridge.tick() }, e => log(`backfill failed: ${(e as Error).message}`))
     clearInterval(live)
     live = setInterval(() => store.set('live:last', String(Date.now())), 30_000)
   })

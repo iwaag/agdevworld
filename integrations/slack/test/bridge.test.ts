@@ -156,6 +156,7 @@ test('bots, other people, edits, deletions and attachments start no turn; each i
     { type: 'message', subtype: 'message_changed', channel: DM, channel_type: 'im', ts: slack.nextTs(), message: { ts: root.ts, user: DEV, text: 'はじめ!', edited: { ts: '1' } }, previous_message: { ts: root.ts, user: DEV, text: 'はじめ' } },
     { type: 'message', subtype: 'message_changed', channel: DM, channel_type: 'im', ts: slack.nextTs(), message: { ts: root.ts, user: DEV, text: 'はじめ', reply_count: 1 }, previous_message: { ts: root.ts, user: DEV, text: 'はじめ' } },
     { type: 'message', subtype: 'message_deleted', channel: DM, channel_type: 'im', ts: slack.nextTs(), deleted_ts: root.ts, previous_message: { ts: root.ts, user: DEV, text: 'はじめ' } },
+    { type: 'message', subtype: 'message_changed', channel: DM, channel_type: 'im', ts: slack.nextTs(), message: { ts: root.ts, thread_ts: root.ts, subtype: 'tombstone', user: 'USLACKBOT', text: 'This message was deleted.' }, previous_message: { ts: root.ts, thread_ts: root.ts, user: DEV, text: 'はじめ' } },
     { type: 'message', subtype: 'file_share', channel: DM, channel_type: 'im', ts: slack.nextTs(), user: DEV, text: '', files: [{ name: 'voice.m4a' }], thread_ts: root.ts },
     { type: 'message', subtype: 'file_share', channel: DM, channel_type: 'im', ts: slack.nextTs(), user: DEV, text: 'この画像を見て', files: [{ name: 'a.png' }], thread_ts: root.ts },
   ]
@@ -165,7 +166,7 @@ test('bots, other people, edits, deletions and attachments start no turn; each i
   assert.deepEqual(wfe.convs.get(conv)!.map(m => m.text), ['はじめ', 'この画像を見て\n\n[Slack: 1 attachment(s) not passed on (a.png); Front has not seen them.]'])
   assert.equal(wfe.turns, 2)
   const notices = slack.msgs.filter(m => m.user === BOT).map(m => (m.text ?? '').slice(0, 2))
-  assert.deepEqual(notices.sort(), ['この', '✏️', '🗑', '📎'].sort(), 'stranger, edit, delete and the attachment-only message are explained; the caption is passed on')
+  assert.deepEqual(notices.sort(), ['この', '✏️', '🗑', '🗑', '📎'].sort(), 'stranger, edit, delete (plain and tombstone) and the attachment-only message are explained; the caption is passed on')
 })
 
 test('an unknown send is found in the thread rather than resent; one that never happened is sent once more; an unreadable thread stays unknown and visible', async () => {

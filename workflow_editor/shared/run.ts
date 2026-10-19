@@ -1219,10 +1219,14 @@ export function apply(prev: RunState | null, e: HistoryEntry | (OpInput & EntryM
       // An exit is a normal end only when nothing is left as running and
       // the remaining work waits on someone; anything else needs a person to
       // look and resume (side effects may have happened after the last record).
+      // Ready work beside a wait is left for the attempt the wait's answer
+      // starts (project_migration p8: agsfx create/run-002 and front
+      // converse/run-002 asked, ended, and were held interrupted for their
+      // report steps, so the answer could not continue them).
       const ex = summarize(s, graph)
       let outcome: AttemptOutcome = e.outcome
       let why = detail
-      if (outcome === 'exited' && !s.cancelled && ex.state === 'in-progress' && (ex.active.length || ex.ready.length)) {
+      if (outcome === 'exited' && !s.cancelled && ex.state === 'in-progress' && (ex.active.length || (ex.ready.length && !ex.waiting.length))) {
         outcome = 'interrupted'
         why = `the executor exited with ${ex.active.length ? `${ex.active.join(', ')} recorded as running` : `${ex.ready.join(', ')} ready and nothing waiting`}${detail ? `; ${detail}` : ''}`
       }

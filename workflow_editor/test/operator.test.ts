@@ -394,3 +394,30 @@ test('a definition saved from a stale read is refused with the current revision;
   } finally { srv.close() }
   close(s)
 })
+
+test('an attempt that asks and leaves other work ready ends normally: the answer continues it (p8 trial b)', async () => {
+  const s = await setup()
+  const { ref } = await s.x.request({ workspace: 'front', workflow: 'converse', text: 'two things', author: 'Pat', receipt: 'conversation:c9:m1', via: 'conversation' })
+  const c1 = await claim(s)
+  const front = as(s.front, ref, c1.attempt.id, 'front-agent')
+  await front({ op: 'node.start', node: 'talk' })
+  const two = `${CONVERSE}  ask:\n    type: talk\n    description: Ask first.\n  report:\n    type: do\n    description: Write it up.\nedges:\n  - {from: talk, to: ask}\n  - {from: talk, to: report}\n`
+  const adj = await adjustRun(s.front, ref, { text: two, reason: 'two things', source: { kind: 'agent' }, completing: { node: 'talk', outcome: 'two things' } }, { by: 'front-agent', via: 'cli', attempt: c1.attempt.id })
+  assert.ok(adj.ok, JSON.stringify(adj.problems))
+  await front({ op: 'node.start', node: 'ask' })
+  await front({ op: 'question.ask', question: 'q1', node: 'ask', text: 'Which one first?', to: 'Pat' })
+  const f = await s.x.finished(c1.attempt.id, { code: 0, signal: null })
+  assert.equal(f.outcome, 'exited', 'ready work beside a wait is not an interruption')
+  const r = await rec(s.front, ref)
+  assert.equal(r.control.hold, null)
+  assert.deepEqual(r.execution.ready, ['report'])
+  await runOp(s.front, ref, { op: 'question.answer', question: 'q1', text: 'the report', from: 'Pat' }, { by: 'Pat', via: 'browser' })
+  assert.ok(await s.x.afterAnswer(s.front, ref, 'q1'), 'the answer continues it')
+  // Work left ready with nothing waiting still is an interruption.
+  const c2 = await claim(s)
+  const again = as(s.front, ref, c2.attempt.id, 'front-agent')
+  await again({ op: 'question.take-up', question: 'q1' })
+  await again({ op: 'node.complete', node: 'ask', outcome: 'report first' })
+  assert.equal((await s.x.finished(c2.attempt.id, { code: 0, signal: null })).outcome, 'interrupted')
+  close(s)
+})

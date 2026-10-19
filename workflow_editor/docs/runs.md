@@ -249,6 +249,14 @@ a name. Both are declarations, as approvers are. **Who records (p9):**
   else's act.
 - Runs an IDE agent performs itself keep the default, which is the run's
   executor.
+- **An agent operating another run** (project_migration p8): an executing
+  attempt of run A that records on run B — instructs, answers, stops,
+  resumes, cancels or decides, as a person does from the run view — records
+  as A's agent (`by`), never as B's, and refuses `--by` naming anyone else.
+  The entry names the attempt as `operator: {run: <project>/<workflow>/<run>,
+  attempt}`; it is not B's fencing (`attempt`), so B's own execution reports
+  stay B's. Whose words the act carries is `--from` (answers, instructions)
+  or `--because`. An ended attempt records nothing.
 
 ### Node states
 

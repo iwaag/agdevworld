@@ -560,6 +560,13 @@ directly. Approval actions work on saved content without errors.
 
 - The filesystem is authoritative. The UI holds a draft until an explicit Save.
 - Save writes the definition file only. It never commits or pushes.
+- A save names the revision its draft was made from (`base`, the content hash
+  the editor shows). A file that changed since — in another view, by
+  `wfe workflow|project save`, or on disk — is not overwritten: the save is
+  refused with code `definition-conflict` and the current revision, and the
+  draft is kept (project_migration p8). `wfe workflow show <wf>` and `wfe
+  project show` print a file with its revision; `save --file … --base <rev>`
+  writes a changed one the same way.
 - Saves write a temporary file in the same directory and rename it over the
   target, so a reader never sees a half-written file. This protects file
   integrity, not against a simultaneous external writer.

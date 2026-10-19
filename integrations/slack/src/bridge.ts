@@ -261,7 +261,8 @@ export class Bridge {
       // A progress update followed by a newer message of its run is stale.
       if (m.kind === 'progress' && fresh.slice(i + 1).some(x => x.run === m.run)) return
       const run = m.run ? this.runLink(m.run) : null
-      const head = `${KIND_LABEL[m.kind] ?? KIND_LABEL.reply}${run ? ` · ${run}` : ''}`
+      // A reply with no run is not a Front turn's: its author is named.
+      const head = `${KIND_LABEL[m.kind] ?? KIND_LABEL.reply}${run ? ` · ${run}` : ` · *${plainForSlack(m.author)}*`}`
       const tail = [
         m.kind === 'question' ? '_このスレッドへの返信は Front が解釈します（質問が複数あるときは、どれへの回答か書いてください）。_' : '',
         m.kind === 'result' || m.kind === 'question' ? desk : '',

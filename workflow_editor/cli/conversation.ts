@@ -37,9 +37,10 @@ link [<conv>] <message> --run <workspace>/<workflow>/<run> --as <relation> --not
                               A different relation later supersedes it; the message itself is
                               never rewritten. 'turn' (the run started for a message) is
                               recorded by the store
-post <conv> (--text <t> | --file <f>) --author <person> [--token <t>] [--re <id>]…
+post <conv> (--text <t> | --file <f>) --author <person> [--token <t>] [--re <id>]… [--via <way>]
                               a person's message from the command line (the Front Desk posts
-                              the same way); starts its turn
+                              the same way); starts its turn. --via names how the words came
+                              (e.g. slack) when not the Front Desk
 dispatch                      start the turns of messages whose run could not be requested yet
                               (also done by the executor's reconcile)
 
@@ -100,7 +101,7 @@ export async function conversationCommand(c: ConversationCli): Promise<number> {
         const lines = [`Conversation ${id} (${v.conversation.state}): ${v.conversation.title}`]
         for (const m of v.messages) {
           const links = v.links.filter(l => l.message === m.id && !v.links.some(x => x.supersedes === l.id))
-          lines.push('', `#${m.id} ${m.at} ${m.role === 'person' ? `${m.author} (the person)` : `${m.author}${m.run ? ` for ${m.run}` : ''}`}${m.kind !== 'message' ? ` [${m.kind}${m.question ? ` ${m.question}` : ''}]` : ''}${m.re.length ? ` re ${m.re.map(n => `#${n}`).join(', ')}` : ''}`)
+          lines.push('', `#${m.id} ${m.at} ${m.role === 'person' ? `${m.author} (the person)${m.via ? ` via ${m.via}` : ''}` : `${m.author}${m.run ? ` for ${m.run}` : ''}`}${m.kind !== 'message' ? ` [${m.kind}${m.question ? ` ${m.question}` : ''}]` : ''}${m.re.length ? ` re ${m.re.map(n => `#${n}`).join(', ')}` : ''}`)
           lines.push(...m.text.split('\n').map(l => `    ${l}`))
           for (const l of links) lines.push(`    → ${l.relation} ${l.run}${l.relation === 'turn' ? '' : ` by ${l.by}: ${l.note}`}`)
           if (m.dispatch && m.dispatch.state !== 'started') lines.push(`    ! turn not started (${m.dispatch.state}${m.dispatch.error ? `: ${m.dispatch.error}` : ''})`)
@@ -137,7 +138,7 @@ export async function conversationCommand(c: ConversationCli): Promise<number> {
       case 'post': {
         const id = args[0]; if (!id) throw c.usage('post needs <conv>')
         const author = c.opt('author'); if (!author) throw c.usage('--author <person> is required: whose words these are')
-        const r = await store.post(id, { text: text(), author, token: c.opt('token') ?? `cli-${Date.now()}-${process.pid}`, re: ids('re') })
+        const r = await store.post(id, { text: text(), author, token: c.opt('token') ?? `cli-${Date.now()}-${process.pid}`, re: ids('re'), via: c.opt('via') })
         c.out(`${r.duplicate ? 'Already posted (same token)' : 'Posted'}: #${r.message.id} in ${id}; turn ${r.message.dispatch_state}${r.message.dispatch_run ? ` (${r.message.dispatch_run})` : ''}${r.message.dispatch_error ? ` — ${r.message.dispatch_error}` : ''}.`, { ok: true, ...r })
         return 0
       }

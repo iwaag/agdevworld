@@ -390,6 +390,8 @@ interface WfeMessage {
   author: string
   text: string
   at: string
+  // How a person's message came when not through the desk (slack_connect p1: `slack`).
+  via?: string | null
   re: number[]
   kind: WfeKind
   run: string | null
@@ -532,7 +534,7 @@ function deskDetail(key: string, found: WfeDetail | null): RoomDetail {
     content: message.text,
     kind: message.role === 'person' ? 'human' : 'agent',
     agent: message.role === 'agent' ? 'front' : null,
-    speaker: message.author,
+    speaker: message.via ? `${message.author} (via ${message.via})` : message.author,
     meaning: wfeMeaning(message),
     run: found ? wfeRunLink(message, found) : undefined,
   }))

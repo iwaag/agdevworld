@@ -1,0 +1,21 @@
+{
+  "name": "agdev-slack",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "engines": { "node": ">=24" },
+  "bin": { "slack-front": "src/main.ts" },
+  "scripts": {
+    "start": "node src/main.ts run",
+    "test": "node --test 'test/**/*.test.ts'",
+    "check": "tsc && node --test 'test/**/*.test.ts'"
+  },
+  "dependencies": {
+    "@slack/socket-mode": "3.1.0",
+    "@slack/web-api": "8.2.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "typescript": "~6.0.2"
+  }
+}

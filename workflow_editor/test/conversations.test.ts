@@ -171,3 +171,19 @@ test('from an attempt: show finds its conversation, reply names its run, and an 
   assert.equal(r.instructions!.i1.by, 'front-agent')
   s.cs.close(); s.x.close()
 })
+
+// slack_connect p1: a message that came another way than the Front Desk says
+// so in the record, and a store written before `via` existed opens with it.
+test('a message keeps the way it came (via); a version-1 store gains the column with its messages kept', async () => {
+  const s = await setup()
+  const m = (await s.cs.post('d9', { text: 'From the phone.', author: 'Pat', token: 'slack:T1:D1:1.000001', via: 'slack' })).message
+  const desk = (await s.cs.post('d9', { text: 'From the desk.', author: 'Pat', token: 'tok-00000091' })).message
+  const v = await s.cs.view('d9')
+  assert.deepEqual(v.messages.filter(x => x.role === 'person').map(x => [x.id, x.via]), [[m.id, 'slack'], [desk.id, null]])
+  await assert.rejects(s.cs.post('d9', { text: 'x', author: 'Pat', token: 'tok-00000092', via: 'Not a Way!' }), /via must match/)
+  s.cs.db.exec('ALTER TABLE messages DROP COLUMN via; PRAGMA user_version = 1')
+  s.cs.close()
+  const reopened = new ConversationStore({ area: s.area, exec: s.x })
+  assert.deepEqual((await reopened.view('d9')).messages.filter(x => x.role === 'person').map(x => [x.id, x.via]), [[m.id, null], [desk.id, null]])
+  reopened.close(); s.x.close()
+})

@@ -246,7 +246,11 @@ export function createHandler(config: ServiceConfig) {
           const input = await body(req) as Record<string, unknown>
           const re = input.re === undefined ? [] : input.re
           if (!Array.isArray(re) || !re.every(n => Number.isInteger(n))) throw new RequestError(400, 're is a list of message ids')
-          const r = await cs.post(wsId, { text: str(input.text, 'text'), author: cfg.person, token: str(input.token, 'token'), re: re as number[] })
+          // A client other than the page (the Slack integration) says how the
+          // words came (`via`) and, for an automated trial actor, who wrote
+          // them (`author`); otherwise they are the configured person's.
+          const opt = (k: string) => input[k] === undefined ? undefined : str(input[k], k)
+          const r = await cs.post(wsId, { text: str(input.text, 'text'), author: opt('author') ?? cfg.person, token: str(input.token, 'token'), re: re as number[], via: opt('via') })
           const v = await cs.view(wsId, { viewBase: (await import('./conversations.ts')).viewBaseOf(area) })
           return send(res, 200, { sent: true, duplicate: r.duplicate, reopened: r.reopened, message: v.messages.find(m => m.id === r.message.id), run: r.message.dispatch_run })
         }

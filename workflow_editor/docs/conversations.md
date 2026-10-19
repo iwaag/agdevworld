@@ -27,6 +27,9 @@ dispatch`, or the executor's reconcile).
   - their words verbatim, the author (the configured person: the page is
     theirs, as every editor write is) and the time;
   - the submit token: the same token twice is one message;
+  - `via`: the way the words came when not the Front Desk (`slack`,
+    `slack-trial`; slack_connect p1). The Front Desk shows it beside the
+    author;
   - `re`: the messages it answers, when the person names them.
 - **Reply of the entrance**:
   - the text and the author (the run's agent);
@@ -94,11 +97,15 @@ is the only one pending.
 | --- | --- |
 | `GET api/conversations` | the conversations, newest first, with the last message |
 | `GET api/conversations/<id>[?since=<id>]` | messages, links, the linked runs as their records say now (situation, execution, waits, run view URL), pending questions; 404 for an id not created yet |
-| `POST api/conversations/<id>/messages {text, token, re?}` | the person's message, then its turn. Answers `{sent, duplicate, reopened, message, run}` |
+| `POST api/conversations/<id>/messages {text, token, re?, via?, author?}` | the person's message, then its turn. Answers `{sent, duplicate, reopened, message, run}`. The author is the configured person unless `author` names another (an automated trial actor); a client other than the page names `via` |
 | `POST api/conversations/<id>/close` | closes the conversation (runs continue) |
 
 Run view URLs are absolute (zulip.json `viewBase`, else present.json
 `answerBase`).
+
+A non-browser client (the Slack integration, `integrations/slack`) sends no
+`Origin`; the write-origin check is for pages. It validates its own users:
+only the configured Slack member's words are posted as the person.
 
 ## Not here
 

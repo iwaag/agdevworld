@@ -5,7 +5,8 @@
 //
 // - conversations: an id (the Front Desk mints it), a title, open or closed;
 // - messages: the person's words as they were said (author, time, the
-//   submit token that makes a resubmission one message) and the entrance's
+//   submit token that makes a resubmission one message, the way they came
+//   when not the Front Desk: `via`, e.g. slack) and the entrance's
 //   replies, each naming the run and attempt that wrote it and the messages
 //   it answers (`re`). A reply never borrows "the newest message" as its
 //   target: concurrent work is told apart by its run;
@@ -36,6 +37,7 @@ export type Relation = typeof RELATIONS[number]
 export const MESSAGE_KINDS = ['message', 'reply', 'question', 'progress', 'result'] as const
 export type MessageKind = typeof MESSAGE_KINDS[number]
 const MAX_TEXT = 100_000
+const VIA = /^[a-z0-9][a-z0-9:._ -]{0,63}$/
 
 // <area>/conversations.json: which workflow serves a person's message, and
 // who the person at the entrance is.
@@ -54,13 +56,13 @@ export function loadConversationConfig(area: string): ConversationConfig | { dis
 export interface ConversationRow { id: string; title: string; created: string; updated: string; state: 'open' | 'closed'; by: string }
 export interface MessageRow {
   id: number; conv: string; role: 'person' | 'agent'; author: string; text: string; at: string
-  token: string | null; re: string; kind: MessageKind; run: string | null; attempt: string | null; question: string | null; key: string | null
+  token: string | null; via: string | null; re: string; kind: MessageKind; run: string | null; attempt: string | null; question: string | null; key: string | null
   dispatch_state: 'pending' | 'started' | 'failed' | null; dispatch_run: string | null; dispatch_error: string | null; dispatch_tries: number
 }
 export interface LinkRow { id: number; conv: string; message: number; run: string; relation: Relation; note: string; by: string; attempt: string | null; at: string; supersedes: number | null }
 
 export interface Message {
-  id: number; role: 'person' | 'agent'; author: string; text: string; at: string; re: number[]; kind: MessageKind
+  id: number; role: 'person' | 'agent'; author: string; text: string; at: string; via: string | null; re: number[]; kind: MessageKind
   run: string | null; runUrl: string | null; question: string | null
   dispatch: { state: 'pending' | 'started' | 'failed'; run: string | null; error: string | null } | null
 }
@@ -97,6 +99,10 @@ export class ConversationStore {
         CREATE INDEX links_conv ON links (conv, message);
         CREATE INDEX links_run ON links (run);
       `),
+    }, {
+      // slack_connect p1: the way a person's message came (null: the Front Desk or the CLI).
+      version: 2,
+      up: db => db.exec('ALTER TABLE messages ADD COLUMN via TEXT'),
     }])
   }
   close() { this.db.close() }
@@ -123,12 +129,14 @@ export class ConversationStore {
 
   // A person's message: stored first, then its turn is started. The same
   // token twice is one message (a resubmitted form, a retried request). A
-  // post to a closed conversation reopens it; a new id creates it.
-  async post(conv: string, o: { text: string; author: string; token: string; re?: number[]; title?: string }): Promise<{ message: MessageRow; duplicate: boolean; reopened: boolean }> {
+  // post to a closed conversation reopens it; a new id creates it. `via`
+  // names the way the words came when not the Front Desk (e.g. slack).
+  async post(conv: string, o: { text: string; author: string; token: string; re?: number[]; title?: string; via?: string }): Promise<{ message: MessageRow; duplicate: boolean; reopened: boolean }> {
     if (!CONVERSATION_ID.test(conv)) throw new RequestError(400, `conversation id must match ${CONVERSATION_ID.source}`)
     if (!o.text.trim()) throw new RequestError(400, 'the message is empty')
     if (o.text.length > MAX_TEXT) throw new RequestError(413, `a message is at most ${MAX_TEXT} characters`)
     if (!/^[A-Za-z0-9:._/#-]{8,200}$/.test(o.token)) throw new RequestError(400, 'a message needs a submit token (8–200 of A-Z a-z 0-9 : . _ / # -)')
+    if (o.via !== undefined && !VIA.test(o.via)) throw new RequestError(400, `via must match ${VIA.source}`)
     const re = this.validRe(conv, o.re ?? [])
     const res = this.tx(() => {
       const seen = this.one<MessageRow>('SELECT * FROM messages WHERE conv = ? AND token = ?', conv, o.token)
@@ -138,7 +146,7 @@ export class ConversationStore {
       const reopened = c?.state === 'closed'
       if (!c) this.db.prepare('INSERT INTO conversations (id, title, created, updated, state, by) VALUES (?, ?, ?, ?, \'open\', ?)').run(conv, o.title?.trim() || firstLine(o.text), at, at, o.author)
       else this.db.prepare('UPDATE conversations SET updated = ?, state = \'open\' WHERE id = ?').run(at, conv)
-      const id = Number(this.db.prepare('INSERT INTO messages (conv, role, author, text, at, token, re, kind, dispatch_state) VALUES (?, \'person\', ?, ?, ?, ?, ?, \'message\', \'pending\')').run(conv, o.author, o.text, at, o.token, JSON.stringify(re)).lastInsertRowid)
+      const id = Number(this.db.prepare('INSERT INTO messages (conv, role, author, text, at, token, via, re, kind, dispatch_state) VALUES (?, \'person\', ?, ?, ?, ?, ?, ?, \'message\', \'pending\')').run(conv, o.author, o.text, at, o.token, o.via ?? null, JSON.stringify(re)).lastInsertRowid)
       return { message: this.message(id)!, duplicate: false, reopened }
     })
     if (res.message.dispatch_state !== 'started') await this.dispatch(res.message.id)
@@ -267,7 +275,7 @@ export class ConversationStore {
       } catch (e) { runs.push({ ...entry, situation: 'unknown', execution: 'unknown', title: null, waiting: [], problem: (e as Error).message }) }
     }
     const message = (m: MessageRow): Message => ({
-      id: m.id, role: m.role, author: m.author, text: m.text, at: m.at, re: JSON.parse(m.re) as number[], kind: m.kind, run: m.run ?? m.dispatch_run, runUrl: (m.run ?? m.dispatch_run) ? url((m.run ?? m.dispatch_run)!) : null, question: m.question,
+      id: m.id, role: m.role, author: m.author, text: m.text, at: m.at, via: m.via, re: JSON.parse(m.re) as number[], kind: m.kind, run: m.run ?? m.dispatch_run, runUrl: (m.run ?? m.dispatch_run) ? url((m.run ?? m.dispatch_run)!) : null, question: m.question,
       dispatch: m.role === 'person' ? { state: m.dispatch_state ?? 'pending', run: m.dispatch_run, error: m.dispatch_error } : null,
     })
     return { conversation: c, messages: rows.filter(m => m.id > (o.since ?? 0)).map(message), links, runs, asking }

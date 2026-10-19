@@ -1,0 +1,35 @@
+# Slack app manifest for the Front integration (slack_connect p1).
+# A private app for one workspace: Socket Mode (no public request URL),
+# the bot's DM ("Messages" tab) as the only input surface, and only the
+# scopes the integration calls (README.md, "Slack contract").
+_metadata:
+  major_version: 2
+  minor_version: 1
+display_information:
+  name: Front
+  description: Talk with the agdev Front from Slack (direct messages).
+  background_color: "#1f2933"
+features:
+  app_home:
+    home_tab_enabled: false
+    messages_tab_enabled: true
+    messages_tab_read_only_enabled: false
+  bot_user:
+    display_name: Front
+    always_online: true
+oauth_config:
+  scopes:
+    bot:
+      - chat:write # chat.postMessage: replies, receipts, mirrored Front Desk text
+      - im:history # message.im events; conversations.history/replies for backfill and send reconciliation
+      - im:write # conversations.open: the Developer's DM channel for backfill at start
+      - reactions:write # reactions.add: the transport receipt on an accepted message (no notification)
+settings:
+  event_subscriptions:
+    bot_events:
+      - message.im
+  interactivity:
+    is_enabled: false
+  org_deploy_enabled: false
+  socket_mode_enabled: true
+  token_rotation_enabled: false

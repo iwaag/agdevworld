@@ -40,8 +40,9 @@ export interface ZulipSource { kind: 'zulip'; realm: string; message: number; st
 // the person's words as they were said at the entrance.
 export interface ConversationSource { kind: 'conversation'; conversation: string; message: number; author: string; at: string }
 export type SourceRef = ZulipSource | ConversationSource
-// How a source is named to a reader.
-export const sourceLabel = (s: SourceRef) => s.kind === 'zulip' ? `Zulip message ${s.message} in "${s.topic}"` : `conversation ${s.conversation} message #${s.message}`
+// How a source is named to a reader. The Zulip form is the one recorded
+// decisions were written with (their evidence is derived from it on replay).
+export const sourceLabel = (s: SourceRef) => s.kind === 'zulip' ? `Zulip message ${s.message}` : `conversation ${s.conversation} message #${s.message}`
 
 // ---- topics ------------------------------------------------------------------------
 

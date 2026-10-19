@@ -450,7 +450,10 @@ export type OpInput =
   // only while no attempt is open.
   | { op: 'run.assign'; node: string; reason: string }
   | { op: 'attempt.begin'; attempt: string; reason: string; backend?: string; settings?: AttemptSettings }
-  | { op: 'attempt.end'; attempt: string; outcome: AttemptOutcome; detail?: string }
+  // `waits` (project_migration p8): ready work beside a wait is left for the
+  // attempt the wait's answer starts. Absent on entries written before, which
+  // replay as they were decided.
+  | { op: 'attempt.end'; attempt: string; outcome: AttemptOutcome; detail?: string; waits?: 'defer-ready' }
   // agent_session p1: what the harness reported of the open attempt's
   // session (`attached`: its id), or a replacement before anything was
   // launched in it (`replaced`: the resumed session is missing on the host;
@@ -1220,13 +1223,15 @@ export function apply(prev: RunState | null, e: HistoryEntry | (OpInput & EntryM
       // the remaining work waits on someone; anything else needs a person to
       // look and resume (side effects may have happened after the last record).
       // Ready work beside a wait is left for the attempt the wait's answer
-      // starts (project_migration p8: agsfx create/run-002 and front
-      // converse/run-002 asked, ended, and were held interrupted for their
-      // report steps, so the answer could not continue them).
+      // starts, on entries that say so (`waits: defer-ready`, written since
+      // project_migration p8: agsfx create/run-002 and front converse/run-002
+      // asked, ended, and were held interrupted for their report steps, so the
+      // answer could not continue them). Older entries replay as decided.
       const ex = summarize(s, graph)
       let outcome: AttemptOutcome = e.outcome
       let why = detail
-      if (outcome === 'exited' && !s.cancelled && ex.state === 'in-progress' && (ex.active.length || (ex.ready.length && !ex.waiting.length))) {
+      const deferred = e.waits === 'defer-ready' && ex.waiting.length > 0
+      if (outcome === 'exited' && !s.cancelled && ex.state === 'in-progress' && (ex.active.length || (ex.ready.length && !deferred))) {
         outcome = 'interrupted'
         why = `the executor exited with ${ex.active.length ? `${ex.active.join(', ')} recorded as running` : `${ex.ready.join(', ')} ready and nothing waiting`}${detail ? `; ${detail}` : ''}`
       }

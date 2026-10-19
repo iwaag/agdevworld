@@ -557,7 +557,7 @@ function adjustText(r: AdjustResult, ref: string): string {
 
 function instructionLines(i: Instruction): string[] {
   return [
-    `  ${i.id} ${i.ack ? `acknowledged (${i.ack.response})` : 'received'} from ${i.from}${i.by !== i.from ? `, recorded by ${i.by}` : ''} via ${i.via} at ${i.at}${i.source ? ` (${sourceLabel(i.source)})` : ''}${i.during.length ? `; arrived while ${i.during.join(', ')} ran` : ''}: ${first(i.text, 400)}`,
+    `  ${i.id} ${i.ack ? `acknowledged (${i.ack.response})` : 'received'} from ${i.from}${i.by !== i.from ? `, recorded by ${i.by}` : ''} via ${i.via} at ${i.at}${i.source ? ` (${sourceLabel(i.source)}${i.source.kind === 'zulip' ? ` in "${i.source.topic}"` : ''})` : ''}${i.during.length ? `; arrived while ${i.during.join(', ')} ran` : ''}: ${first(i.text, 400)}`,
     ...(i.ack ? [`     ${i.ack.by}${i.ack.attempt ? ` (attempt ${i.ack.attempt})` : ''} at ${i.ack.at}: ${first(i.ack.note, 300)}`] : []),
   ]
 }

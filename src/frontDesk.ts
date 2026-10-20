@@ -1,10 +1,7 @@
 // `/?view=frontdesk` and `/?view=argue` — the two rooms, on one scene and
 // their own Phaser game.
 //
-// A room is not one of the `PanelGridScene` views: there is no grid, no chat
-// panel overlay and no ⇄ cycle, and the frame is the whole window. So it
-// gets its own game rather than a slot in `worldViews.ts`, which keeps the
-// world views' wiring exactly as it was. Which room it is, is the adapter
+// The frame is the whole window. Which room it is, is the adapter
 // (`roomState.ts`); the scene is the same.
 
 import Phaser from 'phaser'
@@ -33,11 +30,6 @@ if ((key ?? '') !== requested) {
   else url.searchParams.set(adapter.param, key)
   history.replaceState(null, '', url)
 }
-
-// The chat panel overlay of the world views is not here, so the frame takes
-// the whole window back.
-const app = document.getElementById('app')
-if (app) app.style.inset = '0'
 
 const scene = new FrontDeskScene({ adapter, conversationKey: key })
 new Phaser.Game({

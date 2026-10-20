@@ -189,7 +189,7 @@ export function renderHomeView(root: HTMLElement, opts: { context?: boolean } = 
         h('button', { disabled: !!busy || !gitea, onclick: () => void act('repo', () => api.createRepository(f.repoName.value.trim(), f.repoCategory.value, f.repoDescription.value.trim())) }, 'Create new')),
       results.repo)
     const local = h('details.card.register-local', h('summary', 'Register a local workspace by path'),
-      h('p.muted.small', 'For a project root already on this host. Only offered to local clients: through agdevworld the service refuses host paths.'),
+      h('p.muted.small', 'For a project root already on the service\'s host, by its path there.'),
       h('div.row', h('label.field', h('span', 'Path'), f.wsPath),
         h('button', { disabled: !!busy, onclick: () => void act('local', async () => { const r: RegisterResponse = await api.register(f.wsPath.value.trim()); return { ...r, steps: r.diagnostics.map(d => ({ name: d.code, status: d.severity === 'error' ? 'failed' : 'kept', detail: `${d.message}${d.fix ? ` — ${d.fix}` : ''}` })) } }) }, 'Register')),
       results.local)

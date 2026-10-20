@@ -1,13 +1,9 @@
-// The dashboard is the entrance. Phaser is loaded only for a world view.
-const params = new URLSearchParams(location.search)
-if (params.get('parts') === 'gauge') {
-  void import('./gaugePanel').then(module => module.initGaugePanel())
-} else if (params.get('parts') === 'graph') {
-  void import('./operationParts').then(module => module.initOperationParts())
-} else if (params.get('view') === 'frontdesk' || params.get('view') === 'argue') {
-  void import('./frontDesk')
-} else if (params.has('view') && params.get('parts') !== 'shell') {
-  void import('./worldViews')
-} else {
-  void import('./operationDashboard').then(module => module.initOperationDashboard())
-}
+// This bundle is the Front Desk (`/?view=frontdesk`) and the Arguing Room
+// (`/?view=argue`), on one Phaser scene. Home is the agdev dashboard
+// (retire_old_ui p1): nginx sends a bare `/` there, and any other address of
+// this site lands there too.
+import { AGDEV_URL } from './endpoints'
+
+const view = new URLSearchParams(location.search).get('view')
+if (view === 'frontdesk' || view === 'argue') void import('./frontDesk')
+else location.replace(AGDEV_URL)

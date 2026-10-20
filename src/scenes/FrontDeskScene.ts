@@ -68,6 +68,7 @@ import { FrontDeskSettings } from '../frontDeskSettings'
 import { LABEL_STYLE, labelOf, overtakenFor, pendingFor, requestOf, shortText, type PostLabel } from '../postMeaning'
 import { ProgressPanel } from '../progressPanel'
 import { demoProgress, relayProgress } from '../progressState'
+import { AGDEV_URL } from '../endpoints'
 import { AUTO, ago, clock, runLink, submitToken, type Citation, type Correlation, type PostMeaning, type RoomAdapter, type RoomDetail, type RoomRow } from '../roomState'
 import { assetUrl, type SettingsCharacter, type SettingsManifest } from '../settingsState'
 import { linksIn, paginate, wrapText, type FoundLink, type Measure } from '../textLayout'
@@ -377,10 +378,10 @@ export class FrontDeskScene extends Phaser.Scene {
       this.failedTextures.add(file.key)
     })
 
-    // The ways out: the other room, and the dashboard.
+    // The ways out: the other room, and Home — the agdev dashboard.
     const nav = document.createElement('nav')
     nav.style.cssText = 'position:fixed;top:10px;right:16px;z-index:20;display:flex;gap:8px'
-    for (const [label, href] of [[this.adapter.other.label, this.adapter.other.href], ['Operation room ↗', '/']]) {
+    for (const [label, href] of [[this.adapter.other.label, this.adapter.other.href], ['Home ↗', AGDEV_URL]]) {
       const link = document.createElement('a')
       link.href = href
       link.textContent = label

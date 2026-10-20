@@ -694,7 +694,7 @@ export function sourceOf(v: unknown): SourceRef {
   if (!isObj(v)) return fail('shape', 'a source must be an object')
   const o = v as Record<string, unknown>
   const int = (x: unknown, what: string) => (typeof x === 'number' && Number.isInteger(x) && x > 0 ? x : fail('shape', `source.${what} must be a positive integer`))
-  if (o.kind === 'conversation') return { kind: 'conversation', conversation: text(o.conversation, 'source.conversation'), message: int(o.message, 'message'), author: text(o.author, 'source.author'), at: text(o.at, 'source.at') }
+  if (o.kind === 'conversation') return { kind: 'conversation', conversation: text(o.conversation, 'source.conversation'), message: int(o.message, 'message'), author: text(o.author, 'source.author'), at: text(o.at, 'source.at'), ...(o.invitation !== undefined ? { invitation: int(o.invitation, 'invitation') } : {}) }
   if (o.kind !== 'zulip') fail('shape', 'source.kind must be zulip or conversation')
   return { kind: 'zulip', realm: text(o.realm, 'source.realm'), message: int(o.message, 'message'), stream: int(o.stream, 'stream'), topic: text(o.topic, 'source.topic'), sender: int(o.sender, 'sender'), senderName: text(o.senderName, 'source.senderName'), at: text(o.at, 'source.at') }
 }

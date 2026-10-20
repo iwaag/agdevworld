@@ -25,6 +25,7 @@ import { NODES_HELP, nodesCommand } from './nodes.ts'
 import { PROJECTS_HELP, projectsCommand } from './projects.ts'
 import { CONTEXT_HELP, contextCommand } from './context.ts'
 import { CONVERSATION_HELP, conversationCommand } from './conversation.ts'
+import { DISCUSSION_HELP, discussionCommand } from './discussion.ts'
 import { codeVersion } from '../server/version.ts'
 import { assertNotRetired, assertWorkspaceAllowed, loadBoundary, retiredByUrl } from '../server/boundary.ts'
 
@@ -41,7 +42,7 @@ class Refused extends Error { detail?: unknown; constructor(m: string, detail?: 
 // ---- arguments ---------------------------------------------------------------
 
 interface Parsed { positional: string[]; opts: Map<string, string[]>; flags: Set<string> }
-const FLAGS = new Set(['json', 'help', 'resume', 'h', 'new', 'history', 'no-gitea', 'reuse', 'lost', 'uncertain', 'found', 'complete', 'not-posted', 'ok', 'about-plan', 'all', 'dry-run', 'commit', 'push', 'status', 'rebuild', 'allow-live-executor', 'terminal', 'missing', 'retire', 'upstream', 'published', 'regex', 'ignore-case', 'refresh', 'quick', 'verify-all', 'rendered', 'delivered', 'undelivered', 'partial']) // p7: present stop --all, run adjust --dry-run
+const FLAGS = new Set(['json', 'help', 'resume', 'h', 'new', 'history', 'no-gitea', 'reuse', 'lost', 'uncertain', 'found', 'complete', 'not-posted', 'ok', 'about-plan', 'all', 'dry-run', 'commit', 'push', 'status', 'rebuild', 'allow-live-executor', 'terminal', 'missing', 'retire', 'upstream', 'published', 'regex', 'ignore-case', 'refresh', 'quick', 'verify-all', 'rendered', 'delivered', 'undelivered', 'partial', 'person']) // p7: present stop --all, run adjust --dry-run
 function parse(argv: string[]): Parsed {
   const p: Parsed = { positional: [], opts: new Map(), flags: new Set() }
   for (let i = 0; i < argv.length; i++) {
@@ -176,6 +177,7 @@ reference  the optional technical reference (docs/boast.md): paths,
   nodes: NODES_HELP,
   context: CONTEXT_HELP,
   conversation: CONVERSATION_HELP,
+  discussion: DISCUSSION_HELP,
   projects: PROJECTS_HELP,
   create: `wfe create <dir> --name <name> [--id <id>] [--intent <text>] [--goal <text>]... [--devdocs directory|submodule] [--devdocs-source <path|url>] [--resume]
 
@@ -642,6 +644,9 @@ Projects and workspaces
   boast [status] <project>  a project's Boast page (boast/index.html): published or previewed; reference
   conversation <subcommand> conversations with project agents: targets, list, show, reply, link,
                             post (p8, p15; docs/conversations.md)
+  discussion <subcommand>   discussions of a person, a facilitator and project agents: list, show,
+                            create, post, contribute, invite, join, leave, close, archive (p16;
+                            docs/discussions.md)
   context <subcommand>      scoped context: show (sources for authoring or a run, and where each comes
                             from), get|set|clear|history (the local overrides), run (used vs next)
 
@@ -1105,7 +1110,20 @@ async function cmdExec(p: Parsed): Promise<number> {
         // Conversation messages whose turn could not be started yet (p8).
         const { ConversationStore } = await import('../server/conversations.ts')
         const cs = new ConversationStore({ area: areaDir(p), exec: x })
-        try { notes.push(...(await cs.dispatchDue()).filter(n => !n.includes(': not started — no '))) } finally { cs.close() }
+        try {
+          notes.push(...(await cs.dispatchDue()).filter(n => !n.includes(': not started — no ')))
+          // Discussions (p16): invitations to start, runs that ended without a
+          // contribution, facilitators to tell; then the archive of every
+          // discussion whose records go beyond what is published.
+          const { DiscussionStore } = await import('../server/discussions.ts')
+          const ds = new DiscussionStore(cs)
+          if (!('disabled' in ds.config())) {
+            notes.push(...await ds.reconcile())
+            const { DiscussionArchive } = await import('../server/discussionArchive.ts')
+            const a = await new DiscussionArchive(ds).publish().catch(e => ({ published: [], unchanged: [], failed: [{ conv: '*', error: (e as Error).message }] }))
+            notes.push(...a.published.map(x => `discussion ${x.conv}: archived ${x.records} records (${x.commit.slice(0, 12)})`), ...a.failed.map(f => `discussion ${f.conv}: archive failed — ${f.error}`))
+          }
+        } finally { cs.close() }
         out('', { ok: true, notes }); return 0
       }
       // Execution nodes (p7): every worker's state, what it holds and what waits for it.
@@ -1531,13 +1549,22 @@ const COMMANDS: Record<string, (p: Parsed) => Promise<number>> = {
   runs: cmdRuns, observe: cmdObserve, projects: cmdProjects, run: cmdRun, delegate: cmdDelegate, present: cmdPresent, share: cmdShare, project: cmdProject, repo: cmdRepo, gitea: cmdGitea, dashboard: cmdDashboard, exec: cmdExec, request: cmdRequest, notify: cmdNotify, intake: cmdIntake,
   create: cmdCreate, register: cmdRegister, list: cmdList, status: cmdStatus, validate: cmdValidate,
   approve: cmdApprove, arrange: cmdArrange, 'add-repo': cmdAddRepo, workflow: cmdWorkflow, serve: cmdServe, setup: cmdSetup,
-  version: cmdVersion, nodes: cmdNodes, boast: cmdBoast, context: cmdContext, conversation: cmdConversation,
+  version: cmdVersion, nodes: cmdNodes, boast: cmdBoast, context: cmdContext, conversation: cmdConversation, discussion: cmdDiscussion,
 }
 
 // Conversations with project agents (project_migration p8, workflow_editor p15, docs/conversations.md).
 async function cmdConversation(p: Parsed): Promise<number> {
   return conversationCommand({
     positional: p.positional, opt: k => opt(p, k), opts: k => p.opts.get(k) ?? [], out,
+    usage: m => new UsageError(m), refused: (m, d) => new Refused(m, d),
+    exec: () => openExec(p), area: () => areaDir(p),
+  })
+}
+
+// Discussions (workflow_editor p16, docs/discussions.md).
+async function cmdDiscussion(p: Parsed): Promise<number> {
+  return discussionCommand({
+    positional: p.positional, opt: k => opt(p, k), opts: k => p.opts.get(k) ?? [], flag: k => p.flags.has(k), out,
     usage: m => new UsageError(m), refused: (m, d) => new Refused(m, d),
     exec: () => openExec(p), area: () => areaDir(p),
   })
@@ -1637,7 +1664,7 @@ export async function main(argv: string[]): Promise<number> {
   try {
     return await COMMANDS[cmd](p)
   } catch (e) {
-    if (e instanceof UsageError) { console.error(`wfe ${cmd}: ${e.message}\n\n${cmd === 'run' ? 'See: wfe run help <subcommand>' : cmd === 'delegate' ? 'See: wfe delegate help <subcommand>' : cmd === 'conversation' ? 'Nothing was posted or recorded. See: wfe conversation help' : HELP[cmd]}`); return 2 }
+    if (e instanceof UsageError) { console.error(`wfe ${cmd}: ${e.message}\n\n${cmd === 'run' ? 'See: wfe run help <subcommand>' : cmd === 'delegate' ? 'See: wfe delegate help <subcommand>' : cmd === 'conversation' ? 'Nothing was posted or recorded. See: wfe conversation help' : cmd === 'discussion' ? 'Nothing was posted or recorded. See: wfe discussion help' : HELP[cmd]}`); return 2 }
     if (e instanceof RequestError && !(e instanceof Refused)) e = new Refused(e.message, e.detail)
     // A store that could not be opened or written: store, operation, SQLite code.
     if (e instanceof StoreError) e = new Refused(e.message)

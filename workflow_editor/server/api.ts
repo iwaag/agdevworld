@@ -264,6 +264,77 @@ export function createHandler(config: ServiceConfig) {
         throw new RequestError(404, 'not found')
       }
 
+      // Discussions (workflow_editor p16, docs/discussions.md): a person, a
+      // facilitator and project agents in one shared conversation. The
+      // person's words are the page's (the configured person) unless a
+      // client names an automated trial author; agents speak through their
+      // runs with the CLI. Writes start runs only through invitations.
+      if (a === 'discussions') {
+        const cs = config.conversations
+        if (!cs) throw new RequestError(503, 'conversations are not configured on this service')
+        const { DiscussionStore } = await import('./discussions.ts')
+        const { DiscussionArchive } = await import('./discussionArchive.ts')
+        const { viewBaseOf } = await import('./conversations.ts')
+        const ds = new DiscussionStore(cs)
+        const cfg = ds.config()
+        const person = 'disabled' in cfg ? null : cfg.person
+        const need = () => { if ('disabled' in cfg) throw new RequestError(503, cfg.disabled); return cfg }
+        const input = method === 'POST' ? await body(req) as Record<string, unknown> : {}
+        const opt = (k: string) => input[k] === undefined ? undefined : str(input[k], k)
+        const words = (k: string) => { const v = input[k]; if (typeof v !== 'string' || !v.trim()) throw new RequestError(400, `${k} is required`); return v }
+        const list = (k: string): string[] => { const v = input[k] ?? []; if (!Array.isArray(v) || !v.every(x => typeof x === 'string')) throw new RequestError(400, `${k} is a list of names`); return v as string[] }
+        const nums = (k: string): number[] => { const v = input[k] ?? []; if (!Array.isArray(v) || !v.every(n => Number.isInteger(n))) throw new RequestError(400, `${k} is a list of message ids`); return v as number[] }
+        const archive = new DiscussionArchive(ds)
+        const view = async (id: string, since = 0) => ({ person, ...await ds.view(id, { viewBase: viewBaseOf(area), since }), archive: await archive.status(id) })
+        if (!wsId && method === 'GET') {
+          return send(res, 200, { person, disabled: 'disabled' in cfg ? cfg.disabled : null, participants: await ds.participants(), discussions: ds.list().map(d => ({
+            id: d.id, title: d.title, created: d.created, updated: d.updated, state: d.state, count: d.count, members: d.members, open: d.open,
+            last: d.last ? { at: d.last.at, role: d.last.role, author: d.last.author, participant: d.last.participant, kind: d.last.kind, text: d.last.text.slice(0, 300) } : null,
+          })) })
+        }
+        if (!wsId && method === 'POST') {
+          const c = need()
+          const id = str(input.id, 'id')
+          const author = opt('author') ?? c.person
+          const r = ds.create(id, { title: str(input.title, 'title'), by: author, members: list('members') })
+          let posted = null
+          if (input.text !== undefined) posted = await ds.post(id, { text: words('text'), author, token: str(input.token, 'token'), to: list('to'), re: nums('re'), via: opt('via') })
+          return send(res, r.duplicate ? 200 : 201, { created: !r.duplicate, posted: posted && { message: posted.message.id, duplicate: posted.duplicate, invitations: posted.invitations.map(i => ds.invitationView(i)) }, ...await view(id) })
+        }
+        if (wsId && !b && method === 'GET') {
+          const since = Number(url.searchParams.get('since') ?? 0)
+          return send(res, 200, await view(wsId, Number.isInteger(since) ? since : 0))
+        }
+        if (wsId && b === 'messages' && method === 'POST') {
+          const c = need()
+          const r = await ds.post(wsId, { text: words('text'), author: opt('author') ?? c.person, token: str(input.token, 'token'), to: list('to'), re: nums('re'), via: opt('via') })
+          return send(res, 200, { sent: true, duplicate: r.duplicate, reopened: r.reopened, message: ds.message(r.message, viewBaseOf(area)), invitations: r.invitations.map(i => ds.invitationView(i, viewBaseOf(area))) })
+        }
+        if (wsId && b === 'invitations' && !file && method === 'POST') {
+          const c = need()
+          const r = await ds.invite(wsId, { participant: str(input.participant, 'participant'), question: words('question'), re: nums('re'), by: opt('author') ?? c.person, token: opt('token') })
+          return send(res, 200, { duplicate: r.duplicate, invitation: ds.invitationView(r.invitation, viewBaseOf(area)) })
+        }
+        if (wsId && b === 'invitations' && file && action === 'withdraw' && method === 'POST') {
+          const c = need()
+          return send(res, 200, { invitation: ds.invitationView(ds.withdrawInvitation(wsId, Number(file), { by: opt('author') ?? c.person, reason: str(input.reason, 'reason') })) })
+        }
+        if (wsId && b === 'members' && method === 'POST') {
+          const c = need()
+          const action = str(input.action, 'action')
+          const participant = str(input.participant, 'participant')
+          const by = opt('author') ?? c.person
+          if (action === 'join') return send(res, 200, ds.join(wsId, participant, { by, note: opt('note') }))
+          if (action === 'leave') return send(res, 200, ds.leave(wsId, participant, { by, note: opt('note') }))
+          throw new RequestError(400, 'action is join or leave')
+        }
+        if (wsId && b === 'close' && method === 'POST') { const c = need(); return send(res, 200, { ok: true, ...ds.close(wsId, { by: opt('author') ?? c.person }) }) }
+        if (wsId && b === 'reopen' && method === 'POST') { const c = need(); return send(res, 200, { ok: true, discussion: ds.reopen(wsId, { by: opt('author') ?? c.person }) }) }
+        if (wsId && b === 'archive' && method === 'GET') return send(res, 200, await archive.status(wsId))
+        if (wsId && b === 'archive' && method === 'POST') { if (!ds.discussion(wsId)) throw new RequestError(404, `no discussion ${wsId}`); const r = await archive.publish([wsId]); return send(res, r.failed.length ? 502 : 200, { ...r, status: await archive.status(wsId) }) }
+        throw new RequestError(404, 'not found')
+      }
+
       // Execution nodes (project_migration p7, docs/workers.md): every worker's
       // state, and the remote workers' protocol.
       if (a === 'workers') {

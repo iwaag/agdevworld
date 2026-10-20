@@ -173,6 +173,13 @@ A non-browser client (the Slack integration, `integrations/slack`) sends no
 own users: only the configured Slack member's words are posted as the person.
 It names its destination (`target`) for each new conversation.
 
+## Discussions
+
+A discussion (several participants, a facilitator, invitations) is the
+store's second kind, with its own routes: [discussions.md](discussions.md).
+The conversation routes refuse a discussion id (409 `is-discussion`).
+Relation `handoff` (p16) records work an outcome was handed to.
+
 ## Not here
 
 - Zulip is not on the person's path. Conversational runs still have their

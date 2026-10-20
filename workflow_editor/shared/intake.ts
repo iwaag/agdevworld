@@ -38,11 +38,13 @@ export function sourceReceipt(realm: string, messageId: number): string {
 export interface ZulipSource { kind: 'zulip'; realm: string; message: number; stream: number; topic: string; sender: number; senderName: string; at: string }
 // A message of a conversation (project_migration p8, docs/conversations.md):
 // the person's words as they were said at the entrance.
-export interface ConversationSource { kind: 'conversation'; conversation: string; message: number; author: string; at: string }
+// `invitation`: in a discussion (p16, docs/discussions.md), the invitation
+// the run was started for.
+export interface ConversationSource { kind: 'conversation'; conversation: string; message: number; author: string; at: string; invitation?: number }
 export type SourceRef = ZulipSource | ConversationSource
 // How a source is named to a reader. The Zulip form is the one recorded
 // decisions were written with (their evidence is derived from it on replay).
-export const sourceLabel = (s: SourceRef) => s.kind === 'zulip' ? `Zulip message ${s.message}` : `conversation ${s.conversation} message #${s.message}`
+export const sourceLabel = (s: SourceRef) => s.kind === 'zulip' ? `Zulip message ${s.message}` : `conversation ${s.conversation} message #${s.message}${s.invitation ? ` (invitation ${s.invitation})` : ''}`
 
 // ---- topics ------------------------------------------------------------------------
 

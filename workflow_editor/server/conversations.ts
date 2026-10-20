@@ -38,11 +38,12 @@ import { nodeNames, readRun } from './runs.ts'
 import { runStatus, type RunStatus } from '../shared/status.ts'
 import { openStore, transaction } from './sqlite.ts'
 import { RequestError } from './workspace.ts'
+import { DISCUSSION_MIGRATIONS } from './discussionSchema.ts'
 
 export const CONVERSATION_ID = /^[a-z0-9][a-z0-9-]{0,47}$/
-export const RELATIONS = ['turn', 'new', 'follow-up', 'correction', 'steer', 'answer', 'question', 'informational', 'cites'] as const
+export const RELATIONS = ['turn', 'new', 'follow-up', 'correction', 'steer', 'answer', 'question', 'informational', 'cites', 'handoff'] as const
 export type Relation = typeof RELATIONS[number]
-export const MESSAGE_KINDS = ['message', 'reply', 'question', 'progress', 'result'] as const
+export const MESSAGE_KINDS = ['message', 'reply', 'question', 'progress', 'result', 'synthesis'] as const
 export type MessageKind = typeof MESSAGE_KINDS[number]
 const MAX_TEXT = 100_000
 const VIA = /^[a-z0-9][a-z0-9:._ -]{0,63}$/
@@ -84,11 +85,15 @@ export interface TargetView {
   state: 'available' | 'unavailable'; problem: string | null
 }
 
-export interface ConversationRow { id: string; title: string; created: string; updated: string; state: 'open' | 'closed'; by: string; workspace: string | null; workflow: string | null }
+export interface ConversationRow { id: string; title: string; created: string; updated: string; state: 'open' | 'closed'; by: string; workspace: string | null; workflow: string | null; kind: 'conversation' | 'discussion' }
 export interface MessageRow {
   id: number; conv: string; role: 'person' | 'agent'; author: string; text: string; at: string
   token: string | null; via: string | null; re: string; kind: MessageKind; run: string | null; attempt: string | null; question: string | null; key: string | null
   dispatch_state: 'pending' | 'started' | 'failed' | null; dispatch_run: string | null; dispatch_error: string | null; dispatch_tries: number
+  // A discussion's (workflow_editor p16, server/discussions.ts): the member who
+  // spoke, the invitation an agent's message answers, and the members a
+  // person's message addressed (JSON list).
+  participant: string | null; invitation: number | null; addressed: string | null
 }
 export interface LinkRow { id: number; conv: string; message: number; run: string; relation: Relation; note: string; by: string; attempt: string | null; at: string; supersedes: number | null }
 
@@ -144,7 +149,7 @@ export class ConversationStore {
         const before = formerEntrance(o.area)
         if (before) db.prepare('UPDATE conversations SET workspace = ?, workflow = ? WHERE workspace IS NULL').run(before.workspace, before.workflow)
       },
-    }])
+    }, ...DISCUSSION_MIGRATIONS])
   }
   close() { this.db.close(); this._presenter?.close() }
   // This host's presentation store, opened when a linked run has presentations.
@@ -160,10 +165,11 @@ export class ConversationStore {
   private one<T>(sql: string, ...a: (string | number | null)[]): T | undefined { return this.db.prepare(sql).get(...a) as T | undefined }
 
   conversation(id: string): ConversationRow | undefined { return this.one<ConversationRow>('SELECT * FROM conversations WHERE id = ?', id) }
-  list(o: { target?: ConversationTarget } = {}): (ConversationRow & { last: MessageRow | null; count: number })[] {
+  list(o: { target?: ConversationTarget; kind?: ConversationRow['kind'] } = {}): (ConversationRow & { last: MessageRow | null; count: number })[] {
+    const kind = o.kind ?? 'conversation'
     const rows = o.target
-      ? this.all<ConversationRow>('SELECT * FROM conversations WHERE workspace = ? AND workflow = ? ORDER BY updated DESC', o.target.workspace, o.target.workflow)
-      : this.all<ConversationRow>('SELECT * FROM conversations ORDER BY updated DESC')
+      ? this.all<ConversationRow>('SELECT * FROM conversations WHERE kind = ? AND workspace = ? AND workflow = ? ORDER BY updated DESC', kind, o.target.workspace, o.target.workflow)
+      : this.all<ConversationRow>('SELECT * FROM conversations WHERE kind = ? ORDER BY updated DESC', kind)
     return rows.map(c => ({
       ...c, last: this.one<MessageRow>('SELECT * FROM messages WHERE conv = ? ORDER BY id DESC LIMIT 1', c.id) ?? null,
       count: this.one<{ n: number }>('SELECT count(*) AS n FROM messages WHERE conv = ?', c.id)!.n,
@@ -193,6 +199,7 @@ export class ConversationStore {
     if (o.via !== undefined && !VIA.test(o.via)) throw new RequestError(400, `via must match ${VIA.source}`)
     const re = this.validRe(conv, o.re ?? [])
     const existing = this.conversation(conv)
+    notDiscussion(existing)
     if (existing && o.target && (existing.workspace !== o.target.workspace || existing.workflow !== o.target.workflow)) {
       throw new RequestError(409, `conversation ${conv} is with ${existing.workspace}/${existing.workflow}, not ${targetName(o.target)}: start a new conversation for another destination`, { code: 'other-destination', destination: existing.workspace && `${existing.workspace}/${existing.workflow}` })
     }
@@ -262,6 +269,7 @@ export class ConversationStore {
   reply(conv: string, o: { text: string; author: string; run: string | null; attempt?: string | null; re?: number[]; kind?: MessageKind; question?: string | null; key?: string }): { message: MessageRow; duplicate: boolean } {
     const c = this.conversation(conv)
     if (!c) throw new RequestError(404, `no conversation ${conv}`)
+    notDiscussion(c)
     if (!o.text.trim()) throw new RequestError(400, 'the reply is empty')
     if (o.text.length > MAX_TEXT) throw new RequestError(413, `a message is at most ${MAX_TEXT} characters`)
     const kind = o.kind ?? 'reply'
@@ -298,6 +306,7 @@ export class ConversationStore {
 
   closeConversation(conv: string): ConversationRow {
     if (!this.conversation(conv)) throw new RequestError(404, `no conversation ${conv}`)
+    notDiscussion(this.conversation(conv))
     this.db.prepare('UPDATE conversations SET state = \'closed\', updated = ? WHERE id = ?').run(now(), conv)
     return this.conversation(conv)!
   }
@@ -340,32 +349,18 @@ export class ConversationStore {
     } catch (e) { return { ...base, problem: (e as Error).message } }
   }
 
-  // ---- the view --------------------------------------------------------------------
-
-  // The conversation with every message, its links, and the runs it is
-  // linked to as their own records say now (situation, execution, waits).
-  // Questions the destination asked are pending until a later message of the
-  // person names them, or — when exactly one is pending — follows them.
-  async view(conv: string, o: { viewBase?: string | null; since?: number } = {}) {
-    const c = this.conversation(conv)
-    if (!c) throw new RequestError(404, `no conversation ${conv}`)
-    const url = (run: string) => { if (!o.viewBase) return null; const { workspace, ref } = parseRunName(run); return `${o.viewBase.replace(/\/?$/, '/')}#/ws/${encodeURIComponent(workspace)}/run/${encodeURIComponent(ref.workflow)}/${encodeURIComponent(ref.run)}` }
-    const rows = this.messages(conv)
-    const links = this.links(conv)
-    const asking = pendingQuestions(rows)
-    // The runs linked to its messages, and the destination's own run of each
-    // message (relation `turn`), with the shared status reading (p8 ex1).
-    // Each run also carries where its results open: its file route (a path in
-    // the run folder appended) and its presentations that serve now.
-    const runs: { key: string; workspace: string; workflow: string; run: string; relation: string; url: string | null; files: string | null; situation: string; execution: string; title: string | null; waiting: string[]; status: RunStatus | null; presentations: { id: string; title: string; url: string }[]; problem?: string }[] = []
-    const files = (workspace: string, ref: RunRef) => o.viewBase ? `${o.viewBase.replace(/\/?$/, '/')}api/projects/${encodeURIComponent(workspace)}/runs/${encodeURIComponent(ref.workflow)}/${encodeURIComponent(ref.run)}/raw?path=` : null
-    const turns = rows.filter(m => m.role === 'person' && m.dispatch_run).map(m => m.dispatch_run!)
+  // Runs as their own records say now: the shared status reading (p8 ex1),
+  // where its results open — its file route (a path in the run folder
+  // appended) and its presentations that serve now. A run that cannot be
+  // read is listed with the reason, never left out.
+  async runEntries(keys: { key: string; relation: string }[], viewBase?: string | null): Promise<RunEntry[]> {
+    const files = (workspace: string, ref: RunRef) => viewBase ? `${viewBase.replace(/\/?$/, '/')}api/projects/${encodeURIComponent(workspace)}/runs/${encodeURIComponent(ref.workflow)}/${encodeURIComponent(ref.run)}/raw?path=` : null
     const cfg = loadConversationConfig(this.area)
     const person = 'disabled' in cfg ? null : cfg.person
-    for (const key of [...new Set([...links.map(l => l.run), ...turns])]) {
+    const runs: RunEntry[] = []
+    for (const { key, relation } of keys) {
       const { workspace, ref } = parseRunName(key)
-      const rel = [...links.filter(l => l.run === key).map(l => l.relation), ...(turns.includes(key) ? ['turn'] : [])]
-      const entry = { key, workspace, workflow: ref.workflow, run: ref.run, relation: [...new Set(rel)].join(', '), url: url(key), files: files(workspace, ref) }
+      const entry = { key, workspace, workflow: ref.workflow, run: ref.run, relation, url: runUrl(viewBase, key), files: files(workspace, ref) }
       try {
         if (!this.exec) throw new Error('execution is not configured here')
         const ws = await this.exec.workspace(workspace)
@@ -379,6 +374,29 @@ export class ConversationStore {
         runs.push({ ...entry, situation: situation(rec), execution: rec.execution.state, title: runDisplayTitle(rec), waiting: rec.execution.waiting.map(w => w.node), status, presentations: shown })
       } catch (e) { runs.push({ ...entry, situation: 'unknown', execution: 'unknown', title: null, waiting: [], status: null, presentations: [], problem: (e as Error).message }) }
     }
+    return runs
+  }
+
+  // ---- the view --------------------------------------------------------------------
+
+  // The conversation with every message, its links, and the runs it is
+  // linked to as their own records say now (situation, execution, waits).
+  // Questions the destination asked are pending until a later message of the
+  // person names them, or — when exactly one is pending — follows them.
+  async view(conv: string, o: { viewBase?: string | null; since?: number } = {}) {
+    const c = this.conversation(conv)
+    if (!c) throw new RequestError(404, `no conversation ${conv}`)
+    notDiscussion(c)
+    const url = (run: string) => runUrl(o.viewBase, run)
+    const rows = this.messages(conv)
+    const links = this.links(conv)
+    const asking = pendingQuestions(rows)
+    // The runs linked to its messages, and the destination's own run of each
+    // message (relation `turn`), with the shared status reading (p8 ex1).
+    const turns = rows.filter(m => m.role === 'person' && m.dispatch_run).map(m => m.dispatch_run!)
+    const runs = await this.runEntries([...new Set([...links.map(l => l.run), ...turns])].map(key => ({
+      key, relation: [...new Set([...links.filter(l => l.run === key).map(l => l.relation), ...(turns.includes(key) ? ['turn'] : [])])].join(', '),
+    })), o.viewBase)
     const message = (m: MessageRow): Message => ({
       id: m.id, role: m.role, author: m.author, text: m.text, at: m.at, via: m.via, re: JSON.parse(m.re) as number[], kind: m.kind, run: m.run ?? m.dispatch_run, runUrl: (m.run ?? m.dispatch_run) ? url((m.run ?? m.dispatch_run)!) : null, question: m.question,
       dispatch: m.role === 'person' ? { state: m.dispatch_state ?? 'pending', run: m.dispatch_run, error: m.dispatch_error } : null,
@@ -387,6 +405,12 @@ export class ConversationStore {
     return { conversation: { ...c, destination }, messages: rows.filter(m => m.id > (o.since ?? 0)).map(message), links, runs, asking }
   }
 }
+
+export interface RunEntry {
+  key: string; workspace: string; workflow: string; run: string; relation: string; url: string | null; files: string | null
+  situation: string; execution: string; title: string | null; waiting: string[]; status: RunStatus | null; presentations: { id: string; title: string; url: string }[]; problem?: string
+}
+export const runUrl = (viewBase: string | null | undefined, run: string) => { if (!viewBase) return null; const { workspace, ref } = parseRunName(run); return `${viewBase.replace(/\/?$/, '/')}#/ws/${encodeURIComponent(workspace)}/run/${encodeURIComponent(ref.workflow)}/${encodeURIComponent(ref.run)}` }
 
 // The destination's questions not yet answered by the person: named by a later
 // message's `re`, or followed by the person's next message when it was the
@@ -422,4 +446,11 @@ function formerEntrance(area: string): ConversationTarget | null {
   } catch { return null }
 }
 
-const firstLine = (t: string) => { const l = t.trim().split('\n')[0]; return l.length > 80 ? `${l.slice(0, 77)}…` : l }
+// A discussion has members and invitations instead of one destination
+// (docs/discussions.md): the conversation operations would give it the wrong
+// meaning, so they refuse it and say where it is served.
+function notDiscussion(c: ConversationRow | undefined) {
+  if (c?.kind === 'discussion') throw new RequestError(409, `${c.id} is a discussion, not a conversation: use wfe discussion (api/discussions/${c.id})`, { code: 'is-discussion' })
+}
+
+export const firstLine = (t: string) => { const l = t.trim().split('\n')[0]; return l.length > 80 ? `${l.slice(0, 77)}…` : l }

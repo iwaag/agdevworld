@@ -65,7 +65,7 @@ async function main(): Promise<number> {
         const who = await bridge.identify()
         const dm = await bridge.dm()
         const wfe = await fetch(new URL('api/conversations', config.wfe)).then(r => `HTTP ${r.status}`, e => `unreachable: ${(e as Error).message}`)
-        console.log(`workspace ${who.team}; bot user ${who.botUser}; Developer ${config.developer}; DM ${dm}\nWFE ${config.wfe}: ${wfe}\nlinks: ${config.linkBase} (desk ${config.deskUrl})`)
+        console.log(`workspace ${who.team}; bot user ${who.botUser}; Developer ${config.developer}; DM ${dm}\nWFE ${config.wfe}: ${wfe}\nlinks: ${config.linkBase} (conversations ${config.conversationUrl}); new conversations go to ${config.target}`)
         return 0
       }
       case 'status': {

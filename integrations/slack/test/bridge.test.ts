@@ -54,6 +54,7 @@ class FakeWfe implements WfeApi {
   convs = new Map<string, WfeMessage[]>()
   tokens = new Map<string, WfeMessage>()
   turns = 0
+  targets: string[] = []
   down = false
   loseAnswer = 0 // the post is stored but the answer never arrives
   id = 0
@@ -61,13 +62,14 @@ class FakeWfe implements WfeApi {
     if (this.down) throw new WfeError('WFE unreachable', null)
     const ms = this.convs.get(conv)
     if (!ms) return null
-    return { person: 'iwaag', conversation: { id: conv, title: '', state: 'open', updated: '' }, messages: ms.filter(m => m.id > since), runs: [], asking: [] }
+    return { person: 'iwaag', conversation: { id: conv, title: '', state: 'open', updated: '', destination: 'front/converse' }, messages: ms.filter(m => m.id > since), runs: [], asking: [] }
   }
-  async post(conv: string, b: { text: string; token: string; via: string; author?: string }): Promise<WfePosted> {
+  async post(conv: string, b: { text: string; token: string; via: string; target: string; author?: string }): Promise<WfePosted> {
     if (this.down) throw new WfeError('WFE unreachable', null)
     const seen = this.tokens.get(`${conv}/${b.token}`)
     if (seen) return { sent: true, duplicate: true, reopened: false, message: seen, run: seen.dispatch!.run }
     this.turns++
+    this.targets.push(b.target)
     const m: WfeMessage = { id: ++this.id, role: 'person', author: b.author ?? 'iwaag', text: b.text, at: '', via: b.via, re: [], kind: 'message', run: null, runUrl: null, question: null, dispatch: { state: 'started', run: `front/converse/run-${this.turns}`, error: null } }
     this.tokens.set(`${conv}/${b.token}`, m)
     this.convs.set(conv, [...(this.convs.get(conv) ?? []), m])
@@ -83,7 +85,7 @@ class FakeWfe implements WfeApi {
 
 const config = (store: string): Config => ({
   appToken: 'xapp-x', botToken: 'xoxb-x', developer: DEV, team: null, wfe: 'http://wfe.invalid/', linkBase: 'http://phone.invalid:8093/wfe/',
-  linkMap: { 'http://lan.invalid:8093': 'http://phone.invalid:8093' }, deskUrl: 'http://phone.invalid:8093/?view=frontdesk', trialAuthor: 'Omni Agent (for Developer)', store,
+  linkMap: { 'http://lan.invalid:8093': 'http://phone.invalid:8093' }, target: 'front/converse', conversationUrl: 'http://phone.invalid:8093/hangout/?conv={conv}', trialAuthor: 'Omni Agent (for Developer)', store,
 })
 
 async function setup(file = ':memory:', slack = new FakeSlack(), wfe = new FakeWfe()) {
@@ -116,10 +118,11 @@ test('a root and its thread are one conversation; a redelivered event, a backfil
   const conv = convOf(store, root.ts)
   assert.deepEqual(wfe.convs.get(conv)!.map(m => [m.text, m.via]), [['ロゴを作って', 'slack'], ['青で', 'slack']])
   assert.equal(wfe.turns, 2)
+  assert.deepEqual(wfe.targets, ['front/converse', 'front/converse'], 'every new conversation names its destination')
   assert.deepEqual(slack.reactions.sort(), [`${reply.ts}:inbox_tray`, `${root.ts}:inbox_tray`].sort())
 })
 
-test('concurrent threads get their own replies; Front Desk words are mirrored once, Slack words never; queued output survives a restart', async () => {
+test('concurrent threads get their own replies; page words are mirrored once, Slack words never; queued output survives a restart', async () => {
   const file = join(mkdtempSync(join(tmpdir(), 'slack-front-')), 'store.sqlite')
   let { store, bridge, slack, wfe } = await setup(file)
   const a = slack.human('A をして'), b = slack.human('B をして')
@@ -136,7 +139,7 @@ test('concurrent threads get their own replies; Front Desk words are mirrored on
   await bridge.tick()
   const ta = slack.thread(a.ts), tb = slack.thread(b.ts)
   assert.equal(ta.length, 2)
-  assert.match(ta[0], /^🖥 \*iwaag\*（Front Desk から）\nA は急ぎで$/)
+  assert.match(ta[0], /^🖥 \*iwaag\*（aghangout から）\nA は急ぎで$/)
   assert.match(ta[1], /^❓ \*質問\* · <http:\/\/phone\.invalid:8093\/wfe\/#\/ws\/front\/run\/converse\/run-1\|front\/converse\/run-1>/)
   assert.equal(tb.length, 1)
   assert.match(tb[0], /^✅ \*結果\*.*\nB は \*完了\*。詳細: <http:\/\/phone\.invalid:8093\/wfe\/api\/projects\/p\/raw\?path=x>/s)

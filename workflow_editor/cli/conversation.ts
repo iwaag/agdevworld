@@ -1,48 +1,60 @@
-// `wfe conversation` (project_migration p8, docs/conversations.md): the
-// person's conversations with the entrance, read and answered by the
-// entrance's runs. Thin over server/conversations.ts, the store the service
+// `wfe conversation` (project_migration p8, workflow_editor p15,
+// docs/conversations.md): a person's conversations with projects'
+// conversational workflows, read and answered by those workflows' runs. Thin over server/conversations.ts, the store the service
 // uses.
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
-import { ConversationStore, parseRunName, RELATIONS, runName, viewBaseOf, type MessageKind, type Relation } from '../server/conversations.ts'
+import { ConversationStore, parseRunName, parseTarget, RELATIONS, runName, viewBaseOf, type MessageKind, type Relation } from '../server/conversations.ts'
 import type { ExecStore } from '../server/exec.ts'
 import { readRun } from '../server/runs.ts'
 import { RequestError } from '../server/workspace.ts'
 
-export const CONVERSATION_HELP = `wfe conversation <subcommand> …   (the entrance's conversations; docs/conversations.md)
+export const CONVERSATION_HELP = `wfe conversation <subcommand> …   (conversations with project agents; docs/conversations.md)
 
-A conversation is the person's continuing talk with the entrance (Front).
-Every message of the person starts one run of the entrance workflow with
-those words as its braindump (the "turn"); that run reads the conversation,
-decides what the message is, and answers here. Run state stays in the runs'
-own records: a conversation links to runs, it never copies them.
+A conversation is a person's continuing talk with one project's
+conversational workflow: its destination (<workspace>/<workflow>), named by
+the first message and never changed. Every message of the person starts one
+run of that workflow with those words as its braindump (the "turn"); that run
+reads the conversation, decides what the message is, and answers here. Run
+state stays in the runs' own records: a conversation links to runs, it never
+copies them. Several conversations, with the same or other projects, may be
+open at once.
 
-list                          the conversations, newest first
-show [<conv>] [--since <id>]  every message (the person's words verbatim, each reply with the
-                              run that wrote it and what it answers), what each message is
-                              linked to, the linked runs as their records say now, and the
+targets                       the destinations a new conversation may name (conversations.json),
+                              each with its project, workflow, agent and whether it can take a turn now
+list [--to <workspace>/<workflow>]
+                              the conversations, newest first, with their destination
+show [<conv>] [--since <id>]  the destination, every message (the person's words verbatim, each
+                              reply with the run that wrote it and what it answers), what each
+                              message is linked to, the linked runs as their records say now
+                              (status, run view, file route, serving presentations), and the
                               questions still waiting for the person. Without <conv>: the
                               conversation of this attempt's run (WFE_ATTEMPT)
 reply [<conv>] (--text <t> | --file <f|->) [--re <id>]… [--kind reply|question|progress|result]
               [--question <q>] [--key <k>]
                               answer the person. From an executing attempt the reply is its
-                              run's: it names the run, and the same text (or --key) retried is
-                              one message. --re names the messages it answers — always name
-                              them when several requests are open: a reply is never
-                              attributed by recency. --kind question asks the person (name your
-                              run's WFE question with --question when your run waits on it);
-                              result is a delivered outcome; progress says where work stands
+                              run's and its agent's: it names the run, and the same text (or
+                              --key) retried is one message. --re names the messages it
+                              answers — always name them when several requests are open: a
+                              reply is never attributed by recency. --kind question asks the
+                              person (name your run's WFE question with --question when your
+                              run waits on it); result is a delivered outcome; progress says
+                              where work stands. Links in the text (run views, file routes,
+                              review pages) are what the person opens
 link [<conv>] <message> --run <workspace>/<workflow>/<run> --as <relation> --note <why>
                               record what a message is to a run: ${RELATIONS.filter(r => r !== 'turn').join(', ')}.
                               A different relation later supersedes it; the message itself is
                               never rewritten. 'turn' (the run started for a message) is
                               recorded by the store
-post <conv> (--text <t> | --file <f>) --author <person> [--token <t>] [--re <id>]… [--via <way>]
-                              a person's message from the command line (the Front Desk posts
-                              the same way); starts its turn. --via names how the words came
-                              (e.g. slack) when not the Front Desk
+post <conv> (--text <t> | --file <f>) --author <person> [--to <workspace>/<workflow>] [--token <t>]
+     [--re <id>]… [--via <way>]
+                              a person's message from the command line (pages post the same
+                              way); starts its turn. A new <conv> needs --to, one of the
+                              targets; an existing one keeps its destination (another --to is
+                              refused). --via names how the words came (e.g. slack)
 dispatch                      start the turns of messages whose run could not be requested yet
-                              (also done by the executor's reconcile)
+                              (also done by the executor's reconcile); a destination that cannot
+                              take them leaves them failed with the reason, never sent elsewhere
 
 Carrying the person's words into a run: wfe run instruct|answer … --source-message <conv>:<id>
 records where they were said (the message stays the original; the run gets the reference).`
@@ -90,15 +102,22 @@ export async function conversationCommand(c: ConversationCli): Promise<number> {
     const ids = (k: string) => c.opts(k).map(v => { const n = Number(v.replace(/^#/, '')); if (!Number.isInteger(n)) throw c.usage(`--${k} takes message ids`); return n })
     const isNum = (v: string | undefined) => v !== undefined && /^#?\d+$/.test(v)
     switch (sub) {
+      case 'targets': {
+        const rows = await store.targets()
+        const cfg = store.config()
+        c.out(rows.length ? rows.map(t => `${t.target.padEnd(28)} ${t.state.padEnd(11)} ${t.projectName ?? t.workspace} · ${t.workflowName ?? t.workflow}${t.agent ? ` · ${t.agent}` : ''}${t.problem ? ` — ${t.problem}` : ''}`).join('\n') : 'disabled' in cfg ? cfg.disabled : 'No targets configured.', rows)
+        return 0
+      }
       case 'list': {
-        const rows = store.list()
-        c.out(rows.length ? rows.map(r => `${r.id.padEnd(22)} ${r.state.padEnd(6)} ${String(r.count).padStart(4)} msgs  updated ${r.updated}  ${r.title}`).join('\n') : 'No conversations.', rows)
+        const to = c.opt('to')
+        const rows = store.list(to ? { target: parseTarget(to) } : {})
+        c.out(rows.length ? rows.map(r => `${r.id.padEnd(22)} ${`${r.workspace}/${r.workflow}`.padEnd(20)} ${r.state.padEnd(6)} ${String(r.count).padStart(4)} msgs  updated ${r.updated}  ${r.title}`).join('\n') : 'No conversations.', rows)
         return 0
       }
       case 'show': {
         const id = await conv(args[0])
         const v = await store.view(id, { viewBase: viewBaseOf(c.area()), since: Number(c.opt('since') ?? 0) || 0 })
-        const lines = [`Conversation ${id} (${v.conversation.state}): ${v.conversation.title}`]
+        const lines = [`Conversation ${id} with ${v.conversation.destination ?? '(no destination)'} (${v.conversation.state}): ${v.conversation.title}`]
         for (const m of v.messages) {
           const links = v.links.filter(l => l.message === m.id && !v.links.some(x => x.supersedes === l.id))
           lines.push('', `#${m.id} ${m.at} ${m.role === 'person' ? `${m.author} (the person)${m.via ? ` via ${m.via}` : ''}` : `${m.author}${m.run ? ` for ${m.run}` : ''}`}${m.kind !== 'message' ? ` [${m.kind}${m.question ? ` ${m.question}` : ''}]` : ''}${m.re.length ? ` re ${m.re.map(n => `#${n}`).join(', ')}` : ''}`)
@@ -106,7 +125,7 @@ export async function conversationCommand(c: ConversationCli): Promise<number> {
           for (const l of links) lines.push(`    → ${l.relation} ${l.run}${l.relation === 'turn' ? '' : ` by ${l.by}: ${l.note}`}`)
           if (m.dispatch && m.dispatch.state !== 'started') lines.push(`    ! turn not started (${m.dispatch.state}${m.dispatch.error ? `: ${m.dispatch.error}` : ''})`)
         }
-        lines.push('', 'Runs:', ...v.runs.map(r => `  ${r.key} — ${r.status?.text ?? r.situation} (${r.situation}, ${r.execution})${r.waiting.length ? `, waiting at ${r.waiting.join(', ')}` : ''}; linked as ${r.relation}${r.url ? `; ${r.url}` : ''}${r.problem ? `; ${r.problem}` : ''}`))
+        lines.push('', 'Runs:', ...v.runs.map(r => `  ${r.key} — ${r.status?.text ?? r.situation} (${r.situation}, ${r.execution})${r.waiting.length ? `, waiting at ${r.waiting.join(', ')}` : ''}; linked as ${r.relation}${r.url ? `; ${r.url}` : ''}${r.presentations.map(p => `; review ${p.id} ${p.url}`).join('')}${r.problem ? `; ${r.problem}` : ''}`))
         lines.push(`Waiting for the person: ${v.asking.length ? v.asking.map(n => `#${n}`).join(', ') : 'nothing'}`)
         c.out(lines.join('\n'), v)
         return 0
@@ -138,7 +157,8 @@ export async function conversationCommand(c: ConversationCli): Promise<number> {
       case 'post': {
         const id = args[0]; if (!id) throw c.usage('post needs <conv>')
         const author = c.opt('author'); if (!author) throw c.usage('--author <person> is required: whose words these are')
-        const r = await store.post(id, { text: text(), author, token: c.opt('token') ?? `cli-${Date.now()}-${process.pid}`, re: ids('re'), via: c.opt('via') })
+        const to = c.opt('to')
+        const r = await store.post(id, { text: text(), author, token: c.opt('token') ?? `cli-${Date.now()}-${process.pid}`, re: ids('re'), via: c.opt('via'), target: to ? parseTarget(to) : undefined })
         c.out(`${r.duplicate ? 'Already posted (same token)' : 'Posted'}: #${r.message.id} in ${id}; turn ${r.message.dispatch_state}${r.message.dispatch_run ? ` (${r.message.dispatch_run})` : ''}${r.message.dispatch_error ? ` — ${r.message.dispatch_error}` : ''}.`, { ok: true, ...r })
         return 0
       }

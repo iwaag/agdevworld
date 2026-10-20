@@ -1,32 +1,39 @@
-// Conversations (project_migration p8, docs/conversations.md): the person's
-// continuing conversation with the system's entrance (Front), kept apart
-// from any one run. This module keeps, in
-// <area>/.local/conversations/conversations.sqlite:
+// Conversations (project_migration p8; workflow_editor p15,
+// docs/conversations.md): a person's continuing conversation with one
+// project's conversational workflow — its destination, recorded when the
+// conversation is created and never changed — kept apart from any one run.
+// This module keeps, in <area>/.local/conversations/conversations.sqlite:
 //
-// - conversations: an id (the Front Desk mints it), a title, open or closed;
+// - conversations: an id (the client mints it), a title, open or closed,
+//   and the destination (workspace and workflow) every turn goes to;
 // - messages: the person's words as they were said (author, time, the
 //   submit token that makes a resubmission one message, the way they came
-//   when not the Front Desk: `via`, e.g. slack) and the entrance's
+//   when not a page: `via`, e.g. slack) and the destination agent's
 //   replies, each naming the run and attempt that wrote it and the messages
 //   it answers (`re`). A reply never borrows "the newest message" as its
 //   target: concurrent work is told apart by its run;
 // - links: what a message is to a run. `turn` is recorded here: every
-//   person's message starts one bounded run of the entrance workflow
+//   person's message starts one bounded run of the destination workflow
 //   (receipt `conversation:<id>:<message>`, so a replay or restart finds the
-//   same run). The entrance's agent records its interpretation itself (new,
-//   follow-up, correction, steer, answer, question, informational, cites),
-//   and a correction is a newer link superseding an older one: the message
-//   is never rewritten.
+//   same run). The destination's agent records its interpretation itself
+//   (new, follow-up, correction, steer, answer, question, informational,
+//   cites), and a correction is a newer link superseding an older one: the
+//   message is never rewritten.
 //
-// The store routes and persists; the entrance's agent decides what a message
-// means. Run state stays the runs' own records; nothing here mirrors it.
+// The store routes and persists; the destination's agent decides what a
+// message means. Run state stays the runs' own records; nothing here mirrors
+// it. Which destinations a new conversation may name is configuration
+// (conversations.json `targets`); who a target is to a person (a character,
+// a picture) is the client's.
 import { existsSync, mkdirSync, readFileSync } from 'node:fs'
 import { createHash } from 'node:crypto'
 import { join } from 'node:path'
 import type { DatabaseSync } from 'node:sqlite'
 import type { ConversationSource } from '../shared/intake.ts'
-import { runKey, situation, type RunRecord, type RunRef } from '../shared/run.ts'
+import type { Workflow } from '../shared/model.ts'
+import { runDisplayTitle, runKey, situation, type RunRecord, type RunRef } from '../shared/run.ts'
 import type { ExecStore } from './exec.ts'
+import { presenterOf, type Presenter } from './present.ts'
 import { nodeNames, readRun } from './runs.ts'
 import { runStatus, type RunStatus } from '../shared/status.ts'
 import { openStore, transaction } from './sqlite.ts'
@@ -40,21 +47,44 @@ export type MessageKind = typeof MESSAGE_KINDS[number]
 const MAX_TEXT = 100_000
 const VIA = /^[a-z0-9][a-z0-9:._ -]{0,63}$/
 
-// <area>/conversations.json: which workflow serves a person's message, and
-// who the person at the entrance is.
-//   { "entrance": { "workspace": "front", "workflow": "converse" }, "person": "iwaag" }
-export interface ConversationConfig { entrance: { workspace: string; workflow: string }; person: string }
+// <area>/conversations.json: the destinations a new conversation may name,
+// and who the person writing through pages is.
+//   { "person": "iwaag", "targets": [{ "workspace": "front", "workflow": "converse" }, …] }
+export interface ConversationTarget { workspace: string; workflow: string }
+export interface ConversationConfig { targets: ConversationTarget[]; person: string }
+const NAME = /^[a-z0-9][a-z0-9_.-]*$/
+export const targetName = (t: ConversationTarget) => `${t.workspace}/${t.workflow}`
+export function parseTarget(text: string): ConversationTarget {
+  const [workspace, workflow, ...rest] = text.split('/')
+  if (rest.length || !NAME.test(workspace ?? '') || !NAME.test(workflow ?? '')) throw new RequestError(400, `"${text}" is not a destination (<workspace>/<workflow>)`)
+  return { workspace, workflow }
+}
 export function loadConversationConfig(area: string): ConversationConfig | { disabled: string } {
   const file = join(area, 'conversations.json')
-  if (!existsSync(file)) return { disabled: `no ${file}: conversations have no entrance here` }
+  if (!existsSync(file)) return { disabled: `no ${file}: no conversation targets are configured here` }
   try {
-    const o = JSON.parse(readFileSync(file, 'utf8')) as Partial<ConversationConfig>
-    if (!o.entrance?.workspace || !o.entrance?.workflow || !o.person) return { disabled: `${file} needs {"entrance": {"workspace", "workflow"}, "person"}` }
-    return { entrance: { workspace: o.entrance.workspace, workflow: o.entrance.workflow }, person: o.person }
+    const o = JSON.parse(readFileSync(file, 'utf8')) as { targets?: unknown; person?: unknown }
+    const shape = `${file} needs {"person", "targets": [{"workspace", "workflow"}, …]}`
+    if (typeof o.person !== 'string' || !o.person || !Array.isArray(o.targets)) return { disabled: shape }
+    const targets: ConversationTarget[] = []
+    for (const t of o.targets as Partial<ConversationTarget>[]) {
+      if (typeof t?.workspace !== 'string' || typeof t.workflow !== 'string' || !NAME.test(t.workspace) || !NAME.test(t.workflow)) return { disabled: shape }
+      targets.push({ workspace: t.workspace, workflow: t.workflow })
+    }
+    return { targets, person: o.person }
   } catch (e) { return { disabled: `${file} cannot be read: ${(e as Error).message}` } }
 }
 
-export interface ConversationRow { id: string; title: string; created: string; updated: string; state: 'open' | 'closed'; by: string }
+// A configured target as a client sees it: the project and workflow it
+// names, the agent that answers, and whether a conversation could start a
+// turn there now.
+export interface TargetView {
+  target: string; workspace: string; workflow: string
+  project: string | null; projectName: string | null; workflowName: string | null; intent: string | null; agent: string | null
+  state: 'available' | 'unavailable'; problem: string | null
+}
+
+export interface ConversationRow { id: string; title: string; created: string; updated: string; state: 'open' | 'closed'; by: string; workspace: string | null; workflow: string | null }
 export interface MessageRow {
   id: number; conv: string; role: 'person' | 'agent'; author: string; text: string; at: string
   token: string | null; via: string | null; re: string; kind: MessageKind; run: string | null; attempt: string | null; question: string | null; key: string | null
@@ -104,9 +134,25 @@ export class ConversationStore {
       // slack_connect p1: the way a person's message came (null: the Front Desk or the CLI).
       version: 2,
       up: db => db.exec('ALTER TABLE messages ADD COLUMN via TEXT'),
+    }, {
+      // workflow_editor p15: every conversation records its destination.
+      // Conversations from before had one: the single entrance the
+      // configuration named then, which this step maps once.
+      version: 3,
+      up: db => {
+        db.exec('ALTER TABLE conversations ADD COLUMN workspace TEXT; ALTER TABLE conversations ADD COLUMN workflow TEXT')
+        const before = formerEntrance(o.area)
+        if (before) db.prepare('UPDATE conversations SET workspace = ?, workflow = ? WHERE workspace IS NULL').run(before.workspace, before.workflow)
+      },
     }])
   }
-  close() { this.db.close() }
+  close() { this.db.close(); this._presenter?.close() }
+  // This host's presentation store, opened when a linked run has presentations.
+  private _presenter: Presenter | null | undefined
+  private presenter(): Presenter | null {
+    if (this._presenter === undefined) this._presenter = this.exec ? presenterOf(this.area, this.exec.ctx.registryFile) : null
+    return this._presenter
+  }
   config() { return loadConversationConfig(this.area) }
 
   private tx<T>(f: () => T): T { return transaction(this.db, f, 'conversation store') }
@@ -114,8 +160,11 @@ export class ConversationStore {
   private one<T>(sql: string, ...a: (string | number | null)[]): T | undefined { return this.db.prepare(sql).get(...a) as T | undefined }
 
   conversation(id: string): ConversationRow | undefined { return this.one<ConversationRow>('SELECT * FROM conversations WHERE id = ?', id) }
-  list(): (ConversationRow & { last: MessageRow | null; count: number })[] {
-    return this.all<ConversationRow>('SELECT * FROM conversations ORDER BY updated DESC').map(c => ({
+  list(o: { target?: ConversationTarget } = {}): (ConversationRow & { last: MessageRow | null; count: number })[] {
+    const rows = o.target
+      ? this.all<ConversationRow>('SELECT * FROM conversations WHERE workspace = ? AND workflow = ? ORDER BY updated DESC', o.target.workspace, o.target.workflow)
+      : this.all<ConversationRow>('SELECT * FROM conversations ORDER BY updated DESC')
+    return rows.map(c => ({
       ...c, last: this.one<MessageRow>('SELECT * FROM messages WHERE conv = ? ORDER BY id DESC LIMIT 1', c.id) ?? null,
       count: this.one<{ n: number }>('SELECT count(*) AS n FROM messages WHERE conv = ?', c.id)!.n,
     }))
@@ -130,22 +179,36 @@ export class ConversationStore {
 
   // A person's message: stored first, then its turn is started. The same
   // token twice is one message (a resubmitted form, a retried request). A
-  // post to a closed conversation reopens it; a new id creates it. `via`
-  // names the way the words came when not the Front Desk (e.g. slack).
-  async post(conv: string, o: { text: string; author: string; token: string; re?: number[]; title?: string; via?: string }): Promise<{ message: MessageRow; duplicate: boolean; reopened: boolean }> {
+  // post to a closed conversation reopens it. A new id creates the
+  // conversation with the destination `target` names, which must be one of
+  // the configured targets; nothing defaults to any project. A target that
+  // differs from an existing conversation's destination is refused: another
+  // destination is another conversation. `via` names the way the words came
+  // when not a page (e.g. slack).
+  async post(conv: string, o: { text: string; author: string; token: string; re?: number[]; title?: string; via?: string; target?: ConversationTarget }): Promise<{ message: MessageRow; duplicate: boolean; reopened: boolean }> {
     if (!CONVERSATION_ID.test(conv)) throw new RequestError(400, `conversation id must match ${CONVERSATION_ID.source}`)
     if (!o.text.trim()) throw new RequestError(400, 'the message is empty')
     if (o.text.length > MAX_TEXT) throw new RequestError(413, `a message is at most ${MAX_TEXT} characters`)
     if (!/^[A-Za-z0-9:._/#-]{8,200}$/.test(o.token)) throw new RequestError(400, 'a message needs a submit token (8–200 of A-Z a-z 0-9 : . _ / # -)')
     if (o.via !== undefined && !VIA.test(o.via)) throw new RequestError(400, `via must match ${VIA.source}`)
     const re = this.validRe(conv, o.re ?? [])
+    const existing = this.conversation(conv)
+    if (existing && o.target && (existing.workspace !== o.target.workspace || existing.workflow !== o.target.workflow)) {
+      throw new RequestError(409, `conversation ${conv} is with ${existing.workspace}/${existing.workflow}, not ${targetName(o.target)}: start a new conversation for another destination`, { code: 'other-destination', destination: existing.workspace && `${existing.workspace}/${existing.workflow}` })
+    }
+    if (!existing) {
+      if (!o.target) throw new RequestError(400, `conversation ${conv} does not exist yet: its first message names its destination (target <workspace>/<workflow>)`, { code: 'no-destination' })
+      const cfg = this.config()
+      if ('disabled' in cfg) throw new RequestError(503, cfg.disabled)
+      if (!cfg.targets.some(t => t.workspace === o.target!.workspace && t.workflow === o.target!.workflow)) throw new RequestError(400, `${targetName(o.target)} is not a conversation target here (${cfg.targets.map(targetName).join(', ') || 'none configured'})`, { code: 'unknown-target' })
+    }
     const res = this.tx(() => {
       const seen = this.one<MessageRow>('SELECT * FROM messages WHERE conv = ? AND token = ?', conv, o.token)
       if (seen) return { message: seen, duplicate: true, reopened: false }
       const at = now()
       const c = this.conversation(conv)
       const reopened = c?.state === 'closed'
-      if (!c) this.db.prepare('INSERT INTO conversations (id, title, created, updated, state, by) VALUES (?, ?, ?, ?, \'open\', ?)').run(conv, o.title?.trim() || firstLine(o.text), at, at, o.author)
+      if (!c) this.db.prepare('INSERT INTO conversations (id, title, created, updated, state, by, workspace, workflow) VALUES (?, ?, ?, ?, \'open\', ?, ?, ?)').run(conv, o.title?.trim() || firstLine(o.text), at, at, o.author, o.target!.workspace, o.target!.workflow)
       else this.db.prepare('UPDATE conversations SET updated = ?, state = \'open\' WHERE id = ?').run(at, conv)
       const id = Number(this.db.prepare('INSERT INTO messages (conv, role, author, text, at, token, via, re, kind, dispatch_state) VALUES (?, \'person\', ?, ?, ?, ?, ?, ?, \'message\', \'pending\')').run(conv, o.author, o.text, at, o.token, o.via ?? null, JSON.stringify(re)).lastInsertRowid)
       return { message: this.message(id)!, duplicate: false, reopened }
@@ -154,20 +217,23 @@ export class ConversationStore {
     return { message: this.message(res.message.id)!, duplicate: res.duplicate, reopened: res.reopened }
   }
 
-  // Starts the turn of a person's message: one run of the entrance workflow
-  // with the message as the person's words. Repeating it finds the same run
-  // (the request's receipt), so a crash between the request and the record
-  // here is repaired by dispatching again.
+  // Starts the turn of a person's message: one run of the conversation's
+  // recorded destination with the message as the person's words — the
+  // destination it was created with, whatever the configuration says now.
+  // Repeating it finds the same run (the request's receipt), so a crash
+  // between the request and the record here is repaired by dispatching
+  // again. A destination that cannot take the request leaves the message
+  // `failed` with the reason; it is never sent elsewhere.
   async dispatch(id: number): Promise<MessageRow> {
     const m = this.message(id)
     if (!m || m.role !== 'person' || m.dispatch_state === 'started') return m!
-    const cfg = this.config()
+    const c = this.conversation(m.conv)
     try {
-      if ('disabled' in cfg) throw new Error(cfg.disabled)
+      if (!c?.workspace || !c.workflow) throw new Error(`conversation ${m.conv} has no recorded destination`)
       if (!this.exec) throw new Error('execution is not configured here')
       const source: ConversationSource = { kind: 'conversation', conversation: m.conv, message: m.id, author: m.author, at: m.at }
-      const r = await this.exec.request({ workspace: cfg.entrance.workspace, workflow: cfg.entrance.workflow, text: m.text, author: m.author, receipt: `conversation:${m.conv}:${m.id}`, via: 'conversation', source })
-      const run = runName(cfg.entrance.workspace, r.ref)
+      const r = await this.exec.request({ workspace: c.workspace, workflow: c.workflow, text: m.text, author: m.author, receipt: `conversation:${m.conv}:${m.id}`, via: 'conversation', source })
+      const run = runName(c.workspace, r.ref)
       this.tx(() => {
         this.db.prepare('UPDATE messages SET dispatch_state = \'started\', dispatch_run = ?, dispatch_error = NULL, dispatch_tries = dispatch_tries + 1 WHERE id = ?').run(run, id)
         if (!this.one('SELECT 1 FROM links WHERE message = ? AND relation = \'turn\'', id)) this.db.prepare('INSERT INTO links (conv, message, run, relation, note, by, at) VALUES (?, ?, ?, \'turn\', ?, \'conversation\', ?)').run(m.conv, id, run, 'the run started for this message', now())
@@ -189,7 +255,7 @@ export class ConversationStore {
     return notes
   }
 
-  // ---- the entrance's replies and interpretation ---------------------------------------
+  // ---- the destination's replies and interpretation ------------------------------------
 
   // A reply by a run's agent (or a named author). `key` makes a retried
   // command one message; by default it is the text's hash.
@@ -212,7 +278,7 @@ export class ConversationStore {
     })
   }
 
-  // What a message is to a run, as the entrance's agent reads it. The
+  // What a message is to a run, as the destination's agent reads it. The
   // same link twice is one link; a different relation for the same message
   // and run supersedes the earlier one (a correction keeps both).
   link(conv: string, o: { message: number; run: string; relation: Relation; note: string; by: string; attempt?: string | null }): { link: LinkRow; duplicate: boolean } {
@@ -250,11 +316,35 @@ export class ConversationStore {
     return [...new Set(re)]
   }
 
+  // ---- targets ---------------------------------------------------------------------
+
+  // The configured targets as their projects say now: a target whose
+  // workspace or workflow cannot be read is listed as unavailable with the
+  // reason, never left out.
+  async targets(): Promise<TargetView[]> {
+    const cfg = this.config()
+    if ('disabled' in cfg) return []
+    return Promise.all(cfg.targets.map(t => this.target(t)))
+  }
+  async target(t: ConversationTarget): Promise<TargetView> {
+    const base: TargetView = { target: targetName(t), ...t, project: null, projectName: null, workflowName: null, intent: null, agent: null, state: 'unavailable', problem: null }
+    try {
+      if (!this.exec) throw new Error('execution is not configured here')
+      const ws = await this.exec.workspace(t.workspace)
+      const [project, files] = await Promise.all([ws.readProject().catch(() => ({ project: undefined })), ws.workflowFiles()])
+      Object.assign(base, { project: ws.reg.project ?? null, projectName: project.project?.name || null })
+      let wf: Workflow | undefined
+      for (const f of files) { const r = await ws.readWorkflowFile(f); if (r.workflow?.id === t.workflow) { wf = r.workflow; break } }
+      if (!wf) throw new Error(`workspace ${t.workspace} has no workflow "${t.workflow}"`)
+      return { ...base, workflowName: wf.name || null, intent: wf.intent || null, agent: wf.execution.agent || null, state: 'available' }
+    } catch (e) { return { ...base, problem: (e as Error).message } }
+  }
+
   // ---- the view --------------------------------------------------------------------
 
   // The conversation with every message, its links, and the runs it is
   // linked to as their own records say now (situation, execution, waits).
-  // Questions the entrance asked are pending until a later message of the
+  // Questions the destination asked are pending until a later message of the
   // person names them, or — when exactly one is pending — follows them.
   async view(conv: string, o: { viewBase?: string | null; since?: number } = {}) {
     const c = this.conversation(conv)
@@ -263,35 +353,42 @@ export class ConversationStore {
     const rows = this.messages(conv)
     const links = this.links(conv)
     const asking = pendingQuestions(rows)
-    // The runs linked to its messages, and the entrance's own run of each
+    // The runs linked to its messages, and the destination's own run of each
     // message (relation `turn`), with the shared status reading (p8 ex1).
-    const runs: { key: string; workspace: string; workflow: string; run: string; relation: string; url: string | null; situation: string; execution: string; title: string | null; waiting: string[]; status: RunStatus | null; problem?: string }[] = []
+    // Each run also carries where its results open: its file route (a path in
+    // the run folder appended) and its presentations that serve now.
+    const runs: { key: string; workspace: string; workflow: string; run: string; relation: string; url: string | null; files: string | null; situation: string; execution: string; title: string | null; waiting: string[]; status: RunStatus | null; presentations: { id: string; title: string; url: string }[]; problem?: string }[] = []
+    const files = (workspace: string, ref: RunRef) => o.viewBase ? `${o.viewBase.replace(/\/?$/, '/')}api/projects/${encodeURIComponent(workspace)}/runs/${encodeURIComponent(ref.workflow)}/${encodeURIComponent(ref.run)}/raw?path=` : null
     const turns = rows.filter(m => m.role === 'person' && m.dispatch_run).map(m => m.dispatch_run!)
     const cfg = loadConversationConfig(this.area)
     const person = 'disabled' in cfg ? null : cfg.person
     for (const key of [...new Set([...links.map(l => l.run), ...turns])]) {
       const { workspace, ref } = parseRunName(key)
       const rel = [...links.filter(l => l.run === key).map(l => l.relation), ...(turns.includes(key) ? ['turn'] : [])]
-      const entry = { key, workspace, workflow: ref.workflow, run: ref.run, relation: [...new Set(rel)].join(', '), url: url(key) }
+      const entry = { key, workspace, workflow: ref.workflow, run: ref.run, relation: [...new Set(rel)].join(', '), url: url(key), files: files(workspace, ref) }
       try {
         if (!this.exec) throw new Error('execution is not configured here')
-        const reading = await readRun(await this.exec.workspace(workspace), ref)
+        const ws = await this.exec.workspace(workspace)
+        const reading = await readRun(ws, ref)
         const rec = reading.record as RunRecord | null
         if (!rec) throw new Error('the run cannot be read')
         const job = this.exec.runRows(workspace, ref).jobs.find(j => j.state === 'queued' || j.state === 'claimed') ?? null
         const status = runStatus(rec, { names: nodeNames(reading.bundle, rec), job: job && { state: job.state as 'queued' | 'claimed', reason: job.reason }, person })
-        runs.push({ ...entry, situation: situation(rec), execution: rec.execution.state, title: null, waiting: rec.execution.waiting.map(w => w.node), status })
-      } catch (e) { runs.push({ ...entry, situation: 'unknown', execution: 'unknown', title: null, waiting: [], status: null, problem: (e as Error).message }) }
+        const presenter = rec.presentations ? this.presenter() : null
+        const shown = presenter ? (await presenter.view(ws, rec).catch(() => [])).filter(p => p.live && p.url && !p.local).map(p => ({ id: p.id, title: p.title, url: p.url! })) : []
+        runs.push({ ...entry, situation: situation(rec), execution: rec.execution.state, title: runDisplayTitle(rec), waiting: rec.execution.waiting.map(w => w.node), status, presentations: shown })
+      } catch (e) { runs.push({ ...entry, situation: 'unknown', execution: 'unknown', title: null, waiting: [], status: null, presentations: [], problem: (e as Error).message }) }
     }
     const message = (m: MessageRow): Message => ({
       id: m.id, role: m.role, author: m.author, text: m.text, at: m.at, via: m.via, re: JSON.parse(m.re) as number[], kind: m.kind, run: m.run ?? m.dispatch_run, runUrl: (m.run ?? m.dispatch_run) ? url((m.run ?? m.dispatch_run)!) : null, question: m.question,
       dispatch: m.role === 'person' ? { state: m.dispatch_state ?? 'pending', run: m.dispatch_run, error: m.dispatch_error } : null,
     })
-    return { conversation: c, messages: rows.filter(m => m.id > (o.since ?? 0)).map(message), links, runs, asking }
+    const destination = c.workspace && c.workflow ? targetName({ workspace: c.workspace, workflow: c.workflow }) : null
+    return { conversation: { ...c, destination }, messages: rows.filter(m => m.id > (o.since ?? 0)).map(message), links, runs, asking }
   }
 }
 
-// The entrance's questions not yet answered by the person: named by a later
+// The destination's questions not yet answered by the person: named by a later
 // message's `re`, or followed by the person's next message when it was the
 // only one pending.
 export function pendingQuestions(rows: MessageRow[]): number[] {
@@ -312,6 +409,17 @@ export function viewBaseOf(area: string): string | null {
     try { const v = (JSON.parse(readFileSync(join(area, file), 'utf8')) as Record<string, unknown>)[key]; if (typeof v === 'string' && v) return v } catch { /* the next one */ }
   }
   return null
+}
+
+// The single entrance the configuration named before p15
+// ({"entrance": {workspace, workflow}}), or its first target: what the
+// conversations from before destinations existed were with.
+function formerEntrance(area: string): ConversationTarget | null {
+  try {
+    const o = JSON.parse(readFileSync(join(area, 'conversations.json'), 'utf8')) as { entrance?: Partial<ConversationTarget>; targets?: Partial<ConversationTarget>[] }
+    const t = o.entrance ?? o.targets?.[0]
+    return t?.workspace && t.workflow ? { workspace: t.workspace, workflow: t.workflow } : null
+  } catch { return null }
 }
 
 const firstLine = (t: string) => { const l = t.trim().split('\n')[0]; return l.length > 80 ? `${l.slice(0, 77)}…` : l }

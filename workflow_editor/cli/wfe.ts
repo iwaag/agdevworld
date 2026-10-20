@@ -640,8 +640,8 @@ Projects and workspaces
   present <subcommand>      presentations of a run's result: register, start, status, stop, reconcile
   share <subcommand>        shared areas on this host: list, resolve, ls, verify (docs/shares.md)
   boast [status] <project>  a project's Boast page (boast/index.html): published or previewed; reference
-  conversation <subcommand> the entrance's conversations: list, show, reply, link, post (p8;
-                            docs/conversations.md)
+  conversation <subcommand> conversations with project agents: targets, list, show, reply, link,
+                            post (p8, p15; docs/conversations.md)
   context <subcommand>      scoped context: show (sources for authoring or a run, and where each comes
                             from), get|set|clear|history (the local overrides), run (used vs next)
 
@@ -1534,7 +1534,7 @@ const COMMANDS: Record<string, (p: Parsed) => Promise<number>> = {
   version: cmdVersion, nodes: cmdNodes, boast: cmdBoast, context: cmdContext, conversation: cmdConversation,
 }
 
-// The entrance's conversations (project_migration p8, docs/conversations.md).
+// Conversations with project agents (project_migration p8, workflow_editor p15, docs/conversations.md).
 async function cmdConversation(p: Parsed): Promise<number> {
   return conversationCommand({
     positional: p.positional, opt: k => opt(p, k), opts: k => p.opts.get(k) ?? [], out,

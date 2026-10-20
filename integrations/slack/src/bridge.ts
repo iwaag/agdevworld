@@ -104,7 +104,7 @@ export const HELP = [
   '• DM に新しく書くと新しい会話、スレッドに返信するとその会話の続きです（質問への回答・追加指示もスレッドで）。',
   '• 📥 は受け付け（WFE に記録され Front のターン開始を依頼済み）。Front の返答は同じスレッドに届きます。',
   '• 編集・削除は Front に伝わりません。訂正や取り消しは新しいメッセージで。添付ファイル・音声クリップは未対応です（キーボードの音声入力は使えます）。',
-  '• run・成果物・Front Desk のリンクは Tailscale 接続時に開けます。テキストのやりとりは VPN なしで使えます。',
+  '• run・成果物・aghangout のリンクは Tailscale 接続時に開けます。テキストのやりとりは VPN なしで使えます。',
   '• `!status` で中継の状態を表示します。',
 ].join('\n')
 
@@ -191,7 +191,7 @@ export class Bridge {
     try {
       posted = await this.wfe.post(conv, {
         text: c.text + note, token: `${trial ? 'slack-trial' : 'slack'}:${row.team}:${row.channel}:${row.ts}`,
-        via: trial ? 'slack-trial' : 'slack', ...(trial ? { author: this.config.trialAuthor } : {}),
+        via: trial ? 'slack-trial' : 'slack', target: this.config.target, ...(trial ? { author: this.config.trialAuthor } : {}),
       })
     } catch (e) {
       const msg = (e as Error).message
@@ -249,17 +249,17 @@ export class Bridge {
     })
   }
 
-  // WFE messages as Slack posts: the entrance's replies labelled by kind with
-  // their run, Front Desk words of the person attributed as such; the
-  // integration's own Slack posts are not sent back.
+  // WFE messages as Slack posts: the destination's replies labelled by kind
+  // with their run, the person's words from a page (aghangout) attributed as
+  // such; the integration's own Slack posts are not sent back.
   render(t: ThreadRow, v: WfeView, fresh: WfeMessage[]) {
     const out: Parameters<Store['enqueue']>[0][] = []
-    const desk = `<${this.config.deskUrl.replace(/&/g, '&amp;')}&amp;conv=${encodeURIComponent(t.conv)}|Front Desk で会話全体を見る>`
+    const desk = this.config.conversationUrl ? `<${this.config.conversationUrl.replace('{conv}', encodeURIComponent(t.conv)).replace(/&/g, '&amp;')}|aghangout で会話全体を見る>` : ''
     fresh.forEach((m, i) => {
       if (m.role === 'person') {
         if (m.via?.startsWith('slack') || this.store.one('SELECT 1 FROM posts WHERE conv = ? AND wfe_message = ? AND origin = \'slack\'', t.conv, m.id)) return
         const who = `*${plainForSlack(m.author)}*${m.author === v.person ? '' : '（開発者本人ではありません）'}`
-        const text = `🖥 ${who}（${m.via ? plainForSlack(m.via) : 'Front Desk'} から）\n${plainForSlack(m.text)}`
+        const text = `🖥 ${who}（${m.via ? plainForSlack(m.via) : 'aghangout'} から）\n${plainForSlack(m.text)}`
         this.parts(text, '').forEach((p, n, all) => out.push({ key: `wfe:${t.conv}:${m.id}:${n + 1}`, conv: t.conv, wfe_message: m.id, label: 'mirror', part: n + 1, parts: all.length, channel: t.channel, thread: t.root, text: p }))
         return
       }

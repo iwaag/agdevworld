@@ -8,6 +8,12 @@ services:
       # The agdev origin with the /wfe/ route to the workflow editor
       # (nginx.conf), on the LAN like the service behind it.
       - "8093:8093"
+    # aghangout (workflow_editor p15), a managed project's application served
+    # on the agdev origin at /hangout/: its own releases, installed by its
+    # own deploy into this directory (`current` names the active one). The
+    # site never builds it.
+    volumes:
+      - ${AGHANGOUT_DIR:-../.local/agdev/hangout}:/srv/hangout:ro
 
   # Dev with HMR: docker compose up dev
   dev:

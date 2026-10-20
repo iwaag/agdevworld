@@ -2,19 +2,20 @@
 
 The Developer talks with Front from the Slack app — on the iPhone included —
 through direct messages with a private Front bot. Conversations and their runs
-stay WFE's (`workflow_editor/docs/conversations.md`); the Front Desk shows the
+stay WFE's (`workflow_editor/docs/conversations.md`); aghangout shows the
 same conversations. This process only carries messages: it never opens WFE's
 database, starts Front itself, or interprets what a message means.
 
-- A new top-level DM starts a WFE conversation; replies in its thread continue
+- A new top-level DM starts a WFE conversation with the configured
+  destination (`target`, `front/converse`); replies in its thread continue
   it. Concurrent threads are concurrent conversations.
 - Every accepted message is posted to WFE with `via: slack`, which starts one
   Front turn. 📥 on the message means: WFE has it and its turn was requested.
   Front's replies (`reply`, `question`, `progress`, `result`) arrive in the
   thread, each naming its run.
-- Front Desk messages of a Slack-linked conversation appear in the thread,
-  labelled as coming from the Front Desk. Browser-only conversations stay
-  unlinked.
+- Messages the person wrote in aghangout in a Slack-linked conversation
+  appear in the thread, labelled as coming from aghangout. Browser-only
+  conversations stay unlinked.
 - Edits and deletions are not instructions; the bot says so. Attachment-only
   and audio-clip messages are explained, not forwarded; a caption is forwarded
   with a note that the attachment was not passed on. Keyboard dictation is
@@ -22,7 +23,7 @@ database, starts Front itself, or interprets what a message means.
 - `!status` and `!help` in the DM are answered by the integration itself.
 
 Text works without the home network or VPN (Slack is the transport). Run,
-artifact and Front Desk links point at the tailnet name of the host, so they
+artifact and aghangout links point at the tailnet name of the host, so they
 open when the phone's Tailscale is on.
 
 ## Process and files
@@ -32,7 +33,7 @@ open when the phone's Tailscale is on.
 
 | File (`<area>/slack/`) | |
 | --- | --- |
-| `config.json` | `appToken` (xapp-, `connections:write`), `botToken` (xoxb-), `developer` (member ID), `team` (optional), `wfe`, `linkBase`, `linkMap` (LAN origin → phone origin for URLs in replies), `deskUrl` (optional), `trialAuthor`, `store` (optional). Ignored, mode 600 |
+| `config.json` | `appToken` (xapp-, `connections:write`), `botToken` (xoxb-), `developer` (member ID), `team` (optional), `wfe`, `linkBase`, `linkMap` (LAN origin → phone origin for URLs in replies), `target` (the WFE destination of new conversations, `<workspace>/<workflow>`; required), `conversationUrl` (optional; `{conv}` is replaced by the id; default `<linkBase origin>/hangout/?conv={conv}`), `trialAuthor`, `store` (optional). Ignored, mode 600 |
 | `slack.sqlite` | the transport store |
 | `service.log` | the service's log (no tokens) |
 
@@ -103,7 +104,7 @@ node current/src/main.ts fault lose-next-response            # exercise unknown-
 Recovery:
 
 - **Slack down / tokens revoked**: `status` shows `disconnected`/`reconnecting`
-  and the log the reason. WFE and the Front Desk are unaffected. After a fix,
+  and the log the reason. WFE and aghangout are unaffected. After a fix,
   the next connection backfills.
 - **WFE down**: inbox rows wait (`inbox`), the Developer is told once per
   message; they go through when WFE answers.

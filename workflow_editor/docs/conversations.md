@@ -1,37 +1,65 @@
-# Conversations (project_migration p8)
+# Conversations (project_migration p8, workflow_editor p15)
 
-A conversation is the person's continuing talk with the system's entrance
-(Front, an ordinary managed project). It is kept apart from any one run. A
-conversation refers to many bounded runs; it never holds their state. Code:
-`server/conversations.ts`; CLI: `wfe conversation`; store:
+A conversation is a person's continuing talk with **one project's
+conversational workflow**, its destination (`<workspace>/<workflow>`, e.g.
+`front/converse`, `forge/converse`). The destination is recorded when the
+conversation is created and never changes. A conversation is kept apart from
+any one run: it refers to many bounded runs and never holds their state.
+Code: `server/conversations.ts`; CLI: `wfe conversation`; store:
 `<area>/.local/conversations/conversations.sqlite`.
+
+Any client can hold conversations through the HTTP contract below. Clients
+include aghangout (the managed project `aghangout`), the Slack integration and
+the CLI. The service owns identity, destination, messages, dispatch and
+recovery. A client owns presentation, such as which character or picture
+stands for a destination.
 
 ## Configuration
 
 `<area>/conversations.json`:
 
 ```json
-{ "entrance": { "workspace": "front", "workflow": "converse" }, "person": "iwaag" }
+{
+  "person": "iwaag",
+  "targets": [
+    { "workspace": "front", "workflow": "converse" },
+    { "workspace": "forge", "workflow": "converse" }
+  ]
+}
 ```
 
-Without the file, messages are kept but no turn starts (`dispatch_state:
-failed`, with the reason), and they start once it exists (`wfe conversation
-dispatch`, or the executor's reconcile).
+- `targets` are the destinations a **new** conversation may name.
+- An existing conversation keeps dispatching to its recorded destination
+  after the list changes.
+- `person` is who a page's words are recorded as.
+
+Without the file, no conversation can be created over HTTP (503 with the
+reason). Existing messages are kept.
 
 ## Records
 
-- **Conversation**: an id (the Front Desk mints `YYYYMMDD-HHMMSS`; the first
-  message creates it), a title (the first line), `open` or `closed`. Closing
-  ends the conversation, not its runs. A message reopens it.
+- **Conversation**:
+  - an id, minted by the client (`[a-z0-9][a-z0-9-]{0,47}`; aghangout uses
+    `YYYYMMDD-HHMMSS-<random>`; the first message creates it);
+  - a title (the first line);
+  - `open` or `closed`. Closing ends the conversation, not its runs. A
+    message reopens it.
+  - its **destination** `<workspace>/<workflow>`, named by the first
+    message's `target`. That target must be one of the configured targets.
+    A message naming another target is refused (409, `other-destination`):
+    choosing another partner is another conversation.
+  - Nothing defaults to any project. A first message without a target is
+    refused (400, `no-destination`).
+  - Conversations from before p15 were mapped once, by the store's version-3
+    migration, to the single `entrance` the file named then.
 - **Message of the person**:
   - their words verbatim, the author (the configured person: the page is
     theirs, as every editor write is) and the time;
   - the submit token: the same token twice is one message;
-  - `via`: the way the words came when not the Front Desk (`slack`,
-    `slack-trial`; slack_connect p1). The Front Desk shows it beside the
-    author;
+  - `via`: the way the words came when not a page (`slack`, `slack-trial`;
+    slack_connect p1). Clients show it beside the author;
   - `re`: the messages it answers, when the person names them.
-- **Reply of the entrance**:
+- **Reply of the destination's agent**:
   - the text and the author (the run's agent);
   - the run and attempt that wrote it, `re` (what it answers) and its kind:
     - `reply`;
@@ -42,7 +70,7 @@ dispatch`, or the executor's reconcile).
     run.
 - **Link**: what a message is to a run.
   - `turn` is written by the store: the run started for the message.
-  - The entrance's agent records its reading:
+  - The destination's agent records its reading:
     - `new` (the message began that work);
     - `follow-up`;
     - `correction`;
@@ -56,7 +84,8 @@ dispatch`, or the executor's reconcile).
 
 ## A turn
 
-Every message of the person starts **one run of the entrance workflow**:
+Every message of the person starts **one run of the conversation's
+destination workflow**:
 - the words are the run's braindump;
 - the author is the person;
 - `input.source = {kind: conversation, conversation, message, author, at}`;
@@ -64,7 +93,11 @@ Every message of the person starts **one run of the entrance workflow**:
 
 The message is stored before the request. A failed request, or a crash
 between the request and its record, is repaired by requesting again: the
-receipt finds the same run. Nothing is started twice.
+receipt finds the same run. Nothing is started twice. A destination that
+cannot take the request (an unregistered workspace, a missing workflow) leaves
+the message `dispatch: failed` with the reason. It is shown, and retried at
+the same destination by `wfe conversation dispatch` or the executor's
+reconcile. It is never sent anywhere else.
 
 The store routes and persists. It does not interpret. The run reads the
 conversation (`wfe conversation show`, which defaults to its own conversation)
@@ -81,8 +114,11 @@ may:
 - ask (`reply --kind question`), leaving the message bound to no work until
   the answer.
 
-Acting on another run from its attempt records the entrance's agent as `by`
-and its attempt as `operator` (runs.md, *Who records*).
+Acting on another run from its attempt records the destination's agent as
+`by` and its attempt as `operator` (runs.md, *Who records*). A reply's
+author is the run's agent (`front-agent`, `forge-agent`, …). A client may
+show a character for the destination, but the author stays the agent that
+wrote it.
 
 ## Attribution
 
@@ -95,21 +131,53 @@ is the only one pending.
 
 | Route | |
 | --- | --- |
-| `GET api/conversations` | the conversations, newest first, with the last message |
-| `GET api/conversations/<id>[?since=<id>]` | messages, links, the linked runs and each message's own entrance run (relation `turn`) as their records say now (situation, execution, waits, `status` — the shared short reading, [runs.md](runs.md) *Status in short* — and run view URL), pending questions; 404 for an id not created yet |
-| `POST api/conversations/<id>/messages {text, token, re?, via?, author?}` | the person's message, then its turn. Answers `{sent, duplicate, reopened, message, run}`. The author is the configured person unless `author` names another (an automated trial actor); a client other than the page names `via` |
-| `POST api/conversations/<id>/close` | closes the conversation (runs continue) |
+| `GET api/conversations[?target=<ws>/<wf>]` | `{person, disabled, targets, conversations}`. Conversations are newest first, each with its `destination` and last message. `targets` are the configured ones as their projects say now: `target`, `workspace`, `workflow`, `project`, `projectName`, `workflowName`, `intent`, `agent`, `state` (`available` / `unavailable`) and `problem`. |
+| `GET api/conversations/<id>[?since=<id>]` | See *The view* below. 404 for an id not created yet. |
+| `POST api/conversations/<id>/messages {text, token, target?, re?, via?, author?}` | The person's message, then its turn. `target` (`<ws>/<wf>`) is required for a new id. On an existing id it must match the destination (409 otherwise). Answers `{sent, duplicate, reopened, message, run, destination}`. The author is the configured person, unless `author` names another (an automated trial actor). A client other than a page names `via`. |
+| `POST api/conversations/<id>/close` | Closes the conversation. Runs continue. |
 
-Run view URLs are absolute (zulip.json `viewBase`, else present.json
-`answerBase`).
+**The view** is:
+
+- `conversation`, with its `destination`;
+- `messages`;
+- `links`;
+- `asking` (the pending questions);
+- `runs`: each linked run and each message's own turn run (relation
+  `turn`), as their records say now. Each run carries:
+  - `situation`, `execution`, `waiting`;
+  - `status`, the shared short reading ([runs.md](runs.md), *Status in
+    short*);
+  - `title`;
+  - `url`, the run view;
+  - `files`, the run's file route: append a run-folder path to open a
+    delivered file;
+  - `presentations`, the review pages that serve now on a LAN address.
+
+Run view and file URLs are absolute (zulip.json `viewBase`, else
+present.json `answerBase`).
+
+**Browser clients.**
+
+- Writes are accepted from the service's own origin. On the agdev origin
+  (`:8093`), anything under the same host and port qualifies: `/wfe/` and
+  pages such as `/hangout/`.
+- Writes are also accepted from origins listed in the service's
+  `allowedOrigins` (`--allow-origin`), for a client hosted elsewhere.
+- Another site cannot write. The page holds no credential: its words are
+  the configured person's.
+- Reads (conversations, run views, run files) need no credential on the
+  LAN.
 
 A non-browser client (the Slack integration, `integrations/slack`) sends no
-`Origin`; the write-origin check is for pages. It validates its own users:
-only the configured Slack member's words are posted as the person.
+`Origin`. The write-origin check is for pages. The integration validates its
+own users: only the configured Slack member's words are posted as the person.
+It names its destination (`target`) for each new conversation.
 
 ## Not here
 
-- Zulip is not on the person's path. The entrance's runs still have their
+- Zulip is not on the person's path. Conversational runs still have their
   ordinary run and IO topics as evidence.
-- `wfe conversation` works where the store is (the coordinator). The
-  entrance workflow runs on the coordinator's own worker.
+- `wfe conversation` works where the store is (the coordinator).
+  Conversational workflows run on the coordinator's own worker
+  (`execution.node`), usually in its `conversation` lane (`execution.lane`;
+  workers.md).

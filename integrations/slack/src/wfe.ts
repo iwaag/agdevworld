@@ -1,5 +1,6 @@
 // WFE's conversation API (agdevworld workflow_editor/docs/conversations.md),
-// as a non-browser client: no Origin header, the words' way named by `via`.
+// as a non-browser client: no Origin header, the words' way named by `via`,
+// the destination of a new conversation by `target`.
 
 export type Kind = 'message' | 'reply' | 'question' | 'progress' | 'result'
 export interface WfeMessage {
@@ -9,7 +10,7 @@ export interface WfeMessage {
 }
 export interface WfeView {
   person: string | null
-  conversation: { id: string; title: string; state: 'open' | 'closed'; updated: string }
+  conversation: { id: string; title: string; state: 'open' | 'closed'; updated: string; destination: string | null }
   messages: WfeMessage[]
   runs: { key: string; situation: string; execution: string; waiting: string[] }[]
   asking: number[]
@@ -25,7 +26,7 @@ export class WfeError extends Error {
 
 export interface WfeApi {
   view(conv: string, since: number): Promise<WfeView | null>
-  post(conv: string, body: { text: string; token: string; via: string; author?: string }): Promise<WfePosted>
+  post(conv: string, body: { text: string; token: string; via: string; target: string; author?: string }): Promise<WfePosted>
 }
 
 export class Wfe implements WfeApi {
@@ -46,7 +47,7 @@ export class Wfe implements WfeApi {
     const r = await this.call<WfeView>(`api/conversations/${encodeURIComponent(conv)}?since=${since}`)
     return r.status === 404 ? null : r.body
   }
-  async post(conv: string, body: { text: string; token: string; via: string; author?: string }) {
+  async post(conv: string, body: { text: string; token: string; via: string; target: string; author?: string }) {
     const r = await this.call<WfePosted>(`api/conversations/${encodeURIComponent(conv)}/messages`, {
       method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body),
     }, 120_000)

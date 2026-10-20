@@ -1,5 +1,6 @@
-// project_migration p8 step 3 (docs/conversations.md): a conversation with
-// the entrance. Each person's message starts one bounded run, once, also
+// project_migration p8 step 3, workflow_editor p15 (docs/conversations.md):
+// a conversation with one project's conversational workflow, its recorded
+// destination. Each person's message starts one bounded run, once, also
 // when its request failed or the process restarted; replies name their run
 // and the messages they answer, so concurrent work is never attributed to
 // the newest message; the entrance's interpretation is a link that a later
@@ -51,6 +52,7 @@ nodes:
 
 let k = 0
 async function setup(o: { config?: boolean } = {}) {
+  
   const area = join(root, `area-${++k}`)
   const registry = join(area, 'registry.json')
   for (const id of ['front', 'kid']) {
@@ -60,7 +62,7 @@ async function setup(o: { config?: boolean } = {}) {
     await writeFile(join(dir, 'devdocs', 'workflows', 'converse.yaml'), CONVERSE.replace('front-agent', `${id}-agent`))
     await gitOk(dir, ['add', '-A']); await gitOk(dir, ['commit', '-q', '-m', 'workflow'])
   }
-  const config = () => writeFile(join(area, 'conversations.json'), JSON.stringify({ entrance: { workspace: 'front', workflow: 'converse' }, person: 'Pat' }))
+  const config = (targets = ['front', 'kid']) => writeFile(join(area, 'conversations.json'), JSON.stringify({ person: 'Pat', targets: targets.map(workspace => ({ workspace, workflow: 'converse' })) }))
   if (o.config !== false) await config()
   const x = new ExecStore({ registryFile: registry, area })
   const cs = new ConversationStore({ area, exec: x })
@@ -68,11 +70,13 @@ async function setup(o: { config?: boolean } = {}) {
   const ws = (id: string) => new Workspace(regs.find(w => w.project === id)!)
   return { area, registry, x, cs, ws, config }
 }
+const FRONT = { workspace: 'front', workflow: 'converse' }
+const KID = { workspace: 'kid', workflow: 'converse' }
 const rec = async (ws: Workspace, ref: RunRef) => (await readRun(await runSpace(ws, ref), ref)).record!
 
 test('a message starts one run with the person\'s words and where they were said; the same submission is one message', async () => {
   const s = await setup()
-  const a = await s.cs.post('d1', { text: 'Make me a blue icon.', author: 'Pat', token: 'tok-00000001' })
+  const a = await s.cs.post('d1', { text: 'Make me a blue icon.', author: 'Pat', token: 'tok-00000001', target: FRONT })
   assert.equal(a.duplicate, false)
   assert.equal(a.message.dispatch_state, 'started')
   assert.equal(a.message.dispatch_run, 'front/converse/run-001')
@@ -90,13 +94,14 @@ test('a message starts one run with the person\'s words and where they were said
 })
 
 test('a turn that could not be requested is started later, once; a restart keeps every message and starts nothing twice', async () => {
-  const s = await setup({ config: false })
-  const a = await s.cs.post('d2', { text: 'first', author: 'Pat', token: 'tok-00000002' })
+  const s = await setup()
+  // A store whose request cannot be made (no execution here): the message is kept, its turn failed with the reason.
+  const bare = new ConversationStore({ area: s.area })
+  const a = await bare.post('d2', { text: 'first', author: 'Pat', token: 'tok-00000002', target: FRONT })
   assert.equal(a.message.dispatch_state, 'failed')
-  assert.match(a.message.dispatch_error ?? '', /conversations\.json/)
-  await s.config()
+  assert.match(a.message.dispatch_error ?? '', /execution is not configured/)
+  bare.close()
   // A restart: a new store over the same file.
-  s.cs.close()
   const cs = new ConversationStore({ area: s.area, exec: s.x })
   const notes = await cs.dispatchDue()
   assert.deepEqual(notes, [`conversation d2 #${a.message.id}: started front/converse/run-001`])
@@ -111,7 +116,7 @@ test('a turn that could not be requested is started later, once; a restart keeps
 
 test('concurrent work: each reply names its run and what it answers; retried replies are one message; questions wait for the person', async () => {
   const s = await setup()
-  const m1 = (await s.cs.post('d3', { text: 'Make an icon.', author: 'Pat', token: 'tok-00000031' })).message
+  const m1 = (await s.cs.post('d3', { text: 'Make an icon.', author: 'Pat', token: 'tok-00000031', target: FRONT })).message
   const m2 = (await s.cs.post('d3', { text: 'And what did playprey deliver last?', author: 'Pat', token: 'tok-00000032' })).message
   assert.equal(m2.dispatch_run, 'front/converse/run-002', 'the second message has its own run while the first is open')
   // The second run answers first; the first run's late completion still answers m1.
@@ -134,7 +139,7 @@ test('concurrent work: each reply names its run and what it answers; retried rep
 
 test('the entrance\'s interpretation is a link a correction supersedes; the original message stays as it was', async () => {
   const s = await setup()
-  const m1 = (await s.cs.post('d4', { text: 'Make an icon.', author: 'Pat', token: 'tok-00000041' })).message
+  const m1 = (await s.cs.post('d4', { text: 'Make an icon.', author: 'Pat', token: 'tok-00000041', target: FRONT })).message
   const m2 = (await s.cs.post('d4', { text: 'make it red', author: 'Pat', token: 'tok-00000042' })).message
   const l1 = s.cs.link('d4', { message: m2.id, run: 'front/converse/run-001', relation: 'follow-up', note: 'about the icon', by: 'front-agent' })
   assert.equal(s.cs.link('d4', { message: m2.id, run: 'front/converse/run-001', relation: 'follow-up', note: 'about the icon', by: 'front-agent' }).duplicate, true)
@@ -148,7 +153,7 @@ test('the entrance\'s interpretation is a link a correction supersedes; the orig
 
 test('from an attempt: show finds its conversation, reply names its run, and an instruction carries the message as its source', async () => {
   const s = await setup()
-  const m1 = (await s.cs.post('d5', { text: 'Make an icon.', author: 'Pat', token: 'tok-00000051' })).message
+  const m1 = (await s.cs.post('d5', { text: 'Make an icon.', author: 'Pat', token: 'tok-00000051', target: FRONT })).message
   const c = await s.x.claim('test')
   assert.ok('attempt' in c)
   // The kid project's run the message is about.
@@ -176,14 +181,115 @@ test('from an attempt: show finds its conversation, reply names its run, and an 
 // so in the record, and a store written before `via` existed opens with it.
 test('a message keeps the way it came (via); a version-1 store gains the column with its messages kept', async () => {
   const s = await setup()
-  const m = (await s.cs.post('d9', { text: 'From the phone.', author: 'Pat', token: 'slack:T1:D1:1.000001', via: 'slack' })).message
+  const m = (await s.cs.post('d9', { text: 'From the phone.', author: 'Pat', token: 'slack:T1:D1:1.000001', via: 'slack', target: FRONT })).message
   const desk = (await s.cs.post('d9', { text: 'From the desk.', author: 'Pat', token: 'tok-00000091' })).message
   const v = await s.cs.view('d9')
   assert.deepEqual(v.messages.filter(x => x.role === 'person').map(x => [x.id, x.via]), [[m.id, 'slack'], [desk.id, null]])
   await assert.rejects(s.cs.post('d9', { text: 'x', author: 'Pat', token: 'tok-00000092', via: 'Not a Way!' }), /via must match/)
-  s.cs.db.exec('ALTER TABLE messages DROP COLUMN via; PRAGMA user_version = 1')
+  s.cs.db.exec('ALTER TABLE messages DROP COLUMN via; ALTER TABLE conversations DROP COLUMN workspace; ALTER TABLE conversations DROP COLUMN workflow; PRAGMA user_version = 1')
   s.cs.close()
   const reopened = new ConversationStore({ area: s.area, exec: s.x })
   assert.deepEqual((await reopened.view('d9')).messages.filter(x => x.role === 'person').map(x => [x.id, x.via]), [[m.id, null], [desk.id, null]])
   reopened.close(); s.x.close()
+})
+
+// workflow_editor p15: every conversation has its own destination.
+test('conversations with two projects: each turn goes to its conversation\'s destination, replies stay attributed, nothing defaults', async () => {
+  const s = await setup()
+  const f = (await s.cs.post('p15-f', { text: 'Hello Front.', author: 'Pat', token: 'tok-p15-f001', target: FRONT })).message
+  const k = (await s.cs.post('p15-k', { text: 'Hello kid.', author: 'Pat', token: 'tok-p15-k001', target: KID })).message
+  assert.equal(f.dispatch_run, 'front/converse/run-001')
+  assert.equal(k.dispatch_run, 'kid/converse/run-001')
+  // Later messages keep going where the conversation is, with or without naming it.
+  const k2 = (await s.cs.post('p15-k', { text: 'And another thing.', author: 'Pat', token: 'tok-p15-k002' })).message
+  const k3 = (await s.cs.post('p15-k', { text: 'One more.', author: 'Pat', token: 'tok-p15-k003', target: KID })).message
+  assert.deepEqual([k2.dispatch_run, k3.dispatch_run], ['kid/converse/run-002', 'kid/converse/run-003'])
+  assert.equal((await listRuns(s.ws('front'))).length, 1, 'no message of the kid conversation reached front')
+  // Concurrent replies from both projects stay in their own conversations, named by run.
+  s.cs.reply('p15-k', { text: 'kid answers the third.', author: 'kid-agent', run: 'kid/converse/run-003', re: [k3.id] })
+  s.cs.reply('p15-f', { text: 'Front answers.', author: 'front-agent', run: 'front/converse/run-001', re: [f.id] })
+  s.cs.reply('p15-k', { text: 'kid answers the first.', author: 'kid-agent', run: 'kid/converse/run-001', re: [k.id] })
+  const vk = await s.cs.view('p15-k')
+  assert.equal(vk.conversation.destination, 'kid/converse')
+  assert.deepEqual(vk.messages.filter(m => m.role === 'agent').map(m => [m.author, m.run, m.re]), [['kid-agent', 'kid/converse/run-003', [k3.id]], ['kid-agent', 'kid/converse/run-001', [k.id]]])
+  assert.deepEqual((await s.cs.view('p15-f')).messages.filter(m => m.role === 'agent').map(m => m.author), ['front-agent'])
+  assert.deepEqual(s.cs.list({ target: KID }).map(c => c.id), ['p15-k'])
+  // Another destination is another conversation; a new one names its destination; only configured targets.
+  await assert.rejects(s.cs.post('p15-k', { text: 'to front?', author: 'Pat', token: 'tok-p15-k004', target: FRONT }), (e: Error & { status?: number }) => /is with kid\/converse/.test(e.message) && e.status === 409)
+  await assert.rejects(s.cs.post('p15-new', { text: 'who?', author: 'Pat', token: 'tok-p15-n001' }), /names its destination/)
+  await assert.rejects(s.cs.post('p15-new', { text: 'who?', author: 'Pat', token: 'tok-p15-n002', target: { workspace: 'nobody', workflow: 'converse' } }), /not a conversation target/)
+  assert.equal(s.cs.conversation('p15-new'), undefined, 'a refused first message creates nothing')
+  assert.equal(s.cs.messages('p15-k').length, 5, 'the refused message was not kept')
+  s.cs.close(); s.x.close()
+})
+
+test('a recorded destination outlives a configuration change; one that cannot take the turn fails visibly and is retried there, never elsewhere', async () => {
+  const s = await setup()
+  await s.cs.post('p15-r', { text: 'first', author: 'Pat', token: 'tok-p15-r001', target: KID })
+  // kid is no longer offered for new conversations; the existing one keeps going to kid.
+  await s.config(['front'])
+  const later = (await s.cs.post('p15-r', { text: 'second', author: 'Pat', token: 'tok-p15-r002' })).message
+  assert.equal(later.dispatch_run, 'kid/converse/run-002')
+  await assert.rejects(s.cs.post('p15-r2', { text: 'new with kid', author: 'Pat', token: 'tok-p15-r201', target: KID }), /not a conversation target/)
+  const t = await s.cs.targets()
+  assert.deepEqual(t.map(x => [x.target, x.state, x.agent]), [['front/converse', 'available', 'front-agent']])
+  // The destination's workflow disappears: the turn fails with the reason and is not sent to front.
+  await s.config(['front', 'kid'])
+  const dir = join(s.area, 'pj-kid')
+  await rm(join(dir, 'devdocs', 'workflows', 'converse.yaml'))
+  const [kidView] = (await s.cs.targets()).filter(x => x.workspace === 'kid')
+  assert.equal(kidView.state, 'unavailable')
+  assert.match(kidView.problem ?? '', /no workflow "converse"/)
+  const lost = (await s.cs.post('p15-r', { text: 'third', author: 'Pat', token: 'tok-p15-r003' })).message
+  assert.equal(lost.dispatch_state, 'failed')
+  assert.ok(lost.dispatch_error)
+  assert.equal((await listRuns(s.ws('front'))).length, 0, 'nothing fell back to front')
+  // Restored: the repair starts it at kid, once.
+  await writeFile(join(dir, 'devdocs', 'workflows', 'converse.yaml'), CONVERSE.replace('front-agent', 'kid-agent'))
+  const notes = await s.cs.dispatchDue()
+  assert.deepEqual(notes, [`conversation p15-r #${lost.id}: started kid/converse/run-003`])
+  assert.deepEqual(await s.cs.dispatchDue(), [])
+  s.cs.close(); s.x.close()
+})
+
+test('a version-2 store maps every conversation once to the single entrance configured before', async () => {
+  const s = await setup()
+  await s.cs.post('p15-m', { text: 'old talk', author: 'Pat', token: 'tok-p15-m001', target: FRONT })
+  s.cs.db.exec('ALTER TABLE conversations DROP COLUMN workspace; ALTER TABLE conversations DROP COLUMN workflow; PRAGMA user_version = 2')
+  s.cs.close()
+  await writeFile(join(s.area, 'conversations.json'), JSON.stringify({ entrance: { workspace: 'front', workflow: 'converse' }, person: 'Pat' }))
+  const cs = new ConversationStore({ area: s.area, exec: s.x })
+  assert.equal((await cs.view('p15-m')).conversation.destination, 'front/converse')
+  await s.config()
+  const next = (await cs.post('p15-m', { text: 'continues', author: 'Pat', token: 'tok-p15-m002' })).message
+  assert.equal(next.dispatch_run, 'front/converse/run-002')
+  cs.close(); s.x.close()
+})
+
+test('HTTP: targets, a page\'s first message names its destination, another destination is 409, the view says where results open', async () => {
+  const s = await setup()
+  const { createHandler } = await import('../server/api.ts')
+  const { createServer } = await import('node:http')
+  await writeFile(join(s.area, 'present.json'), JSON.stringify({ answerBase: 'http://lan.invalid:8093/wfe/' }))
+  const server = createServer(createHandler({ registryFile: s.registry, allowedOrigins: [], exec: s.x, conversations: s.cs }))
+  await new Promise<void>(r => server.listen(0, '127.0.0.1', r))
+  const base = `http://127.0.0.1:${(server.address() as { port: number }).port}/api/conversations`
+  const post = (id: string, body: unknown, origin?: string) => fetch(`${base}/${id}/messages`, { method: 'POST', headers: { 'content-type': 'application/json', ...(origin ? { origin } : {}) }, body: JSON.stringify(body) })
+  try {
+    const list = await (await fetch(base)).json() as { person: string; targets: { target: string; state: string }[] }
+    assert.equal(list.person, 'Pat')
+    assert.deepEqual(list.targets.map(t => [t.target, t.state]), [['front/converse', 'available'], ['kid/converse', 'available']])
+    const first = await post('p15-h', { text: 'Hi kid', token: 'tok-p15-h001', target: 'kid/converse' })
+    assert.equal(first.status, 200)
+    const sent = await first.json() as { run: string; destination: string; message: { author: string } }
+    assert.deepEqual([sent.run, sent.destination, sent.message.author], ['kid/converse/run-001', 'kid/converse', 'Pat'])
+    assert.equal((await post('p15-h', { text: 'Hi front', token: 'tok-p15-h002', target: 'front/converse' })).status, 409)
+    assert.equal((await post('p15-h2', { text: 'Hi?', token: 'tok-p15-h003' })).status, 400)
+    assert.equal((await post('p15-h', { text: 'x', token: 'tok-p15-h004' }, 'http://evil.example')).status, 403, 'another site may not write')
+    const filtered = await (await fetch(`${base}?target=kid/converse`)).json() as { conversations: { id: string; destination: string }[] }
+    assert.deepEqual(filtered.conversations.map(c => [c.id, c.destination]), [['p15-h', 'kid/converse']])
+    const v = await (await fetch(`${base}/p15-h`)).json() as { conversation: { destination: string }; runs: { key: string; url: string; files: string; presentations: unknown[] }[] }
+    assert.equal(v.conversation.destination, 'kid/converse')
+    assert.deepEqual(v.runs.map(r => [r.key, r.url, r.files, r.presentations]), [['kid/converse/run-001', 'http://lan.invalid:8093/wfe/#/ws/kid/run/converse/run-001', 'http://lan.invalid:8093/wfe/api/projects/kid/runs/converse/run-001/raw?path=', []]])
+  } finally { server.closeAllConnections(); server.close(); s.cs.close(); s.x.close() }
 })

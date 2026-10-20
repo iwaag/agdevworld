@@ -85,12 +85,14 @@ export interface InvitationRow {
   id: number; conv: string; participant: string; workspace: string; workflow: string; question: string; source: string; by: string; by_run: string | null
   awaited_by: string | null; horizon: number; token: string | null; state: InvitationState; run: string | null; error: string | null; tries: number
   created: string; updated: string; answered_by: number | null; late: number; reported: string | null
+  delivery: string | null // JSON {question, message}: delivered to the run that asked (see post)
 }
 export interface InvitationEventRow { id: number; conv: string; invitation: number; state: string; at: string; run: string | null; message: number | null; note: string }
 export interface Invitation {
   id: number; participant: string; target: string; question: string; source: number[]; by: string; byRun: string | null; awaitedBy: string | null
   horizon: number; state: InvitationState; late: boolean; run: string | null; runUrl: string | null; error: string | null; tries: number
   created: string; updated: string; answeredBy: number | null; reported: string | null
+  deliveredTo: number | null // the question (message) whose asking run this was delivered to
 }
 export interface DiscussionMessage {
   id: number; role: 'person' | 'agent'; author: string; participant: string | null; text: string; at: string; via: string | null; re: number[]; kind: MessageKind
@@ -245,6 +247,15 @@ export class DiscussionStore {
     const left = targets.filter(t => this.left(conv, t.participant))
     if (left.length) throw new RequestError(409, `${left.map(t => t.participant).join(', ')} left this discussion; join ${left.length > 1 ? 'them' : 'it'} again first`, { code: 'left' })
     const invited = targets.some(t => t.kind === 'facilitator') || !targets.length ? [this.resolve(cfg.facilitator.workspace), ...targets.filter(t => t.kind !== 'facilitator')] : targets
+    // The person's reply to a participant's question goes to the run that
+    // asked, while it is there (not completed): as the answer to its WFE
+    // question, else as an instruction. Otherwise the participant is invited
+    // with a new run, as for any addressed message.
+    const asked = new Map<string, { run: string; question: string | null; message: number }>()
+    for (const t of invited) {
+      const q = re.map(n => this.cs.message(n)).filter((m): m is MessageRow => !!m && m.role === 'agent' && m.kind === 'question' && m.participant === t.participant && !!m.run).at(-1)
+      if (q && await this.runIsOpen(q.run!)) asked.set(t.participant, { run: q.run!, question: q.question, message: q.id })
+    }
     const res = this.tx(() => {
       const seen = this.one<MessageRow>('SELECT * FROM messages WHERE conv = ? AND token = ?', conv, o.token)
       const reopened = !seen && c.state === 'closed'
@@ -257,7 +268,7 @@ export class DiscussionStore {
       }
       const m = this.cs.message(id!)!
       // The invitations of a resubmitted message are found by their tokens.
-      const invs = invited.map(t => this.issue(conv, { participant: t, question: m.text, source: [m.id, ...re.filter(n => n !== m.id)], by: o.author, byRun: null, awaitedBy: null, token: `message:${m.id}:${t.participant}` }))
+      const invs = invited.map(t => this.issue(conv, { participant: t, question: m.text, source: [m.id, ...re.filter(n => n !== m.id)], by: o.author, byRun: null, awaitedBy: null, token: `message:${m.id}:${t.participant}`, deliver: asked.get(t.participant) }))
       return { message: m, duplicate: !!seen, reopened, invitations: invs }
     })
     for (const i of res.invitations) if (i.state === 'pending') await this.dispatch(i.id)
@@ -271,14 +282,14 @@ export class DiscussionStore {
 
   // Records an invitation (inside a transaction), joining a participant who
   // was never a member. Its token makes a retried issue the same invitation.
-  private issue(conv: string, o: { participant: ReturnType<DiscussionStore['resolve']>; question: string; source: number[]; by: string; byRun: string | null; awaitedBy: string | null; token: string }): InvitationRow {
+  private issue(conv: string, o: { participant: ReturnType<DiscussionStore['resolve']>; question: string; source: number[]; by: string; byRun: string | null; awaitedBy: string | null; token: string; deliver?: { run: string; question: string | null; message: number } }): InvitationRow {
     const seen = this.one<InvitationRow>('SELECT * FROM invitations WHERE conv = ? AND token = ?', conv, o.token)
     if (seen) return seen
     if (!this.members(conv).some(m => m.participant === o.participant.participant)) this.joinRow(conv, o.participant, o.by, `invited by ${o.by}`)
     const at = now()
-    const id = Number(this.db.prepare('INSERT INTO invitations (conv, participant, workspace, workflow, question, source, by, by_run, awaited_by, token, state, created, updated) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, \'pending\', ?, ?)')
-      .run(conv, o.participant.participant, o.participant.workspace!, o.participant.workflow!, o.question, JSON.stringify(o.source), o.by, o.byRun, o.awaitedBy, o.token, at, at).lastInsertRowid)
-    this.event(conv, id, 'pending', { note: `issued by ${o.by}${o.byRun ? ` (${o.byRun})` : ''} to ${o.participant.participant}${o.awaitedBy ? `; awaited by ${o.awaitedBy}` : ''}` })
+    const id = Number(this.db.prepare('INSERT INTO invitations (conv, participant, workspace, workflow, question, source, by, by_run, awaited_by, token, state, run, delivery, created, updated) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, \'pending\', ?, ?, ?, ?)')
+      .run(conv, o.participant.participant, o.participant.workspace!, o.participant.workflow!, o.question, JSON.stringify(o.source), o.by, o.byRun, o.awaitedBy, o.token, o.deliver?.run ?? null, o.deliver ? JSON.stringify({ question: o.deliver.question, message: o.deliver.message }) : null, at, at).lastInsertRowid)
+    this.event(conv, id, 'pending', { note: `issued by ${o.by}${o.byRun ? ` (${o.byRun})` : ''} to ${o.participant.participant}${o.awaitedBy ? `; awaited by ${o.awaitedBy}` : ''}${o.deliver ? `; for ${o.deliver.run}, which asked #${o.deliver.message}` : ''}` })
     this.touch(conv)
     return this.invitation(id)!
   }
@@ -328,6 +339,7 @@ export class DiscussionStore {
     if (c.state === 'closed') { this.withdraw(i, 'the discussion was closed before it started'); return this.invitation(id)! }
     try {
       if (!this.exec) throw new Error('execution is not configured here')
+      if (i.delivery && i.run && await this.deliver(i)) return this.invitation(id)!
       const named = JSON.parse(i.source) as number[]
       const first = this.cs.message(named[0] ?? 0) ?? this.cs.message(this.horizon(i.conv).message)
       if (!first) throw new Error('the invitation names no message')
@@ -347,6 +359,54 @@ export class DiscussionStore {
       await this.afterResolution(id)
     }
     return this.invitation(id)!
+  }
+
+  // Delivers an invitation to the run that asked: the person's words as the
+  // answer to its open WFE question (which resumes the node waiting on it),
+  // else as an instruction (which continues a waiting run). The receipt makes
+  // a retry the same record. False when that run has ended meanwhile: the
+  // invitation then starts a new run like any other.
+  private async deliver(i: InvitationRow): Promise<boolean> {
+    const d = JSON.parse(i.delivery!) as { question: string | null; message: number }
+    const { workspace, ref } = parseRunName(i.run!)
+    const ws = await this.exec!.workspace(workspace)
+    const rec = (await readRun(ws, ref)).record as RunRecord | null
+    if (!rec || ['completed', 'cancelled'].includes(situation(rec))) {
+      this.tx(() => {
+        this.db.prepare('UPDATE invitations SET run = NULL, delivery = NULL, updated = ? WHERE id = ?').run(now(), i.id)
+        this.event(i.conv, i.id, 'pending', { note: `${i.run} has ended: a new run is requested instead` })
+      })
+      return false
+    }
+    const m = this.cs.message(JSON.parse(i.source)[0])!
+    const source: ConversationSource = { kind: 'conversation', conversation: i.conv, message: m.id, author: m.author, at: m.at, invitation: i.id }
+    const receipt = `discussion:${i.conv}:invitation:${i.id}`
+    const q = d.question ? rec.questions[d.question] : undefined
+    let how: string
+    if (q && !q.withdrawn && !q.takenUp) {
+      await runOp(ws, ref, { op: 'question.answer', question: q.id, text: i.question, from: i.by, source, receipt }, { by: i.by, via: 'discussion' })
+      const job = await this.exec!.afterAnswer(ws, ref, q.id)
+      how = `the answer to ${q.id}${job ? `; job ${job.id}` : ''}`
+    } else {
+      const r = await runOp(ws, ref, { op: 'instruction.receive', text: i.question, from: i.by, source, receipt }, { by: i.by, via: 'discussion' })
+      const ins = r.record.history.find(h => h.receipt === receipt)?.change.instruction?.[1] ?? Object.keys(r.record.instructions ?? {}).at(-1)
+      const job = ins ? await this.exec!.afterInstruction(ws, ref, ins) : null
+      how = `instruction ${ins}${job ? `; job ${job.id}` : ''}`
+    }
+    this.tx(() => {
+      this.db.prepare('UPDATE invitations SET state = \'started\', error = NULL, tries = tries + 1, horizon = CASE WHEN horizon = 0 THEN ? ELSE horizon END, updated = ? WHERE id = ?').run(this.horizon(i.conv).message, now(), i.id)
+      this.event(i.conv, i.id, 'started', { run: i.run, note: `delivered to ${i.run}, which asked #${d.message}, as ${how}` })
+    })
+    return true
+  }
+
+  private async runIsOpen(run: string): Promise<boolean> {
+    if (!this.exec) return false
+    try {
+      const { workspace, ref } = parseRunName(run)
+      const rec = (await readRun(await this.exec.workspace(workspace), ref)).record as RunRecord | null
+      return !!rec && !['completed', 'cancelled'].includes(situation(rec))
+    } catch { return false }
   }
 
   private withdraw(i: InvitationRow, why: string) { this.tx(() => this.withdrawRow(i, why)) }
@@ -403,10 +463,13 @@ export class DiscussionStore {
       this.touch(conv)
       const id = Number(this.db.prepare('INSERT INTO messages (conv, role, author, text, at, re, kind, run, attempt, question, key, participant, invitation) VALUES (?, \'agent\', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
         .run(conv, o.author, o.text, at, JSON.stringify(re), kind, o.run, o.attempt ?? null, o.question ?? null, key, participant, inv?.id ?? null).lastInsertRowid)
-      if (inv && ANSWERING.includes(kind) && inv.state !== 'answered') {
-        const late = inv.state === 'unanswered' || inv.state === 'withdrawn' || inv.state === 'failed' ? 1 : 0
-        this.db.prepare('UPDATE invitations SET state = \'answered\', answered_by = ?, late = ?, updated = ? WHERE id = ?').run(id, late, at, inv.id)
-        this.event(conv, inv.id, 'answered', { run: o.run, message: id, note: late ? `answered late (was ${inv.state})` : 'answered' })
+      // The run's own invitation, and those delivered to it since (a reply
+      // to its question): a reply, result or synthesis answers them.
+      const answered = ANSWERING.includes(kind) ? [...(inv && inv.state !== 'answered' ? [inv] : []), ...this.all<InvitationRow>('SELECT * FROM invitations WHERE conv = ? AND run = ? AND delivery IS NOT NULL AND state = \'started\' AND id IS NOT ?', conv, o.run, inv?.id ?? null)] : []
+      for (const a of answered) {
+        const late = a.state === 'unanswered' || a.state === 'withdrawn' || a.state === 'failed' ? 1 : 0
+        this.db.prepare('UPDATE invitations SET state = \'answered\', answered_by = ?, late = ?, updated = ? WHERE id = ?').run(id, late, at, a.id)
+        this.event(conv, a.id, 'answered', { run: o.run, message: id, note: late ? `answered late (was ${a.state})` : 'answered' })
       }
       return { message: this.cs.message(id)!, duplicate: false }
     })
@@ -542,7 +605,7 @@ export class DiscussionStore {
     return { id: m.id, role: m.role, author: m.author, participant: m.participant, text: m.text, at: m.at, via: m.via, re: JSON.parse(m.re) as number[], kind: m.kind, run, runUrl: run ? runUrl(viewBase, run) : null, attempt: m.attempt, question: m.question, invitation: m.invitation, addressed: m.addressed ? JSON.parse(m.addressed) as string[] : [] }
   }
   invitationView(i: InvitationRow, viewBase?: string | null): Invitation {
-    return { id: i.id, participant: i.participant, target: `${i.workspace}/${i.workflow}`, question: i.question, source: JSON.parse(i.source) as number[], by: i.by, byRun: i.by_run, awaitedBy: i.awaited_by, horizon: i.horizon, state: i.state, late: !!i.late, run: i.run, runUrl: i.run ? runUrl(viewBase, i.run) : null, error: i.error, tries: i.tries, created: i.created, updated: i.updated, answeredBy: i.answered_by, reported: i.reported }
+    return { id: i.id, participant: i.participant, target: `${i.workspace}/${i.workflow}`, question: i.question, source: JSON.parse(i.source) as number[], by: i.by, byRun: i.by_run, awaitedBy: i.awaited_by, horizon: i.horizon, state: i.state, late: !!i.late, run: i.run, runUrl: i.run ? runUrl(viewBase, i.run) : null, error: i.error, tries: i.tries, created: i.created, updated: i.updated, answeredBy: i.answered_by, reported: i.reported, deliveredTo: i.delivery ? (JSON.parse(i.delivery) as { message: number }).message : null }
   }
 
   // The discussion with its members and their history, every message (the

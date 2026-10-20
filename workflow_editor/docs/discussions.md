@@ -63,7 +63,7 @@ the same run.
 | --- | --- |
 | `pending` | recorded, run not requested yet |
 | `started` | its run was requested |
-| `answered` | the run contributed a reply, result or synthesis citing it (`late` when it was already `unanswered`/`withdrawn`/`failed`) |
+| `answered` | the run contributed a reply, result or synthesis (its own invitation, and any delivered to it since; `late` when it was already `unanswered`/`withdrawn`/`failed`) |
 | `unanswered` | the run completed or was cancelled without such a contribution |
 | `failed` | the run could not be requested (the reason is kept); reconcile retries it up to 3 tries in all, then only `wfe discussion dispatch`; never sent to another participant |
 | `withdrawn` | not started, and withdrawn by hand or by closing |
@@ -76,6 +76,14 @@ Every transition is an invitation event (archived).
   not started;
 - nobody named, or the facilitator named → the facilitator is invited (plus
   any others named).
+
+- the message names (`re`) a **question a participant's run asked** the
+  person, and is addressed to that participant → it is delivered to **the run
+  that asked**, while that run has not ended: as the answer to its WFE
+  question (`question.answer`, resuming the node that waits on it) or else
+  as an instruction (continuing a waiting run), with the message as its
+  source and the invitation's receipt. The invitation records `deliveredTo`.
+  After that run ended, the participant is invited with a new run.
 
 A contribution never starts anything by itself. A participant's run cannot
 invite (403 `not-facilitator`); it says in its contribution whom it would

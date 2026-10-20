@@ -231,6 +231,37 @@ test('closing withdraws invitations not started, keeps started ones and continue
   s.cs.close(); s.x.close()
 })
 
+test('the person\'s reply to a participant\'s question reaches the run that asked, as the answer to its question; after that run ended, a new run', async () => {
+  const s = await setup()
+  s.ds.create('p16-q', { title: 'Questions', by: 'Pat', members: ['sage'] })
+  const m1 = (await s.ds.post('p16-q', { text: 'sage, what do you think?', author: 'Pat', token: 'tok-p16-q001', to: ['sage'] })).message
+  const R = 'sage/discuss/run-001'
+  s.x.db.prepare('UPDATE jobs SET state = \'done\' WHERE workspace = \'sage\'').run()
+  await op(s, R, { op: 'node.start', node: 'talk' })
+  await op(s, R, { op: 'question.ask', question: 'q1', node: 'talk', text: 'Which scope: v1 or later?', to: 'Pat' })
+  const q = await s.ds.contribute('p16-q', { text: 'Which scope: v1 or later?', author: 'sage-agent', run: R, invitation: 1, re: [m1.id], kind: 'question', question: 'q1' })
+  assert.equal(s.ds.invitation(1)!.state, 'started', 'a question does not answer the invitation')
+  const a = await s.ds.post('p16-q', { text: 'v1 only.', author: 'Pat', token: 'tok-p16-q002', to: ['sage'], re: [q.message.id] })
+  assert.deepEqual(a.invitations.map(i => [i.participant, i.run, i.state]), [['sage', R, 'started']], 'delivered to the run that asked, no new run')
+  const r = await rec(s, R)
+  assert.equal(r.questions.q1.answers[0].text, 'v1 only.')
+  assert.equal(r.questions.q1.answers[0].from, 'Pat')
+  assert.deepEqual(r.questions.q1.answers[0].source, { kind: 'conversation', conversation: 'p16-q', message: a.message.id, author: 'Pat', at: a.message.at, invitation: a.invitations[0].id })
+  assert.equal(s.x.runRows('sage', ref(R)).jobs.filter(j => j.kind === 'resume').length, 1, 'the run waiting on its question is resumed')
+  assert.equal((await s.ds.post('p16-q', { text: 'v1 only.', author: 'Pat', token: 'tok-p16-q002', to: ['sage'], re: [q.message.id] })).invitations[0].id, a.invitations[0].id, 'a resubmission is the same delivery')
+  assert.equal((await rec(s, R)).questions.q1.answers.length, 1)
+  // Its reply answers both its own invitation and the delivered one.
+  await s.ds.contribute('p16-q', { text: 'Then v1: reuse the lobby.', author: 'sage-agent', run: R, invitation: 1, re: [a.message.id] })
+  assert.deepEqual(s.ds.invitations('p16-q').map(i => i.state), ['answered', 'answered'])
+  // Once that run has ended, a reply to its question starts a new run.
+  await op(s, R, { op: 'question.take-up', question: 'q1' })
+  await op(s, R, { op: 'node.start', node: 'talk' })
+  await op(s, R, { op: 'node.complete', node: 'talk', outcome: 'done' })
+  const late = await s.ds.post('p16-q', { text: 'Also later?', author: 'Pat', token: 'tok-p16-q003', to: ['sage'], re: [q.message.id] })
+  assert.equal(late.invitations[0].run, 'sage/discuss/run-002')
+  s.cs.close(); s.x.close()
+})
+
 test('a restart between an invitation\'s request and its record finds the same run', async () => {
   const s = await setup()
   s.ds.create('p16-f', { title: 'Restart', by: 'Pat' })

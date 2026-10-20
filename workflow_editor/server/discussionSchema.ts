@@ -27,4 +27,10 @@ export const DISCUSSION_MIGRATIONS: Migration[] = [{
     CREATE TABLE archives (conv TEXT PRIMARY KEY, state TEXT NOT NULL, commit_id TEXT, horizon TEXT, published_at TEXT, error TEXT,
       tries INTEGER NOT NULL DEFAULT 0, attempted_at TEXT);
   `),
+}, {
+  // An invitation delivered to a run that is already there: the person's
+  // reply to a participant's question goes to the run that asked
+  // ({question, message}: its WFE question, and the message that asked).
+  version: 5,
+  up: db => db.exec('ALTER TABLE invitations ADD COLUMN delivery TEXT'),
 }]

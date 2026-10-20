@@ -193,7 +193,7 @@ export class DiscussionArchive {
     const manifest: Manifest = {
       format: ARCHIVE_FORMAT, id: conv, title: d.title, created: d.created, by: d.by, state: d.state, facilitator: `${d.workspace}/${d.workflow}`,
       members: this.ds.members(conv), horizon,
-      invitations: [...invs.values()].map(i => ({ id: i.id, participant: i.participant, target: `${i.workspace}/${i.workflow}`, by: i.by, byRun: i.by_run, awaitedBy: i.awaited_by, source: JSON.parse(i.source), horizon: i.horizon, state: i.state, late: !!i.late, run: i.run, answeredBy: i.answered_by, error: i.error })),
+      invitations: [...invs.values()].map(i => ({ id: i.id, participant: i.participant, target: `${i.workspace}/${i.workflow}`, by: i.by, byRun: i.by_run, awaitedBy: i.awaited_by, source: JSON.parse(i.source), horizon: i.horizon, state: i.state, late: !!i.late, run: i.run, answeredBy: i.answered_by, error: i.error, deliveredTo: i.delivery ? (JSON.parse(i.delivery) as { message: number }).message : null })),
       runs: [...runs.values()],
       exports: [...(before?.exports ?? []), { at: now(), from, through: horizon, records: lines.length, state: d.state }],
       transcript: 'transcript.jsonl', summary: 'summary.md',

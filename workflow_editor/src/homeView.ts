@@ -245,7 +245,7 @@ export function renderHomeView(root: HTMLElement, opts: { context?: boolean } = 
     if (!rows.length) { card.append(h('p.muted.small', 'None yet. A discussion brings several project agents and a facilitator to one table: start one in aghangout.')); return card }
     card.append(h('ul.disc-glance', rows.map(d => h('li', { dataset: { discussion: d.id } },
       h('a', { href: discussionHref(d.id) }, d.title),
-      h('span.muted.small', ` · ${d.state} · ${d.members.length} members · ${d.count} messages${d.open ? ` · ${d.open} open invitation${d.open === 1 ? '' : 's'}` : ''} · `,
+      h('span.muted.small', ` · ${d.state} · ${d.members.length} members · ${d.count} messages${d.open ? ` · ${d.open} open invitation${d.open === 1 ? '' : 's'}` : ''}${d.activity ? ` · ${d.activity.state === 'waiting' ? `now: ${d.activity.kind === 'ask' ? `asking ${d.activity.asked.join(', ')}` : d.activity.kind === 'talk' ? 'asking the requester' : d.activity.kind}` : `last: ${d.activity.kind} ${d.activity.node}`}` : ''} · `,
         d.archive.url ? h('a', { href: d.archive.url, target: '_blank', rel: 'noopener', title: 'The archived record in the argue repository' }, `archived through #${d.archive.through} (${d.archive.commit!.slice(0, 7)})`) : `archive: ${d.archive.state}`,
         d.archive.state === 'behind' || d.archive.state === 'failed' ? ` — ${d.archive.state}` : '')))))
     return card

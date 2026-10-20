@@ -291,6 +291,7 @@ export function createHandler(config: ServiceConfig) {
             const a = await archive.status(d.id)
             return {
               id: d.id, title: d.title, created: d.created, updated: d.updated, state: d.state, count: d.count, members: d.members, open: d.open,
+              conductor: d.conductor ?? null, activity: d.activity,
               last: d.last ? { at: d.last.at, role: d.last.role, author: d.last.author, participant: d.last.participant, kind: d.last.kind, text: d.last.text.slice(0, 300) } : null,
               archive: { state: a.state, commit: a.published?.commit ?? null, through: a.published?.horizon.message ?? null, url: a.published?.url ?? null },
             }

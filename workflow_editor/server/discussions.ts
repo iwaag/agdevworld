@@ -190,7 +190,17 @@ export class DiscussionStore {
     if (c.kind !== 'discussion') throw new RequestError(409, `${id} is a conversation with ${c.workspace}/${c.workflow}, not a discussion: use wfe conversation (api/conversations/${id})`, { code: 'is-conversation' })
     return c
   }
-  list() { return this.cs.list({ kind: 'discussion' }).map(c => ({ ...c, members: this.members(c.id).map(m => m.participant), open: this.invitations(c.id).filter(i => OPEN_STATES.includes(i.state)).length })) }
+  // Each discussion with its members, open invitations and (argue p4) what
+  // its conductor does now: the latest waiting activity, else the latest one.
+  list() {
+    return this.cs.list({ kind: 'discussion' }).map(c => {
+      const acts = this.activityRows(c.id)
+      const now = acts.filter(a => a.state === 'waiting').at(-1) ?? acts.at(-1)
+      const who = now?.kind === 'ask' ? this.all<{ participant: string }>('SELECT participant FROM invitations WHERE activity = ? ORDER BY id', now.id).map(r => r.participant) : []
+      return { ...c, members: this.members(c.id).map(m => m.participant), open: this.invitations(c.id).filter(i => OPEN_STATES.includes(i.state)).length,
+        activity: now ? { kind: now.kind, state: now.state, node: now.node, run: now.run, asked: now.awaits ? [now.awaits] : who } : null }
+    })
+  }
   messages(conv: string, since = 0): MessageRow[] { return this.cs.messages(conv, since) }
   membership(conv: string): MembershipRow[] { return this.all<MembershipRow>('SELECT * FROM membership WHERE conv = ? ORDER BY id', conv) }
   invitations(conv: string): InvitationRow[] { return this.all<InvitationRow>('SELECT * FROM invitations WHERE conv = ? ORDER BY id', conv) }

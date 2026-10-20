@@ -101,7 +101,8 @@ service with the request's own `Host` and an `x-wfe-route` header (since
 workflow_editor p11 the service gates no operation on that header). Since
 retire_old_ui p1 the dashboard is the site's Home: a bare `/` on either
 agdevworld listener is redirected there. Its header links Usage
-(docs/usage.md) and the Front Desk.
+(docs/usage.md) and aghangout (`/hangout/`, a managed project's application
+for talking with the project agents; workflow_editor p15).
 
 - **Gitea.** New projects and shared repositories live on Gitea
   (`server/gitea.ts`). The token reaches Git as an HTTP header through

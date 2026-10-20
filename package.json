@@ -4,18 +4,8 @@
   "version": "0.0.0",
   "type": "module",
   "scripts": {
-    "dev": "vite",
-    "build": "tsc && vite build",
-    "preview": "vite preview",
     "editor:install": "npm --prefix workflow_editor ci --no-audit --no-fund",
     "editor:check": "npm --prefix workflow_editor run check",
-    "check": "npm run build && npm run editor:check"
-  },
-  "devDependencies": {
-    "typescript": "~6.0.2",
-    "vite": "^8.2.0"
-  },
-  "dependencies": {
-    "phaser": "^4.2.1"
+    "check": "npm run editor:check"
   }
 }

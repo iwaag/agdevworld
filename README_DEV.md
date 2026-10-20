@@ -1,25 +1,24 @@
 # agdevworld Development Guide
 
-agdevworld is the agdev site. Since retire_old_ui p1 (2026-10-20):
+agdevworld is the agdev site. Since workflow_editor p15 (2026-10-20):
 
 - **Home is the agdev dashboard**, the workflow editor's UI
   (`workflow_editor/`), served by its service under `/wfe/`. It holds the
-  projects, runs, execution nodes, Context, Usage and User nodes.
-- **The Front Desk** (`/?view=frontdesk[&conv=<id>]`) is the one screen this
-  site's own bundle (`src/`) still serves, beside the **Arguing Room**
-  (`/?view=argue`, argue history). The desk reads and posts WFE
-  conversations. Its settings, contexts and progress panels read the
-  `agentroom/` relay.
-- **The relay** (`agentroom/`) serves those panels, the Arguing Room, and
-  what the Usage view reads from this host's harness logins and the pre-WFE
-  records.
+  projects, runs, execution nodes, Context, Usage and User nodes, and it owns
+  conversations and their execution (`workflow_editor/docs/conversations.md`).
+- **aghangout** (`/hangout/`) is where a person talks with the project
+  agents. It is a managed project (`aghangout`, Gitea
+  `developer/pj-aghangout`), not part of this repository. Its own deploy
+  installs releases in a host directory, and this site's web server serves
+  that directory on the agdev origin. It replaced the embedded Front Desk and
+  the Arguing Room, which are deleted with their bundle (`src/`, Phaser).
+- **The relay** (`agentroom/`) serves the Usage view's reads from this host:
+  `/budget` and `/cost`.
 
-The world views (nodes, workspaces, agent room, operation room, routines),
-the operation room dashboard, its graph page and the cost gauge page are
-retired, together with their relay routes and the cluster snapshot
-publication. Their earlier documentation is in this file's history and in
-the episodes (`agent_room`, `operation_room`, `refine_routine`,
-`gauge_panel`, `retire_old_ui`).
+The world views, the operation room, the routine dashboard, the cost gauge
+page (retire_old_ui p1) and the Front Desk and Arguing Room (workflow_editor
+p15) are retired. Their documentation is in this file's history and in the
+episodes.
 
 ## UI design policy: Simple and Detail
 
@@ -50,56 +49,59 @@ each agdevworld screen's purpose and usage.
 
 ## Commands
 
-- `npm run dev` — vite with HMR on :5173 (the Front Desk bundle).
-- `npm run build` — `tsc && vite build`. The bundle's check; the Docker build runs it too.
-- `npm run editor:install` then `npm run check` — the bundle build plus the workflow editor package's own check (`workflow_editor/`: tsc, `node --test`, vite build). The package keeps its own lockfile; the Docker image does not include it.
-- `scripts/wfe-release.sh deploy <area>` — build, check and install the workflow editor service and its `wfe` launcher from an agdevworld commit (see "The workflow editor").
-- `docker compose up --build -d web` — nginx on :8090 (static site) and :8093 (static site + `/wfe/`). Rebuild after a bundle or `nginx.conf` change.
-- `curl -I http://localhost:8093/` — `302` to `/wfe/` (Home); `/?view=frontdesk` answers `200`.
-- `OPSROOM_ZULIP_ENV=<the mirror bot's .env> AGENTROOM_CHAT_ZULIP_ENV=<the Developer's .env> agentroom/service/serve.sh` — the relay on :8094.
-- `agentroom/service/serve.sh check` — one read, counts printed, no listener. Tells a credentials problem from a UI one.
-- `cd agentroom && uv run pytest -q` — the relay's tests.
-- `cd agentroom && uv run agentroom-settings sync` — fetch the settings repository (`.local/settings.toml`, from `settings.example.toml`) and make its ref the active revision; `status` reads it back. No restart or rebuild follows a content update.
+- `npm run editor:install` then `npm run check` — the workflow editor
+  package's check (`workflow_editor/`: tsc, `node --test`, vite build). The
+  package keeps its own lockfile.
+- `scripts/wfe-release.sh deploy <area>` — build, check and install the
+  workflow editor service and its `wfe` launcher from an agdevworld commit
+  (see "The workflow editor").
+- `scripts/slack-release.sh deploy <area>` — the Slack integration
+  (`integrations/slack/README.md`).
+- `docker compose up --build -d web` — nginx on :8090 and :8093 (routing
+  only). Rebuild after an `nginx.conf` or `compose.yaml` change; never for
+  aghangout.
+- `curl -I http://localhost:8093/` — `302` to `/wfe/` (Home);
+  `/hangout/` answers `200` once aghangout is deployed.
+- `agentroom/service/serve.sh [check]`, `cd agentroom && uv run pytest -q` —
+  the relay and its tests.
 
 ## Files
 
-- `src/main.ts` — URL entry: the Front Desk or the Arguing Room; any other address goes Home.
-- `src/frontDesk.ts` / `src/scenes/FrontDeskScene.ts` — the two rooms on one Phaser scene: the Front Desk (`/?view=frontdesk`, one WFE conversation with Front) and the Arguing Room (`/?view=argue`, one `#argue` › `argue-<stem>` discussion, history only). `src/roomState.ts` is what differs between them — the adapter (list, open, post, close) — and the relay's shared `presentation` types; `src/roomDemo.ts` a `&demo=1` adapter for either room that never touches a backend; `src/frontDeskPlayback.ts` the agent-posts-as-turns model and cursor; `src/frontDeskSettings.ts` which settings revision draws what; `src/frontDeskInput.ts` the hidden IME textarea, `src/textLayout.ts` the grapheme-safe wrap and pagination.
-- `src/frontDeskClosePanel.ts`, `src/completionState.ts` — closing a conversation (WFE) or an argue (the relay's door), drawn from one plan model.
-- `src/contextPanel.ts`, `src/contextState.ts` — the shared contexts beside the composer (relay `/contexts`).
-- `src/progressPanel.ts`, `src/progressState.ts` — the progress panel (relay `/progress`).
-- `src/settingsState.ts` — the settings repository as the relay serves it (`/settings`, `/settings/<revision>`): characters, lore, revision-addressed portraits and backgrounds.
-- `src/postMeaning.ts` — what a post is for, as the relay says it.
-- `src/endpoints.ts` — the relay's and the agdev origin's URLs, from the host the page was opened under.
-- `nginx.conf` — the two listeners and the entrance rule (below).
-- `workflow_editor/` — the workflow editor (agdev dashboard, Project Editor, runs, Usage, `wfe`): a system component with its own package (see "The workflow editor").
-- `scripts/wfe-release.sh` — builds and installs the workflow editor's service and launcher.
+- `nginx.conf` — the two listeners and their routes (below).
+- `compose.yaml`, `Dockerfile` — the web container: nginx with
+  `nginx.conf`, and aghangout's release directory mounted read-only
+  (`AGHANGOUT_DIR`, default `../.local/agdev/hangout`).
+- `workflow_editor/` — the workflow editor (agdev dashboard, Project Editor,
+  runs, Usage, conversations, `wfe`): a system component with its own
+  package (see "The workflow editor").
+- `integrations/slack/` — the Slack integration, a second client of the
+  conversation contract.
+- `agentroom/` — the relay.
+- `scripts/wfe-release.sh`, `scripts/slack-release.sh` — releases.
 
-## The entrance (retire_old_ui p1)
+## Routes (workflow_editor p15)
 
-- nginx answers a bare `/` with a redirect Home: on `:8093` to `/wfe/`
-  (relative), and on `:8090`, which has no `/wfe/` route, to the same host's
-  `:8093/wfe/`.
-- `/` with a query is the static site as before, so Front Desk conversation
-  links (Slack posts `<origin>/?view=frontdesk&conv=<id>`) open the desk.
-- The bundle sends any address that is not a room Home
-  (`location.replace`), so an old world-view address lands on the dashboard
-  rather than on a retired screen.
-- The Front Desk links "Home ↗". The dashboard links Usage and
-  "Front Desk ↗": under `/wfe/` that is `/?view=frontdesk`, and from the
-  service's own port it is the same host's `:8093`.
+- `:8093` is the agdev origin:
+  - `/wfe/` is proxied to the workflow editor service with the request's
+    own `Host`, so its pages write to its API same-origin.
+  - `/hangout/` serves aghangout's `current` release from the mount. It is
+    the same origin, so aghangout's posts to `/wfe/api/conversations` pass
+    the service's write-origin check without configuration.
+  - Every other address is redirected to `/wfe/`. Exception: an old Front
+    Desk link `/?view=frontdesk&conv=<id>` is redirected to
+    `/hangout/?conv=<id>`.
+- `:8090` has no routes of its own. It redirects to the same host's
+  `:8093`, with the same Front Desk rule.
+- The dashboard header links Usage and "aghangout ↗"
+  (`workflow_editor/src/site.ts`).
 
 ## The relay
 
-`agentroom/` is a stdlib HTTP relay on `:8094`, every interface. Its own
-`README.md` is the reference. It reads the realm through one mirror on its
-own credential and writes only to close an argue, with the Developer's
-credential. It is a separate process, supervised by the local launchd
-deployment (`com.agdev.agentroom`). Its address defaults to port 8094 on the
-host the page was opened from (`src/endpoints.ts`); set
-`VITE_AGENTROOM_URL` at build time to point elsewhere. When it is
-unavailable, the Front Desk's panels say so and the conversation itself (WFE)
-is unaffected.
+`agentroom/` is a stdlib HTTP relay on `:8094`, every interface, supervised
+by launchd (`com.agdev.agentroom`). Its README is the reference. It serves
+`/budget`, the harness logins' windows read through their CLIs, and `/cost`,
+the pre-WFE agents' records as history. It holds no credential and reads no
+Zulip.
 
 ## Usage (retire_old_ui p1)
 
@@ -108,39 +110,11 @@ The dashboard's Usage card and `#/usage` view replace the cost gauge page
 
 - The executions' usage is read by the workflow editor service from the exec
   store and each attempt's log on the coordinator.
-- The subscription windows come from the relay's `/budget`, which reads this
-  host's harness logins through their CLIs.
-- The pre-WFE agents' `ag.agent-run.v1` records come from the relay's
-  `/cost`, shown as history.
+- The subscription windows come from the relay's `/budget`.
+- The pre-WFE agents' records come from the relay's `/cost`, shown as
+  history.
 - The browser reads all three on the dashboard's origin
   (`/wfe/api/usage…`).
-
-## The Front Desk
-
-### Progress panel (`progress_panel` p1)
-
-The Front Desk's `▦ progress` toggle (`src/progressPanel.ts`, data and words
-in `src/progressState.ts`) shows every request in flight in any Front
-conversation: the open conversation pinned, then active requests, then
-results of the last 24 h. It reads `GET /progress?current=<desk id>` every
-8 s while open (60 s closed, for the toggle's `✋`/`■` badges); the board is
-pyagag's `agag.progress` read of the relay's mirror, Observer's records and
-the health checks of the owners that expose one (`agentroom/src/agentroom/progress.py`). Its open
-state and expanded cards live in `localStorage`. It shares the right column
-with the history panel (one closes the other); on a narrow screen its toggle
-takes the button row's left end.
-
-Drawing rules: every state has an icon and words beside its colour; a band
-or segment moves only on a fresh health check (never on a conversation's
-claim, never while the board is stale or the relay unreadable, never under
-`prefers-reduced-motion`); a plan meter is one segment per task and shows no
-number while planning; stages stay as chips until their records exist. When
-the relay stops answering, the last board stays, marked with the time it was
-read.
-
-`?view=frontdesk&demo=1` scripts two requests over a minute
-(`window.__progressDemo.at(seconds)`, `.fail(true)`); `window.__progress
-.snapshot()` returns what the panel shows, for drivers.
 
 ## The workflow editor (`workflow_editor` p4/ex1)
 

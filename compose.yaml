@@ -1,5 +1,6 @@
 services:
-  # Production-style: build the static bundle, serve via nginx
+  # The agdev origin's routing (nginx.conf): Home under /wfe/, aghangout
+  # under /hangout/.
   web:
     build: .
     restart: unless-stopped
@@ -14,18 +15,3 @@ services:
     # site never builds it.
     volumes:
       - ${AGHANGOUT_DIR:-../.local/agdev/hangout}:/srv/hangout:ro
-
-  # Dev with HMR: docker compose up dev
-  dev:
-    image: node:26-alpine
-    profiles: [dev]
-    working_dir: /app
-    volumes:
-      - .:/app
-      - node_modules:/app/node_modules
-    command: sh -c "npm ci && npm run dev -- --host 0.0.0.0"
-    ports:
-      - "5173:5173"
-
-volumes:
-  node_modules:

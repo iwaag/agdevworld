@@ -1,17 +1,12 @@
 [project]
 name = "agentroom"
 version = "0.1.0"
-description = "Live Zulip read for agdevworld's agent room view"
+description = "What this host says about harness usage, for the workflow editor's Usage view"
 requires-python = ">=3.11"
-dependencies = ["pyagag"]
+dependencies = []
 
 [project.scripts]
 agentroom = "agentroom.main:main"
-agentroom-settings = "agentroom.settings:main"
-agentroom-contexts = "agentroom.contexts:main"
-
-[tool.uv.sources]
-pyagag = { git = "https://github.com/iwaag/pyagag.git", branch = "main" }
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

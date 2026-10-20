@@ -1,13 +1,6 @@
-# Build stage
-FROM node:26-alpine AS build
-WORKDIR /app
-COPY package.json package-lock.json ./
-RUN npm ci
-COPY . .
-RUN npm run build && chmod -R a+r dist
-
-# Serve stage
+# The agdev origin's web server: routing only (nginx.conf). Home (/wfe/) is
+# the workflow editor service on the host; /hangout/ is aghangout's own
+# release, mounted from the host (compose.yaml). Nothing is built here.
 FROM nginx:alpine
 COPY nginx.conf /etc/nginx/conf.d/default.conf
-COPY --from=build /app/dist /usr/share/nginx/html
-EXPOSE 80
+EXPOSE 80 8093

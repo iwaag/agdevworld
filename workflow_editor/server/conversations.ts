@@ -131,7 +131,7 @@ export class ConversationStore {
         CREATE INDEX links_run ON links (run);
       `),
     }, {
-      // slack_connect p1: the way a person's message came (null: the Front Desk or the CLI).
+      // slack_connect p1: the way a person's message came (null: a page or the CLI).
       version: 2,
       up: db => db.exec('ALTER TABLE messages ADD COLUMN via TEXT'),
     }, {

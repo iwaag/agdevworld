@@ -667,6 +667,8 @@ export class ExecStore {
   }
 
   attemptRow(id: string): AttemptRow | undefined { return this.one<AttemptRow>('SELECT * FROM attempts WHERE id = ?', id) }
+  // Every attempt this store holds, for the usage read (server/usage.ts).
+  allAttempts(): AttemptRow[] { return this.all<AttemptRow>('SELECT * FROM attempts ORDER BY began') }
 
   // Idempotent (p7): the same report again (a retransmission) is accepted.
   started(attempt: string, pid: number, worker?: string) {

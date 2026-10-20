@@ -35,6 +35,7 @@ export interface ServiceConfig {
   giteaProblem?: string
   exec?: ExecStore // this host's execution management (queue, attempts, publication)
   conversations?: import('./conversations.ts').ConversationStore // the entrance's conversations (p8)
+  usage?: import('./usage.ts').UsageReader // what executions used (retire_old_ui p1)
 }
 
 
@@ -263,6 +264,17 @@ export function createHandler(config: ServiceConfig) {
       if (a === 'workers') {
         const { workerRoute } = await import('./workerApi.ts')
         return await workerRoute({ exec: needExec(), registryFile: config.registryFile, area }, req, res, parts.slice(2), url)
+      }
+
+      // Usage (retire_old_ui p1, docs/usage.md): read-only.
+      if (a === 'usage' && method === 'GET') {
+        if (!config.usage) throw new RequestError(503, 'usage is not configured on this service')
+        if (wsId === 'budget' && !b) return send(res, 200, await config.usage.budget())
+        if (wsId) throw new RequestError(404, 'not found')
+        const { PERIODS } = await import('./usage.ts')
+        const period = url.searchParams.get('period') ?? '7d'
+        if (!(PERIODS as readonly string[]).includes(period)) throw new RequestError(400, `period is one of ${PERIODS.join(', ')}`)
+        return send(res, 200, await config.usage.usage(period as import('./usage.ts').Period))
       }
 
       // The code this service runs (an installed release names its agdevworld commit).

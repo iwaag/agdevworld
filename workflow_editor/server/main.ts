@@ -23,6 +23,7 @@ import { createHandler } from './api.ts'
 import { Gitea, loadGiteaSetting } from './gitea.ts'
 import { ConversationStore } from './conversations.ts'
 import { ExecStore } from './exec.ts'
+import { UsageReader } from './usage.ts'
 import { Watcher } from './watch.ts'
 
 const here = dirname(fileURLToPath(import.meta.url))
@@ -44,6 +45,8 @@ const gitPollMs = Number(option('--git-poll-ms', '3000'))
 
 const extraOrigins = option('--origins', '').split(',').map(o => o.trim()).filter(Boolean)
 const origins = [`http://127.0.0.1:${port}`, `http://localhost:${port}`, `http://127.0.0.1:${DEV_PORT}`, `http://localhost:${DEV_PORT}`, ...extraOrigins]
+// The agentroom relay on this host: subscription windows and pre-WFE records for Usage.
+const relayUrl = option('--relay', 'http://127.0.0.1:8094')
 const giteaFile = option('--gitea', join(dirname(registryFile), 'gitea.json'))
 let gitea: Gitea | undefined, giteaProblem: string | undefined
 if (existsSync(giteaFile)) {
@@ -58,6 +61,7 @@ const handler = createHandler({
   watcher: new Watcher(pollMs, { gitIntervalMs: gitPollMs, registryFile }),
   gitea, giteaProblem,
   exec, conversations: new ConversationStore({ area, exec }),
+  usage: new UsageReader(exec, relayUrl),
 })
 
 const server = createServer((req, res) => void handler(req, res))

@@ -4,6 +4,7 @@ import type {
   WorkflowResponse, WorkspacesResponse,
 } from '../shared/api.ts'
 import type { ApprovalState } from '../shared/canonical.ts'
+import type { BudgetBoard, Period, SourceState, UsageResponse } from '../shared/usage.ts'
 import type { ApprovalKind, Documentation, Project, Workflow } from '../shared/model.ts'
 import type { Catalog, NodeTemplate, TemplateContent } from '../shared/catalog.ts'
 import type { ContextBundle, ContextChange, AttemptContext, BlockKind, BlockRevision, BlockState, EvidenceRef, ScopeTarget } from '../shared/context.ts'
@@ -80,6 +81,11 @@ export const api = {
   // What a shared:// reference is on this host (p12, server/boast.ts resolveShared).
   shareRef: (ref: string) => call<{ ref: string; state: string; detail: string; url: string | null; download: string | null; host: string; path: string | null; folder: boolean }>('GET', `api/share-ref?ref=${encodeURIComponent(ref)}`),
   dashboard: () => call<DashboardResponse>('GET', 'api/agdev'),
+  // Usage (retire_old_ui p1): the executions' own figures, and the subscription windows apart (a cold read asks the vendors).
+  // Every execution node as the coordinator last heard from it (docs/workers.md).
+  workers: (signal?: AbortSignal) => call<{ workers: (WorkerView & { slots?: { attempt: string; workspace: string; workflow: string; run: string; state: string; lane: string }[] })[] }>('GET', 'api/workers', undefined, [], signal),
+  usage: (period: Period, signal?: AbortSignal) => call<UsageResponse>('GET', `api/usage?period=${period}`, undefined, [], signal),
+  usageBudget: (signal?: AbortSignal) => call<SourceState<BudgetBoard>>('GET', 'api/usage/budget', undefined, [], signal),
   createGiteaProject: (input: { id: string; name: string; intent: string; goals: string[]; devdocs: 'directory' | 'submodule'; resume?: boolean; reuse?: boolean }) =>
     call<CreateProjectResult>('POST', 'api/agdev/projects', input, [422]),
   registerGiteaProject: (owner: string, name: string) => call<AgdevResult>('POST', 'api/agdev/projects/register', { owner, name }),

@@ -11,6 +11,9 @@ import { displayToggle, showDetail } from './displayMode.ts'
 import { icon } from './icons.ts'
 import type { ViewHandle } from './main.ts'
 import { ContextSection } from './contextParts.ts'
+import type { BudgetBoard, SourceState, UsageResponse } from '../shared/usage.ts'
+import { siteLinks } from './site.ts'
+import { budgetCards, gaps, isoClock, plural, usd } from './usageParts.ts'
 
 export function diagnosticList(diags: Diagnostic[]): HTMLElement | null {
   if (!diags.length) return null
@@ -26,12 +29,10 @@ export function renderHomeView(root: HTMLElement, opts: { context?: boolean } = 
   let disposed = false
   const results: Record<string, HTMLElement | null> = {}
 
-  // The editor is part of agdevworld: through its /wfe/ route the operation
-  // room is this origin's root; elsewhere (dev server, direct port) it is the
-  // loopback agdev origin.
-  const agdevworld = location.pathname.startsWith('/wfe/') ? '/' : 'http://localhost:8093/'
-  const header = h('header.topbar', h('div.crumbs', h('a.back-to-world', { href: agdevworld, title: 'agdevworld operation room' }, '← agdevworld'), h('span.sep', '|'), h('strong', 'agdev'), h('span.sep', '/'), h('span.muted', 'Dashboard')),
-    h('div.top-actions', h('a.button', { href: '#/nodes', title: 'The activities you expect as distinct workflow nodes (your node catalog)' }, 'User nodes'), h('a.button.d-only', { href: '#/context', title: 'Compare the instructions of every scope side by side' }, 'Context overview'), h('span.live-state.muted.small.d-only'), h('button.d-only', { onclick: () => void load() }, 'Refresh'), displayToggle()))
+  // The site's Home (retire_old_ui p1): the projects, what is used and where
+  // work runs, and the ways to the other screens.
+  const header = h('header.topbar', h('div.crumbs', h('strong', 'agdev'), h('span.sep', '/'), h('span.muted', 'Dashboard')),
+    h('div.top-actions', ...siteLinks(), h('a.button', { href: '#/nodes', title: 'The activities you expect as distinct workflow nodes (your node catalog)' }, 'User nodes'), h('a.button.d-only', { href: '#/context', title: 'Compare the instructions of every scope side by side' }, 'Context overview'), h('span.live-state.muted.small.d-only'), h('button.d-only', { onclick: () => void load() }, 'Refresh'), displayToggle()))
   // Instructions for all projects (p13 ex1): in both modes, above the
   // projects; kept outside what re-renders so its draft is never replaced.
   const context = new ContextSection({ scope: 'system' })
@@ -53,6 +54,24 @@ export function renderHomeView(root: HTMLElement, opts: { context?: boolean } = 
     repoCategory: h('select', { 'aria-label': 'Repository category' }, ['study', 'wedo', 'other'].map(c => h('option', { value: c }, c))),
     repoDescription: h('input', { 'aria-label': 'Repository description', placeholder: 'What it accumulates (for a new repository)' }),
     wsPath: h('input', { 'aria-label': 'Workspace path', placeholder: 'an existing project root on this host' }),
+  }
+
+  // At a glance (retire_old_ui p1): usage, the windows apart (a cold read asks
+  // the vendors), and the execution nodes; their own 20 s refresh, stopped
+  // with the view.
+  let usage: UsageResponse | null = null
+  let usageError = ''
+  let budget: SourceState<BudgetBoard> | null = null
+  let budgetError = ''
+  let nodes: Awaited<ReturnType<typeof api.workers>>['workers'] | null = null
+  let nodesError = ''
+  const usageCtrl = new AbortController()
+  async function loadUsage() {
+    const [u, b, n] = await Promise.allSettled([api.usage('7d', usageCtrl.signal), api.usageBudget(usageCtrl.signal), api.workers(usageCtrl.signal)])
+    if (n.status === 'fulfilled') { nodes = n.value.workers; nodesError = '' } else nodesError = (n.reason as Error).message
+    if (u.status === 'fulfilled') { usage = u.value; usageError = '' } else usageError = (u.reason as Error).message
+    if (b.status === 'fulfilled') { budget = b.value; budgetError = '' } else budgetError = (b.reason as Error).message
+    if (!disposed) render()
   }
 
   async function load() {
@@ -193,6 +212,41 @@ export function renderHomeView(root: HTMLElement, opts: { context?: boolean } = 
     return bar
   }
 
+  // ---- at a glance (retire_old_ui p1): usage and the execution nodes -----------------------
+
+  function renderUsageCard(): HTMLElement {
+    const card = h('section.card.u-glance', h('div.card-head', h('h2', 'Usage'), h('a.more-link', { href: '#/usage' }, 'Usage details', icon('chevron', 'icon small'))))
+    card.append(budgetCards(budget, budgetError, { windows: 2 }))
+    if (usageError) card.append(h('div.banner.warn', icon('alert', 'icon small'), `Execution usage cannot be read: ${usageError}`))
+    else if (!usage) card.append(h('p.muted.small', 'Reading execution usage…'))
+    else {
+      const t = usage.periods['7d']
+      const usdText = t.withUsd ? `${usd(t.usd['api-equivalent'] + t.usd.reported)} API-equivalent` : 'no USD reported'
+      const notCovered = gaps(t)
+      card.append(h('p.u-glance-line', h('strong', 'Last 7 days'), ` · ${plural(t.attempts, 'execution')} · ${usdText}`),
+        ...(notCovered.length ? [h(`p.small.${t.unknown || t.running ? 'warn-text' : 'muted'}`, notCovered.join(' · '))] : []),
+        h('p.muted.small', `API-equivalent: list price under a subscription, not a charge · read ${isoClock(usage.at)}`))
+    }
+    return card
+  }
+
+  function renderNodesCard(): HTMLElement {
+    const card = h('section.card.u-glance.nodes-glance', h('h2', 'Execution nodes'))
+    if (nodesError) { card.append(h('div.banner.warn', icon('alert', 'icon small'), `Execution nodes cannot be read: ${nodesError}`)); return card }
+    if (!nodes) { card.append(h('p.muted.small', 'Reading…')); return card }
+    if (!nodes.length) { card.append(h('p.muted.small', 'No execution node is configured.')); return card }
+    card.append(h('ul.node-list', ...nodes.map(w => {
+      const running = w.slots?.length ? w.slots : w.busy ? [{ ...w.busy, lane: 'default' }] : []
+      return h('li', { dataset: { worker: w.id } },
+        h(`span.dot.${w.state === 'available' ? 'on' : 'off'}`),
+        h('div', h('strong', w.label || w.id),
+          h('div.small', w.state === 'available' ? (running.length ? null : h('span.muted', 'idle')) : h('span.warn-text', w.state === 'unknown' ? 'never reported' : `contact lost${w.at ? ` (last ${when(w.at)})` : ''}`)),
+          ...running.map(r => h('div.small', h('a', { href: runHref(r.workspace, `${r.workflow}/${r.run}`) }, icon('play', 'icon small'), ` ${r.workspace} · ${r.workflow}/${r.run}`), r.lane !== 'default' ? h('span.muted', ` (${r.lane} lane)`) : null)),
+          w.queued.length ? h('div.small.muted', `${plural(w.queued.length, 'job')} queued`) : null))
+    })))
+    return card
+  }
+
   // ---- Simple (p8/ex1): each project's name, purpose, status and opening ----------------
 
   const runHref = (ws: string, ref: string) => `#/ws/${encodeURIComponent(ws)}/run/${ref.split('/').map(encodeURIComponent).join('/')}`
@@ -250,7 +304,7 @@ export function renderHomeView(root: HTMLElement, opts: { context?: boolean } = 
     }
   }
   function renderInto() {
-    content.replaceChildren(renderSimple(), h('div.dash-detail.d-only', renderStatus(), h('div.dash-grid', h('div.col', renderProjects(), renderRepositories()), renderEntrances())))
+    content.replaceChildren(h('div.dash-glance', renderUsageCard(), renderNodesCard()), renderSimple(), h('div.dash-detail.d-only', renderStatus(), h('div.dash-grid', h('div.col', renderProjects(), renderRepositories()), renderEntrances())))
   }
 
   // The registry may change from the CLI or another view; the page follows
@@ -260,9 +314,11 @@ export function renderHomeView(root: HTMLElement, opts: { context?: boolean } = 
     state: s => { const el = header.querySelector('.live-state'); if (el) el.textContent = s ? 'live' : 'not live' },
   })
   const timer = setInterval(() => { if (!busy) void load() }, 20_000)
+  const usageTimer = setInterval(() => void loadUsage(), 20_000)
 
   render()
   void load()
+  void loadUsage()
   if (opts.context) requestAnimationFrame(() => context.reveal(true))
-  return { dispose: () => { disposed = true; context.dispose(); stream.close(); clearInterval(timer) }, isDirty: () => context.isDirty() }
+  return { dispose: () => { disposed = true; context.dispose(); stream.close(); clearInterval(timer); clearInterval(usageTimer); usageCtrl.abort() }, isDirty: () => context.isDirty() }
 }

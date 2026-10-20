@@ -38,9 +38,7 @@ export function renderNodesView(root: HTMLElement): ViewHandle {
   let busy = false
   let disposed = false
 
-  const agdevworld = location.pathname.startsWith('/wfe/') ? '/' : 'http://localhost:8093/'
-  const header = h('header.topbar', h('div.crumbs', h('a.back-to-world', { href: agdevworld, title: 'agdevworld operation room' }, '← agdevworld'), h('span.sep', '|'),
-    h('a', { href: '#/' }, 'agdev'), h('span.sep', '/'), h('span.muted', 'User nodes')),
+  const header = h('header.topbar', h('div.crumbs', h('a', { href: '#/' }, 'agdev'), h('span.sep', '/'), h('span.muted', 'User nodes')),
     h('div.top-actions', h('button.d-only', { onclick: () => void load() }, 'Refresh'), displayToggle()))
   const main = h('main.nodes-view')
   root.append(header, main)

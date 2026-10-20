@@ -2,7 +2,8 @@
 // (project editor), #/ws/<workspace>/wf/<file> (workflow editor) and
 // #/ws/<workspace>/run/<workflow>/<run>[/at/<devdocs commit>] (run view) and
 // #/ws/<workspace>/run/<workflow>/<run>/io/<attempt>/<line> (one IO entry in full, p10)
-// and #/context[/<workspace>[/<workflow>]] (the scoped context overview, p13).
+// and #/context[/<workspace>[/<workflow>]] (the scoped context overview, p13)
+// and #/usage (subscription windows and what executions used, retire_old_ui p1).
 // A trailing /context on Home (#/home/context), a project or a workflow opens
 // that editor's Context section (p13 ex1).
 import './styles.css'
@@ -13,6 +14,7 @@ import { renderRunView } from './runView.ts'
 import { renderIoEntry } from './ioEntryView.ts'
 import { renderWorkflowView } from './workflowView.ts'
 import { renderContextChooser, renderContextView } from './contextView.ts'
+import { renderUsageView } from './usageView.ts'
 import { closeReader } from './contextParts.ts'
 
 const app = document.getElementById('app')!
@@ -40,6 +42,8 @@ function route() {
     current = renderWorkflowView(app, parts[1], parts[3], { context: parts[4] === 'context' })
   } else if (parts[0] === 'context') {
     current = parts[1] ? renderContextView(app, parts[1], parts[2]) : renderContextChooser(app)
+  } else if (parts[0] === 'usage') {
+    current = renderUsageView(app)
   } else if (parts[0] === 'nodes') {
     current = renderNodesView(app)
   } else if (parts[0] === 'ws' && parts[1]) {

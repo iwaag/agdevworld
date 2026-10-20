@@ -58,9 +58,7 @@ export function renderContextView(root: HTMLElement, wsId: string, workflowId?: 
   let disposed = false
   const editors = new Map<Scope, BlockList>()
 
-  const agdevworld = location.pathname.startsWith('/wfe/') ? '/' : 'http://localhost:8093/'
-  const header = h('header.topbar', h('div.crumbs', h('a.back-to-world', { href: agdevworld }, '← agdevworld'), h('span.sep', '|'),
-    h('a', { href: '#/' }, 'agdev'), h('span.sep', '/'), h('a', { href: `#/ws/${encodeURIComponent(wsId)}` }, wsId),
+  const header = h('header.topbar', h('div.crumbs', h('a', { href: '#/' }, 'agdev'), h('span.sep', '/'), h('a', { href: `#/ws/${encodeURIComponent(wsId)}` }, wsId),
     workflowId ? [h('span.sep', '/'), h('span', workflowId)] : null, h('span.sep', '/'), h('span.muted', 'Context overview')),
     h('div.top-actions', h('button', { onclick: () => void load() }, 'Refresh'), displayToggle()))
   const main = h('main.context-view')
@@ -164,11 +162,10 @@ export function renderContextView(root: HTMLElement, wsId: string, workflowId?: 
 // system scope is this WFE area, no project is needed), and the projects
 // whose matrices compare the other scopes.
 export function renderContextChooser(root: HTMLElement): ViewHandle {
-  const agdevworld = location.pathname.startsWith('/wfe/') ? '/' : 'http://localhost:8093/'
   const main = h('main.context-view')
   const system = new BlockList({ scope: 'system' })
   const list = h('section.card', h('h2', 'Projects'), h('p.muted', 'Loading…'))
-  root.append(h('header.topbar', h('div.crumbs', h('a.back-to-world', { href: agdevworld }, '← agdevworld'), h('span.sep', '|'), h('a', { href: '#/' }, 'agdev'), h('span.sep', '/'), h('span.muted', 'Context overview')), h('div.top-actions', displayToggle())), main)
+  root.append(h('header.topbar', h('div.crumbs', h('a', { href: '#/' }, 'agdev'), h('span.sep', '/'), h('span.muted', 'Context overview')), h('div.top-actions', displayToggle())), main)
   main.append(h('section.card.ctx-edit', h('div.card-head', h('h2', 'All projects'), system.addControl), system.el), list)
   void system.refresh()
   void api.workspaces().then(r => list.replaceChildren(h('h2', 'Projects'),

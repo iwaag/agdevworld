@@ -9,7 +9,7 @@ links of direct conversations ([conversations.md](conversations.md)), and
 adds members, invitations and an archive. Code: `server/discussions.ts`,
 `server/discussionArchive.ts`; CLI: `wfe discussion`; store: the
 conversation store (`<area>/.local/conversations/conversations.sqlite`,
-version 4).
+version 6).
 
 The conversation routes refuse a discussion (409 `is-discussion`) and the
 discussion routes refuse a conversation (409 `is-conversation`): a client
@@ -68,6 +68,9 @@ the same run.
 | `failed` | the run could not be requested (the reason is kept); reconcile retries it up to 3 tries in all, then only `wfe discussion dispatch`; never sent to another participant |
 | `withdrawn` | not started, and withdrawn by hand or by closing |
 
+An **awaited result** (argue p3) is an invitation row that starts nothing:
+see *Awaiting a result* below.
+
 Every transition is an invitation event (archived).
 
 **Routing a person's message.** `to` names the addressees:
@@ -100,9 +103,39 @@ it awaits is resolved (answered, unanswered, failed, withdrawn), it is given
 run ([runs.md](runs.md), *An instruction continues a run nobody executes*).
 Each outcome is told once; a late answer is a new outcome. While the
 facilitator's attempt is open it is told nothing (it reads the invite
-results); reconcile tells it once its attempt ended. A completed run keeps
-the instruction and nothing continues it. A closed discussion continues
-nobody.
+results); reconcile tells it once its attempt ended. **A facilitator run that
+has completed meanwhile** (argue p3) is not given the instruction: a new
+facilitator turn is invited instead (by `discussion`, receipt
+`discussion:<id>:continue:<run>:<outcomes>`, once), its question listing the
+outcomes, so what a finished turn awaited is still taken up. A cancelled
+facilitator run is told nothing. A closed discussion continues nobody.
+
+## Awaiting a result (argue p3)
+
+Work commissioned in a discussion outlives the turn that commissioned it: a
+participant's run entrusts work to its project's workflow (a delegate node),
+answers, and goes on waiting for that child; a synthesize run reports later.
+`wfe discussion await --run <workspace>/<workflow>/<run> --note <what>
+[--re <msg>…]`, from the facilitator's run, makes that run await the
+other run's result. It records an invitation with `awaits: result`, state
+`started`, the awaited run as its run and the facilitator's run as
+`awaitedBy` (token `await:<facilitator run>:<run>`: the same await again is
+the same row, event `awaited`). Nothing is started or delivered.
+
+| Event | Outcome |
+| --- | --- |
+| the awaited run contributes a `result` or `synthesis` here | `answered` by that message |
+| a `reply`, `progress` or `question` of that run | nothing: an interim word does not answer it |
+| the run ends (completed or cancelled, seen by reconcile) | `answered` by its last message here since the await, else `unanswered` |
+| awaiting a run that has already ended | settled at once, by the same rule |
+| the discussion is closed | refused; rows already awaited stay and continue nobody while closed |
+
+Its outcome joins the facilitator's other awaited invitations: the
+facilitator is told once all are resolved (*Facilitator continuation*).
+A participant can keep its own invitation open instead by answering only
+with the result (a `progress` note does not answer it); either way the
+facilitator is continued when the result is there, or when the run that
+owed it has ended without it.
 
 ## Contributions
 
@@ -166,7 +199,7 @@ horizon.
 | --- | --- |
 | `GET api/discussions` | `{person, disabled, participants, discussions}`; participants are the facilitator and the invitable projects as their projects say now (`state`, `problem`) |
 | `POST api/discussions {id, title, members?, text?, token?, to?, re?, author?}` | creates (201; the same id by the same author again is 200), and posts the brief when `text` is given |
-| `GET api/discussions/<id>[?since=<msg>]` | `discussion`, `members`, `membership`, `messages` (with `participant`, `run`, `runUrl`, `invitation`, `addressed`), `invitations` (with `runUrl`), `links`, `runs` (shared status, run view, file route, presentations), `asking`, `horizon`, `archive` |
+| `GET api/discussions/<id>[?since=<msg>]` | `discussion`, `members`, `membership`, `messages` (with `participant`, `run`, `runUrl`, `invitation`, `addressed`), `invitations` (with `runUrl`, `awaits`), `links`, `runs` (shared status, run view, file route, presentations), `asking`, `horizon`, `archive` |
 | `POST api/discussions/<id>/messages {text, token, to?, re?, author?, via?}` | the person's words; `{message, invitations, duplicate, reopened}` |
 | `POST api/discussions/<id>/invitations {participant, question, re?, token?, author?}` | the person's invitation |
 | `POST api/discussions/<id>/invitations/<n>/withdraw {reason}` | withdraws one not started |

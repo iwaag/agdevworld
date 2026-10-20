@@ -277,6 +277,82 @@ test('a restart between an invitation\'s request and its record finds the same r
   cs2.close(); s.cs.close(); s.x.close()
 })
 
+test('argue p3: the facilitator awaits the result of a participant\'s run still working; an interim reply does not answer it, the result does, and the waiting facilitator is continued once', async () => {
+  const s = await setup()
+  s.ds.create('p3-a', { title: 'Commission', by: 'Pat' })
+  const m1 = (await s.ds.post('p3-a', { text: 'Do one experiment and report.', author: 'Pat', token: 'tok-p3-a001' })).message
+  const F = 'argue/facilitate/run-001'
+  s.x.db.prepare('UPDATE jobs SET state = \'done\' WHERE workspace = \'argue\'').run()
+  const inv = (await s.ds.invite('p3-a', { participant: 'forge', question: 'Carry out your part and report.', re: [m1.id], by: 'argue-agent', byRun: F })).invitation
+  // forge answers that it entrusted the work, and its run goes on waiting.
+  const c1 = await s.ds.contribute('p3-a', { text: 'Entrusted to provide/run-009; I will report.', author: 'forge-agent', run: inv.run!, invitation: inv.id, re: [m1.id] })
+  assert.equal(c1.invitation!.state, 'answered')
+  await assert.rejects(s.ds.awaitResult('p3-a', { run: inv.run!, note: 'x', by: 'forge-agent', byRun: inv.run! }), /only the facilitator/)
+  await assert.rejects(s.ds.awaitResult('p3-a', { run: 'forge/discuss/run-404', note: 'x', by: 'argue-agent', byRun: F }), /no run/)
+  const aw = await s.ds.awaitResult('p3-a', { run: inv.run!, note: 'forge\'s experiment result', re: [c1.message.id], by: 'argue-agent', byRun: F })
+  assert.deepEqual([aw.duplicate, aw.invitation.state, aw.invitation.awaits, aw.invitation.awaited_by, aw.invitation.run], [false, 'started', 'result', F, inv.run])
+  assert.equal((await s.ds.awaitResult('p3-a', { run: inv.run!, note: 'again', by: 'argue-agent', byRun: F })).duplicate, true, 'the same await is one row')
+  assert.equal(s.x.runRows('forge', ref(inv.run!)).jobs.length, 1, 'nothing is started for an awaited result')
+  await waitOn(s, F)
+  // The facilitator's own attempt ended; reconcile tells it nothing while the result is open.
+  await s.ds.reconcile()
+  assert.equal(Object.keys((await rec(s, F)).instructions ?? {}).length, 0, 'invitation 2 is told only with the awaited result')
+  // An interim reply does not answer the await; a progress note neither.
+  await s.ds.contribute('p3-a', { text: 'Still running.', author: 'forge-agent', run: inv.run!, re: [m1.id], kind: 'progress' })
+  await s.ds.contribute('p3-a', { text: 'To clarify #3: it is one match.', author: 'forge-agent', run: inv.run!, re: [m1.id] })
+  assert.equal(s.ds.invitation(aw.invitation.id)!.state, 'started')
+  const r = await s.ds.contribute('p3-a', { text: 'Result: one match played; logs at …', author: 'forge-agent', run: inv.run!, re: [m1.id], kind: 'result' })
+  assert.equal(s.ds.invitation(aw.invitation.id)!.state, 'answered')
+  assert.equal(s.ds.invitation(aw.invitation.id)!.answered_by, r.message.id)
+  const ins = Object.values((await rec(s, F)).instructions ?? {})
+  assert.equal(ins.length, 1, 'one instruction for both')
+  assert.match(ins[0].text, /the awaited result of forge\/discuss\/run-001 \(invitation 3, forge\): answered by #\d+/)
+  assert.match(ins[0].text, /invitation 2 to forge: answered by/)
+  assert.equal(s.x.runRows('argue', ref(F)).jobs.filter(j => j.kind === 'resume').length, 1, 'the waiting facilitator is continued')
+  await s.ds.reconcile()
+  assert.equal(Object.keys((await rec(s, F)).instructions ?? {}).length, 1, 'told once')
+  const v = await s.ds.view('p3-a')
+  assert.equal(v.invitations.find(i => i.id === aw.invitation.id)!.awaits, 'result')
+  assert.match(v.runs.find(x => x.key === inv.run)!.relation, /awaited result \(invitation 3\)/)
+  s.cs.close(); s.x.close()
+})
+
+test('argue p3: what a completed facilitator run awaited resolves into a new facilitator turn, once, across a restart; a run that ended silent is unanswered; an ended run settles at once', async () => {
+  const s = await setup()
+  s.ds.create('p3-b', { title: 'Ended facilitator', by: 'Pat' })
+  const m1 = (await s.ds.post('p3-b', { text: 'Go.', author: 'Pat', token: 'tok-p3-b001' })).message
+  const F = 'argue/facilitate/run-001'
+  s.x.db.prepare('UPDATE jobs SET state = \'done\' WHERE workspace = \'argue\'').run()
+  const inv = (await s.ds.invite('p3-b', { participant: 'sage', question: 'Run it.', re: [m1.id], by: 'argue-agent', byRun: F })).invitation
+  await s.ds.contribute('p3-b', { text: 'Started.', author: 'sage-agent', run: inv.run!, invitation: inv.id, re: [m1.id] })
+  const aw = await s.ds.awaitResult('p3-b', { run: inv.run!, note: 'sage\'s result', by: 'argue-agent', byRun: F })
+  // The facilitator's turn completes instead of waiting.
+  await finish(s, F)
+  await s.ds.reconcile()
+  assert.equal(s.ds.invitations('p3-b').length, 3, 'nothing new while the result is open')
+  // A restart: a fresh store over the same records; sage's run ends without a word.
+  await finish(s, inv.run!)
+  const cs2 = new ConversationStore({ area: s.area, exec: s.x })
+  const ds2 = new DiscussionStore(cs2)
+  const notes = await ds2.reconcile()
+  assert.equal(ds2.invitation(aw.invitation.id)!.state, 'unanswered', notes.join('\n'))
+  const turn = ds2.invitations('p3-b').at(-1)!
+  assert.deepEqual([turn.participant, turn.by, turn.awaited_by, turn.state, turn.run], ['argue', 'discussion', null, 'started', 'argue/facilitate/run-002'])
+  assert.match(turn.question, /awaited result of sage\/discuss\/run-001 .*unanswered: .*ended without a message here since the await/)
+  assert.ok(notes.some(n => /new facilitator turn/.test(n)), notes.join('\n'))
+  assert.equal((await rec(s, 'argue/facilitate/run-002')).input.source?.kind, 'conversation')
+  await ds2.reconcile(); await s.ds.reconcile()
+  assert.equal(ds2.invitations('p3-b').length, 4, 'one new turn, however often reconcile runs')
+  // Awaiting a run that has already ended settles at once, by its last message since.
+  const F2 = 'argue/facilitate/run-002'
+  const done = await ds2.awaitResult('p3-b', { run: 'sage/discuss/run-001', note: 'again', by: 'argue-agent', byRun: F2 })
+  assert.equal(done.invitation.state, 'unanswered')
+  // Closed: nobody is continued and nothing new is invited.
+  ds2.close('p3-b', { by: 'Pat' })
+  await assert.rejects(ds2.awaitResult('p3-b', { run: inv.run!, note: 'x', by: 'argue-agent', byRun: F2 }), /closed/)
+  cs2.close(); s.cs.close(); s.x.close()
+})
+
 test('archive: published incrementally from the repository\'s own horizon; a crash after the push publishes nothing twice; two discussions both land; a fresh clone reads them', async () => {
   const s = await setup()
   const a = new DiscussionArchive(s.ds)

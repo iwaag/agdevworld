@@ -17,9 +17,16 @@
 //   finds the same run. Its state is the record of what came of it:
 //   pending → started → answered | unanswered, failed (with the reason),
 //   withdrawn (on close), answered late;
+// - awaited results (argue p3): the facilitator's run may also await the
+//   result of a run that is already working (a participant's run that
+//   entrusted work and waits for it, a synthesize run, any run). It is an
+//   invitation row that starts nothing (`awaits = 'result'`): answered by
+//   that run's next result or synthesis here, or settled when the run ends;
 // - continuation: when every invitation a facilitator run awaits is
 //   resolved, that run is given one instruction listing the outcomes (the
-//   existing continuation of a waiting run, runs.md). An agent's
+//   existing continuation of a waiting run, runs.md); a facilitator run that
+//   has ended meanwhile is replaced by a new facilitator turn invited with
+//   the outcomes, so what it awaited is never left unread. An agent's
 //   contribution never starts anything by itself.
 //
 // Routing a person's message: addressed participants are invited; without
@@ -86,6 +93,7 @@ export interface InvitationRow {
   awaited_by: string | null; horizon: number; token: string | null; state: InvitationState; run: string | null; error: string | null; tries: number
   created: string; updated: string; answered_by: number | null; late: number; reported: string | null
   delivery: string | null // JSON {question, message}: delivered to the run that asked (see post)
+  awaits: string | null // 'result': an awaited result of a run already working (see awaitResult)
 }
 export interface InvitationEventRow { id: number; conv: string; invitation: number; state: string; at: string; run: string | null; message: number | null; note: string }
 export interface Invitation {
@@ -93,6 +101,7 @@ export interface Invitation {
   horizon: number; state: InvitationState; late: boolean; run: string | null; runUrl: string | null; error: string | null; tries: number
   created: string; updated: string; answeredBy: number | null; reported: string | null
   deliveredTo: number | null // the question (message) whose asking run this was delivered to
+  awaits: string | null // 'result': the facilitator awaits this run's result; no run was started for it
 }
 export interface DiscussionMessage {
   id: number; role: 'person' | 'agent'; author: string; participant: string | null; text: string; at: string; via: string | null; re: number[]; kind: MessageKind
@@ -427,6 +436,64 @@ export class DiscussionStore {
     return this.invitation(id)!
   }
 
+  // The facilitator's run awaits the result of a run that is already working:
+  // a participant's run that entrusted work and waits for it, a synthesize
+  // run, or any other run the discussion depends on. Nothing is started; the
+  // row is an invitation (`awaits = 'result'`, state `started`) so that its
+  // outcome reaches the facilitator by the same continuation. It is answered
+  // by that run's next result or synthesis in this discussion; when the run
+  // ends first, by its last message here since the await, else it is
+  // unanswered. The same facilitator run awaiting the same run again is the
+  // same row.
+  async awaitResult(conv: string, o: { run: string; note: string; re?: number[]; by: string; byRun: string }): Promise<{ invitation: InvitationRow; duplicate: boolean }> {
+    const c = this.need(conv)
+    const cfg = this.cfg()
+    if (c.state === 'closed') throw new RequestError(409, `discussion ${conv} is closed: reopen it to await anything`, { code: 'closed' })
+    const f = parseRunName(o.byRun)
+    if (f.workspace !== cfg.facilitator.workspace || f.ref.workflow !== cfg.facilitator.workflow) throw new RequestError(403, `only the facilitator's run (${targetName(cfg.facilitator)}) awaits a result here`, { code: 'not-facilitator' })
+    if (o.run === o.byRun) throw new RequestError(400, 'a run does not await itself')
+    if (!o.note.trim()) throw new RequestError(400, 'say what result is awaited (--note)')
+    const { workspace, ref } = parseRunName(o.run)
+    if (!this.exec) throw new RequestError(503, 'execution is not configured here')
+    const rec = (await readRun(await this.exec.workspace(workspace), ref).catch(() => ({ record: null }))).record as RunRecord | null
+    if (!rec) throw new RequestError(404, `no run ${o.run}`)
+    const re = this.validRe(conv, o.re ?? [])
+    const horizon = this.horizon(conv).message
+    const token = `await:${o.byRun}:${o.run}`
+    const before = this.one<InvitationRow>('SELECT * FROM invitations WHERE conv = ? AND token = ?', conv, token)
+    if (!before) {
+      this.tx(() => {
+        const at = now()
+        const participant = workspace === cfg.facilitator.workspace && ref.workflow === cfg.facilitator.workflow ? cfg.facilitator.workspace : workspace
+        const id = Number(this.db.prepare('INSERT INTO invitations (conv, participant, workspace, workflow, question, source, by, by_run, awaited_by, horizon, token, state, run, awaits, created, updated) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, \'started\', ?, \'result\', ?, ?)')
+          .run(conv, participant, workspace, ref.workflow, o.note.trim(), JSON.stringify(re.length ? re : [horizon]), o.by, o.byRun, o.byRun, horizon, token, o.run, at, at).lastInsertRowid)
+        this.event(conv, id, 'awaited', { run: o.run, note: `${o.byRun} awaits the result of ${o.run} (${situation(rec)}): ${o.note.trim()}` })
+        this.touch(conv)
+      })
+    }
+    const inv = this.one<InvitationRow>('SELECT * FROM invitations WHERE conv = ? AND token = ?', conv, token)!
+    // A run that has already ended settles at once.
+    if (inv.state === 'started' && ['completed', 'cancelled'].includes(situation(rec))) await this.settleEnded(inv, situation(rec))
+    return { invitation: this.invitation(inv.id)!, duplicate: !!before }
+  }
+
+  // An awaited result whose run ended: answered by the run's last message in
+  // the discussion since the await (a result it gave as a reply), else
+  // unanswered. Either way the facilitator is told.
+  private async settleEnded(i: InvitationRow, s: string): Promise<string | null> {
+    this.tx(() => {
+      const last = i.awaits ? this.one<MessageRow>('SELECT * FROM messages WHERE conv = ? AND run = ? AND role = \'agent\' AND at >= ? ORDER BY id DESC LIMIT 1', i.conv, i.run, i.created) : undefined
+      if (last) {
+        this.db.prepare('UPDATE invitations SET state = \'answered\', answered_by = ?, updated = ? WHERE id = ? AND state = \'started\'').run(last.id, now(), i.id)
+        this.event(i.conv, i.id, 'answered', { run: i.run, message: last.id, note: `${i.run} is ${s}; its last message here since the await is #${last.id}` })
+      } else {
+        this.db.prepare('UPDATE invitations SET state = \'unanswered\', updated = ? WHERE id = ? AND state = \'started\'').run(now(), i.id)
+        this.event(i.conv, i.id, 'unanswered', { run: i.run, note: `${i.run} is ${s} and contributed no answer` })
+      }
+    })
+    return this.afterResolution(i.id)
+  }
+
   // ---- the participants' speech ----------------------------------------------------
 
   // A message by a run's agent: attributed to the participant the run speaks
@@ -458,23 +525,26 @@ export class DiscussionStore {
     const key = o.key ?? createHash('sha256').update(o.text).digest('hex').slice(0, 24)
     const res = this.tx(() => {
       const seen = this.one<MessageRow>('SELECT * FROM messages WHERE conv = ? AND run IS ? AND key = ?', conv, o.run, key)
-      if (seen) return { message: seen, duplicate: true }
+      if (seen) return { message: seen, duplicate: true, answered: [] as number[] }
       const at = now()
       this.touch(conv)
       const id = Number(this.db.prepare('INSERT INTO messages (conv, role, author, text, at, re, kind, run, attempt, question, key, participant, invitation) VALUES (?, \'agent\', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
         .run(conv, o.author, o.text, at, JSON.stringify(re), kind, o.run, o.attempt ?? null, o.question ?? null, key, participant, inv?.id ?? null).lastInsertRowid)
       // The run's own invitation, and those delivered to it since (a reply
-      // to its question): a reply, result or synthesis answers them.
-      const answered = ANSWERING.includes(kind) ? [...(inv && inv.state !== 'answered' ? [inv] : []), ...this.all<InvitationRow>('SELECT * FROM invitations WHERE conv = ? AND run = ? AND delivery IS NOT NULL AND state = \'started\' AND id IS NOT ?', conv, o.run, inv?.id ?? null)] : []
+      // to its question): a reply, result or synthesis answers them. A result
+      // or synthesis also answers what is awaited of this run (an interim
+      // reply does not).
+      const answered = ANSWERING.includes(kind) ? [...(inv && inv.state !== 'answered' ? [inv] : []), ...this.all<InvitationRow>('SELECT * FROM invitations WHERE conv = ? AND run = ? AND delivery IS NOT NULL AND state = \'started\' AND id IS NOT ?', conv, o.run, inv?.id ?? null),
+        ...(kind === 'result' || kind === 'synthesis' ? this.all<InvitationRow>('SELECT * FROM invitations WHERE conv = ? AND run = ? AND awaits IS NOT NULL AND state = \'started\'', conv, o.run) : [])] : []
       for (const a of answered) {
         const late = a.state === 'unanswered' || a.state === 'withdrawn' || a.state === 'failed' ? 1 : 0
         this.db.prepare('UPDATE invitations SET state = \'answered\', answered_by = ?, late = ?, updated = ? WHERE id = ?').run(id, late, at, a.id)
         this.event(conv, a.id, 'answered', { run: o.run, message: id, note: late ? `answered late (was ${a.state})` : 'answered' })
       }
-      return { message: this.cs.message(id)!, duplicate: false }
+      return { message: this.cs.message(id)!, duplicate: false, answered: answered.map(a => a.id) }
     })
-    if (inv) await this.afterResolution(inv.id)
-    return { ...res, invitation: inv && this.invitation(inv.id)! }
+    for (const a of new Set([...(inv ? [inv.id] : []), ...(res.answered ?? [])])) await this.afterResolution(a)
+    return { message: res.message, duplicate: res.duplicate, invitation: inv && this.invitation(inv.id)! }
   }
 
   // When an invitation awaited by a facilitator run is resolved and nothing
@@ -493,9 +563,11 @@ export class DiscussionStore {
     const untold = awaited.filter(a => a.reported !== label(a))
     if (!untold.length || !this.exec) return null
     const outcome = (a: InvitationRow) => a.state === 'answered' ? `answered${a.late ? ' late' : ''} by #${a.answered_by} (${a.run})`
-      : a.state === 'unanswered' ? `unanswered: ${a.run} ended without a contribution`
+      : a.state === 'unanswered' ? `unanswered: ${a.run} ended without ${a.awaits ? 'a message here since the await' : 'a contribution'}`
       : a.state === 'failed' ? `failed: ${a.error}` : `withdrawn: ${a.error ?? ''}`
-    const text = [`Discussion ${i.conv}: the invitations you awaited are resolved.`, ...untold.map(a => `- invitation ${a.id} to ${a.participant}: ${outcome(a)}`), `Read what was said: wfe discussion show ${i.conv} --since ${Math.min(...untold.map(a => a.horizon || 0))}`].join('\n')
+    const what = (a: InvitationRow) => a.awaits ? `the awaited result of ${a.run} (invitation ${a.id}, ${a.participant})` : `invitation ${a.id} to ${a.participant}`
+    const lines = (head: string) => [head, ...untold.map(a => `- ${what(a)}: ${outcome(a)}`), `Read what was said: wfe discussion show ${i.conv} --since ${Math.min(...untold.map(a => a.horizon || 0))}`].join('\n')
+    const text = lines(`Discussion ${i.conv}: the invitations you awaited are resolved.`)
     const ids = untold.map(a => `${a.id}-${label(a)}`).join('.')
     let receipt = `discussion:${i.conv}:continue:${i.awaited_by}:${ids}`
     if (receipt.length > 200) receipt = `discussion:${i.conv}:continue:${createHash('sha256').update(receipt).digest('hex').slice(0, 32)}`
@@ -510,6 +582,16 @@ export class DiscussionStore {
       // the invite results, and reconcile tells it once its attempt ended.
       const fr = (await readRun(ws, ref)).record as RunRecord | null
       if (fr && (fr.control.attempt || fr.execution.state === 'not-started')) return null
+      // A facilitator run that completed meanwhile cannot be continued: the
+      // outcomes go to a new facilitator turn (receipt-bound, once), so what
+      // was awaited is read by the facilitator whenever it resolves.
+      if (fr && situation(fr) === 'completed') {
+        const cfg = this.cfg()
+        const turn = this.tx(() => this.issue(i.conv, { participant: this.resolve(cfg.facilitator.workspace), question: lines(`Discussion ${i.conv}: what ${i.awaited_by} awaited is resolved, and that run has completed; this turn takes it up.`), source: m ? [m.id] : JSON.parse(untold[0].source) as number[], by: 'discussion', byRun: null, awaitedBy: null, token: receipt }))
+        this.tx(() => { for (const a of untold) this.db.prepare('UPDATE invitations SET reported = ? WHERE id = ?').run(label(a), a.id) })
+        const started = turn.state === 'pending' ? await this.dispatch(turn.id) : turn
+        return `${i.awaited_by} has completed: a new facilitator turn, invitation ${started.id} (${started.state}${started.run ? ` ${started.run}` : ''})`
+      }
       const source: ConversationSource | undefined = m ? { kind: 'conversation', conversation: i.conv, message: m.id, author: m.author, at: m.at } : undefined
       const r = await runOp(ws, ref, { op: 'instruction.receive', text, from: `discussion ${i.conv}`, ...(source ? { source } : {}), receipt }, { by: 'discussion', via: 'discussion' })
       const ins = r.record.history.find(h => h.receipt === receipt)?.change.instruction?.[1] ?? Object.keys(r.record.instructions ?? {}).at(-1)
@@ -544,6 +626,12 @@ export class DiscussionStore {
         const rec = (await readRun(await this.exec.workspace(workspace), ref)).record as RunRecord | null
         const s = rec ? situation(rec) : null
         if (s !== 'completed' && s !== 'cancelled') continue
+        if (i.awaits) {
+          const told = await this.settleEnded(i, s)
+          notes.push(`discussion ${i.conv} awaited result ${i.id}: ${this.invitation(i.id)!.state} (${i.run} ${s})`)
+          if (told) notes.push(`discussion ${i.conv}: ${told}`)
+          continue
+        }
         this.tx(() => {
           this.db.prepare('UPDATE invitations SET state = \'unanswered\', updated = ? WHERE id = ? AND state = \'started\'').run(now(), i.id)
           this.event(i.conv, i.id, 'unanswered', { run: i.run, note: `${i.run} is ${s} and contributed no answer` })
@@ -605,7 +693,7 @@ export class DiscussionStore {
     return { id: m.id, role: m.role, author: m.author, participant: m.participant, text: m.text, at: m.at, via: m.via, re: JSON.parse(m.re) as number[], kind: m.kind, run, runUrl: run ? runUrl(viewBase, run) : null, attempt: m.attempt, question: m.question, invitation: m.invitation, addressed: m.addressed ? JSON.parse(m.addressed) as string[] : [] }
   }
   invitationView(i: InvitationRow, viewBase?: string | null): Invitation {
-    return { id: i.id, participant: i.participant, target: `${i.workspace}/${i.workflow}`, question: i.question, source: JSON.parse(i.source) as number[], by: i.by, byRun: i.by_run, awaitedBy: i.awaited_by, horizon: i.horizon, state: i.state, late: !!i.late, run: i.run, runUrl: i.run ? runUrl(viewBase, i.run) : null, error: i.error, tries: i.tries, created: i.created, updated: i.updated, answeredBy: i.answered_by, reported: i.reported, deliveredTo: i.delivery ? (JSON.parse(i.delivery) as { message: number }).message : null }
+    return { id: i.id, participant: i.participant, target: `${i.workspace}/${i.workflow}`, question: i.question, source: JSON.parse(i.source) as number[], by: i.by, byRun: i.by_run, awaitedBy: i.awaited_by, horizon: i.horizon, state: i.state, late: !!i.late, run: i.run, runUrl: i.run ? runUrl(viewBase, i.run) : null, error: i.error, tries: i.tries, created: i.created, updated: i.updated, answeredBy: i.answered_by, reported: i.reported, deliveredTo: i.delivery ? (JSON.parse(i.delivery) as { message: number }).message : null, awaits: i.awaits ?? null }
   }
 
   // The discussion with its members and their history, every message (the
@@ -620,7 +708,7 @@ export class DiscussionStore {
     const links = this.cs.links(conv)
     const keys = new Map<string, Set<string>>()
     const add = (k: string, rel: string) => { if (!keys.has(k)) keys.set(k, new Set()); keys.get(k)!.add(rel) }
-    for (const i of invitations) if (i.run) add(i.run, `invitation ${i.id}`)
+    for (const i of invitations) if (i.run) add(i.run, i.awaits ? `awaited result (invitation ${i.id})` : `invitation ${i.id}`)
     for (const l of links) add(l.run, l.relation)
     const runs: RunEntry[] = await this.cs.runEntries([...keys].map(([key, rel]) => ({ key, relation: [...rel].join(', ') })), o.viewBase)
     return {

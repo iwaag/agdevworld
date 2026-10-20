@@ -33,4 +33,9 @@ export const DISCUSSION_MIGRATIONS: Migration[] = [{
   // ({question, message}: its WFE question, and the message that asked).
   version: 5,
   up: db => db.exec('ALTER TABLE invitations ADD COLUMN delivery TEXT'),
+}, {
+  // An awaited result (argue p3): the facilitator awaits the result of a run
+  // that is already working (`awaits = 'result'`); no run is started for it.
+  version: 6,
+  up: db => db.exec('ALTER TABLE invitations ADD COLUMN awaits TEXT'),
 }]

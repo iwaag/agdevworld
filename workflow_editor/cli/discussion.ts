@@ -21,8 +21,9 @@ participant, run and invitation it came from) and its invitations are
 kept by WFE. An invitation is the only thing that starts a run here: the
 person's message invites the participants it addresses, or the facilitator
 when it addresses nobody; the facilitator invites from its run and is told,
-in one instruction, when everything it awaits is resolved. A contribution
-never starts anything by itself.
+in one instruction, when everything it awaits is resolved (a facilitator
+run that has completed meanwhile is replaced by a new facilitator turn
+given the outcomes). A contribution never starts anything by itself.
 
 participants                  the facilitator and the projects that can be invited, and whether
                               each can take an invitation now
@@ -53,6 +54,13 @@ invite [<id>] <participant> --question <q> [--re <msg>]… [--token <t>] [--auth
                               node wait with wfe run wait … --external discussion:<id> and end your
                               attempt to free the slot). Outside an attempt it is the person's
                               (--author). A participant's run cannot invite: say whom you would ask
+await [<id>] --run <workspace>/<workflow>/<run> --note <what> [--re <msg>]…
+                              from the facilitator's run: await the result of a run that is already
+                              working (a participant's run waiting for the work it entrusted, a
+                              synthesize run, any run). Nothing is started. It is resolved by that
+                              run's next result or synthesis here, or when the run ends (answered by
+                              its last message here since the await, else unanswered), and told with
+                              your other awaited invitations. Wait as for invite
 withdraw <id> <invitation> --reason <why> [--author <person>]
                               withdraw an invitation not started yet
 join <id> <participant> [--note <n>] [--author <who>]    a member joins (recorded in the history)
@@ -150,7 +158,7 @@ export async function discussionCommand(c: DiscussionCli): Promise<number> {
           lines.push(...m.text.split('\n').map(l => `    ${l}`))
           for (const l of v.links.filter(l => l.message === m.id && !v.links.some(y => y.supersedes === l.id))) lines.push(`    → ${l.relation} ${l.run} by ${l.by}: ${l.note}`)
         }
-        lines.push('', 'Invitations:', ...v.invitations.map(i => `  ${i.id} → ${i.participant} (${i.target}) by ${i.by}${i.byRun ? ` ${i.byRun}` : ''}${i.awaitedBy ? ', awaited' : ''}: ${i.state}${i.late ? ' (late)' : ''}${i.run ? ` ${i.run}` : ''}${i.answeredBy ? ` answered by #${i.answeredBy}` : ''}${i.error ? ` — ${i.error}` : ''}; about ${i.source.map(n => `#${n}`).join(', ')}; "${i.question.split('\n')[0].slice(0, 100)}"`))
+        lines.push('', 'Invitations:', ...v.invitations.map(i => `  ${i.id} → ${i.participant} (${i.target}) by ${i.by}${i.byRun ? ` ${i.byRun}` : ''}${i.awaits ? ', awaited result' : i.awaitedBy ? ', awaited' : ''}: ${i.state}${i.late ? ' (late)' : ''}${i.run ? ` ${i.run}` : ''}${i.answeredBy ? ` answered by #${i.answeredBy}` : ''}${i.error ? ` — ${i.error}` : ''}; about ${i.source.map(n => `#${n}`).join(', ')}; "${i.question.split('\n')[0].slice(0, 100)}"`))
         if (!v.invitations.length) lines.push('  (none)')
         lines.push('', 'Runs (run view; files: append a path in the run folder):', ...v.runs.map(r => `  ${r.key} — ${r.status?.text ?? r.situation} (${r.situation}, ${r.execution}); ${r.relation}${r.url ? `; ${r.url}` : ''}${r.files ? `; files ${r.files}` : ''}${r.presentations.map(p => `; review ${p.id} ${p.url}`).join('')}${r.problem ? `; ${r.problem}` : ''}`))
         lines.push(`Waiting for the person: ${v.asking.length ? v.asking.map(n => `#${n}`).join(', ') : 'nothing'}`)
@@ -193,6 +201,18 @@ export async function discussionCommand(c: DiscussionCli): Promise<number> {
         const r = await ds.invite(id, { participant, question, re: ids('re'), by, byRun: o?.run ?? null, token: c.opt('token') })
         const i = r.invitation
         c.out(`${r.duplicate ? 'Already invited (same invitation)' : 'Invited'}: invitation ${i.id} → ${i.participant}: ${i.state}${i.run ? ` ${i.run}` : ''}${i.error ? ` — ${i.error}` : ''}${i.awaited_by ? `; awaited by ${i.awaited_by}` : ''}.`, { ok: true, ...r })
+        return 0
+      }
+      case 'await': {
+        const id = await disc(args[0])
+        const o = await own()
+        if (!o) throw c.usage('await is the facilitator\'s, from its executing attempt (WFE_ATTEMPT)')
+        const run = c.opt('run'); if (!run) throw c.usage('--run <workspace>/<workflow>/<run> is required: whose result is awaited')
+        parseRunName(run)
+        const note = c.opt('note'); if (!note) throw c.usage('--note <what> is required: the result awaited')
+        const r = await ds.awaitResult(id, { run, note, re: ids('re'), by: o.agent, byRun: o.run })
+        const i = r.invitation
+        c.out(`${r.duplicate ? 'Already awaited' : 'Awaiting'}: the result of ${run} (invitation ${i.id}): ${i.state}${i.answered_by ? ` by #${i.answered_by}` : ''}; awaited by ${i.awaited_by}.`, { ok: true, ...r })
         return 0
       }
       case 'withdraw': {

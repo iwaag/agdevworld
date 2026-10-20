@@ -179,7 +179,7 @@ export class DiscussionArchive {
     const invs = new Map(this.ds.invitations(conv).map(i => [i.id, i]))
     for (const e of this.ds.events(conv, from.event)) {
       const i = invs.get(e.invitation)
-      lines.push({ at: e.at, order: 2, rec: { type: 'invitation', id: e.id, invitation: e.invitation, state: e.state, at: e.at, run: e.run, message: e.message, note: e.note, ...(e.state === 'pending' && i ? { participant: i.participant, target: `${i.workspace}/${i.workflow}`, question: i.question, source: JSON.parse(i.source), by: i.by, byRun: i.by_run, awaitedBy: i.awaited_by } : {}) } })
+      lines.push({ at: e.at, order: 2, rec: { type: 'invitation', id: e.id, invitation: e.invitation, state: e.state, at: e.at, run: e.run, message: e.message, note: e.note, ...((e.state === 'pending' || e.state === 'awaited') && i ? { participant: i.participant, target: `${i.workspace}/${i.workflow}`, question: i.question, source: JSON.parse(i.source), by: i.by, byRun: i.by_run, awaitedBy: i.awaited_by, ...(i.awaits ? { awaits: i.awaits } : {}) } : {}) } })
     }
     for (const m of this.ds.messages(conv, from.message)) lines.push({ at: m.at, order: 1, rec: { type: 'message', id: m.id, at: m.at, role: m.role, author: m.author, participant: m.participant, kind: m.kind, text: m.text, re: JSON.parse(m.re), via: m.via, addressed: m.addressed ? JSON.parse(m.addressed) : [], invitation: m.invitation, run: m.run, attempt: m.attempt, question: m.question } })
     for (const l of this.ds.cs.links(conv)) if (l.id > from.link) lines.push({ at: l.at, order: 3, rec: { type: 'link', id: l.id, at: l.at, message: l.message, run: l.run, relation: l.relation, note: l.note, by: l.by, attempt: l.attempt, supersedes: l.supersedes } })
@@ -195,7 +195,7 @@ export class DiscussionArchive {
     const manifest: Manifest = {
       format: ARCHIVE_FORMAT, id: conv, title: d.title, created: d.created, by: d.by, state: d.state, facilitator: `${d.workspace}/${d.workflow}`,
       members: this.ds.members(conv), horizon,
-      invitations: [...invs.values()].map(i => ({ id: i.id, participant: i.participant, target: `${i.workspace}/${i.workflow}`, by: i.by, byRun: i.by_run, awaitedBy: i.awaited_by, source: JSON.parse(i.source), horizon: i.horizon, state: i.state, late: !!i.late, run: i.run, answeredBy: i.answered_by, error: i.error, deliveredTo: i.delivery ? (JSON.parse(i.delivery) as { message: number }).message : null })),
+      invitations: [...invs.values()].map(i => ({ id: i.id, participant: i.participant, target: `${i.workspace}/${i.workflow}`, by: i.by, byRun: i.by_run, awaitedBy: i.awaited_by, source: JSON.parse(i.source), horizon: i.horizon, state: i.state, late: !!i.late, run: i.run, answeredBy: i.answered_by, error: i.error, deliveredTo: i.delivery ? (JSON.parse(i.delivery) as { message: number }).message : null, ...(i.awaits ? { awaits: i.awaits } : {}) })),
       runs: [...runs.values()],
       exports: [...(before?.exports ?? []), { at: now(), from, through: horizon, records: lines.length, state: d.state }],
       transcript: 'transcript.jsonl', summary: 'summary.md',

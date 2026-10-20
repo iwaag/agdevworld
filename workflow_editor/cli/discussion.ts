@@ -152,7 +152,7 @@ export async function discussionCommand(c: DiscussionCli): Promise<number> {
         }
         lines.push('', 'Invitations:', ...v.invitations.map(i => `  ${i.id} → ${i.participant} (${i.target}) by ${i.by}${i.byRun ? ` ${i.byRun}` : ''}${i.awaitedBy ? ', awaited' : ''}: ${i.state}${i.late ? ' (late)' : ''}${i.run ? ` ${i.run}` : ''}${i.answeredBy ? ` answered by #${i.answeredBy}` : ''}${i.error ? ` — ${i.error}` : ''}; about ${i.source.map(n => `#${n}`).join(', ')}; "${i.question.split('\n')[0].slice(0, 100)}"`))
         if (!v.invitations.length) lines.push('  (none)')
-        lines.push('', 'Runs:', ...v.runs.map(r => `  ${r.key} — ${r.status?.text ?? r.situation} (${r.situation}, ${r.execution}); ${r.relation}${r.url ? `; ${r.url}` : ''}${r.problem ? `; ${r.problem}` : ''}`))
+        lines.push('', 'Runs (run view; files: append a path in the run folder):', ...v.runs.map(r => `  ${r.key} — ${r.status?.text ?? r.situation} (${r.situation}, ${r.execution}); ${r.relation}${r.url ? `; ${r.url}` : ''}${r.files ? `; files ${r.files}` : ''}${r.presentations.map(p => `; review ${p.id} ${p.url}`).join('')}${r.problem ? `; ${r.problem}` : ''}`))
         lines.push(`Waiting for the person: ${v.asking.length ? v.asking.map(n => `#${n}`).join(', ') : 'nothing'}`)
         lines.push(`Archive: ${archive.state}${archive.published ? ` — ${archive.published.commit.slice(0, 12)} through #${archive.published.horizon.message}${archive.published.url ? ` ${archive.published.url}` : ''}` : ''}${archive.error ? ` (${archive.error})` : ''}`)
         c.out(lines.join('\n'), { ...v, archive })

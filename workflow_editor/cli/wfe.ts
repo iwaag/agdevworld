@@ -1637,7 +1637,7 @@ export async function main(argv: string[]): Promise<number> {
   try {
     return await COMMANDS[cmd](p)
   } catch (e) {
-    if (e instanceof UsageError) { console.error(`wfe ${cmd}: ${e.message}\n\n${cmd === 'run' ? 'See: wfe run help <subcommand>' : cmd === 'delegate' ? 'See: wfe delegate help <subcommand>' : HELP[cmd]}`); return 2 }
+    if (e instanceof UsageError) { console.error(`wfe ${cmd}: ${e.message}\n\n${cmd === 'run' ? 'See: wfe run help <subcommand>' : cmd === 'delegate' ? 'See: wfe delegate help <subcommand>' : cmd === 'conversation' ? 'Nothing was posted or recorded. See: wfe conversation help' : HELP[cmd]}`); return 2 }
     if (e instanceof RequestError && !(e instanceof Refused)) e = new Refused(e.message, e.detail)
     // A store that could not be opened or written: store, operation, SQLite code.
     if (e instanceof StoreError) e = new Refused(e.message)

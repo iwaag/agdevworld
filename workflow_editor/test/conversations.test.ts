@@ -293,3 +293,18 @@ test('HTTP: targets, a page\'s first message names its destination, another dest
     assert.deepEqual(v.runs.map(r => [r.key, r.url, r.files, r.presentations]), [['kid/converse/run-001', 'http://lan.invalid:8093/wfe/#/ws/kid/run/converse/run-001', 'http://lan.invalid:8093/wfe/api/projects/kid/runs/converse/run-001/raw?path=', []]])
   } finally { server.closeAllConnections(); server.close(); s.cs.close(); s.x.close() }
 })
+
+// p15: archsage converse/run-001 gave its reply text without --text, read the
+// tail of a long help as success and completed without replying.
+test('a reply whose text is given without --text is refused with that said first and last, and nothing is posted', async () => {
+  const s = await setup()
+  await s.cs.post('p15-u', { text: 'Hi', author: 'Pat', token: 'tok-p15-u001', target: FRONT })
+  const r = await pexec(process.execPath, [join(pkg, 'cli', 'wfe.ts'), 'conversation', 'reply', '--re', '1', 'The answer is 42.', '--by', 'x', '--registry', s.registry, '--area', s.area])
+    .then(() => ({ code: 0, err: '' }), e => ({ code: e.code as number, err: String(e.stderr) }))
+  assert.equal(r.code, 2)
+  const lines = r.err.trim().split('\n')
+  assert.match(lines[0], /"The answer is 42\." is not a conversation id; the text goes in --text/)
+  assert.match(lines.at(-1)!, /Nothing was posted or recorded/)
+  assert.equal(s.cs.messages('p15-u').length, 1)
+  s.cs.close(); s.x.close()
+})

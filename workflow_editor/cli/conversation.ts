@@ -4,7 +4,7 @@
 // uses.
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
-import { ConversationStore, parseRunName, parseTarget, RELATIONS, runName, viewBaseOf, type MessageKind, type Relation } from '../server/conversations.ts'
+import { CONVERSATION_ID, ConversationStore, parseRunName, parseTarget, RELATIONS, runName, viewBaseOf, type MessageKind, type Relation } from '../server/conversations.ts'
 import type { ExecStore } from '../server/exec.ts'
 import { readRun } from '../server/runs.ts'
 import { RequestError } from '../server/workspace.ts'
@@ -88,7 +88,11 @@ export async function conversationCommand(c: ConversationCli): Promise<number> {
       const src = rec.input.source?.kind === 'conversation' ? rec.input.source.conversation : null
       return { run, attempt, agent: rec.executor.name, conversation: src ?? store.conversationsOfRun(run)[0] ?? null }
     }
+    // A positional that cannot be a conversation id is usually the text
+    // given without --text (archsage converse/run-001 believed such a reply
+    // was posted, p15).
     const conv = async (given?: string) => {
+      if (given && !CONVERSATION_ID.test(given)) throw c.usage(`"${given.length > 40 ? `${given.slice(0, 40)}…` : given}" is not a conversation id; the text goes in --text <text> (or --file <file|->)`)
       if (given) return given
       const o = await own()
       if (o?.conversation) return o.conversation

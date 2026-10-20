@@ -301,6 +301,9 @@ test('execution: the live record beside the published snapshot; a run only on th
   const f = await runFile(s.ctx, 'a', 'ship/run-001', 'braindump.md')
   assert.equal(f.provenance.source, 'live')
   assert.equal((await runFile(s.ctx, 'a', 'ship/run-001', 'braindump.md', { published: true })).provenance.source, 'committed')
+  // p15: the same file named from the project root opens too, live and published.
+  assert.equal((await runFile(s.ctx, 'a', 'ship/run-001', 'devdocs/runs/ship/run-001/braindump.md')).provenance.path, f.provenance.path)
+  assert.equal((await runFile(s.ctx, 'a', 'ship/run-001', 'devdocs/runs/ship/run-001/braindump.md', { published: true })).provenance.source, 'committed')
   // Without a workspace the published records still answer.
   const reg = JSON.parse(await readFile(s.registry, 'utf8'))
   const saved = reg.workspaces

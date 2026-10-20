@@ -795,7 +795,12 @@ export async function run(ctx: AccessContext, project: string, text: string, opt
 // A file of one run's folder: its live copy here (default), or as published.
 export async function runFile(ctx: AccessContext, project: string, text: string, path: string, opts: ReadOptions & { published?: boolean; maxBytes?: number } = {}): Promise<ReadResult> {
   const ref = parseRef(text)
-  const rel = normalizeRepoPath(path)
+  // A path given from the project root (devdocs/runs/<wf>/<run>/…) names the
+  // same file: links written that way open too (p15: forge provide/run-010's
+  // result linked its deliverables so, and they answered 404).
+  const own = `${RUNS_ROOT}/${ref.workflow}/${ref.run}/`
+  const given = normalizeRepoPath(path)
+  const rel = given?.startsWith(own) ? given.slice(own.length) : given
   if (!rel || rel === '.') throw new RequestError(400, `"${path}" is not a path inside the run folder`)
   if (opts.published) return read(ctx, project, `${RUNS_ROOT}/${ref.workflow}/${ref.run}/${rel}`, opts)
   const ws = await liveWorkspace(ctx, project, opts.workspace)

@@ -22,6 +22,10 @@ Code: `server/access.ts`. The CLI is `wfe projects …` (`cli/projects.ts`,
 | A run's file | `wfe projects run <project> <wf>/<run> --file <path> [--published]` | `GET api/projects/<project>/runs/<wf>/<run>/file?path=` |
 | The bytes, for a browser (p8: a link a reader opens — images and audio play, text shows) | — | `GET api/projects/<project>/raw?path=`, `GET api/projects/<project>/runs/<wf>/<run>/raw?path=[&published=1]` |
 
+A run's `path` is relative to the run folder (`deliverables/a.wav`); the
+same path from the project root (`devdocs/runs/<wf>/<run>/deliverables/a.wav`)
+names the same file (workflow_editor p15).
+
 **Targets.** `<project>` is a registered project id. A registered repository
 that no project needs to use is addressed as `repo:<owner>/<name>` or
 `gitea:<id>`. A repository that is not registered is reached only through a

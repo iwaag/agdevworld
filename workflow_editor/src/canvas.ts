@@ -10,6 +10,8 @@ import { FINAL_STEP, PLAN_STEP, type EffectiveGraph } from '../shared/compile.ts
 
 const NS = 'http://www.w3.org/2000/svg'
 export const TYPE_LABEL: Record<string, string> = { study: 'Study', do: 'Do', delegate: 'Delegate', talk: 'Talk' }
+// A discussion activity (argue p4), shown on the card in every display mode.
+export const ACTIVITY_LABEL: Record<string, string> = { announce: 'Announce', ask: 'Ask', ponder: 'Ponder', talk: 'Talk' }
 const EDGE_COLOR: Record<string, string> = { study: '#9aaedc', do: '#e2b867', delegate: '#9c84c4', talk: '#8fd3c0', unknown: '#a9afb8' }
 
 // `step`: a generated documentation step (p5) — the plan talk, a report
@@ -289,11 +291,11 @@ export class Canvas {
       dataset: { id },
       role: 'button',
       tabIndex: 0,
-      'aria-label': `${TYPE_LABEL[t] ?? node.type} node ${title}`,
-      title: `${id} · ${TYPE_LABEL[t] ?? node.type}\n${node.description}`,
+      'aria-label': `${TYPE_LABEL[t] ?? node.type} node ${title}${node.activity ? ` (discussion activity ${node.activity})` : ''}`,
+      title: `${id} · ${TYPE_LABEL[t] ?? node.type}${node.activity ? ` · ${ACTIVITY_LABEL[node.activity] ?? node.activity}` : ''}\n${node.description}`,
       style: { left: `${p.x * m.scale}px`, top: `${p.y * m.scale}px`, width: `${m.width}px`, minHeight: `${m.height}px` },
     })
-    const head = h('div.node-head', icon(iconOf(node.type, node.appearance), 'icon type-icon'), this.simple ? null : h('span.type-label', TYPE_LABEL[t] ?? (node.type || 'no type')))
+    const head = h('div.node-head', icon(iconOf(node.type, node.appearance), 'icon type-icon'), node.activity ? h(`span.activity-label.activity-${node.activity}`, ACTIVITY_LABEL[node.activity] ?? node.activity) : null, this.simple ? null : h('span.type-label', TYPE_LABEL[t] ?? (node.type || 'no type')))
     card.append(head, h('div.node-title', title))
     if (this.simple) {
       // The type stays in the card's accessible name and its title; the

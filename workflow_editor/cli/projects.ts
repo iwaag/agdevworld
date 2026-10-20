@@ -10,7 +10,7 @@ wfe projects tree <project> [<path>] [--depth <n>] [--max <n>]
 wfe projects read <project> <path> [--max-bytes <n>] [--out <file>]
 wfe projects search <project> <pattern> [<path>] [--regex] [--ignore-case] [--max <n>]
 wfe projects runs <project> [<workflow>] [--published]
-wfe projects run <project> <workflow>/<run> [--published] [--file <path>]
+wfe projects run <project> <workflow>/<run> [--published] [--file <path>] [--integration]
 
 Reads every registered project, whether or not it has a workspace on this
 host; needs no project of its own and changes nothing in any workspace.
@@ -32,7 +32,13 @@ search  fixed-string matches (or --regex) as path:line: text, within the one
 runs    the project's runs: the live record (this host's run copy or project
         workspace) beside the snapshot published in its committed devdocs
 run     one run: both records, its files; --file reads one file of its
-        folder (live by default, the published one with --published)
+        folder (live by default, the published one with --published);
+        --integration: where its integrated work is, as three observations
+        kept apart (argue p4; p3 ex1 said "not on main" from a stale local
+        main): the run's run.integrate records, each repository's published
+        default branch on Gitea (fetched now, with the time) and whether it
+        contains the integrated commit, and this host's project workspace
+        (branch head, contains it or not, same/behind/ahead of published)
 
 Source (tree, read, search; show and runs take --rev):
   default            the project root's default branch on Gitea, committed
@@ -145,6 +151,18 @@ export async function projectsCommand(c: ProjectsCli): Promise<number> {
       const ref = need(a1, '<workflow>/<run>')
       const file = c.opt('file')
       if (file) return saved(await x.runFile(ctx, need(target, 'a project'), ref, file, { ...ro, published: c.flag('published'), maxBytes: num('max-bytes') }))
+      if (c.flag('integration')) {
+        const v = await x.integration(ctx, need(target, 'a project'), ref, { workspace: c.opt('workspace') })
+        const lines = [`Integration of ${target} ${v.run} (observed ${v.observed})`]
+        lines.push('Run records (run.integrate):', ...(v.integrations.length ? v.integrations.map(i => `  decision ${i.decision} integrated ${i.at} by ${i.by}: ${i.repositories.map(r => `${r.path} → ${r.target} ${r.method} ${short(r.result)}`).join('; ')}`) : ['  none: this run was never integrated']))
+        for (const r of v.repositories) {
+          lines.push(`${r.path} (integrated commit ${short(r.result)}):`)
+          lines.push('problem' in r.published ? `  published: unreadable — ${r.published.problem}` : `  published: ${r.published.repository} ${r.published.branch} at ${short(r.published.head ?? undefined)} — ${r.published.contains === true ? 'CONTAINS it' : r.published.contains === false ? 'does NOT contain it' : 'unknown'} (${r.published.fetch.state === 'stale' ? `STALE cache from ${r.published.fetch.at}: ${r.published.fetch.error}` : `fetched ${r.published.fetch.at}`})`)
+          lines.push('problem' in r.workspace ? `  workspace: ${r.workspace.problem}` : `  workspace ${r.workspace.id}: ${r.workspace.branch ?? 'detached'} at ${short(r.workspace.head ?? undefined)} — ${r.workspace.contains === true ? 'contains it' : r.workspace.contains === false ? 'does not contain it' : 'unknown'}; ${r.workspace.published} relative to published`)
+        }
+        c.out(lines.join('\n'), v)
+        return 0
+      }
       const v = await x.run(ctx, need(target, 'a project'), ref, { ...ro, published: c.flag('published') })
       const rec = (r: unknown) => r as { execution?: { state?: string }; decisions?: { decision: string; by: string; at: string }[]; integrations?: { at: string; repositories: { path: string; result: string }[] }[]; storage?: { branch?: string } } | undefined
       const lines = [`Run ${v.ref} of ${target}`]

@@ -906,7 +906,7 @@ export interface AdjustResult {
 
 // Node fields of the contract (docs/contract.md); anything else is kept in
 // the file and means nothing to a run.
-const KNOWN_NODE_FIELDS = new Set(['type', 'name', 'description', 'repositories', 'workflow', 'confirms', 'appearance', 'template'])
+const KNOWN_NODE_FIELDS = new Set(['type', 'name', 'description', 'repositories', 'workflow', 'project', 'accepts', 'confirms', 'activity', 'appearance', 'template'])
 function adjustNotes(raw: unknown, active: Workflow, next: Workflow): string[] {
   const notes: string[] = []
   const nodes = (raw && typeof raw === 'object' ? (raw as { nodes?: Record<string, unknown> }).nodes : undefined) ?? {}
@@ -921,7 +921,7 @@ function adjustNotes(raw: unknown, active: Workflow, next: Workflow): string[] {
   return notes
 }
 
-const NODE_FIELDS = ['type', 'name', 'description', 'repositories', 'workflow', 'confirms'] as const
+const NODE_FIELDS = ['type', 'name', 'description', 'repositories', 'workflow', 'confirms', 'activity'] as const
 function authoredDiff(a: Workflow, b: Workflow): AuthoredDiff {
   const fields = (x: Workflow['nodes'][string], y: Workflow['nodes'][string]) => NODE_FIELDS.filter(f => canonicalJson(x[f] ?? null) !== canonicalJson(y[f] ?? null))
   return {
@@ -933,7 +933,7 @@ function authoredDiff(a: Workflow, b: Workflow): AuthoredDiff {
 }
 
 // The active revision's authored definition and its text.
-function activeDefinition(record: RunRecord, bundle: Bundle): { text: string; workflow: Workflow } {
+export function activeDefinition(record: RunRecord, bundle: Bundle): { text: string; workflow: Workflow } {
   const last = bundle.revisions?.at(-1)
   if (last) return { text: last.text, workflow: last.workflow }
   const root = bundle.entries[record.definition.root]

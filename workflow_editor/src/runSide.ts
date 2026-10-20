@@ -20,7 +20,7 @@ import { effectiveOf, holderOf, isOpen, questionState, runKey, situation, type B
 import { reportStep } from '../shared/compile.ts'
 import { sessionPolicyOf } from '../shared/model.ts'
 import type { AdjustView, DelegationsView, DelegationView, PresentationView, RunExecView, RunNotifyView } from './api.ts'
-import { STATE_GLYPH, TYPE_LABEL } from './canvas.ts'
+import { ACTIVITY_LABEL, STATE_GLYPH, TYPE_LABEL } from './canvas.ts'
 import { stepFacts, stepLabel } from './inspector.ts'
 import { h, when } from './dom.ts'
 import { icon } from './icons.ts'
@@ -717,7 +717,7 @@ export class RunSide {
     const box = h('div.node-detail', { dataset: { node: id, key: `node:${id}` } })
     const label2 = (x: string) => (wf && eff ? stepLabel(wf, eff, x) : x)
     box.append(h('div.insp-head', icon(step ? 'doc' : def?.type ?? 'unknown', 'icon'), h('h3', step ? label2(id) : def?.name || id), h('code.d-only', id), h('button.icon-btn', { title: 'Close', 'aria-label': 'Close the selected node', dataset: { action: 'close-node' } }, '×')))
-    box.append(h('div.chips', chip(state, `${STATE_GLYPH[state] ?? ''} ${label}`), h('span.chip.d-only', step ? 'Documentation step' : TYPE_LABEL[def?.type ?? ''] ?? def?.type ?? '?'), h('span.chip.muted.d-only', icon('lock', 'icon tiny'), 'Read-only')))
+    box.append(h('div.chips', chip(state, `${STATE_GLYPH[state] ?? ''} ${label}`), h('span.chip.d-only', step ? 'Documentation step' : TYPE_LABEL[def?.type ?? ''] ?? def?.type ?? '?'), def?.activity ? h('span.chip', `Discussion: ${ACTIVITY_LABEL[def.activity] ?? def.activity}`) : null, h('span.chip.muted.d-only', icon('lock', 'icon tiny'), 'Read-only')))
     if (def?.description) box.append(h('p.small', def.description))
     // A delegate node (p10): its delegation and child, in both modes.
     const dl = this.data.delegView?.delegations.filter(x => x.node === id).at(-1)

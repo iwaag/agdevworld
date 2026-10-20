@@ -43,7 +43,9 @@ import { DISCUSSION_MIGRATIONS } from './discussionSchema.ts'
 export const CONVERSATION_ID = /^[a-z0-9][a-z0-9-]{0,47}$/
 export const RELATIONS = ['turn', 'new', 'follow-up', 'correction', 'steer', 'answer', 'question', 'informational', 'cites', 'handoff'] as const
 export type Relation = typeof RELATIONS[number]
-export const MESSAGE_KINDS = ['message', 'reply', 'question', 'progress', 'result', 'synthesis'] as const
+// `announce` (argue p4): the conductor's own speech in a discussion — an
+// agenda, context, an interim synthesis or a conclusion; it waits for nobody.
+export const MESSAGE_KINDS = ['message', 'reply', 'question', 'progress', 'result', 'synthesis', 'announce'] as const
 export type MessageKind = typeof MESSAGE_KINDS[number]
 const MAX_TEXT = 100_000
 const VIA = /^[a-z0-9][a-z0-9:._ -]{0,63}$/
@@ -85,7 +87,11 @@ export interface TargetView {
   state: 'available' | 'unavailable'; problem: string | null
 }
 
-export interface ConversationRow { id: string; title: string; created: string; updated: string; state: 'open' | 'closed'; by: string; workspace: string | null; workflow: string | null; kind: 'conversation' | 'discussion' }
+export interface ConversationRow {
+  id: string; title: string; created: string; updated: string; state: 'open' | 'closed'; by: string; workspace: string | null; workflow: string | null; kind: 'conversation' | 'discussion'
+  conductor?: string | null // a discussion's conductor run (argue p4)
+  requester?: string | null // a discussion's requester, JSON (argue p4)
+}
 export interface MessageRow {
   id: number; conv: string; role: 'person' | 'agent'; author: string; text: string; at: string
   token: string | null; via: string | null; re: string; kind: MessageKind; run: string | null; attempt: string | null; question: string | null; key: string | null
@@ -94,6 +100,7 @@ export interface MessageRow {
   // spoke, the invitation an agent's message answers, and the members a
   // person's message addressed (JSON list).
   participant: string | null; invitation: number | null; addressed: string | null
+  node?: string | null // the node of its run it was spoken for (argue p4)
 }
 export interface LinkRow { id: number; conv: string; message: number; run: string; relation: Relation; note: string; by: string; attempt: string | null; at: string; supersedes: number | null }
 
@@ -273,7 +280,7 @@ export class ConversationStore {
     if (!o.text.trim()) throw new RequestError(400, 'the reply is empty')
     if (o.text.length > MAX_TEXT) throw new RequestError(413, `a message is at most ${MAX_TEXT} characters`)
     const kind = o.kind ?? 'reply'
-    if (!(MESSAGE_KINDS as readonly string[]).includes(kind) || kind === 'message') throw new RequestError(400, `a reply's kind is one of ${MESSAGE_KINDS.filter(k => k !== 'message').join(', ')}`)
+    if (!(MESSAGE_KINDS as readonly string[]).includes(kind) || kind === 'message' || kind === 'announce') throw new RequestError(400, `a reply's kind is one of ${MESSAGE_KINDS.filter(k => k !== 'message' && k !== 'announce').join(', ')}`)
     const re = this.validRe(conv, o.re ?? [])
     const key = o.key ?? createHash('sha256').update(o.text).digest('hex').slice(0, 24)
     return this.tx(() => {

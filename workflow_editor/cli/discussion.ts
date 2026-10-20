@@ -6,24 +6,64 @@ import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { CONVERSATION_ID, ConversationStore, parseRunName, RELATIONS, runName, viewBaseOf, type MessageKind, type Relation } from '../server/conversations.ts'
 import { DiscussionArchive } from '../server/discussionArchive.ts'
-import { DiscussionStore } from '../server/discussions.ts'
+import { DiscussionStore, type Requester } from '../server/discussions.ts'
 import type { ExecStore } from '../server/exec.ts'
 import { readRun } from '../server/runs.ts'
 import { RequestError } from '../server/workspace.ts'
 
 export const DISCUSSION_HELP = `wfe discussion <subcommand> …   (discussions; docs/discussions.md)
 
-A discussion is a shared conversation of a person, a facilitator (argue)
-and project agents, each speaking through runs of its own project's
-workflow with its own guide and context. Its members and their history,
-every message (the person's words verbatim; each agent message with the
-participant, run and invitation it came from) and its invitations are
-kept by WFE. An invitation is the only thing that starts a run here: the
-person's message invites the participants it addresses, or the facilitator
-when it addresses nobody; the facilitator invites from its run and is told,
-in one instruction, when everything it awaits is resolved (a facilitator
-run that has completed meanwhile is replaced by a new facilitator turn
-given the outcomes). A contribution never starts anything by itself.
+A discussion is a shared conversation of a person, a facilitator (the
+ponderer, which conducts it) and project agents, each speaking through runs
+of its own project's workflow with its own guide and context. Its members
+and their history, every message (the person's words verbatim; each agent
+message with the participant, run and invitation it came from), its
+invitations and the conductor's activities are kept by WFE. An invitation
+is the only thing that starts a run here: the person's message invites the
+participants it addresses; addressing nobody, it goes to the conductor run
+(the facilitator's open run that owns the discussion: as the answer to its
+question, else as an instruction), or invites the facilitator when none is
+open. A contribution never starts anything by itself.
+
+The conductor's run is an ordinary graph whose nodes carry a discussion
+activity (node field activity: announce | ask | ponder | talk). Each is
+performed with its command, from the conductor's executing attempt:
+
+announce [<id>] --node <n> (--text <t> | --file <f|->) --re <msg>… [--conclude [--close]]
+                              speak to the discussion (agenda, context, interim synthesis, the
+                              conclusion); waits for nobody; the node completes with the message.
+                              --conclude records what is still owed and who receives it later;
+                              --close then closes the discussion (it cancels nothing)
+ask [<id>] <participant>… --node <n> --question <q> --re <msg>…
+ask [<id>] --node <n> --run <workspace>/<workflow>/<run> --question <what> [--re <msg>…]
+                              invite them with one question (parallel invitations), or await the
+                              result of a run already working; the node waits and your attempt can
+                              end. When every invitation is resolved (answered #m, unanswered,
+                              failed, withdrawn) WFE completes the node with the outcomes and
+                              continues your run with one instruction. Unavailable participants
+                              fail at once and block nobody
+settle [<id>] --node <n> --reason <why>
+                              move on before an ask is resolved: its node completes now with what
+                              came so far; later outcomes are told as late outcomes of that ask
+ponder [<id>] --node <n> --decision <text> --source <msg>… [--next <activity>:<node>[:<name>]]…
+       [--definition <file>]  your decision: what is settled, what is missing, what comes next and
+                              why, citing the messages it rests on. The node completes with it.
+                              --next adds a chain of new activity nodes after this one (in order);
+                              --definition records any revision of the run's graph instead. Both
+                              are one recorded run revision (wfe run revisions)
+talk [<id>] --node <n> --question <q> --re <msg>… [--to <name>]
+                              consult the discussion's requester: the run's question on the talk
+                              node, posted here too. The person's reply in the discussion is
+                              delivered to your run as its answer; an agent requester answers
+                              through its delegation (wfe delegate answer) or request topic
+state [<id>]                  what the conductor works from: conductor and requester, members,
+                              activities and the conductor run's graph, open invitations, questions
+                              waiting, obligations (what is owed, by whom, to whom), newest message
+annotate <id> --kind intervention|recovery|evaluation|correction|note (--text <t> | --file <f>)
+         --author <who> [--re <msg>]… [--run <run>]
+                              a record by someone outside the speech (an Omni hint, a repair, an
+                              evaluation, a correction of an earlier claim); never speech, starts
+                              nothing; archived and shown apart
 
 participants                  the facilitator and the projects that can be invited, and whether
                               each can take an invitation now
@@ -35,26 +75,32 @@ show [<id>] [--since <msg>]   members and their history, every message (who spok
                               Without <id>: the discussion of this attempt's run. Messages after
                               your invitation's horizon are marked: they are readable, and newer
                               than what you were invited with
-create <id> --title <t> --author <person> [--member <project>]…
-                              a new discussion with the person, the facilitator and the projects
+create <id> --title <t> [--author <person>] [--member <project>]…
+                              a new discussion with the person, the facilitator and the projects.
+                              From the facilitator's attempt the run is its conductor, and the
+                              requester is whoever requested that run (a delegating run, an agent's
+                              request, or the person it names)
 post <id> (--text <t> | --file <f>) --author <person> [--to <participant>]… [--re <msg>]…
      [--token <t>] [--via <way>]
                               the person's message, verbatim. --to invites those participants with
                               it; without --to (or --to <facilitator>) the facilitator is invited
 contribute [<id>] (--text <t> | --file <f|->) --re <msg>… [--kind reply|question|progress|result|synthesis]
-           [--question <q>] [--key <k>]
+           [--question <q>] [--key <k>] [--completing <node>]
                               speak from an executing attempt: the message is your run's, its
                               participant's and its invitation's. Name what you answer (--re): a
                               reply is never attributed by recency. reply/result/synthesis answer
                               your invitation; progress and question do not. synthesis is the
-                              facilitator's (shown apart from original speech)
+                              facilitator's or the archive's (argue), shown apart from original
+                              speech. --completing <node>: that node of your run completes with the
+                              message in the same command (a turn that spoke and left its node
+                              running is held interrupted; p3 rts-vs-bot/discuss/run-001)
 invite [<id>] <participant> --question <q> [--re <msg>]… [--token <t>] [--author <person>]
                               ask a participant: from the facilitator's run the invitation is
                               awaited (your run is told when all it awaits are resolved; make your
                               node wait with wfe run wait … --external discussion:<id> and end your
                               attempt to free the slot). Outside an attempt it is the person's
                               (--author). A participant's run cannot invite: say whom you would ask
-await [<id>] --run <workspace>/<workflow>/<run> --note <what> [--re <msg>]…
+await [<id>] --run <workspace>/<workflow>/<run> --note <what> [--re <msg>]…   (with --node: ask --run)
                               from the facilitator's run: await the result of a run that is already
                               working (a participant's run waiting for the work it entrusted, a
                               synthesize run, any run). Nothing is started. It is resolved by that
@@ -110,7 +156,7 @@ export async function discussionCommand(c: DiscussionCli): Promise<number> {
       if (!rec) return null
       const run = runName(row.workspace, { workflow: row.workflow, run: row.run })
       const src = rec.input.source?.kind === 'conversation' ? rec.input.source : null
-      return { run, attempt, agent: rec.executor.name, discussion: src && ds.discussion(src.conversation) ? src.conversation : null, invitation: src?.invitation ?? null }
+      return { run, attempt, agent: rec.executor.name, rec, discussion: src && ds.discussion(src.conversation) ? src.conversation : ds.conductedBy(run)[0] ?? null, invitation: src && ds.discussion(src.conversation) ? src.invitation ?? null : null }
     }
     const disc = async (given?: string) => {
       if (given && !CONVERSATION_ID.test(given)) throw c.usage(`"${given.length > 40 ? `${given.slice(0, 40)}…` : given}" is not a discussion id; text goes in --text <text> (or --file <file|->)`)
@@ -145,7 +191,8 @@ export async function discussionCommand(c: DiscussionCli): Promise<number> {
         const v = await ds.view(id, { viewBase: viewBaseOf(c.area()), since: Number(c.opt('since') ?? 0) || 0 })
         const archive = await new DiscussionArchive(ds).status(id)
         const mine = o?.invitation ? v.invitations.find(i => i.id === o.invitation) : undefined
-        const lines = [`Discussion ${id} (${v.discussion.state}): ${v.discussion.title}`, `Facilitator: ${v.discussion.facilitator}. Members: ${v.members.map(m => `${m.participant} (${m.kind}${m.workspace ? ` ${m.workspace}/${m.workflow}` : ''})`).join(', ')}`]
+        const req = v.discussion.requester
+        const lines = [`Discussion ${id} (${v.discussion.state}): ${v.discussion.title}`, `Facilitator: ${v.discussion.facilitator}${v.discussion.conductor ? `; conductor ${v.discussion.conductor}` : ''}${req ? `; requester ${req.kind === 'person' ? req.id : req.run}` : ''}. Members: ${v.members.map(m => `${m.participant} (${m.kind}${m.workspace ? ` ${m.workspace}/${m.workflow}` : ''})`).join(', ')}`]
         if (mine) lines.push(`You are ${mine.participant}, invited (invitation ${mine.id}) by ${mine.by}${mine.byRun ? ` (${mine.byRun})` : ''} about ${mine.source.map(n => `#${n}`).join(', ')}; horizon #${mine.horizon}.`)
         const history = v.membership.filter(r => r.action === 'leave' || r.note !== 'created the discussion')
         if (history.length) lines.push('Membership:', ...history.map(r => `  ${r.at} ${r.participant} ${r.action} (by ${r.by}${r.note ? `: ${r.note}` : ''})`))
@@ -154,7 +201,7 @@ export async function discussionCommand(c: DiscussionCli): Promise<number> {
           const head = m.role === 'person'
             ? `${m.author} (person)${m.via ? ` via ${m.via}` : ''}${m.addressed.length ? ` to ${m.addressed.join(', ')}` : ''}`
             : `${m.participant ?? m.author} (${m.author}${m.run ? ` for ${m.run}` : ''}${m.invitation ? `, invitation ${m.invitation}` : ''})`
-          lines.push('', `#${m.id} ${m.at} ${head}${m.kind !== 'message' ? ` [${m.kind}${m.question ? ` ${m.question}` : ''}]` : ''}${m.re.length ? ` re ${m.re.map(n => `#${n}`).join(', ')}` : ''}${after}`)
+          lines.push('', `#${m.id} ${m.at} ${head}${m.kind !== 'message' ? ` [${m.kind}${m.question ? ` ${m.question}` : ''}${m.node ? ` node ${m.node}` : ''}]` : ''}${m.re.length ? ` re ${m.re.map(n => `#${n}`).join(', ')}` : ''}${after}`)
           lines.push(...m.text.split('\n').map(l => `    ${l}`))
           for (const l of v.links.filter(l => l.message === m.id && !v.links.some(y => y.supersedes === l.id))) lines.push(`    → ${l.relation} ${l.run} by ${l.by}: ${l.note}`)
         }
@@ -162,6 +209,8 @@ export async function discussionCommand(c: DiscussionCli): Promise<number> {
         if (!v.invitations.length) lines.push('  (none)')
         lines.push('', 'Runs (run view; files: append a path in the run folder):', ...v.runs.map(r => `  ${r.key} — ${r.status?.text ?? r.situation} (${r.situation}, ${r.execution}); ${r.relation}${r.url ? `; ${r.url}` : ''}${r.files ? `; files ${r.files}` : ''}${r.presentations.map(p => `; review ${p.id} ${p.url}`).join('')}${r.problem ? `; ${r.problem}` : ''}`))
         lines.push(`Waiting for the person: ${v.asking.length ? v.asking.map(n => `#${n}`).join(', ') : 'nothing'}`)
+        if (v.activities.length) lines.push(`Activities: ${v.activities.length} (wfe discussion state ${id})`)
+        if (v.annotations.length) lines.push('Annotations (outside the speech):', ...v.annotations.map(a => `  ${a.kind} by ${a.author} ${a.at}${a.re.length ? ` re ${a.re.map(n => `#${n}`).join(', ')}` : ''}: ${a.text.split('\n')[0].slice(0, 160)}`))
         lines.push(`Archive: ${archive.state}${archive.published ? ` — ${archive.published.commit.slice(0, 12)} through #${archive.published.horizon.message}${archive.published.url ? ` ${archive.published.url}` : ''}` : ''}${archive.error ? ` (${archive.error})` : ''}`)
         c.out(lines.join('\n'), { ...v, archive })
         return 0
@@ -169,8 +218,23 @@ export async function discussionCommand(c: DiscussionCli): Promise<number> {
       case 'create': {
         const id = args[0]; if (!id) throw c.usage('create needs <id>')
         const title = c.opt('title'); if (!title) throw c.usage('--title <title> is required')
-        const author = c.opt('author'); if (!author) throw c.usage('--author <person> is required: who opens it')
-        const r = ds.create(id, { title, by: author, members: c.opts('member') })
+        const o = await own()
+        const cfg = ds.config()
+        // From the facilitator's attempt (argue p4): this run conducts, and
+        // whoever requested it is the requester.
+        const conducting = o && !('disabled' in cfg) && o.run.startsWith(`${cfg.facilitator.workspace}/${cfg.facilitator.workflow}/`) ? o : null
+        let requester: Requester | undefined
+        let author = c.opt('author')
+        if (conducting) {
+          const inp = conducting.rec.input
+          const e = inp.entrustedBy
+          if (e?.kind === 'delegation') requester = { kind: 'run', run: `${e.parent.project}/${e.parent.workflow}/${e.parent.run}`, agent: inp.requester ?? null }
+          else if (e?.kind === 'run') requester = { kind: 'run', run: `${e.project ?? parseRunName(conducting.run).workspace}/${e.workflow}/${e.run}`, agent: inp.requester ?? null }
+          else requester = { kind: 'person', id: inp.onBehalfOf ?? inp.author ?? author ?? (('person' in cfg) ? cfg.person : 'person') }
+          author = author ?? (requester.kind === 'person' ? requester.id : conducting.agent)
+        }
+        if (!author) throw c.usage('--author <person> is required: who opens it')
+        const r = ds.create(id, { title, by: author, members: c.opts('member'), ...(conducting ? { conductor: conducting.run, requester } : {}) })
         c.out(`${r.duplicate ? 'Already exists' : 'Created'}: discussion ${id} with ${ds.members(id).map(m => m.participant).join(', ')}.`, { ok: true, ...r, members: ds.members(id) })
         return 0
       }
@@ -187,8 +251,9 @@ export async function discussionCommand(c: DiscussionCli): Promise<number> {
         if (!o) throw c.usage('contribute speaks for an executing attempt\'s run (WFE_ATTEMPT); the person posts with: wfe discussion post')
         const re = ids('re')
         if (!re.length) throw c.usage('--re <msg> is required: the messages you answer')
-        const r = await ds.contribute(id, { text: text(), author: o.agent, run: o.run, attempt: o.attempt, invitation: o.discussion === id ? o.invitation : null, re, kind: (c.opt('kind') ?? 'reply') as MessageKind, question: c.opt('question') ?? null, key: c.opt('key') })
-        c.out(`${r.duplicate ? 'Already posted (same key); nothing changed' : 'Posted'}: #${r.message.id} in ${id} as ${r.message.participant} for ${o.run}${r.invitation ? `; invitation ${r.invitation.id} ${r.invitation.state}${r.invitation.late ? ' (late)' : ''}` : ''}.`, { ok: true, ...r })
+        const complete = c.opt('completing')
+        const r = await ds.contribute(id, { text: text(), author: o.agent, run: o.run, attempt: o.attempt, invitation: o.discussion === id ? o.invitation : null, re, kind: (c.opt('kind') ?? 'reply') as MessageKind, question: c.opt('question') ?? null, key: c.opt('key'), node: complete ?? null, complete: !!complete })
+        c.out(`${r.duplicate ? 'Already posted (same key); nothing changed' : 'Posted'}: #${r.message.id} in ${id} as ${r.message.participant} for ${o.run}${r.invitation ? `; invitation ${r.invitation.id} ${r.invitation.state}${r.invitation.late ? ' (late)' : ''}` : ''}${r.completed ? `; node ${r.completed} completed` : ''}.`, { ok: true, ...r })
         return 0
       }
       case 'invite': {
@@ -204,6 +269,7 @@ export async function discussionCommand(c: DiscussionCli): Promise<number> {
         return 0
       }
       case 'await': {
+        if (c.opt('node')) return discussionCommand({ ...c, positional: ['ask', ...args], opt: k => k === 'question' ? c.opt('question') ?? c.opt('note') : c.opt(k) })
         const id = await disc(args[0])
         const o = await own()
         if (!o) throw c.usage('await is the facilitator\'s, from its executing attempt (WFE_ATTEMPT)')
@@ -213,6 +279,82 @@ export async function discussionCommand(c: DiscussionCli): Promise<number> {
         const r = await ds.awaitResult(id, { run, note, re: ids('re'), by: o.agent, byRun: o.run })
         const i = r.invitation
         c.out(`${r.duplicate ? 'Already awaited' : 'Awaiting'}: the result of ${run} (invitation ${i.id}): ${i.state}${i.answered_by ? ` by #${i.answered_by}` : ''}; awaited by ${i.awaited_by}.`, { ok: true, ...r })
+        return 0
+      }
+      case 'announce':
+      case 'ask':
+      case 'settle':
+      case 'ponder':
+      case 'talk': {
+        const o = await own()
+        if (!o) throw c.usage(`${sub} is the conductor's, from its executing attempt (WFE_ATTEMPT)`)
+        const given = sub === 'ask' ? (args[0] && ds.discussion(args[0]) ? args[0] : undefined) : args[0]
+        const id = await disc(given)
+        const node = c.opt('node'); if (!node) throw c.usage(`--node <node> is required: the ${sub === 'settle' ? 'ask' : sub} node of your run`)
+        const base = { run: o.run, attempt: o.attempt, author: o.agent, node }
+        if (sub === 'announce') {
+          const re = ids('re'); if (!re.length) throw c.usage('--re <msg> is required: what the announcement is about')
+          const r = await ds.announce(id, { ...base, text: text(), re, invitation: o.discussion === id ? o.invitation : null, conclude: c.flag('conclude'), close: c.flag('close') })
+          const ob = r.activity.obligations
+          c.out(`${r.duplicate ? 'Already announced' : 'Announced'}: #${r.message.id}; node ${node} completed${ob ? `; ${ob.length ? `outstanding:\n${ob.map(b => `  ${b.ref}: ${b.owes} — owner ${b.owner}; later to ${b.receiver}`).join('\n')}` : 'nothing outstanding'}` : ''}${r.closed ? `\nClosed ${id}.` : ''}`, { ok: true, ...r })
+          return 0
+        }
+        if (sub === 'ask') {
+          const question = c.opt('question'); if (!question) throw c.usage('--question <text> is required')
+          const run = c.opt('run'); if (run) parseRunName(run)
+          const who = (given ? args.slice(1) : args)
+          const r = await ds.ask(id, { ...base, participants: who, question, re: ids('re'), awaitRun: run })
+          c.out(`${r.duplicate ? 'Already asked' : 'Asked'} (activity ${r.activity.id}): ${r.invitations.map(i => `invitation ${i.id} → ${i.participant}: ${i.state}${i.run ? ` ${i.run}` : ''}${i.error ? ` — ${i.error}` : ''}`).join('; ')}. Node ${node} waits; end your attempt when nothing else is to be done: WFE completes ${node} with the outcomes and continues this run.`, { ok: true, ...r })
+          return 0
+        }
+        if (sub === 'settle') {
+          const reason = c.opt('reason'); if (!reason) throw c.usage('--reason <why> is required')
+          const r = await ds.settle(id, { ...base, reason })
+          c.out(`${r.duplicate ? 'Already' : 'Settled'}: node ${node} completed (${r.activity.outcome?.split('\n')[0]}).`, { ok: true, ...r })
+          return 0
+        }
+        if (sub === 'ponder') {
+          const decision = c.opt('decision') ?? (c.opt('file') ? text() : undefined); if (!decision) throw c.usage('--decision <text> is required: what you decided and why')
+          const next = c.opts('next').map(v => { const [activity, n, ...name] = v.split(':'); if (!activity || !n) throw c.usage(`--next ${v}: write <activity>:<node>[:<name>]`); return { activity, node: n, ...(name.length ? { name: name.join(':') } : {}) } })
+          const def = c.opt('definition')
+          const r = await ds.ponder(id, { ...base, decision, sources: ids('source'), next, ...(def ? { definition: readFileSync(def === '-' ? 0 : resolve(def), 'utf8') } : {}) })
+          c.out(`${r.duplicate ? 'Already decided' : 'Decided'} (activity ${r.activity.id}): node ${node} completed${r.revision ? `; revision ${r.revision}${next.length ? ` adds ${next.map(x => `${x.activity}:${x.node}`).join(' → ')}` : ''}` : ''}.`, { ok: true, ...r })
+          return 0
+        }
+        const question = c.opt('question'); if (!question) throw c.usage('--question <text> is required')
+        const r = await ds.talk(id, { ...base, question, re: ids('re'), to: c.opt('to') })
+        c.out(`${r.duplicate ? 'Already asked' : 'Asked'} ${r.activity.question} (activity ${r.activity.id}, #${r.activity.message})${'to' in r ? ` to ${r.to}` : ''}; node ${node} waits for the answer.`, { ok: true, ...r })
+        return 0
+      }
+      case 'state': {
+        const id = await disc(args[0])
+        const v = await ds.view(id, { viewBase: viewBaseOf(c.area()) })
+        const d = v.discussion
+        const lines = [`Discussion ${id} (${d.state}): ${d.title}`, `Conductor: ${d.conductor ?? 'none'}${d.conductor ? ` — ${v.runs.find(r => r.key === d.conductor)?.status?.text ?? ''}` : ''}. Requester: ${d.requester ? d.requester.kind === 'person' ? `${d.requester.id} (person)` : `${d.requester.run} (${d.requester.agent ?? 'agent'})` : 'unknown'}.`,
+          `Members: ${v.members.map(m => m.participant).join(', ')}. Newest message #${v.horizon.message}.`]
+        if (d.conductor) {
+          try {
+            const { workspace, ref } = parseRunName(d.conductor)
+            const read = await readRun(await x.workspace(workspace), ref)
+            const rec = read.record
+            if (rec) lines.push('Conductor graph:', ...Object.entries(rec.nodes).map(([n, s]) => { const a = v.activities.find(y => y.run === d.conductor && y.node === n); return `  ${n}: ${s.state}${a ? ` — ${a.kind} (activity ${a.id}, ${a.state})${a.kind === 'ponder' ? `: ${a.text.split('\n')[0].slice(0, 120)}` : ''}` : ''}${s.wait ? ` — waits: ${s.wait.reason}` : ''}` }))
+          } catch (e) { lines.push(`Conductor graph: unreadable (${(e as Error).message})`) }
+        }
+        lines.push('Activities:', ...(v.activities.length ? v.activities.map(a => `  ${a.id} ${a.kind.padEnd(8)} ${a.state.padEnd(9)} ${a.run}#${a.node}${a.message ? ` #${a.message}` : ''}${a.invitations.length ? ` invitations ${a.invitations.join(', ')}` : ''}${a.question ? ` ${a.question}` : ''}${a.text ? ` — ${a.text.split('\n')[0].slice(0, 100)}` : ''}`) : ['  (none)']))
+        const open = v.invitations.filter(i => i.state === 'pending' || i.state === 'started')
+        lines.push('Open invitations:', ...(open.length ? open.map(i => `  ${i.id} → ${i.participant}${i.run ? ` ${i.run}` : ''} (${i.state}${i.awaits ? ', awaited result' : ''}${i.activity ? `, activity ${i.activity}` : ''})`) : ['  (none)']))
+        lines.push(`Waiting for the person: ${v.asking.length ? v.asking.map(n => `#${n}`).join(', ') : 'nothing'}`)
+        lines.push('Obligations:', ...(v.obligations.length ? v.obligations.map(b => `  ${b.ref}: ${b.owes} — owner ${b.owner}; later to ${b.receiver}`) : ['  (none)']))
+        if (v.annotations.length) lines.push('Annotations:', ...v.annotations.map(a => `  ${a.id} ${a.kind} by ${a.author}${a.re.length ? ` re ${a.re.map(n => `#${n}`).join(', ')}` : ''}: ${a.text.split('\n')[0].slice(0, 120)}`))
+        c.out(lines.join('\n'), v)
+        return 0
+      }
+      case 'annotate': {
+        const id = args[0]; if (!id) throw c.usage('annotate needs <id>')
+        const kind = c.opt('kind'); if (!kind) throw c.usage('--kind intervention|recovery|evaluation|correction|note is required')
+        const author = await who(); if (!author) throw c.usage('--author <who> is required')
+        const r = ds.annotate(id, { kind, author, text: text(), re: ids('re'), run: c.opt('run') ?? null, token: c.opt('token') })
+        c.out(`${r.duplicate ? 'Already recorded' : 'Recorded'}: annotation ${r.annotation.id} (${kind}) in ${id}.`, { ok: true, ...r })
         return 0
       }
       case 'withdraw': {

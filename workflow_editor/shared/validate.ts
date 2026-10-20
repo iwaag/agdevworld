@@ -2,7 +2,7 @@
 // well-formed and that its references resolve; it never judges whether the
 // graph fulfils the intent. Errors block approval; drafts may still be saved.
 import {
-  ACCESS_LEVELS, APPEARANCE_COLORS, APPEARANCE_ICONS, CONFIRMS, DELEGATE_ACCEPTS, DEVDOCS_MODES, DOC_POLICIES, DOC_STEPS, ID_PATTERN, INTAKE_MODES, NODE_TYPES, NODE_PATTERN, LANE_PATTERN, PROFILE_PATTERN, SESSION_POLICIES, PROJECT_SCHEMA, WORKFLOW_SCHEMA, INTEGRATE_MODES, guideKey, guideRef, normalizeRepoPath,
+  ACCESS_LEVELS, ACTIVITIES, activityType, APPEARANCE_COLORS, APPEARANCE_ICONS, CONFIRMS, DELEGATE_ACCEPTS, DEVDOCS_MODES, DOC_POLICIES, DOC_STEPS, ID_PATTERN, INTAKE_MODES, NODE_TYPES, NODE_PATTERN, LANE_PATTERN, PROFILE_PATTERN, SESSION_POLICIES, PROJECT_SCHEMA, WORKFLOW_SCHEMA, INTEGRATE_MODES, guideKey, guideRef, normalizeRepoPath,
   type Issue, type Project, type Workflow,
 } from './model.ts'
 
@@ -148,6 +148,10 @@ export function validateWorkflow(w: Workflow, ctx: ValidationContext = {}): Issu
     // Template provenance (p7/ex1) is a record of origin, not a reference
     // the workflow depends on: only its own shape is checked.
     if (n.template && !ID_PATTERN.test(n.template.id)) issues.push(warn('template-id', `Node "${id}" names template "${n.template.id}", which is not a valid template id; the provenance is kept as written.`, { node: id }))
+    if (n.activity !== undefined) {
+      if (!(ACTIVITIES as readonly string[]).includes(n.activity)) issues.push(err('activity-kind', `Node "${id}" has activity "${n.activity}"; expected ${ACTIVITIES.join(', ')}.`, { node: id }))
+      else if (n.type !== activityType(n.activity)) issues.push(err('activity-type', `Node "${id}" is the discussion activity "${n.activity}", which is a ${activityType(n.activity)} node, not "${n.type}".`, { node: id }))
+    }
     if (n.confirms) {
       if (!(CONFIRMS as readonly string[]).includes(n.confirms)) issues.push(err('confirms-kind', `Node "${id}" confirms "${n.confirms}"; expected ${CONFIRMS.join(' or ')}.`, { node: id }))
       else if (n.type !== 'talk') issues.push(err('confirms-type', `Node "${id}" confirms the result but is "${n.type}"; only a talk node asks the person.`, { node: id }))

@@ -436,6 +436,16 @@ workflows. They imply nothing about access, which each workflow declares in
 its bindings. A node may bind no repository, and a binding that no node uses
 is allowed.
 
+### Discussion activities (argue p4)
+
+`activity: announce | ask | ponder | talk` marks what a node is in a
+discussion conducted by the run ([discussions.md](discussions.md),
+*Activities*): metadata on an ordinary node type (`talk` on a talk node,
+the others on do nodes), bound to the discussion's records by `wfe
+discussion announce|ask|ponder|talk --node`. It is part of the definition
+digest, the compiled graph and an adjustment's executable change, like a
+delegate's target. The editor and the run view show it on the card.
+
 ### Graph semantics
 
 An edge means that its target waits for its source to complete. Several
@@ -476,6 +486,7 @@ fulfils its intent.
 | `execution-agent`, `execution-profile`, `execution-guide-path` | error | malformed agent id, profile name or guide path (p6; `<project>:<path>` since project_migration p4) |
 | `execution-guide-duplicate` | warning | a guide listed twice |
 | `intake-mode` | error | `intake.zulip` is not `requests` |
+| `activity-kind`, `activity-type` | error | `activity` other than announce / ask / ponder / talk, or on the wrong node type (argue p4) |
 | `confirms-kind`, `confirms-type`, `confirms-duplicate` | error | `confirms` other than `result`, on a non-talk node, or on more than one node |
 
 Drafts with errors can be saved. They cannot be approved.

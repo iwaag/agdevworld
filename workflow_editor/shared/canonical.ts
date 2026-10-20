@@ -55,6 +55,7 @@ export function definitionProjection(w: Workflow) {
       ...(n.project ? { project: n.project } : {}),
       ...(n.accepts ? { accepts: n.accepts } : {}),
       ...(n.confirms ? { confirms: n.confirms } : {}),
+      ...(n.activity ? { activity: n.activity } : {}),
     }
   }
   const seen = new Set<string>()

@@ -38,4 +38,30 @@ export const DISCUSSION_MIGRATIONS: Migration[] = [{
   // that is already working (`awaits = 'result'`); no run is started for it.
   version: 6,
   up: db => db.exec('ALTER TABLE invitations ADD COLUMN awaits TEXT'),
+}, {
+  // Activities (argue p4, docs/discussions.md *Conductor*, *Activities*):
+  // the conductor run that owns a discussion's progression and the requester
+  // it consults; each announce / ask / ponder / talk of a run's node, bound to
+  // its messages, invitations and decision, with an append-only event history
+  // (each event keeps the activity as it was then: what the archive exports);
+  // the node a message was spoken for; annotations — interventions,
+  // recoveries, evaluations and corrections by someone outside the speech.
+  version: 7,
+  up: db => db.exec(`
+    ALTER TABLE conversations ADD COLUMN conductor TEXT;
+    ALTER TABLE conversations ADD COLUMN requester TEXT;
+    ALTER TABLE invitations ADD COLUMN activity INTEGER;
+    ALTER TABLE messages ADD COLUMN node TEXT;
+    CREATE TABLE activities (id INTEGER PRIMARY KEY AUTOINCREMENT, conv TEXT NOT NULL, run TEXT NOT NULL, node TEXT NOT NULL, attempt TEXT,
+      kind TEXT NOT NULL, state TEXT NOT NULL, text TEXT NOT NULL DEFAULT '', sources TEXT NOT NULL DEFAULT '[]', message INTEGER, question TEXT,
+      awaits TEXT, decision TEXT, obligations TEXT, outcome TEXT, token TEXT NOT NULL, created TEXT NOT NULL, updated TEXT NOT NULL, UNIQUE (conv, token));
+    CREATE INDEX activities_conv ON activities (conv, id);
+    CREATE INDEX activities_run ON activities (run, node);
+    CREATE TABLE activity_events (id INTEGER PRIMARY KEY AUTOINCREMENT, conv TEXT NOT NULL, activity INTEGER, kind TEXT NOT NULL, state TEXT NOT NULL,
+      at TEXT NOT NULL, by TEXT NOT NULL, note TEXT NOT NULL DEFAULT '', data TEXT NOT NULL DEFAULT '{}');
+    CREATE INDEX activity_events_conv ON activity_events (conv, id);
+    CREATE TABLE annotations (id INTEGER PRIMARY KEY AUTOINCREMENT, conv TEXT NOT NULL, kind TEXT NOT NULL, author TEXT NOT NULL, text TEXT NOT NULL,
+      re TEXT NOT NULL DEFAULT '[]', run TEXT, at TEXT NOT NULL, token TEXT, UNIQUE (conv, token));
+    CREATE INDEX annotations_conv ON annotations (conv, id);
+  `),
 }]

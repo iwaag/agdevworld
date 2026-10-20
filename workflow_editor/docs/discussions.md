@@ -1,4 +1,4 @@
-# Discussions (workflow_editor p16)
+# Discussions (workflow_editor p16, argue p4)
 
 A discussion is a shared conversation of **a person, a facilitator and
 project agents**, each agent speaking through runs of its own project's
@@ -9,11 +9,16 @@ links of direct conversations ([conversations.md](conversations.md)), and
 adds members, invitations and an archive. Code: `server/discussions.ts`,
 `server/discussionArchive.ts`; CLI: `wfe discussion`; store: the
 conversation store (`<area>/.local/conversations/conversations.sqlite`,
-version 6).
+version 7).
 
 The conversation routes refuse a discussion (409 `is-discussion`) and the
 discussion routes refuse a conversation (409 `is-conversation`): a client
 cannot give either the other's meaning by accident.
+
+Since argue p4 the facilitator is `ponderer/conduct`: one **conductor run**
+owns a discussion's progression across many attempts, and its graph shows
+how the discussion proceeds as discussion **activities** (*Conductor*,
+*Activities* below). Episode: `devdocs/episodes/argue/p4/`.
 
 ## Configuration
 
@@ -21,8 +26,8 @@ cannot give either the other's meaning by accident.
 
 ```json
 "discussions": {
-  "facilitator": { "workspace": "argue", "workflow": "facilitate" },
-  "participants": [{ "workspace": "forge", "workflow": "discuss" }, { "workspace": "archsage", "workflow": "discuss" }],
+  "facilitator": { "workspace": "ponderer", "workflow": "conduct" },
+  "participants": [{ "workspace": "forge", "workflow": "discuss" }, { "workspace": "argue", "workflow": "synthesize" }],
   "archive": { "workspace": "argue" }
 }
 ```
@@ -77,7 +82,11 @@ Every transition is an invitation event (archived).
 
 - participants named → each is invited with these words; the facilitator is
   not started;
-- nobody named, or the facilitator named → the facilitator is invited (plus
+- nobody named, or the facilitator named → **the open conductor run** is
+  given the words (argue p4): as the answer to the question of its that the
+  message names (`re`), else to its only open question asked in the
+  discussion, else as an instruction. No second run is started. Without an
+  open conductor the facilitator is invited, and that run conducts (plus
   any others named).
 
 - the message names (`re`) a **question a participant's run asked** the
@@ -91,6 +100,78 @@ Every transition is an invitation event (archived).
 A contribution never starts anything by itself. A participant's run cannot
 invite (403 `not-facilitator`); it says in its contribution whom it would
 ask. The person and the facilitator invite.
+
+## Conductor (argue p4)
+
+`conversations.conductor` names the facilitator's run that owns the
+discussion's progression. It is set when an invitation starts a facilitator
+run while no other conductor is open, or when the facilitator's attempt
+creates the discussion (`wfe discussion create` from that attempt). A
+conductor that completes leaves the discussion open: the next untargeted
+message, or a late outcome it awaited, starts a new conductor run. The
+discussion id stays independent of runs.
+
+`conversations.requester` is whom the conductor's `talk` consults:
+`{kind: person, id}` (the person who opened it, or on whose behalf the
+conductor run was requested) or `{kind: run, run, agent}` (the run that
+delegated or requested the conductor run, e.g. Front's converse run). Each
+change of either is an activity event.
+
+## Activities (argue p4)
+
+A node of the conductor's run carries `activity: announce | ask | ponder |
+talk` (contract.md *Discussion activities*; `talk` on a talk node, the
+others on do nodes). Each is performed with its command from the
+conductor's attempt and recorded as an **activity** (`activities`, with an
+append-only `activity_events` history: each event keeps the activity as it
+then was).
+
+| Activity | Command | Completion evidence | Completed by |
+| --- | --- | --- | --- |
+| `announce` | `wfe discussion announce --node <n> --text … --re …` | the message (kind `announce`, key `activity:<run>:<node>`); it waits for nobody and answers the conductor's own invitation | the command: the message first, then the node; reconcile completes a node whose message was delivered when the attempt ended first |
+| `ask` | `wfe discussion ask <participant>… --node <n> --question … --re …`, or `--run <run>` to await a commissioned result | each invitation of the activity answered (#m), unanswered, failed or withdrawn | **WFE**, once no attempt is open: the node resumes and completes with the outcomes, then the run gets one instruction listing them (or, completed, a new conductor run) |
+| `ponder` | `wfe discussion ponder --node <n> --decision … --source <msg>… [--next <activity>:<node>]… \| --definition <file>` | the decision, its sources, the next activities and the run revision | the command, with the revision in the same write (`run adjust --completing`) |
+| `talk` | `wfe discussion talk --node <n> --question … --re …` | the WFE question (to the requester) answered and taken up, or withdrawn | the agent, as any talk; reconcile records the activity's end |
+
+- **Waits.** An ask waits `external: discussion:<id>:activity:<a>` (holder:
+  the invited participants or the awaited run); a talk waits on its
+  question; both free the slot.
+- **Groups.** Invitations of one ask are one group: its node completes when
+  all are resolved. Invitations a facilitator issued without an activity
+  keep the per-run continuation above.
+- **Settling.** `wfe discussion settle --node <n> --reason` completes an ask
+  early, naming what is still open; their later outcomes are told as late
+  outcomes of that ask. Unavailable participants fail at once.
+- **Graph.** `--next` appends a chain of new nodes after the ponder node
+  (`announce:agenda`, `ask:facts`, `ponder:after-facts`). Another round is
+  new nodes; completed ones and their records stay; no cycle.
+- **A turn that spoke and left its node running** (p3:
+  rts-vs-bot/discuss/run-001, run-004): `wfe discussion contribute
+  --completing <node>` speaks and completes in one command. Reconcile
+  completes a node whose message was delivered (a message with `node`, or a
+  participant's reply answering its invitation in a one-node discussion
+  workflow) after the attempt ended without completing it, and lifts a hold
+  whose only cause was that node left running (`run.resume` by
+  `discussion`).
+- **Conclusion.** `wfe discussion announce --conclude [--close]` records the
+  **obligations** the discussion still has (open invitations and awaited
+  results, questions waiting for the person, runs of the discussion still
+  working and their open delegations), each with its owner and who
+  receives it later: the run awaiting it, a new conductor run, the
+  delegating run, or "recorded only: the discussion is closed". Closing
+  still cancels nothing.
+- `wfe discussion state` is the compact read the conductor works from: the
+  conductor and requester, its graph with each node's activity, open
+  invitations, questions, obligations, annotations.
+
+## Annotations (argue p4)
+
+`wfe discussion annotate <id> --kind intervention|recovery|evaluation|
+correction|note --text … --author <who> [--re <msg>…] [--run <run>]`
+records something said about the discussion from outside its speech: an
+Omni hint, a repair, an external evaluation, a correction of an earlier
+claim (which stays as it was said). It starts nothing, is not a message,
+and is archived and shown apart.
 
 ## Facilitator continuation
 
@@ -167,9 +248,12 @@ copy in the archive project's repository (`pj-argue`):
 
 ```text
 discussions/<id>/manifest.json     format ag.argue.discussion.v1, identity, members and history,
-                                   invitations, horizon {message, link, membership, event},
+                                   conductor, requester, activities (argue p4), invitations,
+                                   horizon {message, link, membership, event, activity, annotation},
                                    provenance (runs: workspace, workflow, agent), exports[]
 discussions/<id>/transcript.jsonl  append-only records: message | membership | invitation | link
+                                   | activity (argue p4: activity, conductor, requester events)
+                                   | annotation
 discussions/<id>/summary.md        synthesis (argue's runs; not this writer)
 knowledge/                         cross-discussion knowledge (argue's runs)
 ```
@@ -199,7 +283,7 @@ horizon.
 | --- | --- |
 | `GET api/discussions` | `{person, disabled, participants, discussions}`; participants are the facilitator and the invitable projects as their projects say now (`state`, `problem`) |
 | `POST api/discussions {id, title, members?, text?, token?, to?, re?, author?}` | creates (201; the same id by the same author again is 200), and posts the brief when `text` is given |
-| `GET api/discussions/<id>[?since=<msg>]` | `discussion`, `members`, `membership`, `messages` (with `participant`, `run`, `runUrl`, `invitation`, `addressed`), `invitations` (with `runUrl`, `awaits`), `links`, `runs` (shared status, run view, file route, presentations), `asking`, `horizon`, `archive` |
+| `GET api/discussions/<id>[?since=<msg>]` | `discussion` (with `conductor`, `requester`), `activities`, `annotations`, `obligations`, `members`, `membership`, `messages` (with `participant`, `run`, `runUrl`, `invitation`, `addressed`, `node`), `invitations` (with `runUrl`, `awaits`, `activity`), `links`, `runs` (shared status, run view, file route, presentations), `asking`, `horizon`, `archive` |
 | `POST api/discussions/<id>/messages {text, token, to?, re?, author?, via?}` | the person's words; `{message, invitations, duplicate, reopened}` |
 | `POST api/discussions/<id>/invitations {participant, question, re?, token?, author?}` | the person's invitation |
 | `POST api/discussions/<id>/invitations/<n>/withdraw {reason}` | withdraws one not started |

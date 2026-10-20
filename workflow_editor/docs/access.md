@@ -167,6 +167,23 @@ its own state: a submodule's `state`/`problem`, or a project's
 by default, or from the published one with `--published`.
 With `--published`, a published-source failure remains an error.
 
+## Where integrated work is (argue p4)
+
+`wfe projects run <project> <workflow>/<run> --integration` answers "is this
+run's work on main?" from three observations kept apart, each named with
+its time (p3 ex1: the specialists said "not on main" from a stale local
+`main` of work the executor had integrated):
+
+- the run's `run.integrate` records (decision, time, each repository's
+  target, method and resulting commit);
+- each repository's **published** default branch on Gitea, fetched (or the
+  cache, said to be stale), and whether it contains the integrated commit;
+- this host's **project workspace**: its branch and head, whether it contains
+  the commit, and whether it is the same as, behind, ahead of or diverged
+  from the published branch.
+
+A disposition such as "not integrated" names which of these it rests on.
+
 ## Through agdevworld
 
 These are `GET` routes over managed project content only. No route takes a

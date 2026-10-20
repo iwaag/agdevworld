@@ -831,3 +831,66 @@ export function serializable<T extends { bytes?: Buffer }>(r: T): Omit<T, 'bytes
   const { bytes: _bytes, ...rest } = r
   return rest
 }
+
+// ---- integration evidence (argue p4) -----------------------------------------------
+
+// Where a run's integrated work is, as three separate observations (p3 ex1:
+// the specialists read a stale local main and said "not on main" of work
+// the executor had integrated): the run's own `run.integrate` records, each
+// repository's published default branch on Gitea (fetched, with its time)
+// and whether it contains the integrated commit, and the local project
+// workspace's checkout (its branch head, whether it contains the commit, and
+// how it stands against the published branch). None is inferred from another.
+export interface IntegrationEvidence {
+  run: string; observed: string
+  integrations: { decision: number; at: string; by: string; repositories: { path: string; target: string; method: string; result: string }[] }[]
+  repositories: {
+    path: string; result: string
+    published: { repository: string; branch: string; head: string | null; contains: boolean | null; fetch: FetchInfo } | { problem: string }
+    workspace: { id: string; branch: string | null; head: string | null; contains: boolean | null; published: 'same' | 'behind' | 'ahead' | 'diverged' | 'unknown' } | { problem: string }
+  }[]
+}
+export async function integration(ctx: AccessContext, project: string, text: string, opts: { workspace?: string } = {}): Promise<IntegrationEvidence> {
+  const ref = parseRef(text)
+  const v = await run(ctx, project, text, { workspace: opts.workspace })
+  const recOf = (r: unknown) => r as { integrations?: IntegrationEvidence['integrations'] } | undefined
+  const integrations = (recOf(v.live?.record) ?? recOf(v.published?.record))?.integrations ?? []
+  const latest = new Map<string, string>()
+  for (const i of integrations) for (const r of i.repositories) latest.set(r.path, r.result)
+  const ws = await liveWorkspace(ctx, project, opts.workspace)
+  const repositories: IntegrationEvidence['repositories'] = []
+  const contains = async (dir: string, commit: string, head: string) => {
+    const r = await git(dir, ['merge-base', '--is-ancestor', commit, head])
+    return r.code === 0 ? true : r.code === 1 ? false : null
+  }
+  for (const [path, result] of latest) {
+    let published: IntegrationEvidence['repositories'][number]['published']
+    let pubHead: string | null = null
+    let pubDir: string | null = null
+    try {
+      const l = await locate(ctx, project, path === '.' ? '' : path, { upstream: path !== '.' })
+      pubHead = l.commit; pubDir = l.dir
+      published = { repository: l.repository.fullName, branch: l.repository.defaultBranch, head: l.commit, contains: await contains(l.dir, result, l.commit), fetch: l.fetch }
+    } catch (e) { published = { problem: (e as Error).message } }
+    let workspace: IntegrationEvidence['repositories'][number]['workspace']
+    if (typeof ws === 'string') workspace = { problem: ws }
+    else {
+      const dir = path === '.' ? ws.root : join(ws.root, path)
+      const head = await git(dir, ['rev-parse', '--verify', '-q', 'HEAD^{commit}'])
+      const branch = await git(dir, ['symbolic-ref', '-q', '--short', 'HEAD'])
+      const h = head.code === 0 ? head.stdout.trim() : null
+      let rel: 'same' | 'behind' | 'ahead' | 'diverged' | 'unknown' = 'unknown'
+      if (h && pubHead && pubDir) {
+        if (h === pubHead) rel = 'same'
+        else {
+          const behind = await contains(pubDir, h, pubHead) // the workspace head is an ancestor of the published one
+          const ahead = await contains(dir, pubHead, h)
+          rel = behind ? 'behind' : ahead ? 'ahead' : behind === false && ahead === false ? 'diverged' : 'unknown'
+        }
+      }
+      workspace = { id: ws.reg.id, branch: branch.code === 0 ? branch.stdout.trim() : null, head: h, contains: h ? await contains(dir, result, h) : null, published: rel }
+    }
+    repositories.push({ path, result, published, workspace })
+  }
+  return { run: runKey(ref), observed: now(ctx), integrations, repositories }
+}

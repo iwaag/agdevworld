@@ -6,6 +6,14 @@ export const WORKFLOW_SCHEMA = 'ag.workflow.v2'
 export const PROJECT_SCHEMA = 'ag.project.v2'
 export const NODE_TYPES = ['study', 'do', 'delegate', 'talk'] as const
 export type NodeType = typeof NODE_TYPES[number]
+// What a node is in a discussion (argue p4, docs/discussions.md *Activities*):
+// metadata on an ordinary node type, bound to the discussion's records by
+// `wfe discussion announce|ask|ponder|talk --node`. `talk` is a talk node;
+// the others are do nodes. Part of the definition digest and the compiled
+// graph, like a delegate's target.
+export const ACTIVITIES = ['announce', 'ask', 'ponder', 'talk'] as const
+export type Activity = typeof ACTIVITIES[number]
+export const activityType = (a: string): NodeType => (a === 'talk' ? 'talk' : 'do')
 export const ACCESS_LEVELS = ['readonly', 'editable'] as const
 export type Access = typeof ACCESS_LEVELS[number]
 export const APPROVAL_KINDS = ['intent', 'definition'] as const
@@ -94,6 +102,7 @@ export interface WorkflowNode {
   project?: string
   accepts?: string
   confirms?: string // 'result' on the result-confirmation talk (p6)
+  activity?: string // a discussion activity (argue p4): announce | ask | ponder | talk
   appearance?: Appearance // display only (p7)
   template?: TemplateRef // provenance (p7/ex1): the catalog template it was made from; outside digests and the compiled graph
 }
@@ -247,6 +256,7 @@ export function workflowFromData(raw: unknown): { workflow: Workflow; issues: Sh
     if (value.project !== undefined && value.project !== null) node.project = text(value, 'project', path, issues)
     if (value.accepts !== undefined && value.accepts !== null) node.accepts = text(value, 'accepts', path, issues)
     if (value.confirms !== undefined && value.confirms !== null) node.confirms = text(value, 'confirms', path, issues)
+    if (value.activity !== undefined && value.activity !== null) node.activity = text(value, 'activity', path, issues)
     if (value.appearance !== undefined && value.appearance !== null) {
       const a = map(value, 'appearance', path, issues)
       node.appearance = { icon: text(a, 'icon', `${path}.appearance`, issues), color: text(a, 'color', `${path}.appearance`, issues) }

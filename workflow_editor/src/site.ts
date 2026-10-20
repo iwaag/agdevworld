@@ -15,6 +15,9 @@ export function hangoutHref(): string {
   return `${location.protocol}//${host}:${AGDEV_PORT}/hangout/`
 }
 
+// A discussion's meeting room in aghangout (p16).
+export const discussionHref = (id: string) => `${hangoutHref()}?discussion=${encodeURIComponent(id)}`
+
 // The links every top-level screen offers beside its own actions.
 export function siteLinks(current?: 'usage'): HTMLElement[] {
   return [

@@ -74,7 +74,9 @@ export class DiscussionArchive {
     const o = await this.origin()
     const r = this.row(conv)
     const published = r?.commit_id && r.horizon ? { commit: r.commit_id, horizon: JSON.parse(r.horizon) as Horizon, at: r.published_at, url: 'web' in o && o.web ? `${o.web}/src/commit/${r.commit_id}/discussions/${conv}` : null } : null
-    const state: ArchiveStatus['state'] = 'disabled' in o ? 'disabled' : r?.state === 'failed' ? 'failed' : !published ? 'never' : covers(published.horizon, live) ? 'current' : 'behind'
+    // Closing or reopening is published too (the final catch-up on close).
+    const sameState = !r?.horizon || (JSON.parse(r.horizon) as { state?: string }).state === this.ds.discussion(conv)?.state
+    const state: ArchiveStatus['state'] = 'disabled' in o ? 'disabled' : r?.state === 'failed' ? 'failed' : !published ? 'never' : covers(published.horizon, live) && sameState ? 'current' : 'behind'
     return { state, live, published, error: 'disabled' in o ? o.disabled : r?.state === 'failed' ? r.error : null, tries: r?.tries ?? 0, attempted: r?.attempted_at ?? null, repository: 'disabled' in o ? null : o.web ?? o.url }
   }
 

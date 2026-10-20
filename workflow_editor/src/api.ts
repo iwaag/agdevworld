@@ -81,6 +81,8 @@ export const api = {
   // What a shared:// reference is on this host (p12, server/boast.ts resolveShared).
   shareRef: (ref: string) => call<{ ref: string; state: string; detail: string; url: string | null; download: string | null; host: string; path: string | null; folder: boolean }>('GET', `api/share-ref?ref=${encodeURIComponent(ref)}`),
   dashboard: () => call<DashboardResponse>('GET', 'api/agdev'),
+  // Discussions (p16, docs/discussions.md): the recent ones for Home's entrance.
+  discussions: (signal?: AbortSignal) => call<{ disabled: string | null; discussions: { id: string; title: string; updated: string; state: 'open' | 'closed'; count: number; members: string[]; open: number; archive: { state: string; commit: string | null; through: number | null; url: string | null } }[] }>('GET', 'api/discussions', undefined, [], signal),
   // Usage (retire_old_ui p1): the executions' own figures, and the subscription windows apart (a cold read asks the vendors).
   // Every execution node as the coordinator last heard from it (docs/workers.md).
   workers: (signal?: AbortSignal) => call<{ workers: (WorkerView & { slots?: { attempt: string; workspace: string; workflow: string; run: string; state: string; lane: string }[] })[] }>('GET', 'api/workers', undefined, [], signal),

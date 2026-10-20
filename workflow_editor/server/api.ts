@@ -287,9 +287,13 @@ export function createHandler(config: ServiceConfig) {
         const archive = new DiscussionArchive(ds)
         const view = async (id: string, since = 0) => ({ person, ...await ds.view(id, { viewBase: viewBaseOf(area), since }), archive: await archive.status(id) })
         if (!wsId && method === 'GET') {
-          return send(res, 200, { person, disabled: 'disabled' in cfg ? cfg.disabled : null, participants: await ds.participants(), discussions: ds.list().map(d => ({
-            id: d.id, title: d.title, created: d.created, updated: d.updated, state: d.state, count: d.count, members: d.members, open: d.open,
-            last: d.last ? { at: d.last.at, role: d.last.role, author: d.last.author, participant: d.last.participant, kind: d.last.kind, text: d.last.text.slice(0, 300) } : null,
+          return send(res, 200, { person, disabled: 'disabled' in cfg ? cfg.disabled : null, participants: await ds.participants(), discussions: await Promise.all(ds.list().map(async d => {
+            const a = await archive.status(d.id)
+            return {
+              id: d.id, title: d.title, created: d.created, updated: d.updated, state: d.state, count: d.count, members: d.members, open: d.open,
+              last: d.last ? { at: d.last.at, role: d.last.role, author: d.last.author, participant: d.last.participant, kind: d.last.kind, text: d.last.text.slice(0, 300) } : null,
+              archive: { state: a.state, commit: a.published?.commit ?? null, through: a.published?.horizon.message ?? null, url: a.published?.url ?? null },
+            }
           })) })
         }
         if (!wsId && method === 'POST') {

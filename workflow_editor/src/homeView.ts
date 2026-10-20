@@ -12,7 +12,7 @@ import { icon } from './icons.ts'
 import type { ViewHandle } from './main.ts'
 import { ContextSection } from './contextParts.ts'
 import type { BudgetBoard, SourceState, UsageResponse } from '../shared/usage.ts'
-import { siteLinks } from './site.ts'
+import { discussionHref, hangoutHref, siteLinks } from './site.ts'
 import { budgetCards, gaps, isoClock, plural, usd } from './usageParts.ts'
 
 export function diagnosticList(diags: Diagnostic[]): HTMLElement | null {
@@ -66,8 +66,11 @@ export function renderHomeView(root: HTMLElement, opts: { context?: boolean } = 
   let nodes: Awaited<ReturnType<typeof api.workers>>['workers'] | null = null
   let nodesError = ''
   const usageCtrl = new AbortController()
+  let discussions: Awaited<ReturnType<typeof api.discussions>> | null = null
+  let discussionsError = ''
   async function loadUsage() {
-    const [u, b, n] = await Promise.allSettled([api.usage('7d', usageCtrl.signal), api.usageBudget(usageCtrl.signal), api.workers(usageCtrl.signal)])
+    const [u, b, n, d] = await Promise.allSettled([api.usage('7d', usageCtrl.signal), api.usageBudget(usageCtrl.signal), api.workers(usageCtrl.signal), api.discussions(usageCtrl.signal)])
+    if (d.status === 'fulfilled') { discussions = d.value; discussionsError = '' } else discussionsError = (d.reason as Error).message
     if (n.status === 'fulfilled') { nodes = n.value.workers; nodesError = '' } else nodesError = (n.reason as Error).message
     if (u.status === 'fulfilled') { usage = u.value; usageError = '' } else usageError = (u.reason as Error).message
     if (b.status === 'fulfilled') { budget = b.value; budgetError = '' } else budgetError = (b.reason as Error).message
@@ -230,6 +233,24 @@ export function renderHomeView(root: HTMLElement, opts: { context?: boolean } = 
     return card
   }
 
+  // Discussions (workflow_editor p16): the entrance to them and to their
+  // durable records — the meeting rooms are aghangout's, the archive is the
+  // argue project's repository.
+  function renderDiscussionsCard(): HTMLElement {
+    const card = h('section.card.u-glance.discussions-glance', h('div.card-head', h('h2', 'Discussions'), h('a.more-link', { href: hangoutHref(), title: 'Start or read discussions in aghangout' }, 'aghangout ↗')))
+    if (discussionsError) { card.append(h('p.muted.small', `Not read: ${discussionsError}`)); return card }
+    if (!discussions) { card.append(h('p.muted.small', 'Reading…')); return card }
+    if (discussions.disabled) { card.append(h('p.muted.small', `Not configured: ${discussions.disabled}`)); return card }
+    const rows = discussions.discussions.slice(0, 6)
+    if (!rows.length) { card.append(h('p.muted.small', 'None yet. A discussion brings several project agents and a facilitator to one table: start one in aghangout.')); return card }
+    card.append(h('ul.disc-glance', rows.map(d => h('li', { dataset: { discussion: d.id } },
+      h('a', { href: discussionHref(d.id) }, d.title),
+      h('span.muted.small', ` · ${d.state} · ${d.members.length} members · ${d.count} messages${d.open ? ` · ${d.open} open invitation${d.open === 1 ? '' : 's'}` : ''} · `,
+        d.archive.url ? h('a', { href: d.archive.url, target: '_blank', rel: 'noopener', title: 'The archived record in the argue repository' }, `archived through #${d.archive.through} (${d.archive.commit!.slice(0, 7)})`) : `archive: ${d.archive.state}`,
+        d.archive.state === 'behind' || d.archive.state === 'failed' ? ` — ${d.archive.state}` : '')))))
+    return card
+  }
+
   function renderNodesCard(): HTMLElement {
     const card = h('section.card.u-glance.nodes-glance', h('h2', 'Execution nodes'))
     if (nodesError) { card.append(h('div.banner.warn', icon('alert', 'icon small'), `Execution nodes cannot be read: ${nodesError}`)); return card }
@@ -304,7 +325,7 @@ export function renderHomeView(root: HTMLElement, opts: { context?: boolean } = 
     }
   }
   function renderInto() {
-    content.replaceChildren(h('div.dash-glance', renderUsageCard(), renderNodesCard()), renderSimple(), h('div.dash-detail.d-only', renderStatus(), h('div.dash-grid', h('div.col', renderProjects(), renderRepositories()), renderEntrances())))
+    content.replaceChildren(h('div.dash-glance', renderUsageCard(), renderNodesCard(), renderDiscussionsCard()), renderSimple(), h('div.dash-detail.d-only', renderStatus(), h('div.dash-grid', h('div.col', renderProjects(), renderRepositories()), renderEntrances())))
   }
 
   // The registry may change from the CLI or another view; the page follows

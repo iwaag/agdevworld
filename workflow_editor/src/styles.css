@@ -1083,6 +1083,10 @@ html[data-display="simple"] .run-context { border-radius: 14px; }
 .dash-glance { display: grid; align-items: start; grid-template-columns: minmax(0, 1.7fr) minmax(0, 1fr); gap: 18px; max-width: 1180px; width: 100%; margin: 0 auto; padding: 4px 8px 0; }
 @media (max-width: 900px) { .dash-glance { grid-template-columns: minmax(0, 1fr); } }
 html[data-display="detail"] .dash-glance { max-width: none; padding: 0; }
+/* Discussions (p16): the whole width of the glance row. */
+.discussions-glance { grid-column: 1 / -1; }
+.disc-glance { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.disc-glance li { overflow-wrap: anywhere; }
 .u-glance { display: flex; flex-direction: column; gap: 10px; border-radius: 16px; }
 .u-glance h2 { margin: 0; }
 .u-glance p { margin: 0; }

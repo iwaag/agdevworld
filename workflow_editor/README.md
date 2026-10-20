@@ -46,7 +46,7 @@ Editor for the operating area's registry (`pj-agdev/.local/agdev/`, ignored):
 | File | Content |
 | --- | --- |
 | `registry.json` | projects (id → Gitea root repository), repositories (by Gitea id: owner/name as registered, category, description), workspaces on this host |
-| `gitea.json` | `{"url", "owner", "tokenFile"}`; the token file is outside every repository |
+| `gitea.json` | `{"url", "owner", "tokenFile"}`; the token file is outside every repository. Optional `"principals": {"<name>": {"tokenFile"}}`: other Gitea users an agent may act as with `wfe gitea … --as <name>` (p9); the service never uses them |
 | `system.json` | the operating boundary (below); system configuration, outside every managed project |
 | `pj-<id>/` | workspaces created here or obtained from Gitea |
 | `service/`, `bin/wfe` | installed releases and the launcher (agdevworld's `scripts/wfe-release.sh`) |

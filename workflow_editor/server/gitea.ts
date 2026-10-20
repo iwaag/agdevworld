@@ -7,12 +7,18 @@
 // Gitea URL; it is never written into a URL, a remote, a Git config file, a
 // project file or a run record. Repository URLs inside projects are relative
 // (`../<name>.git`), so .gitmodules names no host either.
+//
+// Other principals (project_migration p9) are named beside the service's:
+//   "principals": {"trustedagent": {"tokenFile": "../gitea/trustedagent"}}
+// `Gitea.as(name)` authenticates as one of them; the service itself never
+// does. A token file holds the bare token, or a `token: <value>` /
+// `TOKEN=<value>` line among others (a credential note).
 import { readFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, resolve } from 'node:path'
 import { git } from './git.ts'
 
-export interface GiteaSetting { url: string; owner: string; tokenFile: string; file: string }
+export interface GiteaSetting { url: string; owner: string; tokenFile: string; file: string; principal?: string; principals?: Record<string, { tokenFile: string }> }
 export interface GiteaRepo {
   id: number
   owner: string
@@ -39,7 +45,27 @@ export async function loadGiteaSetting(file: string): Promise<GiteaSetting> {
   let raw: unknown
   try { raw = JSON.parse(text) } catch (e) { throw new GiteaError(0, `the Gitea setting ${file} is not valid JSON: ${(e as Error).message}`) }
   if (!isObj(raw) || typeof raw.url !== 'string' || typeof raw.owner !== 'string' || typeof raw.tokenFile !== 'string') throw new GiteaError(0, `the Gitea setting ${file} needs text "url", "owner" and "tokenFile"`)
-  return { url: raw.url.replace(/\/+$/, ''), owner: raw.owner, tokenFile: resolve(dirname(file), raw.tokenFile), file }
+  const principals: Record<string, { tokenFile: string }> = {}
+  if (raw.principals !== undefined) {
+    if (!isObj(raw.principals)) throw new GiteaError(0, `the Gitea setting ${file}: "principals" is {"<name>": {"tokenFile": "…"}}`)
+    for (const [name, v] of Object.entries(raw.principals)) {
+      if (!isObj(v) || typeof v.tokenFile !== 'string') throw new GiteaError(0, `the Gitea setting ${file}: principal "${name}" needs text "tokenFile"`)
+      principals[name] = { tokenFile: resolve(dirname(file), v.tokenFile) }
+    }
+  }
+  return { url: raw.url.replace(/\/+$/, ''), owner: raw.owner, tokenFile: resolve(dirname(file), raw.tokenFile), file, principals }
+}
+
+// The token of a token file, never echoed in an error.
+export function tokenOf(text: string, file: string): string {
+  const t = text.trim()
+  if (t && !/\s/.test(t)) return t
+  try { const j = JSON.parse(t) as { token?: unknown }; if (typeof j?.token === 'string' && j.token.trim()) return j.token.trim() } catch { /* not JSON */ }
+  for (const line of t.split(/\r?\n/)) {
+    const m = /^\s*(?:export\s+)?([A-Za-z0-9_.-]*token[A-Za-z0-9_.-]*)\s*[:=]\s*["']?([^\s"']+)["']?\s*$/i.exec(line)
+    if (m) return m[2]
+  }
+  throw new GiteaError(0, `the Gitea token file ${file} ${t ? 'has no token: write the bare token, or a line "token: <value>"' : 'is empty'}`)
 }
 
 export class Gitea {
@@ -48,13 +74,31 @@ export class Gitea {
   constructor(setting: GiteaSetting) { this.setting = setting }
   get url() { return this.setting.url }
   get owner() { return this.setting.owner }
+  // The principal this instance authenticates as: a named one, or the service's.
+  get principal() { return this.setting.principal ?? '(service)' }
+
+  // The same Gitea as a principal named in the setting.
+  as(name: string): Gitea {
+    const p = this.setting.principals?.[name]
+    if (!p) throw new GiteaError(0, `the Gitea setting ${this.setting.file} names no principal "${name}"${Object.keys(this.setting.principals ?? {}).length ? ` (named: ${Object.keys(this.setting.principals!).join(', ')})` : ''}; add "principals": {"${name}": {"tokenFile": "…"}} there`)
+    return new Gitea({ ...this.setting, owner: name, tokenFile: p.tokenFile, principal: name })
+  }
 
   private async auth(): Promise<string> {
     if (this.token === undefined) {
-      try { this.token = (await readFile(this.setting.tokenFile, 'utf8')).trim() } catch { throw new GiteaError(0, `the Gitea token file ${this.setting.tokenFile} cannot be read`) }
-      if (!this.token) throw new GiteaError(0, `the Gitea token file ${this.setting.tokenFile} is empty`)
+      let text: string
+      try { text = await readFile(this.setting.tokenFile, 'utf8') } catch { throw new GiteaError(0, `the Gitea token file ${this.setting.tokenFile} cannot be read`) }
+      this.token = tokenOf(text, this.setting.tokenFile)
     }
     return this.token
+  }
+
+  // What this principal may do in a repository; null when it cannot see it.
+  async access(owner: string, name: string): Promise<{ repo: GiteaRepo; permissions: { admin: boolean; push: boolean; pull: boolean } } | null> {
+    const raw = await this.call<Record<string, unknown>>('GET', `/repos/${enc(owner)}/${enc(name)}`, undefined, true)
+    if (!raw) return null
+    const p = (raw.permissions ?? {}) as Record<string, unknown>
+    return { repo: Gitea.repoOf(raw), permissions: { admin: p.admin === true, push: p.push === true, pull: p.pull === true } }
   }
 
   async call<T>(method: string, path: string, body?: unknown, okMissing = false): Promise<T | null> {

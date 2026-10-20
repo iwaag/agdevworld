@@ -559,6 +559,26 @@ create    creates a repository under the configured owner with a README and
 add       adds a registered repository to this workspace's project as a
           submodule at <path>, with a URL relative to the project on Gitea.
           Staged, not committed. Other projects keep their pinned revisions.`,
+  gitea: `wfe gitea whoami [--as <principal>]
+wfe gitea repo <owner>/<name> [--as <principal>]
+wfe gitea git [--as <principal>] -- <git arguments…>
+
+Gitea as a chosen principal (project_migration p9). Without --as, the
+service's own principal (gitea.json: url, owner, tokenFile); --as names
+another one listed in gitea.json "principals". The token is never printed,
+never written to a remote, a URL or a Git config file.
+
+whoami    the login the principal authenticates as
+repo      whether it sees the repository and may pull, push, administer
+git       runs git in the current directory (or git's own -C <dir>) with
+          the principal's authentication for this Gitea's URL only; the
+          output is git's. Push to a remote of this Gitea (origin or a URL).
+          A force push (--force, -f, +<refspec>, --mirror) is refused: it
+          could overwrite others' work; --force-with-lease is allowed.
+          Author your commits yourself (git -c user.name=… -c user.email=…
+          commit …): the principal is who pushes, not who wrote.
+Typical: a preparation checkout of an existing repository, published as
+the principal before \`wfe project register\`.`,
   dashboard: `wfe dashboard
 
 The agdev dashboard as text: every registered project (where its definition
@@ -607,7 +627,8 @@ Projects and workspaces
   add-repo <path> <loc>     add a Git submodule (git submodule add); --new creates a local repository
   project register|obtain   a project on Gitea: register it here, or clone a workspace of it
   repo register|create|add  shared repositories on Gitea, and adding one to this project
-  dashboard                 every project and shared repository, with where each fact was read
+  gitea whoami|repo|git     Gitea as a chosen principal (--as): who, its access, git with its auth
+  dashboard               every project and shared repository, with where each fact was read
   projects <subcommand>     read any managed project: list, show, tree, read, search, runs, run
                             (committed by default, at a revision, with provenance; docs/access.md)
   request <workflow> …      a person's request to the executor (autolab): a run, queued
@@ -1381,6 +1402,45 @@ async function cmdRepo(p: Parsed): Promise<number> {
   throw new UsageError('wfe repo register <owner>/<name> --category … | create <name> --category … [--description …] | add <repository> <path>')
 }
 
+// A push that could overwrite others' work (p9: preparation pushes).
+export function forcePush(args: string[]): string | undefined {
+  const i = args.indexOf('push')
+  if (i < 0) return undefined
+  return args.slice(i + 1).find(a => a === '--force' || a === '-f' || a === '--mirror' || /^-[a-zA-Z]*f/.test(a) && !a.startsWith('--') || a.startsWith('+'))
+}
+
+async function cmdGitea(p: Parsed): Promise<number> {
+  const [sub, ...rest] = p.positional
+  const base = await giteaOf(p)
+  if (!base) throw new Refused(`no Gitea setting at ${giteaFile(p)}`)
+  const as = opt(p, 'as')
+  let g: Gitea
+  try { g = as ? base.as(as) : base } catch (e) { throw new Refused((e as Error).message) }
+  const who = as ?? `${base.owner}'s setting (service)`
+  const wrap = async <T>(f: () => Promise<T>) => { try { return await f() } catch (e) { if (e instanceof GiteaError) throw new Refused(e.message); throw e } }
+  if (sub === 'whoami') { const login = await wrap(() => g.login()); out(`${login} (as ${who}, ${g.url})`, { login, principal: as ?? null, url: g.url }); return 0 }
+  if (sub === 'repo') {
+    const o = ownerName(rest[0], '<repository>')
+    const a = await wrap(() => g.access(o.owner, o.name))
+    if (!a) { out(`${o.owner}/${o.name}: not visible to ${who} (absent or private)`, { visible: false }); return 1 }
+    const perm = Object.entries(a.permissions).filter(([, v]) => v).map(([k]) => k)
+    out(`${a.repo.fullName} (id ${a.repo.id}, ${a.repo.empty ? 'empty' : `default ${a.repo.defaultBranch}`}${a.repo.archived ? ', archived' : ''}): ${who} may ${perm.length ? perm.join(', ') : 'nothing'}`, { visible: true, repository: a.repo, permissions: a.permissions, principal: as ?? null })
+    return 0
+  }
+  if (sub === 'git') {
+    if (!rest.length) throw new UsageError('wfe gitea git [--as <principal>] -- <git arguments…>')
+    const f = forcePush(rest)
+    if (f) throw new Refused(`a force push (${f}) is refused: it could overwrite work others published; fetch and integrate, or use --force-with-lease`)
+    const env = { ...process.env, ...(await wrap(() => g.gitEnv())) }
+    return await new Promise<number>(res => {
+      const c = spawn('git', rest, { stdio: 'inherit', env })
+      c.on('error', e => { console.error(`wfe gitea git: ${e.message}`); res(1) })
+      c.on('exit', code => res(code ?? 1))
+    })
+  }
+  throw new UsageError('wfe gitea whoami | repo <owner>/<name> | git -- <git arguments…>  [--as <principal>]')
+}
+
 async function cmdDashboard(p: Parsed): Promise<number> {
   const d = await dashboard(await agdevCtx(p))
   const lines = [`Gitea: ${d.gitea.state}${d.gitea.url ? ` ${d.gitea.url} (owner ${d.gitea.owner})` : ''}${d.gitea.error ? ` — ${d.gitea.error}` : ''}`, `Execution host: ${d.executor.state}${d.executor.detail ? ` — ${d.executor.detail}` : ''}`, '', 'Projects:']
@@ -1468,7 +1528,7 @@ async function cmdMigrate(p: Parsed): Promise<number> {
 }
 
 const COMMANDS: Record<string, (p: Parsed) => Promise<number>> = {
-  runs: cmdRuns, observe: cmdObserve, projects: cmdProjects, run: cmdRun, delegate: cmdDelegate, present: cmdPresent, share: cmdShare, project: cmdProject, repo: cmdRepo, dashboard: cmdDashboard, exec: cmdExec, request: cmdRequest, notify: cmdNotify, intake: cmdIntake,
+  runs: cmdRuns, observe: cmdObserve, projects: cmdProjects, run: cmdRun, delegate: cmdDelegate, present: cmdPresent, share: cmdShare, project: cmdProject, repo: cmdRepo, gitea: cmdGitea, dashboard: cmdDashboard, exec: cmdExec, request: cmdRequest, notify: cmdNotify, intake: cmdIntake,
   create: cmdCreate, register: cmdRegister, list: cmdList, status: cmdStatus, validate: cmdValidate,
   approve: cmdApprove, arrange: cmdArrange, 'add-repo': cmdAddRepo, workflow: cmdWorkflow, serve: cmdServe, setup: cmdSetup,
   version: cmdVersion, nodes: cmdNodes, boast: cmdBoast, context: cmdContext, conversation: cmdConversation,

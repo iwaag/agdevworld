@@ -1,80 +1,51 @@
-"""The agent room's HTTP door: stdlib, unauthenticated, loopback.
+"""The relay's HTTP door: stdlib, unauthenticated, on the LAN.
 
 Modelled on cagent's *window* listener
 (`pj-clusterintent/cagent/src/cagent_api/server.py`): `ThreadingHTTPServer`,
-no framework, no auth. cagent needs three doors because two of them can change
-the cluster; this one reads a chat realm the browser's own user can read
-anyway, on a loopback port in a private lab, so the window's shape is the whole
-of what it needs.
+no framework, no auth, in a private lab.
 
-There is now exactly one POST that touches only memory, and it is worth
-being precise about why it did not buy cagent's other doors. `POST /ops/confirm` writes to **this process's
-own memory**: it marks which `done` rows a human has looked at. It reaches
-neither Zulip nor any node — the observer still never posts (`operation_room`
-p2 constraint 5) — and its effect dies with the relay, along with the rows it
-hides. A route that could change the realm would be a different thing and
-would need a different door.
+Since retire_old_ui p1 it serves the Front Desk's panels (settings, contexts,
+progress), the Arguing Room (history and closing an argue), and the reads the
+workflow editor's Usage view takes from this host (`/budget`, and `/cost` as
+pre-WFE history). The agent room, the operation room, the routine dashboard,
+the cost gauge page and their routes are gone.
 
-CORS is answered permissively for the same reason: the frontend may be served
-from vite (:5173) or nginx (:8090), and there is nothing here to protect from
-a page that can already reach the port.
+CORS is answered permissively: there is nothing here to protect from a page
+that can already reach the port.
 """
 
 from __future__ import annotations
 
 import json
-import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, unquote, urlparse
 
+from agag.mirror import Mirror
+
 from .budget import Budget
 from .chat import Chat
-from .close import Closer, parse_key
+from .close import Closer
 from .contexts import Contexts, ContextsError
-from .cost import Cost
+from .cost import ROOTS_VARIABLE, Cost
 from .argueroom import ArguingRoom
-from .frontdesk import FrontDesk
-from .inflight import ROOTS_VARIABLE
-from .ops import Ops
 from .progress import Progress
-from .room import Room, health_block
+from .room import health_block
 from .settings import Settings
 
-ROUTES = ("/healthz", "/agents", "/work", "/work?resolved=1", "/ops", "/routines", "/routines/<name>",
-          "/inflight/<name>", "/cost", "/budget", "/frontdesk", "/frontdesk/<id>",
-          "/frontdesk/<id>/close-plan", "/argues", "/argues/<anchor>",
-          "/argues/<anchor>/close-plan",
-          "/progress?current=<desk id>",
-          "/complete/plan?channel=<channel>&topic=<topic>",
-          "/complete/history?channel=<channel>&topic=<topic>",
+ROUTES = ("/healthz", "/cost", "/budget", "/argues", "/argues/<anchor>",
+          "/argues/<anchor>/close-plan", "/progress?current=<desk id>",
           "/settings", "/settings/<revision>", "/settings/<revision>/<path>",
           "/contexts", "/contexts/<id>/resolve?rev=<rev>", "/contexts/<id>/tree?rev=<rev>",
           "/contexts/<id>/file?rev=<rev>&path=<path>")
-WRITE_ROUTES = ("/ops/confirm", "/chat", "/routines/<name>/start", "/frontdesk/<id>/post",
-                "/frontdesk/<id>/close", "/frontdesk/<id>/render", "/complete",
-                "/argues", "/argues/<anchor>/post", "/argues/<anchor>/render",
-                "/argues/<anchor>/close",
+WRITE_ROUTES = ("/argues/<anchor>/close",
                 "/contexts", "/contexts/register", "/contexts/<id>", "/contexts/<id>/publish")
 
 
-
-# Writes that reached the legacy Front listener through Zulip (#front desk
-# posts and re-voicing requests, argues, routine chat and starts), retired
-# with it in project_migration p8.
-def retired_write(path: str) -> bool:
-    if path == "/chat" or path == "/argues":
-        return True
-    if path.startswith("/frontdesk/") and (path.endswith("/post") or path.endswith("/render")):
-        return True
-    if path.startswith("/argues/") and not path.endswith("/close"):
-        return True
-    return path.startswith("/routines/") and path.endswith("/start")
-
-def make_handler(room: Room, ops: Ops | None = None, chat: Chat | None = None,
+def make_handler(mirror: Mirror | None = None, chat: Chat | None = None,
                  cost: Cost | None = None, budget: Budget | None = None,
-                 desk: FrontDesk | None = None, settings: Settings | None = None,
-                 closer: Closer | None = None, argues: ArguingRoom | None = None,
-                 watchdog=None, contexts: Contexts | None = None, progress: Progress | None = None):
+                 settings: Settings | None = None, closer: Closer | None = None,
+                 argues: ArguingRoom | None = None, contexts: Contexts | None = None,
+                 progress: Progress | None = None):
     class Handler(BaseHTTPRequestHandler):
         server_version = "agentroom/0.1.0"
 
@@ -193,139 +164,47 @@ def make_handler(room: Room, ops: Ops | None = None, chat: Chat | None = None,
             self.send_header("Access-Control-Allow-Headers", "Content-Type")
             self.end_headers()
 
-        def _with_chat(self, payload: dict) -> dict:
-            """Say, in the read payload, whether this relay can answer at all.
-
-            The view has to know before it draws a box: a chat input that
-            silently refuses on submit is the same lie as an empty board.
-            """
-            payload["chat"] = chat.status() if chat is not None else {
-                "configured": False,
-                "reason": "this relay was built without a chat credential",
-            }
-            return payload
-
         def do_GET(self) -> None:  # noqa: N802
             path = urlparse(self.path).path.rstrip("/") or "/"
             try:
                 if path == "/healthz":
-                    payload = {"ok": True, "mirror": health_block(room.mirror)}
-                    if watchdog is not None:
-                        payload["observer_monitor"] = watchdog.latest()
-                    self._write_json(200, payload)
+                    self._write_json(200, {"ok": True, "mirror": health_block(mirror)})
                 elif path == "/":
                     self._write_json(200, {
                         "service": "agentroom",
                         "routes": list(ROUTES),
                         "post": list(WRITE_ROUTES),
                     })
-                elif path == "/agents":
-                    self._write_json(200, room.agents())
-                elif path == "/work":
-                    # `?resolved=1` lists the ✔ topics too, so a finished
-                    # request can be reached for completion (`front_desk` p4).
-                    query = parse_qs(urlparse(self.path).query)
-                    resolved = (query.get("resolved") or ["0"])[0] in ("1", "true", "yes")
-                    self._write_json(200, room.work(include_resolved=resolved))
-                elif path == "/ops":
-                    # Without a credential of its own the engine does not run,
-                    # and the view must be told that rather than shown an
-                    # empty board — an unreadable room and a quiet one look
-                    # identical, which is the failure this whole view exists
-                    # to prevent.
-                    if ops is None:
-                        self._write_json(503, {
-                            "error": "the ops engine is not configured; "
-                                     "set OPSROOM_ZULIP_ENV to its own bot credential",
-                        })
-                    else:
-                        board = ops.snapshot()
-                        # What watches the requests is shown beside them: a
-                        # board of quiet rows means nothing if the monitor
-                        # that would have flagged them has stopped.
-                        board["watchers"] = {"observer_monitor": watchdog.latest()} if watchdog is not None else {}
-                        self._write_json(200, board)
-                elif path == "/routines":
-                    # The routine board is the same engine's reading of the
-                    # same realm, so it degrades the same way: no credential,
-                    # no board, and it says which variable is missing.
-                    if ops is None:
-                        self._write_json(503, {
-                            "error": "the ops engine is not configured; "
-                                     "set OPSROOM_ZULIP_ENV to its own bot credential",
-                        })
-                    else:
-                        self._write_json(200, self._with_chat(ops.routines()))
-                elif path.startswith("/routines/"):
-                    if ops is None:
-                        self._write_json(503, {
-                            "error": "the ops engine is not configured; "
-                                     "set OPSROOM_ZULIP_ENV to its own bot credential",
-                        })
-                    else:
-                        # The name is a topic suffix, so it arrives percent
-                        # encoded and is never used to build a path or a
-                        # narrow — it is matched against the routines the
-                        # engine already found.
-                        # `?resolved=hide` drops the sessions a human has ✔'d
-                        # before the last three are taken; the default keeps
-                        # every caller that never asked reading what it read.
-                        query = parse_qs(urlparse(self.path).query)
-                        hide = (query.get("resolved") or ["show"])[0] == "hide"
-                        found = ops.routine(unquote(path[len("/routines/"):]),
-                                            include_resolved=not hide)
-                        found = self._with_chat(found)
-                        if not found.get("error"):
-                            found["viewer_id"] = chat.viewer_id() if chat is not None else None
-                        self._write_json(404 if found.get("error") else 200, found)
                 elif path == "/cost":
-                    # Host files only, like /inflight, so a view may poll it.
-                    # The ops engine is asked for the roster and each
-                    # routine's sessions — links it already holds, never a
-                    # Zulip read — so without it the board still comes back,
-                    # without the routine section, and says so.
+                    # Host files only, so it may be polled: the pre-WFE
+                    # agents' records, read as history by the workflow
+                    # editor's Usage view.
                     if cost is None:
                         self._write_json(503, {
-                            "error": "the cost gauge is not configured; "
+                            "error": "the cost read is not configured; "
                                      f"set {ROOTS_VARIABLE} to the instance roots on this host",
                         })
                     else:
-                        roster: list[str] = []
-                        sessions: dict[str, list[dict]] = {}
-                        note = None
-                        if ops is not None:
-                            board = ops.snapshot()
-                            roster = [one["instance"] for one in board["instances"]]
-                            for row in ops.routines()["routines"]:
-                                found = ops.routine(row["name"])
-                                sessions[row["name"]] = found.get("sessions") or []
-                        else:
-                            note = "no ops engine: routine sessions and the roster are not known"
-                        payload = cost.board(roster=roster, routine_sessions=sessions)
-                        payload["note"] = note
-                        self._write_json(200, payload)
+                        self._write_json(200, cost.board())
                 elif path == "/budget":
-                    # Its own route, not folded into /cost: this one calls the
-                    # vendors (through the CLIs' own reads), and /cost is
-                    # stat-only and polled at 20 s. The per-provider cache in
-                    # budget.py is what limits the vendor calls, not the page.
+                    # Calls the vendors (through the CLIs' own reads); the
+                    # per-provider cache in budget.py limits those calls,
+                    # not the caller.
                     if budget is None:
                         self._write_json(503, {"error": "the budget read is not configured"})
                     else:
                         self._write_json(200, budget.snapshot())
                 elif path == "/argues" or path.startswith("/argues/"):
                     # The Arguing Room (`argue` p2): the list, or one argue
-                    # by its anchor message id — source posts, Front's saved
-                    # interpretations and the rendering status, all from the
-                    # mirror.
+                    # by its anchor message id, from the mirror.
                     if argues is None:
                         self._write_json(503, {"error": "the Arguing Room is not configured"})
                     elif path == "/argues":
                         self._write_json(200, argues.board())
                     elif path.endswith("/close-plan"):
                         # What closing this argue would change (`argue` p2
-                        # ex1): the shared completion preview, keyed by the
-                        # topic the anchor is in now. A read; nothing moves.
+                        # ex1): the completion preview, keyed by the topic
+                        # the anchor is in now. A read; nothing moves.
                         if closer is None:
                             self._write_json(503, {"error": "conversation completion is not configured"})
                         else:
@@ -336,81 +215,21 @@ def make_handler(room: Room, ops: Ops | None = None, chat: Chat | None = None,
                         found = argues.argue(unquote(path[len("/argues/"):]))
                         self._write_json(404 if found.get("error") else 200, found)
                 elif path == "/progress":
-                    # The progress panel (`progress_panel` p1): every request
-                    # in flight as a card, off the mirror, Observer's records
-                    # and — for owners that expose it — a health check of each
-                    # open serving. A read: it writes nothing and starts
-                    # nothing, whether the panel is shown or not.
+                    # The Front Desk's progress panel (`progress_panel` p1):
+                    # every request in flight as a card, off the mirror,
+                    # Observer's records and the owners' health checks. A
+                    # read: it writes nothing and starts nothing.
                     if progress is None:
-                        self._write_json(503, {"error": "the progress read is not configured (no ops engine)"})
+                        self._write_json(503, {"error": "the progress read is not configured"})
                     else:
                         query = parse_qs(urlparse(self.path).query)
                         current = (query.get("current") or [None])[0]
                         fresh = (query.get("fresh") or ["0"])[0] in ("1", "true", "yes")
                         self._write_json(200, progress.board(current, fresh=fresh))
-                elif path == "/frontdesk":
-                    # The Front Desk's conversations (`front_desk` p1). The
-                    # engine's memory when it has them, the realm when not;
-                    # the payload says which, and `unknown` when neither.
-                    if desk is None:
-                        self._write_json(503, {"error": "the Front Desk is not configured"})
-                    else:
-                        self._write_json(200, desk.board())
-                elif path.startswith("/frontdesk/") and path.endswith("/close-plan"):
-                    # What closing this conversation would change (`front_desk`
-                    # p3). A read: it touches Zulip and writes nothing, and
-                    # it is the *only* thing the button's final
-                    # click approves. Since p4 the Front Desk is one caller of
-                    # the shared operation below; its id names the topic.
-                    if closer is None:
-                        self._write_json(503, {"error": "conversation completion is not configured"})
-                    else:
-                        ident = unquote(path[len("/frontdesk/"):-len("/close-plan")])
-                        found = closer.plan(Closer.desk_key(ident))
-                        self._write_json(400 if found.get("error") else 200, found)
-                elif path == "/complete/plan" or path == "/complete/history":
-                    # The shared completion preview for any selected request
-                    # (`front_desk` p4): `?channel=…&topic=…`. History is the
-                    # relay's own memory of what it carried out, per request
-                    # or for all of them when neither is named.
-                    if closer is None:
-                        self._write_json(503, {"error": "conversation completion is not configured"})
-                    else:
-                        query = parse_qs(urlparse(self.path).query)
-                        channel = (query.get("channel") or [None])[0]
-                        topic = (query.get("topic") or [None])[0]
-                        if path == "/complete/history" and channel is None and topic is None:
-                            self._write_json(200, {"history": closer.records()})
-                        else:
-                            key = parse_key(channel, topic)
-                            if isinstance(key, dict):
-                                self._write_json(400, key)
-                            elif path == "/complete/history":
-                                self._write_json(200, {"channel": key[0], "topic": key[1],
-                                                       "history": closer.records(key)})
-                            else:
-                                found = closer.plan(key)
-                                self._write_json(400 if found.get("error") else 200, found)
-                elif path.startswith("/frontdesk/"):
-                    if desk is None:
-                        self._write_json(503, {"error": "the Front Desk is not configured"})
-                    else:
-                        found = desk.conversation(unquote(path[len("/frontdesk/"):]))
-                        self._write_json(400 if found.get("error") else 200, found)
                 elif path == "/contexts" or path.startswith("/contexts/"):
                     self._contexts_get(path)
                 elif path == "/settings" or path.startswith("/settings/"):
                     self._settings(unquote(path[len("/settings"):]).lstrip("/"))
-                elif path.startswith("/inflight/"):
-                    # The one route a view may poll at a few seconds. It reads
-                    # this host's directories and never Zulip.
-                    if ops is None:
-                        self._write_json(503, {
-                            "error": "the ops engine is not configured; "
-                                     "set OPSROOM_ZULIP_ENV to its own bot credential",
-                        })
-                    else:
-                        self._write_json(200, ops.inflight(unquote(path[len("/inflight/"):])))
                 else:
                     self._write_json(404, {"error": f"no route {path}", "routes": list(ROUTES)})
             except Exception as error:
@@ -423,9 +242,6 @@ def make_handler(room: Room, ops: Ops | None = None, chat: Chat | None = None,
             try:
                 length = int(self.headers.get("Content-Length") or 0)
                 raw = self.rfile.read(length) if length > 0 else b""
-                # No body at all is the common case for confirm — the view's
-                # one button means "all of them" — so an empty request is not
-                # an error here.
                 body = json.loads(raw) if raw.strip() else {}
             except (ValueError, json.JSONDecodeError) as error:
                 self._write_json(400, {"error": f"unreadable body: {error}"})
@@ -435,161 +251,14 @@ def make_handler(room: Room, ops: Ops | None = None, chat: Chat | None = None,
                 return None
             return body
 
-        def _chat(self) -> None:
-            """The one route that writes to the realm (`operation_room` p3).
-
-            Every refusal is decided in `chat.py` and answered as 403: the
-            request was well formed and the *rule* is what declined it. A view
-            that forgot to hide the box therefore still cannot post into
-            another agent's channel.
-            """
-            if chat is None or not chat.configured:
-                reason = (chat.status()["reason"] if chat else
-                          "this relay was built without a chat credential")
-                self._write_json(503, {"error": reason})
-                return
-            if ops is None:
-                self._write_json(503, {
-                    "error": "the ops engine is not configured, so no routine is known "
-                             "and nothing can be posted into one",
-                })
-                return
-            body = self._body()
-            if body is None:
-                return
-            channel = str(body.get("channel") or "")
-            topic = str(body.get("topic") or "")
-            text = str(body.get("text") or "")
-            names = {row["name"] for row in ops.routines()["routines"]}
-            refused = chat.check(channel, topic, text, names)
-            if refused is not None:
-                self._write_json(403, {"sent": False, "error": refused})
-                return
-            try:
-                found = chat.send(channel, topic, text, names)
-            except Exception as error:
-                # No retry: the post may well have landed, and a second one
-                # buys a second paid run for a thing the human asked once.
-                self._write_json(502, {"sent": False,
-                                       "error": f"{type(error).__name__}: {error}"})
-                return
-            self._write_json(200, found)
-
-        def _start(self, name: str) -> None:
-            """Ask Front to run a routine (`refine_routine` p1 step 4).
-
-            The same door as `/chat` — the Developer's credential — posting
-            the request at Front's ordinary entrance, a Front Desk
-            conversation of its own; Front reads the guide and opens the run.
-            Refusals are 409 because the request was well formed and the
-            routine's *state* declined it.
-            """
-            if chat is None or not chat.configured:
-                reason = (chat.status()["reason"] if chat else
-                          "this relay was built without a chat credential")
-                self._write_json(503, {"sent": False, "uncertain": False, "error": reason})
-                return
-            if ops is None:
-                self._write_json(503, {
-                    "sent": False, "uncertain": False,
-                    "error": "the ops engine is not configured, so no routine is known",
-                })
-                return
-            body = self._body()
-            if body is None:
-                return
-            instruction = body.get("instruction")
-            if instruction is not None and not isinstance(instruction, str):
-                self._write_json(400, {"error": "instruction must be a string"})
-                return
-            rows = ops.routines()["routines"]
-            row = next((one for one in rows if one["name"] == name), None)
-            # A Front Desk conversation id, the way the desk screen mints
-            # them, so the request is a conversation the desk can show.
-            stamp = time.strftime("%Y%m%d-%H%M%S", time.gmtime())
-            found = chat.request(row, name, instruction, stamp=stamp)
-            if found["sent"]:
-                self._write_json(200, found)
-            elif found.get("uncertain"):
-                self._write_json(502, found)
-            else:
-                self._write_json(409, found)
-
-        def _desk_post(self, ident: str) -> None:
-            """The Front Desk's write: as the Developer, into
-            `#front` › `front-desk-<id>`, once per submit token."""
-            if desk is None:
-                self._write_json(503, {"sent": False, "error": "the Front Desk is not configured"})
-                return
-            if chat is None or not chat.configured:
-                reason = (chat.status()["reason"] if chat else
-                          "this relay was built without a chat credential")
-                self._write_json(503, {"sent": False, "uncertain": False, "error": reason})
-                return
-            body = self._body()
-            if body is None:
-                return
-            text = str(body.get("text") or "")
-            token = str(body.get("token") or "")
-            refused = desk.check(ident, text, token)
-            if refused is not None:
-                self._write_json(403, {"sent": False, "uncertain": False, "error": refused})
-                return
-            found = desk.post(ident, text, token, body.get("answers"), body.get("not_answer"))
-            if found.get("sent"):
-                self._write_json(200, found)
-            elif found.get("uncertain"):
-                self._write_json(502, found)
-            else:
-                self._write_json(403, found)
-
-        def _answer_write(self, found: dict) -> None:
-            if found.get("sent"):
-                self._write_json(200, found)
-            elif found.get("uncertain"):
-                self._write_json(502, found)
-            else:
-                self._write_json(403, found)
-
-        def _argue_write(self, rest: str) -> None:
-            """The Arguing Room's writes, as the Developer, once per token:
-            `POST /argues` opens one, `/argues/<anchor>/post` is the human's
-            next turn (a ✔'d argue is resumed in place), and
-            `/argues/<anchor>/render` asks Front for another interpretation."""
-            if argues is None:
-                self._write_json(503, {"sent": False, "error": "the Arguing Room is not configured"})
-                return
-            body = self._body()
-            if body is None:
-                return
-            token = str(body.get("token") or "")
-            if rest == "":
-                self._answer_write(argues.create(body.get("stem"), str(body.get("text") or ""), token))
-            elif rest.endswith("/post"):
-                self._answer_write(argues.post(unquote(rest[:-len("/post")]), str(body.get("text") or ""), token,
-                                               body.get("answers"), body.get("not_answer")))
-            elif rest.endswith("/render"):
-                self._answer_write(argues.render(unquote(rest[:-len("/render")]), body.get("revision"), token))
-            else:
-                self._write_json(404, {"error": f"no POST route /argues/{rest}", "post": list(WRITE_ROUTES)})
-
-        def _desk_render(self, ident: str) -> None:
-            if desk is None:
-                self._write_json(503, {"sent": False, "error": "the Front Desk is not configured"})
-                return
-            body = self._body()
-            if body is None:
-                return
-            self._answer_write(desk.render(ident, body.get("revision"), str(body.get("token") or "")))
-
         def _complete(self, key) -> None:
             """Close the selected request and the work it opened.
 
             The body carries the fingerprint of the preview the human
             approved — never a list of destinations. The targets are
             re-derived here, and a plan that no longer matches is answered
-            409 with the fresh one rather than written against. `key` is what
-            the route named, or the refusal it produced instead.
+            409 with the fresh one rather than written against. `key` is the
+            argue's topic, or the refusal naming it produced instead.
             """
             if closer is None:
                 self._write_json(503, {"error": "conversation completion is not configured"})
@@ -597,8 +266,6 @@ def make_handler(room: Room, ops: Ops | None = None, chat: Chat | None = None,
             body = self._body()
             if body is None:
                 return
-            if key is None:
-                key = parse_key(body.get("channel"), body.get("topic"))
             if isinstance(key, dict):
                 self._write_json(400, key)
                 return
@@ -621,99 +288,26 @@ def make_handler(room: Room, ops: Ops | None = None, chat: Chat | None = None,
             path = urlparse(self.path).path.rstrip("/") or "/"
             if path == "/contexts" or path.startswith("/contexts/"):
                 self._contexts_post(path)
-                return
-            if retired_write(path):
-                # The legacy Front listener is retired (project_migration p8):
-                # nothing serves a post into #front, an argue or a routine run
-                # any more, so a write here would buy nobody's answer. The
-                # conversation with Front is the WFE conversation store.
-                self._write_json(410, {
-                    "sent": False, "uncertain": False,
-                    "error": "retired (project_migration p8): talk to Front in the Front Desk, "
-                             "which now posts to the WFE conversations (/wfe/api/conversations); "
-                             "these Zulip conversations stay readable as history",
-                })
-                return
-            if path == "/chat":
-                self._chat()
-                return
-            if path.startswith("/frontdesk/") and path.endswith("/post"):
-                self._desk_post(unquote(path[len("/frontdesk/"):-len("/post")]))
-                return
-            if path.startswith("/argues/") and path.endswith("/close"):
-                # Closing an argue from the room: the same door as the desk's,
-                # the argue named by its anchor (`argue` p2 ex1).
+            elif path.startswith("/argues/") and path.endswith("/close"):
+                # Closing an argue from the room, named by its anchor
+                # (`argue` p2 ex1).
                 if argues is None:
                     self._write_json(503, {"error": "the Arguing Room is not configured"})
                 else:
                     self._complete(argues.completion_key(unquote(path[len("/argues/"):-len("/close")])))
-                return
-            if path == "/argues" or path.startswith("/argues/"):
-                self._argue_write(path[len("/argues"):].lstrip("/"))
-                return
-            if path.startswith("/frontdesk/") and path.endswith("/render"):
-                self._desk_render(unquote(path[len("/frontdesk/"):-len("/render")]))
-                return
-            if path.startswith("/frontdesk/") and path.endswith("/close"):
-                ident = unquote(path[len("/frontdesk/"):-len("/close")])
-                self._complete(Closer.desk_key(ident))
-                return
-            if path == "/complete":
-                self._complete(None)
-                return
-            if path.startswith("/routines/") and path.endswith("/start"):
-                self._start(unquote(path[len("/routines/"):-len("/start")]))
-                return
-            if path != "/ops/confirm":
-                self._write_json(404, {"error": f"no POST route {path}",
-                                       "post": list(WRITE_ROUTES)})
-                return
-            if ops is None:
-                self._write_json(503, {
-                    "error": "the ops engine is not configured; "
-                             "set OPSROOM_ZULIP_ENV to its own bot credential",
-                })
-                return
-            body = self._body()
-            if body is None:
-                return
-
-            channel, topic = body.get("channel"), body.get("topic")
-            if channel is None and topic is None:
-                if body.get("all", True) is not True:
-                    self._write_json(400, {
-                        "error": "pass {\"all\": true} or a {channel, topic} pair",
-                    })
-                    return
-                target = None
-            elif channel is None or topic is None:
-                self._write_json(400, {"error": "channel and topic go together"})
-                return
             else:
-                target = (str(channel), str(topic))
-
-            try:
-                found = ops.confirm(target)
-            except Exception as error:
-                self._write_json(502, {"error": f"{type(error).__name__}: {error}"})
-                return
-            # 409, not 400: the request was well formed and the *state* is what
-            # refused it. Only `done` may be dismissed — the relay decides
-            # that, so a view that forgets to hide the button cannot clear a
-            # stall off the screen.
-            self._write_json(409 if found.get("refused") else
-                             404 if found.get("error") else 200, found)
+                self._write_json(404, {"error": f"no POST route {path}", "post": list(WRITE_ROUTES)})
 
     return Handler
 
 
 def build_server(
-    host: str, port: int, room: Room, ops: Ops | None = None, chat: Chat | None = None,
-    cost: Cost | None = None, budget: Budget | None = None, desk: FrontDesk | None = None,
-    settings: Settings | None = None, closer: Closer | None = None, argues: ArguingRoom | None = None,
-    watchdog=None, contexts: Contexts | None = None, progress: Progress | None = None,
+    host: str, port: int, mirror: Mirror | None = None, chat: Chat | None = None,
+    cost: Cost | None = None, budget: Budget | None = None, settings: Settings | None = None,
+    closer: Closer | None = None, argues: ArguingRoom | None = None,
+    contexts: Contexts | None = None, progress: Progress | None = None,
 ) -> ThreadingHTTPServer:
     return ThreadingHTTPServer(
-        (host, port), make_handler(room, ops, chat, cost, budget, desk, settings, closer, argues,
-                                   watchdog=watchdog, contexts=contexts, progress=progress)
+        (host, port), make_handler(mirror, chat, cost, budget, settings, closer, argues,
+                                   contexts=contexts, progress=progress)
     )

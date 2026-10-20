@@ -47,9 +47,8 @@ def pump(mirror: Mirror) -> int:
 
 
 def empty_room():
-    from agentroom.room import Room
-
-    return Room(mirror=mirror_over(FakeRealm()))
+    """An empty realm's mirror: what the server's health route reads."""
+    return mirror_over(FakeRealm())
 
 
 import pytest as _pytest

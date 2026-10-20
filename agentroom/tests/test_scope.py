@@ -15,18 +15,12 @@ The delegated chain is an agent's own channel: Front serves
 level anchored to the one above by its own `[rootchat]` note.
 """
 
-import json
-import threading
-from http.client import HTTPConnection
 
-import pytest
 
-from conftest import empty_room
 from agentroom.close import BLOCKED, DONE, READY, Closer, parse_key, plan_actions
 from agentroom.closing import (
     ARGUE, DESK, FRONT, INTRO, ROUTINE_GUIDE, ROUTINE_RUN, TOPIC, classify, discover,
 )
-from agentroom.server import build_server
 
 DESK_TOPIC = "front-desk-20260908-1600"
 ROOT = ("front", DESK_TOPIC)
@@ -503,68 +497,6 @@ def test_a_history_of_operations_is_kept_per_request():
     assert record["kind"] == DESK and record["topic"] == DESK_TOPIC
     assert len(door.records()) == 2
     assert door.plan(ROOT)["history"] == [record]
-
-
-@pytest.fixture()
-def relay():
-    door, realm = closer()
-    server = build_server("127.0.0.1", 0, empty_room(), closer=door)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    yield server.server_address[1], door, realm
-    server.shutdown()
-    server.server_close()
-
-
-def request(port, method, path, body=None):
-    connection = HTTPConnection("127.0.0.1", port, timeout=5)
-    payload = None if body is None else json.dumps(body)
-    connection.request(method, path, payload, {"Content-Type": "application/json"})
-    response = connection.getresponse()
-    found = json.loads(response.read())
-    connection.close()
-    return response.status, found
-
-
-def test_the_shared_routes_take_a_channel_and_a_topic(relay):
-    port, _, realm = relay
-    status, found = request(port, "GET", f"/complete/plan?channel=front&topic={DESK_TOPIC}")
-    assert status == 200 and found["scope"]["kind"] == DESK
-    assert realm.posted == [] and realm.resolved == []
-    status, applied = request(port, "POST", "/complete", {
-        "channel": "front", "topic": DESK_TOPIC, "fingerprint": found["fingerprint"]})
-    assert status == 200 and applied["applied"] is True
-    assert [topic for _, topic in realm.resolved] == [PLAN_TOPIC, NOTE_TOPIC, DESK_TOPIC]
-    assert realm.posted == []
-    status, history = request(port, "GET", f"/complete/history?channel=front&topic={DESK_TOPIC}")
-    assert status == 200 and len(history["history"]) == 1
-    status, everything = request(port, "GET", "/complete/history")
-    assert status == 200 and len(everything["history"]) == 1
-
-
-def test_a_malformed_key_is_400_and_a_stale_approval_409(relay):
-    port, _, realm = relay
-    assert request(port, "GET", "/complete/plan?channel=front")[0] == 400
-    assert request(port, "POST", "/complete", {"topic": "x"})[0] == 400
-    status, found = request(port, "POST", "/complete", {
-        "channel": "front", "topic": DESK_TOPIC, "fingerprint": "0000000000000000"})
-    assert status == 409 and found["refused"] is True
-    assert realm.posted == [] and realm.resolved == []
-
-
-def test_an_execution_topic_over_http_is_a_plan_with_nothing_to_approve(relay):
-    port, _, realm = relay
-    status, found = request(port, "GET", f"/complete/plan?channel={AGECHO}&topic={PLAN_TOPIC}")
-    assert status == 200 and found["scope"]["closable"] is False
-    assert found["counts"] == {"ready": 0, "blocked": 1, "done": 0, "kept": 0}
-    assert [p["topic"] for p in found["scope"]["parents"]] == [DESK_TOPIC]
-    status, applied = request(port, "POST", "/complete", {
-        "channel": AGECHO, "topic": PLAN_TOPIC, "fingerprint": found["fingerprint"]})
-    assert status == 200 and applied["partial"] is True
-    assert realm.posted == [] and realm.resolved == []
-
-
-# --- a resolved topic with an open twin -------------------------------------------
 
 
 def twin_realm():

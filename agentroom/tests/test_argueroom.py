@@ -224,90 +224,6 @@ def test_a_stale_mirror_marks_the_state_and_keeps_the_history():
 # --- writing ------------------------------------------------------------------------------
 
 
-def test_creating_an_argue_is_the_anchor_note_then_the_humans_words_once():
-    realm, mirror, _, room = world()
-    found = room.create("Aquarium Dreams", "x", "tok-0")
-    assert not found["sent"] and "not a usable name" in found["error"]
-    found = room.create("aquarium", "I want a self-cleaning aquarium.", "tok-1", now=NOW)
-    assert found["sent"] and found["topic"] == "argue-aquarium"
-    again = room.create("aquarium", "I want a self-cleaning aquarium.", "tok-1", now=NOW)
-    assert again["duplicate"] and again["anchor"] == found["anchor"]
-    rows = sorted((m for m in realm.messages.values() if m["display_recipient"] == "argue"), key=lambda m: m["id"])
-    assert [(m["sender_id"], m["content"]) for m in rows] == [
-        (DEV, "[selfnote][argue] from -"), (DEV, "I want a self-cleaning aquarium.")]
-    pump(mirror)
-    assert room.argue(found["anchor"], now=NOW)["argue"]["posts"][0]["content"] == "I want a self-cleaning aquarium."
-    # The name is taken now, for a different submit too.
-    assert "already exists" in room.create("aquarium", "another", "tok-2")["error"]
-    minted = room.create(None, "no name given", "tok-3", now=NOW)
-    assert minted["sent"] and minted["topic"].startswith("argue-20")
-
-
-def test_a_post_goes_into_the_source_once_and_the_refusals_are_the_relays():
-    realm, mirror, _, room = world()
-    anchor, *_ = talk(realm)
-    pump(mirror)
-    found = room.post(anchor, "  Failure means a wrong answer nobody notices.  ", "tok-1")
-    assert found["sent"] and not found["resumed"]
-    assert realm.messages[found["message_id"]]["content"] == "Failure means a wrong answer nobody notices."
-    assert realm.messages[found["message_id"]]["subject"] == "argue-far"
-    assert room.post(anchor, "Failure means a wrong answer nobody notices.", "tok-1")["duplicate"]
-    assert sum(1 for m in realm.messages.values() if "nobody notices" in m["content"]) == 1
-    assert "submit token" in room.post(anchor, "text", "")["error"]
-    assert "selfnote" in room.post(anchor, "[selfnote][desire] 1 by 8", "tok-2")["error"]
-    assert "nothing to send" in room.post(anchor, "   ", "tok-3")["error"]
-    assert "not in the realm" in room.post(424242, "text", "tok-4")["error"]
-
-
-def test_a_failed_post_is_uncertain_and_never_retried():
-    realm, mirror, client, room = world(fail=RuntimeError("timed out"))
-    client.fail = None
-    anchor, *_ = talk(realm)
-    pump(mirror)
-    client.fail = RuntimeError("timed out")
-    found = room.post(anchor, "did this land?", "tok-1")
-    assert not found["sent"] and found["uncertain"] and "check #argue" in found["note"]
-    client.fail = None
-    assert room.post(anchor, "did this land?", "tok-1")["duplicate"]
-
-
-def test_a_resolved_argue_keeps_its_history_and_is_resumed_in_place():
-    realm, mirror, client, room = world()
-    anchor, *_ = talk(realm)
-    realm.post("argue", "argue-far", "[selfnote][outcome] project pj-failfarm", sender_id=FRONT, sender_name="Front")
-    realm.resolve("argue", "argue-far")
-    pump(mirror)
-    argue = room.argue(anchor, now=NOW)["argue"]
-    assert argue["resolved"] and argue["live_topic"] == "✔ argue-far" and argue["status"]["state"] == "done"
-    assert len(argue["posts"]) == 5 and argue["outcome"] == "project pj-failfarm"
-    found = room.post(anchor, "One more thought.", "tok-1")
-    assert found["sent"] and found["resumed"] and "stays as it is" in found["note"]
-    assert client.patched[0][2]["topic"] == "argue-far"
-    pump(mirror)
-    argue = room.argue(anchor, now=NOW)["argue"]
-    assert not argue["resolved"] and argue["posts"][-1]["content"] == "One more thought." and len(argue["posts"]) == 6
-    # Nothing but the argue was touched: one rename, one post, both in #argue.
-    assert all(m["display_recipient"] in ("argue", "agents") for m in realm.messages.values())
-
-
-def test_a_reinterpretation_request_is_one_selfnote_in_the_source_and_is_visible_until_answered():
-    realm, mirror, _, room = world()
-    anchor, *_ = talk(realm)
-    realm.resolve("argue", "argue-far")
-    pump(mirror)
-    found = room.render(anchor, REV_B, "tok-1")
-    assert found["sent"] and found["settings_revision"] == REV_B
-    note = realm.messages[found["message_id"]]
-    assert note["content"] == f"[selfnote][render] {REV_B}" and note["subject"] == "✔ argue-far"
-    assert room.render(anchor, REV_B, "tok-1")["duplicate"]
-    assert room.render(anchor, None, "tok-2")["settings_revision"] == REV_A  # defaults to the active one
-    assert "no settings revision" in room.render(anchor, "not-a-sha", "tok-3")["error"]
-    pump(mirror)
-    argue = room.argue(anchor, now=NOW)["argue"]
-    assert argue["resolved"], "asking for an interpretation does not reopen the discussion"
-    assert [r["settings_revision"] for r in argue["presentation"]["requests"]] == [REV_B, REV_A]
-
-
 # --- over HTTP, once -------------------------------------------------------------------------
 
 
@@ -330,11 +246,11 @@ def test_the_routes_answer_over_http():
         assert call("GET", f"/argues/{anchor}")[1]["argue"]["topic"] == "argue-far"
         assert call("GET", "/argues/424242")[0] == 404
         # Argues are retired with the legacy Front (project_migration p8):
-        # readable, never written.
-        assert call("POST", f"/argues/{anchor}/post", {"text": "over http", "token": "h1"})[0] == 410
-        assert call("POST", "/argues", {"stem": "http-made", "text": "a new desire", "token": "h2"})[0] == 410
-        assert call("POST", f"/argues/{anchor}/render", {"token": "h3"})[0] == 410
-        assert "/argues/<anchor>/post" in call("GET", "/")[1]["post"]
+        # readable, never written; the write routes are gone (retire_old_ui p1).
+        assert call("POST", f"/argues/{anchor}/post", {"text": "over http", "token": "h1"})[0] == 404
+        assert call("POST", "/argues", {"stem": "http-made", "text": "a new desire", "token": "h2"})[0] == 404
+        assert call("POST", f"/argues/{anchor}/render", {"token": "h3"})[0] == 404
+        assert "/argues/<anchor>/post" not in call("GET", "/")[1]["post"]
     finally:
         server.shutdown()
         server.server_close()
@@ -380,8 +296,8 @@ def test_closing_an_argue_from_the_room_is_the_shared_door_keyed_by_anchor():
         status, again = call("GET", f"/argues/{anchor}/close-plan")
         assert again["actions"][0]["state"] == "done" and again["actions"][0]["reason"] == "already ✔"
         assert call("POST", f"/argues/{anchor}/close", {"fingerprint": "stale"})[0] == 409
-        # Posting to resume it is retired (project_migration p8).
-        assert call("POST", f"/argues/{anchor}/post", {"text": "one more thought", "token": "c1"})[0] == 410
+        # Posting to resume it is retired (project_migration p8) and its route gone.
+        assert call("POST", f"/argues/{anchor}/post", {"text": "one more thought", "token": "c1"})[0] == 404
         assert "/argues/<anchor>/close" in call("GET", "/")[1]["post"]
     finally:
         server.shutdown()
@@ -431,31 +347,5 @@ def test_an_argue_carries_meanings_and_two_speakers_questions_to_the_human():
     meanings = {p["message_id"]: p["meaning"] for p in argue["posts"]}
     assert meanings[ask_lab] == {"intent": "response_request", "to": DEV, "ask": "confirmation"}
     assert all("ag-post" not in p["content"] for p in argue["posts"])
-    # The human answers autolab's by name: only that one settles.
-    sent = room.post(anchor, "Yes, prototype it.", "tok-ans", [ask_lab])
-    assert sent["sent"] and realm.messages[sent["message_id"]]["content"].endswith(f"`ag-post re={ask_lab}`")
-    pump(mirror)
-    after = room.argue(anchor)["argue"]["requests"]
-    assert after["pending"] == [ask_front]
-    assert "not a request" in room.post(anchor, "x", "tok-bad", [anchor])["error"]
 
 
-def test_a_non_answer_in_an_argue_leaves_the_one_question_waiting_until_it_is_answered():
-    """clearer_chat_ui ex1 step 2, through the realm and the mirror: an aside
-    marked "not an answer" is stored with `answer=none` and settles nothing;
-    the explicit answer that follows settles the question."""
-    realm, mirror, _, room = world()
-    anchor, *_ = talk(realm)
-    question = realm.post("argue", "argue-far", "Which failure matters most?\n\n`ag-post intent=response_request to=8 ask=question`",
-                          sender_id=FRONT, sender_name="Front")
-    pump(mirror)
-    sent = room.post(anchor, "Unrelated: I am away for an hour.", "tok-aside", None, True)
-    assert sent["sent"] and realm.messages[sent["message_id"]]["content"].endswith("`ag-post answer=none`")
-    pump(mirror)
-    argue = room.argue(anchor)["argue"]
-    assert argue["requests"]["pending"] == [question] and argue["requests"]["unmatched"] == {}
-    assert room.post(anchor, "x", "tok-both", [question], True)["sent"] is False
-    answered = room.post(anchor, "The second one.", "tok-answer", [question])
-    pump(mirror)
-    rows = room.argue(anchor)["argue"]["requests"]["requests"]
-    assert [(r["id"], r["state"], r["settled_by"]) for r in rows] == [(question, "answered", answered["message_id"])]

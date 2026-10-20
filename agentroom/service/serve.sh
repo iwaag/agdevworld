@@ -1,8 +1,8 @@
 #!/bin/sh
-# Run the agent room relay from a checkout, the way agforge's service script
+# Run the agentroom relay from a checkout, the way agforge's service script
 # does: resolve the project directory, then hand off to uv.
 #
-#   AGENTROOM_ZULIP_ENV=<path to a zulip .env> service/serve.sh
+#   OPSROOM_ZULIP_ENV=<path to the mirror's zulip .env> service/serve.sh [check]
 #
 # The credentials file is never in the repo; on agstudio it is one of
 # pj-agdev/.local/zulip/*.env (see that project's ignored devenv.md).

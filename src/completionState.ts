@@ -1,16 +1,13 @@
 import { AGENTROOM_URL } from './endpoints'
 // Completing a request: the relay's shared operation, read and applied.
 //
-// One request is any conversation, `(channel, topic)` — a Front Desk
-// conversation, an ordinary `front-*` one, one run of a routine, an argue
-// (`front_desk` p4). The relay decides what the request owns, what would
-// change and why; this file carries those words to the screens and sends back
+// Since retire_old_ui p1 the one caller of the relay's door is the Arguing
+// Room (an argue, by its anchor); the Front Desk's own conversations close in
+// WFE (roomState.ts) and are drawn with the same plan words. The relay
+// decides what the request owns, what would change and why; this file carries
+// those words to the Front Desk's Phaser panel (`planLines()`) and sends back
 // the fingerprint of the plan a human read. Nothing here decides that a topic
 // may be closed.
-//
-// Two screens draw the same plan: the Front Desk's Phaser panel and the DOM
-// overlay the operation room and the agent room open. `planLines()` is the
-// one view model both render, so they cannot say different things.
 
 const BASE = AGENTROOM_URL
 
@@ -107,11 +104,6 @@ export function isCompletionPlan(answer: CompletionAnswer): answer is Completion
   return 'actions' in answer && Array.isArray((answer as CompletionPlan).actions)
 }
 
-export interface CompletionSource {
-  plan: (root: CompletionRef) => Promise<CompletionAnswer>
-  apply: (root: CompletionRef, fingerprint: string) => Promise<CompletionAnswer>
-}
-
 async function readJson<T>(url: string, init?: RequestInit): Promise<T | { error: string }> {
   let response: Response
   try {
@@ -134,22 +126,8 @@ async function readJson<T>(url: string, init?: RequestInit): Promise<T | { error
   return payload
 }
 
-const query = (root: CompletionRef) =>
-  `channel=${encodeURIComponent(root.channel)}&topic=${encodeURIComponent(root.topic)}`
-
-export const relayCompletion: CompletionSource = {
-  plan: (root) => readJson<CompletionPlan>(`${BASE}/complete/plan?${query(root)}`, { signal: AbortSignal.timeout(20000) }),
-  apply: (root, fingerprint) => readJson<CompletionPlan>(`${BASE}/complete`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ channel: root.channel, topic: root.topic, fingerprint }),
-    signal: AbortSignal.timeout(60000),
-  }),
-}
-
-// The same door reached through a route that names the request some other
-// way — the Arguing Room's `/argues/<anchor>/close-plan` and `/close`, where
-// the relay resolves the anchor to the argue's current topic itself.
+// The Arguing Room's `/argues/<anchor>/close-plan` and `/close`: the relay
+// resolves the anchor to the argue's current topic itself.
 export const relayCompletionAt = {
   plan: (path: string) => readJson<CompletionPlan>(`${BASE}${path}`, { signal: AbortSignal.timeout(20000) }),
   apply: (path: string, fingerprint: string) => readJson<CompletionPlan>(`${BASE}${path}`, {
@@ -158,17 +136,6 @@ export const relayCompletionAt = {
     body: JSON.stringify({ fingerprint }),
     signal: AbortSignal.timeout(60000),
   }),
-}
-
-export async function loadCompletionHistory(root?: CompletionRef): Promise<{ history: CompletionRecord[] } | { error: string }> {
-  return readJson(`${BASE}/complete/history${root ? `?${query(root)}` : ''}`, { signal: AbortSignal.timeout(8000) })
-}
-
-// The event a screen fires once anything moved, so every view on the page
-// re-reads what it shows (a closed run is ✔).
-export const COMPLETED_EVENT = 'agdevworld:completed'
-export function announceCompleted(root: CompletionRef): void {
-  window.dispatchEvent(new CustomEvent(COMPLETED_EVENT, { detail: root }))
 }
 
 // --- the words both panels draw --------------------------------------------------

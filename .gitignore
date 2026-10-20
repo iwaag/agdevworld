@@ -16,7 +16,6 @@ dist-ssr
 __pycache__/
 *.pyc
 *.local
-public/cluster/
 
 # Editor directories and files
 .vscode/*

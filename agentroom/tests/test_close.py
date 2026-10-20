@@ -11,17 +11,12 @@ The chain is a Front Desk conversation that served an agent's topic, which
 in turn served two nested topics of its own: one already ✔, one open.
 """
 
-import json
 import threading
-from http.client import HTTPConnection
 
-import pytest
 
-from conftest import empty_room
 from agentroom.close import (
     ALREADY, APPLIED, BLOCKED, DONE, FAILED, READY, SKIPPED, Closer,
 )
-from agentroom.server import build_server
 
 DESK = "20260908-1600"
 DESK_TOPIC = f"front-desk-{DESK}"
@@ -306,64 +301,7 @@ def test_two_clicks_do_not_both_close():
                if row["kind"] == "conversation" and row["outcome"] == APPLIED) == 1
 
 
-# --- the routes --------------------------------------------------------------
-
-
-@pytest.fixture()
-def relay():
-    door, realm = closer()
-    server = build_server("127.0.0.1", 0, empty_room(), closer=door)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    yield server.server_address[1], door, realm
-    server.shutdown()
-    server.server_close()
-
-
-def request(port, method, path, body=None):
-    connection = HTTPConnection("127.0.0.1", port, timeout=5)
-    payload = None if body is None else json.dumps(body)
-    connection.request(method, path, payload, {"Content-Type": "application/json"})
-    response = connection.getresponse()
-    found = json.loads(response.read())
-    connection.close()
-    return response.status, found
-
-
-def test_the_plan_route_reads_and_the_close_route_writes(relay):
-    port, _, realm = relay
-    status, found = request(port, "GET", f"/frontdesk/{DESK}/close-plan")
-    assert status == 200 and found["topic"] == DESK_TOPIC and found["scope"]["kind"] == "desk"
-    assert realm.resolved == []
-    status, applied = request(port, "POST", f"/frontdesk/{DESK}/close",
-                              {"fingerprint": found["fingerprint"]})
-    assert status == 200 and applied["applied"] is True
-    assert resolved_topics(realm) == [PLAN_TOPIC, OPEN_TOPIC, DESK_TOPIC]
-
-
-def test_a_stale_approval_is_409_over_http(relay):
-    port, _, realm = relay
-    status, found = request(port, "POST", f"/frontdesk/{DESK}/close",
-                            {"fingerprint": "0000000000000000"})
-    assert status == 409 and found["refused"] is True
-    assert realm.resolved == []
-
-
-def test_the_close_route_takes_no_destinations(relay):
-    """Whatever the browser sends beside the id and the fingerprint is
-    ignored: the server closes what it derived, never what it was told."""
-    port, _, realm = relay
-    status, _ = request(port, "POST", f"/frontdesk/{DESK}/close",
-                        {"topics": ["front/front-desk-somebody-else"],
-                         "channels": ["general"]})
-    assert status == 200
-    assert resolved_topics(realm) == [PLAN_TOPIC, OPEN_TOPIC, DESK_TOPIC]
-
-
-def test_a_bad_id_is_400_over_http(relay):
-    port = relay[0]
-    assert request(port, "GET", "/frontdesk/NOT%20AN%20ID/close-plan")[0] == 400
-    assert request(port, "POST", "/frontdesk/NOT%20AN%20ID/close", {})[0] == 400
+# --- the answer to a close -------------------------------------------------
 
 
 def test_the_answer_to_a_close_is_the_plan_as_it_now_stands():

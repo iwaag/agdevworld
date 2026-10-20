@@ -2,12 +2,15 @@
 
 Every agentic run on this host leaves an `ag.agent-run.v1` record under
 `<instance>/.local/agent/<role>/run-NNNN.json` (`devpolicy/agent_records.md`).
-This module walks the same roots `/inflight` walks (`AGENTROOM_AGENT_ROOTS`),
-normalizes one row per record, prices what can be priced, and folds the rows
-into the aggregates the gauge page draws. Nothing here reads Zulip: the one
-realm-side thing it wants — which conversations belong to a routine session —
-it asks the ops engine for, and the engine answers from links it already
-holds. So this may be polled at will.
+This module walks the agents' roots (`AGENTROOM_AGENT_ROOTS`), normalizes one
+row per record, prices what can be priced, and folds the rows into the
+aggregates. Nothing here reads Zulip, so this may be polled at will.
+
+Since retire_old_ui p1 these records are history: the agents that wrote them
+(the legacy Front among them) ran before workflow runs, and current execution
+usage is the workflow editor's (`workflow_editor/docs/usage.md`), which shows
+this board as its history section. The cost gauge page, the routine
+attribution and the roster it was matched against are gone.
 
 Five kinds of cost, because the harnesses do not agree on what they tell:
 
@@ -20,8 +23,7 @@ Five kinds of cost, because the harnesses do not agree on what they tell:
 - `unknown` — a record with no usage at all (a run that died before the
   harness could count), or a metered model the table does not price.
 
-A model missing from the price table is `unknown`, not 0. An instance in the
-roster with no root on this host is *missing*, not quiet.
+A model missing from the price table is `unknown`, not 0.
 """
 
 from __future__ import annotations
@@ -46,7 +48,22 @@ RECENT = 40
 KINDS = ("reported", "estimated", "subscription", "local", "unknown")
 MILLION = 1_000_000.0
 
-__all__ = ["COST_SCHEMA", "Cost", "Prices", "Row", "normalize_usage", "read_prices"]
+#: `instance=<project root>,…`: the hosts' agent roots, in the environment
+#: because they are absolute local paths (`devpolicy/styles.md`).
+ROOTS_VARIABLE = "AGENTROOM_AGENT_ROOTS"
+
+__all__ = ["COST_SCHEMA", "Cost", "Prices", "ROOTS_VARIABLE", "Row", "normalize_usage", "parse_roots", "read_prices"]
+
+
+def parse_roots(value: str) -> dict[str, Path]:
+    """`front-agstudio1=/path,arxivsage-agstudio1=/path` as a mapping."""
+    roots: dict[str, Path] = {}
+    for entry in (value or "").split(","):
+        instance, sep, path = entry.partition("=")
+        if not sep or not instance.strip() or not path.strip():
+            continue
+        roots[instance.strip()] = Path(path.strip()).expanduser()
+    return roots
 
 
 # --- the price table ---------------------------------------------------------
@@ -267,7 +284,7 @@ def _workspaces(root: Path) -> list[_Workspace]:
 def _attribute_by_window(rows: list[Row], spaces: list[_Workspace]) -> None:
     """Give a record without `channel`/`topic` the workspace its span overlaps.
 
-    `/inflight`'s observation the other way round: the generation directory
+    the generation-directory observation the other way round: the generation directory
     is built just before the run starts, and whatever else lands in it lands
     during or just after the run. So a record whose own span (start derived
     from `duration_ms`, end from the file's mtime) overlaps the directory's
@@ -427,26 +444,15 @@ class Cost:
 
     # -- the board ----------------------------------------------------------
 
-    def board(self, now: float | None = None, *, roster: list[str] = (),
-              routine_sessions: dict[str, list[dict]] | None = None) -> dict:
-        """Everything the gauge page draws, in one read.
-
-        `roster` is the ops engine's list of instances, so an instance this
-        host has no root for is named as missing. `routine_sessions` maps a
-        routine name to its sessions as `/routines/<name>` returns them; each
-        session's conversations are matched against the rows' `channel`/`topic`.
-        """
+    def board(self, now: float | None = None) -> dict:
+        """Every aggregate in one read: periods, days, the per-agent table
+        and the newest records."""
         now = time.time() if now is None else now
         scanned = self.scan()
         rows: list[Row] = scanned["rows"]
         today = _day_start(now)
         week = now - 7 * 86400
         month = now - 30 * 86400
-        by_topic: dict[tuple[str, str], list[Row]] = defaultdict(list)
-        for row in rows:
-            if row.channel and row.topic:
-                by_topic[(row.channel, row.topic)].append(row)
-
         days = []
         for back in range(DAYS - 1, -1, -1):
             start = today - back * 86400
@@ -466,49 +472,12 @@ class Cost:
                 **{k: v for k, v in _total(group).items() if k != "by_harness"},
             })
 
-        routines = []
-        for name, sessions in (routine_sessions or {}).items():
-            listed = []
-            for session in sessions:
-                # A session names its own channel (`routines.session_of`);
-                # before `refine_routine` p1 every run lived in `#front`.
-                topics = ([(session.get("channel") or "front", session.get("topic"))]
-                          if session.get("topic") else [])
-                for node in session.get("nodes") or []:
-                    if node.get("channel") and node.get("topic"):
-                        topics.append((node["channel"], node["topic"]))
-                matched: list[Row] = []
-                for key in topics:
-                    matched.extend(by_topic.get(key, []))
-                by_instance: dict[tuple[str, str, str], list[Row]] = defaultdict(list)
-                for row in matched:
-                    by_instance[(row.instance, row.role, row.harness or "unknown")].append(row)
-                opened = session.get("opened") or {}
-                listed.append({
-                    "channel": session.get("channel") or "front", "topic": session.get("topic"),
-                    "opened_at": opened.get("at"), "resolution": (session.get("resolution") or {}).get("state"),
-                    "conversations": [{"channel": c, "topic": t, "runs": len(by_topic.get((c, t), []))}
-                                      for c, t in topics],
-                    "attribution": {
-                        "fields": sum(1 for row in matched if row.attribution == "fields"),
-                        "window": sum(1 for row in matched if row.attribution == "window"),
-                    },
-                    "agents": [
-                        {"instance": i, "role": r, "harness": h,
-                         **{k: v for k, v in _total(group).items() if k != "by_harness"}}
-                        for (i, r, h), group in sorted(by_instance.items())
-                    ],
-                    **{k: v for k, v in _total(matched).items() if k != "by_harness"},
-                })
-            routines.append({"name": name, "sessions": listed})
-
         unattributed = [row for row in rows if not (row.channel and row.topic)]
         recent = sorted(rows, key=lambda row: row.ended_at, reverse=True)[:RECENT]
         return {
             "schema": COST_SCHEMA,
             "generated_at": now,
             "roots": scanned["roots"],
-            "missing": sorted(set(roster) - set(self.roots)),
             "prices": scanned["prices"].payload(),
             "totals": {
                 "today": _total([row for row in rows if row.ended_at >= today]),
@@ -518,7 +487,6 @@ class Cost:
             },
             "days": days,
             "table": table,
-            "routines": routines,
             "unattributed": {k: v for k, v in _total(unattributed).items() if k != "by_harness"},
             "recent": [row.payload() for row in recent],
             "settings": {"days": DAYS, "window_slack_seconds": WINDOW_SLACK_SECONDS},

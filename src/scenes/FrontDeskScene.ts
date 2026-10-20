@@ -45,7 +45,6 @@
 // relay-backed view in this app follows.
 
 import Phaser from 'phaser'
-import { announceCompleted } from '../completionState'
 import { ContextPanel } from '../contextPanel'
 import { demoBump, demoContexts, relayContexts } from '../contextState'
 import { FrontDeskClosePanel } from '../frontDeskClosePanel'
@@ -294,10 +293,7 @@ export class FrontDeskScene extends Phaser.Scene {
         source: completion,
         conversationId: () => this.conversationId ?? '',
         onChanged: () => {
-          // Every relay-backed view on the page re-reads on this event; the
-          // room's own list shows the ✔ through the same door.
-          const conversation = this.detail?.conversation
-          if (conversation) announceCompleted({ channel: conversation.channel, topic: conversation.topic })
+          // The room's own list shows the ✔ through the same door.
           void this.refresh()
           void this.refreshBoard()
         },

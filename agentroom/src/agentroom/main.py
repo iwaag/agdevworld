@@ -25,13 +25,10 @@ from .budget import budget_from_env
 from .chat import CHAT_ENV_VARIABLE, DEFAULT_MAX_CHARS, Chat
 from .close import Closer
 from .contexts import contexts_from_env
-from .cost import PRICES_VARIABLE, Cost, prices_path_from_env
+from .cost import PRICES_VARIABLE, ROOTS_VARIABLE, Cost, parse_roots, prices_path_from_env
 from .argueroom import ArguingRoom
-from .frontdesk import FrontDesk
-from .inflight import ROOTS_VARIABLE, parse_roots
-from .ops import DEFAULT_DONE_SECONDS, DEFAULT_STALLED_SECONDS, Ops
+from .ops import Ops
 from .realm import MirrorRealm
-from .room import Room
 from .server import build_server
 from .progress import progress_from_env
 from .settings import settings_from_env
@@ -89,19 +86,16 @@ def main(argv: list[str] | None = None) -> int:
 
         keep_subscribed(lambda: ZulipClient.from_env(mirror_path), mirror,
                         log=lambda line: print(line, flush=True))
-    room = Room(mirror=mirror)
-    # The cost gauge reads the same roots `/inflight` does and needs no
-    # credential at all; without roots there is nothing to read and /cost
-    # says so.
+    # The pre-WFE agents' records (`/cost`, history) need no credential at
+    # all; without roots there is nothing to read and /cost says so.
     roots = parse_roots(os.environ.get(ROOTS_VARIABLE, ""))
     cost = Cost(roots, prices_path_from_env()) if roots else None
     # The budget read needs no configuration at all: its defaults are the
     # CLIs' own stores and binaries, and a missing one is *unknown* per card.
     budget = budget_from_env()
 
-    stalled = float(os.environ.get("AGENTROOM_STALLED_SECONDS", DEFAULT_STALLED_SECONDS))
-    done_window = float(os.environ.get("AGENTROOM_DONE_SECONDS", DEFAULT_DONE_SECONDS))
-    ops = Ops(mirror=mirror, stalled_seconds=stalled, agent_roots=roots, done_seconds=done_window)
+    # The conversation index the completion door and the progress board walk.
+    ops = Ops(mirror=mirror)
 
     chat_env = os.environ.get(CHAT_VARIABLE, "")
     chat_path = Path(chat_env).expanduser() if chat_env else None
@@ -112,11 +106,6 @@ def main(argv: list[str] | None = None) -> int:
         env_path=chat_path,
         max_chars=int(os.environ.get("AGENTROOM_CHAT_MAX_CHARS", DEFAULT_MAX_CHARS)),
     )
-
-    # Observer's watchdog moved out of the relay (observer p3 step 7): it is
-    # agobserver.watchdog, a process of its own (com.agdev.agobserver-watchdog),
-    # judging Observer's workflow-health.json and the executor's heartbeat.
-    watchdog = None
 
     if argv and argv[0] == "check":
         # A one-shot read, so a credentials or connectivity problem is found
@@ -132,22 +121,6 @@ def main(argv: list[str] | None = None) -> int:
               f"store {store_dir}")
         for key, count in health["ledger"].items():
             print(f"  {key}: {count}")
-        agents = room.agents()
-        work = room.work()
-        print(f"agents: {len(agents['agents'])} ({len(agents['retired'])} retired)")
-        print(f"unresolved topics: {len(work['topics'])} in {len(work['channels'])} channels")
-        found = ops.snapshot()
-        print(f"ops: {found['health']['state']} — {found['health']['reason']}; "
-              f"{len(found['rows'])} rows, {found['health']['topics']} topics held")
-        for summary in found["instances"]:
-            print(f"  {summary['instance']:<24} roster={summary['roster']:<7} {summary['counts']}")
-        routines = ops.routines()
-        print(f"routines: {len(routines['routines'])}")
-        for row in routines["routines"]:
-            latest = row["latest"]
-            print(f"  {row['name']:<16} {row['state']:<10} runs {row['runs']} "
-                  f"({row['open_runs']} open)"
-                  + (f" · latest {latest['topic']} {latest['run']['state']}" if latest else ""))
         print("chat: " + ("configured" if chat.configured else chat.status()["reason"]))
         if cost is None:
             print(f"cost: not configured ({ROOTS_VARIABLE} unset)")
@@ -173,12 +146,9 @@ def main(argv: list[str] | None = None) -> int:
         mirror.stop()
         return 0
 
-    # The Front Desk reads the mirror through the engine and writes with the
-    # chat's credential. No third credential.
+    # The Arguing Room (`argue` p2): the mirror, the write credential for
+    # closing an argue, and the settings only to know which revision is active.
     settings = settings_from_env()
-    desk = FrontDesk(ops=ops, chat=chat, settings=settings)
-    # The Arguing Room (`argue` p2): the same mirror, the same write
-    # credential, and the settings only to know which revision is active.
     argues = ArguingRoom(mirror=mirror, chat=chat, settings=settings)
 
     # The completion door (`front_desk` p3). It discovers from the mirror and
@@ -191,10 +161,10 @@ def main(argv: list[str] | None = None) -> int:
         mirror=mirror,
     )
 
-    # The settings repository (`front_desk` p2): read per request from the
+    # The settings repository (`front_desk` p2) is read per request from the
     # active revision the sync command switched, so a content update needs
     # neither a restart nor a rebuild. Unconfigured is a payload, not a
-    # refusal to start. (Made above: both rooms ask it which revision is active.)
+    # refusal to start. (Made above: the Arguing Room asks it too.)
 
     # Context repositories (`give_context_easier` p1): the host's shared
     # catalog through pyagag's agrefs, and the Developer's Gitea token for
@@ -203,13 +173,13 @@ def main(argv: list[str] | None = None) -> int:
 
     # The progress panel (`progress_panel` p1): the same mirror, Observer's
     # records beside its monitor-health file, and its probe configuration.
-    progress = progress_from_env(ops, desk.developer_id)
+    progress = progress_from_env(ops, chat.viewer_id)
 
-    server = build_server(host, port, room, ops, chat, cost, budget, desk, settings, closer, argues,
-                          watchdog=watchdog, contexts=contexts, progress=progress)
+    server = build_server(host, port, mirror, chat, cost, budget, settings, closer, argues,
+                          contexts=contexts, progress=progress)
     print(
         f"agentroom listening on http://{host}:{port} (mirror on {mirror_path.name}, "
-        f"store {store_dir}, stalled at {stalled:g}s, "
+        f"store {store_dir}, "
         + ("chat on, " if chat.configured else "chat read-only, ")
         + (f"cost over {len(roots)} roots, " if cost else "cost off, ")
         + f"budget of {len(budget.providers)} harnesses, "

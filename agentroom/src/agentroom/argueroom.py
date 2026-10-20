@@ -52,14 +52,13 @@ from collections import OrderedDict
 from dataclasses import dataclass, field
 from urllib.parse import quote
 
-from agag.argue import ARGUE_CHANNEL, ARGUE_TAG, ARGUE_TOPIC_PREFIX, open_argue, parse_argue, parse_desire
-from agag.memo import render_request_note
+from agag.argue import ARGUE_CHANNEL, ARGUE_TAG, ARGUE_TOPIC_PREFIX, parse_argue, parse_desire
 from agag.mirror import bare_topic
 from agag.selfnote import parse_note
 
 from .chat import Chat
 from .presentation import Located, agents_of, locate, presentation, source_posts
-from .presentation import answer_body, requests_payload, with_requests
+from .presentation import requests_payload, with_requests
 
 SCHEMA = "ag.argueroom.v1"
 OUTCOME_TAG = "outcome"
@@ -262,113 +261,3 @@ class ArguingRoom:
         }
 
     # -- writes -----------------------------------------------------------------------
-
-    def _refusal(self, text: str | None, token) -> str | None:
-        if not self.chat.configured:
-            return self.chat.status()["reason"]
-        bad = SubmitTokens.check(token)
-        if bad is not None:
-            return bad
-        return self.chat.text_check(text) if text is not None else None
-
-    def create(self, stem: str | None, text: str, token: str, now: float | None = None) -> dict:
-        """Open a new argue as the human: the anchor note, then their words."""
-        refused = self._refusal(text, token)
-        stem = (stem or "").strip().lower() or time.strftime("%Y%m%d-%H%M%S", time.gmtime(now))
-        if stem.startswith(ARGUE_TOPIC_PREFIX):
-            stem = stem[len(ARGUE_TOPIC_PREFIX):]
-        if refused is None and not STEM_PATTERN.match(stem):
-            refused = f"{stem!r} is not a usable name ({STEM_PATTERN.pattern})"
-        if refused is None and self.mirror is not None and self.mirror.topic(ARGUE_CHANNEL, f"{ARGUE_TOPIC_PREFIX}{stem}"):
-            refused = f"#{ARGUE_CHANNEL} › {ARGUE_TOPIC_PREFIX}{stem} already exists; choose another name"
-        if refused is not None:
-            return {"sent": False, "uncertain": False, "error": refused}
-        earlier = self.tokens.earlier(token)
-        if earlier is not None:
-            return earlier
-        try:
-            topic, anchor, post = open_argue(self.chat.client(), stem, text, origin=None)
-        except ValueError as error:
-            return self.tokens.keep(token, {"sent": False, "uncertain": False, "error": str(error)})
-        except Exception as error:  # noqa: BLE001 - reported, never retried
-            return self.tokens.keep(token, {
-                "sent": False, "uncertain": True, "error": f"{type(error).__name__}: {error}",
-                "note": f"the argue may have been opened; look at #{ARGUE_CHANNEL} before trying again"})
-        return self.tokens.keep(token, {
-            "sent": True, "uncertain": False, "anchor": anchor, "channel": ARGUE_CHANNEL, "topic": topic,
-            "message_id": post, "note": "the argue is open; the event queue will carry it back"})
-
-    def _unresolve(self, client, where: Located, messages: list) -> bool:
-        if not messages:
-            return False
-        try:
-            client.call("PATCH", f"messages/{messages[-1].id}",
-                        {"topic": where.topic, "propagate_mode": "change_all",
-                         "send_notification_to_new_thread": False})
-        except Exception:  # noqa: BLE001 - the post still goes out; Zulip keeps two names
-            return False
-        return True
-
-    def post(self, anchor, text: str, token: str, answers=None, not_answer=None) -> dict:
-        """The human's next turn, into the source argue, once per token.
-        `answers` names the request(s) it answers (`ag-post re=…`);
-        `not_answer` says it answers none (`ag-post answer=none`)."""
-        refused = self._refusal(text, token)
-        if refused is not None:
-            return {"sent": False, "uncertain": False, "error": refused}
-        where = self._where(anchor)
-        if isinstance(where, dict):
-            return {"sent": False, "uncertain": False, **where}
-        body, refused = answer_body(text, answers, self._requests(where, self.mirror.messages(where.channel, where.topic))
-                                    if answers else None, not_answer)
-        if refused is not None:
-            return {"sent": False, "uncertain": False, "error": refused}
-        earlier = self.tokens.earlier(token)
-        if earlier is not None:
-            return earlier
-        client = self.chat.client()
-        resumed = False
-        if where.resolved:
-            resumed = self._unresolve(client, where, self.mirror.messages(where.channel, where.live_topic,
-                                                                         across_resolve=False))
-        try:
-            message_id = client.send_to_channel(where.channel, where.topic, body)
-        except Exception as error:  # noqa: BLE001 - reported, never retried
-            return self.tokens.keep(token, {
-                "sent": False, "uncertain": True, "error": f"{type(error).__name__}: {error}",
-                "note": f"the post may have landed; check #{where.channel} › {where.topic} before sending again"})
-        return self.tokens.keep(token, {
-            "sent": True, "uncertain": False, "anchor": where.anchor, "channel": where.channel, "topic": where.topic,
-            "message_id": message_id, "resumed": resumed,
-            "note": ("the discussion is resumed; what it ended in stays as it is" if resumed
-                     else "the post is live in the realm; the event queue will carry it back")})
-
-    def render(self, anchor, revision: str | None, token: str) -> dict:
-        where = self._where(anchor)
-        if isinstance(where, dict):
-            return {"sent": False, "uncertain": False, **where}
-        return request_rendering(self.chat, self.tokens, where, revision or self._active_revision(), token)
-
-
-def request_rendering(chat: Chat, tokens: SubmitTokens, where: Located, revision: str | None, token) -> dict:
-    """Ask for an interpretation of one source at one settings revision —
-    shared by both rooms. The note goes into the source's live topic, so a
-    finished conversation can be re-interpreted without being reopened."""
-    if not chat.configured:
-        return {"sent": False, "uncertain": False, "error": chat.status()["reason"]}
-    bad = SubmitTokens.check(token)
-    if bad is None and not (revision and REVISION_PATTERN.match(revision)):
-        bad = "no settings revision is active, and none was named"
-    if bad is not None:
-        return {"sent": False, "uncertain": False, "error": bad}
-    earlier = tokens.earlier(token)
-    if earlier is not None:
-        return earlier
-    try:
-        message_id = chat.client().send_to_channel(where.channel, where.live_topic, render_request_note(revision))
-    except Exception as error:  # noqa: BLE001
-        return tokens.keep(token, {"sent": False, "uncertain": True, "error": f"{type(error).__name__}: {error}"})
-    return tokens.keep(token, {
-        "sent": True, "uncertain": False, "anchor": where.anchor, "settings_revision": revision,
-        "message_id": message_id,
-        "note": "asked; the renderer picks the request up from its mirror, and earlier interpretations stay"})

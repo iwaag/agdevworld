@@ -121,13 +121,13 @@ def test_each_harness_gets_its_kind_and_no_silence_becomes_zero(tmp_path):
     assert rows["run-0007"].ended_at == NOW - 10
     assert abs(rows["run-0007"].started_at - (NOW - 10 - 62.79)) < 0.01
 
-    board = cost.board(now=NOW, roster=["front-x", "elsewhere-y"])
+    board = cost.board(now=NOW)
     total = board["totals"]["today"]
     assert total["runs"] == 7 and total["failed"] == 2
     assert total["usd_reported"] == 0.259934
     assert total["usd_estimated"] == 0.55
     assert total["kinds"] == {"reported": 1, "estimated": 1, "subscription": 2, "local": 2, "unknown": 1}
-    assert board["missing"] == ["elsewhere-y"]
+    assert "missing" not in board and "routines" not in board
     assert board["roots"] == [{"instance": "front-x", "ok": True, "records": 7}]
 
 
@@ -168,20 +168,7 @@ def test_new_records_carry_their_conversation_and_old_ones_are_windowed(tmp_path
         "front", "front-routine-x-1", 1)
     assert rows["run-0003"].attribution == "none"
 
-    sessions = {"x": [{
-        "channel": "front", "topic": "front-routine-x-1", "opened": {"at": NOW - 600},
-        "resolution": {"state": "open"},
-        "nodes": [{"channel": "pj-x", "topic": "workplan-1"}],
-    }]}
-    board = cost.board(now=NOW, routine_sessions=sessions)
-    session = board["routines"][0]["sessions"][0]
-    assert session["runs"] == 2
-    assert session["usd_reported"] == round(2 * 0.259934, 6)
-    assert session["attribution"] == {"fields": 1, "window": 1}
-    assert session["conversations"] == [
-        {"channel": "front", "topic": "front-routine-x-1", "runs": 2},
-        {"channel": "pj-x", "topic": "workplan-1", "runs": 0},
-    ]
+    board = cost.board(now=NOW)
     assert board["unattributed"]["runs"] == 1
 
 

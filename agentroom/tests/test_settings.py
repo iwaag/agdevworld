@@ -20,7 +20,6 @@ from pathlib import Path
 import pytest
 
 from conftest import empty_room
-from agentroom.room import Room
 from agentroom.server import build_server
 from agentroom.settings import MANIFEST_SCHEMA, Settings, SettingsError, read_manifest
 

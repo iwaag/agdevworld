@@ -97,11 +97,11 @@ open attempt.
 
 agdevworld reaches it same-origin at `http://<host>:8093/wfe/`: its nginx
 listens on 8093, published on every interface, and proxies `/wfe/` to the
-service with the request's own `Host` and an `x-wfe-route` header. Through that
-route the service refuses every operation that takes a host path or a
-repository location (path registration, submodules by URL, local projects);
-those stay with `wfe` on this host. The operation room links "agdev dashboard
-↗" to it.
+service with the request's own `Host` and an `x-wfe-route` header (since
+workflow_editor p11 the service gates no operation on that header). Since
+retire_old_ui p1 the dashboard is the site's Home: a bare `/` on either
+agdevworld listener is redirected there. Its header links Usage
+(docs/usage.md) and the Front Desk.
 
 - **Gitea.** New projects and shared repositories live on Gitea
   (`server/gitea.ts`). The token reaches Git as an HTTP header through

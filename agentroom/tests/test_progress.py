@@ -203,11 +203,10 @@ def test_a_new_post_is_seen_on_the_next_board_after_the_refresh_bound(tmp_path, 
 
 
 def test_the_route_answers_and_writes_nothing(tmp_path):
-    from agentroom.room import Room
     from agentroom.server import build_server
 
     progress, realm, ids, mirror = board_for(tmp_path)
-    server = build_server("127.0.0.1", 0, Room(mirror=mirror), progress=progress)
+    server = build_server("127.0.0.1", 0, mirror, progress=progress)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:

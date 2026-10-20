@@ -1,27 +1,30 @@
 # agentroom
 
-A small relay that lets agdevworld show what Zulip already knows:
-which agents exist, which of their work is still open, and — since
-`operation_room` p2 — **who owes a reply and for how long**. It reads the
-realm through one **mirror** and writes to it with the Developer's
-credential on the two doors that write (a chat post, a completion).
+A small relay on the coordinator host. Since retire_old_ui p1 it serves:
 
-**Since `better_zulip_call` p1 every read is a query of the mirror.**
-`agag.mirror` keeps a persisted, event-updated copy of every public
-conversation on the relay's own credential: one registration of an event
-queue for all public channels, one paged read of the realm (62 calls for
-this realm, one second), and events from then on. `/agents`, `/work`,
-`/ops`, `/routines`, `/frontdesk` and every completion preview are computed
-from that copy, so a board reload costs **no Zulip call**, a completion's
-discovery costs none, and a restart within Zulip's queue lifetime resumes
-the same queue and reads nothing. There is no per-request read and no
-30-second cache any more; there is nothing to clear after a write, because
-the write comes back as an event and the next read sees it.
+- the Front Desk's panels: the settings repository, the shared contexts and
+  the progress board;
+- the Arguing Room: argue history, and closing an argue;
+- what the workflow editor's Usage view reads from this host: the harness
+  logins' windows (`/budget`) and, as history, the pre-WFE agents' records
+  (`/cost`).
 
-Every payload carries a `health` block: `live`, or `stale` (or `unknown`)
-with the reason and `stale_since`. A stale mirror keeps answering with the
-last good copy and the views say so beside the data instead of replacing
-the board with errors.
+The agent room, the operation room, the routine dashboard, the cost gauge
+page and their routes (`/agents`, `/work`, `/ops`, `/routines`, `/inflight`,
+`/chat`, `/complete`, `/frontdesk`, the argue writes) are retired. Their
+history is in the episodes (`agent_room`, `operation_room`,
+`refine_routine`, `front_desk`, `gauge_panel`, `retire_old_ui`).
+
+**Every read of the realm is a query of the mirror** (`better_zulip_call`
+p1). `agag.mirror` keeps a persisted, event-updated copy of every public
+conversation on the relay's own credential: one event queue for all public
+channels, one paged read of the realm, and events from then on. A reload
+costs no Zulip call, and a write comes back as an event that the next read
+sees.
+
+Payloads that read the realm carry a `health` block: `live`, or `stale`
+(or `unknown`) with the reason and `stale_since`. A stale mirror keeps
+answering with the last good copy.
 
 ## Run
 
@@ -42,25 +45,23 @@ Other environment values: `AGENTROOM_HOST` (default `0.0.0.0`, every interface),
 `AGENTROOM_PORT` (default `8094`), `AGENTROOM_MIRROR_DIR` (where the
 mirror's SQLite store lives; default `.local/mirror/` in this directory —
 ignored and disposable: delete it and the next start rebuilds it),
-`AGENTROOM_STALLED_SECONDS` (default `900`) is when an owed reply becomes
-`stalled`, `AGENTROOM_DONE_SECONDS` (default a day) is how long a `done`
-receipt stays on the ops board before it is history.
+`AGENTROOM_AGENT_ROOTS` (`instance=<root>,…`) for `/cost`, and the budget
+readers' binaries (`AGENTROOM_CODEX_BIN`, `AGENTROOM_AGY_BIN`).
 
-The writes need the **Developer's** credential, `AGENTROOM_CHAT_ZULIP_ENV`;
-without it the relay is read-only for chat and completion and says so.
+Closing an argue needs the **Developer's** credential,
+`AGENTROOM_CHAT_ZULIP_ENV`; without it the relay is read-only and says so.
 
-`service/serve.sh check` fills the mirror, prints every board from it, the
-mirror's call ledger by purpose, and how many Zulip calls the whole check
-made — the fastest way to tell a credentials problem from a UI one, and the
+`service/serve.sh check` fills the mirror and prints its call ledger by
+purpose, the chat credential's state, the `/cost` records, the settings
+revision, every budget card, and how many Zulip calls the whole check made — the fastest way to tell a credentials problem from a UI one, and the
 honest measurement of what a first fill costs.
 
 ## Always on
 
 On agstudio the relay is a launchd agent, `com.agdev.agentroom`
 (`pj-agdev/devenv/launchd/com.agdev.agentroom.plist.in`). It is always on
-because `/ops` is a *running* reconstruction: the mirror's queue delivers
-events only while somebody polls it, and a relay somebody has to remember to
-start is a board that is not there when it matters.
+because the mirror's queue delivers events only while somebody polls it,
+and the Front Desk's panels and the Usage view read it at any time.
 
 - Reload after a code change: `launchctl kickstart -k gui/$(id -u)/com.agdev.agentroom`.
   A restart within Zulip's queue lifetime (ten minutes) resumes the queue
@@ -79,208 +80,28 @@ terminal proves nothing about the same code under launchd.
 ## Routes
 
 Unauthenticated, CORS open, on the LAN. This is cagent's *window* shape
-(`cagent_api/server.py`). Everything is a `GET` except one POST, and that one
-writes only to this process's memory (see `POST /ops/confirm`).
+(`cagent_api/server.py`).
 
-- `GET /healthz` → `{"ok": true}`
-- `GET /agents` → the `intro-<instance>` topics of `#agents`, each with its
-  latest introduction post and the topic's history, from the mirror. `[selfnote]` posts and
-  lines, and Zulip's own notices, are removed here — the view never sees them.
-- `GET /work` → every **unresolved** topic of every live agent's own
-  channel, flat, with the instance each belongs to. "Unresolved" is the absence of Zulip's `✔ `
-  prefix (`agag.zulip.RESOLVED_TOPIC_PREFIX`) and nothing else: topic naming
-  differs per agent, resolution does not. `?resolved=1` lists the ✔ topics
-  too, each row carrying `resolved` (`front_desk` p4): a finished request is
-  completed from the agent room, and finished means resolved. `#front` is
-  walked as well, and its topics are filed under the instance whose
-  **roster prefix** they carry (`front-` → `front-agstudio1`), because Front's
-  declared channel does not exist and its conversations live here; a topic
-  no live roster claims is nobody's and is not listed.
+- `GET /healthz` → `{"ok": true, "mirror": <health>}`; `GET /` lists the
+  routes.
+- `GET /settings`, `/settings/<revision>`, `/settings/<revision>/<path>` →
+  the settings repository (below).
+- `GET /contexts…`, `POST /contexts…` → the shared context repositories
+  (`give_context_easier` p1, `contexts.py`).
+- `GET /progress?current=<desk id>` → the Front Desk's progress board
+  (`progress_panel` p1, `progress.py`).
+- `GET /argues`, `GET /argues/<anchor>`, `GET /argues/<anchor>/close-plan`,
+  `POST /argues/<anchor>/close` → the Arguing Room (below).
+- `GET /budget` → the subscription windows (below).
+- `GET /cost` → the pre-WFE agents' records, as history (below).
 
-- `GET /routines` → the routine board (`refine_routine` p1): one row per
-  routine channel, carrying its guide, its latest run and **where that run
-  stands**. See below.
-
-- `GET /ops` → the conversation-layer state board: one row per
-  `(instance, channel, topic)` that is `awaiting`, `stalled`, `acked`, `done`
-  or `unknown`, sorted with stalled first, each carrying the evidence its
-  state was read off. See below.
-
-- `POST /ops/confirm` → dismiss the `done` rows a human has looked at. An
-  empty body (or `{"all": true}`) confirms every `done` row on the board;
-  `{"channel": …, "topic": …}` confirms one conversation. Answers
-  `{"confirmed": n, "topics": [...], "refused": [...]}`, `409` when the target
-  is not `done`, `404` when it is not on the board at all.
-
-- `POST /chat` → **the one route that writes to the realm**: a post into a
-  routine topic of `#front`, as the Developer. `{topic, text}`; answers
-  `{sent, channel, topic, message_id}`, `403` with the reason for anything the
-  rules decline, `503` when no chat credential is configured. See below.
-
-- `GET /complete/plan?channel=…&topic=…`, `POST /complete` → what
-  finishing one request would change, and doing it (`front_desk` p3, p4).
-  The **second** route that writes to the realm, and Zulip is the only
-  system it writes to.
-  `GET /complete/history` is what this relay carried out.
-  `GET /frontdesk/<id>/close-plan` and `POST /frontdesk/<id>/close` are the
-  same operation with the Front Desk id naming the topic. See below.
-
-- `GET /argues`, `GET /argues/<anchor>`, `POST /argues`, `POST /argues/<anchor>/post`,
-  `POST /argues/<anchor>/render` → the Arguing Room (below).
-- `GET /frontdesk`, `GET /frontdesk/<id>`, `POST /frontdesk/<id>/post` → the
-  Front Desk's conversations, one conversation's history, and a post into it
-  as the Developer (`front_desk` p1). See below.
-
-- `POST /routines/<name>/start` → the other write (`refine_routine` p1):
-  ask Front to run one routine, by posting the request as the Developer at
-  Front's ordinary entrance — a Front Desk conversation of its own,
-  `#front › front-desk-<stamp>`. Body `{instruction}` (optional
-  conditions). Front reads the guide and opens the run in the routine's
-  channel; the answer carries `desk`, `channel`, `topic` and `message_id`,
-  or `error` (409 when the routine is retired or has no guide, 503 when the
-  chat credential is unset) and `uncertain: true` when the post left and
-  Zulip did not confirm it — nothing is retried, because a second post is a
-  second paid run.
-
-**A session is a run topic** — `#routine-<name> › routinerun-<id>` since
-`refine_routine` p1; see the `/routines` section for what each one carries.
-`?resolved=hide` drops ✔'d runs before the three-session limit is applied.
-The payload's `history` block says how many run topics are held and the
-sweep's rule: the newest `DEEP_RUNS` (3) run topics of a routine are read
-whole and read even under ✔; older runs are read shallow while open and not
-at all once resolved, so a resolved run older than that is in Zulip, not here.
-
-A relay failure answers `502` with the error text, so the view can say the
-room is unreadable instead of showing an empty one. A Zulip failure does
-not reach the reads at all: the mirror keeps its last good copy and every
-payload's `health` says it is stale and since when.
-
-## `/routines` — the routine board
-
-Since `refine_routine` p1 a routine is a **guide** kept in Zulip and the
-**runs** made of it: one public channel per routine, `#routine-<name>`, filed
-in the `routine` channel folder; its fixed `guide` topic, whose **newest post
-is the whole guide**; and one `routinerun-<id>` topic per run, opened by
-Front with a single opening post and then owned by Front. There is no
-schedule and no fire line any more — the dispatcher and its GUI are gone —
-and the old `#front › routine-<name>` / `front-routine-<name>-<stamp>` layout
-with them. This board costs **no Zulip call**: the routine channels are public, so
-the mirror holds every one of their topics whole, resolved ones included (a
-finished run is resolved by Front's listener, so a board that skipped ✔ runs
-would never show one finishing).
-
-`GET /routines` answers `ag.routines.v2`: one row per routine channel —
-`name`, `channel`, `display` (a `display:` line or heading in the guide,
-else the name and an assigned icon), `guide` (the newest post, whole, with
-`posts` and `authors` so a stray post there is visible), `retired` (a ✔ on
-the guide), `runs`/`open_runs`, `latest` (the newest run's summary) and
-`state`, which is the latest run's state or `idle`/`retired`.
-
-**A run's state is read off its own posts** (`routines.run_state`):
-
-- `unstarted` — the opening post and nothing else: Front's listener has not
-  served it yet (it starts a run it opened right after the serving that
-  opened it, and at startup);
-- `acked` — Front's ack is the newest post: a serving is under way;
-- `waiting` — Front's entry is the newest post: it waits on what it
-  delegated;
-- `awaiting` / `stalled` — somebody else posted into the run after Front's
-  entry and Front owes an answer, in the ops board's own words;
-- `finished` — the `ag-routinerun` finish block is in Front's last entry, or
-  the topic carries ✔. **Ending a run and reaching the routine's goal are two
-  different sentences**: `finish.achieved` is the goal, `finish.reason` is
-  why the run ended.
-
-### `GET /routines/<name>` — one routine, its last runs, its chat
-
-The same row, plus the last three runs (`?resolved=hide` drops ✔'d runs
-before the three are taken). Each session carries its `channel` and `topic`,
-its `opened` post (the request as it was made, the conditions as Front read
-them, the guide post it read, where the request came from), its `origin`
-(the conversation Front's own root note in the run topic names — the
-requester; absent for a run opened by hand), `entries` and `last_entry`
-(Front's own record), `finish` (achieved, reason, report), `resolution`,
-`run` (state and evidence), the run topic whole as `chat`, and the **session
-tree** of the conversations the run opened, walked from two selfnote edges
-exactly as before — a `[served]` note in the run naming a callback Front
-answered, a `[rootchat]` note in the remote naming the run — never
-rendered, only linked. A root note *in the run* that names the requester is
-the run's origin and is not a child of the run.
-
-## `POST /chat` and `POST /routines/<name>/start` — the writes
-
-`AGENTROOM_CHAT_ZULIP_ENV` is a **third** credential variable, the Developer's,
-and nothing falls back to it or from it. Unset means the relay is read-only for
-chat and every read payload says so in `chat.configured`. The `/ops` observer
-never gains the ability to post.
-
-`POST /chat {channel, topic, text}` posts into a routine's **own**
-conversations and nowhere else: `#routine-<name> › guide` (a new version of
-the guide — the newest post *is* the guide) or one of its `routinerun-`
-topics (a word into a run Front owns, which serves Front there and buys a
-paid run). The routine must be one the engine has seen. The length guard
-(`AGENTROOM_CHAT_MAX_CHARS`, default 4000, against a realm that truncates
-silently past 10000), the no-selfnote rule and the no-retry rule are as
-before.
-
-`POST /routines/<name>/start {instruction}` no longer opens a run topic: a
-run is something Front opens after reading the guide. It posts the request,
-as the Developer, at Front's ordinary entrance — a Front Desk conversation of
-its own, `#front › front-desk-<stamp>` — saying which routine, the
-conditions given, and that Front may go ahead; the answer carries `desk` so a
-screen can open that conversation. Front reads the guide, opens
-`routinerun-<id>` in the routine's channel, and the run's report comes back
-to that same desk conversation when it ends. A retired routine (guide under
-✔) or one with no guide is refused before anything is posted.
-
-## `/frontdesk` — the Front Desk (`front_desk` p1)
-
-agdevworld's Front Desk scene talks to Front in `#front` › `front-desk-<id>`,
-inside Front's own `front-` sweep. Three routes, in `frontdesk.py`:
-
-- `GET /frontdesk` → `ag.frontdesk.v1`: every Front Desk conversation the
-  relay knows, newest first, each with its `status` (`waiting` — the
-  Developer spoke last; `received` — Front's ack is the newest post;
-  `answered`; `done` — ✔; `quiet`; `unknown` while the queue is dead, with
-  `stale_state`) and the evidence it was read from. Conversations the sweep
-  saw by name but does not hold are listed too, as name-only rows.
-- `GET /frontdesk/<id>` → the conversation: `posts` (real posts only, each
-  with `kind` — `developer`, `agent`, `ack`, `other`), `latest_reply`,
-  `status`, `history` (post count, whether it is a window), a `zulip_url`
-  into the topic, and **`known`**: `held` (the mirror holds the conversation
-  whole, resolved or not, and keeps it current by its queue), `read` (the
-  mirror hydrated it once because its coverage was not complete), or
-  `unknown` (no mirror, or the read failed; nothing is invented and the view
-  keeps what it last knew).
-- `POST /frontdesk/<id>/post` `{text, token, answers?, not_answer?}` → a post as the Developer into
-  `front-desk-<id>`, on the chat credential and with `chat.py`'s guards
-  (configured, length, no selfnote), plus two of its own: the id has one
-  shape (`^[a-z0-9][a-z0-9-]{0,47}$`, so nothing else ever becomes part of a
-  topic name) and the **token** is remembered — a repeated submit (double
-  click, second Enter, retry after a timeout) answers the first result with
-  `duplicate: true` and posts nothing. A ✔'d conversation is **resumed in
-  place**: the topic is un-resolved (renamed back) before the post, because
-  Front's sweep never reads a resolved topic. `403` for a refusal, `502`
-  with `uncertain: true` when the post left and Zulip did not confirm it;
-  never a retry, because a post here starts a paid run.
-  The body may carry the composer's correlation choice (`clearer_chat_ui`
-  ex1): `answers: [request ids]` writes `ag-post re=…` (each must be a
-  request of this conversation), `not_answer: true` writes `ag-post
-  answer=none` (the post settles nothing, not even the one pending request
-  the next-post rule would give it); neither leaves the post plain. Both at
-  once are refused. The same body on `POST /argues/<anchor>/post`.
-
-Since `argue` p2 a Front post carries **no dialogue**. The discussion is
-plain, and Front re-voices it afterwards into a memo topic nobody reacts to
-(`agag.memo`, `agfront.render`). The conversation payload carries that
-relation as **`presentation`** (below); `POST /frontdesk/<id>/render`
-`{revision?, token}` asks for another interpretation. The old `ag-dialogue`
-block inside a reply is not parsed any more.
+A relay failure answers `502` with the error text, so a view can say the
+source is unreadable instead of showing nothing.
 
 ## `/argues` — the Arguing Room (`argue` p2)
 
-A human starts, reads and continues an argue (`#argue › argue-<stem>`,
-`agag.argue`) from a screen. In `argueroom.py`; every read is the mirror's.
+A human reads an argue (`#argue › argue-<stem>`, `agag.argue`) and can
+close it from a screen. In `argueroom.py`; every read is the mirror's.
 
 - `GET /argues` → `ag.argueroom.v1`: every argue, newest first — `anchor`
   (the `[selfnote][argue]` note's message id, which **is** the argue),
@@ -294,26 +115,16 @@ A human starts, reads and continues an argue (`#argue › argue-<stem>`,
   posts — `kind` (`human` / `agent` / `ack`), `agent` (roster name),
   `speaker` (a logical one such as `sage:arxiv` for a post under that
   header) — plus `presentation`.
-- `POST /argues` `{stem?, text, token}` → opens one as the Developer: the
-  anchor note, then the text verbatim. A stem in use is refused; without a
-  stem a UTC stamp is minted.
-- `POST /argues/<anchor>/post` `{text, token, answers?, not_answer?}` → the human's next turn,
-  **into the source argue**. A ✔'d argue is un-resolved first and the
-  discussion resumes; what it ended in is not reopened and nothing
-  downstream runs.
-- `POST /argues/<anchor>/render` `{revision?, token}` → one
-  `[selfnote][render] <settings revision>` in the source (the active
-  revision by default). It reopens nothing and buys nobody a run.
+- `GET /argues/<anchor>/close-plan`, `POST /argues/<anchor>/close` →
+  finishing it from the room (the completion door, below).
 
-Every write is once per `token` (a repeat returns the first result with
-`duplicate: true`), `403` for a refusal, `502` with `uncertain: true` when
-Zulip did not confirm; never retried. Finishing an argue is Front's outcome
-or the shared `/complete` door.
+Argues are history since project_migration p8: opening one, posting in it
+and asking for another interpretation were refused from then on, and their
+routes are gone since retire_old_ui p1.
 
 ### `presentation` — speech and its character dialogue
 
-The same block in `/argues/<anchor>` and `/frontdesk/<id>`
-(`presentation.py`; a desk conversation's anchor is its first post):
+The block in `/argues/<anchor>` (`presentation.py`):
 
 - `memo` — the memo topic whose `[selfnote][memosource]` names the anchor;
 - `interpretations` — one per `(settings_revision, renderer)` saved so far,
@@ -330,35 +141,30 @@ The same block in `/argues/<anchor>` and `/frontdesk/<id>`
   reason. A result whose fingerprint no longer matches the source, or whose
   source post is gone, is `stale`.
 
-## `/complete` — finishing a request (`front_desk` p3, p4)
+## Closing an argue — the completion door (`front_desk` p3, p4; `argue` p2 ex1)
 
 A request is rarely one topic: Front serves it in the conversations of the
 agents it asks, and those open conversations of their own. When the thing is
-done, all of that is still open. Two routes close it, in `closing.py` (what
-the targets *are*) and `close.py` (what would change, and doing it). The
-request is any conversation named by `channel` and `topic` (a ✔ name is read
-bare). The human's click is the decision; nothing here judges whether the
+done, all of that is still open. `closing.py` decides what the targets *are*
+and `close.py` what would change, and does it. Since retire_old_ui p1 the
+door is reached only by the Arguing Room, the argue named by its anchor. The human's click is the decision; nothing here judges whether the
 work was good, and closing writes nothing but the ✔ renames.
 
-- `GET /complete/plan?channel=…&topic=…` → `ag.completion.v1`: `root`, a
+- `GET /argues/<anchor>/close-plan` → `ag.completion.v1`: `root`, a
   `scope` block, the ordered `actions`, each with a `kind` (`topic`,
   `conversation`), a stable `key`, a `state` (`ready`, `done`,
   `blocked`, `kept`), the `reason` it is in that state and the `detail` it
   was decided from; plus `counts`, `excluded`, `gaps`, `status` (which
   credentials this relay has), `history` (this relay's earlier operations on
   the same request) and a `fingerprint`. It writes nothing.
-- `POST /complete` `{channel, topic, fingerprint}` → applies it and answers
+- `POST /argues/<anchor>/close` `{fingerprint}` → applies it and answers
   the same payload with `results` (one row per target: `applied`, `already`,
   `failed`, `skipped`) and `partial`. `409` when the plan has changed since
   the preview — the refusal carries the fresh plan and **nothing is
-  written**. The body carries the request and the approved fingerprint and
-  nothing else: the server closes what it derived, never what a browser
-  named.
-- `GET /complete/history[?channel=…&topic=…]` → the operations this relay
-  carried out, newest last; memory only, forgotten on restart.
-- `GET /frontdesk/<id>/close-plan`, `POST /frontdesk/<id>/close
-  {fingerprint}` → the same two, with the Front Desk id naming
-  `#front` › `front-desk-<id>`.
+  written**. The server closes what it derived, never what a browser named.
+
+The rules below were written for every kind of request the door used to
+take; an argue is the one that still reaches it.
 
 **What a root is, and what it owns** (`closing.classify`, `Scope`,
 `_ownership`, p4). A conversation's *kind* is its name — `desk`, `front`,
@@ -449,24 +255,21 @@ active one, `<destination>/revisions/<sha>/` any retained one (agfront's
 the active revision afresh, so a content update needs no relay restart and
 no frontend rebuild.
 
-## `/cost` — what the backends cost (`gauge_panel`)
+## `/cost` — the pre-WFE agents' records, as history
 
-`GET /cost` reads this host's `ag.agent-run.v1` records — the same
-`AGENTROOM_AGENT_ROOTS` that `/inflight` walks, `<root>/.local/agent/<role>/run-*.json`
-— and never Zulip, so a view may poll it. It answers `ag.cost.v1`:
+`GET /cost` reads this host's `ag.agent-run.v1` records under
+`AGENTROOM_AGENT_ROOTS` (`<root>/.local/agent/<role>/run-*.json`) and never
+Zulip. Those agents (the legacy Front, arxivsage, agecho) ran before
+workflow runs. Current execution usage is the workflow editor's
+(`workflow_editor/docs/usage.md`), which shows this board as history. It
+answers `ag.cost.v1`:
 
 - `totals.{today,days7,days30,all}` and `days[]` (the last 14 local days),
   each with `runs`, `failed`, `usd_reported`, `usd_estimated`, the token
   totals and a `kinds` histogram, plus `by_harness` on the totals.
 - `table[]` — one row per instance × role × harness × model.
-- `routines[]` — per routine, the sessions the ops engine currently lists
-  (the same three the operation room draws, from links it already holds),
-  each with the runs matched to its conversations by `channel`/`topic`,
-  broken down per agent, and an `attribution` count saying how many were
-  matched from the record's own fields and how many from the mtime window.
 - `unattributed`, `recent[]` (last 40 rows), `roots[]` (what was readable),
-  `missing[]` (roster instances with no root on this host — *unknown*, not
-  quiet), `prices` (the table in use).
+  `prices` (the table in use).
 
 **Five cost kinds**, decided per harness by `prices.json` (or the file
 `AGENTROOM_PRICES` names): `reported` (the harness said USD — claude_code),
@@ -497,7 +300,7 @@ answer"** — a failed card has `ok: false`, the reason, and an empty
 It is its own route rather than a field of `/cost` because it calls the
 vendors, through the CLIs' own reads, and `/cost` is stat-only. Each provider
 caches on its own clock (`AGENTROOM_BUDGET_SECONDS`, default 60) behind its
-own lock, so the page's 20 s poll costs one vendor call a minute per harness,
+own lock, so a caller's poll costs one vendor call a minute per harness,
 and a hung codex process never blanks the Claude card.
 
 - **claude_code** — `GET api.anthropic.com/api/oauth/usage` with the bearer
@@ -544,59 +347,3 @@ and a hung codex process never blanks the Claude card.
   `/budget` answers after `JOIN_SECONDS` (15) with what it has — a provider
   still reading says so, keeps its thread, and fills its cache for the next
   tick.
-
-## `/ops` — the state engine
-
-Its module docstring (`src/agentroom/ops.py`) is the reference; this is the
-operator's half.
-
-**A ✔ on an `intro-` topic retires the agent.** An introduction is the
-contract that says an agent exists and how to reach it, so resolving that
-topic is the realm's way of saying it is gone — and the only way, because a
-project can be deleted from every machine without Zulip noticing. A retired
-instance leaves `/ops` and `/agents`, its channel stops being walked for open
-work, and both payloads carry it in `retired` so a reader can tell "gone on
-purpose" from "never seen". It is a flag, not a deletion: un-✔ the topic and
-the agent comes back, live, without a re-sweep.
-
-**The roster is not in this repository.** Every instance states its own
-routing — the Zulip name it is mentioned by, the channel it answers every
-topic in, the prefixes it sweeps — in a fenced block in its `#agents`
-introduction (`pyagag/docs/agent-roster-v1.md`). An introduction with no such
-block is served as `unknown`, never as an agent with nothing to do: p1 guessed
-two rosters and produced 66 phantom stalled rows.
-
-**It subscribes to nothing.** The mirror's queue is registered for *all
-public streams*, so every public channel's events reach it whether or not
-the bot is in the channel — a new channel appears the moment it is opened. The relay makes no write of its own on the mirror's credential.
-
-**Served notes come from the mirror's notes index.** Every
-`[selfnote][served]` line in the realm is indexed as it is read or as it
-arrives, attributed to the instance whose roster carries the sender's bot id.
-(The old per-channel search existed because a global search answered nothing
-for a young credential — Zulip searches the reader's own index; the mirror
-reads channels whole and never searches.)
-
-**When the mirror is stale, every row is `unknown`.** The last known state
-is kept in `stale_state` as evidence and never as the answer. p9's 26 silent minutes
-looked exactly like a quiet board, and a screen that renders unknown as idle
-cannot show the one failure it exists to catch.
-
-**`done` leaves the board by hand, not by clock.** A `done` row is the receipt
-for a debt that was paid, and this board's principle is that evidence stays
-until somebody has seen it — so there is no eviction timer, there is
-`POST /ops/confirm`. Three things about it:
-
-- **Only `done` may be dismissed**, and the *relay* is what enforces that. A
-  button that clears `stalled` off a screen is p9's twenty-six unnoticed
-  minutes with a shortcut to it, and a view that merely hides such a button is
-  a habit rather than a rule.
-- **It records a mark, not a deletion**: `(channel, bare topic)` plus the id of
-  the last post at that moment. Any later post floats the row back up — an
-  unresolve included, which a `del` from the topic table could not manage,
-  because the later rename would arrive naming an `orig_subject` the engine no
-  longer knew.
-- **It is in memory only.** The marks die with the relay, and so do the rows
-  they hide, so the two can never disagree — and a restart never opens on a
-  board of debts somebody already cleared. Nothing about a confirm reaches
-  Zulip.

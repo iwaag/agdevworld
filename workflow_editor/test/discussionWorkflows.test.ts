@@ -115,6 +115,7 @@ async function setup() {
 }
 type S = Awaited<ReturnType<typeof setup>>
 const ref = (run: string): RunRef => { const [, workflow, r] = run.split('/'); return { workflow, run: r } }
+const rec = async (s: S, run: string) => { const r = ref(run); return (await readRun(await runSpace(s.ws(run.split('/')[0]), r), r)).record! }
 const op = (s: S, run: string, o: Parameters<typeof runOp>[2], by = 'exec') => runOp(s.ws(run.split('/')[0]), ref(run), o, { by, via: 'cli' })
 const P = 'ponderer/conduct/run-001'
 // Everything that would be work: messages, invitations, queued jobs, the
@@ -144,6 +145,8 @@ test('the conductor\'s revision is recorded once as progression with its ponder 
   assert.deepEqual([r.relation, r.role, r.target, r.activity, r.attempt, r.evidence, r.before?.revision, r.after?.revision], ['edited', 'progression', { kind: 'run', run: P }, d.activity.id, 'a1', 'operation', 'r1', 'r2'])
   assert.deepEqual(r.messages, [], 'no message is claimed for it')
   assert.ok(s.wfs.snapshot(r.after!.sha256) && s.wfs.snapshot(r.before!.sha256), 'both versions captured')
+  const revAt = (await rec(s, P)).definition.revisions![0].at
+  assert.equal(r.after!.at, revAt, 'the version carries when it came to be (the adjustment), apart from when it was recorded')
   // A repair finds it already recorded (same token): no duplicate.
   await s.wfs.repair({ conv: 'wf-a' })
   assert.equal(s.wfs.rows('wf-a').length, 1)

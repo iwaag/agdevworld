@@ -426,7 +426,7 @@ Episode: `devdocs/episodes/argue/p4/ex3/`. Code:
 | `relation` | `referenced` (declared material), `created`, `edited`, `executed` (a run started from the turn) |
 | `role` | `progression`: the facilitator's own conductor graph (and the facilitator's project's work its run requests); otherwise `subject` (a reference may declare it) |
 | `project`, `workflow`, `target` | `{kind: definition, file}` (a reusable definition) or `{kind: run, run}` (one execution of it) |
-| `after`, `before` | the version: `kind` `draft` (working-tree bytes not equal to the committed file), `committed` (equal to the file at `commit`) or `revision` (a run's frozen `rN`, with its history `seq`); `sha256` of the bytes, `definitionDigest` (the semantic digest: layout and appearance excluded). `before` for an edit |
+| `after`, `before` | the version: `kind` `draft` (working-tree bytes not equal to the committed file), `committed` (equal to the file at `commit`) or `revision` (a run's frozen `rN`, with its history `seq`); `sha256` of the bytes, `definitionDigest` (the semantic digest: layout and appearance excluded); `at`, when that version came to be (the adjustment; r1: the run's creation; a definition: when WFE read it) — the record's own `at` is when it was recorded, later for a derived or backfilled record. `before` for an edit |
 | `nodes` | the nodes it singles out (a reference's `--node`; an edit's added and changed nodes) |
 | `messages` | the explicit source messages; later associations are `workflow_ref_events` |
 | `run`, `attempt`, `invitation`, `activity`, `actor`, `origin` | the turn: the actor run and attempt, its invitation, the conductor's ponder activity; `origin` the discussion run a delegated or requested child works for |

@@ -62,8 +62,12 @@ export type Target = { kind: 'definition'; file: string } | { kind: 'run'; run: 
 // One version of a workflow. `draft`: working-tree bytes not equal to the
 // committed file; `committed`: equal to the file at `commit`; `revision`: a
 // run's frozen revision (r1 the original), `seq` its history position.
+// `at`: when this version came to be — a revision's adjustment (r1: the
+// run's creation), or when WFE read a definition's bytes. A record's own
+// `at` is when it was recorded, which for a derived record is later.
 export interface Version {
   kind: 'draft' | 'committed' | 'revision'
+  at?: string
   sha256: string
   definitionDigest: string | null
   path?: string
@@ -286,7 +290,7 @@ export class DiscussionWorkflows {
         if (mine === blob.stdout.trim()) commit = head.stdout.trim()
       }
     } catch { /* not a repository: a draft */ }
-    const version: Version = { kind: commit ? 'committed' : 'draft', sha256: this.capture(t, `${ws.reg.id}:${path}`), definitionDigest: workflow ? await semanticDigest('definition', workflow) : null, path, ...(commit ? { commit } : {}) }
+    const version: Version = { kind: commit ? 'committed' : 'draft', at: now(), sha256: this.capture(t, `${ws.reg.id}:${path}`), definitionDigest: workflow ? await semanticDigest('definition', workflow) : null, path, ...(commit ? { commit } : {}) }
     return { version, text: t, workflow }
   }
   // A run's revision (default: the one in force), its bytes captured.
@@ -297,17 +301,17 @@ export class DiscussionWorkflows {
     if (!rec) return null
     const want = revision ?? rec.definition.active ?? 'r1'
     const seqOf = (rev: string) => rev === 'r1' ? 1 : rec.history.find(e => e.op === 'run.adjust' && e.change?.revision?.[1] === rev)?.seq
-    let text: string | undefined, sha: string | undefined, digest: string | undefined, path: string | undefined
+    let text: string | undefined, sha: string | undefined, digest: string | undefined, path: string | undefined, at: string | undefined
     if (want === 'r1') {
       const e = rec.definition.workflows[rec.definition.root]
-      text = read.bundle?.entries[rec.definition.root]?.text; sha = e?.sha256; digest = e?.definitionDigest; path = e?.file
+      text = read.bundle?.entries[rec.definition.root]?.text; sha = e?.sha256; digest = e?.definitionDigest; path = e?.file; at = rec.history[0]?.at
     } else {
       const r = rec.definition.revisions?.find(x => x.revision === want)
-      text = read.bundle?.revisions?.find(x => x.revision === want)?.text; sha = r?.sha256; digest = r?.definitionDigest; path = r?.file
+      text = read.bundle?.revisions?.find(x => x.revision === want)?.text; sha = r?.sha256; digest = r?.definitionDigest; path = r?.file; at = r?.at
     }
     if (!sha) return null
     if (text !== undefined && sha256(text) === sha) this.capture(text, `${run}:${path}`)
-    return { version: { kind: 'revision', sha256: sha, definitionDigest: digest ?? null, run, revision: want, seq: seqOf(want) ?? rec.seq, ...(path ? { path } : {}) }, record: rec }
+    return { version: { kind: 'revision', ...(at ? { at } : {}), sha256: sha, definitionDigest: digest ?? null, run, revision: want, seq: seqOf(want) ?? rec.seq, ...(path ? { path } : {}) }, record: rec }
   }
 
   // ---- recording ----------------------------------------------------------------------
@@ -459,7 +463,7 @@ export class DiscussionWorkflows {
         if (shown.code !== 0) throw new RequestError(404, `${o.project} has no devdocs/workflows/${file} at ${o.commit}: ${shown.stderr.trim()}`)
         const full = (await git(info.ownerDir, ['rev-parse', `${o.commit}^{commit}`])).stdout.trim()
         const p = parseWorkflow(shown.stdout); wf = p.ok ? p.model : null
-        version = { kind: 'committed', sha256: this.capture(shown.stdout, `${o.project}:${full}:devdocs/workflows/${file}`), definitionDigest: wf ? await semanticDigest('definition', wf) : null, path: `devdocs/workflows/${file}`, commit: full }
+        version = { kind: 'committed', at: now(), sha256: this.capture(shown.stdout, `${o.project}:${full}:devdocs/workflows/${file}`), definitionDigest: wf ? await semanticDigest('definition', wf) : null, path: `devdocs/workflows/${file}`, commit: full }
       } else {
         const v = await this.definitionVersion(ws, file)
         if (!v) throw new RequestError(404, `${o.project} has no devdocs/workflows/${file}`)

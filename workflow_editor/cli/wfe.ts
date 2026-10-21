@@ -26,6 +26,7 @@ import { PROJECTS_HELP, projectsCommand } from './projects.ts'
 import { CONTEXT_HELP, contextCommand } from './context.ts'
 import { CONVERSATION_HELP, conversationCommand } from './conversation.ts'
 import { DISCUSSION_HELP, discussionCommand } from './discussion.ts'
+import { DIALOGUE_HELP, dialogueCommand } from './dialogue.ts'
 import { codeVersion } from '../server/version.ts'
 import { assertNotRetired, assertWorkspaceAllowed, loadBoundary, retiredByUrl } from '../server/boundary.ts'
 import { discussionTurn, quietly } from './evidence.ts'
@@ -43,7 +44,7 @@ class Refused extends Error { detail?: unknown; constructor(m: string, detail?: 
 // ---- arguments ---------------------------------------------------------------
 
 interface Parsed { positional: string[]; opts: Map<string, string[]>; flags: Set<string> }
-const FLAGS = new Set(['json', 'help', 'resume', 'h', 'new', 'history', 'no-gitea', 'reuse', 'lost', 'uncertain', 'found', 'complete', 'not-posted', 'ok', 'about-plan', 'all', 'dry-run', 'commit', 'push', 'status', 'rebuild', 'allow-live-executor', 'terminal', 'missing', 'retire', 'upstream', 'published', 'regex', 'ignore-case', 'refresh', 'quick', 'verify-all', 'rendered', 'delivered', 'undelivered', 'partial', 'person', 'integration', 'conclude', 'close', 'no-title']) // p7: present stop --all, run adjust --dry-run
+const FLAGS = new Set(['json', 'help', 'resume', 'h', 'new', 'history', 'no-gitea', 'reuse', 'lost', 'uncertain', 'found', 'complete', 'not-posted', 'ok', 'about-plan', 'all', 'dry-run', 'commit', 'push', 'status', 'rebuild', 'allow-live-executor', 'terminal', 'missing', 'retire', 'upstream', 'published', 'regex', 'ignore-case', 'refresh', 'quick', 'verify-all', 'rendered', 'delivered', 'undelivered', 'partial', 'person', 'integration', 'conclude', 'close', 'no-title', 'queue']) // p7: present stop --all, run adjust --dry-run
 function parse(argv: string[]): Parsed {
   const p: Parsed = { positional: [], opts: new Map(), flags: new Set() }
   for (let i = 0; i < argv.length; i++) {
@@ -179,6 +180,7 @@ reference  the optional technical reference (docs/boast.md): paths,
   context: CONTEXT_HELP,
   conversation: CONVERSATION_HELP,
   discussion: DISCUSSION_HELP,
+  dialogue: DIALOGUE_HELP,
   projects: PROJECTS_HELP,
   create: `wfe create <dir> --name <name> [--id <id>] [--intent <text>] [--goal <text>]... [--devdocs directory|submodule] [--devdocs-source <path|url>] [--resume]
 
@@ -648,6 +650,8 @@ Projects and workspaces
   discussion <subcommand>   discussions of a person, a facilitator and project agents: list, show,
                             create, post, contribute, invite, join, leave, close, archive (p16;
                             docs/discussions.md)
+  dialogue <subcommand>     character dialogue, the short reading view of discussions: status, show,
+                            history, retry, work (argue p5; docs/dialogue.md)
   context <subcommand>      scoped context: show (sources for authoring or a run, and where each comes
                             from), get|set|clear|history (the local overrides), run (used vs next)
 
@@ -1575,7 +1579,7 @@ const COMMANDS: Record<string, (p: Parsed) => Promise<number>> = {
   runs: cmdRuns, observe: cmdObserve, projects: cmdProjects, run: cmdRun, delegate: cmdDelegate, present: cmdPresent, share: cmdShare, project: cmdProject, repo: cmdRepo, gitea: cmdGitea, dashboard: cmdDashboard, exec: cmdExec, request: cmdRequest, notify: cmdNotify, intake: cmdIntake,
   create: cmdCreate, register: cmdRegister, list: cmdList, status: cmdStatus, validate: cmdValidate,
   approve: cmdApprove, arrange: cmdArrange, 'add-repo': cmdAddRepo, workflow: cmdWorkflow, serve: cmdServe, setup: cmdSetup,
-  version: cmdVersion, nodes: cmdNodes, boast: cmdBoast, context: cmdContext, conversation: cmdConversation, discussion: cmdDiscussion,
+  version: cmdVersion, nodes: cmdNodes, boast: cmdBoast, context: cmdContext, conversation: cmdConversation, discussion: cmdDiscussion, dialogue: cmdDialogue,
 }
 
 // Conversations with project agents (project_migration p8, workflow_editor p15, docs/conversations.md).
@@ -1593,6 +1597,14 @@ async function cmdDiscussion(p: Parsed): Promise<number> {
     positional: p.positional, opt: k => opt(p, k), opts: k => p.opts.get(k) ?? [], flag: k => p.flags.has(k), out,
     usage: m => new UsageError(m), refused: (m, d) => new Refused(m, d),
     exec: () => openExec(p), area: () => areaDir(p),
+  })
+}
+
+// Character dialogue (argue p5, docs/dialogue.md).
+async function cmdDialogue(p: Parsed): Promise<number> {
+  return dialogueCommand({
+    positional: p.positional, opt: k => opt(p, k), flag: k => p.flags.has(k), out,
+    usage: m => new UsageError(m), exec: () => openExec(p), area: () => areaDir(p),
   })
 }
 

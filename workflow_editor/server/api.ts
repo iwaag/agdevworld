@@ -36,6 +36,7 @@ export interface ServiceConfig {
   exec?: ExecStore // this host's execution management (queue, attempts, publication)
   conversations?: import('./conversations.ts').ConversationStore // conversations with project agents (p8, p15)
   usage?: import('./usage.ts').UsageReader // what executions used (retire_old_ui p1)
+  dialogue?: import('./dialogue.ts').DialogueStore // character dialogue, the service's own store and worker (argue p5)
 }
 
 
@@ -376,9 +377,36 @@ export function createHandler(config: ServiceConfig) {
         }
         if (wsId && b === 'close' && method === 'POST') { const c = need(); return send(res, 200, { ok: true, ...ds.close(wsId, { by: opt('author') ?? c.person }) }) }
         if (wsId && b === 'reopen' && method === 'POST') { const c = need(); return send(res, 200, { ok: true, discussion: ds.reopen(wsId, { by: opt('author') ?? c.person }) }) }
+        // Character dialogue (argue p5, docs/dialogue.md): the presentation
+        // path, apart from every read above. A read may queue lines for the
+        // dialogue worker; it never calls a model and changes nothing else.
+        if (wsId && b === 'dialogue') {
+          const { DialogueStore } = await import('./dialogue.ts')
+          const dl = config.dialogue ?? new DialogueStore(ds)
+          const language = (method === 'POST' ? opt('language') : url.searchParams.get('lang') ?? undefined) ?? 'ja'
+          if (!file && method === 'GET') {
+            const since = Number(url.searchParams.get('since') ?? 0)
+            return send(res, 200, await dl.read(wsId, language, { queue: url.searchParams.get('queue') !== '0', since: Number.isInteger(since) ? since : 0 }))
+          }
+          if (file === 'retry' && method === 'POST') {
+            const c = need()
+            const message = Number(input.message)
+            if (!Number.isInteger(message)) throw new RequestError(400, 'message is a message id')
+            return send(res, 200, { ok: true, ...await dl.retry(wsId, message, language, opt('author') ?? c.person) })
+          }
+          throw new RequestError(404, 'not found')
+        }
         if (wsId && b === 'archive' && method === 'GET') return send(res, 200, await archive.status(wsId))
         if (wsId && b === 'archive' && method === 'POST') { if (!ds.discussion(wsId)) throw new RequestError(404, `no discussion ${wsId}`); const r = await archive.publish([wsId]); return send(res, r.failed.length ? 502 : 200, { ...r, status: await archive.status(wsId) }) }
         throw new RequestError(404, 'not found')
+      }
+
+      // Character dialogue's state (argue p5, docs/dialogue.md): read-only.
+      if (a === 'dialogue' && !wsId && method === 'GET') {
+        if (!config.conversations) throw new RequestError(503, 'conversations are not configured on this service')
+        const { DialogueStore } = await import('./dialogue.ts')
+        const { DiscussionStore } = await import('./discussions.ts')
+        return send(res, 200, await (config.dialogue ?? new DialogueStore(new DiscussionStore(config.conversations))).status())
       }
 
       // Execution nodes (project_migration p7, docs/workers.md): every worker's

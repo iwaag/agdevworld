@@ -411,6 +411,14 @@ or is newer than the overview's coverage.
 manifest carries `category`, `displayTitle` and the current `overview`. A
 metadata change or a new overview makes the discussion due.
 
+## Character dialogue (argue p5)
+
+A client may also show each agent message as one short line in its
+speaker's character voice: `docs/dialogue.md`. Those lines are a
+presentation kept beside the archive project's workspace, never in this
+store. Nothing in this document reads or writes them, and a reply, a
+citation or an overview always names the original message.
+
 ## Workflows in a discussion (argue p4 ex3)
 
 Which workflow a turn referenced, created, edited or executed, at which

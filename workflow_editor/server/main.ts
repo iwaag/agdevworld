@@ -25,6 +25,8 @@ import { ConversationStore } from './conversations.ts'
 import { ExecStore } from './exec.ts'
 import { UsageReader } from './usage.ts'
 import { Watcher } from './watch.ts'
+import { DialogueStore, DialogueWorker } from './dialogue.ts'
+import { DiscussionStore } from './discussions.ts'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const pkg = resolve(here, '..')
@@ -53,6 +55,10 @@ if (existsSync(giteaFile)) {
   try { gitea = new Gitea(await loadGiteaSetting(giteaFile)) } catch (e) { giteaProblem = (e as Error).message }
 } else giteaProblem = `no Gitea setting at ${giteaFile}`
 const exec = new ExecStore({ registryFile, area, gitea })
+const conversations = new ConversationStore({ area, exec })
+// Character dialogue (argue p5): its store and the worker that renders lines,
+// in this process, beside (never inside) the executor's slots.
+const dialogue = new DialogueStore(new DiscussionStore(conversations))
 const handler = createHandler({
   registryFile,
   area,
@@ -60,8 +66,9 @@ const handler = createHandler({
   distDir: serveDist ? join(pkg, 'dist') : undefined,
   watcher: new Watcher(pollMs, { gitIntervalMs: gitPollMs, registryFile }),
   gitea, giteaProblem,
-  exec, conversations: new ConversationStore({ area, exec }),
+  exec, conversations,
   usage: new UsageReader(exec, relayUrl),
+  dialogue,
 })
 
 const server = createServer((req, res) => void handler(req, res))
@@ -76,4 +83,5 @@ server.listen(port, bind, () => {
   console.log(`authoring area: ${area}`)
   console.log(gitea ? `gitea: ${gitea.url} (owner ${gitea.owner})` : `gitea: none — ${giteaProblem}`)
   if (extraOrigins.length) console.log(`extra origins: ${extraOrigins.join(', ')}`)
+  if (!process.env.WFE_NO_DIALOGUE) new DialogueWorker(dialogue).start()
 })

@@ -422,7 +422,8 @@ export function renderProjectView(root: HTMLElement, wsId: string, opts: { conte
     const go = h('button.primary', {
       onclick: async () => {
         if (!reqText.value.trim() || !reqAuthor.value.trim() || !reqWorkflow.value) { reqResult = h('div.banner.error', 'Choose a workflow, and give your name and your words.'); renderRuns(); return }
-        reqReceipt ||= `browser-${crypto.randomUUID()}`
+        // Not crypto.randomUUID: a page opened by LAN name (http://agstudio.local) is not a secure context.
+        reqReceipt ||= `browser-${Array.from(crypto.getRandomValues(new Uint8Array(16)), b => b.toString(16).padStart(2, '0')).join('')}`
         go.disabled = true
         try {
           const r = await api.requestRun(wsId, { workflow: reqWorkflow.value, text: reqText.value, author: reqAuthor.value.trim(), receipt: reqReceipt })

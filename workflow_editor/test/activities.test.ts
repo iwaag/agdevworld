@@ -357,3 +357,22 @@ test('the archive project\'s synthesize run contributes a synthesis; a participa
   await assert.rejects(s.ds.contribute('p4-g', { text: 'hello', author: 'forge-agent', run: 'forge/discuss/run-001', re: [brief.id], kind: 'announce' }), /facilitator/)
   s.cs.close(); s.x.close()
 })
+
+test('a question answered through a delegation (an agent requester) is no longer waiting for the person nor owed (argue p4 step 5: conduct/run-004 q1)', async () => {
+  const s = await setup()
+  const created = await s.x.request({ workspace: 'ponderer', workflow: 'conduct', text: 'Conduct.', author: 'front-agent', receipt: 'test:conduct:q', via: 'cli' })
+  const run = `ponderer/${created.ref.workflow}/${created.ref.run}`
+  s.ds.create('p4-h', { title: 'Agent requester', by: 'front-agent', members: ['forge'], conductor: run, requester: { kind: 'run', run: 'front/converse/run-001', agent: 'front-agent' } })
+  s.x.db.prepare('UPDATE jobs SET state = \'done\' WHERE workspace = \'ponderer\'').run()
+  await begin(s, run, 'a1')
+  await s.ds.ponder('p4-h', { run, attempt: 'a1', ...who, node: 'ponder', decision: 'Open, then ask front.', sources: [], next: [{ activity: 'announce', node: 'open' }, { activity: 'talk', node: 'ask-front' }, { activity: 'ponder', node: 'then' }] })
+  const open = await s.ds.announce('p4-h', { run, attempt: 'a1', ...who, node: 'open', text: 'Requested by front/converse/run-001: one line.', re: [] })
+  const t = await s.ds.talk('p4-h', { run, attempt: 'a1', ...who, node: 'ask-front', question: 'How detailed?', re: [open.message.id] })
+  assert.deepEqual((await s.ds.view('p4-h')).asking, [t.message!.id])
+  assert.equal((await s.ds.obligations('p4-h')).filter(o => o.kind === 'question').length, 1)
+  await end(s, run, 'a1')
+  await op(s, run, { op: 'question.answer', question: t.activity.question!, text: 'As is.', from: 'front-agent' } as never, 'front-agent')
+  assert.deepEqual((await s.ds.view('p4-h')).asking, [], 'answered in the run: not waiting')
+  assert.equal((await s.ds.obligations('p4-h')).filter(o => o.kind === 'question').length, 0, 'and not owed')
+  s.cs.close(); s.x.close()
+})

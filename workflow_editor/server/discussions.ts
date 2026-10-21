@@ -1011,6 +1011,26 @@ export class DiscussionStore {
     return { activity: this.activityView(row), message: said.message, to, duplicate: false }
   }
 
+  // The questions still waiting for an answer: those the messages leave open
+  // whose WFE question is not answered, taken up or withdrawn either (argue p4
+  // step 5: an agent requester answers through its delegation, never with a
+  // message here — conduct/run-004 q1 stayed "waiting for the person").
+  async openAsking(conv: string, rows: MessageRow[] = this.messages(conv)): Promise<number[]> {
+    const out: number[] = []
+    for (const n of pendingQuestions(rows)) {
+      const m = this.cs.message(n)
+      if (m?.run && m.question && this.exec) {
+        try {
+          const { workspace, ref } = parseRunName(m.run)
+          const q = ((await readRun(await this.exec.workspace(workspace), ref)).record as RunRecord | null)?.questions[m.question]
+          if (q && (q.answers.length || q.takenUp || q.withdrawn)) continue
+        } catch { /* unreadable: still listed */ }
+      }
+      out.push(n)
+    }
+    return out
+  }
+
   // What is still owed in a discussion, and who receives it when it comes
   // (argue p4): open invitations and awaited results, questions to the
   // person, runs of the discussion still working and their delegated work.
@@ -1037,7 +1057,7 @@ export class DiscussionStore {
       out.push({ kind: i.awaits ? 'result' : 'invitation', ref: `invitation ${i.id}`, owes: i.awaits ? `the result of ${i.run}` : `a reply from ${i.participant}`, owner: i.run ?? i.participant, receiver: await receiver(i.awaited_by), since: i.created })
     }
     const rows = this.messages(conv)
-    for (const n of pendingQuestions(rows)) {
+    for (const n of await this.openAsking(conv, rows)) {
       const m = this.cs.message(n)!
       out.push({ kind: 'question', ref: `#${n}`, owes: `an answer to ${m.participant ?? m.author}${m.question ? ` (${m.question})` : ''}`, owner: (() => { const r = this.requester(conv); return r?.kind === 'run' ? r.run : r?.id ?? this.cfg().person })(), receiver: m.run ? await receiver(m.run) : 'the discussion', since: m.at })
     }
@@ -1210,7 +1230,7 @@ export class DiscussionStore {
       invitations: invitations.map(i => this.invitationView(i, o.viewBase)),
       links,
       runs,
-      asking: pendingQuestions(rows),
+      asking: await this.openAsking(conv, rows),
       horizon: this.horizon(conv),
     }
   }

@@ -30,6 +30,8 @@ activity (node field activity: announce | ask | ponder | talk). Each is
 performed with its command, from the conductor's executing attempt:
 
 announce [<id>] --node <n> (--text <t> | --file <f|->) --re <msg>… [--conclude [--close]]
+                              (a discussion you created opens with an announcement that quotes the
+                              request and names whose it is; it needs no --re)
                               speak to the discussion (agenda, context, interim synthesis, the
                               conclusion); waits for nobody; the node completes with the message.
                               --conclude records what is still owed and who receives it later;
@@ -82,7 +84,8 @@ create <id> --title <t> [--author <person>] [--member <project>]…
                               request, or the person it names)
 post <id> (--text <t> | --file <f>) --author <person> [--to <participant>]… [--re <msg>]…
      [--token <t>] [--via <way>]
-                              the person's message, verbatim. --to invites those participants with
+                              the person's message, verbatim (refused from an executing attempt:
+                              a run speaks as itself with contribute or announce). --to invites those participants with
                               it; without --to (or --to <facilitator>) the facilitator is invited
 contribute [<id>] (--text <t> | --file <f|->) --re <msg>… [--kind reply|question|progress|result|synthesis]
            [--question <q>] [--key <k>] [--completing <node>]
@@ -241,6 +244,11 @@ export async function discussionCommand(c: DiscussionCli): Promise<number> {
       case 'post': {
         const id = args[0]; if (!id) throw c.usage('post needs <id>')
         const author = c.opt('author'); if (!author) throw c.usage('--author <person> is required: whose words these are')
+        // The person's route (argue p4 step 5: ponderer/conduct/run-004 posted
+        // the requester's brief as a person named front-agent): an executing
+        // attempt speaks as its own run.
+        const o = await own()
+        if (o) throw c.refused(`post is the person's route; ${o.run} speaks as itself: wfe discussion contribute, or announce from the conductor (quote the request and name whose it is)`, { code: 'not-person' })
         const r = await ds.post(id, { text: text(), author, token: c.opt('token') ?? `cli-${Date.now()}-${process.pid}`, re: ids('re'), to: c.opts('to'), via: c.opt('via') })
         c.out(`${r.duplicate ? 'Already posted (same token)' : 'Posted'}: #${r.message.id} in ${id}${r.reopened ? ' (reopened)' : ''}; ${r.invitations.map(i => `invitation ${i.id} → ${i.participant}: ${i.state}${i.run ? ` ${i.run}` : ''}${i.error ? ` — ${i.error}` : ''}`).join('; ')}.`, { ok: true, ...r })
         return 0
@@ -293,7 +301,8 @@ export async function discussionCommand(c: DiscussionCli): Promise<number> {
         const node = c.opt('node'); if (!node) throw c.usage(`--node <node> is required: the ${sub === 'settle' ? 'ask' : sub} node of your run`)
         const base = { run: o.run, attempt: o.attempt, author: o.agent, node }
         if (sub === 'announce') {
-          const re = ids('re'); if (!re.length) throw c.usage('--re <msg> is required: what the announcement is about')
+          // The opening of a discussion the conductor created has nothing to name.
+          const re = ids('re'); if (!re.length && ds.horizon(id).message) throw c.usage('--re <msg> is required: what the announcement is about')
           const r = await ds.announce(id, { ...base, text: text(), re, invitation: o.discussion === id ? o.invitation : null, conclude: c.flag('conclude'), close: c.flag('close') })
           const ob = r.activity.obligations
           c.out(`${r.duplicate ? 'Already announced' : 'Announced'}: #${r.message.id}; node ${node} completed${ob ? `; ${ob.length ? `outstanding:\n${ob.map(b => `  ${b.ref}: ${b.owes} — owner ${b.owner}; later to ${b.receiver}`).join('\n')}` : 'nothing outstanding'}` : ''}${r.closed ? `\nClosed ${id}.` : ''}`, { ok: true, ...r })

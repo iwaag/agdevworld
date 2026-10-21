@@ -9,10 +9,10 @@
     "seed": "node scripts/seed.ts",
     "service": "node server/main.ts --registry ../.local/wfe-fixture/registry.json",
     "dev": "vite",
-    "build": "tsc && vite build",
+    "build": "tsc && vite build && vite build -c vite.embed.config.ts",
     "start": "npm run build && node server/main.ts --serve-dist --registry ../.local/wfe-fixture/registry.json",
     "test": "node --test 'test/**/*.test.ts'",
-    "check": "tsc && node --test 'test/**/*.test.ts' && vite build",
+    "check": "tsc && node --test 'test/**/*.test.ts' && vite build && vite build -c vite.embed.config.ts",
     "wfe": "node cli/wfe.ts"
   },
   "dependencies": {

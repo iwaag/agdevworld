@@ -268,7 +268,7 @@ test('store v9: a v8 store\'s discussions become `discussion` explicitly; catego
   s.ds.create('rd-m', { title: 'Before v9', by: 'Pat' })
   const m1 = (await s.ds.post('rd-m', { text: 'What did v8 know?', author: 'Pat', token: 'tok-rd-m-001', to: ['forge'] })).message
   // The same store as v8 had it: no category, no title, no meta, no overviews.
-  s.cs.db.exec('ALTER TABLE conversations DROP COLUMN category; ALTER TABLE conversations DROP COLUMN display_title; DROP TABLE discussion_meta; DROP TABLE overviews; PRAGMA user_version = 8')
+  s.cs.db.exec('DROP TABLE workflow_refs; DROP TABLE workflow_ref_events; DROP TABLE workflow_snapshots; DROP TABLE workflow_meta; ALTER TABLE conversations DROP COLUMN category; ALTER TABLE conversations DROP COLUMN display_title; DROP TABLE discussion_meta; DROP TABLE overviews; PRAGMA user_version = 8')
   s.cs.close()
   const cs = new ConversationStore({ area: s.area, exec: s.x })
   const ds = new DiscussionStore(cs)

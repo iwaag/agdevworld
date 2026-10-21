@@ -1,4 +1,4 @@
-# Discussions (workflow_editor p16, argue p4, argue p4 ex1, argue p4 ex2)
+# Discussions (workflow_editor p16, argue p4, argue p4 ex1, argue p4 ex2, argue p4 ex3)
 
 A discussion is a shared conversation of **a person, a facilitator and
 project agents**, each agent speaking through runs of its own project's
@@ -9,7 +9,7 @@ links of direct conversations ([conversations.md](conversations.md)), and
 adds members, invitations and an archive. Code: `server/discussions.ts`,
 `server/discussionArchive.ts`; CLI: `wfe discussion`; store: the
 conversation store (`<area>/.local/conversations/conversations.sqlite`,
-version 9).
+version 10).
 
 The conversation routes refuse a discussion (409 `is-discussion`) and the
 discussion routes refuse a conversation (409 `is-conversation`): a client
@@ -265,6 +265,8 @@ discussions/<id>/manifest.json     format ag.argue.discussion.v1, identity, memb
 discussions/<id>/transcript.jsonl  append-only records: message | membership | invitation | link
                                    | activity (argue p4: activity, conductor, requester events)
                                    | annotation | meta | overview (argue p4 ex2)
+                                   | workflow | workflow-link (argue p4 ex3)
+discussions/<id>/workflows/<sha256>.yaml   each workflow version a record names (argue p4 ex3), once
 discussions/<id>/summary.md        synthesis (the archive project's runs; not this writer)
 ```
 
@@ -408,6 +410,96 @@ or is newer than the overview's coverage.
 `overview`; manifests written before have neither, which counts as 0. The
 manifest carries `category`, `displayTitle` and the current `overview`. A
 metadata change or a new overview makes the discussion due.
+
+## Workflows in a discussion (argue p4 ex3)
+
+Which workflow a turn referenced, created, edited or executed, at which
+exact version, recorded as evidence beside the speech: a reader sees what
+an agent consulted, made and changed without leaving the discussion.
+Episode: `devdocs/episodes/argue/p4/ex3/`. Code:
+`server/discussionWorkflows.ts`; CLI: `wfe discussion workflow`.
+
+**A record** (`workflow_refs`) names:
+
+| Field | |
+| --- | --- |
+| `relation` | `referenced` (declared material), `created`, `edited`, `executed` (a run started from the turn) |
+| `role` | `progression`: the facilitator's own conductor graph (and the facilitator's project's work its run requests); otherwise `subject` (a reference may declare it) |
+| `project`, `workflow`, `target` | `{kind: definition, file}` (a reusable definition) or `{kind: run, run}` (one execution of it) |
+| `after`, `before` | the version: `kind` `draft` (working-tree bytes not equal to the committed file), `committed` (equal to the file at `commit`) or `revision` (a run's frozen `rN`, with its history `seq`); `sha256` of the bytes, `definitionDigest` (the semantic digest: layout and appearance excluded). `before` for an edit |
+| `nodes` | the nodes it singles out (a reference's `--node`; an edit's added and changed nodes) |
+| `messages` | the explicit source messages; later associations are `workflow_ref_events` |
+| `run`, `attempt`, `invitation`, `activity`, `actor`, `origin` | the turn: the actor run and attempt, its invitation, the conductor's ponder activity; `origin` the discussion run a delegated or requested child works for |
+| `evidence`, `operation` | `operation` (written by the operation, or derived from the run's own history), `claim` (an authored reference), `backfill` (derived for history, said in the note); the source operation (`workflow.save`, `workflow.new`, `run.adjust:rN@seq`, `run.request:<receipt>`, `delegate.request:<d>@seq`, `attach`) |
+| `state` | `recorded`; `unconfirmed` (an interrupted operation whose effect could not be verified, shown only as such); `pending` (a journal entry, never shown) |
+
+**Every version a record names is captured** (`workflow_snapshots`, by
+sha256): a saved definition is a draft the next save replaces, so its
+bytes are the only proof of what was seen. Snapshots are kept with the
+store and exported to the archive.
+
+**What records what.** From an executing attempt whose run works for a
+discussion — invited to it (`input.source`), conducting it, or entrusted by
+such a run (a delegation or request, followed up to four levels):
+
+| Operation | Record |
+| --- | --- |
+| `wfe workflow save` | `edited` definition, the replaced bytes `before`, the saved bytes `after` (an unchanged save records nothing) |
+| `wfe workflow new` | `created` definition, a draft |
+| `wfe run adjust`, `wfe discussion ponder --next/--definition` | `edited` run, `rN-1` → `rN`, from the run's history (token `adjust:<run>:<rN>`), with the ponder activity |
+| `wfe request --request` | `executed`, the child's `r1` (token `request:<receipt>`) |
+| `wfe delegate request` | `executed`, once the child exists, from the delegation record (token `delegation:<uid>`) |
+| `wfe discussion workflow attach` | `referenced` (or the relation declared), evidence `claim` |
+
+A record is written **after** the operation succeeded. A save, a creation
+and a request are journaled first (`pending`, with the bytes a save will
+write); the executor's reconcile resolves a journal entry older than a
+minute from the operation's own evidence (the file holds the saved bytes;
+a job carries the request's receipt) or marks it `unconfirmed`. Revisions
+and delegated children are derived from the runs of open discussions on
+every reconcile under the same tokens, so a hook and a repair record each
+once. Editing a definition in the editor (no attempt) is not recorded.
+
+**What a reference proves.** WFE reads and captures the version it names,
+so the record proves what was retrieved at that turn — not that it was
+understood. A shell read of a file, a workflow named in prose or the time
+of a message is never taken as a reference.
+
+**Message association.** A record carries the messages named when it was
+made (`attach --re`) and those added later (`workflow link`, `contribute
+--workflow <record>`: a run links its own records; the person any, with a
+note). Without one, the record keeps its turn; clients show it as a
+recorded operation of that turn, never under the nearest message.
+
+**Reading** (no model, no run, no write):
+
+| Route | |
+| --- | --- |
+| `GET api/discussions/<id>/workflows` | `{workflows, horizon}`: each record with `name`, `available`/`unavailable`, `changes` (an edit), `preview` (node boxes, edges and marks for a card), `runUrl`, `editorUrl` (the editor's current view) |
+| `GET api/discussions/<id>/workflows/<n>` | the pinned graph: `after` and `before` (`version`, `workflow`, `effective`, or `unavailable` with the reason), `changes`, `state` (a run's node states replayed to the recorded `seq`, or `unavailable`: a definition has none), `time` |
+| `GET api/discussions/<id>/workflows/<n>/current` | the target as it is now, labelled current: the working-tree definition, or the run's revision in force with its current states; `same` says whether it is still the recorded bytes |
+
+A version is read from its snapshot, else from the run's frozen files; its
+sha256 is checked (`unavailable: digest mismatch`), it is parsed and
+compiled, never executed. A version that was never captured, or whose
+source is gone, is `unavailable` — never replaced by the current file,
+main, a newer draft or the latest revision.
+
+**Comparison** is by node id and edge endpoints: nodes `added`, `removed`,
+`changed` (with each property's before and after: type, name,
+description, repositories, workflow, project, accepts, confirms,
+activity), `restyled` (appearance or position only), edges added and
+removed, workflow-level fields, and the compiled graph's generated steps
+(`_…`) apart. `behavioural` is false when the semantic digests are equal.
+A new id is an addition and a removal; a rename is never inferred.
+
+**Archive.** Transcript records `workflow` (the record as recorded) and
+`workflow-link` (an association); horizon `workflow`, `workflowEvent`
+(absent before: 0); the manifest's `workflows` lists every record with its
+snapshot paths; every version's bytes are written once to
+`discussions/<id>/workflows/<sha256>.yaml`, which is what a fresh reader
+resolves a version from after its source branch moved or its project
+retired.
 
 ## Hand-off and reuse
 

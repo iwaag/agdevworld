@@ -93,4 +93,29 @@ export const DISCUSSION_MIGRATIONS: Migration[] = [{
       at TEXT NOT NULL, token TEXT NOT NULL, UNIQUE (conv, token));
     CREATE INDEX overviews_conv ON overviews (conv, id);
   `),
+}, {
+  // Workflows in a discussion (argue p4 ex3, server/discussionWorkflows.ts):
+  // which workflow a turn referenced, created, edited or executed, at which
+  // version (byte sha256 and semantic digest, before and after), with its
+  // turn (run, attempt, invitation, activity), source messages, evidence and
+  // operation; later message associations as events; and every version a
+  // record names, captured by sha256 (a saved definition is a draft the next
+  // save replaces). `state` pending is a journal entry of an operation in
+  // progress and is never shown. `since`: when recording began; what is
+  // derived for operations before it is backfill.
+  version: 10,
+  up: db => db.exec(`
+    CREATE TABLE workflow_refs (id INTEGER PRIMARY KEY AUTOINCREMENT, conv TEXT NOT NULL, relation TEXT NOT NULL, role TEXT NOT NULL, project TEXT NOT NULL,
+      workflow TEXT NOT NULL, target TEXT NOT NULL, after TEXT, before TEXT, nodes TEXT NOT NULL DEFAULT '[]', note TEXT NOT NULL DEFAULT '', evidence TEXT NOT NULL,
+      operation TEXT NOT NULL, messages TEXT NOT NULL DEFAULT '[]', activity INTEGER, invitation INTEGER, run TEXT, attempt TEXT, actor TEXT NOT NULL, origin TEXT,
+      state TEXT NOT NULL, at TEXT NOT NULL, token TEXT NOT NULL, UNIQUE (conv, token));
+    CREATE INDEX workflow_refs_conv ON workflow_refs (conv, id);
+    CREATE INDEX workflow_refs_state ON workflow_refs (state);
+    CREATE TABLE workflow_ref_events (id INTEGER PRIMARY KEY AUTOINCREMENT, conv TEXT NOT NULL, ref INTEGER NOT NULL, message INTEGER NOT NULL, by TEXT NOT NULL,
+      run TEXT, at TEXT NOT NULL, note TEXT NOT NULL DEFAULT '');
+    CREATE INDEX workflow_ref_events_conv ON workflow_ref_events (conv, id);
+    CREATE TABLE workflow_snapshots (sha256 TEXT PRIMARY KEY, text TEXT NOT NULL, captured TEXT NOT NULL, origin TEXT NOT NULL);
+    CREATE TABLE workflow_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+    INSERT INTO workflow_meta (key, value) VALUES ('since', strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+  `),
 }]

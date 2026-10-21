@@ -57,6 +57,7 @@ import { situation, type OpInput, type RunRecord } from '../shared/run.ts'
 import { CONVERSATION_ID, firstLine, loadConversationConfig, parseRunName, pendingQuestions, runName, runUrl, targetName, type ConversationRow, type ConversationStore, type ConversationTarget, type MessageKind, type MessageRow, type RunEntry, type TargetView } from './conversations.ts'
 import { activeDefinition, adjustRun, readRun, runOp, usableRun } from './runs.ts'
 import { parseWorkflow, renderWorkflow } from './yamlDoc.ts'
+import { DiscussionWorkflows } from './discussionWorkflows.ts'
 import { loadRegistry } from './registry.ts'
 import { transaction } from './sqlite.ts'
 import { RequestError } from './workspace.ts'
@@ -129,7 +130,7 @@ export interface DiscussionMessage {
   node: string | null
 }
 // The live extent of a discussion's records, by table: what an export covers.
-export interface Horizon { message: number; link: number; membership: number; event: number; activity?: number; annotation?: number; meta?: number; overview?: number }
+export interface Horizon { message: number; link: number; membership: number; event: number; activity?: number; annotation?: number; meta?: number; overview?: number; workflow?: number; workflowEvent?: number }
 
 // The discussion's requester (argue p4): whom the conductor's talk consults.
 export type Requester = { kind: 'person'; id: string } | { kind: 'run'; run: string; agent: string | null }
@@ -244,7 +245,8 @@ export class DiscussionStore {
   events(conv: string, since = 0): InvitationEventRow[] { return this.all<InvitationEventRow>('SELECT * FROM invitation_events WHERE conv = ? AND id > ? ORDER BY id', conv, since) }
   horizon(conv: string): Horizon {
     const max = (table: string) => this.one<{ n: number | null }>(`SELECT max(id) AS n FROM ${table} WHERE conv = ?`, conv)!.n ?? 0
-    return { message: max('messages'), link: max('links'), membership: max('membership'), event: max('invitation_events'), activity: max('activity_events'), annotation: max('annotations'), meta: max('discussion_meta'), overview: max('overviews') }
+    const workflow = this.one<{ n: number | null }>('SELECT max(id) AS n FROM workflow_refs WHERE conv = ? AND state != \'pending\'', conv)!.n ?? 0
+    return { message: max('messages'), link: max('links'), membership: max('membership'), event: max('invitation_events'), activity: max('activity_events'), annotation: max('annotations'), meta: max('discussion_meta'), overview: max('overviews'), workflow, workflowEvent: max('workflow_ref_events') }
   }
 
   // The current members: the membership history folded, in order of joining.
@@ -1023,6 +1025,9 @@ export class DiscussionStore {
       await this.finishNode(o.run, o.node, o.decision.trim(), { by: o.author, attempt: o.attempt, receipt })
     }
     const { row } = this.tx(() => this.recordActivity(conv, { run: o.run, node: o.node, attempt: o.attempt, kind: 'ponder', state: 'completed', text: o.decision.trim(), sources, decision: { next: next.map(x => ({ activity: x.activity, node: x.node })), revision }, outcome: revision ? `revision ${revision}` : 'no graph change', by: o.author, note: next.length ? `next: ${next.map(x => `${x.activity}:${x.node}`).join(' → ')}` : revision ? `revision ${revision}` : 'decided; no graph change' }))
+    // The conductor's revision is recorded as its progression, with this
+    // activity (argue p4 ex3); a failure here leaves it to the reconcile's repair.
+    if (revision) await new DiscussionWorkflows(this).deriveRun(conv, o.run).catch(() => undefined)
     return { activity: this.activityView(row), revision, duplicate: false }
   }
 

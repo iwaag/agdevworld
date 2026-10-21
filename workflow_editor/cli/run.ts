@@ -18,6 +18,7 @@ import { sourceLabel } from '../shared/intake.ts'
 import { runSpace } from '../server/runspace.ts'
 import { integrationStatus } from '../shared/approval.ts'
 import type { ExecStore } from '../server/exec.ts'
+import { discussionTurn, quietly } from './evidence.ts'
 
 export interface RunCli {
   positional: string[]
@@ -975,6 +976,12 @@ export async function runCommand(c: RunCli): Promise<number> {
       const completing = completingNode ? { node: completingNode, outcome: need(c, 'outcome', `what ${completingNode} produced or concluded`), artifacts: c.opts('artifact').map(p => artifactPath(root, r, p)) } : undefined
       if (!completing && c.opt('outcome')) throw c.usage('--outcome goes with --completing <node>')
       const res = await wrap(() => adjustRun(ws, r, { text, reason: need(c, 'reason', 'why the run changes'), source, dryRun: c.flag('dry-run'), propose: c.opt('propose'), expectRevision: c.opt('expect-revision'), completing }, { by, via: 'cli', expectSeq, attempt, receipt }))
+      // A revision made from a discussion turn is recorded there (argue p4
+      // ex3), from the run's own history, under the revision's id.
+      if (res.ok && res.revision && !res.dryRun && attempt) {
+        const ev = await discussionTurn(c.exec(), c.area())
+        if (ev) { await quietly(() => ev.wfs.deriveRun(ev.turn.conv, `${ws.reg.id}/${r.workflow}/${r.run}`)); ev.close() }
+      }
       c.out(adjustText(res, runKey(r)), res)
       return res.ok ? 0 : 1
     }

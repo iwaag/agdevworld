@@ -7,6 +7,7 @@ import { resolve } from 'node:path'
 import { CONVERSATION_ID, ConversationStore, parseRunName, RELATIONS, runName, viewBaseOf, type MessageKind, type Relation } from '../server/conversations.ts'
 import { DiscussionArchive } from '../server/discussionArchive.ts'
 import { DiscussionStore, type Requester } from '../server/discussions.ts'
+import { DiscussionWorkflows, type WorkflowRef, type WorkflowRelation, type WorkflowRole } from '../server/discussionWorkflows.ts'
 import type { ExecStore } from '../server/exec.ts'
 import { readRun } from '../server/runs.ts'
 import { RequestError } from '../server/workspace.ts'
@@ -92,7 +93,7 @@ post <id> (--text <t> | --file <f>) --author <person> [--to <participant>]… [-
                               a run speaks as itself with contribute or announce). --to invites those participants with
                               it; without --to (or --to <facilitator>) the facilitator is invited
 contribute [<id>] (--text <t> | --file <f|->) --re <msg>… [--kind reply|question|progress|result|synthesis]
-           [--question <q>] [--key <k>] [--completing <node>]
+           [--question <q>] [--key <k>] [--completing <node>] [--workflow <record>]…
                               speak from an executing attempt: the message is your run's, its
                               participant's and its invitation's. Name what you answer (--re): a
                               reply is never attributed by recency. reply/result/synthesis answer
@@ -100,7 +101,9 @@ contribute [<id>] (--text <t> | --file <f|->) --re <msg>… [--kind reply|questi
                               facilitator's project's or the archive project's (any of its
                               workflows), shown apart from original speech. --completing <node>: that node of your run completes with the
                               message in the same command (a turn that spoke and left its node
-                              running is held interrupted; p3 rts-vs-bot/discuss/run-001)
+                              running is held interrupted; p3 rts-vs-bot/discuss/run-001).
+                              --workflow <record>: the workflow records of your turn this message is
+                              about (wfe discussion workflow list) are shown with it
 invite [<id>] <participant> --question <q> [--re <msg>]… [--token <t>] [--author <person>]
                               ask a participant: from the facilitator's run the invitation is
                               awaited (your run is told when all it awaits are resolved; make your
@@ -143,6 +146,32 @@ overview [<id>] --purpose <t> [--outcome <t>] [--unresolved <t>]… [--through <
                               earlier ones stay. From a run: the facilitator's or archive project's.
                               --title also records the display title. --file takes
                               {purpose, outcome?, unresolved?[], through?, title?, note?}
+workflow attach [<id>] --project <p> (--workflow <wf> [--commit <c>] | --run <wf>/<run> [--revision rN])
+         [--as referenced|created|edited|executed] [--node <n>]… [--re <msg>]… [--note <what it is to the discussion>]
+         [--from <what it was copied from>] [--role subject|progression]
+                              declare a workflow as material of this discussion: the definition as it
+                              is now in the project's working tree (a draft unless it equals the
+                              committed file), at a commit, or a run's revision. WFE reads it and keeps
+                              its bytes, so readers see exactly that version beside the turn; --node
+                              names the nodes you mean, --re the messages it belongs to. It records
+                              that the version was retrieved, not that it was understood. Starts
+                              nothing. (Saving or creating a definition, revising a run and requesting
+                              or delegating work from a discussion turn are recorded by those commands
+                              themselves.)
+workflow link [<id>] <record> --message <msg> [--note <n>] [--author <who>]
+                              associate a recorded operation with the message it belongs to, later
+                              (a run links its own records; the person any, with a note)
+workflow list [<id>]          the workflows of the discussion: each record's relation, role, version,
+                              turn (run, attempt, invitation), messages and evidence
+workflow show [<id>] <record> [--current]
+                              one record's pinned version (and the version before an edit), the change
+                              by node id and edge, and the node states at the recorded point;
+                              --current: the target as it is now, labelled current
+workflow repair [<id>] [--all]
+                              resolve operations interrupted before their record (from the operation's
+                              own evidence, else unconfirmed) and record the revisions and delegated
+                              children of the discussion's runs (also done by the executor's reconcile
+                              for open discussions); --all: every discussion, as backfill
 dispatch                      start invitations not started yet, mark those whose run ended
                               without a contribution unanswered, tell waiting facilitators
                               (also done by the executor's reconcile every minute)
@@ -290,9 +319,12 @@ export async function discussionCommand(c: DiscussionCli): Promise<number> {
         if (!re.length) throw c.usage('--re <msg> is required: the messages you answer')
         const complete = c.opt('completing')
         const r = await ds.contribute(id, { text: text(), author: o.agent, run: o.run, attempt: o.attempt, invitation: o.discussion === id ? o.invitation : null, re, kind: (c.opt('kind') ?? 'reply') as MessageKind, question: c.opt('question') ?? null, key: c.opt('key'), node: complete ?? null, complete: !!complete })
-        c.out(`${r.duplicate ? 'Already posted (same key); nothing changed' : 'Posted'}: #${r.message.id} in ${id} as ${r.message.participant} for ${o.run}${r.invitation ? `; invitation ${r.invitation.id} ${r.invitation.state}${r.invitation.late ? ' (late)' : ''}` : ''}${r.completed ? `; node ${r.completed} completed` : ''}.`, { ok: true, ...r })
+        const wfs = new DiscussionWorkflows(ds)
+        const linked = c.opts('workflow').map(v => wfs.link(id, Number(v.replace(/^#/, '')), { message: r.message.id, by: o.agent, run: o.run }).ref.id)
+        c.out(`${r.duplicate ? 'Already posted (same key); nothing changed' : 'Posted'}: #${r.message.id} in ${id} as ${r.message.participant} for ${o.run}${r.invitation ? `; invitation ${r.invitation.id} ${r.invitation.state}${r.invitation.late ? ' (late)' : ''}` : ''}${r.completed ? `; node ${r.completed} completed` : ''}${linked.length ? `; workflow record${linked.length === 1 ? '' : 's'} ${linked.join(', ')} shown with it` : ''}.`, { ok: true, ...r, workflows: linked })
         return 0
       }
+      case 'workflow': return await workflowCommand(c, ds, args, { own, disc, ids, isNum, who })
       case 'invite': {
         const named = args.length >= 2 ? args : [undefined, args[0]]
         const id = await disc(named[0])
@@ -491,4 +523,82 @@ export async function discussionCommand(c: DiscussionCli): Promise<number> {
     if (e instanceof RequestError) throw c.refused(e.message, e.detail)
     throw e
   } finally { cs.close() }
+}
+
+const RELATION_WORDS: Record<string, string> = { referenced: 'referenced', created: 'created', edited: 'edited', executed: 'executed' }
+const versionLine = (v: WorkflowRef['after']) => !v ? 'no version recorded' : v.kind === 'revision' ? `${v.run} ${v.revision} (sha256 ${v.sha256.slice(0, 12)}, seq ${v.seq ?? '?'})` : `${v.kind}${v.commit ? ` at ${v.commit.slice(0, 12)}` : ''} ${v.path ?? ''} (sha256 ${v.sha256.slice(0, 12)})`
+const refLine = (r: WorkflowRef) => `${String(r.id).padStart(3)} ${RELATION_WORDS[r.relation].padEnd(10)} ${r.role.padEnd(11)} ${r.project}/${r.workflow}${r.target.kind === 'run' ? ` run ${r.target.run}` : ' definition'} — ${versionLine(r.after)}${r.before ? ` (before: ${versionLine(r.before)})` : ''}\n      turn ${r.run ?? r.actor}${r.attempt ? ` attempt ${r.attempt}` : ''}${r.invitation ? ` invitation ${r.invitation}` : ''}${r.origin ? ` for ${r.origin}` : ''}${r.activity ? ` activity ${r.activity}` : ''}; ${r.messages.length ? `messages ${r.messages.map(n => `#${n}`).join(', ')}` : 'no message'}; ${r.evidence} (${r.operation})${r.state !== 'recorded' ? ` [${r.state}]` : ''}${r.nodes.length ? `; nodes ${r.nodes.join(', ')}` : ''}${r.note ? `\n      ${r.note.split('\n')[0].slice(0, 200)}` : ''}`
+
+async function workflowCommand(c: DiscussionCli, ds: DiscussionStore, args: string[], h: {
+  own: () => Promise<{ run: string; attempt: string; agent: string; discussion: string | null; invitation: number | null } | null>
+  disc: (given?: string) => Promise<string>
+  ids: (k: string) => number[]
+  isNum: (v: string | undefined) => boolean
+  who: () => Promise<string | undefined>
+}): Promise<number> {
+  const [op, ...rest] = args
+  const wfs = new DiscussionWorkflows(ds)
+  const given = rest[0] && !h.isNum(rest[0]) ? rest[0] : undefined
+  const id = op === 'repair' && !given ? undefined : await h.disc(given)
+  const after = given ? rest.slice(1) : rest
+  switch (op) {
+    case 'attach': {
+      const project = c.opt('project'); if (!project) throw c.usage('--project <project workspace> is required')
+      const workflow = c.opt('workflow'), run = c.opt('run')
+      if (!!workflow === !!run) throw c.usage('give exactly one of --workflow <workflow> (a definition) or --run <workflow>/<run> (a run\'s revision)')
+      if (c.opt('commit') && !workflow) throw c.usage('--commit goes with --workflow')
+      if (c.opt('revision') && !run) throw c.usage('--revision goes with --run')
+      const o = await h.own()
+      const turn = o ? await wfs.turnOf(o.attempt) : null
+      const author = o?.agent ?? c.opt('author'); if (!author) throw c.usage('--author <who> is required outside an executing attempt')
+      const r = await wfs.attach(id!, { project, workflow, run, revision: c.opt('revision'), commit: c.opt('commit'), relation: c.opt('as') as WorkflowRelation | undefined, role: c.opt('role') as WorkflowRole | undefined, nodes: c.opts('node'), note: c.opt('note'), messages: h.ids('re'), from: c.opt('from'), turn: turn && turn.conv === id ? turn : o ? { conv: id!, run: o.run, attempt: o.attempt, actor: o.agent, invitation: null, origin: null } : null, author })
+      c.out(`${r.duplicate ? 'Already recorded (same version, same messages)' : 'Recorded'}: workflow record ${r.ref.id} in ${id}.\n${refLine(r.ref)}`, { ok: true, ...r })
+      return 0
+    }
+    case 'link': {
+      const n = Number(after[0]?.replace(/^#/, '')); if (!Number.isInteger(n)) throw c.usage('workflow link needs <record>')
+      const msg = Number(c.opt('message')?.replace(/^#/, '')); if (!Number.isInteger(msg)) throw c.usage('--message <msg> is required')
+      const o = await h.own()
+      const by = o?.agent ?? c.opt('author'); if (!by) throw c.usage('--author <who> is required outside an executing attempt')
+      if (!o && !c.opt('note')) throw c.usage('--note <why> is required outside an executing attempt: the reason is part of the record')
+      const r = wfs.link(id!, n, { message: msg, by, run: o?.run ?? null, note: c.opt('note') })
+      c.out(`${r.duplicate ? 'Already associated' : 'Associated'}: workflow record ${n} with #${msg}.`, { ok: true, ...r })
+      return 0
+    }
+    case 'list': {
+      const rows = wfs.rows(id!).map(r => wfs.view(r))
+      c.out(rows.length ? rows.map(refLine).join('\n') : `No workflow is recorded in ${id}.`, { ok: true, workflows: rows })
+      return 0
+    }
+    case 'show': {
+      const n = Number(after[0]?.replace(/^#/, '')); if (!Number.isInteger(n)) throw c.usage('workflow show needs <record>')
+      if (c.flag('current')) {
+        const r = await wfs.current(id!, n)
+        const cur = r.current as { available: boolean; unavailable?: string; version?: WorkflowRef['after']; workflow?: { nodes: Record<string, { name: string }> }; same?: boolean; state?: { nodes?: Record<string, string>; unavailable?: string } }
+        c.out(cur.available ? [`CURRENT (not the recorded version): ${versionLine(cur.version!)}${cur.same ? ' — the same bytes as recorded' : ' — differs from the recorded version'}`, ...Object.entries(cur.workflow!.nodes).map(([k, v]) => `  ${k}: ${v.name}${cur.state?.nodes?.[k] ? ` [${cur.state.nodes[k]} now]` : ''}`)].join('\n') : `The current target is unavailable: ${cur.unavailable}`, r)
+        return 0
+      }
+      const g = await wfs.graph(id!, n)
+      const lines = [refLine(g.ref)]
+      const side = (label: string, s: typeof g.after | null) => {
+        if (!s) return
+        if (!s.available) { lines.push(`${label}: unavailable — ${(s as { unavailable: string }).unavailable}`); return }
+        lines.push(`${label}: ${Object.keys(s.workflow!.nodes).length} nodes, ${s.workflow!.edges.length} edges`, ...Object.entries(s.workflow!.nodes).map(([k, v]) => `  ${k} (${v.type}${v.activity ? ` ${v.activity}` : ''}): ${v.name}`))
+      }
+      side(g.before ? 'After' : 'Version', g.after)
+      side('Before', g.before)
+      const ch = g.changes
+      if (ch) lines.push(`Change (${ch.behavioural ? 'behavioural' : 'layout or style only'}):`, ...ch.added.map(x => `  + node ${x.id} "${x.name}"`), ...ch.removed.map(x => `  - node ${x.id} "${x.name}"`), ...ch.changed.map(x => `  ~ node ${x.id}: ${x.props.map(p => p.prop).join(', ')}`), ...ch.restyled.map(x => `  · node ${x.id}: ${[...x.style, ...(x.moved ? ['position'] : [])].join(', ')}`), ...ch.edgesAdded.map(([a, b]) => `  + edge ${a} → ${b}`), ...ch.edgesRemoved.map(([a, b]) => `  - edge ${a} → ${b}`), ...ch.fields.map(f => `  ~ ${f.field}`))
+      const st = g.state as { unavailable?: string; seq?: number; at?: string; nodes?: Record<string, string> }
+      lines.push(st.unavailable ? `State: unavailable — ${st.unavailable}` : `State at seq ${st.seq} (${st.at}): ${Object.entries(st.nodes!).map(([k, v]) => `${k}=${v}`).join(', ')}`)
+      c.out(lines.join('\n'), g)
+      return 0
+    }
+    case 'repair': {
+      const notes = await wfs.repair({ conv: id, all: c.flag('all') })
+      c.out(notes.join('\n') || 'Nothing to repair or record.', { ok: true, notes })
+      return 0
+    }
+  }
+  throw c.usage('workflow needs attach, link, list, show or repair (see: wfe discussion help)')
 }

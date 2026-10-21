@@ -28,6 +28,7 @@ import { CONVERSATION_HELP, conversationCommand } from './conversation.ts'
 import { DISCUSSION_HELP, discussionCommand } from './discussion.ts'
 import { codeVersion } from '../server/version.ts'
 import { assertNotRetired, assertWorkspaceAllowed, loadBoundary, retiredByUrl } from '../server/boundary.ts'
+import { discussionTurn, quietly } from './evidence.ts'
 
 const here = dirname(fileURLToPath(import.meta.url))
 // The editor package (agdevworld/workflow_editor, or an installed release of it).
@@ -804,7 +805,15 @@ async function definitionCommand(p: Parsed, kind: 'workflow' | 'project', sub: '
     if (kind === 'workflow') {
       const parsed = parseWorkflow(next)
       if (!parsed.ok) throw new Refused(`the new definition does not parse: ${parsed.problem.message}`, parsed.problem)
-      const saved = await ws.saveWorkflow(file, parsed.model, base)
+      // A save from a discussion turn is recorded there (argue p4 ex3):
+      // journaled with the bytes it replaces, recorded once it succeeded.
+      const ev = process.env.WFE_ATTEMPT ? await discussionTurn(await openExec(p), areaDir(p)) : null
+      const journal = ev ? await quietly(() => ev.wfs.beginDefinitionWrite(ev.turn, ws, file, { operation: 'workflow.save', model: parsed.model })) : null
+      let saved: Awaited<ReturnType<typeof ws.saveWorkflow>>
+      try { saved = await ws.saveWorkflow(file, parsed.model, base) } catch (e) { ev?.wfs.abort(journal); ev?.close(); throw e }
+      const recorded = ev ? await quietly(() => ev.wfs.finishDefinitionWrite(journal, ws, file)) : null
+      ev?.close()
+      if (recorded) process.stderr.write(`Recorded in discussion ${ev!.turn.conv}: workflow record ${recorded.id} (${recorded.relation}).\n`)
       const issues = validateWorkflowIssues(await ws.workflowResponse(file))
       out([`${saved.rev === base ? 'Unchanged' : 'Saved'}: devdocs/workflows/${file} (revision ${saved.rev}); not committed.`, ...issues.map(issueLine)].join('\n'), { ok: true, workspace: ws.reg.id, file, rev: saved.rev, changed: saved.rev !== base, issues })
     } else {
@@ -905,7 +914,13 @@ async function cmdWorkflow(p: Parsed): Promise<number> {
     documentation = { policy: 'custom', plan: chosen.includes('plan'), reports: chosen.includes('reports'), final: chosen.includes('final') }
   }
   try {
-    const r = await ws.createWorkflow(id, opt(p, 'name') ?? '', documentation, opt(p, 'template') ?? 'empty')
+    const ev = process.env.WFE_ATTEMPT ? await discussionTurn(await openExec(p), areaDir(p)) : null
+    const journal = ev ? await quietly(() => ev.wfs.beginDefinitionWrite(ev.turn, ws, `${id}.yaml`, { operation: 'workflow.new' })) : null
+    let r: Awaited<ReturnType<typeof ws.createWorkflow>>
+    try { r = await ws.createWorkflow(id, opt(p, 'name') ?? '', documentation, opt(p, 'template') ?? 'empty') } catch (e) { ev?.wfs.abort(journal); ev?.close(); throw e }
+    const recorded = ev ? await quietly(() => ev.wfs.finishDefinitionWrite(journal, ws, r.file)) : null
+    ev?.close()
+    if (recorded) process.stderr.write(`Recorded in discussion ${ev!.turn.conv}: workflow record ${recorded.id} (created, a draft).\n`)
     const path = join(ws.root, 'devdocs', 'workflows', r.file)
     out(`Created ${path}. Fill in intent, repositories, nodes and edges (docs/contract.md).`, { ok: true, file: r.file, path })
     return 0
@@ -1119,6 +1134,10 @@ async function cmdExec(p: Parsed): Promise<number> {
           const ds = new DiscussionStore(cs)
           if (!('disabled' in ds.config())) {
             notes.push(...await ds.reconcile())
+            // Workflow records (argue p4 ex3): interrupted operations resolved,
+            // revisions and delegated children of open discussions' runs.
+            const { DiscussionWorkflows } = await import('../server/discussionWorkflows.ts')
+            notes.push(...(await new DiscussionWorkflows(ds).repair().catch(e => [`discussion workflows: repair failed — ${(e as Error).message}`])))
             const { DiscussionArchive } = await import('../server/discussionArchive.ts')
             const a = await new DiscussionArchive(ds).publish().catch(e => ({ published: [], unchanged: [], failed: [{ conv: '*', error: (e as Error).message }] }))
             notes.push(...a.published.map(x => `discussion ${x.conv}: archived ${x.records} records (${x.commit.slice(0, 12)})`), ...a.failed.map(f => `discussion ${f.conv}: archive failed — ${f.error}`))
@@ -1360,7 +1379,14 @@ async function cmdRequest(p: Parsed): Promise<number> {
     }
     const pred = opt(p, 'predecessor')
     const predecessor = pred ? await (await import('../server/runs.ts')).resolveRef(ws, pred) : undefined
-    const r = await x.request({ workspace: ws.reg.id, workflow, text, author: author ?? input?.requester ?? '', receipt, by: opt(p, 'by') ?? own?.agent, via: 'cli', predecessor, node: opt(p, 'node'), ...(input ? { input } : {}) })
+    // Work requested from a discussion turn is recorded there as executed
+    // (argue p4 ex3), journaled by the request's receipt.
+    const ev = own ? await discussionTurn(x, areaDir(p)) : null
+    const journal = ev ? await quietly(async () => ev.wfs.beginRequest(ev.turn, { workspace: ws.reg.id, workflow, receipt })) : null
+    let r: Awaited<ReturnType<typeof x.request>>
+    try { r = await x.request({ workspace: ws.reg.id, workflow, text, author: author ?? input?.requester ?? '', receipt, by: opt(p, 'by') ?? own?.agent, via: 'cli', predecessor, node: opt(p, 'node'), ...(input ? { input } : {}) }) } catch (e) { if (journal !== null) ev?.wfs.abort(journal); ev?.close(); throw e }
+    if (ev && journal !== null) { const rec = await quietly(() => ev.wfs.finishRequest(journal, `${ws.reg.id}/${r.ref.workflow}/${r.ref.run}`)); if (rec) process.stderr.write(`Recorded in discussion ${ev.turn.conv}: workflow record ${rec.id} (executed).\n`) }
+    ev?.close()
     out(`${r.duplicate ? 'Already requested (same receipt)' : 'Requested'}: run ${r.ref.workflow}/${r.ref.run} in ${ws.reg.id}; job ${r.job.id} is ${r.job.state}${r.job.worker ? ` for execution node ${r.job.worker}` : ''}.`, r)
     return 0
   } catch (e) {

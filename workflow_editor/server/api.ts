@@ -99,7 +99,7 @@ function asProject(v: unknown): Project {
 
 const MIME: Record<string, string> = {
   '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8',
-  '.svg': 'image/svg+xml', '.json': 'application/json', '.ico': 'image/x-icon', '.png': 'image/png',
+  '.svg': 'image/svg+xml', '.json': 'application/json', '.ico': 'image/x-icon', '.png': 'image/png', '.mjs': 'text/javascript; charset=utf-8', '.map': 'application/json',
 }
 // What a project's or run's file is served as for a reader's browser (p8):
 // media plays and text shows; anything else downloads.
@@ -159,10 +159,14 @@ export function createHandler(config: ServiceConfig) {
     let file = join(config.distDir, rel)
     if (!file.startsWith(config.distDir + sep) && file !== config.distDir) return false
     const st = await stat(file).catch(() => null)
+    // The embeddable graph (argue p4 ex3, src/embed/): its fixed names are
+    // never answered with the editor's page, and never cached stale.
+    const embed = rel.startsWith(`embed${sep}`) || rel.startsWith('embed/')
+    if (embed && (!st || st.isDirectory())) return false
     if (!st || st.isDirectory()) file = join(config.distDir, 'index.html')
     const data = await readFile(file).catch(() => null)
     if (!data) return false
-    res.writeHead(200, { 'content-type': MIME[extname(file)] ?? 'application/octet-stream' })
+    res.writeHead(200, { 'content-type': MIME[extname(file)] ?? 'application/octet-stream', ...(embed ? { 'cache-control': 'no-cache' } : {}) })
     res.end(data)
     return true
   }
@@ -319,6 +323,19 @@ export function createHandler(config: ServiceConfig) {
           const c = need()
           const r = await ds.post(wsId, { text: words('text'), author: opt('author') ?? c.person, token: str(input.token, 'token'), to: list('to'), re: nums('re'), via: opt('via') })
           return send(res, 200, { sent: true, duplicate: r.duplicate, reopened: r.reopened, message: ds.message(r.message, viewBaseOf(area)), invitations: r.invitations.map(i => ds.invitationView(i, viewBaseOf(area))) })
+        }
+        // Workflows in the discussion (argue p4 ex3, docs/discussions.md
+        // *Workflows in a discussion*): reads only — no model, no run, no write.
+        if (wsId && b === 'workflows' && method === 'GET') {
+          const { DiscussionWorkflows } = await import('./discussionWorkflows.ts')
+          const wfs = new DiscussionWorkflows(ds)
+          ds.discussion(wsId) ?? (() => { throw new RequestError(404, `no discussion ${wsId}`) })()
+          if (!file) return send(res, 200, { workflows: await wfs.list(wsId, viewBaseOf(area)), horizon: wfs.horizon(wsId) })
+          const n = Number(file)
+          if (!Number.isInteger(n)) throw new RequestError(404, 'not found')
+          if (!action) return send(res, 200, await wfs.graph(wsId, n, viewBaseOf(area)))
+          if (action === 'current') return send(res, 200, await wfs.current(wsId, n, viewBaseOf(area)))
+          throw new RequestError(404, 'not found')
         }
         if (wsId && b === 'invitations' && !file && method === 'POST') {
           const c = need()

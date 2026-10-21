@@ -50,7 +50,15 @@ export interface CanvasContext {
   // Where the reader's attention belongs (the run view's current position):
   // an initial view that cannot show everything readably is centred on it.
   focus?: string[]
+  // A change or reference shown on the graph (argue p4 ex3, the embedded
+  // graph of a discussion; the editor never sets them): each card's mark is
+  // text and a pattern, never a colour alone; an edge's is a dash and its
+  // title.
+  marks?: Record<string, { kind: 'added' | 'changed' | 'removed' | 'selected'; label: string }>
+  edgeMarks?: Record<string, { kind: 'added' | 'removed'; label: string }> // key: `${from}\u0000${to}`
 }
+
+const MARK_GLYPH: Record<string, string> = { added: '＋', changed: '～', removed: '－', selected: '◎' }
 
 export interface CanvasEvents {
   select(sel: Selection): void
@@ -295,6 +303,12 @@ export class Canvas {
       title: `${id} · ${TYPE_LABEL[t] ?? node.type}${node.activity ? ` · ${ACTIVITY_LABEL[node.activity] ?? node.activity}` : ''}\n${node.description}`,
       style: { left: `${p.x * m.scale}px`, top: `${p.y * m.scale}px`, width: `${m.width}px`, minHeight: `${m.height}px` },
     })
+    const mark = this.ctx.marks?.[id]
+    if (mark) {
+      card.classList.add(`mark-${mark.kind}`)
+      card.setAttribute('aria-label', `${card.getAttribute('aria-label')}, ${mark.label}`)
+      card.append(h(`span.mark-badge.mark-${mark.kind}`, h('span', { 'aria-hidden': 'true' }, MARK_GLYPH[mark.kind]), ` ${mark.label}`))
+    }
     const head = h('div.node-head', icon(iconOf(node.type, node.appearance), 'icon type-icon'), node.activity ? h(`span.activity-label.activity-${node.activity}`, ACTIVITY_LABEL[node.activity] ?? node.activity) : null, this.simple ? null : h('span.type-label', TYPE_LABEL[t] ?? (node.type || 'no type')))
     card.append(head, h('div.node-title', title))
     if (this.simple) {
@@ -472,7 +486,9 @@ export class Canvas {
       line.setAttribute('d', d); line.classList.add('line')
       line.setAttribute('stroke', selected ? '#3f6fd8' : own ? COLOR_HEX[own] : EDGE_COLOR[color])
       line.setAttribute('marker-end', `url(#arrow-${color})`)
-      const title = document.createElementNS(NS, 'title'); title.textContent = `${e.from} → ${e.to}`
+      const em = this.ctx.edgeMarks?.[`${e.from}\u0000${e.to}`]
+      if (em) { g.classList.add(`edge-${em.kind}`); line.setAttribute('stroke-dasharray', em.kind === 'added' ? '10 5' : '3 6'); line.setAttribute('stroke-width', '4') }
+      const title = document.createElementNS(NS, 'title'); title.textContent = `${e.from} → ${e.to}${em ? ` (${em.label})` : ''}`
       g.append(title, hit, line)
       g.addEventListener('pointerdown', ev => { ev.stopPropagation(); this.events.select({ kind: 'edge', index: i }) })
       this.svg.append(g)

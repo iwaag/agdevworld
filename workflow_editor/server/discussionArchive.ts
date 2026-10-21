@@ -35,6 +35,7 @@
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync, appendFileSync } from 'node:fs'
 import { isAbsolute, join, resolve } from 'node:path'
 import type { DiscussionStore, Horizon } from './discussions.ts'
+import { DiscussionWorkflows } from './discussionWorkflows.ts'
 import { git, gitOk } from './git.ts'
 import { withLock } from './lock.ts'
 
@@ -50,10 +51,11 @@ export interface ArchiveStatus {
   error: string | null; tries: number; attempted: string | null
   repository: string | null
 }
-const ZERO: Horizon = { message: 0, link: 0, membership: 0, event: 0, activity: 0, annotation: 0, meta: 0, overview: 0 }
+const ZERO: Horizon = { message: 0, link: 0, membership: 0, event: 0, activity: 0, annotation: 0, meta: 0, overview: 0, workflow: 0, workflowEvent: 0 }
 // A manifest written before argue p4 has no activity or annotation horizon,
-// one before argue p4 ex2 no meta or overview horizon: 0.
-const OPTIONAL = ['activity', 'annotation', 'meta', 'overview'] as const
+// one before argue p4 ex2 no meta or overview horizon, one before argue p4
+// ex3 no workflow horizon: 0.
+const OPTIONAL = ['activity', 'annotation', 'meta', 'overview', 'workflow', 'workflowEvent'] as const
 const covers = (a: Horizon, b: Horizon) => a.message >= b.message && a.link >= b.link && a.membership >= b.membership && a.event >= b.event && OPTIONAL.every(k => (a[k] ?? 0) >= (b[k] ?? 0))
 const now = () => new Date().toISOString()
 // A repository's identity: its URL without credentials, `.git` or a final
@@ -161,7 +163,7 @@ export class DiscussionArchive {
             const r = this.write(conv)
             if (!r) { unchanged.push(conv); continue }
             await g(['add', '--', `discussions/${conv}`])
-            await g(['commit', '-q', '-m', `Archive discussion ${conv} through #${r.horizon.message}`, '-m', `Discussion-Horizon: ${conv} m${r.horizon.message} l${r.horizon.link} j${r.horizon.membership} e${r.horizon.event} a${r.horizon.activity ?? 0} n${r.horizon.annotation ?? 0} t${r.horizon.meta ?? 0} o${r.horizon.overview ?? 0}`])
+            await g(['commit', '-q', '-m', `Archive discussion ${conv} through #${r.horizon.message}`, '-m', `Discussion-Horizon: ${conv} m${r.horizon.message} l${r.horizon.link} j${r.horizon.membership} e${r.horizon.event} a${r.horizon.activity ?? 0} n${r.horizon.annotation ?? 0} t${r.horizon.meta ?? 0} o${r.horizon.overview ?? 0} w${r.horizon.workflow ?? 0} x${r.horizon.workflowEvent ?? 0}`])
             made.push({ conv, commit: (await g(['rev-parse', 'HEAD'])).trim(), records: r.records })
           }
           if (made.length) {
@@ -222,12 +224,29 @@ export class DiscussionArchive {
     for (const a of this.ds.annotations(conv, from.annotation ?? 0)) lines.push({ at: a.at, order: 5, rec: { type: 'annotation', id: a.id, at: a.at, kind: a.kind, author: a.author, text: a.text, re: JSON.parse(a.re), run: a.run } })
     for (const m of this.ds.metaRows(conv, from.meta ?? 0)) lines.push({ at: m.at, order: 6, rec: { type: 'meta', id: m.id, at: m.at, field: m.field, value: m.value, by: m.by, run: m.run, note: m.note } })
     for (const v of this.ds.overviewRows(conv, from.overview ?? 0)) lines.push({ at: v.at, order: 7, rec: { type: 'overview', id: v.id, at: v.at, author: v.author, run: v.run, purpose: v.purpose, outcome: v.outcome, unresolved: JSON.parse(v.unresolved), through: v.through, sources: JSON.parse(v.sources), note: v.note } })
+    // Workflows of the discussion (argue p4 ex3): each record as recorded,
+    // later message associations, and every version a record names, once,
+    // as discussions/<id>/workflows/<sha256>.yaml (what a fresh reader
+    // resolves a version from after its source moved or retired).
+    const wfs = new DiscussionWorkflows(this.ds)
+    const snapshots: string[] = []
+    for (const w of wfs.rows(conv, from.workflow ?? 0)) {
+      const r = wfs.view(w)
+      lines.push({ at: w.at, order: 8, rec: { type: 'workflow', ...r } })
+      for (const v of [r.after, r.before]) if (v && !snapshots.includes(v.sha256)) snapshots.push(v.sha256)
+    }
+    for (const e of wfs.events(conv, from.workflowEvent ?? 0)) lines.push({ at: e.at, order: 9, rec: { type: 'workflow-link', id: e.id, at: e.at, ref: e.ref, message: e.message, by: e.by, run: e.run, note: e.note } })
     if (!lines.length && before?.state === d.state) return null
     lines.sort((a, b) => a.at.localeCompare(b.at) || a.order - b.order)
     const dir = join(this.dir, 'discussions', conv)
     mkdirSync(dir, { recursive: true })
     if (lines.length) appendFileSync(join(dir, 'transcript.jsonl'), lines.map(l => `${JSON.stringify(l.rec)}\n`).join(''))
-    const horizon = { message: Math.max(from.message, live.message), link: Math.max(from.link, live.link), membership: Math.max(from.membership, live.membership), event: Math.max(from.event, live.event), activity: Math.max(from.activity ?? 0, live.activity ?? 0), annotation: Math.max(from.annotation ?? 0, live.annotation ?? 0), meta: Math.max(from.meta ?? 0, live.meta ?? 0), overview: Math.max(from.overview ?? 0, live.overview ?? 0) }
+    for (const sha of snapshots) {
+      const snap = wfs.snapshot(sha)
+      const file = join(dir, 'workflows', `${sha}.yaml`)
+      if (snap && !existsSync(file)) { mkdirSync(join(dir, 'workflows'), { recursive: true }); writeFileSync(file, snap.text) }
+    }
+    const horizon = { message: Math.max(from.message, live.message), link: Math.max(from.link, live.link), membership: Math.max(from.membership, live.membership), event: Math.max(from.event, live.event), activity: Math.max(from.activity ?? 0, live.activity ?? 0), annotation: Math.max(from.annotation ?? 0, live.annotation ?? 0), meta: Math.max(from.meta ?? 0, live.meta ?? 0), overview: Math.max(from.overview ?? 0, live.overview ?? 0), workflow: Math.max(from.workflow ?? 0, live.workflow ?? 0), workflowEvent: Math.max(from.workflowEvent ?? 0, live.workflowEvent ?? 0) }
     const runs = new Map<string, { run: string; workspace: string; workflow: string; author: string | null; participant: string }>()
     for (const i of invs.values()) if (i.run) runs.set(i.run, { run: i.run, workspace: i.workspace, workflow: i.workflow, author: null, participant: i.participant })
     for (const m of this.ds.messages(conv)) if (m.run) { const [ws, wf] = m.run.split('/'); runs.set(m.run, { run: m.run, workspace: ws, workflow: wf, author: m.author, participant: m.participant ?? ws }) }
@@ -240,6 +259,7 @@ export class DiscussionArchive {
       invitations: [...invs.values()].map(i => ({ id: i.id, participant: i.participant, target: `${i.workspace}/${i.workflow}`, by: i.by, byRun: i.by_run, awaitedBy: i.awaited_by, source: JSON.parse(i.source), horizon: i.horizon, state: i.state, late: !!i.late, run: i.run, answeredBy: i.answered_by, error: i.error, deliveredTo: i.delivery ? (JSON.parse(i.delivery) as { message: number }).message : null, ...(i.awaits ? { awaits: i.awaits } : {}) })),
       runs: [...runs.values()],
       exports: [...(before?.exports ?? []), { at: now(), from, through: horizon, records: lines.length, state: d.state }],
+      workflows: wfs.rows(conv).map(w => { const r = wfs.view(w); const snap = (v: typeof r.after) => v && existsSync(join(dir, 'workflows', `${v.sha256}.yaml`)) ? `workflows/${v.sha256}.yaml` : null; return { id: r.id, relation: r.relation, role: r.role, project: r.project, workflow: r.workflow, target: r.target, after: r.after, before: r.before, messages: r.messages, run: r.run, attempt: r.attempt, invitation: r.invitation, evidence: r.evidence, state: r.state, snapshot: { after: snap(r.after), before: snap(r.before) } } }),
       transcript: 'transcript.jsonl', summary: 'summary.md',
     }
     writeFileSync(join(dir, 'manifest.json'), `${JSON.stringify(manifest, null, 2)}\n`)
@@ -261,7 +281,7 @@ export interface Manifest {
   format: string; id: string; title: string; created: string; by: string; state: string; facilitator: string
   conductor?: string | null; requester?: unknown; activities?: unknown[]
   category?: string; displayTitle?: string | null; overview?: unknown
-  members: unknown[]; horizon: Horizon; invitations: unknown[]; runs: unknown[]
+  members: unknown[]; horizon: Horizon; invitations: unknown[]; runs: unknown[]; workflows?: unknown[]
   exports: { at: string; from: Horizon; through: Horizon; records: number; state: string }[]
   transcript: string; summary: string
 }

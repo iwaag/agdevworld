@@ -969,7 +969,7 @@ export class DiscussionStore {
         let prev = o.node
         for (const x of next) {
           if (x.node in w.nodes) throw new RequestError(409, `node ${x.node} is already in ${o.run}: a new activity is a new node (another id)`, { code: 'node-exists' })
-          w.nodes[x.node] = { type: x.activity === 'talk' ? 'talk' : 'do', activity: x.activity, name: x.name ?? '', description: x.description ?? ACTIVITY_DESCRIPTIONS[x.activity as Activity], repositories: [] }
+          w.nodes[x.node] = { type: x.activity === 'talk' ? 'talk' : 'do', activity: x.activity, name: x.name ?? x.node, description: x.description ?? ACTIVITY_DESCRIPTIONS[x.activity as Activity], repositories: [] }
           w.edges.push({ from: prev, to: x.node })
           prev = x.node
         }

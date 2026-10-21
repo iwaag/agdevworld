@@ -379,7 +379,12 @@ export class ConversationStore {
         const presenter = rec.presentations ? this.presenter() : null
         const shown = presenter ? (await presenter.view(ws, rec).catch(() => [])).filter(p => p.live && p.url && !p.local).map(p => ({ id: p.id, title: p.title, url: p.url! })) : []
         runs.push({ ...entry, situation: situation(rec), execution: rec.execution.state, title: runDisplayTitle(rec), waiting: rec.execution.waiting.map(w => w.node), status, presentations: shown })
-      } catch (e) { runs.push({ ...entry, situation: 'unknown', execution: 'unknown', title: null, waiting: [], status: null, presentations: [], problem: (e as Error).message }) }
+      } catch (e) {
+        // A run of a project no longer registered here (a retired one, argue
+        // p4 ex1) has no run view to open: no link is made up for it.
+        const gone = e instanceof RequestError && e.status === 404 && /is not registered/.test(e.message)
+        runs.push({ ...entry, ...(gone ? { url: null, files: null } : {}), situation: 'unknown', execution: 'unknown', title: null, waiting: [], status: null, presentations: [], problem: gone ? `${(e as Error).message} here (a retired or unknown project): no run view; the run's record stays in that project's history` : (e as Error).message })
+      }
     }
     return runs
   }

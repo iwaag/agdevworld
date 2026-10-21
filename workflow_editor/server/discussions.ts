@@ -57,6 +57,7 @@ import { situation, type OpInput, type RunRecord } from '../shared/run.ts'
 import { CONVERSATION_ID, firstLine, loadConversationConfig, parseRunName, pendingQuestions, runName, runUrl, targetName, type ConversationRow, type ConversationStore, type ConversationTarget, type MessageKind, type MessageRow, type RunEntry, type TargetView } from './conversations.ts'
 import { activeDefinition, adjustRun, readRun, runOp, usableRun } from './runs.ts'
 import { parseWorkflow, renderWorkflow } from './yamlDoc.ts'
+import { loadRegistry } from './registry.ts'
 import { transaction } from './sqlite.ts'
 import { RequestError } from './workspace.ts'
 
@@ -1219,6 +1220,10 @@ export class DiscussionStore {
     for (const l of links) add(l.run, l.relation)
     if (c.conductor) add(c.conductor, 'conductor')
     const runs: RunEntry[] = await this.cs.runEntries([...keys].map(([key, rel]) => ({ key, relation: [...rel].join(', ') })), o.viewBase)
+    // Speech of a project no longer registered here (argue p4 ex1: argue's
+    // runs) keeps its run name; it gets no run-view link that opens nothing.
+    const known = this.exec ? new Set((await loadRegistry(this.exec.ctx.registryFile)).workspaces.map(w => w.id)) : null
+    const linkable = (run: string | null) => !run || !known || known.has(parseRunName(run).workspace)
     return {
       discussion: { id: c.id, title: c.title, created: c.created, updated: c.updated, state: c.state, by: c.by, facilitator: `${c.workspace}/${c.workflow}`, conductor: c.conductor ?? null, requester: this.requester(conv) },
       activities: this.activityRows(conv).map(a => this.activityView(a)),
@@ -1226,8 +1231,8 @@ export class DiscussionStore {
       obligations: await this.obligations(conv),
       members: this.members(conv),
       membership: this.membership(conv),
-      messages: rows.filter(m => m.id > (o.since ?? 0)).map(m => this.message(m, o.viewBase)),
-      invitations: invitations.map(i => this.invitationView(i, o.viewBase)),
+      messages: rows.filter(m => m.id > (o.since ?? 0)).map(m => this.message(m, o.viewBase)).map(m => linkable(m.run) ? m : { ...m, runUrl: null }),
+      invitations: invitations.map(i => this.invitationView(i, o.viewBase)).map(i => linkable(i.run) ? i : { ...i, runUrl: null }),
       links,
       runs,
       asking: await this.openAsking(conv, rows),

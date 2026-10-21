@@ -9,7 +9,7 @@
 // resolve in the new repository.
 import { after, before, test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { ConversationStore } from '../server/conversations.ts'
@@ -211,4 +211,34 @@ test('destinationOf: credentials, .git and a final slash do not make another rep
   assert.equal(destinationOf('http://user:tok@host:3000/developer/pj-ponderer.git'), 'http://host:3000/developer/pj-ponderer')
   assert.equal(destinationOf('http://host:3000/developer/pj-ponderer/'), 'http://host:3000/developer/pj-ponderer')
   assert.notEqual(destinationOf('http://host:3000/developer/pj-argue.git'), destinationOf('http://host:3000/developer/pj-ponderer.git'))
+})
+
+test('a retired (unregistered) project\'s speech keeps its run names but gets no run-view link; the discussion stays readable', async () => {
+  const s = await setup()
+  await history(s)
+  s.ds.create('d-old', { title: 'Old', by: 'Pat', members: ['forge'] })
+  const a = await s.ds.post('d-old', { text: 'Words for the facilitator.', author: 'Pat', token: 'tok-dest-r001' })
+  const fr = a.invitations[0].run!
+  assert.equal(fr, 'argue/facilitate/run-001')
+  await s.ds.contribute('d-old', { text: 'The old facilitator speaks.', author: 'argue-agent', run: fr, invitation: a.invitations[0].id, re: [a.message.id] })
+  const before = await s.ds.view('d-old', { viewBase: 'http://h/wfe/' })
+  assert.match(before.messages.at(-1)!.runUrl!, /#\/ws\/argue\/run\/facilitate\/run-001$/)
+  // As `wfe project unregister argue` leaves it: no workspace of argue.
+  const regFile = join(s.area, 'registry.json')
+  const reg = JSON.parse(await readFile(regFile, 'utf8')) as { workspaces: { id: string }[] }
+  await writeFile(regFile, JSON.stringify({ ...reg, workspaces: reg.workspaces.filter(w => w.id !== 'argue') }))
+  await s.configure('ponderer', 'conduct', 'ponderer')
+  const v = await s.ds.view('d-old', { viewBase: 'http://h/wfe/' })
+  const m = v.messages.at(-1)!
+  assert.equal(m.run, fr, 'the run identity is kept')
+  assert.equal(m.participant, 'argue', 'and so is the participant')
+  assert.equal(m.runUrl, null, 'no link to a run view that opens nothing')
+  assert.equal(v.invitations[0].runUrl, null)
+  const r = v.runs.find(x => x.key === fr)!
+  assert.equal(r.url, null)
+  assert.match(r.problem!, /not registered here \(a retired or unknown project\)/)
+  // The conductor is ponderer now: an untargeted message goes there, not to argue.
+  const b = await s.ds.post('d-old', { text: 'Who conducts now?', author: 'Pat', token: 'tok-dest-r002' })
+  assert.deepEqual(b.invitations.map(i => [i.participant, i.run]), [['ponderer', 'ponderer/conduct/run-001']])
+  s.close()
 })

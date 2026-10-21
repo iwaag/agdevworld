@@ -10,7 +10,7 @@
 import { after, before, test } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdtemp, readdir, readFile, realpath, rm, stat, writeFile } from 'node:fs/promises'
-import { tmpdir } from 'node:os'
+import { hostname, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { ConversationStore } from '../server/conversations.ts'
 import { createProject } from '../server/create.ts'
@@ -206,7 +206,7 @@ test('a failing line is retried, then failed with its reason, and the original s
   s.close()
 })
 
-test('a stopped worker\'s lease returns to the queue; a job is completed once, with one result', async () => {
+test('a stopped worker\'s lease returns to the queue, at once when its process is gone; a job is completed once, by its holder, with one result', async () => {
   const s = await setup()
   discussion(s, 'd5')
   const a = speak(s, 'd5', 'agent', 'Interrupted line.')
@@ -222,6 +222,18 @@ test('a stopped worker\'s lease returns to the queue; a job is completed once, w
   assert.equal(await s.dl.perform(again), 'done')
   assert.equal(await s.dl.perform(again), 'dropped', 'a late second completion of the same job writes nothing')
   assert.equal((await s.dl.history('d5', a, 'ja')).length, 1)
+  // A worker process that died holding a job: taken back at once, not after the lease;
+  // and the dead holder's late completion (say it was only frozen) writes nothing.
+  const b = speak(s, 'd5', 'agent', 'Held by a dead process.')
+  await s.dl.read('d5', 'ja')
+  const held = (await s.dl.claim())!
+  db.prepare('UPDATE jobs SET owner = ? WHERE id = ?').run(`${hostname()}:999999:x`, held.id)
+  assert.equal(await s.dl.reclaim(), 1, 'its process is gone: back to the queue at once')
+  const taken = (await s.dl.claim())!
+  assert.equal(taken.id, held.id)
+  assert.equal(await s.dl.perform({ ...held, owner: `${hostname()}:999999:x` }), 'dropped', 'the old holder cannot complete it')
+  assert.equal(await s.dl.perform(taken), 'done')
+  assert.equal((await s.dl.history('d5', b, 'ja')).length, 1, 'one result')
   s.close()
 })
 

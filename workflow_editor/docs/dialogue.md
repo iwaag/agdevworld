@@ -101,8 +101,11 @@ current line; a read marks the message `stale` until the new line is in.
   job's own renderer, voice and language. The result and the job's `done`
   are one transaction, so a restart neither loses nor duplicates a line. A
   second completion of the same job writes nothing.
-- **Recovery.** A lease left by a stopped worker returns its job to the
-  queue. A failure is retried after 20 s, 40 s and so on.
+- **Recovery.** A job's holder (`host:pid:nonce`) is recorded, and only
+  the holder may complete it. A job held by a process on this host that is
+  gone returns to the queue at the next tick; otherwise it returns when its
+  5-minute lease runs out. A failure is retried after 20 s, 40 s and so
+  on.
 - **Priority.** Retries come first, then new speech, then reader windows.
 
 **The worker** runs in the WFE service process (`DialogueWorker`, started

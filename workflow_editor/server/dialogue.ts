@@ -26,6 +26,7 @@
 import { spawn } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { mkdirSync, readFileSync, realpathSync, statSync } from 'node:fs'
+import { hostname } from 'node:os'
 import { isAbsolute, join, resolve } from 'node:path'
 import type { DatabaseSync } from 'node:sqlite'
 import type { MessageRow } from './conversations.ts'
@@ -75,7 +76,7 @@ export interface DialogueRequest {
   target: SourceMessage; context: SourceMessage[]
 }
 interface ResultRow { id: number; key: string; conv: string; message: number; language: string; participant: string | null; character: string | null; voice: string; renderer: string; model: string | null; characters: string | null; source: string; context: string; horizon: number; text: string; usage: string; created: string; job: number }
-interface JobRow { id: number; key: string; conv: string; message: number; language: string; state: 'queued' | 'running' | 'done' | 'failed' | 'dropped'; priority: number; tries: number; not_before: string | null; lease_until: string | null; error: string | null; request: string; renderer: string; model: string; voice: string; origin: string; created: string; updated: string; started: string | null; finished: string | null; regenerate: number }
+interface JobRow { owner?: string | null; id: number; key: string; conv: string; message: number; language: string; state: 'queued' | 'running' | 'done' | 'failed' | 'dropped'; priority: number; tries: number; not_before: string | null; lease_until: string | null; error: string | null; request: string; renderer: string; model: string; voice: string; origin: string; created: string; updated: string; started: string | null; finished: string | null; regenerate: number }
 
 export type ItemState = 'original' | 'ready' | 'pending' | 'running' | 'failed' | 'unrequested'
 export interface DialogueItem {
@@ -108,7 +109,19 @@ const MIGRATIONS = [{
     CREATE INDEX results_message ON results (conv, message, language, id);
     CREATE TABLE state (k TEXT PRIMARY KEY, v TEXT NOT NULL);
   `),
+}, {
+  // Who holds a running job (host:pid:nonce): a restarted worker takes back
+  // at once what a dead process held, and only the holder may complete it.
+  version: 2,
+  up: (db: DatabaseSync) => db.exec('ALTER TABLE jobs ADD COLUMN owner TEXT'),
 }]
+const HOST = hostname()
+// A holder on this host whose process is gone; another host's is left to its lease.
+function deadOwner(owner: string | null): boolean {
+  const [host, pid] = (owner ?? '').split(':')
+  if (host !== HOST || !pid || !/^\d+$/.test(pid)) return false
+  try { process.kill(Number(pid), 0); return false } catch (e) { return (e as NodeJS.ErrnoException).code === 'ESRCH' }
+}
 
 // Runs the renderer (`node <render.ts> <command>`), with the configured env.
 export function runRenderer(cfg: DialogueConfig, command: 'describe' | 'render', input?: string, timeoutMs = 240_000): Promise<string> {
@@ -322,10 +335,16 @@ export class DialogueStore {
     return n
   }
 
-  // Leases left by a stopped worker go back to the queue (their try counted).
+  // Jobs left by a stopped worker go back to the queue (their try counted):
+  // at once when the holder was a process on this host that is gone, else
+  // when the lease runs out.
   async reclaim(): Promise<number> {
     const db = await this.db()
-    return Number(db.prepare("UPDATE jobs SET state = 'queued', lease_until = NULL, updated = ? WHERE state = 'running' AND lease_until < ?").run(now(), now()).changes)
+    let n = Number(db.prepare("UPDATE jobs SET state = 'queued', lease_until = NULL, owner = NULL, updated = ? WHERE state = 'running' AND lease_until < ?").run(now(), now()).changes)
+    for (const j of db.prepare("SELECT id, owner FROM jobs WHERE state = 'running'").all() as { id: number; owner: string | null }[]) {
+      if (deadOwner(j.owner)) n += Number(db.prepare("UPDATE jobs SET state = 'queued', lease_until = NULL, owner = NULL, updated = ? WHERE id = ? AND state = 'running' AND owner = ?").run(now(), j.id, j.owner).changes)
+    }
+    return n
   }
 
   // Takes the next due job: atomically from queued to running, its try counted.
@@ -335,8 +354,9 @@ export class DialogueStore {
       const j = db.prepare("SELECT * FROM jobs WHERE state = 'queued' AND (not_before IS NULL OR not_before <= ?) ORDER BY priority DESC, id LIMIT 1").get(now()) as JobRow | undefined
       if (!j) return null
       const t = now()
-      db.prepare("UPDATE jobs SET state = 'running', tries = tries + 1, lease_until = ?, started = ?, updated = ? WHERE id = ?").run(new Date(Date.now() + LEASE_MS).toISOString(), t, t, j.id)
-      return { ...j, state: 'running' as const, tries: j.tries + 1 }
+      const owner = `${HOST}:${process.pid}:${Math.random().toString(36).slice(2, 10)}`
+      db.prepare("UPDATE jobs SET state = 'running', tries = tries + 1, lease_until = ?, owner = ?, started = ?, updated = ? WHERE id = ?").run(new Date(Date.now() + LEASE_MS).toISOString(), owner, t, t, j.id)
+      return { ...j, state: 'running' as const, tries: j.tries + 1, owner }
     }, NAME)
   }
 
@@ -346,11 +366,11 @@ export class DialogueStore {
     const cfg = this.config()
     const db = await this.db()
     const fail = (error: string) => transaction(db, () => {
-      const cur = db.prepare('SELECT state FROM jobs WHERE id = ?').get(job.id) as { state: string } | undefined
-      if (cur?.state !== 'running') return 'dropped' as const
+      const cur = db.prepare('SELECT state, owner FROM jobs WHERE id = ?').get(job.id) as { state: string; owner: string | null } | undefined
+      if (cur?.state !== 'running' || cur.owner !== (job.owner ?? null)) return 'dropped' as const
       const max = 'disabled' in cfg ? 1 : cfg.tries
-      if (job.tries >= max) { db.prepare("UPDATE jobs SET state = 'failed', error = ?, lease_until = NULL, finished = ?, updated = ? WHERE id = ?").run(error, now(), now(), job.id); return 'failed' as const }
-      db.prepare("UPDATE jobs SET state = 'queued', error = ?, lease_until = NULL, not_before = ?, updated = ? WHERE id = ?").run(error, new Date(Date.now() + (this.o.backoffMs ?? 20_000) * 2 ** (job.tries - 1)).toISOString(), now(), job.id)
+      if (job.tries >= max) { db.prepare("UPDATE jobs SET state = 'failed', error = ?, lease_until = NULL, owner = NULL, finished = ?, updated = ? WHERE id = ?").run(error, now(), now(), job.id); return 'failed' as const }
+      db.prepare("UPDATE jobs SET state = 'queued', error = ?, lease_until = NULL, owner = NULL, not_before = ?, updated = ? WHERE id = ?").run(error, new Date(Date.now() + (this.o.backoffMs ?? 20_000) * 2 ** (job.tries - 1)).toISOString(), now(), job.id)
       return 'retry' as const
     }, NAME)
     if ('disabled' in cfg) return fail(cfg.disabled)
@@ -360,7 +380,7 @@ export class DialogueStore {
     if (DialogueStore.key(d, request).key !== job.key) {
       // The renderer, its model or the speaker's character changed since the
       // job was queued: these inputs are no longer what a reader would get.
-      db.prepare("UPDATE jobs SET state = 'dropped', error = 'the renderer or the character changed before it ran', lease_until = NULL, updated = ? WHERE id = ? AND state = 'running'").run(now(), job.id)
+      db.prepare("UPDATE jobs SET state = 'dropped', error = 'the renderer or the character changed before it ran', lease_until = NULL, owner = NULL, updated = ? WHERE id = ? AND state = 'running' AND owner = ?").run(now(), job.id, job.owner ?? null)
       return 'dropped'
     }
     let out: { renderer?: string; voice?: string; character?: string | null; language?: string; text?: string; usage?: unknown }
@@ -369,14 +389,14 @@ export class DialogueStore {
       return fail(`the renderer answered for other inputs (${out.renderer}/${out.voice}/${out.language}) or without text`)
     }
     return transaction(db, () => {
-      const cur = db.prepare('SELECT state FROM jobs WHERE id = ?').get(job.id) as { state: string } | undefined
-      if (cur?.state !== 'running') return 'dropped' as const
+      const cur = db.prepare('SELECT state, owner FROM jobs WHERE id = ?').get(job.id) as { state: string; owner: string | null } | undefined
+      if (cur?.state !== 'running' || cur.owner !== (job.owner ?? null)) return 'dropped' as const
       const ctx = request.context.map(c => ({ id: c.id, sha256: sha(c.text) }))
       db.prepare(`INSERT INTO results (key, conv, message, language, participant, character, voice, renderer, model, characters, source, context, horizon, text, usage, created, job)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
         .run(job.key, job.conv, job.message, job.language, request.target.participant, out.character ?? null, job.voice, job.renderer, job.model, d.characters.commit,
           sha(request.target.text), JSON.stringify(ctx), Math.max(job.message, ...ctx.map(c => c.id)), out.text!.trim(), JSON.stringify(out.usage ?? null), now(), job.id)
-      db.prepare("UPDATE jobs SET state = 'done', error = NULL, lease_until = NULL, regenerate = 0, finished = ?, updated = ? WHERE id = ?").run(now(), now(), job.id)
+      db.prepare("UPDATE jobs SET state = 'done', error = NULL, lease_until = NULL, owner = NULL, regenerate = 0, finished = ?, updated = ? WHERE id = ?").run(now(), now(), job.id)
       return 'done' as const
     }, NAME)
   }

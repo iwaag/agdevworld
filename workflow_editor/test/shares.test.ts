@@ -3,7 +3,7 @@
 // partial state, and confirmations bound to exactly the published bytes.
 import { after, before, test } from 'node:test'
 import assert from 'node:assert/strict'
-import { cp, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises'
+import { cp, mkdir, mkdtemp, readdir, readFile, rm, symlink, writeFile } from 'node:fs/promises'
 import { createServer, type Server } from 'node:http'
 import { hostname, tmpdir } from 'node:os'
 import { createHash } from 'node:crypto'
@@ -14,7 +14,7 @@ import { gitOk } from '../server/git.ts'
 import { loadRegistry } from '../server/registry.ts'
 import { createRun, readRun, runOp } from '../server/runs.ts'
 import {
-  availability, listFiles, publishOutput, resolveRef, selectInput, serveShare, setShareArea, verifyInput, verifyManifest, verifyOutput,
+  availability, findInShares, listFiles, locate, publishOutput, resolveRef, selectInput, serveShare, setShareArea, verifyInput, verifyManifest, verifyOutput,
 } from '../server/shares.ts'
 import { RequestError, Workspace } from '../server/workspace.ts'
 import { main } from '../cli/wfe.ts'
@@ -380,4 +380,109 @@ test('p11: intended dotfiles survive transport, including nested dot directories
     assert.deepEqual(listed.entries.map(e => e.name), ['.config', '.gitignore'])
   } finally { await new Promise<void>(resolve => server.close(() => resolve())) }
 
+})
+
+// workflow_editor fix1: people describe shared materials in their own words
+// (characters/freework/run-001 asked about "nfsの/agshare/agag_folks/ponderer"
+// and was told it did not exist).
+async function folks() {
+  const area = join(root, `area-${++k}`)
+  const shareRoot = join(root, `nfs-${k}`)
+  await share(area, 'agshare', shareRoot)
+  await mkdir(join(shareRoot, 'agag_folks', 'ponderer'), { recursive: true })
+  await writeFile(join(shareRoot, 'agag_folks', 'ponderer', 'face.png'), 'png')
+  await writeFile(join(shareRoot, 'agag_folks', 'ponderer', 'lore.md'), 'lore')
+  await mkdir(join(shareRoot, 'old', 'agag_folks', 'ponderer'), { recursive: true })
+  await mkdir(join(shareRoot, 'deep', 'a', 'b', 'c'), { recursive: true })
+  await writeFile(join(shareRoot, 'deep', 'a', 'b', 'c', 'buried.txt'), 'x')
+  setShareArea(area)
+  return { area, shareRoot }
+}
+
+test('locate reads a person\'s path against the configured shares: /<share>/…, <share>/…, share-relative, this host\'s folder, another host\'s mount path', async () => {
+  const { shareRoot } = await folks()
+  for (const text of ['/agshare/agag_folks/ponderer', 'agshare/agag_folks/ponderer', 'agag_folks/ponderer/', 'shared://agshare/agag_folks/ponderer/', `${shareRoot}/agag_folks/ponderer`, '/mnt/agshare/agag_folks/ponderer', 'agshare:agag_folks/ponderer', '"/agshare/agag_folks/ponderer"。', '「agag_folks/ponderer」']) {
+    const l = await locate(text)
+    assert.equal(l.state, 'ok', `${text}: ${l.detail}`)
+    assert.equal(l.matches[0].ref, 'shared://agshare/agag_folks/ponderer/', text)
+    assert.equal(l.matches[0].folder, true)
+  }
+  const file = await locate('/agshare/agag_folks/ponderer/lore.md')
+  assert.equal(file.matches[0].ref, 'shared://agshare/agag_folks/ponderer/lore.md')
+  assert.equal(file.matches[0].folder, false)
+})
+
+test('locate tells several matches, absence, an unreachable share and a path leaving the share apart', async () => {
+  const { shareRoot, area } = await folks()
+  // "ponderer" inside agshare: only one reading, so a bare name is absent at the root …
+  assert.equal((await locate('ponderer')).state, 'absent')
+  // … and two folders at different readings are ambiguous.
+  await mkdir(join(shareRoot, 'agshare', 'agag_folks', 'ponderer'), { recursive: true })
+  const two = await locate('agshare/agag_folks/ponderer')
+  assert.equal(two.state, 'ambiguous')
+  assert.deepEqual(two.matches.map(m => m.ref).sort(), ['shared://agshare/agag_folks/ponderer/', 'shared://agshare/agshare/agag_folks/ponderer/'])
+  const gone = await locate('/agshare/agag_folks/nobody')
+  assert.equal(gone.state, 'absent')
+  assert.equal(gone.nearest, 'shared://agshare/agag_folks/')
+  assert.equal((await locate('shared://elsewhere/x')).state, 'unknown-share')
+  assert.equal((await locate('agag_folks/../../etc')).state, 'outside')
+  await symlink('/etc', join(shareRoot, 'agag_folks', 'escape'))
+  assert.equal((await locate('agag_folks/escape')).state, 'outside')
+  // A mount point without its marker: not reachable, so nothing is claimed absent.
+  await rm(join(shareRoot, '.wfe-share.json'))
+  const down = await locate('/agshare/agag_folks/ponderer')
+  assert.equal(down.state, 'unavailable', down.detail)
+  assert.match(down.detail, /absence is not confirmed/)
+  await writeFile(join(area, 'shares.json'), JSON.stringify({ shares: {} }))
+  assert.equal((await locate('agag_folks/ponderer')).state, 'unavailable')
+})
+
+test('find searches by name or trailing segments, shallowest first, and says when a bound left it incomplete', async () => {
+  const { shareRoot } = await folks()
+  const both = await findInShares('PONDERER')
+  assert.deepEqual(both.matches.map(m => m.ref), ['shared://agshare/agag_folks/ponderer/', 'shared://agshare/old/agag_folks/ponderer/'])
+  assert.equal(both.complete, true)
+  assert.deepEqual((await findInShares('old/agag_folks/ponderer')).matches.map(m => m.ref), ['shared://agshare/old/agag_folks/ponderer/'])
+  assert.deepEqual((await findInShares('*.md')).matches.map(m => m.ref), ['shared://agshare/agag_folks/ponderer/lore.md'])
+  assert.deepEqual((await findInShares('*', { shares: ['agshare'], under: 'agag_folks/ponderer' })).matches.map(m => m.path), ['agag_folks/ponderer/face.png', 'agag_folks/ponderer/lore.md'])
+  const none = await findInShares('nobody')
+  assert.equal(none.matches.length, 0)
+  assert.equal(none.complete, true)
+  const shallow = await findInShares('buried.txt', { maxDepth: 3 })
+  assert.equal(shallow.matches.length, 0)
+  assert.equal(shallow.complete, false)
+  assert.equal(shallow.searched[0].stopped, 'depth')
+  assert.equal((await findInShares('buried.txt', { maxDepth: 5 })).matches.length, 1)
+  const few = await findInShares('buried.txt', { maxEntries: 3 })
+  assert.equal(few.complete, false)
+  assert.equal(few.searched[0].entries, 3)
+  const one = await findInShares('ponderer', { limit: 1 })
+  assert.equal(one.matches.length, 1)
+  assert.equal(one.complete, false)
+  await rm(join(shareRoot, '.wfe-share.json'))
+  const down = await findInShares('ponderer')
+  assert.equal(down.complete, false)
+  assert.equal(down.searched[0].state, 'unmounted')
+})
+
+test('CLI: share resolve/ls/find take descriptions; exit 1 unless one item, or something found', async () => {
+  const { area } = await folks()
+  const lines: string[] = []
+  const log = console.log, err = console.error
+  const run = async (argv: string[]) => {
+    lines.length = 0
+    console.log = (...a: unknown[]) => { lines.push(a.join(' ')) }; console.error = (...a: unknown[]) => { lines.push(a.join(' ')) }
+    try { return await main([...argv, '--registry', join(area, 'registry.json'), '--json']) } finally { console.log = log; console.error = err; setShareArea(area) }
+  }
+  await writeFile(join(area, 'registry.json'), JSON.stringify({ workspaces: [] }))
+  assert.equal(await run(['share', 'resolve', '/agshare/agag_folks/ponderer']), 0, lines.join('\n'))
+  assert.equal(JSON.parse(lines.join('\n')).ref, 'shared://agshare/agag_folks/ponderer/')
+  assert.equal(await run(['share', 'ls', 'agag_folks/ponderer']), 0, lines.join('\n'))
+  assert.deepEqual(JSON.parse(lines.join('\n')).files.map((f: { path: string }) => f.path), ['face.png', 'lore.md'])
+  assert.equal(await run(['share', 'resolve', '/agshare/agag_folks/nobody']), 1)
+  assert.equal(JSON.parse(lines.join('\n')).state, 'absent')
+  assert.equal(await run(['share', 'find', 'ponderer', '--under', '/agshare/old']), 0, lines.join('\n'))
+  assert.deepEqual(JSON.parse(lines.join('\n')).matches.map((m: { ref: string }) => m.ref), ['shared://agshare/old/agag_folks/ponderer/'])
+  assert.equal(await run(['share', 'find', 'buried.txt', '--depth', '2']), 1)
+  assert.equal(JSON.parse(lines.join('\n')).complete, false)
 })

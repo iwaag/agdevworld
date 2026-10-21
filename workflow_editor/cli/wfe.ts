@@ -377,13 +377,42 @@ workflow's execution.node, the project's and the area's default
 (<area>/workers.json; docs/workers.md). The run keeps it for every attempt.`,
   share: `wfe share <subcommand> …   (shared areas on this host; docs/shares.md)
 
+A share is where people put materials for agents and pick results up. They
+name what they put there in their own words — "/agshare/folks/ponderer",
+"agshare/folks/ponderer", "folks/ponderer", another PC's mount path — not
+as a reference; resolve, ls and find read such words against the shares
+this host has configured, never outside their roots, and print the
+reference (shared://<share>/<path>, a trailing / for a folder) that records
+and other hosts use.
+
 list                       the shares this host has configured (<area>/shares.json) and
                            whether each is mounted here (its marker file answers)
-resolve <ref>              where shared://<share>/<path> is on this host, its state
-                           (ok, unknown-share, unmounted, absent, outside …) and its
-                           LAN download address. Paths printed here are this host's:
-                           never write them into a tracked record, name the reference
-ls <ref> [--max <n>]       the files a reference holds (path and size; nothing is hashed)
+resolve <ref or path>      what shared item the words name, and where it is on this host.
+                           Accepts a reference, <share>/<path>, /<share>/<path>, a path
+                           under this host's folder for a share, or a path inside a share.
+                           Each reading is one stat (nothing is searched). Answers:
+                             ok           one item: its reference, this host's path, its
+                                          LAN download address
+                             ambiguous    several items match (each is listed)
+                             absent       no reading exists in the reachable shares
+                                          (the nearest existing folder is named)
+                             unavailable  a share it may be in is not reachable here
+                                          (unmounted, or none configured): absence is
+                                          not confirmed
+                             unknown-share, outside
+                           Paths printed here are this host's: never write them into a
+                           tracked record, name the reference. Exit 1 unless ok
+ls <ref or path> [--max <n>]
+                           the files one item holds (path and size; nothing is hashed)
+find <name> [--share <s>]... [--under <ref or path>] [--max-entries <n>] [--depth <n>]
+     [--limit <n>]         search the shares for a file or folder by name, or by the last
+                           segments of a path ("ponderer", "folks/ponderer", "*.png");
+                           without case, breadth first, symbolic links not followed.
+                           Bounded: entries read (default 50000), folder depth (12) and
+                           matches (50). A search that met a bound, an unreadable folder
+                           or an unreachable share says it was incomplete — then finding
+                           nothing is not absence: narrow it with --under or raise a
+                           bound. Exit 1 when nothing was found
 verify <manifest.json> [--quick]
                            check an input-set or output manifest (devdocs/runs/…/inputs/
                            i<n>.json, outputs/o<n>.json, or a copy of one) against this
@@ -643,7 +672,7 @@ Projects and workspaces
   observe                   a read-only snapshot of every run for monitors (observer p3)
   notify <subcommand>       Zulip coordination: status, deliveries, claim, resolve … (autolab delivers)
   present <subcommand>      presentations of a run's result: register, start, status, stop, reconcile
-  share <subcommand>        shared areas on this host: list, resolve, ls, verify (docs/shares.md)
+  share <subcommand>        shared areas on this host: list, resolve, ls, find, verify (docs/shares.md)
   boast [status] <project>  a project's Boast page (boast/index.html): published or previewed; reference
   conversation <subcommand> conversations with project agents: targets, list, show, reply, link,
                             post (p8, p15; docs/conversations.md)
@@ -992,7 +1021,7 @@ async function openExec(p: Parsed): Promise<ExecStore> {
 async function cmdShare(p: Parsed): Promise<number> {
   const [sub, arg] = p.positional
   const m = await import('../server/shares.ts')
-  const { humanBytes } = await import('../shared/shares.ts')
+  const { formatRef, humanBytes, parseRef } = await import('../shared/shares.ts')
   m.setShareArea(areaDir(p))
   switch (sub) {
     case 'list': {
@@ -1003,19 +1032,46 @@ async function cmdShare(p: Parsed): Promise<number> {
     }
     case 'resolve':
     case 'ls': {
-      if (!arg) throw new UsageError(`${sub} <shared://share/path>`)
-      const r = await m.resolveRef(arg)
-      const parsed = (await import('../shared/shares.ts')).parseRef(arg)!
+      if (!arg) throw new UsageError(`${sub} <reference, path or description of a shared item>`)
+      const l = await m.locate(p.positional.slice(1).join(' '))
+      const one = l.state === 'ok' ? l.matches[0] : null
       if (sub === 'resolve') {
-        const url = r.state === 'ok' ? m.downloadUrl(parsed) : null
-        out(`${r.ref}: ${r.state}${r.abs ? `\n  here: ${r.abs}` : ''}${r.detail ? `\n  ${r.detail}` : ''}${url ? `\n  download: ${url}` : ''}`, { ok: r.state === 'ok', ...r, url })
-        return r.state === 'ok' ? 0 : 1
+        const url = one ? m.downloadUrl(parseRef(one.ref)!) : null
+        const lines = one
+          ? [`${one.ref}: ok (${one.folder ? 'folder' : 'file'}${one.as === 'reference' ? '' : `; "${l.text}" read as ${one.as}`})`, `  here: ${one.abs}`, ...(url ? [`  download: ${url}`] : [])]
+          : [`"${l.text}": ${l.state} — ${l.detail}`,
+            ...l.matches.map(x => `  ${x.ref}  (${x.folder ? 'folder' : 'file'}; read as ${x.as})`),
+            ...(l.state !== 'ambiguous' ? l.tried.map(x => `  tried ${formatRef(x.share, x.path)} (${x.as}): ${x.state}`) : []),
+            ...(l.nearest ? [`  nearest existing folder: ${l.nearest} (wfe share ls; wfe share find <name> searches by name)`] : [])]
+        out(lines.join('\n'), { ok: !!one, ...l, ref: one?.ref ?? null, abs: one?.abs ?? null, url })
+        return one ? 0 : 1
       }
-      if (r.state !== 'ok') throw new Refused(`${r.ref}: ${r.detail}`)
+      if (!one) throw new Refused(`"${l.text}": ${l.state} — ${l.detail}`)
       const max = Number(opt(p, 'max') ?? 500)
-      const files = await m.listFiles(r.abs!, { max: 100000 })
-      out([...files.slice(0, max).map(f => `${String(f.bytes).padStart(12)}  ${f.path}`), `${files.length} files, ${humanBytes(files.reduce((n, f) => n + f.bytes, 0))}${files.length > max ? ` (first ${max} shown)` : ''}`].join('\n'), { ok: true, ref: r.ref, files })
+      const files = await m.listFiles(one.abs, { max: 100000 })
+      out([...files.slice(0, max).map(f => `${String(f.bytes).padStart(12)}  ${f.path}`), `${one.ref}: ${files.length} files, ${humanBytes(files.reduce((n, f) => n + f.bytes, 0))}${files.length > max ? ` (first ${max} shown)` : ''}`].join('\n'), { ok: true, ref: one.ref, files })
       return 0
+    }
+    case 'find': {
+      if (!arg) throw new UsageError('find <name> [--share <s>] [--under <ref or path>] [--max-entries <n>] [--depth <n>] [--limit <n>]')
+      const num = (k: string) => { const v = opt(p, k); if (v === undefined) return undefined; const n = Number(v); if (!Number.isInteger(n) || n < 1) throw new UsageError(`--${k} takes a positive whole number`); return n }
+      let shares = p.opts.get('share')
+      let under: string | undefined
+      const u = opt(p, 'under')
+      if (u) {
+        const l = await m.locate(u)
+        if (l.state !== 'ok' || !l.matches[0].folder) throw new Refused(`--under "${u}": ${l.state === 'ok' ? 'not a folder' : `${l.state} — ${l.detail}`}`)
+        shares = [l.matches[0].share]; under = l.matches[0].path
+      }
+      const f = await m.findInShares(p.positional.slice(1).join(' '), { shares, under, maxEntries: num('max-entries'), maxDepth: num('depth'), limit: num('limit') })
+      const lines = [
+        ...f.matches.map(x => `${x.ref}  (${x.folder ? 'folder' : 'file'})`),
+        ...f.searched.map(x => `searched ${x.under}: ${x.state === 'ok' ? `${x.entries} entries${x.detail ? `, ${x.detail}` : ', complete'}` : `${x.state} — ${x.detail}`}`),
+        f.matches.length ? `${f.matches.length} match${f.matches.length === 1 ? '' : 'es'}${f.complete ? '' : ' (search incomplete: there may be more)'}`
+          : f.complete ? `"${f.name}" is not in ${f.searched.map(x => x.under).join(', ')} (every entry was read)` : `"${f.name}" was not found in the part searched; the search was incomplete, so this is not absence`,
+      ]
+      out(lines.join('\n'), { ok: f.matches.length > 0, ...f })
+      return f.matches.length ? 0 : 1
     }
     case 'verify': {
       if (!arg) throw new UsageError('verify <manifest.json>')
@@ -1024,7 +1080,7 @@ async function cmdShare(p: Parsed): Promise<number> {
       out(`${r.ref} (${r.digest.slice(0, 19)}…): ${r.status} — ${r.detail}`, { ok: r.status === 'verified', ...r })
       return r.status === 'verified' ? 0 : 1
     }
-    default: throw new UsageError('share list | resolve <ref> | ls <ref> | verify <manifest.json>')
+    default: throw new UsageError('share list | resolve <ref or path> | ls <ref or path> | find <name> | verify <manifest.json>')
   }
 }
 

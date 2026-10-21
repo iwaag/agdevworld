@@ -2,8 +2,8 @@
 
 A **shared area** (a *share*) is a folder that several hosts reach — an NFS
 export, or the server's own backing folder — known to every project by a
-logical name. A person supplies large inputs by putting a folder there and
-naming it in the request; a run records exactly which bytes it used and
+logical name. A person supplies inputs by putting a folder there and
+naming it in the request, in their own words; a run records exactly which bytes it used and
 publishes large outputs back to the share. Tracked records hold references
 and manifests. Shared storage is available alongside Git for payloads.
 
@@ -17,10 +17,40 @@ slash) a folder, `shared://<share>/` the share's root. `<share>` matches the
 project id pattern; `<path>` is a normalized relative path (no `..`, no
 leading slash). A reference never contains a host path.
 
-References are found in the **words** of the input: a braindump, a request,
-a Zulip post that became one, a delegation's request. `run.create` records
-each one once, in order, in `input.references`. No upload form exists: the
-person describes the folder in prose and the reference travels with it.
+References written in the **words** of the input (a braindump, a request,
+a Zulip post that became one, a delegation's request) are recorded by
+`run.create` once each, in order, in `input.references`. No upload form
+exists.
+
+## What people write (workflow_editor fix1)
+
+People do not write references. They write `/agshare/agag_folks/ponderer`,
+`agshare/…`, `agag_folks/ponderer`, "the ponderer folder on the NFS", or
+another PC's mount path. Such a path is a description, not a local absolute
+path (characters/freework/run-001 checked `/agshare/…` literally on a host
+that serves the share from its backing folder, and answered that it did not
+exist). Turning the description into a reference is the agent's work, with
+the share layer's help:
+
+- `locate` (`wfe share resolve|ls`) reads the text against this host's
+  configured shares — a reference; `<share>/<path>`, `/<share>/<path>` or
+  any path with a configured share's name as a segment; `<share>:<path>`; a
+  path under this host's folder for a share; the whole path inside each
+  share — one stat per reading, never a walk, never outside a share's root.
+  It answers `ok` (one item, with its reference), `ambiguous` (each match),
+  `absent` (nothing in reachable shares; the nearest existing folder is
+  named), `unavailable` (a share it may be in is not reachable here, so
+  absence is not confirmed), `unknown-share` or `outside`.
+- `findInShares` (`wfe share find`) searches by a name or the last segments
+  of a path, case-insensitively, breadth first, bounded by entries read,
+  depth and matches. It reports per share what was read and whether it
+  stopped; an incomplete search that found nothing is not absence.
+- Recorded facts keep the reference: `wfe run input --ref` takes the one
+  `resolve` printed.
+
+Whether a path names shared materials or the project's own files
+(`src/main.ts`) is the agent's reading of the request; the tools only say
+what the shares hold.
 
 ## Where a share is on this host
 
@@ -132,7 +162,8 @@ again and ask again.
   lists a folder (at most 2000 entries) as JSON. User dotfiles are served;
   the named transport, Git and OS metadata above are hidden.
   Read-only. The project file API is unchanged and never reaches a share.
-- `wfe share list|resolve|ls|verify` works on this host without a run.
+- `wfe share list|resolve|ls|find|verify` works on this host without a run
+  (on an execution node, against that node's own `shares.json`).
   `wfe share verify <manifest.json>` checks an input-set or output manifest
   — taken from any run record or received by itself — against this host's
   share: how another PC verifies a delivery it got only by reference.

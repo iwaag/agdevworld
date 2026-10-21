@@ -16,7 +16,7 @@ import { canonicalJson } from '../shared/canonical.ts'
 import { ID_PATTERN } from '../shared/model.ts'
 import { runFolder, runKey, type RunRecord, type RunRef } from '../shared/run.ts'
 import {
-  formatRef, inputBody, OUTPUT_MANIFEST, outputBody, outputFolderPath, parseRef, totalBytes,
+  formatRef, inputBody, OUTPUT_MANIFEST, SHARE_SCHEME, outputBody, outputFolderPath, parseRef, totalBytes,
   type SetFile, type SetObservation, type ShareRef, type Staging,
 } from '../shared/shares.ts'
 import { atomicWrite, inside } from './files.ts'
@@ -123,6 +123,141 @@ export async function resolveRef(text: string, cfg = loadShareConfig()): Promise
   if (r.folder && !st.isDirectory()) return { ...base, state: 'not-a-folder', detail: `${r.ref} is not a folder` }
   if (!r.folder && !st.isFile() && !st.isDirectory()) return { ...base, state: 'not-a-file', detail: `${r.ref} is neither a file nor a folder` }
   return { ...base, state: 'ok', abs: real, detail: '' }
+}
+
+// ---- locating what a person described (workflow_editor fix1) -------------------------------
+
+// People name shared materials as they think of them — `/agshare/x`,
+// `agshare/x`, `x`, this host's mount path — not as references. `locate`
+// reads such a text against this host's configured shares, never outside
+// their roots, and says which reference it names: one (ok), several
+// (ambiguous), none in reachable shares (absent), or none while a share
+// it might be in is not reachable (unavailable: absence is not confirmed).
+// An exact path is a stat per reading, never a walk; `findInShares` is the
+// bounded search for a bare name.
+export type LocateState = 'ok' | 'ambiguous' | 'absent' | 'unavailable' | 'unknown-share' | 'outside'
+export interface Located { ref: string; share: string; path: string; folder: boolean; abs: string; as: string }
+export interface Reading { share: string; path: string; as: string; state: ResolveState; detail: string }
+export interface Location { text: string; state: LocateState; matches: Located[]; tried: Reading[]; nearest: string | null; detail: string }
+
+const located = async (share: string, path: string, abs: string, as: string): Promise<Located> => {
+  const folder = (await stat(abs)).isDirectory()
+  return { ref: formatRef(share, path, folder), share, path, folder, abs, as }
+}
+
+export async function locate(text: string, cfg = loadShareConfig()): Promise<Location> {
+  const t = text.trim().replace(/[.,;:!?。、]+$/, '').replace(/^["'`<「『]+|["'`>」』]+$/g, '').replace(/[.,;:!?。、]+$/, '')
+  const ids = Object.keys(cfg.shares)
+  const readings: { share: string; path: string; as: string }[] = []
+  const add = (share: string, segs: string[], as: string) => {
+    if (!readings.some(r => r.share === share && r.path === segs.join('/'))) readings.push({ share, path: segs.join('/'), as })
+  }
+  const base = { text, matches: [] as Located[], tried: [] as Reading[], nearest: null }
+  if (t.startsWith(SHARE_SCHEME)) {
+    const r = parseRef(t)
+    if (!r) return { ...base, state: 'outside', detail: `"${t}" is not a valid shared://<share>/<path> reference` }
+    if (!cfg.shares[r.share]) return { ...base, state: 'unknown-share', detail: `share "${r.share}" is not configured on this host; configured: ${ids.join(', ') || 'none'}` }
+    add(r.share, r.path ? r.path.split('/') : [], 'reference')
+  } else {
+    if (!ids.length) return { ...base, state: 'unavailable', detail: `no shares are configured on this host${cfg.file ? ` (${cfg.file})` : ''}` }
+    const colon = /^([a-z0-9][a-z0-9_-]*):\/?(.*)$/.exec(t)
+    const plain = colon && cfg.shares[colon[1]] ? null : t
+    if (colon && cfg.shares[colon[1]]) add(colon[1], colon[2].split('/').filter(Boolean), `${colon[1]}: prefix`)
+    if (plain !== null) {
+      const segs = plain.split('/').filter(s => s !== '' && s !== '.')
+      if (segs.includes('..') || plain.includes('\\')) return { ...base, state: 'outside', detail: `"${t}" leaves the folder it names; only paths inside a share are read` }
+      // This host's own folder for a share, as configured or as it resolves.
+      for (const id of ids) {
+        for (const root of new Set([cfg.shares[id].root, await realpath(cfg.shares[id].root).catch(() => cfg.shares[id].root)])) {
+          if (plain === root || plain.startsWith(root + '/')) add(id, plain.slice(root.length).split('/').filter(Boolean), `this host's folder for ${id}`)
+        }
+      }
+      // A share named in the path: `/agshare/x`, `agshare/x`, `/mnt/agshare/x`.
+      const at = segs.findIndex(s => cfg.shares[s])
+      if (at >= 0) add(segs[at], segs.slice(at + 1), at === 0 ? `share named first` : `share named in the path`)
+      // The whole path inside each share.
+      if (segs.length) for (const id of ids) add(id, segs, `inside ${id}`)
+    }
+  }
+  const matches: Located[] = []
+  const tried: Reading[] = []
+  for (const r of readings) {
+    const res = await resolveRef(formatRef(r.share, r.path, !r.path), cfg)
+    tried.push({ share: r.share, path: r.path, as: r.as, state: res.state, detail: res.detail })
+    if (res.state === 'ok' && !matches.some(m => m.abs === res.abs)) matches.push(await located(r.share, r.path, res.abs!, r.as))
+  }
+  if (matches.length === 1) return { text, state: 'ok', matches, tried, nearest: null, detail: '' }
+  if (matches.length > 1) return { text, state: 'ambiguous', matches, tried, nearest: null, detail: `${matches.length} items match: ${matches.map(m => m.ref).join(', ')}` }
+  // Nothing: the deepest existing folder of the first reading helps the next look.
+  let nearest: string | null = null
+  const first = readings[0]
+  if (first && tried[0]?.state === 'absent') {
+    const segs = first.path.split('/')
+    for (let n = segs.length - 1; n >= 0 && !nearest; n--) {
+      const up = await resolveRef(formatRef(first.share, segs.slice(0, n).join('/'), true), cfg)
+      if (up.state === 'ok') nearest = formatRef(first.share, segs.slice(0, n).join('/'), true)
+    }
+  }
+  const down = tried.filter(r => r.state === 'unmounted' || r.state === 'unknown-share')
+  if (down.length) return { text, state: 'unavailable', matches, tried, nearest, detail: `not found in the reachable shares, and ${[...new Set(down.map(r => r.share))].join(', ')} cannot be read on this host (${down[0].detail}): absence is not confirmed` }
+  if (tried.some(r => r.state === 'outside')) return { text, state: 'outside', matches, tried, nearest, detail: tried.find(r => r.state === 'outside')!.detail }
+  return { text, state: 'absent', matches, tried, nearest, detail: `nothing at ${readings.map(r => formatRef(r.share, r.path)).join(' or ')}` }
+}
+
+// Searching shares for a name (a file or folder name, or the last segments
+// of a path), breadth first so the shallowest come first. Bounded by the
+// entries read, the depth and the results; a search that met a bound, an
+// unreadable folder or an unreachable share is incomplete, and finding
+// nothing then is not absence. Symbolic links are not followed; transport
+// metadata is not content. `*` in a segment matches any characters; names
+// compare without case.
+export interface FindOptions { shares?: string[]; under?: string; maxEntries?: number; maxDepth?: number; limit?: number }
+export interface Searched { share: string; under: string; state: ResolveState; entries: number; stopped: 'entries' | 'depth' | 'limit' | null; unreadable: number; detail: string }
+export interface Found { name: string; matches: Located[]; complete: boolean; searched: Searched[] }
+export const FIND_DEFAULTS = { maxEntries: 50000, maxDepth: 12, limit: 50 }
+
+export async function findInShares(name: string, opts: FindOptions = {}, cfg = loadShareConfig()): Promise<Found> {
+  const want = name.trim().split('/').filter(Boolean).map(s => new RegExp(`^${s.replace(/[.+?^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*')}$`, 'i'))
+  if (!want.length) throw new RequestError(400, 'find needs a name')
+  const maxEntries = opts.maxEntries ?? FIND_DEFAULTS.maxEntries, maxDepth = opts.maxDepth ?? FIND_DEFAULTS.maxDepth, limit = opts.limit ?? FIND_DEFAULTS.limit
+  const ids = opts.shares?.length ? opts.shares : Object.keys(cfg.shares)
+  const matches: Located[] = []
+  const searched: Searched[] = []
+  const ends = (segs: string[]) => segs.length >= want.length && want.every((re, i) => re.test(segs[segs.length - want.length + i]))
+  for (const id of ids) {
+    const under = opts.under ?? ''
+    const start = await resolveRef(formatRef(id, under, true), cfg)
+    const s: Searched = { share: id, under: formatRef(id, under, true), state: start.state, entries: 0, stopped: null, unreadable: 0, detail: start.detail }
+    searched.push(s)
+    if (start.state !== 'ok') continue
+    const root = (await shareRoot(id, cfg)).root!
+    let level: string[] = [under]
+    for (let depth = 1; level.length && !s.stopped; depth++) {
+      if (depth > maxDepth) { s.stopped = 'depth'; break }
+      const next: string[] = []
+      for (const rel of level) {
+        let entries
+        try { entries = await readdir(join(root, ...rel.split('/').filter(Boolean)), { withFileTypes: true }) } catch { s.unreadable++; continue }
+        for (const e of entries.sort((a, b) => (a.name < b.name ? -1 : 1))) {
+          if (transportMetadata(e.name) || e.isSymbolicLink()) continue
+          if (s.entries >= maxEntries) { s.stopped = 'entries'; break }
+          s.entries++
+          const path = rel ? `${rel}/${e.name}` : e.name
+          if (ends(path.split('/'))) {
+            if (matches.length >= limit) { s.stopped = 'limit'; break }
+            matches.push({ ref: formatRef(id, path, e.isDirectory()), share: id, path, folder: e.isDirectory(), abs: join(root, ...path.split('/')), as: 'found by name' })
+          }
+          if (e.isDirectory()) next.push(path)
+        }
+        if (s.stopped) break
+      }
+      level = next
+    }
+    if (s.stopped) s.detail = s.stopped === 'entries' ? `stopped after ${maxEntries} entries (--max-entries)` : s.stopped === 'depth' ? `folders below depth ${maxDepth} were not read (--depth)` : `stopped at ${limit} matches (--limit)`
+    else if (s.unreadable) s.detail = `${s.unreadable} folder${s.unreadable === 1 ? '' : 's'} could not be read`
+    if (s.stopped === 'limit') break
+  }
+  return { name, matches, complete: searched.every(s => s.state === 'ok' && !s.stopped && !s.unreadable), searched }
 }
 
 // ---- files -----------------------------------------------------------------------------------

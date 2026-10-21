@@ -242,10 +242,12 @@ export function renderHomeView(root: HTMLElement, opts: { context?: boolean } = 
     if (!discussions) { card.append(h('p.muted.small', 'Reading…')); return card }
     if (discussions.disabled) { card.append(h('p.muted.small', `Not configured: ${discussions.disabled}`)); return card }
     const rows = discussions.discussions.slice(0, 6)
+    const c = discussions.counts
+    if (c) card.append(h('p.muted.small', `${c.discussion.open + c.discussion.closed} discussions (${c.discussion.open} open) · ${c.check.open + c.check.closed} operational checks, listed apart in aghangout`))
     if (!rows.length) { card.append(h('p.muted.small', 'None yet. A discussion brings several project agents and a facilitator to one table: start one in aghangout.')); return card }
     card.append(h('ul.disc-glance', rows.map(d => h('li', { dataset: { discussion: d.id } },
-      h('a', { href: discussionHref(d.id) }, d.title),
-      h('span.muted.small', ` · ${d.state} · ${d.members.length} members · ${d.count} messages${d.open ? ` · ${d.open} open invitation${d.open === 1 ? '' : 's'}` : ''}${d.activity ? ` · ${d.activity.state === 'waiting' ? `now: ${d.activity.kind === 'ask' ? `asking ${d.activity.asked.join(', ')}` : d.activity.kind === 'talk' ? 'asking the requester' : d.activity.kind}` : `last: ${d.activity.kind} ${d.activity.node}`}` : ''} · `,
+      h('a', { href: discussionHref(d.id), title: d.displayTitle ? d.title : '' }, d.displayTitle ?? d.title),
+      h('span.muted.small', ` · ${d.state}${d.status.awaiting.some(a => a.you) ? ' · waiting for you' : ''}${d.status.owed ? ` · ${d.status.owed} owed` : ''} · ${d.members.length} members · ${d.count} messages${d.open ? ` · ${d.open} open invitation${d.open === 1 ? '' : 's'}` : ''}${d.activity ? ` · ${d.activity.state === 'waiting' ? `now: ${d.activity.kind === 'ask' ? `asking ${d.activity.asked.join(', ')}` : d.activity.kind === 'talk' ? 'asking the requester' : d.activity.kind}` : `last: ${d.activity.kind} ${d.activity.node}`}` : ''} · `,
         d.archive.url && d.archive.state !== 'unverified' ? h('a', { href: d.archive.url, target: '_blank', rel: 'noopener', title: 'The archived record in the archive project\'s repository' }, `archived through #${d.archive.through} (${d.archive.commit!.slice(0, 7)})`) : `archive: ${d.archive.state}`,
         d.archive.state === 'behind' || d.archive.state === 'failed' ? ` — ${d.archive.state}` : '')))))
     return card

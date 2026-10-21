@@ -71,4 +71,26 @@ export const DISCUSSION_MIGRATIONS: Migration[] = [{
   // `unverified` until the writer reads the configured one.
   version: 8,
   up: db => db.exec('ALTER TABLE archives ADD COLUMN destination TEXT'),
+}, {
+  // Reading a discussion (argue p4 ex2): its purpose category (`discussion`
+  // or `check`: an operational check, a fixture) and an optional display
+  // title, with an append-only history of who set them and why; and the
+  // overview — a source-linked interpretation (purpose, outcome, unresolved
+  // points) with its author, run, the newest message it covers and the
+  // messages it cites, kept as append-only revisions apart from the speech.
+  // Every existing discussion starts as `discussion`; historical checks are
+  // classified explicitly, each change recorded.
+  version: 9,
+  up: db => db.exec(`
+    ALTER TABLE conversations ADD COLUMN category TEXT;
+    ALTER TABLE conversations ADD COLUMN display_title TEXT;
+    UPDATE conversations SET category = 'discussion' WHERE kind = 'discussion';
+    CREATE TABLE discussion_meta (id INTEGER PRIMARY KEY AUTOINCREMENT, conv TEXT NOT NULL, field TEXT NOT NULL, value TEXT,
+      by TEXT NOT NULL, run TEXT, at TEXT NOT NULL, note TEXT NOT NULL DEFAULT '');
+    CREATE INDEX discussion_meta_conv ON discussion_meta (conv, id);
+    CREATE TABLE overviews (id INTEGER PRIMARY KEY AUTOINCREMENT, conv TEXT NOT NULL, author TEXT NOT NULL, run TEXT, purpose TEXT NOT NULL,
+      outcome TEXT, unresolved TEXT NOT NULL DEFAULT '[]', through INTEGER NOT NULL, sources TEXT NOT NULL DEFAULT '[]', note TEXT NOT NULL DEFAULT '',
+      at TEXT NOT NULL, token TEXT NOT NULL, UNIQUE (conv, token));
+    CREATE INDEX overviews_conv ON overviews (conv, id);
+  `),
 }]

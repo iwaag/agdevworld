@@ -129,7 +129,7 @@ export interface DiscussionMessage {
   node: string | null
 }
 // The live extent of a discussion's records, by table: what an export covers.
-export interface Horizon { message: number; link: number; membership: number; event: number; activity?: number; annotation?: number }
+export interface Horizon { message: number; link: number; membership: number; event: number; activity?: number; annotation?: number; meta?: number; overview?: number }
 
 // The discussion's requester (argue p4): whom the conductor's talk consults.
 export type Requester = { kind: 'person'; id: string } | { kind: 'run'; run: string; agent: string | null }
@@ -149,9 +149,40 @@ export interface ActivityView {
 export interface ActivityEventRow { id: number; conv: string; activity: number | null; kind: string; state: string; at: string; by: string; note: string; data: string }
 export const ANNOTATION_KINDS = ['intervention', 'recovery', 'evaluation', 'correction', 'note'] as const
 export interface AnnotationRow { id: number; conv: string; kind: string; author: string; text: string; re: string; run: string | null; at: string; token: string | null }
+// Reading a discussion (argue p4 ex2): its purpose category, a display title
+// recorded for readers, and the overview — an interpretation with sources.
+export const CATEGORIES = ['discussion', 'check'] as const
+export type Category = typeof CATEGORIES[number]
+export interface MetaRow { id: number; conv: string; field: 'category' | 'displayTitle'; value: string | null; by: string; run: string | null; at: string; note: string }
+export interface OverviewRow { id: number; conv: string; author: string; run: string | null; purpose: string; outcome: string | null; unresolved: string; through: number; sources: string; note: string; at: string; token: string }
+// `after`: messages newer than the newest one the overview covers.
+export interface Overview { id: number; author: string; run: string | null; purpose: string; outcome: string | null; unresolved: string[]; through: number; sources: number[]; note: string; at: string; after: number }
+// The opening request, shown (labelled) when no overview exists: the first
+// message of the person, else the conductor's opening announcement.
+export interface Brief { message: number; author: string; participant: string | null; text: string }
+// Where a discussion stands, read from WFE's records (invitations, questions,
+// activities, obligations): never from its speech.
+export interface DiscussionStatus {
+  room: 'open' | 'closed'
+  working: number // invitations, awaited results, runs and delegations still open
+  owed: number // every obligation, questions included
+  awaiting: { message: number; question: string | null; from: string; receiver: { kind: 'person' | 'run'; id: string; agent: string | null }; you: boolean }[]
+  failed: { invitation: number; participant: string; error: string | null }[]
+  held: { run: string; situation: string }[] // runs of the discussion stopped or interrupted
+}
+const MAX_TITLE = 200
+const MAX_OVERVIEW = 4000
+// A citation in an overview: [#123] (or [#123 #124]).
+const CITATION = /\[#(\d+)((?:[ ,]+#\d+)*)\]/g
+export function citations(text: string): number[] {
+  const out: number[] = []
+  for (const m of text.matchAll(CITATION)) for (const n of m[0].matchAll(/#(\d+)/g)) out.push(Number(n[1]))
+  return [...new Set(out)]
+}
+
 // Something still owed in a discussion (argue p4): who owes it and who will
 // receive it when it comes, read from the records now.
-export interface Obligation { kind: 'invitation' | 'result' | 'question' | 'run' | 'delegation'; ref: string; owes: string; owner: string; receiver: string; since: string }
+export interface Obligation { kind: 'invitation' | 'result' | 'question' | 'run' | 'delegation'; ref: string; owes: string; owner: string; receiver: string; since: string; situation?: string }
 
 // The description a node made by `wfe discussion ponder --next` starts with.
 const ACTIVITY_DESCRIPTIONS: Record<Activity, string> = {
@@ -161,6 +192,10 @@ const ACTIVITY_DESCRIPTIONS: Record<Activity, string> = {
   talk: 'Consult the requester about intent or direction (wfe discussion talk); their answer continues this run.',
 }
 const now = () => new Date().toISOString()
+function categoryOf(v: string): Category {
+  if (!(CATEGORIES as readonly string[]).includes(v)) throw new RequestError(400, `a discussion's category is ${CATEGORIES.join(' or ')} (check: an operational check or fixture)`, { code: 'bad-category' })
+  return v as Category
+}
 const label = (i: Pick<InvitationRow, 'state' | 'late'>) => `${i.state}${i.late ? '-late' : ''}`
 const resolved = (s: InvitationState) => !OPEN_STATES.includes(s)
 
@@ -209,7 +244,7 @@ export class DiscussionStore {
   events(conv: string, since = 0): InvitationEventRow[] { return this.all<InvitationEventRow>('SELECT * FROM invitation_events WHERE conv = ? AND id > ? ORDER BY id', conv, since) }
   horizon(conv: string): Horizon {
     const max = (table: string) => this.one<{ n: number | null }>(`SELECT max(id) AS n FROM ${table} WHERE conv = ?`, conv)!.n ?? 0
-    return { message: max('messages'), link: max('links'), membership: max('membership'), event: max('invitation_events'), activity: max('activity_events'), annotation: max('annotations') }
+    return { message: max('messages'), link: max('links'), membership: max('membership'), event: max('invitation_events'), activity: max('activity_events'), annotation: max('annotations'), meta: max('discussion_meta'), overview: max('overviews') }
   }
 
   // The current members: the membership history folded, in order of joining.
@@ -253,10 +288,13 @@ export class DiscussionStore {
   // From the conductor's attempt (argue p4), `conductor` is that run and the
   // requester is the run that requested it (or the person it acts for);
   // otherwise the requester is the person who opens the discussion.
-  create(conv: string, o: { title: string; by: string; members?: string[]; conductor?: string; requester?: Requester }): { discussion: ConversationRow; duplicate: boolean } {
+  // Its category (argue p4 ex2) is `discussion` unless the creator says it
+  // is an operational `check` (a fixture, a trial of the system).
+  create(conv: string, o: { title: string; by: string; members?: string[]; conductor?: string; requester?: Requester; category?: string }): { discussion: ConversationRow; duplicate: boolean } {
     if (!CONVERSATION_ID.test(conv)) throw new RequestError(400, `discussion id must match ${CONVERSATION_ID.source}`)
     const title = o.title.trim()
     if (!title) throw new RequestError(400, 'a discussion needs a title')
+    const category = categoryOf(o.category ?? 'discussion')
     const cfg = this.cfg()
     const members = [...new Set(o.members ?? [])].map(p => this.resolve(p)).filter(m => m.kind !== 'facilitator')
     return this.tx(() => {
@@ -267,7 +305,8 @@ export class DiscussionStore {
       }
       const at = now()
       const requester: Requester = o.requester ?? { kind: 'person', id: o.by }
-      this.db.prepare('INSERT INTO conversations (id, title, created, updated, state, by, workspace, workflow, kind, conductor, requester) VALUES (?, ?, ?, ?, \'open\', ?, ?, ?, \'discussion\', ?, ?)').run(conv, firstLine(title), at, at, o.by, cfg.facilitator.workspace, cfg.facilitator.workflow, o.conductor ?? null, JSON.stringify(requester))
+      this.db.prepare('INSERT INTO conversations (id, title, created, updated, state, by, workspace, workflow, kind, conductor, requester, category) VALUES (?, ?, ?, ?, \'open\', ?, ?, ?, \'discussion\', ?, ?, ?)').run(conv, firstLine(title), at, at, o.by, cfg.facilitator.workspace, cfg.facilitator.workflow, o.conductor ?? null, JSON.stringify(requester), category)
+      this.db.prepare('INSERT INTO discussion_meta (conv, field, value, by, run, at, note) VALUES (?, \'category\', ?, ?, ?, ?, ?)').run(conv, category, o.by, o.conductor ?? null, at, o.category ? 'at creation' : 'at creation (default)')
       this.activityEvent(conv, null, 'requester', requester.kind, o.by, requester.kind === 'person' ? `requested by ${requester.id}` : `requested by ${requester.run}`, { requester })
       if (o.conductor) this.activityEvent(conv, null, 'conductor', 'set', o.by, `${o.conductor} conducts (it created the discussion)`, { run: o.conductor })
       if (o.requester?.kind !== 'run' || !o.conductor) this.joinRow(conv, this.resolve(o.by, { person: true }), o.by, 'created the discussion')
@@ -1069,7 +1108,7 @@ export class DiscussionStore {
       if (run === o.except) continue
       const r = await rec(run)
       if (!r || ended(r)) continue
-      if (!out.some(x => x.owner === run)) out.push({ kind: 'run', ref: run, owes: `its work (${situation(r)})`, owner: run, receiver: closed ? 'recorded only: the discussion is closed (reopen to continue)' : 'its own contributions here', since: r.created })
+      if (!out.some(x => x.owner === run)) out.push({ kind: 'run', ref: run, owes: `its work (${situation(r)})`, owner: run, receiver: closed ? 'recorded only: the discussion is closed (reopen to continue)' : 'its own contributions here', since: r.created, situation: situation(r) })
       for (const d of Object.values(r.delegations ?? {}).filter(isOpenDelegation)) {
         const child = d.child ? `${d.child.workspace}/${d.child.workflow}/${d.child.run}` : `${d.target.project ?? ''}/${d.target.workflow} (not created yet)`
         out.push({ kind: 'delegation', ref: child, owes: `its result to ${run} (delegation ${d.id})`, owner: child, receiver: run, since: d.dispatched.at })
@@ -1194,6 +1233,141 @@ export class DiscussionStore {
     return [...new Set(re)]
   }
 
+  // ---- reading: category, display title, overview, status (argue p4 ex2) ----------
+
+  metaRows(conv: string, since = 0): MetaRow[] { return this.all<MetaRow>('SELECT * FROM discussion_meta WHERE conv = ? AND id > ? ORDER BY id', conv, since) }
+
+  // Corrects a discussion's category or display title, each change recorded
+  // with who and why. Nothing else moves: no message, no invitation, no run,
+  // no reopening, and not `updated` (the list's order is the conversation's).
+  setMeta(conv: string, o: { category?: string; displayTitle?: string | null; by: string; run?: string | null; note?: string }): { discussion: ConversationRow; changed: MetaRow[] } {
+    const c = this.need(conv)
+    if (o.category === undefined && o.displayTitle === undefined) throw new RequestError(400, 'nothing to change: name a category or a display title')
+    const category = o.category === undefined ? undefined : categoryOf(o.category)
+    const title = o.displayTitle === undefined ? undefined : o.displayTitle?.trim() || null
+    if (title && (title.includes('\n') || title.length > MAX_TITLE)) throw new RequestError(400, `a display title is one line of at most ${MAX_TITLE} characters`)
+    if (o.run) parseRunName(o.run)
+    return this.tx(() => {
+      const ids: number[] = []
+      const at = now()
+      const record = (field: MetaRow['field'], value: string | null) => ids.push(Number(this.db.prepare('INSERT INTO discussion_meta (conv, field, value, by, run, at, note) VALUES (?, ?, ?, ?, ?, ?, ?)').run(conv, field, value, o.by, o.run ?? null, at, o.note?.trim() ?? '').lastInsertRowid))
+      if (category !== undefined && category !== (c.category ?? 'discussion')) { this.db.prepare('UPDATE conversations SET category = ? WHERE id = ?').run(category, conv); record('category', category) }
+      if (title !== undefined && title !== (c.display_title ?? null)) { this.db.prepare('UPDATE conversations SET display_title = ? WHERE id = ?').run(title, conv); record('displayTitle', title) }
+      return { discussion: this.cs.conversation(conv)!, changed: ids.map(id => this.one<MetaRow>('SELECT * FROM discussion_meta WHERE id = ?', id)!) }
+    })
+  }
+
+  overviewRows(conv: string, since = 0): OverviewRow[] { return this.all<OverviewRow>('SELECT * FROM overviews WHERE conv = ? AND id > ? ORDER BY id', conv, since) }
+  overviewView(r: OverviewRow): Overview {
+    const after = this.one<{ n: number }>('SELECT count(*) AS n FROM messages WHERE conv = ? AND id > ?', r.conv, r.through)!.n
+    return { id: r.id, author: r.author, run: r.run, purpose: r.purpose, outcome: r.outcome, unresolved: JSON.parse(r.unresolved) as string[], through: r.through, sources: JSON.parse(r.sources) as number[], note: r.note, at: r.at, after }
+  }
+  // The current overview: the newest revision. Earlier ones stay readable.
+  overview(conv: string): Overview | null {
+    const r = this.one<OverviewRow>('SELECT * FROM overviews WHERE conv = ? ORDER BY id DESC LIMIT 1', conv)
+    return r ? this.overviewView(r) : null
+  }
+
+  // An overview: what the discussion is trying to establish, its current
+  // outcome and what is unresolved, each statement citing the messages it
+  // rests on ([#n]), covering the speech through one message. It is an
+  // interpretation with sources — not speech, not agreement, not the
+  // discussion's execution state — and starts nothing. From a run it is the
+  // facilitator's or the archive project's; outside a run it is whoever is
+  // named (the person, an outside agent), as recorded.
+  publishOverview(conv: string, o: { purpose: string; outcome?: string | null; unresolved?: string[]; through?: number; title?: string | null; note?: string; author: string; run?: string | null; token?: string }): { overview: Overview; duplicate: boolean; changed: MetaRow[] } {
+    this.need(conv)
+    const cfg = this.cfg()
+    if (o.run) {
+      const { workspace } = parseRunName(o.run)
+      if (workspace !== cfg.facilitator.workspace && workspace !== cfg.archive?.workspace) throw new RequestError(403, `an overview is the facilitator's or the archive project's (${[cfg.facilitator.workspace, cfg.archive?.workspace].filter(Boolean).join(', ')}); a participant says what it thinks in a reply`, { code: 'not-facilitator' })
+    }
+    const purpose = o.purpose.trim()
+    const outcome = o.outcome?.trim() || null
+    const unresolved = (o.unresolved ?? []).map(u => u.trim()).filter(Boolean)
+    if (!purpose) throw new RequestError(400, 'an overview states the purpose')
+    for (const t of [purpose, outcome ?? '', ...unresolved]) if (t.length > MAX_OVERVIEW) throw new RequestError(413, `each part of an overview is at most ${MAX_OVERVIEW} characters`)
+    const newest = this.horizon(conv).message
+    const through = o.through ?? newest
+    const at = this.cs.message(through)
+    if (!at || at.conv !== conv) throw new RequestError(400, through ? `message #${through} is not in ${conv}` : `${conv} has no message to summarise yet`)
+    const cite = (part: string, text: string) => {
+      const ns = citations(text)
+      if (!ns.length) throw new RequestError(400, `the ${part} cites no message: write the messages it rests on as [#n]`, { code: 'no-source' })
+      for (const n of ns) {
+        const m = this.cs.message(n)
+        if (!m || m.conv !== conv) throw new RequestError(400, `the ${part} cites #${n}, which is not a message of ${conv}`, { code: 'bad-source' })
+        if (n > through) throw new RequestError(400, `the ${part} cites #${n}, newer than the message it covers through (#${through})`, { code: 'bad-source' })
+      }
+      return ns
+    }
+    const sources = [...new Set([...cite('purpose', purpose), ...(outcome ? cite('outcome', outcome) : []), ...unresolved.flatMap((u, i) => cite(`unresolved point ${i + 1}`, u))])].sort((a, b) => a - b)
+    const token = o.token ?? `${o.author}:${createHash('sha256').update(JSON.stringify([purpose, outcome, unresolved, through])).digest('hex').slice(0, 24)}`
+    const r = this.tx(() => {
+      const seen = this.one<OverviewRow>('SELECT * FROM overviews WHERE conv = ? AND token = ?', conv, token)
+      if (seen) return { row: seen, duplicate: true }
+      const id = Number(this.db.prepare('INSERT INTO overviews (conv, author, run, purpose, outcome, unresolved, through, sources, note, at, token) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
+        .run(conv, o.author, o.run ?? null, purpose, outcome, JSON.stringify(unresolved), through, JSON.stringify(sources), o.note?.trim() ?? '', now(), token).lastInsertRowid)
+      return { row: this.one<OverviewRow>('SELECT * FROM overviews WHERE id = ?', id)!, duplicate: false }
+    })
+    const changed = o.title !== undefined ? this.setMeta(conv, { displayTitle: o.title, by: o.author, run: o.run, note: o.note?.trim() || 'with an overview' }).changed : []
+    return { overview: this.overviewView(r.row), duplicate: r.duplicate, changed }
+  }
+
+  // The opening request, for a discussion without an overview: the earliest
+  // of the person's messages and the conductor's announcements (a discussion
+  // the conductor opened quotes its request there).
+  brief(conv: string): Brief | null {
+    const m = this.one<MessageRow>('SELECT * FROM messages WHERE conv = ? AND (role = \'person\' OR kind = \'announce\') ORDER BY id LIMIT 1', conv)
+    return m ? { message: m.id, author: m.author, participant: m.participant, text: m.text.length > 400 ? `${m.text.slice(0, 400)}…` : m.text } : null
+  }
+
+  // Where the discussion stands, from its records: what is still owed (also
+  // in a closed room), whose answer is awaited — the configured person's
+  // only when the question's receiver is that person (a talk goes to the
+  // requester, which may be a run) — failed invitations and held runs.
+  async status(conv: string): Promise<DiscussionStatus> {
+    const c = this.need(conv)
+    const cfg = this.cfg()
+    const obligations = await this.obligations(conv)
+    const req = this.requester(conv)
+    const talks = this.activityRows(conv).filter(a => a.kind === 'talk')
+    const awaiting = (await this.openAsking(conv)).map(n => {
+      const m = this.cs.message(n)!
+      const receiver = talks.some(t => t.message === n) && req
+        ? req.kind === 'run' ? { kind: 'run' as const, id: req.run, agent: req.agent } : { kind: 'person' as const, id: req.id, agent: null }
+        : { kind: 'person' as const, id: cfg.person, agent: null }
+      return { message: n, question: m.question, from: m.participant ?? m.author, receiver, you: receiver.kind === 'person' && receiver.id === cfg.person }
+    })
+    return {
+      room: c.state, working: obligations.filter(b => b.kind !== 'question').length, owed: obligations.length, awaiting,
+      failed: this.invitations(conv).filter(i => i.state === 'failed').map(i => ({ invitation: i.id, participant: i.participant, error: i.error })),
+      held: obligations.filter(b => b.kind === 'run' && ['stopped', 'interrupted', 'unknown'].includes(b.situation ?? '')).map(b => ({ run: b.ref, situation: b.situation! })),
+    }
+  }
+
+  // The list as readers use it: one category and state at a time, a page at
+  // a time, with the counts of every view. Overview, brief and status are
+  // read for the page's rows only; no transcript is read for the list.
+  async listing(o: { category?: string; state?: string; limit?: number; offset?: number } = {}) {
+    const all = this.list()
+    const cat = (d: ConversationRow) => d.category ?? 'discussion'
+    const counts = Object.fromEntries(CATEGORIES.map(k => [k, { open: all.filter(d => cat(d) === k && d.state === 'open').length, closed: all.filter(d => cat(d) === k && d.state === 'closed').length }]))
+    if (o.category !== undefined) categoryOf(o.category)
+    if (o.state !== undefined && !['open', 'closed', 'all'].includes(o.state)) throw new RequestError(400, 'state is open, closed or all')
+    const rows = all.filter(d => (o.category === undefined || cat(d) === o.category) && (!o.state || o.state === 'all' || d.state === o.state))
+    const offset = Math.max(0, o.offset ?? 0)
+    const page = rows.slice(offset, o.limit === undefined ? undefined : offset + Math.max(1, o.limit))
+    return {
+      counts, total: rows.length, offset,
+      discussions: await Promise.all(page.map(async d => {
+        const overview = this.overview(d.id)
+        const members = this.members(d.id)
+        return { ...d, category: cat(d), displayTitle: d.display_title ?? null, overview, brief: overview ? null : this.brief(d.id), status: await this.status(d.id), participants: members.filter(m => m.kind === 'project').map(m => m.participant) }
+      })),
+    }
+  }
+
   // ---- the view --------------------------------------------------------------------
 
   message(m: MessageRow, viewBase?: string | null): DiscussionMessage {
@@ -1225,7 +1399,12 @@ export class DiscussionStore {
     const known = this.exec ? new Set((await loadRegistry(this.exec.ctx.registryFile)).workspaces.map(w => w.id)) : null
     const linkable = (run: string | null) => !run || !known || known.has(parseRunName(run).workspace)
     return {
-      discussion: { id: c.id, title: c.title, created: c.created, updated: c.updated, state: c.state, by: c.by, facilitator: `${c.workspace}/${c.workflow}`, conductor: c.conductor ?? null, requester: this.requester(conv) },
+      discussion: { id: c.id, title: c.title, created: c.created, updated: c.updated, state: c.state, by: c.by, facilitator: `${c.workspace}/${c.workflow}`, conductor: c.conductor ?? null, requester: this.requester(conv), category: c.category ?? 'discussion', displayTitle: c.display_title ?? null },
+      overview: this.overview(conv),
+      overviews: this.overviewRows(conv).map(r => this.overviewView(r)),
+      brief: this.brief(conv),
+      status: await this.status(conv),
+      meta: this.metaRows(conv),
       activities: this.activityRows(conv).map(a => this.activityView(a)),
       annotations: this.annotations(conv).map(a => ({ ...a, re: JSON.parse(a.re) as number[] })),
       obligations: await this.obligations(conv),

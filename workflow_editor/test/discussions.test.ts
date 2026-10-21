@@ -443,9 +443,32 @@ test('HTTP: participants, create with a brief, an addressed post, the view with 
     assert.equal(pub.status.state, 'current')
     const closed = await (await post('discussions/p16-http/close', {})).json() as { discussion: { state: string } }
     assert.equal(closed.discussion.state, 'closed')
+    // Metadata and the overview (argue p4 ex2): records only; a closed room stays closed.
+    const jobsBefore = (s.x.db.prepare('SELECT count(*) AS n FROM jobs').get() as { n: number }).n
+    const meta = await (await post('discussions/p16-http/meta', { category: 'check', displayTitle: 'HTTPの確認', note: 'a check' })).json() as { changed: { field: string; value: string; by: string }[]; discussion: { category: string } }
+    assert.deepEqual(meta.changed.map(m => [m.field, m.value, m.by]), [['category', 'check', 'Pat'], ['displayTitle', 'HTTPの確認', 'Pat']])
+    assert.equal((await post('discussions/p16-http/meta', { category: 'trial' })).status, 400)
+    assert.equal((await post('discussions/p16-http/overview', { purpose: 'no source' })).status, 400, 'an overview without a source is refused')
+    const ov = await (await post('discussions/p16-http/overview', { purpose: 'HTTP経路の確認 [#1]', unresolved: ['sageの意見 [#2]'], note: 'first' })).json() as { overview: { author: string; sources: number[]; after: number } }
+    assert.deepEqual([ov.overview.author, ov.overview.sources, ov.overview.after], ['Pat', [1, 2], 0])
+    assert.equal((s.x.db.prepare('SELECT count(*) AS n FROM jobs').get() as { n: number }).n, jobsBefore, 'nothing started')
+    const listed = await (await fetch(`${root}/discussions?category=check&state=closed&limit=5`)).json() as { counts: Record<string, { open: number; closed: number }>; total: number; discussions: { id: string; displayTitle: string; overview: { purpose: string }; status: { room: string } }[] }
+    assert.deepEqual(listed.counts, { discussion: { open: 0, closed: 0 }, check: { open: 0, closed: 1 } })
+    assert.deepEqual(listed.discussions.map(d => [d.id, d.displayTitle, d.overview.purpose, d.status.room]), [['p16-http', 'HTTPの確認', 'HTTP経路の確認 [#1]', 'closed']])
+    assert.equal((await fetch(`${root}/discussions?category=discussion`).then(r => r.json()) as { total: number }).total, 0)
+    assert.equal((await fetch(`${root}/discussions?limit=-1`)).status, 400)
     // The CLI reads the same store.
     const { stdout } = await pexec(process.execPath, [join(pkg, 'cli', 'wfe.ts'), 'discussion', 'show', 'p16-http', '--registry', s.registry, '--area', s.area])
-    assert.match(stdout, /Discussion p16-http \(closed\): Over HTTP/)
+    assert.match(stdout, /Discussion p16-http \(closed, check\): Over HTTP — shown as "HTTPの確認"/)
+    assert.match(stdout, /Overview by Pat .*through #2: purpose HTTP経路の確認 \[#1\] \| 1 unresolved/)
+    const ls = await pexec(process.execPath, [join(pkg, 'cli', 'wfe.ts'), 'discussion', 'list', '--category', 'check', '--registry', s.registry, '--area', s.area])
+    assert.match(ls.stdout, /p16-http\s+check\s+closed .*overview\s.*HTTPの確認/)
+    const ow = await pexec(process.execPath, [join(pkg, 'cli', 'wfe.ts'), 'discussion', 'overview', 'p16-http', '--purpose', 'HTTP経路の確認（改） [#1]', '--note', 'cli', '--author', 'Omni Agent', '--registry', s.registry, '--area', s.area])
+    assert.match(ow.stdout, /Recorded: overview 2 of p16-http, through #2, citing #1. Nothing was sent or started./)
+    const sh = await pexec(process.execPath, [join(pkg, 'cli', 'wfe.ts'), 'discussion', 'overview', 'p16-http', '--registry', s.registry, '--area', s.area])
+    assert.match(sh.stdout, /Overview of p16-http by Omni Agent, .*covers through #2 \(current\); cites #1/)
+    const mt = await pexec(process.execPath, [join(pkg, 'cli', 'wfe.ts'), 'discussion', 'meta', 'p16-http', '--no-title', '--note', 'original is fine', '--author', 'Omni Agent', '--registry', s.registry, '--area', s.area])
+    assert.match(mt.stdout, /Recorded for p16-http: displayTitle = \(none\)/)
     assert.match(stdout, /Pat \(person\) to sage/)
     assert.match(stdout, /Archive: behind|Archive: current/)
     const st = await pexec(process.execPath, [join(pkg, 'cli', 'wfe.ts'), 'discussion', 'archive', '--registry', s.registry, '--area', s.area])

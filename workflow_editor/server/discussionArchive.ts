@@ -11,7 +11,9 @@
 //   discussions/<id>/transcript.jsonl  append-only: message | membership |
 //                                      invitation | link | activity (argue p4:
 //                                      the conductor's activities, conductor and
-//                                      requester changes) | annotation records
+//                                      requester changes) | annotation | meta
+//                                      (argue p4 ex2: category and display
+//                                      title changes) | overview records
 //
 // The repository is the truth about what is published: an export reads the
 // pushed manifest's horizon and appends only records beyond it, so a crash
@@ -48,9 +50,11 @@ export interface ArchiveStatus {
   error: string | null; tries: number; attempted: string | null
   repository: string | null
 }
-const ZERO: Horizon = { message: 0, link: 0, membership: 0, event: 0, activity: 0, annotation: 0 }
-// A manifest written before argue p4 has no activity or annotation horizon: 0.
-const covers = (a: Horizon, b: Horizon) => a.message >= b.message && a.link >= b.link && a.membership >= b.membership && a.event >= b.event && (a.activity ?? 0) >= (b.activity ?? 0) && (a.annotation ?? 0) >= (b.annotation ?? 0)
+const ZERO: Horizon = { message: 0, link: 0, membership: 0, event: 0, activity: 0, annotation: 0, meta: 0, overview: 0 }
+// A manifest written before argue p4 has no activity or annotation horizon,
+// one before argue p4 ex2 no meta or overview horizon: 0.
+const OPTIONAL = ['activity', 'annotation', 'meta', 'overview'] as const
+const covers = (a: Horizon, b: Horizon) => a.message >= b.message && a.link >= b.link && a.membership >= b.membership && a.event >= b.event && OPTIONAL.every(k => (a[k] ?? 0) >= (b[k] ?? 0))
 const now = () => new Date().toISOString()
 // A repository's identity: its URL without credentials, `.git` or a final
 // slash (a local path as given, resolved).
@@ -157,7 +161,7 @@ export class DiscussionArchive {
             const r = this.write(conv)
             if (!r) { unchanged.push(conv); continue }
             await g(['add', '--', `discussions/${conv}`])
-            await g(['commit', '-q', '-m', `Archive discussion ${conv} through #${r.horizon.message}`, '-m', `Discussion-Horizon: ${conv} m${r.horizon.message} l${r.horizon.link} j${r.horizon.membership} e${r.horizon.event} a${r.horizon.activity ?? 0} n${r.horizon.annotation ?? 0}`])
+            await g(['commit', '-q', '-m', `Archive discussion ${conv} through #${r.horizon.message}`, '-m', `Discussion-Horizon: ${conv} m${r.horizon.message} l${r.horizon.link} j${r.horizon.membership} e${r.horizon.event} a${r.horizon.activity ?? 0} n${r.horizon.annotation ?? 0} t${r.horizon.meta ?? 0} o${r.horizon.overview ?? 0}`])
             made.push({ conv, commit: (await g(['rev-parse', 'HEAD'])).trim(), records: r.records })
           }
           if (made.length) {
@@ -216,18 +220,21 @@ export class DiscussionArchive {
     for (const l of this.ds.cs.links(conv)) if (l.id > from.link) lines.push({ at: l.at, order: 3, rec: { type: 'link', id: l.id, at: l.at, message: l.message, run: l.run, relation: l.relation, note: l.note, by: l.by, attempt: l.attempt, supersedes: l.supersedes } })
     for (const e of this.ds.activityEvents(conv, from.activity ?? 0)) lines.push({ at: e.at, order: 4, rec: { type: 'activity', id: e.id, at: e.at, kind: e.kind, activity: e.activity, state: e.state, by: e.by, note: e.note, data: JSON.parse(e.data) } })
     for (const a of this.ds.annotations(conv, from.annotation ?? 0)) lines.push({ at: a.at, order: 5, rec: { type: 'annotation', id: a.id, at: a.at, kind: a.kind, author: a.author, text: a.text, re: JSON.parse(a.re), run: a.run } })
+    for (const m of this.ds.metaRows(conv, from.meta ?? 0)) lines.push({ at: m.at, order: 6, rec: { type: 'meta', id: m.id, at: m.at, field: m.field, value: m.value, by: m.by, run: m.run, note: m.note } })
+    for (const v of this.ds.overviewRows(conv, from.overview ?? 0)) lines.push({ at: v.at, order: 7, rec: { type: 'overview', id: v.id, at: v.at, author: v.author, run: v.run, purpose: v.purpose, outcome: v.outcome, unresolved: JSON.parse(v.unresolved), through: v.through, sources: JSON.parse(v.sources), note: v.note } })
     if (!lines.length && before?.state === d.state) return null
     lines.sort((a, b) => a.at.localeCompare(b.at) || a.order - b.order)
     const dir = join(this.dir, 'discussions', conv)
     mkdirSync(dir, { recursive: true })
     if (lines.length) appendFileSync(join(dir, 'transcript.jsonl'), lines.map(l => `${JSON.stringify(l.rec)}\n`).join(''))
-    const horizon = { message: Math.max(from.message, live.message), link: Math.max(from.link, live.link), membership: Math.max(from.membership, live.membership), event: Math.max(from.event, live.event), activity: Math.max(from.activity ?? 0, live.activity ?? 0), annotation: Math.max(from.annotation ?? 0, live.annotation ?? 0) }
+    const horizon = { message: Math.max(from.message, live.message), link: Math.max(from.link, live.link), membership: Math.max(from.membership, live.membership), event: Math.max(from.event, live.event), activity: Math.max(from.activity ?? 0, live.activity ?? 0), annotation: Math.max(from.annotation ?? 0, live.annotation ?? 0), meta: Math.max(from.meta ?? 0, live.meta ?? 0), overview: Math.max(from.overview ?? 0, live.overview ?? 0) }
     const runs = new Map<string, { run: string; workspace: string; workflow: string; author: string | null; participant: string }>()
     for (const i of invs.values()) if (i.run) runs.set(i.run, { run: i.run, workspace: i.workspace, workflow: i.workflow, author: null, participant: i.participant })
     for (const m of this.ds.messages(conv)) if (m.run) { const [ws, wf] = m.run.split('/'); runs.set(m.run, { run: m.run, workspace: ws, workflow: wf, author: m.author, participant: m.participant ?? ws }) }
     const manifest: Manifest = {
       format: ARCHIVE_FORMAT, id: conv, title: d.title, created: d.created, by: d.by, state: d.state, facilitator: `${d.workspace}/${d.workflow}`,
       conductor: d.conductor ?? null, requester: this.ds.requester(conv),
+      category: d.category ?? 'discussion', displayTitle: d.display_title ?? null, overview: currentOverview(this.ds, conv),
       members: this.ds.members(conv), horizon,
       activities: this.ds.activityRows(conv).map(a => this.ds.activityView(a)),
       invitations: [...invs.values()].map(i => ({ id: i.id, participant: i.participant, target: `${i.workspace}/${i.workflow}`, by: i.by, byRun: i.by_run, awaitedBy: i.awaited_by, source: JSON.parse(i.source), horizon: i.horizon, state: i.state, late: !!i.late, run: i.run, answeredBy: i.answered_by, error: i.error, deliveredTo: i.delivery ? (JSON.parse(i.delivery) as { message: number }).message : null, ...(i.awaits ? { awaits: i.awaits } : {}) })),
@@ -240,9 +247,20 @@ export class DiscussionArchive {
   }
 }
 
+// The current overview as of the export, without its live `after` count
+// (the horizon says what the export covers).
+function currentOverview(ds: DiscussionStore, conv: string) {
+  const o = ds.overview(conv)
+  if (!o) return null
+  const { after, ...rest } = o
+  void after
+  return rest
+}
+
 export interface Manifest {
   format: string; id: string; title: string; created: string; by: string; state: string; facilitator: string
   conductor?: string | null; requester?: unknown; activities?: unknown[]
+  category?: string; displayTitle?: string | null; overview?: unknown
   members: unknown[]; horizon: Horizon; invitations: unknown[]; runs: unknown[]
   exports: { at: string; from: Horizon; through: Horizon; records: number; state: string }[]
   transcript: string; summary: string

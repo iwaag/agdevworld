@@ -91,6 +91,8 @@ export interface ConversationRow {
   id: string; title: string; created: string; updated: string; state: 'open' | 'closed'; by: string; workspace: string | null; workflow: string | null; kind: 'conversation' | 'discussion'
   conductor?: string | null // a discussion's conductor run (argue p4)
   requester?: string | null // a discussion's requester, JSON (argue p4)
+  category?: 'discussion' | 'check' | null // a discussion's purpose category (argue p4 ex2)
+  display_title?: string | null // a discussion's title for readers, when one was recorded (argue p4 ex2)
 }
 export interface MessageRow {
   id: number; conv: string; role: 'person' | 'agent'; author: string; text: string; at: string

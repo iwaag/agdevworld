@@ -69,7 +69,9 @@ annotate <id> --kind intervention|recovery|evaluation|correction|note (--text <t
 
 participants                  the facilitator and the projects that can be invited, and whether
                               each can take an invitation now
-list                          the discussions, newest first, with members and open invitations
+list [--category discussion|check] [--state open|closed]
+                              the discussions, newest first, with category, members, open invitations
+                              and whether an overview covers the newest message
 show [<id>] [--since <msg>]   members and their history, every message (who spoke, for which
                               run and invitation, what it answers, whom the person addressed),
                               the invitations (state, run, horizon, outcome), linked runs as their
@@ -77,8 +79,10 @@ show [<id>] [--since <msg>]   members and their history, every message (who spok
                               Without <id>: the discussion of this attempt's run. Messages after
                               your invitation's horizon are marked: they are readable, and newer
                               than what you were invited with
-create <id> --title <t> [--author <person>] [--member <project>]…
+create <id> --title <t> [--author <person>] [--member <project>]… [--category discussion|check]
                               a new discussion with the person, the facilitator and the projects.
+                              --category check: an operational check or fixture (listed apart from
+                              ordinary discussions; default discussion).
                               From the facilitator's attempt the run is its conductor, and the
                               requester is whoever requested that run (a delegating run, an agent's
                               request, or the person it names)
@@ -121,6 +125,24 @@ close <id> [--author <who>]   end automatic dispatch: invitations not started ar
                               started ones finish and are recorded; no facilitator is continued;
                               nothing downstream is cancelled
 reopen <id> [--author <who>]  continue it; nothing withdrawn or completed is replayed
+meta <id> [--category discussion|check] [--title <display title> | --no-title] --note <why> [--author <who>]
+                              correct how the discussion is listed: its category, and a title for
+                              readers (the original title and id stay). Recorded with who and why;
+                              sends nothing, invites nobody, reopens nothing
+overview [<id>] --purpose <t> [--outcome <t>] [--unresolved <t>]… [--through <msg>] [--title <t>]
+         --note <what changed> [--author <who>]    (or --file <json|->; without either: show it)
+                              the reader's overview, shown in the list and at the top of the room:
+                              what the discussion is trying to establish, its current outcome and
+                              what is unresolved, in the readers' language, each part citing the
+                              messages it rests on as [#n] (WFE refuses a part without one). It
+                              covers the speech through --through (default: the newest message);
+                              later messages make it "stale" in readers' eyes, still readable. An
+                              overview is your interpretation with sources: not speech, not proof
+                              of agreement, not the discussion's status (WFE derives that). Keep
+                              disagreement and open work in it. A new one is a new revision; the
+                              earlier ones stay. From a run: the facilitator's or archive project's.
+                              --title also records the display title. --file takes
+                              {purpose, outcome?, unresolved?[], through?, title?, note?}
 dispatch                      start invitations not started yet, mark those whose run ended
                               without a contribution unanswered, tell waiting facilitators
                               (also done by the executor's reconcile every minute)
@@ -186,8 +208,10 @@ export async function discussionCommand(c: DiscussionCli): Promise<number> {
         return 0
       }
       case 'list': {
-        const rows = ds.list()
-        c.out(rows.length ? rows.map(r => `${r.id.padEnd(24)} ${r.state.padEnd(6)} ${String(r.count).padStart(4)} msgs  ${String(r.open).padStart(2)} open  [${r.members.join(', ')}]  ${r.title}`).join('\n') : 'No discussions.', rows)
+        const l = await ds.listing({ category: c.opt('category'), state: c.opt('state') })
+        const rows = l.discussions
+        const cov = (r: typeof rows[number]) => !r.overview ? 'no overview' : r.overview.after ? `overview +${r.overview.after}` : 'overview'
+        c.out(rows.length ? rows.map(r => `${r.id.padEnd(24)} ${r.category.padEnd(10)} ${r.state.padEnd(6)} ${String(r.count).padStart(4)} msgs  ${String(r.open).padStart(2)} open  ${cov(r).padEnd(12)} [${r.members.join(', ')}]  ${r.displayTitle ?? r.title}`).join('\n') : 'No discussions.', l)
         return 0
       }
       case 'show': {
@@ -197,7 +221,10 @@ export async function discussionCommand(c: DiscussionCli): Promise<number> {
         const archive = await new DiscussionArchive(ds).status(id)
         const mine = o?.invitation ? v.invitations.find(i => i.id === o.invitation) : undefined
         const req = v.discussion.requester
-        const lines = [`Discussion ${id} (${v.discussion.state}): ${v.discussion.title}`, `Facilitator: ${v.discussion.facilitator}${v.discussion.conductor ? `; conductor ${v.discussion.conductor}` : ''}${req ? `; requester ${req.kind === 'person' ? req.id : req.run}` : ''}. Members: ${v.members.map(m => `${m.participant} (${m.kind}${m.workspace ? ` ${m.workspace}/${m.workflow}` : ''})`).join(', ')}`]
+        const ov = v.overview
+        const lines = [`Discussion ${id} (${v.discussion.state}, ${v.discussion.category}): ${v.discussion.title}${v.discussion.displayTitle ? ` — shown as "${v.discussion.displayTitle}"` : ''}`,
+          ov ? `Overview by ${ov.author}${ov.run ? ` (${ov.run})` : ''} ${ov.at}, through #${ov.through}${ov.after ? ` (${ov.after} newer message${ov.after === 1 ? '' : 's'})` : ''}: purpose ${ov.purpose.split('\n')[0].slice(0, 160)}${ov.outcome ? ` | outcome ${ov.outcome.split('\n')[0].slice(0, 160)}` : ''}${ov.unresolved.length ? ` | ${ov.unresolved.length} unresolved` : ''}` : 'Overview: none (wfe discussion overview)',
+          `Facilitator: ${v.discussion.facilitator}${v.discussion.conductor ? `; conductor ${v.discussion.conductor}` : ''}${req ? `; requester ${req.kind === 'person' ? req.id : req.run}` : ''}. Members: ${v.members.map(m => `${m.participant} (${m.kind}${m.workspace ? ` ${m.workspace}/${m.workflow}` : ''})`).join(', ')}`]
         if (mine) lines.push(`You are ${mine.participant}, invited (invitation ${mine.id}) by ${mine.by}${mine.byRun ? ` (${mine.byRun})` : ''} about ${mine.source.map(n => `#${n}`).join(', ')}; horizon #${mine.horizon}.`)
         const history = v.membership.filter(r => r.action === 'leave' || r.note !== 'created the discussion')
         if (history.length) lines.push('Membership:', ...history.map(r => `  ${r.at} ${r.participant} ${r.action} (by ${r.by}${r.note ? `: ${r.note}` : ''})`))
@@ -239,8 +266,8 @@ export async function discussionCommand(c: DiscussionCli): Promise<number> {
           author = author ?? (requester.kind === 'person' ? requester.id : conducting.agent)
         }
         if (!author) throw c.usage('--author <person> is required: who opens it')
-        const r = ds.create(id, { title, by: author, members: c.opts('member'), ...(conducting ? { conductor: conducting.run, requester } : {}) })
-        c.out(`${r.duplicate ? 'Already exists' : 'Created'}: discussion ${id} with ${ds.members(id).map(m => m.participant).join(', ')}.`, { ok: true, ...r, members: ds.members(id) })
+        const r = ds.create(id, { title, by: author, members: c.opts('member'), category: c.opt('category'), ...(conducting ? { conductor: conducting.run, requester } : {}) })
+        c.out(`${r.duplicate ? 'Already exists' : 'Created'}: ${r.discussion.category === 'check' ? 'check' : 'discussion'} ${id} with ${ds.members(id).map(m => m.participant).join(', ')}.`, { ok: true, ...r, members: ds.members(id) })
         return 0
       }
       case 'post': {
@@ -366,6 +393,35 @@ export async function discussionCommand(c: DiscussionCli): Promise<number> {
         const author = await who(); if (!author) throw c.usage('--author <who> is required')
         const r = ds.annotate(id, { kind, author, text: text(), re: ids('re'), run: c.opt('run') ?? null, token: c.opt('token') })
         c.out(`${r.duplicate ? 'Already recorded' : 'Recorded'}: annotation ${r.annotation.id} (${kind}) in ${id}.`, { ok: true, ...r })
+        return 0
+      }
+      case 'meta': {
+        const id = args[0]; if (!id) throw c.usage('meta needs <id>')
+        const note = c.opt('note'); if (!note) throw c.usage('--note <why> is required: the reason is part of the record')
+        const by = await who(); if (!by) throw c.usage('--author <who> is required outside an executing attempt')
+        const title = c.flag('no-title') ? null : c.opt('title')
+        const r = ds.setMeta(id, { category: c.opt('category'), displayTitle: title, by, run: (await own())?.run ?? null, note })
+        c.out(r.changed.length ? `Recorded for ${id}: ${r.changed.map(m => `${m.field} = ${m.value ?? '(none)'}`).join('; ')}.` : `Nothing changed for ${id}: it already reads so.`, { ok: true, ...r })
+        return 0
+      }
+      case 'overview': {
+        const id = await disc(args[0])
+        if (!c.opt('purpose') && !c.opt('file')) {
+          const o = ds.overview(id)
+          const b = ds.brief(id)
+          c.out(o ? [`Overview of ${id} by ${o.author}${o.run ? ` (${o.run})` : ''}, ${o.at}; covers through #${o.through}${o.after ? `, ${o.after} newer message${o.after === 1 ? '' : 's'}` : ' (current)'}; cites ${o.sources.map(n => `#${n}`).join(' ')}`, `Purpose: ${o.purpose}`, `Outcome: ${o.outcome ?? '(none stated)'}`, ...o.unresolved.map(u => `Unresolved: ${u}`), o.note ? `Note: ${o.note}` : ''].filter(Boolean).join('\n')
+            : `No overview of ${id}.${b ? ` Readers see the brief (#${b.message}, ${b.author}), labelled as such.` : ''}`, { overview: o, brief: b })
+          return 0
+        }
+        const o = await own()
+        const author = o?.agent ?? c.opt('author'); if (!author) throw c.usage('--author <who> is required outside an executing attempt')
+        const f = c.opt('file')
+        const given = f ? JSON.parse(readFileSync(f === '-' ? 0 : resolve(f), 'utf8')) as { purpose?: string; outcome?: string; unresolved?: string[]; through?: number; title?: string; note?: string } : null
+        const purpose = given?.purpose ?? c.opt('purpose'); if (!purpose) throw c.usage('--purpose <text> is required (or --file)')
+        const note = given?.note ?? c.opt('note'); if (!note) throw c.usage('--note <what changed> is required: why this revision')
+        const through = given?.through ?? (c.opt('through') ? Number(c.opt('through')!.replace(/^#/, '')) : undefined)
+        const r = ds.publishOverview(id, { purpose, outcome: given?.outcome ?? c.opt('outcome') ?? null, unresolved: given?.unresolved ?? c.opts('unresolved'), through, title: given?.title ?? c.opt('title'), note, author, run: o?.run ?? null })
+        c.out(`${r.duplicate ? 'Already recorded (same overview)' : 'Recorded'}: overview ${r.overview.id} of ${id}, through #${r.overview.through}, citing ${r.overview.sources.map(n => `#${n}`).join(' ')}${r.changed.length ? `; display title "${r.changed[0].value}"` : ''}. Nothing was sent or started.`, { ok: true, ...r })
         return 0
       }
       case 'withdraw': {

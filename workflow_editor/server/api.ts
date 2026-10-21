@@ -286,13 +286,18 @@ export function createHandler(config: ServiceConfig) {
         const nums = (k: string): number[] => { const v = input[k] ?? []; if (!Array.isArray(v) || !v.every(n => Number.isInteger(n))) throw new RequestError(400, `${k} is a list of message ids`); return v as number[] }
         const archive = new DiscussionArchive(ds)
         const view = async (id: string, since = 0) => ({ person, ...await ds.view(id, { viewBase: viewBaseOf(area), since }), archive: await archive.status(id) })
+        // The list as readers use it (argue p4 ex2): ?category=discussion|check
+        // &state=open|closed|all&limit=&offset=, with every view's counts;
+        // overview, brief and status for the page's rows only.
         if (!wsId && method === 'GET') {
-          return send(res, 200, { person, disabled: 'disabled' in cfg ? cfg.disabled : null, participants: await ds.participants(), discussions: await Promise.all(ds.list().map(async d => {
+          const q = (k: string) => url.searchParams.get(k) ?? undefined
+          const n = (k: string) => { const v = q(k); if (v === undefined) return undefined; const x = Number(v); if (!Number.isInteger(x) || x < 0) throw new RequestError(400, `${k} is a whole number`); return x }
+          const l = 'disabled' in cfg ? null : await ds.listing({ category: q('category'), state: q('state'), limit: n('limit'), offset: n('offset') })
+          return send(res, 200, { person, disabled: 'disabled' in cfg ? cfg.disabled : null, participants: await ds.participants(), counts: l?.counts ?? null, total: l?.total ?? 0, offset: l?.offset ?? 0, discussions: await Promise.all((l?.discussions ?? []).map(async d => {
             const a = await archive.status(d.id)
             return {
-              id: d.id, title: d.title, created: d.created, updated: d.updated, state: d.state, count: d.count, members: d.members, open: d.open,
-              conductor: d.conductor ?? null, activity: d.activity,
-              last: d.last ? { at: d.last.at, role: d.last.role, author: d.last.author, participant: d.last.participant, kind: d.last.kind, text: d.last.text.slice(0, 300) } : null,
+              id: d.id, title: d.title, displayTitle: d.displayTitle, category: d.category, created: d.created, updated: d.updated, state: d.state, count: d.count, members: d.members, participants: d.participants, open: d.open,
+              conductor: d.conductor ?? null, activity: d.activity, overview: d.overview, brief: d.brief, status: d.status,
               archive: { state: a.state, commit: a.published?.commit ?? null, through: a.published?.horizon.message ?? null, url: a.published?.url ?? null },
             }
           })) })
@@ -301,7 +306,7 @@ export function createHandler(config: ServiceConfig) {
           const c = need()
           const id = str(input.id, 'id')
           const author = opt('author') ?? c.person
-          const r = ds.create(id, { title: str(input.title, 'title'), by: author, members: list('members') })
+          const r = ds.create(id, { title: str(input.title, 'title'), by: author, members: list('members'), category: opt('category') })
           let posted = null
           if (input.text !== undefined) posted = await ds.post(id, { text: words('text'), author, token: str(input.token, 'token'), to: list('to'), re: nums('re'), via: opt('via') })
           return send(res, r.duplicate ? 200 : 201, { created: !r.duplicate, posted: posted && { message: posted.message.id, duplicate: posted.duplicate, invitations: posted.invitations.map(i => ds.invitationView(i)) }, ...await view(id) })
@@ -332,6 +337,25 @@ export function createHandler(config: ServiceConfig) {
           if (action === 'join') return send(res, 200, ds.join(wsId, participant, { by, note: opt('note') }))
           if (action === 'leave') return send(res, 200, ds.leave(wsId, participant, { by, note: opt('note') }))
           throw new RequestError(400, 'action is join or leave')
+        }
+        // Metadata and the overview (argue p4 ex2): records about the
+        // discussion; they send nothing, invite nobody and reopen nothing.
+        if (wsId && b === 'meta' && method === 'POST') {
+          const c = need()
+          const t = input.displayTitle
+          if (t !== undefined && t !== null && typeof t !== 'string') throw new RequestError(400, 'displayTitle is a string, or null to remove it')
+          const r = ds.setMeta(wsId, { category: opt('category'), displayTitle: t as string | null | undefined, by: opt('author') ?? c.person, note: opt('note') })
+          return send(res, 200, { ok: true, changed: r.changed, discussion: { id: wsId, category: r.discussion.category ?? 'discussion', displayTitle: r.discussion.display_title ?? null } })
+        }
+        if (wsId && b === 'overview' && method === 'GET') { ds.discussion(wsId) ?? (() => { throw new RequestError(404, `no discussion ${wsId}`) })(); return send(res, 200, { overview: ds.overview(wsId), revisions: ds.overviewRows(wsId).map(r => ds.overviewView(r)), brief: ds.brief(wsId) }) }
+        if (wsId && b === 'overview' && method === 'POST') {
+          const c = need()
+          const u = input.unresolved ?? []
+          if (!Array.isArray(u) || !u.every(x => typeof x === 'string')) throw new RequestError(400, 'unresolved is a list of texts')
+          const through = input.through === undefined ? undefined : Number(input.through)
+          if (through !== undefined && !Number.isInteger(through)) throw new RequestError(400, 'through is a message id')
+          const r = ds.publishOverview(wsId, { purpose: words('purpose'), outcome: opt('outcome') ?? null, unresolved: u as string[], through, title: opt('displayTitle'), note: opt('note'), author: opt('author') ?? c.person, token: opt('token') })
+          return send(res, 200, { ok: true, ...r })
         }
         if (wsId && b === 'close' && method === 'POST') { const c = need(); return send(res, 200, { ok: true, ...ds.close(wsId, { by: opt('author') ?? c.person }) }) }
         if (wsId && b === 'reopen' && method === 'POST') { const c = need(); return send(res, 200, { ok: true, discussion: ds.reopen(wsId, { by: opt('author') ?? c.person }) }) }

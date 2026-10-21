@@ -1,4 +1,4 @@
-# Discussions (workflow_editor p16, argue p4, argue p4 ex1)
+# Discussions (workflow_editor p16, argue p4, argue p4 ex1, argue p4 ex2)
 
 A discussion is a shared conversation of **a person, a facilitator and
 project agents**, each agent speaking through runs of its own project's
@@ -9,7 +9,7 @@ links of direct conversations ([conversations.md](conversations.md)), and
 adds members, invitations and an archive. Code: `server/discussions.ts`,
 `server/discussionArchive.ts`; CLI: `wfe discussion`; store: the
 conversation store (`<area>/.local/conversations/conversations.sqlite`,
-version 8).
+version 9).
 
 The conversation routes refuse a discussion (409 `is-discussion`) and the
 discussion routes refuse a conversation (409 `is-conversation`): a client
@@ -258,12 +258,13 @@ copy in the archive project's repository (`archive.workspace`'s origin;
 
 ```text
 discussions/<id>/manifest.json     format ag.argue.discussion.v1, identity, members and history,
-                                   conductor, requester, activities (argue p4), invitations,
-                                   horizon {message, link, membership, event, activity, annotation},
+                                   conductor, requester, activities (argue p4), category, displayTitle,
+                                   overview (argue p4 ex2), invitations,
+                                   horizon {message, link, membership, event, activity, annotation, meta, overview},
                                    provenance (runs: workspace, workflow, agent), exports[]
 discussions/<id>/transcript.jsonl  append-only records: message | membership | invitation | link
                                    | activity (argue p4: activity, conductor, requester events)
-                                   | annotation
+                                   | annotation | meta | overview (argue p4 ex2)
 discussions/<id>/summary.md        synthesis (the archive project's runs; not this writer)
 ```
 
@@ -312,9 +313,12 @@ Gitea tree URL; the live horizon; the configured repository.
 
 | Route | |
 | --- | --- |
-| `GET api/discussions` | `{person, disabled, participants, discussions}`; participants are the facilitator and the invitable projects as their projects say now (`state`, `problem`) |
-| `POST api/discussions {id, title, members?, text?, token?, to?, re?, author?}` | creates (201; the same id by the same author again is 200), and posts the brief when `text` is given |
-| `GET api/discussions/<id>[?since=<msg>]` | `discussion` (with `conductor`, `requester`), `activities`, `annotations`, `obligations`, `members`, `membership`, `messages` (with `participant`, `run`, `runUrl`, `invitation`, `addressed`, `node`), `invitations` (with `runUrl`, `awaits`, `activity`), `links`, `runs` (shared status, run view, file route, presentations), `asking`, `horizon`, `archive` |
+| `GET api/discussions[?category=discussion\|check&state=open\|closed\|all&limit=&offset=]` | `{person, disabled, participants, counts, total, offset, discussions}`; participants are the facilitator and the invitable projects as their projects say now (`state`, `problem`); `counts` per category and state; each row with `category`, `displayTitle`, `participants` (project members), `overview` or `brief`, `status`, `activity`, `archive` — computed for the page's rows only |
+| `POST api/discussions {id, title, members?, category?, text?, token?, to?, re?, author?}` | creates (201; the same id by the same author again is 200), and posts the brief when `text` is given |
+| `POST api/discussions/<id>/meta {category?, displayTitle?, note?, author?}` | corrects the category or display title (`displayTitle: null` removes it); records only |
+| `GET api/discussions/<id>/overview` | `{overview, revisions, brief}` |
+| `POST api/discussions/<id>/overview {purpose, outcome?, unresolved?, through?, displayTitle?, note?, author?, token?}` | a new overview revision; records only |
+| `GET api/discussions/<id>[?since=<msg>]` | `discussion` (with `conductor`, `requester`, `category`, `displayTitle`), `overview`, `overviews`, `brief`, `status`, `meta`, `activities`, `annotations`, `obligations`, `members`, `membership`, `messages` (with `participant`, `run`, `runUrl`, `invitation`, `addressed`, `node`), `invitations` (with `runUrl`, `awaits`, `activity`), `links`, `runs` (shared status, run view, file route, presentations), `asking`, `horizon`, `archive` |
 | `POST api/discussions/<id>/messages {text, token, to?, re?, author?, via?}` | the person's words; `{message, invitations, duplicate, reopened}` |
 | `POST api/discussions/<id>/invitations {participant, question, re?, token?, author?}` | the person's invitation |
 | `POST api/discussions/<id>/invitations/<n>/withdraw {reason}` | withdraws one not started |
@@ -324,6 +328,86 @@ Gitea tree URL; the live horizon; the configured repository.
 
 Writes follow the conversation contract's browser rules (same origin or an
 allowed one; the page's words are the configured person's).
+
+## Reading a discussion (argue p4 ex2)
+
+What a reader needs to choose a discussion and understand it: what it is
+for, what came of it and what it needs now. Episode:
+`devdocs/episodes/argue/p4/ex2/`.
+
+**Category.** Each discussion is a `discussion` (the default) or a `check`
+(an operational check, a fixture or a trial of the system). Clients list
+checks apart.
+
+- It is set at creation with `--category check` or the create route's
+  `category`. Automated fixtures and operational trials declare it.
+- It is corrected later with `wfe discussion meta <id> --category …
+  --note <why>`, or `POST api/discussions/<id>/meta`.
+- A prefix such as "[Check]" in a title is not a classifier. A substantive
+  discussion held as an experiment is a `discussion`.
+
+**Display title.** This is a one-line title for readers, recorded
+explicitly (`meta --title`, or `overview --title`). The original title and
+the id stay and are shown in the room's details. No client derives a
+display title from the original by string rules.
+
+Every change of either is an append-only `discussion_meta` record: field,
+value, who, run, when and why. A metadata write never touches messages,
+invitations, runs, the open/closed state or `updated` (the list order).
+
+**Overview.** An overview is a short interpretation for readers. It is
+shared by the list and the top of the room, and it has three parts:
+
+- the purpose: what the discussion is trying to establish;
+- the outcome, which is optional: what it has concluded so far;
+- the unresolved points.
+
+Every part cites the messages it rests on as `[#n]`. WFE refuses a part
+without a citation, and a citation that is not a message of the discussion
+or is newer than the overview's coverage.
+
+| Field | |
+| --- | --- |
+| `author`, `run` | who wrote it: from a run, the facilitator's or the archive project's (its agent and run); outside a run, whoever is named (the person, an outside agent) |
+| `through` | the newest message it covers (default: the newest when written) |
+| `sources` | every message it cites |
+| `note`, `at` | why this revision, when |
+| `after` (views only) | messages newer than `through`: readers see "covers through #n, N later" |
+
+- An overview is not speech, not proof of agreement, and not the
+  discussion's state. It starts nothing.
+- A new overview is a new revision. The newest is current, and the earlier
+  ones stay in the store and in the archive.
+- Disagreement, uncertainty and open work belong in it.
+- An overview may be written in the readers' language. It condenses what
+  the cited messages say, and those messages stay one action away.
+- Writing one is available work, never a step every discussion must pass.
+  Reading a list or a room never runs a model.
+- Without an overview, readers get the **brief** (the earliest of the
+  person's messages and the conductor's announcements, first 400
+  characters), labelled as the request, never as a conclusion.
+
+**Status** (`status` in the list and the view) comes from WFE's records:
+
+- `room` is `open` or `closed`. A closed room may still owe work.
+- `working` counts open invitations, awaited results, runs of the
+  discussion still working and their open delegations.
+- `owed` counts every obligation, questions included (*Activities*,
+  *Conclusion*).
+- `awaiting` lists open questions, each with its receiver:
+  - a `talk` question goes to the requester, either a person id or a run
+    with its agent;
+  - any other open question goes to the configured person.
+  - `you` is true only when the receiver is the configured person.
+- `failed` lists failed invitations with WFE's reason.
+- `held` lists runs of the discussion that are stopped, interrupted or
+  unknown.
+
+**Archive.** Transcript records `meta` (field, value, by, run, note) and
+`overview` (all fields above but `after`). The horizon gains `meta` and
+`overview`; manifests written before have neither, which counts as 0. The
+manifest carries `category`, `displayTitle` and the current `overview`. A
+metadata change or a new overview makes the discussion due.
 
 ## Hand-off and reuse
 

@@ -452,7 +452,8 @@ test('HTTP: participants, create with a brief, an addressed post, the view with 
     const ov = await (await post('discussions/p16-http/overview', { purpose: 'HTTP経路の確認 [#1]', unresolved: ['sageの意見 [#2]'], note: 'first' })).json() as { overview: { author: string; sources: number[]; after: number } }
     assert.deepEqual([ov.overview.author, ov.overview.sources, ov.overview.after], ['Pat', [1, 2], 0])
     assert.equal((s.x.db.prepare('SELECT count(*) AS n FROM jobs').get() as { n: number }).n, jobsBefore, 'nothing started')
-    const listed = await (await fetch(`${root}/discussions?category=check&state=closed&limit=5`)).json() as { counts: Record<string, { open: number; closed: number }>; total: number; discussions: { id: string; displayTitle: string; overview: { purpose: string }; status: { room: string } }[] }
+    const listed = await (await fetch(`${root}/discussions?category=check&state=closed&limit=5`)).json() as { counts: Record<string, { open: number; closed: number }>; total: number; discussions: { id: string; displayTitle: string; newest: number; overview: { purpose: string }; status: { room: string } }[] }
+    assert.equal(listed.discussions[0].newest, 2)
     assert.deepEqual(listed.counts, { discussion: { open: 0, closed: 0 }, check: { open: 0, closed: 1 } })
     assert.deepEqual(listed.discussions.map(d => [d.id, d.displayTitle, d.overview.purpose, d.status.room]), [['p16-http', 'HTTPの確認', 'HTTP経路の確認 [#1]', 'closed']])
     assert.equal((await fetch(`${root}/discussions?category=discussion`).then(r => r.json()) as { total: number }).total, 0)

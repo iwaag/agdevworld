@@ -296,7 +296,7 @@ export function createHandler(config: ServiceConfig) {
           return send(res, 200, { person, disabled: 'disabled' in cfg ? cfg.disabled : null, participants: await ds.participants(), counts: l?.counts ?? null, total: l?.total ?? 0, offset: l?.offset ?? 0, discussions: await Promise.all((l?.discussions ?? []).map(async d => {
             const a = await archive.status(d.id)
             return {
-              id: d.id, title: d.title, displayTitle: d.displayTitle, category: d.category, created: d.created, updated: d.updated, state: d.state, count: d.count, members: d.members, participants: d.participants, open: d.open,
+              id: d.id, title: d.title, displayTitle: d.displayTitle, category: d.category, created: d.created, updated: d.updated, state: d.state, count: d.count, newest: d.last?.id ?? 0, members: d.members, participants: d.participants, open: d.open,
               conductor: d.conductor ?? null, activity: d.activity, overview: d.overview, brief: d.brief, status: d.status,
               archive: { state: a.state, commit: a.published?.commit ?? null, through: a.published?.horizon.message ?? null, url: a.published?.url ?? null },
             }

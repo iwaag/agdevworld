@@ -313,7 +313,7 @@ Gitea tree URL; the live horizon; the configured repository.
 
 | Route | |
 | --- | --- |
-| `GET api/discussions[?category=discussion\|check&state=open\|closed\|all&limit=&offset=]` | `{person, disabled, participants, counts, total, offset, discussions}`; participants are the facilitator and the invitable projects as their projects say now (`state`, `problem`); `counts` per category and state; each row with `category`, `displayTitle`, `participants` (project members), `overview` or `brief`, `status`, `activity`, `archive` — computed for the page's rows only |
+| `GET api/discussions[?category=discussion\|check&state=open\|closed\|all&limit=&offset=]` | `{person, disabled, participants, counts, total, offset, discussions}`; participants are the facilitator and the invitable projects as their projects say now (`state`, `problem`); `counts` per category and state; each row with `category`, `displayTitle`, `newest` (its newest message id), `participants` (project members), `overview` or `brief`, `status`, `activity`, `archive` — computed for the page's rows only |
 | `POST api/discussions {id, title, members?, category?, text?, token?, to?, re?, author?}` | creates (201; the same id by the same author again is 200), and posts the brief when `text` is given |
 | `POST api/discussions/<id>/meta {category?, displayTitle?, note?, author?}` | corrects the category or display title (`displayTitle: null` removes it); records only |
 | `GET api/discussions/<id>/overview` | `{overview, revisions, brief}` |

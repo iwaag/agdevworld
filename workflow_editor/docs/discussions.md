@@ -1,4 +1,4 @@
-# Discussions (workflow_editor p16, argue p4)
+# Discussions (workflow_editor p16, argue p4, argue p4 ex1)
 
 A discussion is a shared conversation of **a person, a facilitator and
 project agents**, each agent speaking through runs of its own project's
@@ -9,7 +9,7 @@ links of direct conversations ([conversations.md](conversations.md)), and
 adds members, invitations and an archive. Code: `server/discussions.ts`,
 `server/discussionArchive.ts`; CLI: `wfe discussion`; store: the
 conversation store (`<area>/.local/conversations/conversations.sqlite`,
-version 7).
+version 8).
 
 The conversation routes refuse a discussion (409 `is-discussion`) and the
 discussion routes refuse a conversation (409 `is-conversation`): a client
@@ -18,7 +18,9 @@ cannot give either the other's meaning by accident.
 Since argue p4 the facilitator is `ponderer/conduct`: one **conductor run**
 owns a discussion's progression across many attempts, and its graph shows
 how the discussion proceeds as discussion **activities** (*Conductor*,
-*Activities* below). Episode: `devdocs/episodes/argue/p4/`.
+*Activities* below). Episode: `devdocs/episodes/argue/p4/`. Since argue p4
+ex1 ponderer also keeps the archive, the summaries and the evaluations
+(`pj-ponderer`); the `argue` project is retired.
 
 ## Configuration
 
@@ -27,13 +29,20 @@ how the discussion proceeds as discussion **activities** (*Conductor*,
 ```json
 "discussions": {
   "facilitator": { "workspace": "ponderer", "workflow": "conduct" },
-  "participants": [{ "workspace": "forge", "workflow": "discuss" }, { "workspace": "argue", "workflow": "synthesize" }],
-  "archive": { "workspace": "argue" }
+  "participants": [{ "workspace": "forge", "workflow": "discuss" }, { "workspace": "archsage", "workflow": "discuss" }],
+  "archive": { "workspace": "ponderer" }
 }
 ```
 
 Without it, discussions are disabled (503 with the reason); existing records
 stay readable through the CLI.
+
+A participant is a workspace with one discussion workflow; the facilitator's
+workspace cannot also be a participant. Other workflows of a participating
+project (ponderer's `synthesize`, a forge `provide`) are reached by ordinary
+delegation or requests from that project's runs, and any run of the
+facilitator's or the archive project's workspace may speak there (a
+synthesis included).
 
 ## Members
 
@@ -42,7 +51,7 @@ A participant is identified by:
 | Kind | Id | Speaks through |
 | --- | --- | --- |
 | `person` | the configured person, or an author a client names (an automated trial) | the page, the CLI |
-| `facilitator` | the facilitator's workspace (`argue`) | runs of `argue/facilitate` |
+| `facilitator` | the facilitator's workspace (`ponderer`) | runs of `ponderer/conduct` (and, for a synthesis, other ponderer runs) |
 | `project` | the project's workspace (`forge`) | runs of its discussion workflow (`forge/discuss`) |
 
 The agent is the run's agent (`forge-agent`); the model is the run's own
@@ -244,7 +253,8 @@ re-invite explicitly.
 ## Archive
 
 WFE's store is authoritative for live speech. The archive is a reproducible
-copy in the archive project's repository (`pj-argue`):
+copy in the archive project's repository (`archive.workspace`'s origin;
+`pj-ponderer` since argue p4 ex1, `pj-argue` before):
 
 ```text
 discussions/<id>/manifest.json     format ag.argue.discussion.v1, identity, members and history,
@@ -254,9 +264,11 @@ discussions/<id>/manifest.json     format ag.argue.discussion.v1, identity, memb
 discussions/<id>/transcript.jsonl  append-only records: message | membership | invitation | link
                                    | activity (argue p4: activity, conductor, requester events)
                                    | annotation
-discussions/<id>/summary.md        synthesis (argue's runs; not this writer)
-knowledge/                         cross-discussion knowledge (argue's runs)
+discussions/<id>/summary.md        synthesis (the archive project's runs; not this writer)
 ```
+
+The format keeps its first name, `ag.argue.discussion.v1`, which every
+manifest carries.
 
 **One writer**: `DiscussionArchive`, run by the coordinator's reconcile every
 minute and by `wfe discussion archive`, in its own clone
@@ -272,10 +284,29 @@ minutes (at most an hour). A discussion is due when its live horizon goes
 beyond the published one or its open/closed state changed (the final
 catch-up on close).
 
+**Destination.** Each publication record keeps the repository its commit and
+horizon were verified in (`destination`: the origin URL without credentials;
+store v8). When `archive.workspace` names another project, nothing is
+assumed about the new repository:
+
+- a record of another destination (or one written before v8, which has
+  none) is `unverified`, never `current`, and its link still names the
+  repository it was verified in;
+- it is due: the next export reads the new destination's own manifest,
+  appends only what lies beyond that horizon (nothing, when the history was
+  imported there first) and records the commit it finds there;
+- the writer's clone of another origin is deleted and cloned again from the
+  destination, never re-pointed.
+
+A switch therefore moves the history first (an import that keeps the
+commits, as argue p4 ex1 did with `git merge --allow-unrelated-histories`),
+then the configuration; the reconcile verifies each discussion in the new
+repository within a minute.
+
 Status (`GET api/discussions/<id>/archive`, the view's `archive`, `wfe
-discussion archive --status`): `current`, `behind`, `failed`, `never` or
-`disabled`; the published commit, horizon, time and Gitea tree URL; the live
-horizon.
+discussion archive --status`): `current`, `behind`, `unverified`, `failed`,
+`never` or `disabled`; the published commit, horizon, time, destination and
+Gitea tree URL; the live horizon; the configured repository.
 
 ## HTTP
 
@@ -297,8 +328,12 @@ allowed one; the page's words are the configured person's).
 ## Hand-off and reuse
 
 An outcome is handed to an implementing project as an ordinary request
-naming the pinned source (`argue@<commit>:discussions/<id>/summary.md`, the
-messages); the argue run records the resulting run with `wfe discussion link
-<id> <msg> --run <ws>/<wf>/<run> --as handoff --note …`, which the archive
-exports. Later runs find knowledge in `pj-argue` `knowledge/` (`wfe projects
-files argue knowledge/…` from other projects).
+naming the pinned source (`ponderer@<commit>:discussions/<id>/summary.md`,
+the messages); the run that handed it over records the resulting run with
+`wfe discussion link <id> <msg> --run <ws>/<wf>/<run> --as handoff --note …`,
+which the archive exports. Earlier discussions are read in the archive
+project (`wfe projects read ponderer discussions/…`); reusable discussion
+knowledge is ponderer's `wedo-argue`; what a discussion found about its
+subject is the owning project's. Citations `argue@<commit>:…` written
+before argue p4 ex1 name commits that are in pj-ponderer's history
+(`HISTORY.md` there).

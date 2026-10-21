@@ -235,7 +235,7 @@ export function renderHomeView(root: HTMLElement, opts: { context?: boolean } = 
 
   // Discussions (workflow_editor p16): the entrance to them and to their
   // durable records — the meeting rooms are aghangout's, the archive is the
-  // argue project's repository.
+  // archive project's repository (ponderer's since argue p4 ex1).
   function renderDiscussionsCard(): HTMLElement {
     const card = h('section.card.u-glance.discussions-glance', h('div.card-head', h('h2', 'Discussions'), h('a.more-link', { href: hangoutHref(), title: 'Start or read discussions in aghangout' }, 'aghangout ↗')))
     if (discussionsError) { card.append(h('p.muted.small', `Not read: ${discussionsError}`)); return card }
@@ -246,7 +246,7 @@ export function renderHomeView(root: HTMLElement, opts: { context?: boolean } = 
     card.append(h('ul.disc-glance', rows.map(d => h('li', { dataset: { discussion: d.id } },
       h('a', { href: discussionHref(d.id) }, d.title),
       h('span.muted.small', ` · ${d.state} · ${d.members.length} members · ${d.count} messages${d.open ? ` · ${d.open} open invitation${d.open === 1 ? '' : 's'}` : ''}${d.activity ? ` · ${d.activity.state === 'waiting' ? `now: ${d.activity.kind === 'ask' ? `asking ${d.activity.asked.join(', ')}` : d.activity.kind === 'talk' ? 'asking the requester' : d.activity.kind}` : `last: ${d.activity.kind} ${d.activity.node}`}` : ''} · `,
-        d.archive.url ? h('a', { href: d.archive.url, target: '_blank', rel: 'noopener', title: 'The archived record in the argue repository' }, `archived through #${d.archive.through} (${d.archive.commit!.slice(0, 7)})`) : `archive: ${d.archive.state}`,
+        d.archive.url && d.archive.state !== 'unverified' ? h('a', { href: d.archive.url, target: '_blank', rel: 'noopener', title: 'The archived record in the archive project\'s repository' }, `archived through #${d.archive.through} (${d.archive.commit!.slice(0, 7)})`) : `archive: ${d.archive.state}`,
         d.archive.state === 'behind' || d.archive.state === 'failed' ? ` — ${d.archive.state}` : '')))))
     return card
   }

@@ -7,7 +7,7 @@
 //
 // - members: an append-only membership history (`join` / `leave`), folded
 //   into the current members. A participant is the configured person (or a
-//   named trial author), the facilitator (`argue/facilitate`) or a project
+//   named trial author), the facilitator (`ponderer/conduct`) or a project
 //   speaking through its discussion workflow (`<project>/discuss`);
 // - invitations: the only thing that starts a run in a discussion. One
 //   names a participant, the question, the messages it is about, who issued
@@ -75,9 +75,9 @@ const OPEN_STATES: InvitationState[] = ['pending', 'started']
 
 // conversations.json `discussions`: the facilitator, the projects that may be
 // invited, and the managed project whose repository keeps the archive.
-//   "discussions": { "facilitator": {"workspace": "argue", "workflow": "facilitate"},
+//   "discussions": { "facilitator": {"workspace": "ponderer", "workflow": "conduct"},
 //                    "participants": [{"workspace": "forge", "workflow": "discuss"}, …],
-//                    "archive": {"workspace": "argue"} }
+//                    "archive": {"workspace": "ponderer"} }
 export interface DiscussionConfig { person: string; facilitator: ConversationTarget; participants: ConversationTarget[]; archive: { workspace: string } | null }
 const NAME = /^[a-z0-9][a-z0-9_.-]*$/
 export function loadDiscussionConfig(area: string): DiscussionConfig | { disabled: string } {
@@ -627,7 +627,7 @@ export class DiscussionStore {
     } else {
       // A run speaking without an invitation of its own must still be a
       // member's run (e.g. a facilitator turn answering after a restart), or
-      // the archive project's (argue's synthesize, requested as ordinary work).
+      // the archive project's (a synthesis requested as ordinary work).
       if (!this.members(conv).some(m => m.participant === participant) && !this.invitations(conv).some(i => i.run === o.run) && participant !== cfg.archive?.workspace) throw new RequestError(403, `${o.run} is not a member's run in ${conv}`, { code: 'not-member' })
     }
     if (kind === 'synthesis' && participant !== cfg.facilitator.workspace && participant !== cfg.archive?.workspace) throw new RequestError(403, `a synthesis is the facilitator's or the archive's (${[cfg.facilitator.workspace, cfg.archive?.workspace].filter(Boolean).join(', ')}); a participant's view is a reply`, { code: 'not-facilitator' })

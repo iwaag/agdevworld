@@ -64,4 +64,11 @@ export const DISCUSSION_MIGRATIONS: Migration[] = [{
       re TEXT NOT NULL DEFAULT '[]', run TEXT, at TEXT NOT NULL, token TEXT, UNIQUE (conv, token));
     CREATE INDEX annotations_conv ON annotations (conv, id);
   `),
+}, {
+  // The archive's destination (argue p4 ex1): the repository a published
+  // commit and horizon were verified in. A row whose destination is not the
+  // configured archive repository (or, written before v8, has none) is
+  // `unverified` until the writer reads the configured one.
+  version: 8,
+  up: db => db.exec('ALTER TABLE archives ADD COLUMN destination TEXT'),
 }]

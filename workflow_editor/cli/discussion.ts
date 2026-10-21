@@ -93,8 +93,8 @@ contribute [<id>] (--text <t> | --file <f|->) --re <msg>… [--kind reply|questi
                               participant's and its invitation's. Name what you answer (--re): a
                               reply is never attributed by recency. reply/result/synthesis answer
                               your invitation; progress and question do not. synthesis is the
-                              facilitator's or the archive's (argue), shown apart from original
-                              speech. --completing <node>: that node of your run completes with the
+                              facilitator's project's or the archive project's (any of its
+                              workflows), shown apart from original speech. --completing <node>: that node of your run completes with the
                               message in the same command (a turn that spoke and left its node
                               running is held interrupted; p3 rts-vs-bot/discuss/run-001)
 invite [<id>] <participant> --question <q> [--re <msg>]… [--token <t>] [--author <person>]
@@ -124,9 +124,11 @@ reopen <id> [--author <who>]  continue it; nothing withdrawn or completed is rep
 dispatch                      start invitations not started yet, mark those whose run ended
                               without a contribution unanswered, tell waiting facilitators
                               (also done by the executor's reconcile every minute)
-archive [<id>…] [--status]    publish the archive (pj-argue discussions/<id>/manifest.json and
-                              transcript.jsonl) for the named or every due discussion, or say
-                              what is published: commit, horizon, and what is still behind
+archive [<id>…] [--status]    publish the archive (the archive project's discussions/<id>/
+                              manifest.json and transcript.jsonl) for the named or every due
+                              discussion, or say what is published: commit, horizon, the
+                              repository it was verified in, and what is still behind
+                              (unverified: published in another repository than the configured one)
 
 Carrying the person's words into a run: wfe run instruct|answer … --source-message <id>:<msg>.`
 
@@ -419,7 +421,8 @@ export async function discussionCommand(c: DiscussionCli): Promise<number> {
         if (c.flag('status')) {
           const targets = args.length ? args : ds.list().map(d => d.id)
           const rows = await Promise.all(targets.map(async id => ({ id, ...await a.status(id) })))
-          c.out(rows.map(r => `${r.id.padEnd(24)} ${r.state.padEnd(8)} ${r.published ? `${r.published.commit.slice(0, 12)} through #${r.published.horizon.message} (live #${r.live.message})` : `live #${r.live.message}`}${r.error ? ` — ${r.error}` : ''}`).join('\n') || 'No discussions.', rows)
+          const repo = rows[0]?.repository ?? (await a.origin() as { web?: string | null; url?: string }).web ?? null
+          c.out([...(repo ? [`Archive repository: ${repo}`] : []), ...rows.map(r => `${r.id.padEnd(24)} ${r.state.padEnd(10)} ${r.published ? `${r.published.commit.slice(0, 12)} through #${r.published.horizon.message} (live #${r.live.message})` : `live #${r.live.message}`}${r.error ? ` — ${r.error}` : ''}`)].join('\n') || 'No discussions.', rows)
           return 0
         }
         const r = await a.publish(args.length ? args : undefined)

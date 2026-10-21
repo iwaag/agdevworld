@@ -1,6 +1,7 @@
 // The discussion archive (workflow_editor p16, docs/discussions.md
 // "Archive"): reproducible copies of discussions in the archive project's
-// repository (pj-argue), written by one owner — this module, in the
+// repository (conversations.json "discussions".archive; pj-ponderer since
+// argue p4 ex1), written by one owner — this module, in the
 // coordinator's reconcile and `wfe discussion archive` — in a clone nobody
 // else uses (<area>/.local/discussions/archive), under a file lock.
 //
@@ -18,9 +19,18 @@
 // twice; the next export finds the horizon already there and records the
 // commit it observes. A push that fails leaves the live discussion untouched
 // and the archive `failed` with the reason, retried at the next reconcile.
-// Interpretation (summary.md, knowledge/) is written by the archive project's
-// own runs and integrated like any run's work; this writer never touches it.
-import { existsSync, mkdirSync, readFileSync, writeFileSync, appendFileSync } from 'node:fs'
+// Interpretation (summary.md and the like) is written by the archive
+// project's own runs and integrated like any run's work; this writer never
+// touches it.
+//
+// The destination (argue p4 ex1): each row records the repository its
+// commit and horizon were verified in. When the configured archive project
+// changes, a row of another destination is `unverified` — its commit names
+// another repository — and due: the next export reads the new destination's
+// own manifest, appends only beyond that horizon, and records the commit it
+// finds there. The writer's clone of another origin is rebuilt, not
+// re-pointed.
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync, appendFileSync } from 'node:fs'
 import { isAbsolute, join, resolve } from 'node:path'
 import type { DiscussionStore, Horizon } from './discussions.ts'
 import { git, gitOk } from './git.ts'
@@ -29,11 +39,12 @@ import { withLock } from './lock.ts'
 export const ARCHIVE_FORMAT = 'ag.argue.discussion.v1'
 const IDENTITY = { 'user.name': 'WFE discussion archive', 'user.email': 'wfe-discussion-archive@agdev.invalid' }
 
-export interface ArchiveRow { conv: string; state: 'current' | 'failed' | 'publishing'; commit_id: string | null; horizon: string | null; published_at: string | null; error: string | null; tries: number; attempted_at: string | null }
+export interface ArchiveRow { conv: string; state: 'current' | 'failed' | 'publishing'; commit_id: string | null; horizon: string | null; published_at: string | null; error: string | null; tries: number; attempted_at: string | null; destination: string | null }
 export interface ArchiveStatus {
-  state: 'current' | 'behind' | 'failed' | 'never' | 'disabled'
+  state: 'current' | 'behind' | 'unverified' | 'failed' | 'never' | 'disabled'
   live: Horizon
-  published: { commit: string; horizon: Horizon; at: string | null; url: string | null } | null
+  // destination: the repository the commit was verified in (null: before v8)
+  published: { commit: string; horizon: Horizon; at: string | null; url: string | null; destination: string | null } | null
   error: string | null; tries: number; attempted: string | null
   repository: string | null
 }
@@ -41,6 +52,10 @@ const ZERO: Horizon = { message: 0, link: 0, membership: 0, event: 0, activity: 
 // A manifest written before argue p4 has no activity or annotation horizon: 0.
 const covers = (a: Horizon, b: Horizon) => a.message >= b.message && a.link >= b.link && a.membership >= b.membership && a.event >= b.event && (a.activity ?? 0) >= (b.activity ?? 0) && (a.annotation ?? 0) >= (b.annotation ?? 0)
 const now = () => new Date().toISOString()
+// A repository's identity: its URL without credentials, `.git` or a final
+// slash (a local path as given, resolved).
+export const destinationOf = (url: string) => url.replace(/\/\/[^@/]+@/, '//').replace(/\/+$/, '').replace(/\.git$/, '')
+const webOf = (destination: string) => /^https?:\/\//.test(destination) ? destination : null
 
 export class DiscussionArchive {
   readonly ds: DiscussionStore
@@ -51,14 +66,14 @@ export class DiscussionArchive {
   }
   private row(conv: string): ArchiveRow | undefined { return this.ds.db.prepare('SELECT * FROM archives WHERE conv = ?').get(conv) as ArchiveRow | undefined }
   private record(conv: string, o: Partial<ArchiveRow>) {
-    const cur = this.row(conv) ?? { conv, state: 'failed', commit_id: null, horizon: null, published_at: null, error: null, tries: 0, attempted_at: null }
+    const cur = this.row(conv) ?? { conv, state: 'failed', commit_id: null, horizon: null, published_at: null, error: null, tries: 0, attempted_at: null, destination: null }
     const n = { ...cur, ...o }
-    this.ds.db.prepare('INSERT INTO archives (conv, state, commit_id, horizon, published_at, error, tries, attempted_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (conv) DO UPDATE SET state = excluded.state, commit_id = excluded.commit_id, horizon = excluded.horizon, published_at = excluded.published_at, error = excluded.error, tries = excluded.tries, attempted_at = excluded.attempted_at')
-      .run(conv, n.state, n.commit_id, n.horizon, n.published_at, n.error, n.tries, n.attempted_at)
+    this.ds.db.prepare('INSERT INTO archives (conv, state, commit_id, horizon, published_at, error, tries, attempted_at, destination) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (conv) DO UPDATE SET state = excluded.state, commit_id = excluded.commit_id, horizon = excluded.horizon, published_at = excluded.published_at, error = excluded.error, tries = excluded.tries, attempted_at = excluded.attempted_at, destination = excluded.destination')
+      .run(conv, n.state, n.commit_id, n.horizon, n.published_at, n.error, n.tries, n.attempted_at, n.destination)
   }
 
   // The archive project's repository: its workspace's origin.
-  async origin(): Promise<{ url: string; web: string | null } | { disabled: string }> {
+  async origin(): Promise<{ url: string; web: string | null; destination: string } | { disabled: string }> {
     const cfg = this.ds.config()
     if ('disabled' in cfg) return cfg
     if (!cfg.archive) return { disabled: 'conversations.json "discussions" names no archive' }
@@ -67,8 +82,8 @@ export class DiscussionArchive {
       const ws = await this.ds.exec.workspace(cfg.archive.workspace)
       let url = (await gitOk(ws.root, ['remote', 'get-url', 'origin'])).trim()
       if (!/^[a-z+]+:\/\//.test(url) && !isAbsolute(url) && !/^[^/]+@[^:]+:/.test(url)) url = resolve(ws.root, url)
-      const web = /^https?:\/\//.test(url) ? url.replace(/\/\/[^@/]+@/, '//').replace(/\.git$/, '') : null
-      return { url, web }
+      const destination = destinationOf(url)
+      return { url, web: webOf(destination), destination }
     } catch (e) { return { disabled: `the archive workspace ${cfg.archive.workspace} has no readable origin: ${(e as Error).message}` } }
   }
 
@@ -76,21 +91,28 @@ export class DiscussionArchive {
     const live = this.ds.horizon(conv)
     const o = await this.origin()
     const r = this.row(conv)
-    const published = r?.commit_id && r.horizon ? { commit: r.commit_id, horizon: JSON.parse(r.horizon) as Horizon, at: r.published_at, url: 'web' in o && o.web ? `${o.web}/src/commit/${r.commit_id}/discussions/${conv}` : null } : null
+    // A link names the repository the commit was verified in, never the
+    // configured one by assumption.
+    const web = r?.destination ? webOf(r.destination) : null
+    const published = r?.commit_id && r.horizon ? { commit: r.commit_id, horizon: JSON.parse(r.horizon) as Horizon, at: r.published_at, url: web ? `${web}/src/commit/${r.commit_id}/discussions/${conv}` : null, destination: r.destination ?? null } : null
     // Closing or reopening is published too (the final catch-up on close).
     const sameState = !r?.horizon || (JSON.parse(r.horizon) as { state?: string }).state === this.ds.discussion(conv)?.state
-    const state: ArchiveStatus['state'] = 'disabled' in o ? 'disabled' : r?.state === 'failed' ? 'failed' : !published ? 'never' : covers(published.horizon, live) && sameState ? 'current' : 'behind'
-    return { state, live, published, error: 'disabled' in o ? o.disabled : r?.state === 'failed' ? r.error : null, tries: r?.tries ?? 0, attempted: r?.attempted_at ?? null, repository: 'disabled' in o ? null : o.web ?? o.url }
+    const elsewhere = !!published && 'destination' in o && published.destination !== o.destination
+    const state: ArchiveStatus['state'] = 'disabled' in o ? 'disabled' : r?.state === 'failed' ? 'failed' : !published ? 'never' : elsewhere ? 'unverified' : covers(published.horizon, live) && sameState ? 'current' : 'behind'
+    return { state, live, published, error: 'disabled' in o ? o.disabled : r?.state === 'failed' ? r.error : elsewhere ? `published in ${published!.destination ?? 'a repository not recorded (before store v8)'}; not yet verified in ${o.destination}` : null, tries: r?.tries ?? 0, attempted: r?.attempted_at ?? null, repository: 'disabled' in o ? null : o.web ?? o.url }
   }
 
   // Discussions whose live records go beyond what was last published, or
-  // whose state (open/closed) differs from the published one, or that failed.
-  // A failed one waits 2^tries minutes (at most an hour) before the next try.
-  due(at = Date.now()): string[] {
+  // whose state (open/closed) differs from the published one, or that failed,
+  // or whose publication was verified in another destination than `dest` (the
+  // configured one; given by publish). A failed one waits 2^tries minutes (at
+  // most an hour) before the next try.
+  due(at = Date.now(), dest?: string): string[] {
     return this.ds.list().filter(d => {
       const r = this.row(d.id)
       if (r?.state === 'failed' && r.attempted_at && at - Date.parse(r.attempted_at) < Math.min(2 ** r.tries, 60) * 60_000) return false
       if (!r || r.state !== 'current' || !r.horizon) return true
+      if (dest !== undefined && r.destination !== dest) return true
       const h = JSON.parse(r.horizon) as Horizon & { state?: string }
       return !covers(h, this.ds.horizon(d.id)) || h.state !== d.state
     }).map(d => d.id)
@@ -103,7 +125,7 @@ export class DiscussionArchive {
   async publish(convs?: string[], o: { beforePush?: () => Promise<void>; afterPush?: () => Promise<void> } = {}): Promise<{ published: { conv: string; commit: string; records: number }[]; unchanged: string[]; failed: { conv: string; error: string }[] }> {
     const origin = await this.origin()
     if ('disabled' in origin) return { published: [], unchanged: [], failed: (convs ?? this.due()).map(conv => ({ conv, error: origin.disabled })) }
-    const targets = convs ?? this.due()
+    const targets = convs ?? this.due(Date.now(), origin.destination)
     if (!targets.length) return { published: [], unchanged: [], failed: [] }
     mkdirSync(join(this.dir, '..'), { recursive: true })
     return withLock(join(this.dir, '..', 'archive.writer'), async () => {
@@ -112,8 +134,14 @@ export class DiscussionArchive {
       const at = now()
       for (const conv of targets) this.record(conv, { attempted_at: at })
       try {
+        // The clone is disposable: one of another repository is rebuilt from
+        // the destination's published truth, never re-pointed.
+        if (existsSync(join(this.dir, '.git'))) {
+          const was = await git(this.dir, ['remote', 'get-url', 'origin'], { env })
+          if (was.code !== 0 || destinationOf(was.stdout.trim()) !== origin.destination) rmSync(this.dir, { recursive: true, force: true })
+          else await g(['remote', 'set-url', 'origin', origin.url])
+        }
         if (!existsSync(join(this.dir, '.git'))) await gitOk(join(this.dir, '..'), ['clone', '-q', '--', origin.url, this.dir], { env, timeoutMs: 180_000 })
-        else await g(['remote', 'set-url', 'origin', origin.url])
         for (let round = 1; ; round++) {
           await g(['fetch', '-q', 'origin'])
           const branch = await this.branch(env)
@@ -147,7 +175,7 @@ export class DiscussionArchive {
             const m = this.published(conv)
             if (!m) continue
             const commit = (await g(['log', '-1', '--format=%H', '--', `discussions/${conv}/manifest.json`])).trim()
-            this.record(conv, { state: 'current', commit_id: commit, horizon: JSON.stringify({ ...m.horizon, state: m.state }), published_at: m.exports.at(-1)?.at ?? null, error: null, tries: 0 })
+            this.record(conv, { state: 'current', commit_id: commit, horizon: JSON.stringify({ ...m.horizon, state: m.state }), published_at: m.exports.at(-1)?.at ?? null, error: null, tries: 0, destination: origin.destination })
           }
           return { published: made, unchanged, failed: [] }
         }

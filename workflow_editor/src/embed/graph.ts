@@ -32,6 +32,7 @@ const SHADOW_CSS = `${css.replace(/:root\b/g, ':host')}
 :host { display: block; position: relative; contain: content; }
 .wfe-embed { position: absolute; inset: 0; display: flex; }
 .wfe-embed .canvas { flex: 1; min-height: 0; height: 100%; border-radius: 0; }
+.wfe-embed .frame-note { display: none; } /* the editor's hint; the host page says what is shown, and Fit stays */
 `
 
 export function mountGraph(host: HTMLElement, first: GraphOptions): Graph {

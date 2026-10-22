@@ -195,6 +195,13 @@ service's (conversations.md, *Browser clients*).
 { "repository": "<clone URL of the shared repository>", "branch": "main" }
 ```
 
+Optional: `"mirrors": ["<URL>", …]` — backup copies on other hosts, pushed
+after each publication and by every executor reconcile while behind (state
+in `wfe challenge status`); `"sshCommand"` — how an `ssh://` mirror is
+reached (`GIT_SSH_COMMAND` for mirror pushes only). A mirror is never read:
+recovery is a clone of it pushed to a new repository, then `wfe challenge
+reindex`.
+
 Without it every route answers 503 with the reason, and attaching is refused.
 Git credentials are the service's Gitea ones (`gitea.json`), passed per
 command, never written into the clone.

@@ -36,7 +36,8 @@ resolve|withdraw|reopen <id> --base <commit> [--note <why>] WRITER
                               a state change is an ordinary edit; --note is its commit message.
                               Say what resolved it in the body when that helps the next reader
 ops [--all]                   the journal: writes not yet published (unsynced, conflict, …)
-retry [<op>]                  publish what is not yet published (also every executor reconcile)
+retry [<op>]                  publish what is not yet published, and catch up backup mirrors
+                              (also every executor reconcile)
 discard <op> --reason <t> --by <name>
                               drop a write that is not published (its draft stays in ops --all)
 status                        the repository, the head the index read, the last fetch, mirrors
@@ -236,7 +237,9 @@ export async function challengeCommand(c: ChallengeCli): Promise<number> {
         }
         if (id) { const op = await local().retry(Number(id)); c.out(opLine(op), { operation: op }); return op.state === 'published' ? 0 : 1 }
         const r = await local().publish()
-        c.out(`published ${r.published.length}, unsynced ${r.failed.length}, conflicts ${r.conflicts.length}, refused ${r.refused.length}${r.failed.length ? ` — ${r.failed[0]!.error}` : ''}`, r)
+        await local().sync({ force: true })
+        const mirrors = await local().mirror()
+        c.out([`published ${r.published.length}, unsynced ${r.failed.length}, conflicts ${r.conflicts.length}, refused ${r.refused.length}${r.failed.length ? ` — ${r.failed[0]!.error}` : ''}`, ...mirrors].join('\n'), { ...r, mirrors })
         return r.failed.length ? 1 : 0
       }
       case 'discard': {

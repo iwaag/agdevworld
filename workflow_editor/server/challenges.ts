@@ -67,22 +67,23 @@ const now = () => new Date().toISOString()
 const sha256 = (b: string | Buffer) => createHash('sha256').update(b).digest('hex')
 
 // <area>/challenges.json: {"repository": "<clone URL or path>", "branch"?: "main", "web"?: "<browser URL>",
-//   "mirrors"?: ["<URL of a copy on another host>", …]}
+//   "mirrors"?: ["<URL of a copy on another host>", …], "sshCommand"?: "ssh -i <key> -o BatchMode=yes"}
 // A mirror is a backup: after a publication the branch is pushed there too
-// (best effort; its state is in status()). It is never read.
-export interface ChallengeConfig { url: string; branch: string; web: string | null; destination: string; mirrors: string[] }
+// (best effort; its state is in status()). It is never read. `sshCommand`
+// is how an ssh:// mirror is reached (GIT_SSH_COMMAND for mirror pushes only).
+export interface ChallengeConfig { url: string; branch: string; web: string | null; destination: string; mirrors: string[]; sshCommand: string | null }
 export function loadChallengeConfig(area: string): ChallengeConfig | { disabled: string } {
   const file = join(area, 'challenges.json')
   if (!existsSync(file)) return { disabled: `no ${file}: no challenge repository is configured here` }
   try {
-    const o = JSON.parse(readFileSync(file, 'utf8')) as { repository?: unknown; branch?: unknown; web?: unknown; mirrors?: unknown }
+    const o = JSON.parse(readFileSync(file, 'utf8')) as { repository?: unknown; branch?: unknown; web?: unknown; mirrors?: unknown; sshCommand?: unknown }
     if (typeof o.repository !== 'string' || !o.repository.trim()) return { disabled: `${file} needs {"repository": "<clone URL>"}` }
     let url = o.repository.trim()
     if (!/^[a-z+]+:\/\//.test(url) && !isAbsolute(url) && !/^[^/]+@[^:]+:/.test(url)) url = resolve(area, url)
     const destination = url.replace(/\/\/[^@/]+@/, '//').replace(/\/+$/, '').replace(/\.git$/, '')
     const web = typeof o.web === 'string' && o.web ? o.web.replace(/\/+$/, '') : /^https?:\/\//.test(destination) ? destination : null
     if (o.mirrors !== undefined && (!Array.isArray(o.mirrors) || !o.mirrors.every(m => typeof m === 'string' && m))) return { disabled: `${file}: "mirrors" is a list of repository URLs` }
-    return { url, branch: typeof o.branch === 'string' && o.branch ? o.branch : 'main', web, destination, mirrors: (o.mirrors as string[] | undefined) ?? [] }
+    return { url, branch: typeof o.branch === 'string' && o.branch ? o.branch : 'main', web, destination, mirrors: (o.mirrors as string[] | undefined) ?? [], sshCommand: typeof o.sshCommand === 'string' && o.sshCommand ? o.sshCommand : null }
   } catch (e) { return { disabled: `${file} cannot be read: ${(e as Error).message}` } }
 }
 
@@ -303,7 +304,7 @@ export class ChallengeStore {
     for (const url of c.mirrors) {
       const was = JSON.parse(this.meta(`mirror:${url}`) ?? '{}') as { commit?: string | null; error?: string | null }
       if (was.commit === head && !was.error) continue
-      const p = await git(this.clone, ['push', '-q', url, `${head}:refs/heads/${c.branch}`], { env: await this.env(), timeoutMs: 120_000 })
+      const p = await git(this.clone, ['push', '-q', url, `${head}:refs/heads/${c.branch}`], { env: { ...await this.env(), ...(c.sshCommand ? { GIT_SSH_COMMAND: c.sshCommand } : {}) }, timeoutMs: 120_000 })
       const rec = p.code === 0 ? { commit: head, at: now(), error: null } : { commit: was.commit ?? null, at: now(), error: (p.stderr.trim() || `exit ${p.code}`).slice(0, 500) }
       this.setMeta(`mirror:${url}`, JSON.stringify(rec))
       notes.push(`challenge mirror ${url}: ${rec.error ? `failed — ${rec.error}` : `at ${head.slice(0, 12)}`}`)

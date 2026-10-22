@@ -103,7 +103,7 @@ function delegateFields(ctx: InspectorContext, n: Workflow['nodes'][string], ro:
       disabled: ro, 'aria-label': 'Delegate target',
       onchange: (e: Event) => { const v = (e.target as HTMLSelectElement).value; if (v) n.workflow = v; else delete n.workflow; actions.changed(true) },
     }, wfOptions)),
-    chosen && chosen.intake === false ? h('p.banner.warn.small', `${project}/${chosen.id} does not accept requests (intake: zulip requests); a dispatch to it is refused.`) : null,
+    chosen && chosen.intake === false ? h('p.banner.warn.small', `${project}/${chosen.id} opts out of requests (intake: zulip ""); a dispatch to it is refused.`) : null,
     h('label.field', h('span', 'Who accepts the child\'s result'), h('select', {
       disabled: ro, 'aria-label': 'Delegate acceptance',
       onchange: (e: Event) => { const v = (e.target as HTMLSelectElement).value; if (v === 'parent') n.accepts = 'parent'; else delete n.accepts; actions.changed(true) },

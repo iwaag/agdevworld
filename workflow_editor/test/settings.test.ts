@@ -68,11 +68,11 @@ test('model: execution, intake and confirms are read, written back and validated
   assert.ok(again.ok)
   assert.deepEqual(again.model.execution, w.execution)
   assert.equal(again.model.nodes.present.confirms, 'result')
-  // Legacy definitions with no intake retain their original settings and digest.
-  const legacy = parseWorkflow(newWorkflowText(base()))
-  assert.ok(legacy.ok)
-  assert.equal(legacy.model.intake.zulip, '')
-  assert.doesNotMatch(newWorkflowText(legacy.model), /execution|intake|confirms/)
+  // An explicit opt-out is written and read back as itself (fix2).
+  const off = parseWorkflow(newWorkflowText(base()))
+  assert.ok(off.ok)
+  assert.equal(off.model.intake.zulip, '')
+  assert.doesNotMatch(newWorkflowText(off.model), /execution|confirms/)
   const codes = (w: Workflow) => validateWorkflow(w).filter(i => i.severity === 'error').map(i => i.code).sort()
   assert.deepEqual(codes({ ...base(), execution: { agent: 'Bad Agent', profile: 'x y', guides: ['../out.md', '/abs.md'] } }), ['execution-agent', 'execution-guide-path', 'execution-guide-path', 'execution-profile'])
   assert.deepEqual(codes({ ...base(), intake: { zulip: 'everything' } }), ['intake-mode'])
@@ -87,7 +87,8 @@ test('model: execution, intake and confirms are read, written back and validated
 test('definition approval covers the settings when declared; workflows without them keep their digest', async () => {
   const w = base()
   const plain = definitionProjection(w) as Record<string, unknown>
-  assert.ok(!('execution' in plain) && !('intake' in plain), 'no new keys for a workflow that declares none')
+  assert.ok(!('execution' in plain), 'no execution key for a workflow that declares none')
+  assert.deepEqual(plain.intake, { zulip: '' }, 'intake is always projected (fix2)')
   const before = await semanticDigest('definition', w)
   const withProfile = { ...w, execution: { agent: '', profile: 'opus', guides: [] } }
   assert.notEqual(await semanticDigest('definition', withProfile), before, 'changing the profile stales the approval')

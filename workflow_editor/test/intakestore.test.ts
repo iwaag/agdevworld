@@ -347,6 +347,14 @@ test('an empty template declares intake too, while an explicit workflow opt-out 
   assert.ok((await i.due()).channels.some(c => c.workflow === 'blank'))
   await writeFile(path, text.replace('zulip: requests', 'zulip: ""'))
   assert.ok(!(await i.due()).channels.some(c => c.workflow === 'blank'))
+  // fix2: without a declaration it accepts requests; a wrong type is a problem.
+  await writeFile(path, text.replace(/intake:\n {2}zulip: requests\n/, ''))
+  assert.doesNotMatch(await readFile(path, 'utf8'), /intake/)
+  assert.ok((await i.due()).channels.some(c => c.workflow === 'blank'))
+  await writeFile(path, text.replace('zulip: requests', 'zulip: true'))
+  const due = await i.due()
+  assert.ok(!due.channels.some(c => c.workflow === 'blank'))
+  assert.ok(due.problems.some(p => /blank\.yaml cannot be read: \$\.intake\.zulip/.test(p)), due.problems.join('\n'))
   i.close()
 })
 

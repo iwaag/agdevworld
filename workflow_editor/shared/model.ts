@@ -47,8 +47,9 @@ export function docSteps(d: Documentation): DocSteps | null {
 // the agent identity, the host's execution profile and project-relative
 // guides added to the common workflow contract; credentials stay in host
 // configuration. `intake.zulip: requests` lets the workflow's Zulip channel
-// accept request topics (docs/intake.md). Empty values: the host's defaults,
-// no intake.
+// accept request topics (docs/intake.md). Empty execution values: the host's
+// defaults. Intake is on unless the file opts out with `zulip: ""` (fix2):
+// an absent intake, an empty mapping or an absent zulip read as requests.
 export const INTAKE_MODES = ['requests'] as const
 // A talk node may be the run's designated result confirmation (p6): the
 // person's confirmation there maps to the result decision (docs/runs.md).
@@ -287,7 +288,8 @@ export function workflowFromData(raw: unknown): { workflow: Workflow; issues: Sh
   if (execution.session !== undefined && execution.session !== null) w.execution.session = text(execution, 'session', '$.execution', issues)
   if (execution.node !== undefined && execution.node !== null) w.execution.node = text(execution, 'node', '$.execution', issues)
   if (execution.lane !== undefined && execution.lane !== null) w.execution.lane = text(execution, 'lane', '$.execution', issues)
-  w.intake = { zulip: text(map(raw, 'intake', '$', issues), 'zulip', '$.intake', issues) }
+  const intake = map(raw, 'intake', '$', issues)
+  w.intake = { zulip: intake.zulip === undefined || intake.zulip === null ? 'requests' : text(intake, 'zulip', '$.intake', issues) }
   const approvals = map(raw, 'approvals', '$', issues)
   for (const [key, value] of Object.entries(approvals)) {
     const path = `$.approvals.${key}`

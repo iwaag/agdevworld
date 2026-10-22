@@ -19,7 +19,7 @@ export interface WorkflowRef {
   // Delegate targets in that file's saved content (delegateTargets): a
   // workflow id of the same project, or `<project>/<workflow>` of another.
   delegates: string[]
-  intake?: boolean // declares intake: {zulip: requests} (p10: a delegation is delivered through it)
+  intake?: boolean // accepts requests: the default, false for intake: {zulip: ""} (p10: a delegation is delivered through it; fix2)
 }
 export interface ValidationContext {
   repositories?: RepositoryInfo[]
@@ -99,7 +99,7 @@ export function validateWorkflow(w: Workflow, ctx: ValidationContext = {}): Issu
     if (p === null || p === '.') issues.push(err('execution-guide-path', `execution.guides[${i}] "${g}" must be a project-relative file path without "..", or <project>:<path> for a file of another managed project.`, { field: 'execution' }))
   })
   if (new Set(w.execution.guides.map(guideKey)).size !== w.execution.guides.length) issues.push(warn('execution-guide-duplicate', 'execution.guides lists a guide twice.', { field: 'execution' }))
-  if (w.intake.zulip && !(INTAKE_MODES as readonly string[]).includes(w.intake.zulip)) issues.push(err('intake-mode', `intake.zulip "${w.intake.zulip}" is not supported; expected ${INTAKE_MODES.join(' or ')} (or leave it out).`, { field: 'intake' }))
+  if (w.intake.zulip && !(INTAKE_MODES as readonly string[]).includes(w.intake.zulip)) issues.push(err('intake-mode', `intake.zulip "${w.intake.zulip}" is not supported; expected ${INTAKE_MODES.join(' or ')}, or "" to accept none.`, { field: 'intake' }))
 
   // Repository bindings
   const byPath = new Map((ctx.repositories ?? []).map(r => [r.path, r]))
@@ -136,7 +136,7 @@ export function validateWorkflow(w: Workflow, ctx: ValidationContext = {}): Issu
       if (!n.workflow) issues.push(err('delegate-target-missing', `Delegate node "${id}" has no target workflow.`, { node: id }))
       else if (own && n.workflow === w.id) issues.push(err('delegate-self', `Delegate node "${id}" targets its own workflow.`, { node: id }))
       else if (peers && !peers.some(r => r.id === n.workflow)) issues.push(err('delegate-target-unknown', `Delegate node "${id}" targets workflow "${n.workflow}", which does not exist in ${own ? 'this project' : `project ${n.project}`}.`, { node: id }))
-      else if (peers && peers.find(r => r.id === n.workflow)?.intake === false) issues.push(warn('delegate-no-intake', `Delegate node "${id}" targets ${n.project ? `${n.project}/` : ''}${n.workflow}, which does not accept requests (intake: {zulip: requests}); a dispatch to it is refused.`, { node: id }))
+      else if (peers && peers.find(r => r.id === n.workflow)?.intake === false) issues.push(warn('delegate-no-intake', `Delegate node "${id}" targets ${n.project ? `${n.project}/` : ''}${n.workflow}, which opts out of requests (intake: {zulip: ""}); a dispatch to it is refused.`, { node: id }))
       if (n.accepts && !(DELEGATE_ACCEPTS as readonly string[]).includes(n.accepts)) issues.push(err('delegate-accepts', `Delegate node "${id}" has accepts "${n.accepts}"; expected ${DELEGATE_ACCEPTS.join(' or ')}.`, { node: id }))
     } else if (n.workflow || n.project || n.accepts) {
       issues.push(warn('workflow-on-non-delegate', `Node "${id}" is "${n.type}" but names a delegate target (${['workflow', 'project', 'accepts'].filter(k => n[k as 'workflow']).join(', ')}); only delegate nodes use it.`, { node: id }))

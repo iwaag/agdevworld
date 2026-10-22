@@ -163,10 +163,13 @@ export class DelegateStore {
     const notes: string[] = []
     // The target as it is now: it exists, validates and accepts requests.
     const summary = (await target.workflowSummaries()).list.find(s => s.id === gn.workflow)
-    if (!summary) throw new RequestError(409, `project ${project} (workspace ${target.reg.id}) has no workflow "${gn.workflow}"`, { code: 'delegate-target' })
+    if (!summary) {
+      const unreadable = (await target.workflowSummaries()).list.find(s => !s.id && s.problem && /^(.*)\.ya?ml$/.exec(s.file)?.[1] === gn.workflow)
+      throw new RequestError(409, unreadable ? `${project}/${unreadable.file} cannot be read: ${unreadable.problem!.message}` : `project ${project} (workspace ${target.reg.id}) has no workflow "${gn.workflow}"`, { code: 'delegate-target' })
+    }
     const tw = await target.workflowResponse(summary.file)
     if (!tw.workflow || tw.issues.some(i => i.severity === 'error')) throw new RequestError(409, `${project}/${gn.workflow} has validation errors; a child needs a valid definition (wfe validate ${gn.workflow} --workspace ${target.reg.id})`, { code: 'delegate-target' })
-    if (tw.workflow.intake.zulip !== 'requests') throw new RequestError(409, `${project}/${gn.workflow} does not accept requests (intake: {zulip: requests}); a delegation is delivered through its intake`, { code: 'delegate-target' })
+    if (tw.workflow.intake.zulip !== 'requests') throw new RequestError(409, `${project}/${gn.workflow} opts out of requests (intake: {zulip: ""}); a delegation is delivered through its intake`, { code: 'delegate-target' })
     // Cycles: the target's definitions reaching back, and the active ancestors.
     const self = `${rec.project}/${rec.workflow}`
     const tkey = `${project}/${gn.workflow}`

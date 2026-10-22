@@ -133,8 +133,9 @@ export class IntakeStore {
   // ---- routes: the configured workflow channels ---------------------------------------------
 
   // A channel routes to a workflow when the notifier recorded its stream id,
-  // the workflow (as it is now in its workspace) declares intake.zulip:
-  // requests, and the project has an available workspace here. Nothing is routed by name.
+  // the workflow (as it is now in its workspace) accepts requests (the
+  // default; intake: {zulip: ""} opts out, fix2), and the project has an
+  // available workspace here. Nothing is routed by name.
   async routes(): Promise<{ realm: string; routes: Route[]; problems: string[] } | { disabled: string }> {
     const c = loadIntakeConfig(this.area)
     if ('disabled' in c) return c
@@ -152,7 +153,9 @@ export class IntakeStore {
       if (!(await observe(reg1)).available) { problems.push(`intake: project ${project}: workspace ${reg1.id} is not available`); continue }
       const ws = new Workspace(reg1)
       for (const s of (await ws.workflowSummaries()).list) {
-        if (!s.id) continue
+        // An unreadable file (an intake of the wrong type, fix2) is neither on
+        // nor off: it is reported, not skipped in silence.
+        if (!s.id) { if (s.problem) problems.push(`intake: ${project}: ${s.file} cannot be read: ${s.problem.message}`); continue }
         const wf = (await ws.workflowResponse(s.file)).workflow
         if (wf?.intake.zulip !== 'requests') continue
         const target = this.notify?.target(`channel:${project}/${s.id}`)

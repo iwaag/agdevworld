@@ -63,14 +63,16 @@ export function definitionProjection(w: Workflow) {
     .map(e => [e.from, e.to] as const)
     .filter(([from, to]) => { const k = canonicalJson([from, to]); if (seen.has(k)) return false; seen.add(k); return true })
     .sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : a[1] < b[1] ? -1 : a[1] > b[1] ? 1 : 0))
-  // Execution and intake (p6) are part of what is approved when declared;
-  // a workflow without them keeps the digest it had.
+  // Execution (p6) is part of what is approved when declared; a workflow
+  // without it keeps the digest it had. Intake is always projected (fix2):
+  // a workflow without a declaration accepts requests, and the opt-out
+  // (zulip: "") is a definition of its own.
   // The session policy (agent_session p1) is projected when declared.
   // The execution node (project_migration p7) likewise, only when declared,
   // and the worker lane (p8).
   const execution = w.execution && (w.execution.agent || w.execution.profile || w.execution.guides.length || w.execution.session || w.execution.node || w.execution.lane)
     ? { execution: { agent: w.execution.agent, profile: w.execution.profile, guides: w.execution.guides.map(guideKey), ...(w.execution.session ? { session: w.execution.session } : {}), ...(w.execution.node ? { node: w.execution.node } : {}), ...(w.execution.lane ? { lane: w.execution.lane } : {}) } } : {}
-  const intake = w.intake?.zulip ? { intake: { zulip: w.intake.zulip } } : {}
+  const intake = { intake: { zulip: w.intake?.zulip ?? 'requests' } }
   // The three steps (p8/ex2) are projected when declared, so a default or
   // manual workflow keeps the digest it had.
   const documentation: Record<string, unknown> = { policy: w.documentation.policy }

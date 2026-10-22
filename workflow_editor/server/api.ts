@@ -85,6 +85,9 @@ function asWorkflow(v: unknown): Workflow {
     if (!isObj(b) || typeof b.path !== 'string' || typeof b.access !== 'string') throw new RequestError(400, `workflow.repositories.${k} is malformed`)
   }
   for (const e of v.edges) if (!isObj(e) || typeof e.from !== 'string' || typeof e.to !== 'string') throw new RequestError(400, 'workflow.edges is malformed')
+  // A model without intake would remove the file's declaration, turning an
+  // opt-out into the default (fix2).
+  if (!isObj(v.intake) || typeof v.intake.zulip !== 'string') throw new RequestError(400, 'workflow.intake must be {zulip: text} ("" accepts no requests)')
   for (const [k, p] of Object.entries((v.layout as Record<string, Record<string, unknown>>).nodes)) {
     if (!isObj(p) || typeof p.x !== 'number' || typeof p.y !== 'number' || !Number.isFinite(p.x) || !Number.isFinite(p.y)) throw new RequestError(400, `workflow.layout.nodes.${k} is malformed`)
   }

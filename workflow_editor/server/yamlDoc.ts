@@ -85,7 +85,7 @@ export function parseProject(text: string): Parsed<Project> {
 // listed fields (others are preserved); "dict" owns every key (entries);
 // "list" is a sequence compared item by item; "scalar" is a leaf.
 type Shape =
-  | { kind: 'scalar' }
+  | { kind: 'scalar'; absent?: string; declare?: boolean }
   | { kind: 'list'; item: Shape; block?: boolean }
   | { kind: 'record'; fields: Record<string, Shape>; flow?: boolean }
   | { kind: 'dict'; value: Shape }
@@ -100,13 +100,15 @@ export const WORKFLOW_SHAPE = record({
   schema: scalar, id: scalar, name: scalar, intent: scalar,
   documentation: record({ policy: scalar, plan: scalar, reports: scalar, final: scalar }),
   execution: record({ agent: scalar, profile: scalar, guides: list(scalar), session: scalar, node: scalar, lane: scalar }),
-  intake: record({ zulip: scalar }),
+  intake: record({ zulip: { kind: 'scalar', absent: 'requests' } }),
   repositories: dict(record({ path: scalar, access: scalar, integrate: scalar }, true)),
   nodes: dict(record({ type: scalar, name: scalar, confirms: scalar, activity: scalar, appearance: record({ icon: scalar, color: scalar }, true), description: scalar, repositories: list(scalar), workflow: scalar, project: scalar, accepts: scalar, template: record({ id: scalar, revision: scalar, expectation: scalar }) })),
   edges: list(record({ from: scalar, to: scalar }, true)),
   approvals: record({ intent: approval, definition: approval }),
   layout: record({ nodes: dict(record({ x: scalar, y: scalar }, true)) }),
 })
+// A new file declares its intake either way, so the opt-out is in sight.
+const NEW_WORKFLOW_SHAPE: Shape = { ...WORKFLOW_SHAPE, fields: { ...(WORKFLOW_SHAPE as Extract<Shape, { kind: 'record' }>).fields, intake: record({ zulip: { kind: 'scalar', declare: true } }) } } as Shape
 // Goals are sentences: a new goals list is written one item per line.
 export const PROJECT_SHAPE = record({ schema: scalar, id: scalar, name: scalar, devdocs: scalar, intent: scalar, goals: list(scalar, true), guides: list(scalar, true), execution: record({ node: scalar, lane: scalar }, true) })
 
@@ -125,10 +127,15 @@ function isAbsent(value: unknown) {
 
 // The model reads an absent key as empty. So an empty value for a key the
 // file does not have is not written: untouched entries keep their text.
-function isEmpty(value: unknown): boolean {
+// A scalar whose absent key reads as another value (intake.zulip reads as
+// requests, fix2) is empty at that value, and its '' is a value of its own;
+// a declared one is written even at that value (a new file shows it).
+function isEmpty(value: unknown, shape?: Shape): boolean {
+  if (shape?.kind === 'scalar' && shape.declare) return value === undefined
+  if (shape?.kind === 'scalar' && shape.absent !== undefined) return value === undefined || value === shape.absent
   if (value === undefined || value === '') return true
   if (Array.isArray(value)) return value.length === 0
-  if (value && typeof value === 'object') return Object.values(value).every(isEmpty)
+  if (value && typeof value === 'object') return Object.entries(value).every(([k, v]) => isEmpty(v, shape?.kind === 'record' ? shape.fields[k] : shape?.kind === 'dict' ? shape.value : undefined))
   return false
 }
 
@@ -182,7 +189,7 @@ function syncChild(doc: Document, parent: YamlNode, key: string | number, value:
     return
   }
   const current = get()
-  if (current === undefined && isEmpty(value) && !(isMap(parent) && parent.has(key))) return
+  if (current === undefined && isEmpty(value, shape) && !(isMap(parent) && parent.has(key))) return
   if (shape.kind === 'scalar') { setScalar(doc, parent, key, value); return }
   if (shape.kind === 'list') {
     const items = value as unknown[]
@@ -271,8 +278,8 @@ export function projectForWrite(p: Project): Record<string, unknown> {
   return { schema: p.schema, id: p.id, name: p.name, devdocs: p.devdocs, intent: p.intent, goals: p.goals, guides: p.guides?.length ? p.guides : undefined, execution: p.execution?.node || p.execution?.lane ? { node: p.execution.node || undefined, lane: p.execution.lane || undefined } : undefined }
 }
 
-export function renderWorkflow(doc: Document, w: Workflow): string {
-  applyModel(doc, workflowForWrite(w), WORKFLOW_SHAPE)
+export function renderWorkflow(doc: Document, w: Workflow, shape: Shape = WORKFLOW_SHAPE): string {
+  applyModel(doc, workflowForWrite(w), shape)
   return doc.toString(STRINGIFY)
 }
 
@@ -284,7 +291,7 @@ export function renderProject(doc: Document, p: Project): string {
 export function newWorkflowText(w: Workflow): string {
   const doc = new Document({})
   doc.commentBefore = ' Workflow definition (ag.workflow.v2). Edit here or in the workflow editor.'
-  return renderWorkflow(doc, w)
+  return renderWorkflow(doc, w, NEW_WORKFLOW_SHAPE)
 }
 
 export function newProjectText(p: Project): string {

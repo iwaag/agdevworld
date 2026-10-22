@@ -1068,7 +1068,7 @@ export class DiscussionStore {
             this.tx(() => this.recordActivity(conv, { run, node: q.node!, attempt: null, kind: 'talk', state: 'waiting', text: q.text, sources: re, message: said.message.id, question: q.id, by: q.askedBy, note: `asked ${q.to} (${q.id}) #${said.message.id}` }))
           }
         }
-      } catch (e) { notes.push(`discussion ${conv}: ${run} questions: ${(e as Error).message}`) }
+      } catch { /* unreadable (a retired project's run): read again next time */ }
     }
     return notes
   }

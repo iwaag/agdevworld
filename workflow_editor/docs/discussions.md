@@ -142,6 +142,13 @@ then was).
 | `ponder` | `wfe discussion ponder --node <n> --decision … --source <msg>… [--next <activity>:<node>]… \| --definition <file>` | the decision, its sources, the next activities and the run revision | the command, with the revision in the same write (`run adjust --completing`) |
 | `talk` | `wfe run ask <run> <n> --to <requester> --question …` (no discussion command since fix3); WFE posts it (*Questions*) and records the activity | the WFE question (to the requester) answered and taken up, or withdrawn | the agent, as any talk; reconcile records the activity's end |
 
+- **Completed elsewhere** (fix3). `wfe run complete` (or `run adjust
+  --completing`) on an announce, ask or ponder node, and a completion that
+  would end a conductor run whose open discussion it never concluded, give a
+  warning instead of a record: the risk and the activity's command. The
+  same command with `--yes` records it. A warning, not a refusal:
+  conduct/run-020 completed its last ponder node so and left its discussion
+  open with nothing said.
 - **Waits.** An ask waits `external: discussion:<id>:activity:<a>` (holder:
   the invited participants or the awaited run); a talk waits on its
   question; both free the slot.

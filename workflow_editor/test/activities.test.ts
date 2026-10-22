@@ -12,6 +12,7 @@ import assert from 'node:assert/strict'
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { main } from '../cli/wfe.ts'
 import { ConversationStore } from '../server/conversations.ts'
 import { createProject } from '../server/create.ts'
 import { DiscussionArchive } from '../server/discussionArchive.ts'
@@ -405,5 +406,31 @@ test('a conductor\'s question on any node is posted by WFE, awaits the person an
   const reply = await s.ds.post('fix3-a', { text: 'Enough.', author: 'Pat', token: 'tok-fix3-a-002' })
   assert.deepEqual(reply.invitations.map(i => i.run), [P], 'to the conductor, no second run')
   assert.equal((await rec(s, P)).questions.q1.answers[0]?.text, 'Enough.')
+  s.cs.close(); s.x.close()
+})
+
+test('wfe run complete on a ponder node that would end an open, unconcluded discussion warns and records nothing; --yes completes it (workflow_editor fix3: ponderer/conduct/run-020)', async () => {
+  const s = await setup()
+  const brief = await opened(s, 'fix3-b')
+  await begin(s, P, 'a1')
+  await s.ds.ponder('fix3-b', { run: P, attempt: 'a1', ...who, node: 'ponder', decision: 'Wait for the result.', sources: [brief.id], next: [{ activity: 'ponder', node: 'after' }] })
+  await end(s, P, 'a1')
+  await op(s, P, { op: 'node.start', node: 'after' } as never, 'ponderer-agent')
+  const cli = async (extra: string[]) => {
+    const prev = { log: console.log, error: console.error }
+    const err: string[] = []
+    console.log = () => {}
+    console.error = (...m: unknown[]) => { err.push(m.join(' ')) }
+    try { return { code: await main(['run', 'complete', 'conduct/run-001', 'after', '--outcome', 'Accepted; nothing owed.', '--by', 'ponderer-agent', '--workspace', 'ponderer', ...extra, '--registry', join(s.area, 'registry.json'), '--area', s.area]), err: err.join('\n') } } finally { console.log = prev.log; console.error = prev.error }
+  }
+  const warned = await cli([])
+  assert.equal(warned.code, 1)
+  assert.match(warned.err, /Not recorded — warning/)
+  assert.match(warned.err, /after is the ponder activity of a discussion.*Recommended: wfe discussion ponder --node after/)
+  assert.match(warned.err, /conducts fix3-b: still open, and this run has announced no conclusion/)
+  assert.match(warned.err, /--yes/)
+  assert.equal((await rec(s, P)).nodes.after.state, 'running', 'nothing recorded')
+  assert.equal((await cli(['--yes'])).code, 0)
+  assert.equal((await rec(s, P)).execution.state, 'completed', 'accepted with --yes')
   s.cs.close(); s.x.close()
 })

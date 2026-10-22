@@ -9,7 +9,7 @@ import { normalizeRepoPath, sessionPolicyOf } from '../shared/model.ts'
 import { docStepsOf, hasDocSteps, splitCounts } from '../shared/compile.ts'
 import { describeSteps, effectiveOf, EXECUTOR_OPS, holderOf, hostOf, notableEvents, questionState, runKey, type BecauseRef, type EntrustRef, type HistoryEntry, type Instruction, type OpInput, type RunRecord, type RunRef } from '../shared/run.ts'
 import {
-  adjustRun, checkRun, createRun, listRuns, readRun, resolveRef, runDir, runOp, runResponse, type AdjustResult, type CreateRunOptions,
+  adjustRun, checkRun, createRun, listRuns, readRun, resolveRef, runDir, runOp, runResponse, usableRun, type AdjustResult, type CreateRunOptions,
 } from '../server/runs.ts'
 import { RequestError, type Workspace } from '../server/workspace.ts'
 import { humanBytes } from '../shared/shares.ts'
@@ -32,6 +32,14 @@ export interface RunCli {
   serviceUrl: () => Promise<string | null> // the editor's base URL when it serves this registry
   exec: () => ExecStore // this host's execution management (queue, attempts, publication)
   area: () => string // the operating area (its node catalog is frozen into new runs, p7/ex1)
+}
+
+// The command that performs each discussion activity a plain completion would
+// skip (talk is completed like any talk; workflow_editor fix3).
+const ACTIVITY_COMMANDS: Record<string, string> = {
+  announce: 'wfe discussion announce --node <n> --text … --re … (with --conclude [--close] for the conclusion)',
+  ask: 'let WFE complete it when its invitations are resolved, or move on with wfe discussion settle --node <n> --reason …',
+  ponder: 'wfe discussion ponder --node <n> --decision … --source … (--next adds what comes next)',
 }
 
 const COMMON = `Common options: --by <name> (who records: your own name. An executing
@@ -125,12 +133,16 @@ ask. --deadline says when the result is expected at the latest (an ISO time
 or a duration from now); a monitor treats the wait as uncertain after it and
 looks into it, while a wait inside it is left alone. Nothing changes state
 because of a deadline. Writes run.json.`,
-  complete: `wfe run complete <run> <node> --outcome <text> [--artifact <path>]... [--agreement <question>]
+  complete: `wfe run complete <run> <node> --outcome <text> [--artifact <path>]... [--agreement <question>] [--yes]
 
 Records the outcome of a running node. Available documentation is recorded
 by hash. Documents, plan agreement, review decisions, acknowledged input and
 presentation shutdown are optional records and do not gate completion.
-A combined adjustment is available with --definition and --completing. Writes run.json.`,
+A combined adjustment is available with --definition and --completing. Writes run.json.
+A warning records nothing and says the risk and the recommended way:
+completing a discussion activity's node (announce, ask, ponder) here, or
+completing a conductor run whose discussion is still open with no
+conclusion from it. --yes completes anyway.`,
   fail: `wfe run fail <run> <node> --reason <text>
 
 Records that a problem prevents the running or waiting node from continuing.
@@ -335,7 +347,8 @@ choices, including running and completed work. Default source is agent;
 no question, answer take-up or human agreement is a prerequisite.
 --dry-run shows changes without writing. --propose <name> saves an optional
 proposal. --completing <node> --outcome <text> records a revision and that
-running node's completion atomically. Stale revisions and writers receive
+running node's completion atomically (a discussion activity's node warns as
+in wfe run complete; --yes accepts). Stale revisions and writers receive
 concrete diagnostics so the agent can re-read and retry. Writes revision files and run.json.`,
   nodes: `wfe run nodes <run> [--show <template>]
 
@@ -673,6 +686,37 @@ export async function runCommand(c: RunCli): Promise<number> {
   }
   const node = () => { if (!args[1]) throw c.usage('<node> is required'); return args[1] }
   const rootOf = async (r: RunRef) => (await wrap(() => runSpace(ws, r))).root
+  // This area's discussions, when they are configured (null otherwise).
+  const discussions = async <T>(fn: (ds: import('../server/discussions.ts').DiscussionStore) => Promise<T>): Promise<T | null> => {
+    const { ConversationStore } = await import('../server/conversations.ts')
+    const { DiscussionStore } = await import('../server/discussions.ts')
+    const cs = new ConversationStore({ area: c.area(), exec: c.exec() })
+    try {
+      const ds = new DiscussionStore(cs)
+      return 'disabled' in ds.config() ? null : await fn(ds)
+    } finally { cs.close() }
+  }
+  // Completing a node outside the discussion's commands: warnings, not
+  // refusals (workflow_editor fix3). ponderer/conduct/run-020 completed its
+  // last ponder node with wfe run complete: no decision was recorded, the run
+  // completed, and its discussion stayed open with no conclusion. Nothing is
+  // recorded until the same command is given again with --yes.
+  const completionCheck = async (r: RunRef, n: string, o: { last: boolean }) => {
+    if (c.flag('yes')) return
+    const { record, graph } = await wrap(() => usableRun(ws, r))
+    const warnings: string[] = []
+    const activity = graph.nodes[n]?.activity
+    const how = activity && ACTIVITY_COMMANDS[activity]
+    if (how) warnings.push(`${n} is the ${activity} activity of a discussion. Completed this way, the discussion gets no record of it (no message, decision or outcomes). Recommended: ${how.replace('<n>', n)}.`)
+    const others = Object.entries(record.nodes).filter(([id]) => id !== n)
+    if (o.last && others.every(([, x]) => x.state === 'completed' || x.state === 'cancelled')) {
+      const run = `${ws.reg.id}/${runKey(r)}`
+      const open = await quietly(() => discussions(async ds => ds.conductedBy(run).filter(id => ds.discussion(id)?.state === 'open'
+        && !ds.activityRows(id).some(a => a.run === run && a.kind === 'announce' && a.obligations !== null)))) ?? []
+      if (open.length) warnings.push(`This completes ${run}, which conducts ${open.join(', ')}: still open, and this run has announced no conclusion there. A completed run can no longer speak; the discussion would wait for the next message. Recommended, if it is finished: add a conclusion first (wfe discussion ponder --node <a ponder node> --next announce:<id>, then wfe discussion announce --node <id> --conclude [--close]); if it is not, say there what happens next.`)
+    }
+    if (warnings.length) throw c.refused(`Not recorded — warning:\n${warnings.map(w => `- ${w}`).join('\n')}\nTo complete ${n} this way anyway, give the same command with --yes.`, { code: 'completion-warning', node: n, warnings })
+  }
 
   switch (sub) {
     case 'create': {
@@ -746,6 +790,7 @@ export async function runCommand(c: RunCli): Promise<number> {
       const root = await rootOf(r)
       const artifacts = c.opts('artifact').map(p => artifactPath(root, r, p))
       const agreement = c.opt('agreement')
+      await completionCheck(r, node(), { last: true })
       return op({ op: 'node.complete', node: node(), outcome: need(c, 'outcome', 'what the node produced or concluded'), artifacts, ...(agreement ? { agreement } : {}) }, rec => {
         const d = rec.nodes[args[1]]?.document
         return `Recorded: ${args[1]} completed.${d ? ` Document ${d.path} checked (${d.bytes} bytes, sha256 ${d.sha256.slice(0, 12)}…).` : ''}${rec.nodes[args[1]]?.agreement ? ` Plan agreed in ${rec.nodes[args[1]].agreement!.question}.` : ''}`
@@ -825,15 +870,10 @@ export async function runCommand(c: RunCli): Promise<number> {
         // A run that speaks for a discussion has its question posted there
         // (workflow_editor fix3); the reconcile posts what this could not.
         async target => {
-          const { ConversationStore } = await import('../server/conversations.ts')
-          const { DiscussionStore } = await import('../server/discussions.ts')
-          const cs = new ConversationStore({ area: c.area(), exec: c.exec() })
           try {
-            const ds = new DiscussionStore(cs)
-            if ('disabled' in ds.config()) return null
-            const notes = await ds.postQuestions({ run: `${ws.reg.id}/${runKey(target)}` })
+            const notes = await discussions(ds => ds.postQuestions({ run: `${ws.reg.id}/${runKey(target)}` })) ?? []
             return notes.length ? notes.map(n => n.replace(/^discussion /, 'Posted in discussion ')).join('\n') : null
-          } catch (e) { return `Not posted in its discussion yet (${(e as Error).message}); the executor's reconcile posts it.` } finally { cs.close() }
+          } catch (e) { return `Not posted in its discussion yet (${(e as Error).message}); the executor's reconcile posts it.` }
         })
     }
     case 'answer': {
@@ -989,6 +1029,8 @@ export async function runCommand(c: RunCli): Promise<number> {
       const root = await rootOf(r)
       const completing = completingNode ? { node: completingNode, outcome: need(c, 'outcome', `what ${completingNode} produced or concluded`), artifacts: c.opts('artifact').map(p => artifactPath(root, r, p)) } : undefined
       if (!completing && c.opt('outcome')) throw c.usage('--outcome goes with --completing <node>')
+      // The new definition decides what follows, so only the activity warns here.
+      if (completing && !c.flag('dry-run')) await completionCheck(r, completing.node, { last: false })
       const res = await wrap(() => adjustRun(ws, r, { text, reason: need(c, 'reason', 'why the run changes'), source, dryRun: c.flag('dry-run'), propose: c.opt('propose'), expectRevision: c.opt('expect-revision'), completing }, { by, via: 'cli', expectSeq, attempt, receipt }))
       // A revision made from a discussion turn is recorded there (argue p4
       // ex3), from the run's own history, under the revision's id.

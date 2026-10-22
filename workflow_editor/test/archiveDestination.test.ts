@@ -14,8 +14,8 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { ConversationStore } from '../server/conversations.ts'
 import { createProject } from '../server/create.ts'
-import { DiscussionArchive, destinationOf } from '../server/discussionArchive.ts'
-import { DiscussionStore } from '../server/discussions.ts'
+import { ConversationArchive, destinationOf } from '../server/conversationArchive.ts'
+import { ConversationService } from '../server/conversationService.ts'
 import { ExecStore } from '../server/exec.ts'
 import { git, gitOk } from '../server/git.ts'
 
@@ -70,7 +70,7 @@ async function setup() {
   await configure('argue', 'facilitate', 'argue')
   const x = new ExecStore({ registryFile: registry, area })
   const cs = new ConversationStore({ area, exec: x })
-  const ds = new DiscussionStore(cs)
+  const ds = new ConversationService(cs)
   const close = () => { cs.close(); x.close() }
   return { area, origins, configure, x, cs, ds, close }
 }
@@ -78,9 +78,11 @@ type S = Awaited<ReturnType<typeof setup>>
 
 // Two discussions in argue's archive: one closed, one open.
 async function history(s: S) {
-  const a = new DiscussionArchive(s.ds)
-  s.ds.create('d-closed', { title: 'Closed one', by: 'Pat', members: ['forge'] })
-  s.ds.create('d-open', { title: 'Open one', by: 'Pat', members: ['forge'] })
+  const a = new ConversationArchive(s.ds)
+  s.ds.create('d-closed', { facilitate: true, title: 'Closed one', by: 'Pat', members: ['forge'] })
+  s.ds.create('d-open', { facilitate: true, title: 'Open one', by: 'Pat', members: ['forge'] })
+  // Discussions from before challenge p2: their archive stays at discussions/<id>.
+  for (const id of ['d-closed', 'd-open']) s.cs.db.prepare('UPDATE conversations SET kind = \'discussion\' WHERE id = ?').run(id)
   await s.ds.post('d-closed', { text: 'First words.', author: 'Pat', token: 'tok-dest-c001', to: ['forge'] })
   await s.ds.post('d-open', { text: 'Other words.', author: 'Pat', token: 'tok-dest-o001', to: ['forge'] })
   s.ds.close('d-closed', { by: 'Pat' })
@@ -102,7 +104,7 @@ async function importHistory(s: S) {
 }
 
 const tree = async (bare: string, path: string) => (await git(bare, ['show', `main:${path}`])).stdout
-const writerOrigin = async (a: DiscussionArchive) => destinationOf((await gitOk(a.dir, ['remote', 'get-url', 'origin'])).trim())
+const writerOrigin = async (a: ConversationArchive) => destinationOf((await gitOk(a.dir, ['remote', 'get-url', 'origin'])).trim())
 
 test('a switch to an imported history: unverified until read there, then current with the new repository\'s commit; nothing appended twice; the writer\'s clone rebuilt', async () => {
   const s = await setup()
@@ -216,7 +218,8 @@ test('destinationOf: credentials, .git and a final slash do not make another rep
 test('a retired (unregistered) project\'s speech keeps its run names but gets no run-view link; the discussion stays readable', async () => {
   const s = await setup()
   await history(s)
-  s.ds.create('d-old', { title: 'Old', by: 'Pat', members: ['forge'] })
+  s.ds.create('d-old', { facilitate: true, title: 'Old', by: 'Pat', members: ['forge'] })
+  s.cs.db.prepare('UPDATE conversations SET kind = \'discussion\' WHERE id = ?').run('d-old')
   const a = await s.ds.post('d-old', { text: 'Words for the facilitator.', author: 'Pat', token: 'tok-dest-r001' })
   const fr = a.invitations[0].run!
   assert.equal(fr, 'argue/facilitate/run-001')
@@ -233,7 +236,7 @@ test('a retired (unregistered) project\'s speech keeps its run names but gets no
   assert.equal(m.run, fr, 'the run identity is kept')
   assert.equal(m.participant, 'argue', 'and so is the participant')
   assert.equal(m.runUrl, null, 'no link to a run view that opens nothing')
-  assert.equal(v.invitations[0].runUrl, null)
+  assert.equal(v.requests[0].runUrl, null)
   const r = v.runs.find(x => x.key === fr)!
   assert.equal(r.url, null)
   assert.match(r.problem!, /not registered here \(a retired or unknown project\)/)

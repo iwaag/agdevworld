@@ -13,9 +13,9 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { ConversationStore } from '../server/conversations.ts'
 import { createProject } from '../server/create.ts'
-import { DiscussionArchive } from '../server/discussionArchive.ts'
-import { DiscussionStore } from '../server/discussions.ts'
-import { compareWorkflows, DiscussionWorkflows, type Turn } from '../server/discussionWorkflows.ts'
+import { ConversationArchive } from '../server/conversationArchive.ts'
+import { ConversationService } from '../server/conversationService.ts'
+import { compareWorkflows, ConversationWorkflows, type Turn } from '../server/conversationWorkflows.ts'
 import { ExecStore } from '../server/exec.ts'
 import { gitOk } from '../server/git.ts'
 import { loadRegistry } from '../server/registry.ts'
@@ -107,8 +107,8 @@ async function setup() {
   }))
   const x = new ExecStore({ registryFile: registry, area })
   const cs = new ConversationStore({ area, exec: x })
-  const ds = new DiscussionStore(cs)
-  const wfs = new DiscussionWorkflows(ds)
+  const ds = new ConversationService(cs)
+  const wfs = new ConversationWorkflows(ds)
   const regs = (await loadRegistry(registry)).workspaces
   const ws = (id: string) => new Workspace(regs.find(w => w.project === id)!)
   return { area, x, cs, ds, wfs, ws }
@@ -126,7 +126,7 @@ const work = (s: S, conv: string) => ({
 })
 
 async function opened(s: S, conv: string) {
-  s.ds.create(conv, { title: 'Which workflow?', by: 'Pat', members: ['forge'] })
+  s.ds.create(conv, { facilitate: true, title: 'Which workflow?', by: 'Pat', members: ['forge'] })
   const brief = (await s.ds.post(conv, { text: 'How does forge provide an image?', author: 'Pat', token: `tok-${conv}-001` })).message
   s.x.db.prepare('UPDATE jobs SET state = \'done\'').run()
   return brief
@@ -332,10 +332,10 @@ test('the archive carries every record, its message associations and each versio
   const turn = turnOf('wf-h', 'forge/discuss/run-001', 'f7', 'forge-agent')
   const a = await s.wfs.attach('wf-h', { project: 'forge', workflow: 'provide', messages: [brief.id], turn, author: 'forge-agent' })
   s.wfs.link('wf-h', a.ref.id, { message: brief.id + 0, by: 'Pat', note: 'the brief' })
-  const arch = new DiscussionArchive(s.ds)
+  const arch = new ConversationArchive(s.ds)
   const p = await arch.publish(['wf-h'])
   assert.deepEqual(p.failed, [])
-  const dir = join(s.area, '.local', 'discussions', 'archive', 'discussions', 'wf-h')
+  const dir = join(s.area, '.local', 'discussions', 'archive', 'conversations', 'wf-h')
   const lines = (await readFile(join(dir, 'transcript.jsonl'), 'utf8')).trim().split('\n').map(l => JSON.parse(l) as { type: string; id?: number })
   assert.ok(lines.some(l => l.type === 'workflow' && l.id === a.ref.id))
   const manifest = JSON.parse(await readFile(join(dir, 'manifest.json'), 'utf8')) as { horizon: { workflow: number }; workflows: { id: number; snapshot: { after: string } }[] }

@@ -687,12 +687,12 @@ export async function runCommand(c: RunCli): Promise<number> {
   const node = () => { if (!args[1]) throw c.usage('<node> is required'); return args[1] }
   const rootOf = async (r: RunRef) => (await wrap(() => runSpace(ws, r))).root
   // This area's discussions, when they are configured (null otherwise).
-  const discussions = async <T>(fn: (ds: import('../server/discussions.ts').DiscussionStore) => Promise<T>): Promise<T | null> => {
+  const discussions = async <T>(fn: (ds: import('../server/conversationService.ts').ConversationService) => Promise<T>): Promise<T | null> => {
     const { ConversationStore } = await import('../server/conversations.ts')
-    const { DiscussionStore } = await import('../server/discussions.ts')
+    const { ConversationService } = await import('../server/conversationService.ts')
     const cs = new ConversationStore({ area: c.area(), exec: c.exec() })
     try {
-      const ds = new DiscussionStore(cs)
+      const ds = new ConversationService(cs)
       return 'disabled' in ds.config() ? null : await fn(ds)
     } finally { cs.close() }
   }
@@ -711,7 +711,7 @@ export async function runCommand(c: RunCli): Promise<number> {
     const others = Object.entries(record.nodes).filter(([id]) => id !== n)
     if (o.last && others.every(([, x]) => x.state === 'completed' || x.state === 'cancelled')) {
       const run = `${ws.reg.id}/${runKey(r)}`
-      const open = await quietly(() => discussions(async ds => ds.conductedBy(run).filter(id => ds.discussion(id)?.state === 'open'
+      const open = await quietly(() => discussions(async ds => ds.conductedBy(run).filter(id => ds.conversation(id)?.state === 'open'
         && !ds.activityRows(id).some(a => a.run === run && a.kind === 'announce' && a.obligations !== null)))) ?? []
       if (open.length) warnings.push(`This completes ${run}, which conducts ${open.join(', ')}: still open, and this run has announced no conclusion there. A completed run can no longer speak; the discussion would wait for the next message. Recommended, if it is finished: add a conclusion first (wfe discussion ponder --node <a ponder node> --next announce:<id>, then wfe discussion announce --node <id> --conclude [--close]); if it is not, say there what happens next.`)
     }

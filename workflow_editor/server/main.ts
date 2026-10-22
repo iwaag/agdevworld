@@ -26,7 +26,7 @@ import { ExecStore } from './exec.ts'
 import { UsageReader } from './usage.ts'
 import { Watcher } from './watch.ts'
 import { DialogueStore, DialogueWorker } from './dialogue.ts'
-import { DiscussionStore } from './discussions.ts'
+import { ConversationService } from './conversationService.ts'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const pkg = resolve(here, '..')
@@ -58,7 +58,7 @@ const exec = new ExecStore({ registryFile, area, gitea })
 const conversations = new ConversationStore({ area, exec })
 // Character dialogue (argue p5): its store and the worker that renders lines,
 // in this process, beside (never inside) the executor's slots.
-const dialogue = new DialogueStore(new DiscussionStore(conversations))
+const dialogue = new DialogueStore(new ConversationService(conversations))
 const handler = createHandler({
   registryFile,
   area,

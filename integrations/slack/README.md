@@ -6,13 +6,18 @@ stay WFE's (`workflow_editor/docs/conversations.md`); aghangout shows the
 same conversations. This process only carries messages: it never opens WFE's
 database, starts Front itself, or interprets what a message means.
 
-- A new top-level DM starts a WFE conversation with the configured
-  destination (`target`, `front/converse`); replies in its thread continue
-  it. Concurrent threads are concurrent conversations.
-- Every accepted message is posted to WFE with `via: slack`, which starts one
-  Front turn. 📥 on the message means: WFE has it and its turn was requested.
-  Front's replies (`reply`, `question`, `progress`, `result`) arrive in the
-  thread, each naming its run.
+- A new top-level DM starts a WFE conversation with the configured project
+  (`with`, `front`: a one-to-one room); replies in its thread continue it.
+  Concurrent threads are concurrent conversations. (`target`
+  `<workspace>/<workflow>`, the field before challenge p2, is read as its
+  workspace.)
+- Every accepted message is posted to WFE with `via: slack` and routed as
+  any person's message (docs/conversations.md *Routing*): to the default
+  addressee (Front), or the conductor if the room was later given one in
+  aghangout. 📥 on the message means: WFE has it and its requests were made.
+  Replies (`reply`, `question`, `progress`, `result`) arrive in the thread,
+  each naming its run. A room that has no default addressee any more refuses
+  an unaddressed message; the bot says so and the words are not recorded.
 - Messages the person wrote in aghangout in a Slack-linked conversation
   appear in the thread, labelled as coming from aghangout. Browser-only
   conversations stay unlinked.
@@ -33,7 +38,7 @@ open when the phone's Tailscale is on.
 
 | File (`<area>/slack/`) | |
 | --- | --- |
-| `config.json` | `appToken` (xapp-, `connections:write`), `botToken` (xoxb-), `developer` (member ID), `team` (optional), `wfe`, `linkBase`, `linkMap` (LAN origin → phone origin for URLs in replies), `target` (the WFE destination of new conversations, `<workspace>/<workflow>`; required), `conversationUrl` (optional; `{conv}` is replaced by the id; default `<linkBase origin>/hangout/?conv={conv}`), `trialAuthor`, `store` (optional). Ignored, mode 600 |
+| `config.json` | `appToken` (xapp-, `connections:write`), `botToken` (xoxb-), `developer` (member ID), `team` (optional), `wfe`, `linkBase`, `linkMap` (LAN origin → phone origin for URLs in replies), `with` (the project new conversations are with, e.g. `front`; required; `target` is read as before), `conversationUrl` (optional; `{conv}` is replaced by the id; default `<linkBase origin>/hangout/?conv={conv}`), `trialAuthor`, `store` (optional). Ignored, mode 600 |
 | `slack.sqlite` | the transport store |
 | `service.log` | the service's log (no tokens) |
 

@@ -38,7 +38,7 @@ import { positions, METRICS } from '../shared/layout.ts'
 import type { Workflow } from '../shared/model.ts'
 import { replay, type RunRecord } from '../shared/run.ts'
 import { parseRunName, runName, runUrl } from './conversations.ts'
-import type { DiscussionStore } from './discussions.ts'
+import type { ConversationService } from './conversationService.ts'
 import { git } from './git.ts'
 import { readRun } from './runs.ts'
 import { loadRegistry } from './registry.ts'
@@ -164,9 +164,9 @@ export function previewOf(w: Workflow, marks: Record<string, string> = {}, remov
 
 // ---- the store ----------------------------------------------------------------------
 
-export class DiscussionWorkflows {
-  readonly ds: DiscussionStore
-  constructor(ds: DiscussionStore) { this.ds = ds }
+export class ConversationWorkflows {
+  readonly ds: ConversationService
+  constructor(ds: ConversationService) { this.ds = ds }
   private get db() { return this.ds.db }
   private tx<T>(f: () => T): T { return transaction(this.db, f, 'conversation store') }
   private all<T>(sql: string, ...a: (string | number | null)[]): T[] { return this.db.prepare(sql).all(...a) as T[] }
@@ -232,7 +232,7 @@ export class DiscussionWorkflows {
   }
   async contextOfRun(run: string, rec: RunRecord, depth: number): Promise<{ conv: string; invitation: number | null; origin: string | null } | null> {
     const src = rec.input.source?.kind === 'conversation' ? rec.input.source : null
-    if (src && this.ds.discussion(src.conversation)) return { conv: src.conversation, invitation: src.invitation ?? null, origin: depth ? run : null }
+    if (src && this.ds.conversation(src.conversation)) return { conv: src.conversation, invitation: src.invitation ?? null, origin: depth ? run : null }
     const conducted = this.ds.conductedBy(run)[0]
     if (conducted) return { conv: conducted, invitation: null, origin: depth ? run : null }
     if (depth >= MAX_DEPTH) return null
@@ -443,7 +443,7 @@ export class DiscussionWorkflows {
   // captures the version it names, which proves what was retrieved at that
   // turn; it does not prove that it was understood.
   async attach(conv: string, o: { project: string; workflow?: string; file?: string; run?: string; revision?: string; commit?: string; relation?: WorkflowRelation; role?: WorkflowRole; nodes?: string[]; note?: string; messages?: number[]; from?: string; turn: Turn | null; author: string }): Promise<{ ref: WorkflowRef; duplicate: boolean }> {
-    this.ds.discussion(conv) ?? (() => { throw new RequestError(404, `no discussion ${conv}`) })()
+    this.ds.conversation(conv) ?? (() => { throw new RequestError(404, `no discussion ${conv}`) })()
     const messages = this.validMessages(conv, o.messages ?? [])
     const relation = o.relation ?? 'referenced'
     if (!(WORKFLOW_RELATIONS as readonly string[]).includes(relation)) throw new RequestError(400, `a relation is one of ${WORKFLOW_RELATIONS.join(', ')}`)
@@ -554,7 +554,7 @@ export class DiscussionWorkflows {
     const runs = new Set<string>()
     for (const i of this.ds.invitations(conv)) if (i.run && !i.awaits) runs.add(i.run)
     for (const a of this.all<{ run: string }>('SELECT DISTINCT run FROM activities WHERE conv = ?', conv)) runs.add(a.run)
-    const c = this.ds.discussion(conv)?.conductor
+    const c = this.ds.conversation(conv)?.conductor
     if (c) runs.add(c)
     return [...runs]
   }

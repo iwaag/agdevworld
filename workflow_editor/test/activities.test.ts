@@ -15,8 +15,8 @@ import { join } from 'node:path'
 import { main } from '../cli/wfe.ts'
 import { ConversationStore } from '../server/conversations.ts'
 import { createProject } from '../server/create.ts'
-import { DiscussionArchive } from '../server/discussionArchive.ts'
-import { DiscussionStore } from '../server/discussions.ts'
+import { ConversationArchive } from '../server/conversationArchive.ts'
+import { ConversationService } from '../server/conversationService.ts'
 import { ExecStore } from '../server/exec.ts'
 import { gitOk } from '../server/git.ts'
 import { loadRegistry } from '../server/registry.ts'
@@ -89,7 +89,7 @@ async function setup(o: { participants?: string[] } = {}) {
   }))
   const x = new ExecStore({ registryFile: registry, area })
   const cs = new ConversationStore({ area, exec: x })
-  const ds = new DiscussionStore(cs)
+  const ds = new ConversationService(cs)
   const regs = (await loadRegistry(registry)).workspaces
   const ws = (id: string) => new Workspace(regs.find(w => w.project === id)!)
   return { area, x, cs, ds, ws }
@@ -115,7 +115,7 @@ async function talk(s: S, conv: string, o: { run: string; attempt: string; node:
 // A conductor whose first decision adds an announcement, a parallel ask and
 // a second ponder.
 async function opened(s: S, conv: string) {
-  s.ds.create(conv, { title: 'Facts first', by: 'Pat', members: ['forge', 'sage'] })
+  s.ds.create(conv, { facilitate: true, title: 'Facts first', by: 'Pat', members: ['forge', 'sage'] })
   const brief = (await s.ds.post(conv, { text: 'Find out what the game and the model can do.', author: 'Pat', token: `tok-${conv}-001` })).message
   assert.equal(s.cs.conversation(conv)!.conductor, P, 'the invited facilitator run conducts')
   s.x.db.prepare('UPDATE jobs SET state = \'done\' WHERE workspace = \'ponderer\'').run()
@@ -263,9 +263,9 @@ test('a conductor run created by a delegation: the requesting run is the request
   // The conductor run requested as work (not invited), then opening the discussion.
   const created = await s.x.request({ workspace: 'ponderer', workflow: 'conduct', text: 'Hold a discussion about seats.', author: 'front-agent', receipt: 'test:conduct:1', via: 'cli' })
   const run = `ponderer/${created.ref.workflow}/${created.ref.run}`
-  s.ds.create('p4-d', { title: 'Seats', by: 'front-agent', members: ['forge'], conductor: run, requester: req })
+  s.ds.create('p4-d', { facilitate: true, title: 'Seats', by: 'front-agent', members: ['forge'], conductor: run, requester: req })
   assert.equal(s.ds.requester('p4-d')!.kind, 'run')
-  assert.deepEqual(s.ds.members('p4-d').map(m => m.participant), ['ponderer', 'forge'], 'an agent requester does not join as a person')
+  assert.deepEqual(s.ds.members('p4-d').map(m => m.participant), ['forge', 'ponderer'], 'an agent requester does not join as a person')
   s.x.db.prepare('UPDATE jobs SET state = \'done\' WHERE workspace = \'ponderer\'').run()
   await begin(s, run, 'a1')
   await s.ds.ponder('p4-d', { run, attempt: 'a1', ...who, node: 'ponder', decision: 'Ask front which seat.', sources: [], next: [{ activity: 'announce', node: 'open' }, { activity: 'talk', node: 'ask-front' }, { activity: 'ask', node: 'facts' }] })
@@ -334,20 +334,20 @@ test('a conclusion records what is still owed and who receives it; annotations s
   assert.equal(ob.length, 1)
   assert.equal(ob[0].kind, 'invitation')
   assert.match(ob[0].owner, /forge\/discuss\/run-001/)
-  assert.match(ob[0].receiver, /recorded only: the discussion is closed/)
+  assert.match(ob[0].receiver, /recorded only: the conversation is closed/)
   assert.equal(s.cs.conversation('p4-f')!.state, 'closed')
   const v = await s.ds.view('p4-f')
   assert.equal(v.messages.some(m => m.text.includes('Hint')), false, 'an annotation is not speech')
   assert.equal(v.annotations[0].id, ann.annotation.id)
   assert.deepEqual(v.activities.map(a => [a.kind, a.state]), [['ponder', 'completed'], ['ask', 'settled'], ['announce', 'completed']])
-  const arch = new DiscussionArchive(s.ds)
+  const arch = new ConversationArchive(s.ds)
   const pub = await arch.publish(['p4-f'])
   assert.deepEqual(pub.failed, [])
-  const lines = (await readFile(join(arch.dir, 'discussions', 'p4-f', 'transcript.jsonl'), 'utf8')).trim().split('\n').map(l => JSON.parse(l) as { type: string; kind?: string })
+  const lines = (await readFile(join(arch.dir, 'conversations', 'p4-f', 'transcript.jsonl'), 'utf8')).trim().split('\n').map(l => JSON.parse(l) as { type: string; kind?: string })
   assert.ok(lines.some(l => l.type === 'activity' && l.kind === 'conductor'))
   assert.equal(lines.filter(l => l.type === 'activity' && l.kind === 'activity').length >= 4, true)
   assert.equal(lines.filter(l => l.type === 'annotation').length, 1)
-  const m = JSON.parse(await readFile(join(arch.dir, 'discussions', 'p4-f', 'manifest.json'), 'utf8')) as { conductor: string; horizon: { activity: number; annotation: number }; activities: unknown[] }
+  const m = JSON.parse(await readFile(join(arch.dir, 'conversations', 'p4-f', 'manifest.json'), 'utf8')) as { conductor: string; horizon: { activity: number; annotation: number }; activities: unknown[] }
   assert.equal(m.conductor, P)
   assert.equal(m.horizon.annotation, 1)
   assert.equal(m.activities.length, 3)
@@ -373,7 +373,7 @@ test('a question answered through a delegation (an agent requester) is no longer
   const s = await setup()
   const created = await s.x.request({ workspace: 'ponderer', workflow: 'conduct', text: 'Conduct.', author: 'front-agent', receipt: 'test:conduct:q', via: 'cli' })
   const run = `ponderer/${created.ref.workflow}/${created.ref.run}`
-  s.ds.create('p4-h', { title: 'Agent requester', by: 'front-agent', members: ['forge'], conductor: run, requester: { kind: 'run', run: 'front/converse/run-001', agent: 'front-agent' } })
+  s.ds.create('p4-h', { facilitate: true, title: 'Agent requester', by: 'front-agent', members: ['forge'], conductor: run, requester: { kind: 'run', run: 'front/converse/run-001', agent: 'front-agent' } })
   s.x.db.prepare('UPDATE jobs SET state = \'done\' WHERE workspace = \'ponderer\'').run()
   await begin(s, run, 'a1')
   await s.ds.ponder('p4-h', { run, attempt: 'a1', ...who, node: 'ponder', decision: 'Open, then ask front.', sources: [], next: [{ activity: 'announce', node: 'open' }, { activity: 'talk', node: 'ask-front' }, { activity: 'ponder', node: 'then' }] })

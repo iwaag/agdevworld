@@ -241,59 +241,19 @@ export function createHandler(config: ServiceConfig) {
         throw new RequestError(404, 'not found')
       }
 
-      // Conversations (project_migration p8, workflow_editor p15,
-      // docs/conversations.md): a person's continuing conversation with one
-      // project's conversational workflow. A post is the person's words (the
-      // page is the person's, as every editor write is); the destination's
-      // replies are written by its runs through the CLI.
+      // Conversations (project_migration p8 … challenge p2,
+      // docs/conversations.md): one tree for every conversation — a person
+      // with one project, several, or a room a conductor leads. The person's
+      // words are the page's (the configured person) unless a client names an
+      // automated trial author; agents speak through their runs with the CLI.
+      // Writes start runs only through response requests.
       if (a === 'conversations') {
         const cs = config.conversations
         if (!cs) throw new RequestError(503, 'conversations are not configured on this service')
-        const cfg = cs.config()
-        const { parseTarget, viewBaseOf } = await import('./conversations.ts')
-        if (!wsId && method === 'GET') {
-          const filter = url.searchParams.get('target')
-          return send(res, 200, { person: 'disabled' in cfg ? null : cfg.person, disabled: 'disabled' in cfg ? cfg.disabled : null, targets: await cs.targets(), conversations: cs.list(filter ? { target: parseTarget(filter) } : {}).map(c => ({
-            id: c.id, title: c.title, created: c.created, updated: c.updated, state: c.state, count: c.count, destination: c.workspace && `${c.workspace}/${c.workflow}`,
-            last: c.last ? { at: c.last.at, role: c.last.role, author: c.last.author, kind: c.last.kind, text: c.last.text.slice(0, 300) } : null,
-          })) })
-        }
-        if (wsId && !b && method === 'GET') {
-          const since = Number(url.searchParams.get('since') ?? 0)
-          return send(res, 200, { person: 'disabled' in cfg ? null : cfg.person, ...await cs.view(wsId, { viewBase: viewBaseOf(area), since: Number.isInteger(since) ? since : 0 }) })
-        }
-        if (wsId && b === 'messages' && method === 'POST') {
-          if ('disabled' in cfg) throw new RequestError(503, cfg.disabled)
-          const input = await body(req) as Record<string, unknown>
-          const re = input.re === undefined ? [] : input.re
-          if (!Array.isArray(re) || !re.every(n => Number.isInteger(n))) throw new RequestError(400, 're is a list of message ids')
-          // A client other than the page (the Slack integration) says how the
-          // words came (`via`) and, for an automated trial actor, who wrote
-          // them (`author`); otherwise they are the configured person's. The
-          // first message names the destination (`target`).
-          const opt = (k: string) => input[k] === undefined ? undefined : str(input[k], k)
-          const target = opt('target')
-          const { attachRequests } = await import('./conversations.ts')
-          const r = await cs.post(wsId, { text: str(input.text, 'text'), author: opt('author') ?? cfg.person, token: str(input.token, 'token'), re: re as number[], via: opt('via'), target: target === undefined ? undefined : parseTarget(target), challenges: attachRequests(input.challenges) })
-          const v = await cs.view(wsId, { viewBase: viewBaseOf(area) })
-          return send(res, 200, { sent: true, duplicate: r.duplicate, reopened: r.reopened, message: v.messages.find(m => m.id === r.message.id), run: r.message.dispatch_run, destination: v.conversation.destination })
-        }
-        if (wsId && b === 'close' && method === 'POST') return send(res, 200, { ok: true, conversation: cs.closeConversation(wsId) })
-        throw new RequestError(404, 'not found')
-      }
-
-      // Discussions (workflow_editor p16, docs/discussions.md): a person, a
-      // facilitator and project agents in one shared conversation. The
-      // person's words are the page's (the configured person) unless a
-      // client names an automated trial author; agents speak through their
-      // runs with the CLI. Writes start runs only through invitations.
-      if (a === 'discussions') {
-        const cs = config.conversations
-        if (!cs) throw new RequestError(503, 'conversations are not configured on this service')
-        const { DiscussionStore } = await import('./discussions.ts')
-        const { DiscussionArchive } = await import('./discussionArchive.ts')
-        const { viewBaseOf } = await import('./conversations.ts')
-        const ds = new DiscussionStore(cs)
+        const { ConversationService } = await import('./conversationService.ts')
+        const { ConversationArchive } = await import('./conversationArchive.ts')
+        const { viewBaseOf, attachRequests } = await import('./conversations.ts')
+        const ds = new ConversationService(cs)
         const cfg = ds.config()
         const person = 'disabled' in cfg ? null : cfg.person
         const need = () => { if ('disabled' in cfg) throw new RequestError(503, cfg.disabled); return cfg }
@@ -302,21 +262,24 @@ export function createHandler(config: ServiceConfig) {
         const words = (k: string) => { const v = input[k]; if (typeof v !== 'string' || !v.trim()) throw new RequestError(400, `${k} is required`); return v }
         const list = (k: string): string[] => { const v = input[k] ?? []; if (!Array.isArray(v) || !v.every(x => typeof x === 'string')) throw new RequestError(400, `${k} is a list of names`); return v as string[] }
         const nums = (k: string): number[] => { const v = input[k] ?? []; if (!Array.isArray(v) || !v.every(n => Number.isInteger(n))) throw new RequestError(400, `${k} is a list of message ids`); return v as number[] }
-        const archive = new DiscussionArchive(ds)
+        const archive = new ConversationArchive(ds)
         const view = async (id: string, since = 0) => ({ person, ...await ds.view(id, { viewBase: viewBaseOf(area), since }), archive: await archive.status(id) })
-        // The list as readers use it (argue p4 ex2): ?category=discussion|check
-        // &state=open|closed|all&limit=&offset=, with every view's counts;
-        // overview, brief and status for the page's rows only.
+        const exists = (id: string) => ds.conversation(id) ?? (() => { throw new RequestError(404, `no conversation ${id}`) })()
+        // The list as readers use it: ?category=conversation|check
+        // &state=open|closed|all&with=<participant>&mode=direct|group|facilitated
+        // &limit=&offset=, with every view's counts; overview, brief and status
+        // for the page's rows only.
         if (!wsId && method === 'GET') {
           const q = (k: string) => url.searchParams.get(k) ?? undefined
           const n = (k: string) => { const v = q(k); if (v === undefined) return undefined; const x = Number(v); if (!Number.isInteger(x) || x < 0) throw new RequestError(400, `${k} is a whole number`); return x }
-          const l = 'disabled' in cfg ? null : await ds.listing({ category: q('category'), state: q('state'), limit: n('limit'), offset: n('offset') })
-          return send(res, 200, { person, disabled: 'disabled' in cfg ? cfg.disabled : null, participants: await ds.participants(), counts: l?.counts ?? null, total: l?.total ?? 0, offset: l?.offset ?? 0, discussions: await Promise.all((l?.discussions ?? []).map(async d => {
-            const a = await archive.status(d.id)
+          const l = 'disabled' in cfg ? null : await ds.listing({ category: q('category'), state: q('state'), with: q('with'), mode: q('mode'), limit: n('limit'), offset: n('offset') })
+          return send(res, 200, { person, disabled: 'disabled' in cfg ? cfg.disabled : null, participants: await ds.participants(), counts: l?.counts ?? null, total: l?.total ?? 0, offset: l?.offset ?? 0, conversations: await Promise.all((l?.conversations ?? []).map(async d => {
+            const st = await archive.status(d.id)
             return {
               id: d.id, title: d.title, displayTitle: d.displayTitle, category: d.category, created: d.created, updated: d.updated, state: d.state, count: d.count, newest: d.last?.id ?? 0, members: d.members, participants: d.participants, open: d.open,
-              conductor: d.conductor ?? null, activity: d.activity, overview: d.overview, brief: d.brief, status: d.status,
-              archive: { state: a.state, commit: a.published?.commit ?? null, through: a.published?.horizon.message ?? null, url: a.published?.url ?? null },
+              mode: d.mode, defaultTo: d.defaultTo, facilitation: d.facilitation, conductor: d.conductor ?? null, activity: d.activity, overview: d.overview, brief: d.brief, status: d.status,
+              last: d.last ? { id: d.last.id, at: d.last.at, role: d.last.role, author: d.last.author, participant: d.last.participant, kind: d.last.kind, text: d.last.text.slice(0, 300) } : null,
+              archive: { state: st.state, commit: st.published?.commit ?? null, through: st.published?.horizon.message ?? null, url: st.published?.url ?? null, path: st.path },
             }
           })) })
         }
@@ -324,28 +287,53 @@ export function createHandler(config: ServiceConfig) {
           const c = need()
           const id = str(input.id, 'id')
           const author = opt('author') ?? c.person
-          const r = ds.create(id, { title: str(input.title, 'title'), by: author, members: list('members'), category: opt('category') })
+          const dt = input.defaultTo
+          if (dt !== undefined && dt !== null && typeof dt !== 'string') throw new RequestError(400, 'defaultTo is a participant, or null')
+          const r = ds.create(id, { title: str(input.title, 'title'), by: author, members: list('members'), category: opt('category'), facilitate: input.facilitate === true, ...(dt !== undefined ? { defaultTo: dt as string | null } : {}) })
           let posted = null
-          const { attachRequests } = await import('./conversations.ts')
           if (input.text !== undefined) posted = await ds.post(id, { text: words('text'), author, token: str(input.token, 'token'), to: list('to'), re: nums('re'), via: opt('via'), challenges: attachRequests(input.challenges) })
-          return send(res, r.duplicate ? 200 : 201, { created: !r.duplicate, posted: posted && { message: posted.message.id, duplicate: posted.duplicate, invitations: posted.invitations.map(i => ds.invitationView(i)) }, ...await view(id) })
+          return send(res, r.duplicate ? 200 : 201, { created: !r.duplicate, posted: posted && { message: posted.message.id, duplicate: posted.duplicate, requests: posted.invitations.map(i => ds.invitationView(i)) }, ...await view(id) })
         }
         if (wsId && !b && method === 'GET') {
           const since = Number(url.searchParams.get('since') ?? 0)
           return send(res, 200, await view(wsId, Number.isInteger(since) ? since : 0))
         }
+        // The person's words. A new id is created by its first message, with
+        // the project `with` names (a one-to-one room). A client other than
+        // the page (Slack) says how the words came (`via`) and, for an
+        // automated trial actor, who wrote them (`author`).
         if (wsId && b === 'messages' && method === 'POST') {
           const c = need()
-          const { attachRequests } = await import('./conversations.ts')
-          const r = await ds.post(wsId, { text: words('text'), author: opt('author') ?? c.person, token: str(input.token, 'token'), to: list('to'), re: nums('re'), via: opt('via'), challenges: attachRequests(input.challenges) })
-          return send(res, 200, { sent: true, duplicate: r.duplicate, reopened: r.reopened, message: ds.message(r.message, viewBaseOf(area)), invitations: r.invitations.map(i => ds.invitationView(i, viewBaseOf(area))) })
+          const r = await ds.post(wsId, { text: words('text'), author: opt('author') ?? c.person, token: str(input.token, 'token'), to: list('to'), runs: list('runs'), re: nums('re'), via: opt('via'), with: opt('with'), title: opt('title'), challenges: attachRequests(input.challenges) })
+          return send(res, 200, { sent: true, duplicate: r.duplicate, reopened: r.reopened, created: r.created, message: ds.message(r.message, viewBaseOf(area)), requests: r.invitations.map(i => ds.invitationView(i, viewBaseOf(area))) })
         }
-        // Workflows in the discussion (argue p4 ex3, docs/discussions.md
-        // *Workflows in a discussion*): reads only — no model, no run, no write.
+        // Facilitation: start (with a brief: the person's words to the
+        // conductor) or end. Joining a member or changing presentation never
+        // starts it.
+        if (wsId && b === 'facilitation' && method === 'POST') {
+          const c = need()
+          const action = str(input.action, 'action')
+          const by = opt('author') ?? c.person
+          if (action === 'start') {
+            const r = await ds.startFacilitation(wsId, { text: words('text'), author: by, token: str(input.token, 'token'), re: nums('re'), via: opt('via'), challenges: attachRequests(input.challenges) })
+            return send(res, 200, { duplicate: r.duplicate, facilitation: r.facilitation, message: ds.message(r.posted.message, viewBaseOf(area)), requests: r.posted.invitations.map(i => ds.invitationView(i, viewBaseOf(area))) })
+          }
+          if (action === 'end') return send(res, 200, ds.endFacilitation(wsId, { by, note: opt('note') }))
+          throw new RequestError(400, 'action is start or end')
+        }
+        if (wsId && b === 'default' && method === 'POST') {
+          const c = need()
+          const p = input.participant
+          if (p !== null && typeof p !== 'string') throw new RequestError(400, 'participant is a member, or null')
+          const r = ds.setDefault(wsId, p as string | null, { by: opt('author') ?? c.person, note: opt('note') })
+          return send(res, 200, { ok: true, defaultTo: r.default_to ?? null })
+        }
+        // Workflows in the conversation (argue p4 ex3, *Workflows in a
+        // conversation*): reads only — no model, no run, no write.
         if (wsId && b === 'workflows' && method === 'GET') {
-          const { DiscussionWorkflows } = await import('./discussionWorkflows.ts')
-          const wfs = new DiscussionWorkflows(ds)
-          ds.discussion(wsId) ?? (() => { throw new RequestError(404, `no discussion ${wsId}`) })()
+          const { ConversationWorkflows } = await import('./conversationWorkflows.ts')
+          const wfs = new ConversationWorkflows(ds)
+          exists(wsId)
           if (!file) return send(res, 200, { workflows: await wfs.list(wsId, viewBaseOf(area)), horizon: wfs.horizon(wsId) })
           const n = Number(file)
           if (!Number.isInteger(n)) throw new RequestError(404, 'not found')
@@ -353,34 +341,41 @@ export function createHandler(config: ServiceConfig) {
           if (action === 'current') return send(res, 200, await wfs.current(wsId, n, viewBaseOf(area)))
           throw new RequestError(404, 'not found')
         }
-        if (wsId && b === 'invitations' && !file && method === 'POST') {
+        if (wsId && b === 'requests' && !file && method === 'POST') {
           const c = need()
           const r = await ds.invite(wsId, { participant: str(input.participant, 'participant'), question: words('question'), re: nums('re'), by: opt('author') ?? c.person, token: opt('token') })
-          return send(res, 200, { duplicate: r.duplicate, invitation: ds.invitationView(r.invitation, viewBaseOf(area)) })
+          return send(res, 200, { duplicate: r.duplicate, request: ds.invitationView(r.invitation, viewBaseOf(area)) })
         }
-        if (wsId && b === 'invitations' && file && action === 'withdraw' && method === 'POST') {
+        if (wsId && b === 'requests' && file && action === 'withdraw' && method === 'POST') {
           const c = need()
-          return send(res, 200, { invitation: ds.invitationView(ds.withdrawInvitation(wsId, Number(file), { by: opt('author') ?? c.person, reason: str(input.reason, 'reason') })) })
+          return send(res, 200, { request: ds.invitationView(ds.withdrawInvitation(wsId, Number(file), { by: opt('author') ?? c.person, reason: str(input.reason, 'reason') })) })
+        }
+        if (wsId && b === 'requests' && file && action === 'retry' && method === 'POST') { need(); return send(res, 200, { request: ds.invitationView(await ds.retry(wsId, Number(file)), viewBaseOf(area)) }) }
+        if (wsId && b === 'resume' && method === 'POST') {
+          const c = need()
+          const n = input.request === undefined ? undefined : Number(input.request)
+          if (n !== undefined && !Number.isInteger(n)) throw new RequestError(400, 'request is a request id')
+          return send(res, 200, { ok: true, ...await ds.resume(wsId, { by: opt('author') ?? c.person, request: n }) })
         }
         if (wsId && b === 'members' && method === 'POST') {
           const c = need()
-          const action = str(input.action, 'action')
+          const act = str(input.action, 'action')
           const participant = str(input.participant, 'participant')
           const by = opt('author') ?? c.person
-          if (action === 'join') return send(res, 200, ds.join(wsId, participant, { by, note: opt('note') }))
-          if (action === 'leave') return send(res, 200, ds.leave(wsId, participant, { by, note: opt('note') }))
+          if (act === 'join') return send(res, 200, ds.join(wsId, participant, { by, note: opt('note') }))
+          if (act === 'leave') return send(res, 200, ds.leave(wsId, participant, { by, note: opt('note') }))
           throw new RequestError(400, 'action is join or leave')
         }
         // Metadata and the overview (argue p4 ex2): records about the
-        // discussion; they send nothing, invite nobody and reopen nothing.
+        // conversation; they send nothing, ask nobody and reopen nothing.
         if (wsId && b === 'meta' && method === 'POST') {
           const c = need()
           const t = input.displayTitle
           if (t !== undefined && t !== null && typeof t !== 'string') throw new RequestError(400, 'displayTitle is a string, or null to remove it')
           const r = ds.setMeta(wsId, { category: opt('category'), displayTitle: t as string | null | undefined, by: opt('author') ?? c.person, note: opt('note') })
-          return send(res, 200, { ok: true, changed: r.changed, discussion: { id: wsId, category: r.discussion.category ?? 'discussion', displayTitle: r.discussion.display_title ?? null } })
+          return send(res, 200, { ok: true, changed: r.changed, conversation: { id: wsId, category: r.conversation.category === 'check' ? 'check' : 'conversation', displayTitle: r.conversation.display_title ?? null } })
         }
-        if (wsId && b === 'overview' && method === 'GET') { ds.discussion(wsId) ?? (() => { throw new RequestError(404, `no discussion ${wsId}`) })(); return send(res, 200, { overview: ds.overview(wsId), revisions: ds.overviewRows(wsId).map(r => ds.overviewView(r)), brief: ds.brief(wsId) }) }
+        if (wsId && b === 'overview' && method === 'GET') { exists(wsId); return send(res, 200, { overview: ds.overview(wsId), revisions: ds.overviewRows(wsId).map(r => ds.overviewView(r)), brief: ds.brief(wsId) }) }
         if (wsId && b === 'overview' && method === 'POST') {
           const c = need()
           const u = input.unresolved ?? []
@@ -391,7 +386,7 @@ export function createHandler(config: ServiceConfig) {
           return send(res, 200, { ok: true, ...r })
         }
         if (wsId && b === 'close' && method === 'POST') { const c = need(); return send(res, 200, { ok: true, ...ds.close(wsId, { by: opt('author') ?? c.person }) }) }
-        if (wsId && b === 'reopen' && method === 'POST') { const c = need(); return send(res, 200, { ok: true, discussion: ds.reopen(wsId, { by: opt('author') ?? c.person }) }) }
+        if (wsId && b === 'reopen' && method === 'POST') { const c = need(); return send(res, 200, { ok: true, conversation: ds.reopen(wsId, { by: opt('author') ?? c.person }) }) }
         // Character dialogue (argue p5, docs/dialogue.md): the presentation
         // path, apart from every read above. A read may queue lines for the
         // dialogue worker; it never calls a model and changes nothing else.
@@ -412,7 +407,7 @@ export function createHandler(config: ServiceConfig) {
           throw new RequestError(404, 'not found')
         }
         if (wsId && b === 'archive' && method === 'GET') return send(res, 200, await archive.status(wsId))
-        if (wsId && b === 'archive' && method === 'POST') { if (!ds.discussion(wsId)) throw new RequestError(404, `no discussion ${wsId}`); const r = await archive.publish([wsId]); return send(res, r.failed.length ? 502 : 200, { ...r, status: await archive.status(wsId) }) }
+        if (wsId && b === 'archive' && method === 'POST') { exists(wsId); const r = await archive.publish([wsId]); return send(res, r.failed.length ? 502 : 200, { ...r, status: await archive.status(wsId) }) }
         throw new RequestError(404, 'not found')
       }
 
@@ -427,8 +422,8 @@ export function createHandler(config: ServiceConfig) {
       if (a === 'dialogue' && !wsId && method === 'GET') {
         if (!config.conversations) throw new RequestError(503, 'conversations are not configured on this service')
         const { DialogueStore } = await import('./dialogue.ts')
-        const { DiscussionStore } = await import('./discussions.ts')
-        return send(res, 200, await (config.dialogue ?? new DialogueStore(new DiscussionStore(config.conversations))).status())
+        const { ConversationService } = await import('./conversationService.ts')
+        return send(res, 200, await (config.dialogue ?? new DialogueStore(new ConversationService(config.conversations))).status())
       }
 
       // Execution nodes (project_migration p7, docs/workers.md): every worker's

@@ -16,8 +16,8 @@ import { join } from 'node:path'
 import { ChallengeStore } from '../server/challenges.ts'
 import { ConversationStore } from '../server/conversations.ts'
 import { createProject } from '../server/create.ts'
-import { DiscussionArchive } from '../server/discussionArchive.ts'
-import { DiscussionStore } from '../server/discussions.ts'
+import { ConversationArchive } from '../server/conversationArchive.ts'
+import { ConversationService } from '../server/conversationService.ts'
 import { ExecStore, attachmentBrief } from '../server/exec.ts'
 import { gitOk } from '../server/git.ts'
 import { loadRegistry } from '../server/registry.ts'
@@ -75,7 +75,7 @@ async function setup() {
   const x = new ExecStore({ registryFile: registry, area })
   const ch = new ChallengeStore({ area })
   const cs = new ConversationStore({ area, exec: x, challenges: ch })
-  const ds = new DiscussionStore(cs)
+  const ds = new ConversationService(cs)
   const regs = (await loadRegistry(registry)).workspaces
   const ws = (id: string) => new Workspace(regs.find(w => w.project === id)!)
   return { area, x, ch, cs, ds, ws }
@@ -91,11 +91,11 @@ test('a conversation message carries a challenge; its turn gets that revision, n
   s = await setup()
   const c = await s.ch.create({ by: 'front-agent', via: 'cli', request: 'att-create-1', title: 'Edge remnants', body: 'Version one.', projects: ['gimmickimg'] })
   first = c.record!.commit
-  const p = await s.cs.post('att-c1', { text: 'Let us think about this one.', author: 'Pat', token: 'tok-att-0001', target: { workspace: 'front', workflow: 'converse' }, challenges: [{ id: 'ch-0001' }] })
-  const run = p.message.dispatch_run!
-  assert.ok(run, p.message.dispatch_error ?? '')
+  const p = await s.ds.post('att-c1', { text: 'Let us think about this one.', author: 'Pat', token: 'tok-att-0001', with: 'front', challenges: [{ id: 'ch-0001' }] })
+  const run = p.invitations[0]!.run!
+  assert.ok(run, p.invitations[0]!.error ?? '')
   // the same submission again: one message, one attachment
-  await s.cs.post('att-c1', { text: 'Let us think about this one.', author: 'Pat', token: 'tok-att-0001', challenges: [{ id: 'ch-0001' }] })
+  await s.ds.post('att-c1', { text: 'Let us think about this one.', author: 'Pat', token: 'tok-att-0001', challenges: [{ id: 'ch-0001' }] })
   assert.equal(s.cs.attachmentsOf([p.message.id]).length, 1)
   const r = await rec(s, run)
   assert.deepEqual(r.input.attachments, [{ kind: 'challenge', id: 'ch-0001', commit: first, title: 'Edge remnants', sha256: c.record!.sha256, file: `attachments/ch-0001@${first.slice(0, 12)}.md` }])
@@ -105,23 +105,23 @@ test('a conversation message carries a challenge; its turn gets that revision, n
   const e = await s.ch.edit('ch-0001', { by: 'Pat', via: 'page', request: 'att-edit-1', base: first, body: 'Version two.' })
   second = e.record!.commit
   assert.match(await file(s, run, r.input.attachments![0]!.file), /Version one\./)
-  const v = await s.cs.view('att-c1')
-  assert.deepEqual(v.messages[0]!.attachments.map(a => [a.commit, a.latest?.commit]), [[first, second]])
+  const v = await s.ds.view('att-c1')
+  assert.deepEqual(v.messages[0]!.attachments!.map(a => [a.commit, a.latest?.commit]), [[first, second]])
   // a message may name a revision explicitly
-  const p2 = await s.cs.post('att-c1', { text: 'And the earlier text.', author: 'Pat', token: 'tok-att-0002', challenges: [{ id: 'ch-0001', at: first.slice(0, 10) }] })
-  assert.equal((await rec(s, p2.message.dispatch_run!)).input.attachments![0]!.commit, first)
+  const p2 = await s.ds.post('att-c1', { text: 'And the earlier text.', author: 'Pat', token: 'tok-att-0002', challenges: [{ id: 'ch-0001', at: first.slice(0, 10) }] })
+  assert.equal((await rec(s, p2.invitations[0]!.run!)).input.attachments![0]!.commit, first)
 })
 
 test('unknown, unpublished or malformed references are refused and the message is not stored', async () => {
   const before = s.cs.messages('att-c1').length
-  await assert.rejects(s.cs.post('att-c1', { text: 'x', author: 'Pat', token: 'tok-att-0003', challenges: [{ id: 'ch-0099' }] }), (e: unknown) => e instanceof RequestError && e.status === 404)
-  await assert.rejects(s.cs.post('att-c1', { text: 'x', author: 'Pat', token: 'tok-att-0004', challenges: [{ id: 'nope' }] }), /not a challenge id/)
-  await assert.rejects(s.cs.post('att-c1', { text: 'x', author: 'Pat', token: 'tok-att-0005', challenges: [{ id: 'ch-0001', at: 'deadbeef' }] }), /no commit/)
+  await assert.rejects(s.ds.post('att-c1', { text: 'x', author: 'Pat', token: 'tok-att-0003', challenges: [{ id: 'ch-0099' }] }), (e: unknown) => e instanceof RequestError && e.status === 404)
+  await assert.rejects(s.ds.post('att-c1', { text: 'x', author: 'Pat', token: 'tok-att-0004', challenges: [{ id: 'nope' }] }), /not a challenge id/)
+  await assert.rejects(s.ds.post('att-c1', { text: 'x', author: 'Pat', token: 'tok-att-0005', challenges: [{ id: 'ch-0001', at: 'deadbeef' }] }), /no commit/)
   assert.equal(s.cs.messages('att-c1').length, before)
 })
 
 test('a discussion message carries a challenge to whom it invites, and to the run that asked', async () => {
-  s.ds.create('att-d1', { title: 'Edges', by: 'Pat', members: ['forge'] })
+  s.ds.create('att-d1', { facilitate: true, title: 'Edges', by: 'Pat', members: ['forge'] })
   const p = await s.ds.post('att-d1', { text: 'Forge, can you look at ch-0001?', author: 'Pat', token: 'tok-att-d001', to: ['forge'], challenges: [{ id: 'ch-0001' }] })
   const inv = p.invitations[0]!
   assert.equal(inv.state, 'started', inv.error ?? '')
@@ -146,10 +146,10 @@ test('a discussion message carries a challenge to whom it invites, and to the ru
   // the view and the archive keep them
   const v = await s.ds.view('att-d1')
   assert.equal(v.messages.find(m => m.id === p.message.id)!.attachments![0]!.id, 'ch-0001')
-  const a = await new DiscussionArchive(s.ds).publish(['att-d1'])
+  const a = await new ConversationArchive(s.ds).publish(['att-d1'])
   assert.deepEqual(a.failed, [])
   const clone = join(s.area, '.local', 'discussions', 'archive')
-  const lines = (await readFile(join(clone, 'discussions', 'att-d1', 'transcript.jsonl'), 'utf8')).split('\n').filter(Boolean).map(l => JSON.parse(l) as { type: string; id?: number; attachments?: { id: string; commit: string }[] })
+  const lines = (await readFile(join(clone, 'conversations', 'att-d1', 'transcript.jsonl'), 'utf8')).split('\n').filter(Boolean).map(l => JSON.parse(l) as { type: string; id?: number; attachments?: { id: string; commit: string }[] })
   assert.deepEqual(lines.find(l => l.type === 'message' && l.id === p.message.id)!.attachments!.map(x => [x.id, x.commit]), [['ch-0001', second]])
 })
 
@@ -160,7 +160,7 @@ test('reading and attaching start no run', async () => {
   s.ch.list({ text: 'edge' })
   await s.ch.at('ch-0001', first)
   await s.cs.pinAll([{ id: 'ch-0001' }])
-  await s.cs.view('att-c1')
+  await s.ds.view('att-c1')
   await s.ds.view('att-d1')
   assert.equal(jobs(), n)
   s.cs.close(); s.ch.close(); s.x.close()

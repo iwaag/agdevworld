@@ -3,7 +3,7 @@
 // service and its worker use.
 import { ConversationStore } from '../server/conversations.ts'
 import { DialogueStore, DialogueWorker } from '../server/dialogue.ts'
-import { DiscussionStore } from '../server/discussions.ts'
+import { ConversationService } from '../server/conversationService.ts'
 import type { ExecStore } from '../server/exec.ts'
 
 export const DIALOGUE_HELP = `wfe dialogue <subcommand> …   (character dialogue; docs/dialogue.md)
@@ -47,7 +47,7 @@ export async function dialogueCommand(c: DialogueCli): Promise<number> {
   if (!sub || sub === 'help') { c.out(DIALOGUE_HELP, { help: DIALOGUE_HELP }); return 0 }
   const x = await c.exec()
   const cs = new ConversationStore({ area: c.area(), exec: x })
-  const dl = new DialogueStore(new DiscussionStore(cs))
+  const dl = new DialogueStore(new ConversationService(cs))
   const lang = c.opt('lang') ?? 'ja'
   try {
     if (sub === 'status') {

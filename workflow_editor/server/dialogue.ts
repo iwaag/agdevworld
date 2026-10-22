@@ -30,7 +30,7 @@ import { hostname } from 'node:os'
 import { isAbsolute, join, resolve } from 'node:path'
 import type { DatabaseSync } from 'node:sqlite'
 import type { MessageRow } from './conversations.ts'
-import type { DiscussionStore } from './discussions.ts'
+import type { ConversationService } from './conversationService.ts'
 import { git } from './git.ts'
 import { openStore, transaction } from './sqlite.ts'
 import { RequestError } from './workspace.ts'
@@ -138,12 +138,12 @@ export function runRenderer(cfg: DialogueConfig, command: 'describe' | 'render',
 }
 
 export class DialogueStore {
-  readonly ds: DiscussionStore
+  readonly ds: ConversationService
   private _db: DatabaseSync | null = null
   private _dir: string | null = null
   private described: { at: number; real: string; mtime: number; d: RendererDescription } | null = null
   private o: { config?: DialogueConfig | { disabled: string }; backoffMs?: number }
-  constructor(ds: DiscussionStore, o: { config?: DialogueConfig | { disabled: string }; backoffMs?: number } = {}) { this.ds = ds; this.o = o }
+  constructor(ds: ConversationService, o: { config?: DialogueConfig | { disabled: string }; backoffMs?: number } = {}) { this.ds = ds; this.o = o }
 
   config(): DialogueConfig | { disabled: string } { return this.o.config ?? loadDialogueConfig(this.ds.area) }
 
@@ -210,7 +210,7 @@ export class DialogueStore {
       const kind = x.role === 'person' ? 'person' : (members.find(r => r.participant === p)?.kind ?? 'project')
       participants[p] = { kind, projectName: kind === 'person' ? null : nameOf.get(p) ?? null }
     }
-    const d = this.ds.discussion(conv)!
+    const d = this.ds.conversation(conv)!
     return {
       request: { schema: 'ag.dialogue-request.v1', language, discussion: { id: conv, title: d.display_title ?? d.title }, participants, target: src(m, TARGET_CHARS), context },
       horizon: m.id,
@@ -232,7 +232,7 @@ export class DialogueStore {
   // read queues at most `window` missing lines (`queue`), and only lines; it
   // never calls a model.
   async read(conv: string, language: string, o: { queue?: boolean; since?: number } = {}): Promise<DialogueRead> {
-    if (!this.ds.discussion(conv)) throw new RequestError(404, `no discussion ${conv}`)
+    if (!this.ds.conversation(conv)) throw new RequestError(404, `no discussion ${conv}`)
     const rows = this.ds.messages(conv)
     const plain = (problem: string): DialogueRead => ({
       discussion: conv, language, available: false, problem, renderer: null, queued: 0,
@@ -284,7 +284,7 @@ export class DialogueStore {
     const cfg = this.config()
     if ('disabled' in cfg) throw new RequestError(503, cfg.disabled)
     if (!cfg.languages.includes(language)) throw new RequestError(400, `language is one of ${cfg.languages.join(', ')}`)
-    if (!this.ds.discussion(conv)) throw new RequestError(404, `no discussion ${conv}`)
+    if (!this.ds.conversation(conv)) throw new RequestError(404, `no discussion ${conv}`)
     const rows = this.ds.messages(conv)
     const m = rows.find(x => x.id === message)
     if (!m) throw new RequestError(404, `no message ${message} in discussion ${conv}`)
@@ -315,12 +315,12 @@ export class DialogueStore {
     const cfg = this.config()
     if ('disabled' in cfg || !cfg.follow.length) return 0
     const db = await this.db()
-    const top = (this.ds.db.prepare("SELECT max(m.id) AS n FROM messages m JOIN conversations c ON c.id = m.conv WHERE c.kind = 'discussion'").get() as { n: number | null }).n ?? 0
+    const top = (this.ds.db.prepare("SELECT max(m.id) AS n FROM messages m JOIN conversations c ON c.id = m.conv").get() as { n: number | null }).n ?? 0
     const cp = db.prepare("SELECT v FROM state WHERE k = 'follow'").get() as { v: string } | undefined
     if (!cp) { db.prepare("INSERT OR IGNORE INTO state (k, v) VALUES ('follow', ?)").run(String(top)); return 0 }
     const from = Number(cp.v)
     if (top <= from) return 0
-    const fresh = this.ds.db.prepare("SELECT m.id, m.conv FROM messages m JOIN conversations c ON c.id = m.conv WHERE c.kind = 'discussion' AND m.role = 'agent' AND m.id > ? AND m.id <= ? ORDER BY m.id").all(from, top) as { id: number; conv: string }[]
+    const fresh = this.ds.db.prepare("SELECT m.id, m.conv FROM messages m JOIN conversations c ON c.id = m.conv WHERE m.role = 'agent' AND m.id > ? AND m.id <= ? ORDER BY m.id").all(from, top) as { id: number; conv: string }[]
     let n = 0
     if (fresh.length) {
       const d = await this.describe()

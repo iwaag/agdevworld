@@ -13,8 +13,8 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { ConversationStore } from '../server/conversations.ts'
 import { createProject } from '../server/create.ts'
-import { DiscussionArchive } from '../server/discussionArchive.ts'
-import { citations, DiscussionStore } from '../server/discussions.ts'
+import { ConversationArchive } from '../server/conversationArchive.ts'
+import { citations, ConversationService } from '../server/conversationService.ts'
 import { ExecStore } from '../server/exec.ts'
 import { gitOk } from '../server/git.ts'
 import { loadRegistry } from '../server/registry.ts'
@@ -84,7 +84,7 @@ async function setup(o: { participants?: string[] } = {}) {
   }))
   const x = new ExecStore({ registryFile: registry, area })
   const cs = new ConversationStore({ area, exec: x })
-  const ds = new DiscussionStore(cs)
+  const ds = new ConversationService(cs)
   const regs = (await loadRegistry(registry)).workspaces
   const ws = (id: string) => new Workspace(regs.find(w => w.project === id)!)
   return { area, x, cs, ds, ws }
@@ -109,7 +109,7 @@ async function talk(s: S, conv: string, o: { run: string; attempt: string; node:
 // A conductor whose first decision adds an announcement, a parallel ask and
 // a second ponder.
 async function opened(s: S, conv: string) {
-  s.ds.create(conv, { title: 'Facts first', by: 'Pat', members: ['forge', 'sage'] })
+  s.ds.create(conv, { facilitate: true, title: 'Facts first', by: 'Pat', members: ['forge', 'sage'] })
   const brief = (await s.ds.post(conv, { text: 'Find out what the game and the model can do.', author: 'Pat', token: `tok-${conv}-001` })).message
   assert.equal(s.cs.conversation(conv)!.conductor, P, 'the invited facilitator run conducts')
   s.x.db.prepare('UPDATE jobs SET state = \'done\' WHERE workspace = \'ponderer\'').run()
@@ -127,10 +127,10 @@ test('citations are [#n] (several in one bracket); a bare #n is text', () => {
 
 test('a category is set at creation (default discussion) and corrected later with its reason; nothing is sent, invited, started or reopened, and the list order stays', async () => {
   const s = await setup()
-  s.ds.create('rd-a', { title: 'Seats (trial 3)', by: 'Pat', members: ['forge'] })
-  s.ds.create('rd-b', { title: 'Fixture: two lines', by: 'Pat', category: 'check' })
-  assert.throws(() => s.ds.create('rd-c', { title: 'x', by: 'Pat', category: 'trial' }), /discussion or check/)
-  assert.equal(s.cs.conversation('rd-a')!.category, 'discussion')
+  s.ds.create('rd-a', { facilitate: true, title: 'Seats (trial 3)', by: 'Pat', members: ['forge'] })
+  s.ds.create('rd-b', { facilitate: true, title: 'Fixture: two lines', by: 'Pat', category: 'check' })
+  assert.throws(() => s.ds.create('rd-c', { facilitate: true, title: 'x', by: 'Pat', category: 'trial' }), /conversation or check/)
+  assert.equal(s.cs.conversation('rd-a')!.category, 'conversation')
   assert.equal(s.cs.conversation('rd-b')!.category, 'check')
   assert.deepEqual(s.ds.metaRows('rd-b').map(m => [m.field, m.value, m.note]), [['category', 'check', 'at creation']])
   await s.ds.post('rd-a', { text: 'Which seat should the bot take?', author: 'Pat', token: 'tok-rd-a-001' })
@@ -143,9 +143,9 @@ test('a category is set at creation (default discussion) and corrected later wit
   assert.deepEqual(s.ds.setMeta('rd-a', { category: 'check', by: 'Omni Agent', note: 'again' }).changed, [], 'the same value again records nothing')
   s.ds.setMeta('rd-a', { category: 'discussion', displayTitle: null, by: 'Pat', note: 'it was a real question after all' })
   const v = await s.ds.view('rd-a')
-  assert.equal(v.discussion.category, 'discussion')
-  assert.equal(v.discussion.displayTitle, null)
-  assert.deepEqual(v.meta.map(m => `${m.field}=${m.value}`), ['category=discussion', 'category=check', 'displayTitle=席の選び方（3回目）', 'category=discussion', 'displayTitle=null'])
+  assert.equal(v.conversation.category, 'conversation')
+  assert.equal(v.conversation.displayTitle, null)
+  assert.deepEqual(v.meta.map(m => `${m.field}=${m.value}`), ['category=conversation', 'category=check', 'displayTitle=席の選び方（3回目）', 'category=conversation', 'displayTitle=null'])
   assert.throws(() => s.ds.setMeta('rd-a', { by: 'Pat' }), /nothing to change/)
   assert.throws(() => s.ds.setMeta('rd-a', { displayTitle: 'two\nlines', by: 'Pat' }), /one line/)
   s.cs.close(); s.x.close()
@@ -153,7 +153,7 @@ test('a category is set at creation (default discussion) and corrected later wit
 
 test('an overview cites what it rests on, covers the speech through one message and is stale (still readable) after newer messages; revisions stay; it starts nothing', async () => {
   const s = await setup()
-  s.ds.create('rd-o', { title: 'Where should provenance live?', by: 'Pat', members: ['forge'] })
+  s.ds.create('rd-o', { facilitate: true, title: 'Where should provenance live?', by: 'Pat', members: ['forge'] })
   assert.equal(s.ds.brief('rd-o'), null, 'no message: no brief either')
   assert.throws(() => s.ds.publishOverview('rd-o', { purpose: 'x [#1]', author: 'Pat' }), /no message to summarise/)
   const m1 = (await s.ds.post('rd-o', { text: 'Where should the provenance of a forge-made asset live?', author: 'Pat', token: 'tok-rd-o-001', to: ['forge'] })).message
@@ -202,7 +202,7 @@ test('status: awaiting the person only when the question\'s receiver is that per
   // An agent requester: the same kind of question is not the person's.
   const created = await s.x.request({ workspace: 'ponderer', workflow: 'conduct', text: 'Conduct.', author: 'front-agent', receipt: 'test:conduct:rd', via: 'cli' })
   const run = `ponderer/${created.ref.workflow}/${created.ref.run}`
-  s.ds.create('rd-t', { title: 'Agent requester', by: 'front-agent', members: ['forge'], conductor: run, requester: { kind: 'run', run: 'front/converse/run-001', agent: 'front-agent' } })
+  s.ds.create('rd-t', { facilitate: true, title: 'Agent requester', by: 'front-agent', members: ['forge'], conductor: run, requester: { kind: 'run', run: 'front/converse/run-001', agent: 'front-agent' } })
   s.x.db.prepare('UPDATE jobs SET state = \'done\' WHERE workspace = \'ponderer\'').run()
   await begin(s, run, 'a3')
   await s.ds.ponder('rd-t', { run, attempt: 'a3', ...who, node: 'ponder', decision: 'Open, then ask front.', sources: [], next: [{ activity: 'announce', node: 'open' }, { activity: 'talk', node: 'ask-front' }, { activity: 'ponder', node: 'then' }] })
@@ -214,7 +214,7 @@ test('status: awaiting the person only when the question\'s receiver is that per
   assert.deepEqual(s.ds.brief('rd-t'), { message: open.message.id, author: 'ponderer-agent', participant: 'ponderer', text: open.message.text }, 'a conductor-opened discussion\'s brief is its opening announcement')
 
   // A closed room whose invited participant is still working owes it.
-  s.ds.create('rd-u', { title: 'Make it', by: 'Pat', members: ['forge'] })
+  s.ds.create('rd-u', { facilitate: true, title: 'Make it', by: 'Pat', members: ['forge'] })
   const fr = (await s.ds.post('rd-u', { text: 'forge, make it.', author: 'Pat', token: 'tok-rd-u-002', to: ['forge'] })).invitations[0].run!
   s.ds.close('rd-u', { by: 'Pat' })
   st = await s.ds.status('rd-u')
@@ -227,42 +227,42 @@ test('status: awaiting the person only when the question\'s receiver is that per
 test('the list: one category and state at a time, paged, with every view\'s counts; no row is lost after the twelfth', async () => {
   const s = await setup()
   for (let i = 1; i <= 25; i++) s.ds.create(`rd-old-${String(i).padStart(2, '0')}`, { title: `Old discussion ${i}`, by: 'Pat' })
-  for (let i = 1; i <= 3; i++) s.ds.create(`rd-chk-${i}`, { title: `Check ${i}`, by: 'Pat', category: 'check' })
+  for (let i = 1; i <= 3; i++) s.ds.create(`rd-chk-${i}`, { facilitate: true, title: `Check ${i}`, by: 'Pat', category: 'check' })
   for (let i = 1; i <= 20; i++) s.ds.close(`rd-old-${String(i).padStart(2, '0')}`, { by: 'Pat' })
   const first = await s.ds.listing({ category: 'discussion', state: 'all', limit: 20 })
-  assert.deepEqual(first.counts, { discussion: { open: 5, closed: 20 }, check: { open: 3, closed: 0 } })
+  assert.deepEqual(first.counts, { conversation: { open: 5, closed: 20 }, check: { open: 3, closed: 0 } })
   assert.equal(first.total, 25)
-  assert.equal(first.discussions.length, 20)
+  assert.equal(first.conversations.length, 20)
   const rest = await s.ds.listing({ category: 'discussion', state: 'all', limit: 20, offset: 20 })
-  assert.equal(rest.discussions.length, 5)
-  assert.equal(new Set([...first.discussions, ...rest.discussions].map(d => d.id)).size, 25, 'every discussion is reachable')
-  assert.equal((await s.ds.listing({ category: 'check' })).discussions.every(d => d.category === 'check'), true)
+  assert.equal(rest.conversations.length, 5)
+  assert.equal(new Set([...first.conversations, ...rest.conversations].map(d => d.id)).size, 25, 'every discussion is reachable')
+  assert.equal((await s.ds.listing({ category: 'check' })).conversations.every(d => d.category === 'check'), true)
   assert.equal((await s.ds.listing({ category: 'discussion', state: 'open' })).total, 5)
-  const row = first.discussions[0]
-  assert.deepEqual(Object.keys(row.status).sort(), ['awaiting', 'failed', 'held', 'owed', 'room', 'working'])
+  const row = first.conversations[0]
+  assert.deepEqual(Object.keys(row.status).sort(), ['awaiting', 'continuations', 'failed', 'held', 'owed', 'room', 'working'])
   assert.equal(row.overview, null)
-  await assert.rejects(s.ds.listing({ category: 'trial' }), /discussion or check/)
+  await assert.rejects(s.ds.listing({ category: 'trial' }), /conversation or check/)
   await assert.rejects(s.ds.listing({ state: 'half' }), /open, closed or all/)
   s.cs.close(); s.x.close()
 })
 
 test('the archive exports metadata and overview records with their own horizons; the manifest carries the category, display title and current overview; a replay adds nothing', async () => {
   const s = await setup()
-  s.ds.create('rd-x', { title: 'Archive me', by: 'Pat', category: 'check' })
+  s.ds.create('rd-x', { facilitate: true, title: 'Archive me', by: 'Pat', category: 'check' })
   const m1 = (await s.ds.post('rd-x', { text: 'A check of the archive.', author: 'Pat', token: 'tok-rd-x-001', to: ['forge'] })).message
-  const arch = new DiscussionArchive(s.ds)
+  const arch = new ConversationArchive(s.ds)
   assert.deepEqual((await arch.publish(['rd-x'])).failed, [])
   s.ds.setMeta('rd-x', { displayTitle: 'アーカイブの確認', by: 'Pat', note: 'readable title' })
   assert.ok(arch.due().includes('rd-x'), 'a metadata change makes it due')
   assert.equal((await arch.status('rd-x')).state, 'behind')
   s.ds.publishOverview('rd-x', { purpose: `アーカイブの確認 [#${m1.id}]`, author: 'Pat', note: 'first' })
   assert.deepEqual((await arch.publish(['rd-x'])).failed, [])
-  const lines = (await readFile(join(arch.dir, 'discussions', 'rd-x', 'transcript.jsonl'), 'utf8')).trim().split('\n').map(l => JSON.parse(l) as { type: string; field?: string; value?: string; sources?: number[]; through?: number })
+  const lines = (await readFile(join(arch.dir, 'conversations', 'rd-x', 'transcript.jsonl'), 'utf8')).trim().split('\n').map(l => JSON.parse(l) as { type: string; field?: string; value?: string; sources?: number[]; through?: number })
   assert.deepEqual(lines.filter(l => l.type === 'meta').map(l => `${l.field}=${l.value}`), ['category=check', 'displayTitle=アーカイブの確認'])
   const ov = lines.filter(l => l.type === 'overview')
   assert.equal(ov.length, 1)
   assert.deepEqual([ov[0].sources, ov[0].through], [[m1.id], m1.id])
-  const man = JSON.parse(await readFile(join(arch.dir, 'discussions', 'rd-x', 'manifest.json'), 'utf8')) as { category: string; displayTitle: string; overview: { purpose: string; after?: number }; horizon: { meta: number; overview: number } }
+  const man = JSON.parse(await readFile(join(arch.dir, 'conversations', 'rd-x', 'manifest.json'), 'utf8')) as { category: string; displayTitle: string; overview: { purpose: string; after?: number }; horizon: { meta: number; overview: number } }
   assert.equal(man.category, 'check')
   assert.equal(man.displayTitle, 'アーカイブの確認')
   assert.equal(man.overview.purpose, `アーカイブの確認 [#${m1.id}]`)
@@ -275,23 +275,24 @@ test('the archive exports metadata and overview records with their own horizons;
 
 test('store v9: a v8 store\'s discussions become `discussion` explicitly; categories, titles and overviews persist across a restart and a reopening', async () => {
   const s = await setup()
-  s.ds.create('rd-m', { title: 'Before v9', by: 'Pat' })
+  s.ds.create('rd-m', { facilitate: true, title: 'Before v9', by: 'Pat' })
   const m1 = (await s.ds.post('rd-m', { text: 'What did v8 know?', author: 'Pat', token: 'tok-rd-m-001', to: ['forge'] })).message
   // The same store as v8 had it: no category, no title, no meta, no overviews.
-  s.cs.db.exec('DROP TABLE attachments; DROP TABLE workflow_refs; DROP TABLE workflow_ref_events; DROP TABLE workflow_snapshots; DROP TABLE workflow_meta; ALTER TABLE conversations DROP COLUMN category; ALTER TABLE conversations DROP COLUMN display_title; DROP TABLE discussion_meta; DROP TABLE overviews; PRAGMA user_version = 8')
+  s.cs.db.exec('DROP TABLE attachments; DROP TABLE workflow_refs; DROP TABLE workflow_ref_events; DROP TABLE workflow_snapshots; DROP TABLE workflow_meta; ALTER TABLE conversations DROP COLUMN category; ALTER TABLE conversations DROP COLUMN display_title; DROP TABLE discussion_meta; DROP TABLE overviews; ALTER TABLE conversations DROP COLUMN default_to; ALTER TABLE invitations DROP COLUMN role; ALTER TABLE invitations DROP COLUMN receipt; ALTER TABLE invitations DROP COLUMN held; ALTER TABLE archives DROP COLUMN path; DROP TABLE facilitations; UPDATE conversations SET kind = \'discussion\', workspace = \'ponderer\', workflow = \'conduct\'; PRAGMA user_version = 8')
   s.cs.close()
   const cs = new ConversationStore({ area: s.area, exec: s.x })
-  const ds = new DiscussionStore(cs)
-  assert.equal(cs.conversation('rd-m')!.category, 'discussion', 'migrated explicitly')
+  const ds = new ConversationService(cs)
+  assert.equal(cs.conversation('rd-m')!.category, 'conversation', 'migrated explicitly (v9 `discussion`, named `conversation` since v12)')
+  assert.equal(ds.facilitation('rd-m')!.token, 'migrated', 'v12: a discussion keeps the facilitation it had')
   assert.deepEqual(ds.metaRows('rd-m'), [], 'the migration writes no history: classification is a recorded act')
   ds.setMeta('rd-m', { category: 'check', displayTitle: 'v8の確認', by: 'Omni Agent', note: 'migration map' })
   ds.publishOverview('rd-m', { purpose: `v8の記録を確かめる [#${m1.id}]`, author: 'Omni Agent', note: 'first' })
   ds.close('rd-m', { by: 'Pat' })
   cs.close()
   const cs2 = new ConversationStore({ area: s.area, exec: s.x })
-  const ds2 = new DiscussionStore(cs2)
+  const ds2 = new ConversationService(cs2)
   ds2.reopen('rd-m', { by: 'Pat' })
   const v = await ds2.view('rd-m')
-  assert.deepEqual([v.discussion.state, v.discussion.category, v.discussion.displayTitle, v.overview?.purpose], ['open', 'check', 'v8の確認', `v8の記録を確かめる [#${m1.id}]`])
+  assert.deepEqual([v.conversation.state, v.conversation.category, v.conversation.displayTitle, v.overview?.purpose], ['open', 'check', 'v8の確認', `v8の記録を確かめる [#${m1.id}]`])
   cs2.close(); s.x.close()
 })

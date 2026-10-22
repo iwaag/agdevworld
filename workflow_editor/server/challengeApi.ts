@@ -6,7 +6,7 @@
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { basename, extname } from 'node:path'
 import { CHALLENGE_STATES, MAX_EVIDENCE, type AddEvidence, type ChallengeState, type ChallengeStore, type Source } from './challenges.ts'
-import { loadConversationConfig } from './conversations.ts'
+import { configuredPerson } from './conversations.ts'
 import { RequestError } from './workspace.ts'
 
 // Evidence travels as base64 in the JSON body.
@@ -66,7 +66,7 @@ export function writeFields(input: Record<string, unknown>) {
 export async function challengeRoute(store: ChallengeStore, area: string, req: IncomingMessage, res: ServerResponse, parts: string[], url: URL): Promise<void> {
   const method = req.method ?? 'GET'
   const [, , id, sub, name, action] = parts
-  const person = () => { const c = loadConversationConfig(area); return 'disabled' in c ? null : c.person }
+  const person = () => configuredPerson(area)
   const actor = (input: Record<string, unknown>) => {
     const author = input.author === undefined ? person() : typeof input.author === 'string' && input.author.trim() ? input.author : null
     if (!author) throw new RequestError(input.author === undefined ? 503 : 400, input.author === undefined ? 'no person is configured here (conversations.json "person"): a page cannot write' : 'author is a name')

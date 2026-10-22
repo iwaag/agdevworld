@@ -1,16 +1,16 @@
 # Character dialogue (argue p5)
 
-The short reading view of a discussion. Each agent message may also be read
+The short reading view of a conversation (every conversation since challenge p2). Each agent message may also be read
 as one short line in its speaker's character voice. The line is rendered
 from the original speech by the client's renderer (aghangout's
 `renderer/render.ts`). It is presentation only: the original message is
-what the discussion, its progression, its archive, its overview and every
+what the conversation, its progression, its archive, its overview and every
 run work from. Code: `server/dialogue.ts`, `cli/dialogue.ts`; checks:
 `test/dialogue.test.ts`; `wfe dialogue help`.
 
 ## Configuration
 
-`<area>/conversations.json`, beside `discussions`:
+`<area>/conversations.json`, beside `projects`:
 
 ```json
 "dialogue": {
@@ -41,7 +41,7 @@ every message stays as written.
 The configured archive project's workspace keeps them in
 `.local/character-dialogue/dialogue.sqlite` (today
 `pj-ponderer/.local/character-dialogue/`). The path is resolved from
-`discussions.archive` through the registry, and refused unless Git ignores
+`archive` through the registry, and refused unless Git ignores
 it there.
 
 - **One writer.** This module writes it: the service's worker renders, and
@@ -65,7 +65,7 @@ A line is keyed by the SHA-256 of these inputs:
 - the speaker's voice: the hash of its character's name, nickname, lore
   and style, or the neutral voice;
 - the request (`ag.dialogue-request.v1`):
-  - the language and the discussion's title;
+  - the language and the conversation's title;
   - the target message (id, speaker, kind, replies, addressees, text);
   - the context;
   - the participants' kinds and project names.
@@ -77,7 +77,7 @@ target is cut only past 16,000.
 
 A result records the following:
 
-- discussion, message, language, speaker and character;
+- conversation, message, language, speaker and character;
 - renderer, model and the character export's commit;
 - the target's hash, the context ids with their hashes, and the horizon
   (the newest message it saw);
@@ -110,7 +110,7 @@ current line; a read marks the message `stale` until the new line is in.
 
 **The worker** runs in the WFE service process (`DialogueWorker`, started
 unless `WFE_NO_DIALOGUE` is set). Every 2 s it reclaims expired leases,
-follows new agent messages of every discussion from its checkpoint (taken
+follows new agent messages of every conversation from its checkpoint (taken
 at its first start, so history is never rendered wholesale), and renders
 up to `concurrency` jobs. It holds no executor slot, starts no run and
 never delays original speech: a message is delivered and readable before
@@ -119,7 +119,7 @@ process when the service is not running.
 
 ## Reads (the presentation path)
 
-`GET api/discussions/<id>/dialogue?lang=ja[&since=<msg>][&queue=0]`:
+`GET api/conversations/<id>/dialogue?lang=ja[&since=<msg>][&queue=0]`:
 
 ```json
 { "discussion": "…", "language": "ja", "available": true, "problem": null,
@@ -140,7 +140,7 @@ process when the service is not running.
 - **Queueing.** A read queues at most `window` missing lines and calls no
   model. Reading again queues nothing that is already queued, done or
   failed.
-- **Retry.** `POST api/discussions/<id>/dialogue/retry {"message": n,
+- **Retry.** `POST api/conversations/<id>/dialogue/retry {"message": n,
   "language": "ja"}` queues a failed line again. On a ready line it renders
   the line again, and the current line stays until the new one is in.
 - **State.** `GET api/dialogue` gives the configuration, storage, renderer,
@@ -154,8 +154,8 @@ original message ids; a line has no id of its own.
 None of the following reads the dialogue store, and none of their payloads
 contains a line:
 
-- `wfe discussion show|state`;
-- `GET api/discussions[/<id>]`;
+- `wfe conversation show|state`;
+- `GET api/conversations[/<id>]`;
 - the archive writer and its `manifest.json`/`transcript.jsonl`;
 - overviews;
 - invitations, context assembly for a run, and run copies.

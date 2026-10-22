@@ -16,8 +16,8 @@ import { fileURLToPath } from 'node:url'
 import { promisify } from 'node:util'
 import { ConversationStore } from '../server/conversations.ts'
 import { createProject } from '../server/create.ts'
-import { DiscussionArchive } from '../server/discussionArchive.ts'
-import { DiscussionStore } from '../server/discussions.ts'
+import { ConversationArchive } from '../server/conversationArchive.ts'
+import { ConversationService } from '../server/conversationService.ts'
 import { ExecStore } from '../server/exec.ts'
 import { gitOk } from '../server/git.ts'
 import { loadRegistry } from '../server/registry.ts'
@@ -76,7 +76,7 @@ async function setup(o: { participants?: string[] } = {}) {
   }))
   const x = new ExecStore({ registryFile: registry, area })
   const cs = new ConversationStore({ area, exec: x })
-  const ds = new DiscussionStore(cs)
+  const ds = new ConversationService(cs)
   const regs = (await loadRegistry(registry)).workspaces
   const ws = (id: string) => new Workspace(regs.find(w => w.project === id)!)
   return { area, registry, bare, x, cs, ds, ws }
@@ -89,10 +89,11 @@ const waitOn = async (s: Awaited<ReturnType<typeof setup>>, run: string) => { aw
 
 test('a discussion starts with its members; an unaddressed message invites the facilitator once; an addressed one only those named', async () => {
   const s = await setup()
-  const d = s.ds.create('p16-a', { title: 'How should knowledge outlive projects?', by: 'Pat', members: ['forge'] })
+  const d = s.ds.create('p16-a', { facilitate: true, title: 'How should knowledge outlive projects?', by: 'Pat', members: ['forge'] })
   assert.equal(d.duplicate, false)
-  assert.deepEqual(s.ds.members('p16-a').map(m => [m.participant, m.kind]), [['Pat', 'person'], ['argue', 'facilitator'], ['forge', 'project']])
-  assert.equal(s.ds.create('p16-a', { title: 'again', by: 'Pat' }).duplicate, true, 'a retried create is the same discussion')
+  assert.deepEqual(s.ds.members('p16-a').map(m => [m.participant, m.kind]), [['Pat', 'person'], ['forge', 'project'], ['argue', 'project']])
+  assert.equal(s.ds.facilitation('p16-a')!.workspace, 'argue', 'opened as a facilitated conversation')
+  assert.equal(s.ds.create('p16-a', { facilitate: true, title: 'again', by: 'Pat' }).duplicate, true, 'a retried create is the same discussion')
 
   const a = await s.ds.post('p16-a', { text: 'Where should our cross-project decisions live?', author: 'Pat', token: 'tok-p16-a001' })
   assert.deepEqual(a.invitations.map(i => [i.participant, i.state, i.run]), [['argue', 'started', 'argue/facilitate/run-001']])
@@ -109,16 +110,15 @@ test('a discussion starts with its members; an unaddressed message invites the f
   assert.ok(s.ds.members('p16-a').some(m => m.participant === 'sage'), 'a participant invited for the first time joins, by the inviter')
   assert.equal(s.ds.membership('p16-a').at(-1)!.by, 'Pat')
   assert.equal((await s.ds.view('p16-a')).messages.find(m => m.id === b.message.id)!.addressed[0], 'sage')
-  // A discussion is not a conversation, and the other way round.
-  await assert.rejects(s.cs.post('p16-a', { text: 'x', author: 'Pat', token: 'tok-p16-a003' }), /is a discussion/)
-  await assert.rejects(s.cs.view('p16-a'), /is a discussion/)
-  assert.deepEqual(s.cs.list().map(c => c.id), [], 'conversation lists leave discussions out')
+  // One kind of conversation (challenge p2): the store lists it with every other.
+  assert.deepEqual(s.cs.list().map(c => c.id), ['p16-a'])
+  assert.equal(s.ds.mode('p16-a'), 'facilitated')
   s.cs.close(); s.x.close()
 })
 
 test('the facilitator invites two projects, each contribution is attributed to its run, and the facilitator is told once, after both', async () => {
   const s = await setup()
-  s.ds.create('p16-b', { title: 'Archive layout', by: 'Pat' })
+  s.ds.create('p16-b', { facilitate: true, title: 'Archive layout', by: 'Pat' })
   const m1 = (await s.ds.post('p16-b', { text: 'Which layout should the archive have?', author: 'Pat', token: 'tok-p16-b001' })).message
   const F = 'argue/facilitate/run-001'
   const f1 = await s.ds.contribute('p16-b', { text: 'I will ask forge and sage.', author: 'argue-agent', run: F, invitation: 1, re: [m1.id] })
@@ -131,7 +131,7 @@ test('the facilitator invites two projects, each contribution is attributed to i
   s.x.db.prepare('UPDATE jobs SET state = \'done\' WHERE run = \'run-001\' AND workspace = \'argue\'').run()
   await waitOn(s, F)
   // A participant cannot invite.
-  await assert.rejects(s.ds.invite('p16-b', { participant: 'sage', question: 'and you?', re: [m1.id], by: 'forge-agent', byRun: i2.run }), /only the facilitator/)
+  await assert.rejects(s.ds.invite('p16-b', { participant: 'sage', question: 'and you?', re: [m1.id], by: 'forge-agent', byRun: i2.run }), /only the conductor/)
 
   const c2 = await s.ds.contribute('p16-b', { text: 'Assets need content hashes.', author: 'forge-agent', run: i2.run!, attempt: 'att-f1', invitation: i2.id, re: [m1.id] })
   assert.deepEqual([c2.message.participant, c2.message.run, c2.message.attempt, c2.message.invitation], ['forge', 'forge/discuss/run-001', 'att-f1', i2.id])
@@ -159,7 +159,7 @@ test('the facilitator invites two projects, each contribution is attributed to i
 
 test('an unavailable participant fails visibly and blocks nobody; a run that ends silent is unanswered, and a late answer is told again', async () => {
   const s = await setup({ participants: ['forge', 'sage', 'ghost'] })
-  s.ds.create('p16-c', { title: 'Failure', by: 'Pat' })
+  s.ds.create('p16-c', { facilitate: true, title: 'Failure', by: 'Pat' })
   const m1 = (await s.ds.post('p16-c', { text: 'Ask everyone.', author: 'Pat', token: 'tok-p16-c001' })).message
   const F = 'argue/facilitate/run-001'
   const ghost = (await s.ds.invite('p16-c', { participant: 'ghost', question: 'Anything?', re: [m1.id], by: 'argue-agent', byRun: F })).invitation
@@ -191,14 +191,14 @@ test('an unavailable participant fails visibly and blocks nobody; a run that end
 
 test('a direct question reaches only its participant; membership changes are history; a member who left cannot be invited', async () => {
   const s = await setup()
-  s.ds.create('p16-d', { title: 'Members', by: 'Pat', members: ['forge', 'sage'] })
+  s.ds.create('p16-d', { facilitate: true, title: 'Members', by: 'Pat', members: ['forge', 'sage'] })
   const m1 = (await s.ds.post('p16-d', { text: 'forge: can you render this?', author: 'Pat', token: 'tok-p16-d001', to: ['forge'] })).message
   assert.deepEqual(s.ds.invitations('p16-d').map(i => i.participant), ['forge'])
   const c = await s.ds.contribute('p16-d', { text: 'Yes.', author: 'forge-agent', run: 'forge/discuss/run-001', invitation: 1, re: [m1.id] })
   assert.equal(c.invitation!.awaited_by, null)
   assert.equal(s.ds.invitations('p16-d').length, 1, 'a contribution starts nothing')
   assert.equal(s.ds.leave('p16-d', 'sage', { by: 'Pat', note: 'not needed' }).left, true)
-  await assert.rejects(s.ds.post('p16-d', { text: 'sage?', author: 'Pat', token: 'tok-p16-d002', to: ['sage'] }), /left this discussion/)
+  await assert.rejects(s.ds.post('p16-d', { text: 'sage?', author: 'Pat', token: 'tok-p16-d002', to: ['sage'] }), /left this conversation/)
   s.ds.join('p16-d', 'sage', { by: 'Pat', note: 'back' })
   assert.deepEqual(s.ds.membership('p16-d').filter(r => r.participant === 'sage').map(r => r.action), ['join', 'leave', 'join'])
   // A late joiner reads everything said before.
@@ -210,7 +210,7 @@ test('a direct question reaches only its participant; membership changes are his
 
 test('closing withdraws invitations not started, keeps started ones and continues nobody; reopening replays nothing', async () => {
   const s = await setup({ participants: ['forge', 'sage', 'ghost'] })
-  s.ds.create('p16-e', { title: 'Close', by: 'Pat' })
+  s.ds.create('p16-e', { facilitate: true, title: 'Close', by: 'Pat' })
   const m1 = (await s.ds.post('p16-e', { text: 'Go.', author: 'Pat', token: 'tok-p16-e001' })).message
   const F = 'argue/facilitate/run-001'
   const started = (await s.ds.invite('p16-e', { participant: 'sage', question: 'Q', re: [m1.id], by: 'argue-agent', byRun: F })).invitation
@@ -233,7 +233,7 @@ test('closing withdraws invitations not started, keeps started ones and continue
 
 test('the person\'s reply to a participant\'s question reaches the run that asked, as the answer to its question; after that run ended, a new run', async () => {
   const s = await setup()
-  s.ds.create('p16-q', { title: 'Questions', by: 'Pat', members: ['sage'] })
+  s.ds.create('p16-q', { facilitate: true, title: 'Questions', by: 'Pat', members: ['sage'] })
   const m1 = (await s.ds.post('p16-q', { text: 'sage, what do you think?', author: 'Pat', token: 'tok-p16-q001', to: ['sage'] })).message
   const R = 'sage/discuss/run-001'
   s.x.db.prepare('UPDATE jobs SET state = \'done\' WHERE workspace = \'sage\'').run()
@@ -269,12 +269,12 @@ test('the person\'s reply to a participant\'s question reaches the run that aske
 
 test('a restart between an invitation\'s request and its record finds the same run', async () => {
   const s = await setup()
-  s.ds.create('p16-f', { title: 'Restart', by: 'Pat' })
+  s.ds.create('p16-f', { facilitate: true, title: 'Restart', by: 'Pat' })
   const m1 = (await s.ds.post('p16-f', { text: 'First.', author: 'Pat', token: 'tok-p16-f001' })).message
   // Simulate the crash: the run was requested, the record says pending.
   s.cs.db.prepare('UPDATE invitations SET state = \'pending\', run = NULL WHERE id = 1').run()
   const cs2 = new ConversationStore({ area: s.area, exec: s.x })
-  const ds2 = new DiscussionStore(cs2)
+  const ds2 = new ConversationService(cs2)
   await ds2.reconcile()
   assert.equal(ds2.invitation(1)!.run, 'argue/facilitate/run-001', 'the receipt finds the same run')
   assert.equal(s.x.runRows('argue', ref('argue/facilitate/run-001')).jobs.length, 1)
@@ -284,7 +284,7 @@ test('a restart between an invitation\'s request and its record finds the same r
 
 test('argue p3: the facilitator awaits the result of a participant\'s run still working; an interim reply does not answer it, the result does, and the waiting facilitator is continued once', async () => {
   const s = await setup()
-  s.ds.create('p3-a', { title: 'Commission', by: 'Pat' })
+  s.ds.create('p3-a', { facilitate: true, title: 'Commission', by: 'Pat' })
   const m1 = (await s.ds.post('p3-a', { text: 'Do one experiment and report.', author: 'Pat', token: 'tok-p3-a001' })).message
   const F = 'argue/facilitate/run-001'
   s.x.db.prepare('UPDATE jobs SET state = \'done\' WHERE workspace = \'argue\'').run()
@@ -317,14 +317,14 @@ test('argue p3: the facilitator awaits the result of a participant\'s run still 
   await s.ds.reconcile()
   assert.equal(Object.keys((await rec(s, F)).instructions ?? {}).length, 1, 'told once')
   const v = await s.ds.view('p3-a')
-  assert.equal(v.invitations.find(i => i.id === aw.invitation.id)!.awaits, 'result')
-  assert.match(v.runs.find(x => x.key === inv.run)!.relation, /awaited result \(invitation 3\)/)
+  assert.equal(v.requests.find(i => i.id === aw.invitation.id)!.awaits, 'result')
+  assert.match(v.runs.find(x => x.key === inv.run)!.relation, /awaited result \(request 3\)/)
   s.cs.close(); s.x.close()
 })
 
 test('argue p3: what a completed facilitator run awaited resolves into a new facilitator turn, once, across a restart; a run that ended silent is unanswered; an ended run settles at once', async () => {
   const s = await setup()
-  s.ds.create('p3-b', { title: 'Ended facilitator', by: 'Pat' })
+  s.ds.create('p3-b', { facilitate: true, title: 'Ended facilitator', by: 'Pat' })
   const m1 = (await s.ds.post('p3-b', { text: 'Go.', author: 'Pat', token: 'tok-p3-b001' })).message
   const F = 'argue/facilitate/run-001'
   s.x.db.prepare('UPDATE jobs SET state = \'done\' WHERE workspace = \'argue\'').run()
@@ -338,7 +338,7 @@ test('argue p3: what a completed facilitator run awaited resolves into a new fac
   // A restart: a fresh store over the same records; sage's run ends without a word.
   await finish(s, inv.run!)
   const cs2 = new ConversationStore({ area: s.area, exec: s.x })
-  const ds2 = new DiscussionStore(cs2)
+  const ds2 = new ConversationService(cs2)
   const notes = await ds2.reconcile()
   assert.equal(ds2.invitation(aw.invitation.id)!.state, 'unanswered', notes.join('\n'))
   const turn = ds2.invitations('p3-b').at(-1)!
@@ -360,9 +360,9 @@ test('argue p3: what a completed facilitator run awaited resolves into a new fac
 
 test('archive: published incrementally from the repository\'s own horizon; a crash after the push publishes nothing twice; two discussions both land; a fresh clone reads them', async () => {
   const s = await setup()
-  const a = new DiscussionArchive(s.ds)
-  s.ds.create('p16-g', { title: 'One', by: 'Pat', members: ['forge'] })
-  s.ds.create('p16-h', { title: 'Two', by: 'Pat', members: ['sage'] })
+  const a = new ConversationArchive(s.ds)
+  s.ds.create('p16-g', { facilitate: true, title: 'One', by: 'Pat', members: ['forge'] })
+  s.ds.create('p16-h', { facilitate: true, title: 'Two', by: 'Pat', members: ['sage'] })
   const g1 = (await s.ds.post('p16-g', { text: 'First words.', author: 'Pat', token: 'tok-p16-g001' })).message
   await s.ds.post('p16-h', { text: 'Other words.', author: 'Pat', token: 'tok-p16-h001' })
   assert.deepEqual(a.due().sort(), ['p16-g', 'p16-h'])
@@ -397,13 +397,13 @@ test('archive: published incrementally from the repository\'s own horizon; a cra
   const fresh = join(s.area, 'fresh')
   await gitOk(s.area, ['clone', '-q', s.bare, fresh])
   for (const id of ['p16-g', 'p16-h']) {
-    const lines = (await readFile(join(fresh, 'discussions', id, 'transcript.jsonl'), 'utf8')).trim().split('\n').map(l => JSON.parse(l) as { type: string; id: number })
+    const lines = (await readFile(join(fresh, 'conversations', id, 'transcript.jsonl'), 'utf8')).trim().split('\n').map(l => JSON.parse(l) as { type: string; id: number })
     const msgs = lines.filter(l => l.type === 'message').map(l => l.id)
     assert.deepEqual(msgs, s.ds.messages(id).map(m => m.id), `${id}: every message once`)
     assert.equal(new Set(lines.map(l => `${l.type}:${l.id}`)).size, lines.length, `${id}: no duplicate record`)
-    const man = JSON.parse(await readFile(join(fresh, 'discussions', id, 'manifest.json'), 'utf8')) as { horizon: { message: number }; format: string; members: unknown[] }
+    const man = JSON.parse(await readFile(join(fresh, 'conversations', id, 'manifest.json'), 'utf8')) as { horizon: { message: number }; format: string; members: unknown[] }
     assert.equal(man.horizon.message, Math.max(...msgs))
-    assert.equal(man.format, 'ag.argue.discussion.v1')
+    assert.equal(man.format, 'ag.conversation.v1')
   }
   assert.ok((await readFile(join(fresh, 'knowledge.md'), 'utf8')).includes('knowledge'), 'the other writer\'s work is kept')
   // Closing is published as the final catch-up.
@@ -412,11 +412,11 @@ test('archive: published incrementally from the repository\'s own horizon; a cra
   await a.publish()
   const { stdout } = await pexec('git', ['-C', fresh, 'pull', '-q'])
   void stdout
-  assert.equal((JSON.parse(await readFile(join(fresh, 'discussions', 'p16-g', 'manifest.json'), 'utf8')) as { state: string }).state, 'closed')
+  assert.equal((JSON.parse(await readFile(join(fresh, 'conversations', 'p16-g', 'manifest.json'), 'utf8')) as { state: string }).state, 'closed')
   s.cs.close(); s.x.close()
 })
 
-test('HTTP: participants, create with a brief, an addressed post, the view with invitations and archive; the conversation route refuses a discussion; CLI show and archive', async () => {
+test('HTTP: participants, create with a brief, an addressed post, the view with requests and archive; CLI show and archive', async () => {
   const s = await setup()
   const { createHandler } = await import('../server/api.ts')
   const { createServer } = await import('node:http')
@@ -426,46 +426,46 @@ test('HTTP: participants, create with a brief, an addressed post, the view with 
   const root = `http://127.0.0.1:${(server.address() as { port: number }).port}/api`
   const post = (path: string, body: unknown, origin?: string) => fetch(`${root}/${path}`, { method: 'POST', headers: { 'content-type': 'application/json', ...(origin ? { origin } : {}) }, body: JSON.stringify(body) })
   try {
-    const list = await (await fetch(`${root}/discussions`)).json() as { person: string; participants: { participant: string; kind: string; state: string }[] }
+    const list = await (await fetch(`${root}/conversations`)).json() as { person: string; participants: { participant: string; kind: string; state: string }[] }
     assert.equal(list.person, 'Pat')
-    assert.deepEqual(list.participants.map(p => [p.participant, p.kind, p.state]), [['argue', 'facilitator', 'available'], ['forge', 'project', 'available'], ['sage', 'project', 'available']])
-    const created = await post('discussions', { id: 'p16-http', title: 'Over HTTP', members: ['forge'], text: 'The brief, verbatim.  ', token: 'tok-p16-http1' })
+    assert.deepEqual(list.participants.map(p => [p.participant, p.kind, p.state]), [['forge', 'project', 'available'], ['sage', 'project', 'available'], ['argue', 'facilitator', 'available']])
+    const created = await post('conversations', { id: 'p16-http', title: 'Over HTTP', members: ['forge'], facilitate: true, text: 'The brief, verbatim.  ', token: 'tok-p16-http1' })
     assert.equal(created.status, 201)
-    const c = await created.json() as { posted: { invitations: { participant: string; state: string }[] }; messages: { text: string; author: string }[] }
-    assert.deepEqual(c.posted.invitations.map(i => [i.participant, i.state]), [['argue', 'started']])
+    const c = await created.json() as { posted: { requests: { participant: string; state: string; role: string }[] }; messages: { text: string; author: string }[] }
+    assert.deepEqual(c.posted.requests.map(i => [i.participant, i.state, i.role]), [['argue', 'started', 'conduct']])
     assert.equal(c.messages[0].text, 'The brief, verbatim.  ', 'words are kept as written')
     assert.equal(c.messages[0].author, 'Pat')
-    const sent = await (await post('discussions/p16-http/messages', { text: 'sage, what do you think?', token: 'tok-p16-http2', to: ['sage'] })).json() as { invitations: { participant: string; run: string; runUrl: string }[] }
-    assert.deepEqual(sent.invitations.map(i => [i.participant, i.run, i.runUrl]), [['sage', 'sage/discuss/run-001', 'http://lan.invalid:8093/wfe/#/ws/sage/run/discuss/run-001']])
-    assert.equal((await post('discussions/p16-http/messages', { text: 'x', token: 'tok-p16-http3' }, 'http://evil.example')).status, 403, 'another site may not write')
-    assert.equal((await post('conversations/p16-http/messages', { text: 'x', token: 'tok-p16-http4' })).status, 409)
-    const v = await (await fetch(`${root}/discussions/p16-http`)).json() as { members: { participant: string }[]; invitations: unknown[]; runs: { key: string }[]; archive: { state: string } }
-    assert.deepEqual(v.members.map(m => m.participant), ['Pat', 'argue', 'forge', 'sage'])
-    assert.equal(v.invitations.length, 2)
+    const sent = await (await post('conversations/p16-http/messages', { text: 'sage, what do you think?', token: 'tok-p16-http2', to: ['sage'] })).json() as { requests: { participant: string; run: string; runUrl: string }[] }
+    assert.deepEqual(sent.requests.map(i => [i.participant, i.run, i.runUrl]), [['sage', 'sage/discuss/run-001', 'http://lan.invalid:8093/wfe/#/ws/sage/run/discuss/run-001']])
+    assert.equal((await post('conversations/p16-http/messages', { text: 'x', token: 'tok-p16-http3' }, 'http://evil.example')).status, 403, 'another site may not write')
+    const v = await (await fetch(`${root}/conversations/p16-http`)).json() as { members: { participant: string }[]; requests: unknown[]; runs: { key: string }[]; archive: { state: string; path: string } }
+    assert.deepEqual(v.members.map(m => m.participant), ['Pat', 'forge', 'argue', 'sage'])
+    assert.equal(v.requests.length, 2)
+    assert.equal(v.archive.path, 'conversations/p16-http')
     assert.deepEqual(v.runs.map(r => r.key).sort(), ['argue/facilitate/run-001', 'sage/discuss/run-001'])
     assert.equal(v.archive.state, 'never')
-    const pub = await (await post('discussions/p16-http/archive', {})).json() as { status: { state: string; published: { commit: string } } }
+    const pub = await (await post('conversations/p16-http/archive', {})).json() as { status: { state: string; published: { commit: string } } }
     assert.equal(pub.status.state, 'current')
-    const closed = await (await post('discussions/p16-http/close', {})).json() as { discussion: { state: string } }
-    assert.equal(closed.discussion.state, 'closed')
+    const closed = await (await post('conversations/p16-http/close', {})).json() as { conversation: { state: string } }
+    assert.equal(closed.conversation.state, 'closed')
     // Metadata and the overview (argue p4 ex2): records only; a closed room stays closed.
     const jobsBefore = (s.x.db.prepare('SELECT count(*) AS n FROM jobs').get() as { n: number }).n
-    const meta = await (await post('discussions/p16-http/meta', { category: 'check', displayTitle: 'HTTPの確認', note: 'a check' })).json() as { changed: { field: string; value: string; by: string }[]; discussion: { category: string } }
+    const meta = await (await post('conversations/p16-http/meta', { category: 'check', displayTitle: 'HTTPの確認', note: 'a check' })).json() as { changed: { field: string; value: string; by: string }[]; conversation: { category: string } }
     assert.deepEqual(meta.changed.map(m => [m.field, m.value, m.by]), [['category', 'check', 'Pat'], ['displayTitle', 'HTTPの確認', 'Pat']])
-    assert.equal((await post('discussions/p16-http/meta', { category: 'trial' })).status, 400)
-    assert.equal((await post('discussions/p16-http/overview', { purpose: 'no source' })).status, 400, 'an overview without a source is refused')
-    const ov = await (await post('discussions/p16-http/overview', { purpose: 'HTTP経路の確認 [#1]', unresolved: ['sageの意見 [#2]'], note: 'first' })).json() as { overview: { author: string; sources: number[]; after: number } }
+    assert.equal((await post('conversations/p16-http/meta', { category: 'trial' })).status, 400)
+    assert.equal((await post('conversations/p16-http/overview', { purpose: 'no source' })).status, 400, 'an overview without a source is refused')
+    const ov = await (await post('conversations/p16-http/overview', { purpose: 'HTTP経路の確認 [#1]', unresolved: ['sageの意見 [#2]'], note: 'first' })).json() as { overview: { author: string; sources: number[]; after: number } }
     assert.deepEqual([ov.overview.author, ov.overview.sources, ov.overview.after], ['Pat', [1, 2], 0])
     assert.equal((s.x.db.prepare('SELECT count(*) AS n FROM jobs').get() as { n: number }).n, jobsBefore, 'nothing started')
-    const listed = await (await fetch(`${root}/discussions?category=check&state=closed&limit=5`)).json() as { counts: Record<string, { open: number; closed: number }>; total: number; discussions: { id: string; displayTitle: string; newest: number; overview: { purpose: string }; status: { room: string } }[] }
-    assert.equal(listed.discussions[0].newest, 2)
-    assert.deepEqual(listed.counts, { discussion: { open: 0, closed: 0 }, check: { open: 0, closed: 1 } })
-    assert.deepEqual(listed.discussions.map(d => [d.id, d.displayTitle, d.overview.purpose, d.status.room]), [['p16-http', 'HTTPの確認', 'HTTP経路の確認 [#1]', 'closed']])
-    assert.equal((await fetch(`${root}/discussions?category=discussion`).then(r => r.json()) as { total: number }).total, 0)
-    assert.equal((await fetch(`${root}/discussions?limit=-1`)).status, 400)
+    const listed = await (await fetch(`${root}/conversations?category=check&state=closed&limit=5`)).json() as { counts: Record<string, { open: number; closed: number }>; total: number; conversations: { id: string; displayTitle: string; newest: number; overview: { purpose: string }; status: { room: string } }[] }
+    assert.equal(listed.conversations[0].newest, 2)
+    assert.deepEqual(listed.counts, { conversation: { open: 0, closed: 0 }, check: { open: 0, closed: 1 } })
+    assert.deepEqual(listed.conversations.map(d => [d.id, d.displayTitle, d.overview.purpose, d.status.room]), [['p16-http', 'HTTPの確認', 'HTTP経路の確認 [#1]', 'closed']])
+    assert.equal((await fetch(`${root}/conversations?category=conversation`).then(r => r.json()) as { total: number }).total, 0)
+    assert.equal((await fetch(`${root}/conversations?limit=-1`)).status, 400)
     // The CLI reads the same store.
     const { stdout } = await pexec(process.execPath, [join(pkg, 'cli', 'wfe.ts'), 'discussion', 'show', 'p16-http', '--registry', s.registry, '--area', s.area])
-    assert.match(stdout, /Discussion p16-http \(closed, check\): Over HTTP — shown as "HTTPの確認"/)
+    assert.match(stdout, /Conversation p16-http \(closed, check, facilitated\): Over HTTP — shown as "HTTPの確認"/)
     assert.match(stdout, /Overview by Pat .*through #2: purpose HTTP経路の確認 \[#1\] \| 1 unresolved/)
     const ls = await pexec(process.execPath, [join(pkg, 'cli', 'wfe.ts'), 'discussion', 'list', '--category', 'check', '--registry', s.registry, '--area', s.area])
     assert.match(ls.stdout, /p16-http\s+check\s+closed .*overview\s.*HTTPの確認/)

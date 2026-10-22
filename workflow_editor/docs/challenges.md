@@ -149,11 +149,11 @@ defaults to the current revision when the message is sent). The conversation
 store keeps, per message, the challenge, the commit, its title and the file's
 sha256 at that commit (store v11 `attachments`).
 
-- **Conversations and discussions**: `challenges` on a person's message
-  (`POST …/messages`; `wfe conversation post|discussion post --challenge
+- **Conversations** (one-to-one and facilitated alike): `challenges` on a person's message
+  (`POST …/messages`; `wfe conversation post --challenge
   <id>[@<commit>]`). The view lists them on each message, with the latest
   revision beside the attached one when it moved.
-- **The receiving run** — a conversation turn, a discussion invitation's new
+- **The receiving run** — a conversation request's new
   run, or an ordinary request (`wfe request … --challenge <id>[@<commit>]`,
   the request route's `challenges`) — gets each attached challenge in its
   input: the file as it was at the attached commit, written into the run
@@ -162,10 +162,10 @@ sha256 at that commit (store v11 `attachments`).
   brief names them and how to read the evidence (`wfe challenge evidence <id>
   --at <commit>`). Evidence is not copied: it is read on demand.
 - **An answer or instruction delivered to a run already working** (a
-  discussion reply to the run that asked, the conductor's continuation)
+  reply to the run that asked, an explicit instruction, the conductor's continuation)
   carries the references in its `source.attachments`; the brief names them
   and `wfe challenge show <id> --at <commit>` reads the pinned text.
-- **Archives**: discussion transcript `message` records carry
+- **Archives**: conversation transcript `message` records carry
   `attachments`.
 - **Project context** may carry a short pointer to a relevant challenge; it
   is not a second editable copy of its body, and nothing dumps every open

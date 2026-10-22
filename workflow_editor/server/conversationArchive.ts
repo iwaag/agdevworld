@@ -1,29 +1,35 @@
-// The discussion archive (workflow_editor p16, docs/discussions.md
-// "Archive"): reproducible copies of discussions in the archive project's
-// repository (conversations.json "discussions".archive; pj-ponderer since
-// argue p4 ex1), written by one owner — this module, in the
-// coordinator's reconcile and `wfe discussion archive` — in a clone nobody
+// The conversation archive (workflow_editor p16, argue p4 ex1, challenge p2;
+// docs/conversations.md "Archive"): reproducible copies of every
+// conversation in the archive project's repository (conversations.json
+// "archive"; pj-ponderer), written by one owner — this module, in the
+// coordinator's reconcile and `wfe conversation archive` — in a clone nobody
 // else uses (<area>/.local/discussions/archive), under a file lock.
 //
-//   discussions/<id>/manifest.json     identity, members and their history,
-//                                      invitations, the published horizon,
-//                                      provenance (runs), exports
-//   discussions/<id>/transcript.jsonl  append-only: message | membership |
-//                                      invitation | link | activity (argue p4:
-//                                      the conductor's activities, conductor and
-//                                      requester changes) | annotation | meta
-//                                      (argue p4 ex2: category and display
-//                                      title changes) | overview records
+// Each conversation has one archive path, recorded the first time it is
+// published and never moved: conversations that began as discussions keep
+// `discussions/<id>/` (their commits and citations stay valid), every other
+// one is `conversations/<id>/`. Gaining members or a conductor changes
+// nothing about where it lives.
+//
+//   <path>/manifest.json     identity, members and their history, facilitations,
+//                            requests, the published horizon, provenance (runs),
+//                            migration provenance, exports
+//   <path>/transcript.jsonl  append-only: message | membership | invitation
+//                            (a response request's events) | link | activity
+//                            (the conductor's activities, conductor, requester
+//                            and facilitation events) | annotation | meta |
+//                            overview | workflow | workflow-link records
+//   <path>/workflows/<sha256>.yaml   each workflow version a record names
 //
 // The repository is the truth about what is published: an export reads the
 // pushed manifest's horizon and appends only records beyond it, so a crash
 // after a push and before the bookkeeping below is recorded publishes nothing
 // twice; the next export finds the horizon already there and records the
-// commit it observes. A push that fails leaves the live discussion untouched
-// and the archive `failed` with the reason, retried at the next reconcile.
-// Interpretation (summary.md and the like) is written by the archive
-// project's own runs and integrated like any run's work; this writer never
-// touches it.
+// commit it observes. A push that fails leaves the live conversation
+// untouched and the archive `failed` with the reason, retried at the next
+// reconcile. Interpretation (summary.md and the like) is written by the
+// archive project's own runs; this writer never touches it. Exporting never
+// starts a run.
 //
 // The destination (argue p4 ex1): each row records the repository its
 // commit and horizon were verified in. When the configured archive project
@@ -34,15 +40,18 @@
 // re-pointed.
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync, appendFileSync } from 'node:fs'
 import { isAbsolute, join, resolve } from 'node:path'
-import type { DiscussionStore, Horizon } from './discussions.ts'
-import { DiscussionWorkflows } from './discussionWorkflows.ts'
+import type { ConversationService, Horizon } from './conversationService.ts'
+import { ConversationWorkflows } from './conversationWorkflows.ts'
 import { git, gitOk } from './git.ts'
 import { withLock } from './lock.ts'
 
-export const ARCHIVE_FORMAT = 'ag.argue.discussion.v1'
-const IDENTITY = { 'user.name': 'WFE discussion archive', 'user.email': 'wfe-discussion-archive@agdev.invalid' }
+// The manifest format: `ag.conversation.v1` since challenge p2, a superset of
+// the discussions' `ag.argue.discussion.v1` (which readers still accept).
+export const ARCHIVE_FORMAT = 'ag.conversation.v1'
+export const LEGACY_FORMATS = ['ag.argue.discussion.v1']
+const IDENTITY = { 'user.name': 'WFE conversation archive', 'user.email': 'wfe-discussion-archive@agdev.invalid' }
 
-export interface ArchiveRow { conv: string; state: 'current' | 'failed' | 'publishing'; commit_id: string | null; horizon: string | null; published_at: string | null; error: string | null; tries: number; attempted_at: string | null; destination: string | null }
+export interface ArchiveRow { conv: string; state: 'current' | 'failed' | 'publishing'; commit_id: string | null; horizon: string | null; published_at: string | null; error: string | null; tries: number; attempted_at: string | null; destination: string | null; path: string | null }
 export interface ArchiveStatus {
   state: 'current' | 'behind' | 'unverified' | 'failed' | 'never' | 'disabled'
   live: Horizon
@@ -50,6 +59,7 @@ export interface ArchiveStatus {
   published: { commit: string; horizon: Horizon; at: string | null; url: string | null; destination: string | null } | null
   error: string | null; tries: number; attempted: string | null
   repository: string | null
+  path: string // where the conversation's archive lives in the repository
 }
 const ZERO: Horizon = { message: 0, link: 0, membership: 0, event: 0, activity: 0, annotation: 0, meta: 0, overview: 0, workflow: 0, workflowEvent: 0 }
 // A manifest written before argue p4 has no activity or annotation horizon,
@@ -63,26 +73,32 @@ const now = () => new Date().toISOString()
 export const destinationOf = (url: string) => url.replace(/\/\/[^@/]+@/, '//').replace(/\/+$/, '').replace(/\.git$/, '')
 const webOf = (destination: string) => /^https?:\/\//.test(destination) ? destination : null
 
-export class DiscussionArchive {
-  readonly ds: DiscussionStore
+export class ConversationArchive {
+  readonly ds: ConversationService
   readonly dir: string
-  constructor(ds: DiscussionStore, o: { dir?: string } = {}) {
+  constructor(ds: ConversationService, o: { dir?: string } = {}) {
     this.ds = ds
     this.dir = o.dir ?? join(ds.area, '.local', 'discussions', 'archive')
   }
   private row(conv: string): ArchiveRow | undefined { return this.ds.db.prepare('SELECT * FROM archives WHERE conv = ?').get(conv) as ArchiveRow | undefined }
   private record(conv: string, o: Partial<ArchiveRow>) {
-    const cur = this.row(conv) ?? { conv, state: 'failed', commit_id: null, horizon: null, published_at: null, error: null, tries: 0, attempted_at: null, destination: null }
-    const n = { ...cur, ...o }
-    this.ds.db.prepare('INSERT INTO archives (conv, state, commit_id, horizon, published_at, error, tries, attempted_at, destination) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (conv) DO UPDATE SET state = excluded.state, commit_id = excluded.commit_id, horizon = excluded.horizon, published_at = excluded.published_at, error = excluded.error, tries = excluded.tries, attempted_at = excluded.attempted_at, destination = excluded.destination')
-      .run(conv, n.state, n.commit_id, n.horizon, n.published_at, n.error, n.tries, n.attempted_at, n.destination)
+    const cur = this.row(conv) ?? { conv, state: 'failed', commit_id: null, horizon: null, published_at: null, error: null, tries: 0, attempted_at: null, destination: null, path: this.pathOf(conv) }
+    const n = { ...cur, ...o, path: cur.path ?? this.pathOf(conv) }
+    this.ds.db.prepare('INSERT INTO archives (conv, state, commit_id, horizon, published_at, error, tries, attempted_at, destination, path) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (conv) DO UPDATE SET state = excluded.state, commit_id = excluded.commit_id, horizon = excluded.horizon, published_at = excluded.published_at, error = excluded.error, tries = excluded.tries, attempted_at = excluded.attempted_at, destination = excluded.destination, path = excluded.path')
+      .run(conv, n.state, n.commit_id, n.horizon, n.published_at, n.error, n.tries, n.attempted_at, n.destination, n.path)
+  }
+  // The conversation's archive path: as recorded, else by how it began.
+  pathOf(conv: string): string {
+    const r = this.ds.db.prepare('SELECT path FROM archives WHERE conv = ?').get(conv) as { path: string | null } | undefined
+    if (r?.path) return r.path
+    return `${this.ds.conversation(conv)?.kind === 'discussion' ? 'discussions' : 'conversations'}/${conv}`
   }
 
   // The archive project's repository: its workspace's origin.
   async origin(): Promise<{ url: string; web: string | null; destination: string } | { disabled: string }> {
     const cfg = this.ds.config()
     if ('disabled' in cfg) return cfg
-    if (!cfg.archive) return { disabled: 'conversations.json "discussions" names no archive' }
+    if (!cfg.archive) return { disabled: 'conversations.json names no archive project' }
     if (!this.ds.exec) return { disabled: 'execution is not configured here' }
     try {
       const ws = await this.ds.exec.workspace(cfg.archive.workspace)
@@ -100,12 +116,12 @@ export class DiscussionArchive {
     // A link names the repository the commit was verified in, never the
     // configured one by assumption.
     const web = r?.destination ? webOf(r.destination) : null
-    const published = r?.commit_id && r.horizon ? { commit: r.commit_id, horizon: JSON.parse(r.horizon) as Horizon, at: r.published_at, url: web ? `${web}/src/commit/${r.commit_id}/discussions/${conv}` : null, destination: r.destination ?? null } : null
+    const published = r?.commit_id && r.horizon ? { commit: r.commit_id, horizon: JSON.parse(r.horizon) as Horizon, at: r.published_at, url: web ? `${web}/src/commit/${r.commit_id}/${this.pathOf(conv)}` : null, destination: r.destination ?? null } : null
     // Closing or reopening is published too (the final catch-up on close).
-    const sameState = !r?.horizon || (JSON.parse(r.horizon) as { state?: string }).state === this.ds.discussion(conv)?.state
+    const sameState = !r?.horizon || (JSON.parse(r.horizon) as { state?: string }).state === this.ds.conversation(conv)?.state
     const elsewhere = !!published && 'destination' in o && published.destination !== o.destination
     const state: ArchiveStatus['state'] = 'disabled' in o ? 'disabled' : r?.state === 'failed' ? 'failed' : !published ? 'never' : elsewhere ? 'unverified' : covers(published.horizon, live) && sameState ? 'current' : 'behind'
-    return { state, live, published, error: 'disabled' in o ? o.disabled : r?.state === 'failed' ? r.error : elsewhere ? `published in ${published!.destination ?? 'a repository not recorded (before store v8)'}; not yet verified in ${o.destination}` : null, tries: r?.tries ?? 0, attempted: r?.attempted_at ?? null, repository: 'disabled' in o ? null : o.web ?? o.url }
+    return { state, live, published, error: 'disabled' in o ? o.disabled : r?.state === 'failed' ? r.error : elsewhere ? `published in ${published!.destination ?? 'a repository not recorded (before store v8)'}; not yet verified in ${o.destination}` : null, tries: r?.tries ?? 0, attempted: r?.attempted_at ?? null, repository: 'disabled' in o ? null : o.web ?? o.url, path: this.pathOf(conv) }
   }
 
   // Discussions whose live records go beyond what was last published, or
@@ -162,8 +178,8 @@ export class DiscussionArchive {
           for (const conv of targets) {
             const r = this.write(conv)
             if (!r) { unchanged.push(conv); continue }
-            await g(['add', '--', `discussions/${conv}`])
-            await g(['commit', '-q', '-m', `Archive discussion ${conv} through #${r.horizon.message}`, '-m', `Discussion-Horizon: ${conv} m${r.horizon.message} l${r.horizon.link} j${r.horizon.membership} e${r.horizon.event} a${r.horizon.activity ?? 0} n${r.horizon.annotation ?? 0} t${r.horizon.meta ?? 0} o${r.horizon.overview ?? 0} w${r.horizon.workflow ?? 0} x${r.horizon.workflowEvent ?? 0}`])
+            await g(['add', '--', this.pathOf(conv)])
+            await g(['commit', '-q', '-m', `Archive conversation ${conv} through #${r.horizon.message}`, '-m', `Conversation-Horizon: ${conv} m${r.horizon.message} l${r.horizon.link} j${r.horizon.membership} e${r.horizon.event} a${r.horizon.activity ?? 0} n${r.horizon.annotation ?? 0} t${r.horizon.meta ?? 0} o${r.horizon.overview ?? 0} w${r.horizon.workflow ?? 0} x${r.horizon.workflowEvent ?? 0}`])
             made.push({ conv, commit: (await g(['rev-parse', 'HEAD'])).trim(), records: r.records })
           }
           if (made.length) {
@@ -180,7 +196,7 @@ export class DiscussionArchive {
           for (const conv of [...made.map(m => m.conv), ...unchanged]) {
             const m = this.published(conv)
             if (!m) continue
-            const commit = (await g(['log', '-1', '--format=%H', '--', `discussions/${conv}/manifest.json`])).trim()
+            const commit = (await g(['log', '-1', '--format=%H', '--', `${this.pathOf(conv)}/manifest.json`])).trim()
             this.record(conv, { state: 'current', commit_id: commit, horizon: JSON.stringify({ ...m.horizon, state: m.state }), published_at: m.exports.at(-1)?.at ?? null, error: null, tries: 0, destination: origin.destination })
           }
           return { published: made, unchanged, failed: [] }
@@ -190,7 +206,7 @@ export class DiscussionArchive {
         for (const conv of targets) this.record(conv, { state: 'failed', error, tries: (this.row(conv)?.tries ?? 0) + 1 })
         return { published: [], unchanged: [], failed: targets.map(conv => ({ conv, error })) }
       }
-    }, { timeoutMs: 120_000, what: 'the discussion archive' })
+    }, { timeoutMs: 120_000, what: 'the conversation archive' })
   }
 
   private async branch(env: Record<string, string>): Promise<string> {
@@ -200,13 +216,13 @@ export class DiscussionArchive {
 
   // The manifest as published (in the checked-out remote state).
   published(conv: string): Manifest | null {
-    try { return JSON.parse(readFileSync(join(this.dir, 'discussions', conv, 'manifest.json'), 'utf8')) as Manifest } catch { return null }
+    try { return JSON.parse(readFileSync(join(this.dir, this.pathOf(conv), 'manifest.json'), 'utf8')) as Manifest } catch { return null }
   }
 
   // Appends the records beyond the published horizon and rewrites the
   // manifest. Null when nothing changed (no new record, same state).
   private write(conv: string): { horizon: Horizon; records: number } | null {
-    const d = this.ds.discussion(conv)
+    const d = this.ds.conversation(conv)
     if (!d) return null
     const before = this.published(conv)
     const from = before?.horizon ?? ZERO
@@ -214,9 +230,13 @@ export class DiscussionArchive {
     const lines: { at: string; order: number; rec: Record<string, unknown> }[] = []
     for (const r of this.ds.membership(conv)) if (r.id > from.membership) lines.push({ at: r.at, order: 0, rec: { type: 'membership', id: r.id, participant: r.participant, kind: r.kind, workspace: r.workspace, workflow: r.workflow, action: r.action, by: r.by, at: r.at, note: r.note } })
     const invs = new Map(this.ds.invitations(conv).map(i => [i.id, i]))
+    // A request's first event carries what it is (a migrated one-to-one turn
+    // has only the event its migration recorded).
+    const first = new Map<number, number>()
+    for (const e of this.ds.events(conv)) if (!first.has(e.invitation)) first.set(e.invitation, e.id)
     for (const e of this.ds.events(conv, from.event)) {
       const i = invs.get(e.invitation)
-      lines.push({ at: e.at, order: 2, rec: { type: 'invitation', id: e.id, invitation: e.invitation, state: e.state, at: e.at, run: e.run, message: e.message, note: e.note, ...((e.state === 'pending' || e.state === 'awaited') && i ? { participant: i.participant, target: `${i.workspace}/${i.workflow}`, question: i.question, source: JSON.parse(i.source), by: i.by, byRun: i.by_run, awaitedBy: i.awaited_by, ...(i.awaits ? { awaits: i.awaits } : {}) } : {}) } })
+      lines.push({ at: e.at, order: 2, rec: { type: 'invitation', id: e.id, invitation: e.invitation, state: e.state, at: e.at, run: e.run, message: e.message, note: e.note, ...((e.state === 'pending' || e.state === 'awaited' || first.get(e.invitation) === e.id) && i ? { participant: i.participant, target: `${i.workspace}/${i.workflow}`, question: i.question, source: JSON.parse(i.source), by: i.by, byRun: i.by_run, awaitedBy: i.awaited_by, ...(i.awaits ? { awaits: i.awaits } : {}), ...(i.role ? { role: i.role } : {}), ...(i.receipt ? { receipt: i.receipt } : {}), ...(i.delivery && JSON.parse(i.delivery).instruct ? { instruct: true } : {}) } : {}) } })
     }
     // A message's attachments (challenge p1) go with it: the challenge and the
     // revision it was sent with, which resolve in the challenge repository.
@@ -226,11 +246,11 @@ export class DiscussionArchive {
     for (const a of this.ds.annotations(conv, from.annotation ?? 0)) lines.push({ at: a.at, order: 5, rec: { type: 'annotation', id: a.id, at: a.at, kind: a.kind, author: a.author, text: a.text, re: JSON.parse(a.re), run: a.run } })
     for (const m of this.ds.metaRows(conv, from.meta ?? 0)) lines.push({ at: m.at, order: 6, rec: { type: 'meta', id: m.id, at: m.at, field: m.field, value: m.value, by: m.by, run: m.run, note: m.note } })
     for (const v of this.ds.overviewRows(conv, from.overview ?? 0)) lines.push({ at: v.at, order: 7, rec: { type: 'overview', id: v.id, at: v.at, author: v.author, run: v.run, purpose: v.purpose, outcome: v.outcome, unresolved: JSON.parse(v.unresolved), through: v.through, sources: JSON.parse(v.sources), note: v.note } })
-    // Workflows of the discussion (argue p4 ex3): each record as recorded,
+    // Workflows of the conversation (argue p4 ex3): each record as recorded,
     // later message associations, and every version a record names, once,
-    // as discussions/<id>/workflows/<sha256>.yaml (what a fresh reader
+    // as <path>/workflows/<sha256>.yaml (what a fresh reader
     // resolves a version from after its source moved or retired).
-    const wfs = new DiscussionWorkflows(this.ds)
+    const wfs = new ConversationWorkflows(this.ds)
     const snapshots: string[] = []
     for (const w of wfs.rows(conv, from.workflow ?? 0)) {
       const r = wfs.view(w)
@@ -240,7 +260,7 @@ export class DiscussionArchive {
     for (const e of wfs.events(conv, from.workflowEvent ?? 0)) lines.push({ at: e.at, order: 9, rec: { type: 'workflow-link', id: e.id, at: e.at, ref: e.ref, message: e.message, by: e.by, run: e.run, note: e.note } })
     if (!lines.length && before?.state === d.state) return null
     lines.sort((a, b) => a.at.localeCompare(b.at) || a.order - b.order)
-    const dir = join(this.dir, 'discussions', conv)
+    const dir = join(this.dir, this.pathOf(conv))
     mkdirSync(dir, { recursive: true })
     if (lines.length) appendFileSync(join(dir, 'transcript.jsonl'), lines.map(l => `${JSON.stringify(l.rec)}\n`).join(''))
     for (const sha of snapshots) {
@@ -253,12 +273,18 @@ export class DiscussionArchive {
     for (const i of invs.values()) if (i.run) runs.set(i.run, { run: i.run, workspace: i.workspace, workflow: i.workflow, author: null, participant: i.participant })
     for (const m of this.ds.messages(conv)) if (m.run) { const [ws, wf] = m.run.split('/'); runs.set(m.run, { run: m.run, workspace: ws, workflow: wf, author: m.author, participant: m.participant ?? ws }) }
     const manifest: Manifest = {
-      format: ARCHIVE_FORMAT, id: conv, title: d.title, created: d.created, by: d.by, state: d.state, facilitator: `${d.workspace}/${d.workflow}`,
+      format: ARCHIVE_FORMAT, id: conv, path: this.pathOf(conv), origin: d.kind, title: d.title, created: d.created, by: d.by, state: d.state,
+      facilitator: (() => { const f = this.ds.facilitation(conv); return f ? `${f.workspace}/${f.workflow}` : null })(),
+      facilitations: this.ds.facilitations(conv).map(f => ({ id: f.id, facilitator: `${f.workspace}/${f.workflow}`, state: f.state, brief: f.brief, horizon: f.horizon, by: f.by, byRun: f.by_run, at: f.at, ended: f.ended_at ? { at: f.ended_at, by: f.ended_by, note: f.end_note } : null, note: f.note })),
+      defaultTo: d.default_to ?? null,
       conductor: d.conductor ?? null, requester: this.ds.requester(conv),
-      category: d.category ?? 'discussion', displayTitle: d.display_title ?? null, overview: currentOverview(this.ds, conv),
+      category: d.category === 'check' ? 'check' : 'conversation', displayTitle: d.display_title ?? null, overview: currentOverview(this.ds, conv),
       members: this.ds.members(conv), horizon,
       activities: this.ds.activityRows(conv).map(a => this.ds.activityView(a)),
-      invitations: [...invs.values()].map(i => ({ id: i.id, participant: i.participant, target: `${i.workspace}/${i.workflow}`, by: i.by, byRun: i.by_run, awaitedBy: i.awaited_by, source: JSON.parse(i.source), horizon: i.horizon, state: i.state, late: !!i.late, run: i.run, answeredBy: i.answered_by, error: i.error, deliveredTo: i.delivery ? (JSON.parse(i.delivery) as { message: number }).message : null, ...(i.awaits ? { awaits: i.awaits } : {}) })),
+      invitations: [...invs.values()].map(i => ({ id: i.id, participant: i.participant, target: `${i.workspace}/${i.workflow}`, role: i.role, receipt: i.receipt, by: i.by, byRun: i.by_run, awaitedBy: i.awaited_by, source: JSON.parse(i.source), horizon: i.horizon, state: i.state, late: !!i.late, run: i.run, answeredBy: i.answered_by, error: i.error, deliveredTo: i.delivery ? (JSON.parse(i.delivery) as { message: number }).message : null, ...(i.delivery && JSON.parse(i.delivery).instruct ? { instruct: true } : {}), ...(i.awaits ? { awaits: i.awaits } : {}), ...(i.held ? { held: i.held } : {}) })),
+      // Records this conversation had before its store's migration to one
+      // kind of conversation (challenge p2): what was derived, and when.
+      migration: (() => { const m = this.ds.membership(conv).find(r => r.by === 'wfe migration v12'); return m ? { store: 'conversation store v12', note: m.note, derived: ['membership', 'requests', 'defaultTo'] } : null })(),
       runs: [...runs.values()],
       exports: [...(before?.exports ?? []), { at: now(), from, through: horizon, records: lines.length, state: d.state }],
       workflows: wfs.rows(conv).map(w => { const r = wfs.view(w); const snap = (v: typeof r.after) => v && existsSync(join(dir, 'workflows', `${v.sha256}.yaml`)) ? `workflows/${v.sha256}.yaml` : null; return { id: r.id, relation: r.relation, role: r.role, project: r.project, workflow: r.workflow, target: r.target, after: r.after, before: r.before, messages: r.messages, run: r.run, attempt: r.attempt, invitation: r.invitation, evidence: r.evidence, state: r.state, snapshot: { after: snap(r.after), before: snap(r.before) } } }),
@@ -271,7 +297,7 @@ export class DiscussionArchive {
 
 // The current overview as of the export, without its live `after` count
 // (the horizon says what the export covers).
-function currentOverview(ds: DiscussionStore, conv: string) {
+function currentOverview(ds: ConversationService, conv: string) {
   const o = ds.overview(conv)
   if (!o) return null
   const { after, ...rest } = o
@@ -280,7 +306,8 @@ function currentOverview(ds: DiscussionStore, conv: string) {
 }
 
 export interface Manifest {
-  format: string; id: string; title: string; created: string; by: string; state: string; facilitator: string
+  format: string; id: string; path?: string; origin?: string; title: string; created: string; by: string; state: string; facilitator: string | null
+  facilitations?: unknown[]; defaultTo?: string | null; migration?: unknown
   conductor?: string | null; requester?: unknown; activities?: unknown[]
   category?: string; displayTitle?: string | null; overview?: unknown
   members: unknown[]; horizon: Horizon; invitations: unknown[]; runs: unknown[]; workflows?: unknown[]

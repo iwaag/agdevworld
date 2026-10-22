@@ -1,11 +1,13 @@
-// The conversation store's discussion tables (workflow_editor p16,
-// docs/discussions.md). A discussion shares the store's conversations,
-// messages and links with direct conversations; these are what it adds:
-// members (an append-only history), invitations (the only thing that starts
-// a run in a discussion) and the archive's bookkeeping.
+// The conversation store's tables beyond its first three versions
+// (docs/conversations.md): members (an append-only history), response
+// requests (table `invitations`, the only thing that starts a run in a
+// conversation), the conductor's activities, metadata, overviews, workflow
+// references, attachments, facilitations and the archive's bookkeeping.
+// Versions 4–11 were written for discussions (workflow_editor p16 … challenge
+// p1); version 12 (challenge p2) makes every conversation one kind of room.
 import type { Migration } from './sqlite.ts'
 
-export const DISCUSSION_MIGRATIONS: Migration[] = [{
+export const CONVERSATION_MIGRATIONS: Migration[] = [{
   version: 4,
   up: db => db.exec(`
     ALTER TABLE conversations ADD COLUMN kind TEXT NOT NULL DEFAULT 'conversation';
@@ -94,7 +96,7 @@ export const DISCUSSION_MIGRATIONS: Migration[] = [{
     CREATE INDEX overviews_conv ON overviews (conv, id);
   `),
 }, {
-  // Workflows in a discussion (argue p4 ex3, server/discussionWorkflows.ts):
+  // Workflows in a discussion (argue p4 ex3, server/conversationWorkflows.ts):
   // which workflow a turn referenced, created, edited or executed, at which
   // version (byte sha256 and semantic digest, before and after), with its
   // turn (run, attempt, invitation, activity), source messages, evidence and
@@ -130,4 +132,74 @@ export const DISCUSSION_MIGRATIONS: Migration[] = [{
       commit_id TEXT NOT NULL, title TEXT NOT NULL, sha256 TEXT NOT NULL, at TEXT NOT NULL, UNIQUE (message, kind, ref));
     CREATE INDEX attachments_conv ON attachments (conv, message);
   `),
+}, {
+  // One conversation (challenge p2, docs/conversations.md): every room has
+  // members, response requests, an optional facilitation and an optional
+  // default addressee; how it began only names its archive namespace.
+  // - conversations.default_to: the default addressee (a one-to-one room's
+  //   project);
+  // - invitations.role / receipt / held: the workflow role selected for the
+  //   request, the run request's receipt as recorded, and a continuation held
+  //   while the room is closed or no longer facilitated;
+  // - facilitations: when and by whom a conductor began (and stopped)
+  //   leading, with its brief and the history horizon it started from;
+  // - archives.path: where the room's archive lives, never moved.
+  // Direct conversations are mapped into the same records: their destination
+  // becomes the project member and default addressee, each person's message
+  // one request keeping its receipt and run (nothing completed becomes
+  // pending; nothing is dispatched here). Discussions get the facilitation
+  // they always had. The category `discussion` is now `conversation`.
+  version: 12,
+  up: db => {
+    const at = new Date().toISOString()
+    const by = 'wfe migration v12'
+    db.exec(`
+      ALTER TABLE conversations ADD COLUMN default_to TEXT;
+      ALTER TABLE invitations ADD COLUMN role TEXT;
+      ALTER TABLE invitations ADD COLUMN receipt TEXT;
+      ALTER TABLE invitations ADD COLUMN held TEXT;
+      ALTER TABLE archives ADD COLUMN path TEXT;
+      CREATE TABLE facilitations (id INTEGER PRIMARY KEY AUTOINCREMENT, conv TEXT NOT NULL, workspace TEXT NOT NULL, workflow TEXT NOT NULL, state TEXT NOT NULL,
+        brief INTEGER, horizon INTEGER NOT NULL DEFAULT 0, by TEXT NOT NULL, by_run TEXT, at TEXT NOT NULL, ended_at TEXT, ended_by TEXT, end_note TEXT,
+        note TEXT NOT NULL DEFAULT '', token TEXT NOT NULL, UNIQUE (conv, token));
+      CREATE INDEX facilitations_conv ON facilitations (conv, id);
+      UPDATE archives SET path = 'discussions/' || conv;
+      UPDATE conversations SET category = 'conversation' WHERE category IS NULL OR category = 'discussion';
+      UPDATE invitations SET receipt = 'discussion:' || conv || ':invitation:' || id;
+    `)
+    const all = <T>(sql: string, ...a: (string | number | null)[]) => db.prepare(sql).all(...a) as T[]
+    // Discussions: the facilitation they had from their creation.
+    for (const c of all<{ id: string; workspace: string; workflow: string; by: string; created: string }>('SELECT id, workspace, workflow, by, created FROM conversations WHERE kind = \'discussion\'')) {
+      const brief = (db.prepare('SELECT id FROM messages WHERE conv = ? AND (role = \'person\' OR kind = \'announce\') ORDER BY id LIMIT 1').get(c.id) as { id: number } | undefined)?.id ?? null
+      db.prepare('INSERT INTO facilitations (conv, workspace, workflow, state, brief, horizon, by, at, note, token) VALUES (?, ?, ?, \'active\', ?, 0, ?, ?, ?, \'migrated\')')
+        .run(c.id, c.workspace, c.workflow, brief, c.by, c.created, `${by} (${at}): a discussion, facilitated since it was created`)
+    }
+    db.exec(`UPDATE invitations SET role = CASE
+        WHEN awaits IS NOT NULL THEN 'await'
+        WHEN delivery IS NOT NULL THEN 'deliver'
+        WHEN EXISTS (SELECT 1 FROM conversations c WHERE c.id = invitations.conv AND c.workspace = invitations.workspace AND c.workflow = invitations.workflow) THEN 'conduct'
+        ELSE 'discuss' END`)
+    // Direct conversations: their destination becomes the project member and
+    // the default addressee; each person's message one request.
+    const ANSWERING = "('reply', 'result', 'synthesis', 'announce')"
+    for (const c of all<{ id: string; workspace: string | null; workflow: string | null; by: string; created: string }>('SELECT id, workspace, workflow, by, created FROM conversations WHERE kind = \'conversation\'')) {
+      if (!c.workspace || !c.workflow) continue
+      db.prepare('UPDATE conversations SET default_to = ? WHERE id = ?').run(c.workspace, c.id)
+      const join = db.prepare('INSERT INTO membership (conv, participant, kind, workspace, workflow, action, by, at, note) VALUES (?, ?, ?, ?, ?, \'join\', ?, ?, ?)')
+      const people = [...new Set([c.by, ...all<{ author: string }>('SELECT author FROM messages WHERE conv = ? AND role = \'person\' ORDER BY id', c.id).map(r => r.author)])]
+      for (const p of people) join.run(c.id, p, 'person', null, null, by, c.created, `${by} (${at}): spoke in the conversation`)
+      join.run(c.id, c.workspace, 'project', c.workspace, c.workflow, by, c.created, `${by} (${at}): the conversation's destination since it was created`)
+      for (const m of all<{ id: number; author: string; text: string; at: string; dispatch_state: string | null; dispatch_run: string | null; dispatch_error: string | null; dispatch_tries: number }>('SELECT * FROM messages WHERE conv = ? AND role = \'person\' ORDER BY id', c.id)) {
+        const state = m.dispatch_state === 'started' ? 'started' : m.dispatch_state === 'failed' ? 'failed' : 'pending'
+        const answer = state === 'started' && m.dispatch_run ? db.prepare(`SELECT id FROM messages WHERE conv = ? AND role = 'agent' AND run = ? AND id > ? AND kind IN ${ANSWERING} ORDER BY id LIMIT 1`).get(c.id, m.dispatch_run, m.id) as { id: number } | undefined : undefined
+        const id = Number(db.prepare('INSERT INTO invitations (conv, participant, workspace, workflow, question, source, by, horizon, token, state, run, error, tries, created, updated, answered_by, role, receipt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, \'converse\', ?)')
+          .run(c.id, c.workspace, c.workspace, c.workflow, m.text, JSON.stringify([m.id]), m.author, m.id, `message:${m.id}:${c.workspace}`, answer ? 'answered' : state, m.dispatch_run, m.dispatch_error, m.dispatch_tries, m.at, at, answer?.id ?? null, `conversation:${c.id}:${m.id}`).lastInsertRowid)
+        db.prepare('INSERT INTO invitation_events (conv, invitation, state, at, run, message, note) VALUES (?, ?, ?, ?, ?, ?, ?)')
+          .run(c.id, id, answer ? 'answered' : state, at, m.dispatch_run, answer?.id ?? null, `${by}: the turn of message #${m.id} (receipt conversation:${c.id}:${m.id})${m.dispatch_run ? `, run ${m.dispatch_run}` : ''}${answer ? `, answered by #${answer.id}` : ''}${m.dispatch_error ? `; ${m.dispatch_error}` : ''}`)
+        db.prepare('UPDATE messages SET participant = ?, addressed = ? WHERE id = ?').run(m.author, JSON.stringify([c.workspace]), m.id)
+        if (m.dispatch_run) db.prepare('UPDATE messages SET invitation = ? WHERE conv = ? AND role = \'agent\' AND run = ? AND invitation IS NULL').run(id, c.id, m.dispatch_run)
+      }
+      db.prepare('UPDATE messages SET participant = CASE WHEN instr(coalesce(run, \'\'), \'/\') > 0 THEN substr(run, 1, instr(run, \'/\') - 1) ELSE ? END WHERE conv = ? AND role = \'agent\' AND participant IS NULL').run(c.workspace, c.id)
+    }
+  },
 }]

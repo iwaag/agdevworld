@@ -11,7 +11,7 @@ export interface Config {
   wfe: string // the WFE service, e.g. http://localhost:8098/
   linkBase: string // where the Developer's phone reaches WFE (run views), e.g. the tailnet name
   linkMap: Record<string, string> // origins in reply text mapped to phone-reachable ones
-  target: string // the WFE destination of every new conversation, <workspace>/<workflow> (workflow_editor p15)
+  with: string // the project every new conversation is with (challenge p2; `target` <workspace>/<workflow> before)
   conversationUrl: string // where a conversation opens in a browser, {conv} replaced by its id (aghangout)
   trialAuthor: string // who trial messages are recorded as (never the Developer)
   store: string // the transport store (SQLite)
@@ -42,11 +42,13 @@ export function loadConfig(file: string): Config {
   for (const [from, to] of Object.entries((o.linkMap ?? {}) as Record<string, unknown>)) {
     try { linkMap[new URL(from).origin] = new URL(String(to)).origin } catch { problems.push(`linkMap: ${from} → ${String(to)} is not origin → origin`) }
   }
-  const target = str('target', /^[a-z0-9][a-z0-9_.-]*\/[a-z0-9][a-z0-9_.-]*$/, 'the destination of new conversations, <workspace>/<workflow> (e.g. front/converse)')
+  // `with` names the project; `target` (<workspace>/<workflow>, before challenge p2) is read as its workspace.
+  if (o.with === undefined && typeof o.target === 'string') o.with = o.target.split('/')[0]
+  const withProject = str('with', /^[a-z0-9][a-z0-9_.-]*$/, 'the project new conversations are with (e.g. front)')
   const conversationUrl = typeof o.conversationUrl === 'string' ? o.conversationUrl : linkBase ? `${new URL(linkBase).origin}/hangout/?conv={conv}` : ''
   if (conversationUrl && !conversationUrl.includes('{conv}')) problems.push('conversationUrl: a URL with {conv} where the conversation id goes')
   const trialAuthor = typeof o.trialAuthor === 'string' && o.trialAuthor.trim() ? o.trialAuthor.trim() : 'Omni Agent (for Developer)'
   if (problems.length) throw new ConfigError(`${file}:\n  ${problems.join('\n  ')}`)
   const store = typeof o.store === 'string' ? resolve(dirname(file), o.store) : join(dirname(file), 'slack.sqlite')
-  return { appToken, botToken, developer, team, wfe, linkBase, linkMap, target, conversationUrl, trialAuthor, store }
+  return { appToken, botToken, developer, team, wfe, linkBase, linkMap, with: withProject, conversationUrl, trialAuthor, store }
 }

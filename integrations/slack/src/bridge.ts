@@ -191,7 +191,7 @@ export class Bridge {
     try {
       posted = await this.wfe.post(conv, {
         text: c.text + note, token: `${trial ? 'slack-trial' : 'slack'}:${row.team}:${row.channel}:${row.ts}`,
-        via: trial ? 'slack-trial' : 'slack', target: this.config.target, ...(trial ? { author: this.config.trialAuthor } : {}),
+        via: trial ? 'slack-trial' : 'slack', with: this.config.with, ...(trial ? { author: this.config.trialAuthor } : {}),
       })
     } catch (e) {
       const msg = (e as Error).message
@@ -213,10 +213,11 @@ export class Bridge {
       this.store.settle(row.id, 'done', { outcome: posted.duplicate ? 'accepted (already in WFE)' : 'accepted', conv, wfe_message: posted.message.id })
       this.store.touch(conv)
       this.store.enqueue({ key: `react:${row.channel}:${row.ts}`, kind: 'reaction', channel: row.channel, thread: row.ts, text: RECEIVED_REACTION })
-      if (posted.message.dispatch?.state === 'failed') notice('turn-failed', `⚠️ WFE は受け取りましたが、Front のターンを開始できませんでした（${plainForSlack(posted.message.dispatch.error ?? '')}）。WFE 側で再試行されます。`, root)
+      const failed = posted.requests.filter(r => r.state === 'failed')
+      if (failed.length) notice('turn-failed', `⚠️ WFE は受け取りましたが、${failed.map(r => r.participant).join('、')} の作業を開始できませんでした（${plainForSlack(failed[0]!.error ?? '')}）。WFE 側で再試行されます。`, root)
       if (posted.reopened) notice('reopened', '↩ 閉じていた会話を再開しました（閉じても run は止まっていません）。', root)
     })
-    this.log(`inbox ${row.source} → ${conv} #${posted.message.id}${posted.duplicate ? ' (duplicate)' : ''}; turn ${posted.message.dispatch?.state ?? '?'}${posted.run ? ` ${posted.run}` : ''}`)
+    this.log(`inbox ${row.source} → ${conv} #${posted.message.id}${posted.duplicate ? ' (duplicate)' : ''}; ${posted.requests.map(r => `${r.participant} ${r.state}${r.run ? ` ${r.run}` : ''}`).join(', ') || 'no request'}`)
   }
 
   // ---- WFE → outbox -------------------------------------------------------------

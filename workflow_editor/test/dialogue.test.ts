@@ -15,8 +15,8 @@ import { join } from 'node:path'
 import { ConversationStore } from '../server/conversations.ts'
 import { createProject } from '../server/create.ts'
 import { DialogueStore, DialogueWorker, DIALOGUE_DIR, type DialogueConfig } from '../server/dialogue.ts'
-import { DiscussionArchive } from '../server/discussionArchive.ts'
-import { DiscussionStore } from '../server/discussions.ts'
+import { ConversationArchive } from '../server/conversationArchive.ts'
+import { ConversationService } from '../server/conversationService.ts'
 import { ExecStore } from '../server/exec.ts'
 import { gitOk } from '../server/git.ts'
 import { loadRegistry } from '../server/registry.ts'
@@ -85,7 +85,7 @@ nodes:
   const config: DialogueConfig = { renderer: join(rdir, 'render.ts'), languages: ['ja', 'en'], follow: ['ja'], concurrency: 2, window: o.window ?? 40, tries: 2, env: {} }
   const x = new ExecStore({ registryFile: registry, area })
   const cs = new ConversationStore({ area, exec: x })
-  const ds = new DiscussionStore(cs)
+  const ds = new ConversationService(cs)
   const dl = new DialogueStore(ds, { config, backoffMs: 1 })
   const close = () => { dl.close(); cs.close(); x.close() }
   return { area, dir, rdir, registry, x, cs, ds, dl, close }
@@ -101,7 +101,7 @@ function speak(s: S, conv: string, role: 'person' | 'agent', text: string, re: n
   return Number(r.lastInsertRowid)
 }
 function discussion(s: S, id: string) {
-  s.ds.create(id, { title: `About ${id}`, by: 'Pat', members: [] })
+  s.ds.create(id, { facilitate: true, title: `About ${id}`, by: 'Pat', members: [] })
   s.cs.db.prepare("INSERT INTO membership (conv, participant, kind, workspace, workflow, action, by, at, note) VALUES (?, 'forge', 'project', 'forge', 'discuss', 'join', 'Pat', ?, '')").run(id, new Date().toISOString())
 }
 const work = (s: S) => new DialogueWorker(s.dl, () => {}).drain(30_000)
@@ -261,9 +261,9 @@ test('the boundary: discussion views, the archive and run copies carry no line',
   assert.ok(line)
   const view = JSON.stringify(await s.ds.view('d7', {}))
   assert.ok(!view.includes(line) && !view.includes('ctx='), 'the discussion view has no rendering')
-  const pub = await new DiscussionArchive(s.ds).publish(['d7'])
+  const pub = await new ConversationArchive(s.ds).publish(['d7'])
   assert.deepEqual(pub.failed, [])
-  const archive = join(s.area, '.local', 'discussions', 'archive', 'discussions', 'd7')
+  const archive = join(s.area, '.local', 'discussions', 'archive', 'conversations', 'd7')
   for (const f of await readdir(archive)) assert.ok(!(await readFile(join(archive, f), 'utf8')).includes('ctx='), `${f} has no rendering`)
   const ws = new Workspace((await loadRegistry(s.registry)).workspaces.find(w => w.id === 'ponderer')!)
   const { copy } = await prepareCopy(ws, { project: 'ponderer', workflow: 'conduct', receipt: 'boundary' })

@@ -101,6 +101,16 @@ const begin = (s: S, run: string, a: string) => op(s, run, { op: 'attempt.begin'
 const end = (s: S, run: string, a: string) => op(s, run, { op: 'attempt.end', attempt: a, outcome: 'exited', explain: 'cause', waits: 'defer-ready' } as never)
 const P = 'ponderer/conduct/run-001'
 const who = { author: 'ponderer-agent' }
+// A talk node's question (workflow_editor fix3): the run asks it like any
+// question (wfe run ask) and WFE posts it in the discussion.
+async function talk(s: S, conv: string, o: { run: string; attempt: string; node: string; question: string; to: string }) {
+  await op(s, o.run, { op: 'node.start', node: o.node, attempt: o.attempt } as never, 'ponderer-agent')
+  const r = await op(s, o.run, { op: 'question.ask', node: o.node, text: o.question, to: o.to, attempt: o.attempt } as never, 'ponderer-agent')
+  const q = Object.values(r.record.questions).at(-1)!
+  await s.ds.postQuestions({ run: o.run, conv })
+  const activity = s.ds.activityRows(conv).find(a => a.run === o.run && a.question === q.id)!
+  return { to: q.to, activity, message: s.cs.message(activity.message!) }
+}
 // A conductor whose first decision adds an announcement, a parallel ask and
 // a second ponder.
 async function opened(s: S, conv: string) {
@@ -213,8 +223,8 @@ test('talk: the person\'s reply, addressed to nobody, is the conductor\'s answer
   const brief = await opened(s, 'p4-c')
   await begin(s, P, 'a1')
   await s.ds.ponder('p4-c', { run: P, attempt: 'a1', ...who, node: 'ponder', decision: 'The scope is unclear: ask the requester.', sources: [brief.id], next: [{ activity: 'talk', node: 'clarify' }, { activity: 'ponder', node: 'scope' }] })
-  const t = await s.ds.talk('p4-c', { run: P, attempt: 'a1', ...who, node: 'clarify', question: 'Is one match enough?', re: [brief.id] })
-  assert.equal(t.to, 'Pat', 'the requester is the person who opened the discussion')
+  const t = await talk(s, 'p4-c', { run: P, attempt: 'a1', node: 'clarify', question: 'Is one match enough?', to: 'Pat' })
+  assert.equal(t.activity.kind, 'talk', 'a question on the talk node is the talk activity')
   assert.equal(t.message!.kind, 'question')
   let r = await rec(s, P)
   assert.equal(r.nodes.clarify.state, 'waiting')
@@ -239,7 +249,7 @@ test('talk: the person\'s reply, addressed to nobody, is the conductor\'s answer
   // Without re: the only open question of the conductor is answered.
   await begin(s, P, 'a2')
   await s.ds.ponder('p4-c', { run: P, attempt: 'a2', ...who, node: 'scope', decision: 'Ask about the seat too.', sources: [reply.message.id], next: [{ activity: 'talk', node: 'seat' }, { activity: 'ponder', node: 'then' }] })
-  const t2 = await s.ds.talk('p4-c', { run: P, attempt: 'a2', ...who, node: 'seat', question: 'Which seat?', re: [reply.message.id] })
+  const t2 = await talk(s, 'p4-c', { run: P, attempt: 'a2', node: 'seat', question: 'Which seat?', to: 'Pat' })
   await end(s, P, 'a2')
   await s.ds.post('p4-c', { text: 'Seat 0.', author: 'Pat', token: 'tok-p4-c-003' })
   assert.equal((await rec(s, P)).questions[t2.activity.question!].answers[0]?.text, 'Seat 0.')
@@ -260,7 +270,7 @@ test('a conductor run created by a delegation: the requesting run is the request
   await s.ds.ponder('p4-d', { run, attempt: 'a1', ...who, node: 'ponder', decision: 'Ask front which seat.', sources: [], next: [{ activity: 'announce', node: 'open' }, { activity: 'talk', node: 'ask-front' }, { activity: 'ask', node: 'facts' }] })
   const brief = (await s.ds.post('p4-d', { text: 'Context from front: seats matter.', author: 'Pat', token: 'tok-p4-d-001', to: ['forge'] })).message
   await s.ds.announce('p4-d', { run, attempt: 'a1', ...who, node: 'open', text: 'We discuss seats.', re: [brief.id] })
-  const t = await s.ds.talk('p4-d', { run, attempt: 'a1', ...who, node: 'ask-front', question: 'Seat 0 or 1?', re: [brief.id] })
+  const t = await talk(s, 'p4-d', { run, attempt: 'a1', node: 'ask-front', question: 'Seat 0 or 1?', to: 'front-agent' })
   assert.equal(t.to, 'front-agent')
   assert.equal((await rec(s, run)).questions[t.activity.question!].to, 'front-agent')
   await op(s, run, { op: 'question.withdraw', question: t.activity.question!, reason: 'front said seat 0 elsewhere', attempt: 'a1' } as never, 'ponderer-agent')
@@ -366,13 +376,34 @@ test('a question answered through a delegation (an agent requester) is no longer
   s.x.db.prepare('UPDATE jobs SET state = \'done\' WHERE workspace = \'ponderer\'').run()
   await begin(s, run, 'a1')
   await s.ds.ponder('p4-h', { run, attempt: 'a1', ...who, node: 'ponder', decision: 'Open, then ask front.', sources: [], next: [{ activity: 'announce', node: 'open' }, { activity: 'talk', node: 'ask-front' }, { activity: 'ponder', node: 'then' }] })
-  const open = await s.ds.announce('p4-h', { run, attempt: 'a1', ...who, node: 'open', text: 'Requested by front/converse/run-001: one line.', re: [] })
-  const t = await s.ds.talk('p4-h', { run, attempt: 'a1', ...who, node: 'ask-front', question: 'How detailed?', re: [open.message.id] })
+  await s.ds.announce('p4-h', { run, attempt: 'a1', ...who, node: 'open', text: 'Requested by front/converse/run-001: one line.', re: [] })
+  const t = await talk(s, 'p4-h', { run, attempt: 'a1', node: 'ask-front', question: 'How detailed?', to: 'front-agent' })
   assert.deepEqual((await s.ds.view('p4-h')).asking, [t.message!.id])
   assert.equal((await s.ds.obligations('p4-h')).filter(o => o.kind === 'question').length, 1)
   await end(s, run, 'a1')
   await op(s, run, { op: 'question.answer', question: t.activity.question!, text: 'As is.', from: 'front-agent' } as never, 'front-agent')
   assert.deepEqual((await s.ds.view('p4-h')).asking, [], 'answered in the run: not waiting')
   assert.equal((await s.ds.obligations('p4-h')).filter(o => o.kind === 'question').length, 0, 'and not owed')
+  s.cs.close(); s.x.close()
+})
+
+test('a conductor\'s question on any node is posted by WFE, awaits the person and takes the reply as its answer (workflow_editor fix3: ponderer/conduct/run-020 relayed a delegated child\'s question with wfe run ask and the discussion awaited nobody)', async () => {
+  const s = await setup()
+  const brief = await opened(s, 'fix3-a')
+  await begin(s, P, 'a1')
+  await s.ds.ponder('fix3-a', { run: P, attempt: 'a1', ...who, node: 'ponder', decision: 'Hand it on.', sources: [brief.id], next: [{ activity: 'ask', node: 'try' }, { activity: 'ponder', node: 'after' }] })
+  await op(s, P, { op: 'node.start', node: 'try', attempt: 'a1' } as never, 'ponderer-agent')
+  await op(s, P, { op: 'question.ask', node: 'try', text: 'The child is done: enough?', to: 'Pat', attempt: 'a1' } as never, 'ponderer-agent')
+  await end(s, P, 'a1')
+  assert.deepEqual((await s.ds.status('fix3-a')).awaiting, [], 'not posted yet: the asking command did not run here')
+  await s.ds.reconcile()
+  const st = await s.ds.status('fix3-a')
+  assert.equal(st.awaiting.length, 1, 'the reconcile posted it')
+  const m = s.cs.message(st.awaiting[0].message)!
+  assert.deepEqual([m.kind, m.question, m.participant, m.node, st.awaiting[0].receiver.id, st.awaiting[0].you], ['question', 'q1', 'ponderer', 'try', 'Pat', true])
+  assert.ok(!s.ds.activityRows('fix3-a').some(a => a.kind === 'talk'), 'a question off a talk node is not a talk activity')
+  const reply = await s.ds.post('fix3-a', { text: 'Enough.', author: 'Pat', token: 'tok-fix3-a-002' })
+  assert.deepEqual(reply.invitations.map(i => i.run), [P], 'to the conductor, no second run')
+  assert.equal((await rec(s, P)).questions.q1.answers[0]?.text, 'Enough.')
   s.cs.close(); s.x.close()
 })

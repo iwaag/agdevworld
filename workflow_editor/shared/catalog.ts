@@ -62,7 +62,7 @@ export type AttemptCatalog = { state: 'supplied'; sha256: string; templates: num
 // The run's catalog in an attempt's brief (docs/catalog.md, "Delivered").
 // The meaning is stated once; each template's id, name, type and
 // expectation follow; tool usage stays in the tools' help.
-export const CATALOG_MEANING = 'The person recognizes these activities as distinct steps. When relevant to this request, they generally expect them to be visible as workflow nodes. Choose whether and where to represent them using the request and the current workflow.'
+export const CATALOG_MEANING = 'The person recognizes these activities as distinct steps. When one is relevant to this request, perform it as a node of its own as far as possible (a node the workflow has, or one you add first), not inside another node such as a talk. It is not an absolute rule: where that work fits no node of its own, do it the way that serves the request. Where the nodes go is your design, from the request and the current workflow.'
 export function catalogBrief(c: RunCatalog, run: string): string[] {
   if (c.state === 'none') return []
   if (c.state === 'unavailable') return ['', `The person's node catalog could not be read when this run was created (${c.problem}), so which activities they expect as distinct workflow nodes is not known for this run.`]

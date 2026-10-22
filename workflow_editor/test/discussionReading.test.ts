@@ -96,6 +96,16 @@ const begin = (s: S, run: string, a: string) => op(s, run, { op: 'attempt.begin'
 const end = (s: S, run: string, a: string) => op(s, run, { op: 'attempt.end', attempt: a, outcome: 'exited', explain: 'cause', waits: 'defer-ready' } as never)
 const P = 'ponderer/conduct/run-001'
 const who = { author: 'ponderer-agent' }
+// A talk node's question (workflow_editor fix3): the run asks it like any
+// question (wfe run ask) and WFE posts it in the discussion.
+async function talk(s: S, conv: string, o: { run: string; attempt: string; node: string; question: string; to: string }) {
+  await op(s, o.run, { op: 'node.start', node: o.node, attempt: o.attempt } as never, 'ponderer-agent')
+  const r = await op(s, o.run, { op: 'question.ask', node: o.node, text: o.question, to: o.to, attempt: o.attempt } as never, 'ponderer-agent')
+  const q = Object.values(r.record.questions).at(-1)!
+  await s.ds.postQuestions({ run: o.run, conv })
+  const activity = s.ds.activityRows(conv).find(a => a.run === o.run && a.question === q.id)!
+  return { to: q.to, activity, message: s.cs.message(activity.message!) }
+}
 // A conductor whose first decision adds an announcement, a parallel ask and
 // a second ponder.
 async function opened(s: S, conv: string) {
@@ -181,7 +191,7 @@ test('status: awaiting the person only when the question\'s receiver is that per
   const brief = await opened(s, 'rd-s')
   await begin(s, P, 'a1')
   await s.ds.ponder('rd-s', { run: P, attempt: 'a1', ...who, node: 'ponder', decision: 'Ask the requester, probe the ghost.', sources: [brief.id], next: [{ activity: 'talk', node: 'clarify' }, { activity: 'ask', node: 'probe' }, { activity: 'ponder', node: 'then' }] })
-  const t = await s.ds.talk('rd-s', { run: P, attempt: 'a1', ...who, node: 'clarify', question: 'Is one match enough?', re: [brief.id] })
+  const t = await talk(s, 'rd-s', { run: P, attempt: 'a1', node: 'clarify', question: 'Is one match enough?', to: 'Pat' })
   await s.ds.ask('rd-s', { run: P, attempt: 'a1', ...who, node: 'probe', participants: ['ghost'], question: 'There?', re: [brief.id] })
   await end(s, P, 'a1')
   let st = await s.ds.status('rd-s')
@@ -197,7 +207,7 @@ test('status: awaiting the person only when the question\'s receiver is that per
   await begin(s, run, 'a3')
   await s.ds.ponder('rd-t', { run, attempt: 'a3', ...who, node: 'ponder', decision: 'Open, then ask front.', sources: [], next: [{ activity: 'announce', node: 'open' }, { activity: 'talk', node: 'ask-front' }, { activity: 'ponder', node: 'then' }] })
   const open = await s.ds.announce('rd-t', { run, attempt: 'a3', ...who, node: 'open', text: 'Requested by front/converse/run-001: one line.', re: [] })
-  const t2 = await s.ds.talk('rd-t', { run, attempt: 'a3', ...who, node: 'ask-front', question: 'How detailed?', re: [open.message.id] })
+  const t2 = await talk(s, 'rd-t', { run, attempt: 'a3', node: 'ask-front', question: 'How detailed?', to: 'front-agent' })
   await end(s, run, 'a3')
   st = await s.ds.status('rd-t')
   assert.deepEqual(st.awaiting.map(a => [a.message, a.receiver.kind, a.receiver.id, a.receiver.agent, a.you]), [[t2.message!.id, 'run', 'front/converse/run-001', 'front-agent', false]], 'never "waiting for you"')

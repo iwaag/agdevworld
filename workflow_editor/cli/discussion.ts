@@ -26,6 +26,11 @@ participants it addresses; addressing nobody, it goes to the conductor run
 question, else as an instruction), or invites the facilitator when none is
 open. A contribution never starts anything by itself.
 
+A question is your run's question, from any run (\`wfe run ask <run> <node>
+--to <whom> --question …\`): WFE posts every open question of a run that
+speaks for a discussion there, and the person's reply naming it comes back
+to that run as its answer. There is no other way to ask here.
+
 The conductor's run is an ordinary graph whose nodes carry a discussion
 activity (node field activity: announce | ask | ponder | talk). Each is
 performed with its command, from the conductor's executing attempt:
@@ -54,11 +59,10 @@ ponder [<id>] --node <n> --decision <text> --source <msg>… [--next <activity>:
                               --next adds a chain of new activity nodes after this one (in order);
                               --definition records any revision of the run's graph instead. Both
                               are one recorded run revision (wfe run revisions)
-talk [<id>] --node <n> --question <q> --re <msg>… [--to <name>]
-                              consult the discussion's requester: the run's question on the talk
-                              node, posted here too. The person's reply in the discussion is
-                              delivered to your run as its answer; an agent requester answers
-                              through its delegation (wfe delegate answer) or request topic
+talk                          (no command) a talk node's question to the requester is wfe run ask
+                              on that node, --to the requester (state names them); it is the talk
+                              activity. An agent requester answers through its delegation (wfe
+                              delegate answer) or request topic
 state [<id>]                  what the conductor works from: conductor and requester, members,
                               activities and the conductor run's graph, open invitations, questions
                               waiting, obligations (what is owed, by whom, to whom), newest message
@@ -92,12 +96,12 @@ post <id> (--text <t> | --file <f>) --author <person> [--to <participant>]… [-
                               the person's message, verbatim (refused from an executing attempt:
                               a run speaks as itself with contribute or announce). --to invites those participants with
                               it; without --to (or --to <facilitator>) the facilitator is invited
-contribute [<id>] (--text <t> | --file <f|->) --re <msg>… [--kind reply|question|progress|result|synthesis]
-           [--question <q>] [--key <k>] [--completing <node>] [--workflow <record>]…
+contribute [<id>] (--text <t> | --file <f|->) --re <msg>… [--kind reply|progress|result|synthesis]
+           [--key <k>] [--completing <node>] [--workflow <record>]…
                               speak from an executing attempt: the message is your run's, its
                               participant's and its invitation's. Name what you answer (--re): a
                               reply is never attributed by recency. reply/result/synthesis answer
-                              your invitation; progress and question do not. synthesis is the
+                              your invitation; progress does not. A question is wfe run ask. synthesis is the
                               facilitator's project's or the archive project's (any of its
                               workflows), shown apart from original speech. --completing <node>: that node of your run completes with the
                               message in the same command (a turn that spoke and left its node
@@ -318,7 +322,9 @@ export async function discussionCommand(c: DiscussionCli): Promise<number> {
         const re = ids('re')
         if (!re.length) throw c.usage('--re <msg> is required: the messages you answer')
         const complete = c.opt('completing')
-        const r = await ds.contribute(id, { text: text(), author: o.agent, run: o.run, attempt: o.attempt, invitation: o.discussion === id ? o.invitation : null, re, kind: (c.opt('kind') ?? 'reply') as MessageKind, question: c.opt('question') ?? null, key: c.opt('key'), node: complete ?? null, complete: !!complete })
+        // One way to ask (workflow_editor fix3): WFE posts the run's question.
+        if (c.opt('kind') === 'question' || c.opt('question')) throw c.refused('a question is your run\'s question: wfe run ask <run> <node> --to <whom> --question <q>. WFE posts it in this discussion and the reply comes back to your run as its answer', { code: 'question-is-run-ask' })
+        const r = await ds.contribute(id, { text: text(), author: o.agent, run: o.run, attempt: o.attempt, invitation: o.discussion === id ? o.invitation : null, re, kind: (c.opt('kind') ?? 'reply') as MessageKind, key: c.opt('key'), node: complete ?? null, complete: !!complete })
         const wfs = new DiscussionWorkflows(ds)
         const linked = c.opts('workflow').map(v => wfs.link(id, Number(v.replace(/^#/, '')), { message: r.message.id, by: o.agent, run: o.run }).ref.id)
         c.out(`${r.duplicate ? 'Already posted (same key); nothing changed' : 'Posted'}: #${r.message.id} in ${id} as ${r.message.participant} for ${o.run}${r.invitation ? `; invitation ${r.invitation.id} ${r.invitation.state}${r.invitation.late ? ' (late)' : ''}` : ''}${r.completed ? `; node ${r.completed} completed` : ''}${linked.length ? `; workflow record${linked.length === 1 ? '' : 's'} ${linked.join(', ')} shown with it` : ''}.`, { ok: true, ...r, workflows: linked })
@@ -353,8 +359,7 @@ export async function discussionCommand(c: DiscussionCli): Promise<number> {
       case 'announce':
       case 'ask':
       case 'settle':
-      case 'ponder':
-      case 'talk': {
+      case 'ponder': {
         const o = await own()
         if (!o) throw c.usage(`${sub} is the conductor's, from its executing attempt (WFE_ATTEMPT)`)
         const given = sub === 'ask' ? (args[0] && ds.discussion(args[0]) ? args[0] : undefined) : args[0]
@@ -391,11 +396,9 @@ export async function discussionCommand(c: DiscussionCli): Promise<number> {
           c.out(`${r.duplicate ? 'Already decided' : 'Decided'} (activity ${r.activity.id}): node ${node} completed${r.revision ? `; revision ${r.revision}${next.length ? ` adds ${next.map(x => `${x.activity}:${x.node}`).join(' → ')}` : ''}` : ''}.`, { ok: true, ...r })
           return 0
         }
-        const question = c.opt('question'); if (!question) throw c.usage('--question <text> is required')
-        const r = await ds.talk(id, { ...base, question, re: ids('re'), to: c.opt('to') })
-        c.out(`${r.duplicate ? 'Already asked' : 'Asked'} ${r.activity.question} (activity ${r.activity.id}, #${r.activity.message})${'to' in r ? ` to ${r.to}` : ''}; node ${node} waits for the answer.`, { ok: true, ...r })
         return 0
       }
+      case 'talk': throw c.refused('there is no talk command: ask the requester with wfe run ask <run> <talk node> --to <requester> --question <q> (wfe discussion state names the requester). WFE posts it here as the talk activity', { code: 'question-is-run-ask' })
       case 'state': {
         const id = await disc(args[0])
         const v = await ds.view(id, { viewBase: viewBaseOf(c.area()) })

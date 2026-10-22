@@ -37,7 +37,9 @@
 //   invitations are resolved and then continues the run; announce and ponder
 //   complete with their message or decision; talk is the run's question to
 //   the discussion's requester (the person who opened it, or the run that
-//   requested the conductor run);
+//   requested the conductor run), asked like any question with `wfe run ask`;
+// - questions (fix3): every open question of a run that speaks for the
+//   discussion is posted here by WFE (postQuestions), whoever asked it;
 // - annotations: interventions, recoveries, evaluations and corrections by
 //   someone outside the speech, kept apart from it.
 //
@@ -190,7 +192,7 @@ const ACTIVITY_DESCRIPTIONS: Record<Activity, string> = {
   announce: 'Tell the discussion what comes next and why (wfe discussion announce): an agenda, context, an interim synthesis or the conclusion.',
   ask: 'Ask the participants who can supply what is missing (wfe discussion ask), or await a commissioned result (--run); WFE completes it with their outcomes.',
   ponder: 'Read what was said and what is owed (wfe discussion state), decide the next step and why (wfe discussion ponder).',
-  talk: 'Consult the requester about intent or direction (wfe discussion talk); their answer continues this run.',
+  talk: 'Consult the requester about intent or direction: wfe run ask on this node, to the requester (wfe discussion state names them); WFE posts the question here and their answer continues this run.',
 }
 const now = () => new Date().toISOString()
 function categoryOf(v: string): Category {
@@ -794,7 +796,8 @@ export class DiscussionStore {
   // yet started (failed ones up to DISPATCH_TRIES in all), finds started ones
   // whose run ended without a contribution (`unanswered`), and tells waiting
   // facilitators what they have not been told (a crash between a resolution
-  // and the instruction).
+  // and the instruction); posts questions a run asked where the asking
+  // command could not (a worker's run, a failure after the record).
   async reconcile(): Promise<string[]> {
     const notes: string[] = []
     for (const i of this.all<InvitationRow>('SELECT i.* FROM invitations i JOIN conversations c ON c.id = i.conv WHERE c.state = \'open\' AND (i.state = \'pending\' OR (i.state = \'failed\' AND i.tries < ?)) ORDER BY i.id', DISPATCH_TRIES)) {
@@ -827,6 +830,7 @@ export class DiscussionStore {
       const told = await this.afterResolution(r.id)
       if (told) notes.push(`discussion ${r.conv}: ${told}`)
     }
+    notes.push(...await this.postQuestions())
     notes.push(...await this.reconcileActivities())
     return notes
   }
@@ -1031,29 +1035,42 @@ export class DiscussionStore {
     return { activity: this.activityView(row), revision, duplicate: false }
   }
 
-  // talk: the conductor consults the discussion's requester. The question is
-  // the run's WFE question on the talk node (to the person, or to the
-  // requesting run's agent, whose relay carries it), and is posted here so
-  // everyone reads it. The person's reply comes back to this run as the
-  // answer (post); an agent's answer through its delegation or request.
-  async talk(conv: string, o: { run: string; attempt: string | null; author: string; node: string; question: string; re: number[]; to?: string }) {
-    const t = await this.activityNode(conv, o.run, o.node, 'talk')
-    const seen = this.one<ActivityRow>('SELECT * FROM activities WHERE conv = ? AND token = ?', conv, `${o.run}:${o.node}`)
-    if (seen) return { activity: this.activityView(seen), message: this.cs.message(seen.message ?? 0) ?? null, duplicate: true }
-    const req = this.requester(conv)
-    const to = o.to ?? (req?.kind === 'run' ? req.agent ?? req.run : req?.id ?? this.cfg().person)
-    const receipt = `discussion:${conv}:talk:${o.run}:${o.node}`
-    let q = Object.values(t.record.questions).find(x => x.node === o.node && !x.withdrawn)?.id
-    if (!q) {
-      await this.startNode(o.run, o.node, t.node.state, { by: o.author, attempt: o.attempt, receipt })
-      let n = Object.keys(t.record.questions).length + 1
-      while (`q${n}` in t.record.questions) n++
-      const r = await this.nodeOp(o.run, { op: 'question.ask', question: `q${n}`, node: o.node, text: o.question, to } as OpInput, { by: o.author, attempt: o.attempt, receipt: `${receipt}:ask` })
-      q = r.record.history.find(h => h.receipt === `${receipt}:ask`)?.change.question?.[1] ?? `q${n}`
+  // A question is one thing (workflow_editor fix3): the run's WFE question
+  // (`wfe run ask`), whoever asks it. Every open question of a run that speaks
+  // for a discussion is posted here by WFE, so everyone reads it and the
+  // person's reply naming it comes back to that run as the answer (post). On
+  // the conductor's talk node it is the talk activity. Called after `wfe run
+  // ask` and by the reconcile; the key makes it one message per question.
+  // (ponderer/conduct/run-020 relayed a delegated child's question with `wfe
+  // run ask`; nothing reached the discussion, which said it awaited nobody.)
+  async postQuestions(o: { run?: string; conv?: string } = {}): Promise<string[]> {
+    const notes: string[] = []
+    if (!this.exec) return notes
+    const cfg = this.cfg()
+    const wfs = new DiscussionWorkflows(this)
+    const convs = o.conv ? [o.conv] : this.list().filter(c => c.state === 'open').map(c => c.id)
+    for (const conv of convs) for (const run of wfs.runsOf(conv)) {
+      if (o.run && run !== o.run) continue
+      try {
+        const { workspace, ref } = parseRunName(run)
+        const { record, graph } = await usableRun(await this.exec.workspace(workspace), ref)
+        if (['completed', 'cancelled'].includes(situation(record))) continue
+        for (const q of Object.values(record.questions)) {
+          if (q.answers.length || q.takenUp || q.withdrawn) continue
+          if (this.one<MessageRow>('SELECT id FROM messages WHERE conv = ? AND run = ? AND question = ?', conv, run, q.id)) continue
+          const inv = this.invitations(conv).find(i => i.run === run)
+          const re = inv ? (JSON.parse(inv.source) as number[]).filter(n => this.cs.message(n)?.conv === conv).slice(0, 1) : []
+          const said = await this.contribute(conv, { text: q.text, author: q.askedBy, run, attempt: null, re, kind: 'question', question: q.id, key: `question:${run}:${q.id}`, node: q.node })
+          if (said.duplicate) continue
+          notes.push(`discussion ${conv}: ${run} ${q.id} to ${q.to} posted as #${said.message.id}`)
+          const talk = q.node && graph.nodes[q.node]?.activity === 'talk' && workspace === cfg.facilitator.workspace && ref.workflow === cfg.facilitator.workflow
+          if (talk && !this.one<ActivityRow>('SELECT id FROM activities WHERE conv = ? AND token = ?', conv, `${run}:${q.node}`)) {
+            this.tx(() => this.recordActivity(conv, { run, node: q.node!, attempt: null, kind: 'talk', state: 'waiting', text: q.text, sources: re, message: said.message.id, question: q.id, by: q.askedBy, note: `asked ${q.to} (${q.id}) #${said.message.id}` }))
+          }
+        }
+      } catch (e) { notes.push(`discussion ${conv}: ${run} questions: ${(e as Error).message}`) }
     }
-    const said = await this.contribute(conv, { text: o.question, author: o.author, run: o.run, attempt: o.attempt, re: o.re, kind: 'question', question: q, key: `activity:${o.run}:${o.node}`, node: o.node })
-    const { row } = this.tx(() => this.recordActivity(conv, { run: o.run, node: o.node, attempt: o.attempt, kind: 'talk', state: 'waiting', text: o.question, sources: o.re, message: said.message.id, question: q!, by: o.author, note: `asked ${to} (${q}) #${said.message.id}` }))
-    return { activity: this.activityView(row), message: said.message, to, duplicate: false }
+    return notes
   }
 
   // The questions still waiting for an answer: those the messages leave open
@@ -1337,13 +1354,22 @@ export class DiscussionStore {
     const obligations = await this.obligations(conv)
     const req = this.requester(conv)
     const talks = this.activityRows(conv).filter(a => a.kind === 'talk')
-    const awaiting = (await this.openAsking(conv)).map(n => {
+    // Any other question goes to whom the run asked it (fix3): a person
+    // member, or the agent whose run relays it (the requesting run's).
+    const people = new Set([cfg.person, ...this.members(conv).filter(x => x.kind === 'person').map(x => x.participant)])
+    const askedTo = async (m: MessageRow) => {
+      if (!m.run || !m.question || !this.exec) return null
+      try { const { workspace, ref } = parseRunName(m.run); return ((await readRun(await this.exec.workspace(workspace), ref)).record as RunRecord | null)?.questions[m.question]?.to ?? null } catch { return null }
+    }
+    const awaiting = await Promise.all((await this.openAsking(conv)).map(async n => {
       const m = this.cs.message(n)!
+      const to = talks.some(t => t.message === n) ? null : await askedTo(m)
       const receiver = talks.some(t => t.message === n) && req
         ? req.kind === 'run' ? { kind: 'run' as const, id: req.run, agent: req.agent } : { kind: 'person' as const, id: req.id, agent: null }
-        : { kind: 'person' as const, id: cfg.person, agent: null }
+        : !to || people.has(to) ? { kind: 'person' as const, id: to ?? cfg.person, agent: null }
+        : { kind: 'run' as const, id: req?.kind === 'run' && req.agent === to ? req.run : to, agent: to }
       return { message: n, question: m.question, from: m.participant ?? m.author, receiver, you: receiver.kind === 'person' && receiver.id === cfg.person }
-    })
+    }))
     return {
       room: c.state, working: obligations.filter(b => b.kind !== 'question').length, owed: obligations.length, awaiting,
       failed: this.invitations(conv).filter(i => i.state === 'failed').map(i => ({ invitation: i.id, participant: i.participant, error: i.error })),

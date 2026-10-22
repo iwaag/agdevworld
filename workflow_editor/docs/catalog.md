@@ -201,10 +201,18 @@ affects new runs only.
 
 **Delivered.** The brief (`server/exec.ts`) states the meaning once:
 
-> The person recognizes these activities as distinct steps. When relevant to
-> this request, they generally expect them to be visible as workflow nodes.
-> Choose whether and where to represent them using the request and the
-> current workflow.
+> The person recognizes these activities as distinct steps. When one is
+> relevant to this request, perform it as a node of its own as far as
+> possible (a node the workflow has, or one you add first), not inside
+> another node such as a talk. It is not an absolute rule: where that work
+> fits no node of its own, do it the way that serves the request. Where the
+> nodes go is your design, from the request and the current workflow.
+
+"As far as possible" is workflow_editor fix3: the earlier "they generally
+expect … choose whether and where" read as optional, and every
+gimmickimg/freework run (001–004) did all its work inside the one talk,
+`present` included. A hard rule would close off the cases a node does not
+fit, so the wording asks for the most, not for always.
 
 It then lists each template's id, name, type and expectation, and names the
 tools. Their usage lives in their help:

@@ -130,8 +130,8 @@ change of either is an activity event.
 
 A node of the conductor's run carries `activity: announce | ask | ponder |
 talk` (contract.md *Discussion activities*; `talk` on a talk node, the
-others on do nodes). Each is performed with its command from the
-conductor's attempt and recorded as an **activity** (`activities`, with an
+others on do nodes). Each is performed from the conductor's attempt (talk
+with `wfe run ask`, the others with their command) and recorded as an **activity** (`activities`, with an
 append-only `activity_events` history: each event keeps the activity as it
 then was).
 
@@ -140,7 +140,7 @@ then was).
 | `announce` | `wfe discussion announce --node <n> --text … --re …` | the message (kind `announce`, key `activity:<run>:<node>`); it waits for nobody and answers the conductor's own invitation | the command: the message first, then the node; reconcile completes a node whose message was delivered when the attempt ended first |
 | `ask` | `wfe discussion ask <participant>… --node <n> --question … --re …`, or `--run <run>` to await a commissioned result | each invitation of the activity answered (#m), unanswered, failed or withdrawn | **WFE**, once no attempt is open: the node resumes and completes with the outcomes, then the run gets one instruction listing them (or, completed, a new conductor run) |
 | `ponder` | `wfe discussion ponder --node <n> --decision … --source <msg>… [--next <activity>:<node>]… \| --definition <file>` | the decision, its sources, the next activities and the run revision | the command, with the revision in the same write (`run adjust --completing`) |
-| `talk` | `wfe discussion talk --node <n> --question … --re …` | the WFE question (to the requester) answered and taken up, or withdrawn | the agent, as any talk; reconcile records the activity's end |
+| `talk` | `wfe run ask <run> <n> --to <requester> --question …` (no discussion command since fix3); WFE posts it (*Questions*) and records the activity | the WFE question (to the requester) answered and taken up, or withdrawn | the agent, as any talk; reconcile records the activity's end |
 
 - **Waits.** An ask waits `external: discussion:<id>:activity:<a>` (holder:
   the invited participants or the awaited run); a talk waits on its
@@ -232,15 +232,35 @@ owed it has ended without it.
 `wfe discussion contribute` (from an executing attempt) writes a message
 attributed to the participant the run speaks for, its run, its attempt and
 its invitation, naming what it answers (`--re`, required). Kinds: `reply`,
-`result` and `synthesis` answer the invitation; `progress` and `question`
-do not. `synthesis` is the facilitator's and is shown apart from original
-speech. The same key (default: the text's hash) from the same run is one
+`result` and `synthesis` answer the invitation; `progress` does not. A
+question is not a contribution (*Questions*). `synthesis` is the
+facilitator's and is shown apart from original speech. The same key (default: the text's hash) from the same run is one
 message.
 
 The run reads the discussion with `wfe discussion show` (its own discussion
 by default): members and history, every message, the invitations and their
 runs, questions waiting for the person, and the archive. Messages newer than
 its invitation's horizon are marked "after your invitation".
+
+## Questions (workflow_editor fix3)
+
+A question is one thing everywhere: the run's WFE question (`wfe run ask`),
+whoever asks it — a participant, the conductor on its talk node, or the
+conductor relaying a delegated child's question from its delegate node.
+**WFE posts every open question of a run that speaks for an open
+discussion** (its invitations' runs and its conductors) as a message of
+kind `question`: the question's text, attributed to the asking agent and
+the run's participant, with its question id and node, naming the message
+the run was invited for (`re`), key `question:<run>:<q>`, so one message
+per question. `wfe run ask` posts it at once; the executor's reconcile posts
+what that could not (a failure after the record). A question on the
+conductor's talk node is also the `talk` activity. A person's reply naming
+the message is delivered to the run that asked as its answer (*Routing*).
+`wfe discussion contribute --kind question` and `wfe discussion talk` are
+refused: two ways to ask, one of which posted nothing, made
+ponderer/conduct/run-020 relay gimmickimg's question with `wfe run ask`
+alone, and the discussion said it awaited nobody while the run awaited the
+person.
 
 ## Closing and reopening
 
@@ -399,7 +419,9 @@ or is newer than the overview's coverage.
 - `awaiting` lists open questions, each with its receiver:
   - a `talk` question goes to the requester, either a person id or a run
     with its agent;
-  - any other open question goes to the configured person.
+  - any other open question goes to whom the run asked it: a person
+    (`to` is the configured person or a person member), else that agent,
+    with the requesting run when it is the requester's (fix3).
   - `you` is true only when the receiver is the configured person.
 - `failed` lists failed invitations with WFE's reason.
 - `held` lists runs of the discussion that are stopped, interrupted or

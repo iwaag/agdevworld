@@ -444,7 +444,8 @@ is allowed.
 discussion conducted by the run ([discussions.md](discussions.md),
 *Activities*): metadata on an ordinary node type (`talk` on a talk node,
 the others on do nodes), bound to the discussion's records by `wfe
-discussion announce|ask|ponder|talk --node`. It is part of the definition
+discussion announce|ask|ponder --node` and, for talk, by the node's
+question (`wfe run ask`, posted by WFE; discussions.md *Questions*). It is part of the definition
 digest, the compiled graph and an adjustment's executable change, like a
 delegate's target. The editor and the run view show it on the card.
 

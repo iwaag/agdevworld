@@ -239,7 +239,12 @@ test('the person\'s reply to a participant\'s question reaches the run that aske
   s.x.db.prepare('UPDATE jobs SET state = \'done\' WHERE workspace = \'sage\'').run()
   await op(s, R, { op: 'node.start', node: 'talk' })
   await op(s, R, { op: 'question.ask', question: 'q1', node: 'talk', text: 'Which scope: v1 or later?', to: 'Pat' })
-  const q = await s.ds.contribute('p16-q', { text: 'Which scope: v1 or later?', author: 'sage-agent', run: R, invitation: 1, re: [m1.id], kind: 'question', question: 'q1' })
+  // WFE posts the run's question (workflow_editor fix3), once.
+  assert.deepEqual(await s.ds.postQuestions({ run: R }), [`discussion p16-q: ${R} q1 to Pat posted as #2`])
+  assert.deepEqual(await s.ds.postQuestions(), [], 'one message per question')
+  const q = { message: s.cs.message(2)! }
+  assert.deepEqual([q.message.kind, q.message.question, q.message.participant, q.message.re], ['question', 'q1', 'sage', JSON.stringify([m1.id])])
+  assert.deepEqual((await s.ds.status('p16-q')).awaiting.map(x => [x.message, x.receiver.id, x.you]), [[2, 'Pat', true]])
   assert.equal(s.ds.invitation(1)!.state, 'started', 'a question does not answer the invitation')
   const a = await s.ds.post('p16-q', { text: 'v1 only.', author: 'Pat', token: 'tok-p16-q002', to: ['sage'], re: [q.message.id] })
   assert.deepEqual(a.invitations.map(i => [i.participant, i.run, i.state]), [['sage', R, 'started']], 'delivered to the run that asked, no new run')

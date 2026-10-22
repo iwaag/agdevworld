@@ -343,10 +343,11 @@ The person's node catalog as this run was given it at creation (docs/catalog.md)
 the activities they recognize as distinct workflow steps, each with how they
 expect it to appear (expectation) and what the agent performing it does
 (description). A catalog edit after the run was created does not change it.
-The person recognizes these activities as distinct steps. When relevant to
-the run's request, they generally expect them to be visible as workflow
-nodes; whether and where is the designer's choice, made from the request and
-the current workflow. A node from one of them: wfe nodes instantiate
+The person recognizes these activities as distinct steps. When one is
+relevant to the run's request, it is performed as a node of its own as far as
+possible, not inside another node such as a talk; not an absolute rule, and
+where the nodes go is the designer's choice, made from the request and the
+current workflow (workflow_editor fix3). A node from one of them: wfe nodes instantiate
 <template> --run <run> --file <draft> (wfe nodes help), then wfe run adjust.
 Also says when the catalog was unavailable at creation, or when the run
 predates catalogs. Reads only.`,
@@ -820,7 +821,20 @@ export async function runCommand(c: RunCli): Promise<number> {
       const r = await ref()
       const root = await rootOf(r)
       return op({ op: 'question.ask', question: c.opt('id') ?? '', node: args[1], text: need(c, 'question', 'the question'), to: need(c, 'to', 'to whom it is addressed'), ...(c.flag('about-plan') ? { plan: true } : {}), ...(c.opts('subject').length ? { subjects: c.opts('subject').map(p => projectPath(root, p)) } : {}), ...(c.opt('presentation') ? { presentation: c.opt('presentation') } : {}), ...(c.opt('output') ? { output: c.opt('output') } : {}), ...(c.opt('about-adjustment') ? { adjustment: c.opt('about-adjustment') } : {}) },
-        rec => { const q = Object.values(rec.questions).at(-1)!; return `Recorded question ${q.id} to ${q.to}${q.node ? `; ${q.node} waits on it` : ''}.` }, r)
+        rec => { const q = Object.values(rec.questions).at(-1)!; return `Recorded question ${q.id} to ${q.to}${q.node ? `; ${q.node} waits on it` : ''}.` }, r,
+        // A run that speaks for a discussion has its question posted there
+        // (workflow_editor fix3); the reconcile posts what this could not.
+        async target => {
+          const { ConversationStore } = await import('../server/conversations.ts')
+          const { DiscussionStore } = await import('../server/discussions.ts')
+          const cs = new ConversationStore({ area: c.area(), exec: c.exec() })
+          try {
+            const ds = new DiscussionStore(cs)
+            if ('disabled' in ds.config()) return null
+            const notes = await ds.postQuestions({ run: `${ws.reg.id}/${runKey(target)}` })
+            return notes.length ? notes.map(n => n.replace(/^discussion /, 'Posted in discussion ')).join('\n') : null
+          } catch (e) { return `Not posted in its discussion yet (${(e as Error).message}); the executor's reconcile posts it.` } finally { cs.close() }
+        })
     }
     case 'answer': {
       if (!args[1]) throw c.usage('<question> is required')

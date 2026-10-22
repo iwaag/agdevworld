@@ -25,8 +25,12 @@ Entrusts the running delegate node's work to the workflow it names
 (project/workflow in the run's definition). Before anything is written the
 target is resolved to its one workspace on this host (an ambiguous or
 missing one is refused, never guessed), checked to validate and to accept
-requests, and checked for cycles (its definitions delegating back here, or
-this run descending from that workflow). Then:
+requests (every workflow does unless it declares intake: {zulip: ""}), and
+checked for cycles (its definitions delegating back here, or this run
+descending from that workflow). A refusal is about that definition or this
+host, not about whether the project takes work: wfe request still reaches
+the workflow, but as a plain request, so nothing brings its questions or its
+result back to this run (front/converse/run-045). Then:
   Writes  delegations/<d>/request.md (your request, exactly as the child
           receives it) and delegations/<d>/original-input.md (the person's
           own words this run started from, or --original), and records the

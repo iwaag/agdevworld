@@ -244,8 +244,8 @@ workflow.
   agree on. No guide is copied (p13): the project's guides are declared once
   in `project.yaml` `guides` and inherited. A project without valid
   workflows (a new one) binds its root editable and every submodule and
-  local area editable. Newly created workflows, including freework, declare
-  `intake: {zulip: requests}` by default.
+  local area editable. Newly created workflows, including freework, are
+  written with `intake: {zulip: requests}` (the default, fix2).
 - **Placed by one mechanism**: project creation (`create.ts`, in the initial
   commit; in the devdocs source in submodule mode) and `wfe workflow basics
   [--dry-run] [--commit [--push]] [--workspace <id> | --all]` for existing
@@ -273,7 +273,9 @@ execution:
                               # or <project>:<path>, a file of another managed project (project_migration p4)
   session: run                # fresh (default) | run: later attempts resume the run's session (docs/sessions.md)
 intake:
-  zulip: requests             # the workflow's Zulip channel accepts request topics (docs/intake.md)
+  zulip: requests             # the default, also when intake or zulip is absent: the workflow's
+                              # Zulip channel accepts request topics and delegations (docs/intake.md);
+                              # "" opts out (fix2)
 nodes:
   present:
     type: talk
@@ -479,13 +481,13 @@ fulfils its intent.
 | `node-description-missing`, `node-binding-duplicate`, `nodes-empty` | warning | incomplete draft |
 | `delegate-target-missing`, `delegate-target-unknown`, `delegate-self`, `delegate-recursive` | error | delegate target absent, not in its project, itself, or reaching back to itself (across the registry's projects when the registry is known, p10) |
 | `delegate-project-unknown`, `delegate-accepts` | error | a target project that is not a valid id or has no registered workspace; `accepts` other than `person` / `parent` (p10) |
-| `delegate-no-intake` | warning | the target workflow does not accept requests; a dispatch to it is refused (p10) |
+| `delegate-no-intake` | warning | the target workflow opts out of requests (`intake: {zulip: ""}`); a dispatch to it is refused (p10) |
 | `workflow-on-non-delegate` | warning | `workflow`, `project` or `accepts` on a non-delegate node |
 | `edge-from-missing`, `edge-to-missing`, `edge-self`, `graph-cycle` | error | broken or cyclic edges |
 | `edge-duplicate`, `layout-orphan` | warning | redundant entries |
 | `execution-agent`, `execution-profile`, `execution-guide-path` | error | malformed agent id, profile name or guide path (p6; `<project>:<path>` since project_migration p4) |
 | `execution-guide-duplicate` | warning | a guide listed twice |
-| `intake-mode` | error | `intake.zulip` is not `requests` |
+| `intake-mode` | error | `intake.zulip` is text other than `requests` or `""` (another type is a shape problem) |
 | `activity-kind`, `activity-type` | error | `activity` other than announce / ask / ponder / talk, or on the wrong node type (argue p4) |
 | `confirms-kind`, `confirms-type`, `confirms-duplicate` | error | `confirms` other than `result`, on a non-talk node, or on more than one node |
 
@@ -527,7 +529,8 @@ declared approver and the time:
    repository bindings (key, path, access), node IDs, types, names,
    descriptions, node repository bindings, delegate targets, and edges;
   a binding's `integrate` when declared (project_migration p4);
-   and, when declared (p6), `execution`, `intake` and a node's `confirms`.
+   `intake` (always, fix2); and, when declared (p6), `execution` and a
+   node's `confirms`.
 
 Excluded from both digests: workflow `id` and `name`, approvals, layout,
 node appearance (p7), template provenance (p7/ex1), fields outside the contract, comments, key order and
@@ -542,8 +545,10 @@ Digest = `sha256:` + hex SHA-256 of the UTF-8 canonical JSON of a projection:
   "repositories": {key: {"access": …, "path": normalized path}}}`; edges are
   de-duplicated and sorted by `from`, then `to`. When declared (p6), the
   projection also has `"execution": {"agent", "profile", "guides": [normalized
-  paths]}`, `"intake": {"zulip"}` and a node's `"confirms"`; a workflow
-  without them keeps the digest it had. Under `custom` (p8/ex2)
+  paths]}` and a node's `"confirms"`; a workflow without them keeps the
+  digest it had. `"intake": {"zulip"}` is always projected (fix2):
+  `"requests"` for a workflow without a declaration, so it has the digest
+  of one declaring requests, and `""` for the opt-out. Under `custom` (p8/ex2)
   `"documentation"` also has `"plan"`, `"reports"` and `"final"`; `default`
   and `manual` keep the projection (and the digest) they had.
 - Canonical JSON: keys sorted by UTF-16 code unit, no insignificant

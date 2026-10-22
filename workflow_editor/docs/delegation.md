@@ -54,7 +54,7 @@ Validation ([contract.md](contract.md)):
 | `delegate-project-unknown` | error | `project` is not a valid id, or (with a registry) no workspace of it is registered |
 | `delegate-recursive` | error | following delegate targets across the registry's projects reaches this workflow again |
 | `delegate-accepts` | error | `accepts` is not `person` or `parent` |
-| `delegate-no-intake` | warning | the target workflow does not declare `intake: {zulip: requests}`; a dispatch to it is refused |
+| `delegate-no-intake` | warning | the target workflow opts out of requests (`intake: {zulip: ""}`); a dispatch to it is refused |
 | `workflow-on-non-delegate` | warning | `workflow`, `project` or `accepts` on a node that is not a delegate |
 
 Delegate nodes compile into the effective graph like any node; `project`
@@ -124,8 +124,8 @@ At `wfe delegate request`, before anything is written:
    without a selection, none, or one outside the operating boundary refuse
    the dispatch (`delegate-target`), naming the candidates. Never a guess.
 2. **Target workflow.** It exists in that workspace now, validates without
-   errors, and declares `intake: {zulip: requests}`, and its workflow
-   channel is provisioned. The child's own definition is frozen later by its
+   errors, and accepts requests (the default; `intake: {zulip: ""}` opts
+   out, [intake.md](intake.md)), and its workflow channel is provisioned. The child's own definition is frozen later by its
    ordinary run creation; the dispatch records the digest it saw.
 3. **Cycles.** Refused (`delegate-cycle`) when the target, as currently
    defined, reaches the parent's workflow through delegate nodes across the

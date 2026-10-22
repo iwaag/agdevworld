@@ -47,17 +47,27 @@ configured requesters; their words are recorded as theirs.
 A channel is a workflow channel only when all three hold:
 
 1. the notifier recorded its stream id as `channel:<project>/<workflow>`;
-2. the workflow declares `intake: {zulip: requests}`;
+2. the workflow accepts requests: it declares `intake: {zulip: requests}` or
+   no intake at all (an absent `intake`, `intake: {}` or an absent `zulip`);
 3. the host enables intake (`<area>/zulip.json`, `intake.enabled`) and names
    the requester identities (`intake.requesters`, Zulip user ids). All registered
    projects are eligible automatically. `intake.projects` is an optional map
    of workspace selections when a project has several workspaces; it is not
    a project allowlist. With one workspace, no per-project configuration is needed.
 
-New workflows, whether empty or created from a template or placed as a basic
-workflow, declare `intake: {zulip: requests}` by default. A workflow may explicitly
-opt out with `intake: {zulip: ""}`. Older definitions without intake retain their
-original meaning until updated; existing run snapshots are never rewritten.
+**Intake is on unless a workflow opts out** (workflow_editor fix2). A
+workflow opts out only with `intake: {zulip: ""}`. A new workflow (empty,
+from a template, a basic workflow) is written with `intake: {zulip:
+requests}`, so the setting is in sight. Loading, editing, saving and
+exporting keep the opt-out and the default apart, and so does the
+definition digest ([contract.md](contract.md)). A wrong type (`zulip: true`,
+`intake: requests`, …) makes the file unreadable. It is never read as
+either value, and the routing problems name it. An opt-out describes what
+the workflow's runs are for, not whether its project takes work from
+others: a conversation or discussion turn, for one, serves its own source.
+Run snapshots are never rewritten. front/converse/run-045 could not
+delegate to two aghangout workflows that had no declaration, because
+loading then read "none" while creation wrote "requests".
 
 Routing uses the realm (the configured Zulip URL's host and port) and the
 stream id. Channel and topic **names never select a project, workflow or

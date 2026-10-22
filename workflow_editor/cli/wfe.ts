@@ -24,6 +24,7 @@ import { runCommand, runIndex } from './run.ts'
 import { NODES_HELP, nodesCommand } from './nodes.ts'
 import { PROJECTS_HELP, projectsCommand } from './projects.ts'
 import { CONTEXT_HELP, contextCommand } from './context.ts'
+import { CHALLENGE_HELP, challengeCommand } from './challenge.ts'
 import { CONVERSATION_HELP, conversationCommand } from './conversation.ts'
 import { DISCUSSION_HELP, discussionCommand } from './discussion.ts'
 import { DIALOGUE_HELP, dialogueCommand } from './dialogue.ts'
@@ -178,6 +179,7 @@ reference  the optional technical reference (docs/boast.md): paths,
            publication sources, media, browser capabilities, messages`,
   nodes: NODES_HELP,
   context: CONTEXT_HELP,
+  challenge: CHALLENGE_HELP,
   conversation: CONVERSATION_HELP,
   discussion: DISCUSSION_HELP,
   dialogue: DIALOGUE_HELP,
@@ -679,6 +681,9 @@ Projects and workspaces
   discussion <subcommand>   discussions of a person, a facilitator and project agents: list, show,
                             create, post, contribute, invite, join, leave, close, archive (p16;
                             docs/discussions.md)
+  challenge <subcommand>    durable shared records of problems found in work: list, show, history,
+                            evidence, create, edit, resolve, withdraw, reopen, ops, retry, status
+                            (challenge p1; docs/challenges.md)
   dialogue <subcommand>     character dialogue, the short reading view of discussions: status, show,
                             history, retry, work (argue p5; docs/dialogue.md)
   context <subcommand>      scoped context: show (sources for authoring or a run, and where each comes
@@ -1203,6 +1208,18 @@ async function cmdExec(p: Parsed): Promise<number> {
             notes.push(...a.published.map(x => `discussion ${x.conv}: archived ${x.records} records (${x.commit.slice(0, 12)})`), ...a.failed.map(f => `discussion ${f.conv}: archive failed — ${f.error}`))
           }
         } finally { cs.close() }
+        // Challenges (challenge p1): writes not yet seen in the repository are
+        // published (each looked up in the remote history first), mirrors caught up.
+        const { ChallengeStore } = await import('../server/challenges.ts')
+        const g = await giteaOf(p)
+        const ch = new ChallengeStore({ area: areaDir(p), env: async () => g ? g.gitEnv() : {} })
+        try {
+          if (!('disabled' in ch.config())) {
+            const r = await ch.publish().catch(e => ({ published: [], failed: [{ id: 0, error: (e as Error).message }], conflicts: [], refused: [] }))
+            notes.push(...r.published.map(n => `challenge operation ${n}: published`), ...r.failed.map(f => `challenge operation ${f.id || '*'}: unsynced — ${f.error}`), ...r.conflicts.map(n => `challenge operation ${n}: conflict (draft kept)`))
+            notes.push(...await ch.mirror().catch(e => [`challenge mirrors: ${(e as Error).message}`]))
+          }
+        } finally { ch.close() }
         out('', { ok: true, notes }); return 0
       }
       // Execution nodes (p7): every worker's state, what it holds and what waits for it.
@@ -1635,7 +1652,16 @@ const COMMANDS: Record<string, (p: Parsed) => Promise<number>> = {
   runs: cmdRuns, observe: cmdObserve, projects: cmdProjects, run: cmdRun, delegate: cmdDelegate, present: cmdPresent, share: cmdShare, project: cmdProject, repo: cmdRepo, gitea: cmdGitea, dashboard: cmdDashboard, exec: cmdExec, request: cmdRequest, notify: cmdNotify, intake: cmdIntake,
   create: cmdCreate, register: cmdRegister, list: cmdList, status: cmdStatus, validate: cmdValidate,
   approve: cmdApprove, arrange: cmdArrange, 'add-repo': cmdAddRepo, workflow: cmdWorkflow, serve: cmdServe, setup: cmdSetup,
-  version: cmdVersion, nodes: cmdNodes, boast: cmdBoast, context: cmdContext, conversation: cmdConversation, discussion: cmdDiscussion, dialogue: cmdDialogue,
+  version: cmdVersion, nodes: cmdNodes, boast: cmdBoast, context: cmdContext, challenge: cmdChallenge, conversation: cmdConversation, discussion: cmdDiscussion, dialogue: cmdDialogue,
+}
+
+// Challenges (challenge p1, docs/challenges.md).
+async function cmdChallenge(p: Parsed): Promise<number> {
+  return challengeCommand({
+    positional: p.positional, opt: k => opt(p, k), opts: k => p.opts.get(k) ?? [], flag: k => p.flags.has(k), out,
+    usage: m => new UsageError(m), refused: (m, d) => new Refused(m, d), isUsage: e => e instanceof UsageError || e instanceof Refused,
+    area: () => areaDir(p), env: async () => { const g = await giteaOf(p); return g ? g.gitEnv() : {} },
+  })
 }
 
 // Conversations with project agents (project_migration p8, workflow_editor p15, docs/conversations.md).
@@ -1758,7 +1784,7 @@ export async function main(argv: string[]): Promise<number> {
   try {
     return await COMMANDS[cmd](p)
   } catch (e) {
-    if (e instanceof UsageError) { console.error(`wfe ${cmd}: ${e.message}\n\n${cmd === 'run' ? 'See: wfe run help <subcommand>' : cmd === 'delegate' ? 'See: wfe delegate help <subcommand>' : cmd === 'conversation' ? 'Nothing was posted or recorded. See: wfe conversation help' : cmd === 'discussion' ? 'Nothing was posted or recorded. See: wfe discussion help' : HELP[cmd]}`); return 2 }
+    if (e instanceof UsageError) { console.error(`wfe ${cmd}: ${e.message}\n\n${cmd === 'run' ? 'See: wfe run help <subcommand>' : cmd === 'delegate' ? 'See: wfe delegate help <subcommand>' : cmd === 'conversation' ? 'Nothing was posted or recorded. See: wfe conversation help' : cmd === 'discussion' ? 'Nothing was posted or recorded. See: wfe discussion help' : cmd === 'challenge' ? 'Nothing was written. See: wfe challenge help' : HELP[cmd]}`); return 2 }
     if (e instanceof RequestError && !(e instanceof Refused)) e = new Refused(e.message, e.detail)
     // A store that could not be opened or written: store, operation, SQLite code.
     if (e instanceof StoreError) e = new Refused(e.message)

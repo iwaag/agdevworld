@@ -37,6 +37,7 @@ export interface ServiceConfig {
   conversations?: import('./conversations.ts').ConversationStore // conversations with project agents (p8, p15)
   usage?: import('./usage.ts').UsageReader // what executions used (retire_old_ui p1)
   dialogue?: import('./dialogue.ts').DialogueStore // character dialogue, the service's own store and worker (argue p5)
+  challenges?: import('./challenges.ts').ChallengeStore // challenges (challenge p1)
 }
 
 
@@ -118,6 +119,14 @@ function sendRaw(res: ServerResponse, path: string, bytes: Buffer) {
 }
 
 export function createHandler(config: ServiceConfig) {
+  let challenges = config.challenges
+  async function challengeStore() {
+    if (!challenges) {
+      const { ChallengeStore } = await import('./challenges.ts')
+      challenges = new ChallengeStore({ area: config.area ?? dirname(config.registryFile), env: async () => config.gitea ? config.gitea.gitEnv() : {} })
+    }
+    return challenges
+  }
   async function registry(): Promise<Registry> { return loadRegistry(config.registryFile) }
   const area = config.area ?? dirname(config.registryFile)
   // Shared areas resolve against this area's shares.json (project_migration p6).
@@ -402,6 +411,13 @@ export function createHandler(config: ServiceConfig) {
         if (wsId && b === 'archive' && method === 'GET') return send(res, 200, await archive.status(wsId))
         if (wsId && b === 'archive' && method === 'POST') { if (!ds.discussion(wsId)) throw new RequestError(404, `no discussion ${wsId}`); const r = await archive.publish([wsId]); return send(res, r.failed.length ? 502 : 200, { ...r, status: await archive.status(wsId) }) }
         throw new RequestError(404, 'not found')
+      }
+
+      // Challenges (challenge p1, docs/challenges.md): durable shared records
+      // of problems, in one Git repository; writes go through the journal.
+      if (a === 'challenges') {
+        const { challengeRoute } = await import('./challengeApi.ts')
+        return await challengeRoute(await challengeStore(), area, req, res, parts, url)
       }
 
       // Character dialogue's state (argue p5, docs/dialogue.md): read-only.

@@ -337,7 +337,10 @@ test('archives: a one-to-one room at conversations/<id>, the same path after a c
   assert.equal(s.ds.messages('c-arc').length, 2, 'the room is untouched')
   assert.equal((await a.publish(['c-arc'])).published.length, 1)
   await s.ds.startFacilitation('c-arc', { text: 'ponderer, lead us.', author: 'Pat', token: 'tok-ca-0002' })
-  await a.publish(['c-arc'])
+  // Two writers at once (a reconcile and a person's publish): one waits for the other's lock.
+  const both = await Promise.all([a.publish(['c-arc']), new ConversationArchive(s.ds).publish(['c-arc'])])
+  assert.deepEqual(both.map(r => r.failed), [[], []])
+  assert.equal(both.reduce((n, r) => n + r.published.length, 0), 1, 'the second finds it published')
   assert.deepEqual((await a.publish(['c-arc'])).unchanged, ['c-arc'], 'a second backfill adds nothing')
   assert.equal((await a.status('c-arc')).path, 'conversations/c-arc', 'promotion does not move the archive')
   const fresh = join(s.area, 'fresh')

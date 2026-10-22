@@ -7,7 +7,7 @@ import { contextChanges, changeWords, type AttemptContext, type ContextDelivery 
 import { docStepsOf, type EffectiveGraph, type StepSpec } from './compile.ts'
 import type { DocSteps } from './model.ts'
 import type { AttemptCatalog, CatalogContext } from './catalog.ts'
-import { INSTRUCTION_RESPONSES, sourceLabel, type SourceRef } from './intake.ts'
+import { INSTRUCTION_RESPONSES, sourceLabel, type AttachmentRef, type SourceRef } from './intake.ts'
 import {
   CANDIDATE, INPUT_ID, OUTPUT_ID, SET_OBSERVATIONS, STAGINGS, outputNumber, parseRef,
   type ExternalOutput, type InputSet, type SetObservation, type ShareRef, type Staging,
@@ -66,7 +66,12 @@ export interface RunInput {
   // docs/shares.md), in order: what the person pointed at. Whether a host
   // can reach them is observed when they are used, never recorded here.
   references?: ShareRef[]
+  // Challenges attached to the words (challenge p1, docs/challenges.md),
+  // each as it was at the attached commit: the file in the run folder
+  // (attachments/<id>@<commit12>.md) is that revision's text.
+  attachments?: InputAttachment[]
 }
+export interface InputAttachment extends AttachmentRef { file: string }
 // `name` is the agent identity the run is performed as (p6: the workflow's
 // execution.agent); `host` the execution host that launches it, when that is
 // not the agent itself (autolab executing for ppt-agent).
@@ -690,11 +695,23 @@ function evidence(v: unknown, what: string, expected: string): DocumentEvidence 
   return { path: expected, sha256: d.sha256 as string, bytes: d.bytes as number }
 }
 
+// Challenge references (challenge p1): pinned to a commit, never a moving name.
+export function attachmentsOf(v: unknown): AttachmentRef[] {
+  if (!Array.isArray(v)) return fail('shape', 'source.attachments must be a list')
+  return v.map((a, i) => {
+    const o = isObj(a) ? a as Record<string, unknown> : fail('shape', `source.attachments[${i}] must be an object`)
+    if (o.kind !== 'challenge' || typeof o.id !== 'string' || !/^ch-[0-9]{4,}$/.test(o.id)) fail('shape', `source.attachments[${i}] must be a challenge (ch-0001)`)
+    if (typeof o.commit !== 'string' || !/^[0-9a-f]{40,64}$/.test(o.commit)) fail('shape', `source.attachments[${i}].commit must be a full commit id`)
+    if (typeof o.sha256 !== 'string' || !/^[0-9a-f]{64}$/.test(o.sha256)) fail('shape', `source.attachments[${i}].sha256 must be 64 hex digits`)
+    return { kind: 'challenge' as const, id: o.id as string, commit: o.commit as string, title: typeof o.title === 'string' ? o.title : '', sha256: o.sha256 as string }
+  })
+}
+
 export function sourceOf(v: unknown): SourceRef {
   if (!isObj(v)) return fail('shape', 'a source must be an object')
   const o = v as Record<string, unknown>
   const int = (x: unknown, what: string) => (typeof x === 'number' && Number.isInteger(x) && x > 0 ? x : fail('shape', `source.${what} must be a positive integer`))
-  if (o.kind === 'conversation') return { kind: 'conversation', conversation: text(o.conversation, 'source.conversation'), message: int(o.message, 'message'), author: text(o.author, 'source.author'), at: text(o.at, 'source.at'), ...(o.invitation !== undefined ? { invitation: int(o.invitation, 'invitation') } : {}) }
+  if (o.kind === 'conversation') return { kind: 'conversation', conversation: text(o.conversation, 'source.conversation'), message: int(o.message, 'message'), author: text(o.author, 'source.author'), at: text(o.at, 'source.at'), ...(o.invitation !== undefined ? { invitation: int(o.invitation, 'invitation') } : {}), ...(o.attachments !== undefined ? { attachments: attachmentsOf(o.attachments) } : {}) }
   if (o.kind !== 'zulip') fail('shape', 'source.kind must be zulip or conversation')
   return { kind: 'zulip', realm: text(o.realm, 'source.realm'), message: int(o.message, 'message'), stream: int(o.stream, 'stream'), topic: text(o.topic, 'source.topic'), sender: int(o.sender, 'sender'), senderName: text(o.senderName, 'source.senderName'), at: text(o.at, 'source.at') }
 }

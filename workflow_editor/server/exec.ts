@@ -117,6 +117,19 @@ export function documentationBrief(r: RunRecord): string[] {
 // The person's additional instructions as the attempt starts (p6): the
 // unacknowledged ones in full, in arrival order. More may arrive while it
 // works; wfe run state shows them. Acknowledgment is a record, not a gate (p11).
+// Challenges the input carried (challenge p1, docs/challenges.md): each as
+// it was when attached, its file in the run folder, and how to read its
+// evidence and its current revision — a separate, explicit read.
+export function attachmentBrief(r: RunRecord, dir: string): string[] {
+  const all = r.input.attachments ?? []
+  if (!all.length) return []
+  return [`Attached to the ${r.input.kind === 'request' ? 'request' : 'person\'s words'} (${all.length}): durable challenges, each as it was when attached (wfe challenge help):`,
+    ...all.map(a => `- ${a.id} "${a.title}" at ${a.commit.slice(0, 12)}: ${dir}/${a.file}; evidence: wfe challenge evidence ${a.id} --at ${a.commit.slice(0, 12)}; its latest revision: wfe challenge show ${a.id}`)]
+}
+// Challenges carried by an answer's or an instruction's source.
+export const attachedLines = (s: import('../shared/intake.ts').SourceRef | undefined, indent = '    ') =>
+  s?.kind === 'conversation' && s.attachments?.length ? s.attachments.map(a => `${indent}attached: ${a.id} "${a.title}" at ${a.commit.slice(0, 12)} — wfe challenge show ${a.id} --at ${a.commit.slice(0, 12)}`) : []
+
 export function instructionBrief(r: RunRecord): string[] {
   const all = Object.values(r.instructions ?? {})
   if (!all.length) return []
@@ -124,7 +137,7 @@ export function instructionBrief(r: RunRecord): string[] {
   if (!pending.length) return [`Additional instructions: ${all.length}, all acknowledged (wfe run instructions <run>).`]
   return [
     '', `Additional instructions received and not yet acknowledged (${pending.length}); optional acknowledgment records what you will do (wfe run ack <run> <id>… --response incorporate|clarify|new-run --note …):`,
-    ...pending.flatMap(i => [`- ${i.id}, from ${i.from} at ${i.at}${i.during.length ? ` (while ${i.during.join(', ')} ran)` : ''}:`, ...i.text.split('\n').map(l => `    ${l}`)]),
+    ...pending.flatMap(i => [`- ${i.id}, from ${i.from} at ${i.at}${i.during.length ? ` (while ${i.during.join(', ')} ran)` : ''}:`, ...i.text.split('\n').map(l => `    ${l}`), ...attachedLines(i.source)]),
   ]
 }
 // The run's presentations as the attempt starts (p7): which revision each
@@ -349,14 +362,17 @@ export class ExecStore {
   // words — the run's request.md, with its requester, what entrusted it, the
   // person it serves and the original words it was derived from.
   // `source`: where the person's words were said (a conversation message, p8).
-  async request(o: { workspace: string; workflow: string; text: string; author: string; receipt: string; by?: string; via: string; predecessor?: RunRef; node?: string; source?: import('../shared/intake.ts').SourceRef; input?: Extract<import('./runs.ts').CreateRunOptions['input'], { kind: 'request' }> }): Promise<{ job: JobRow; ref: RunRef; duplicate: boolean }> {
+  // `attachments` (challenge p1): challenges the words carried, each with its
+  // file's text at the attached commit, written into the new run's folder.
+  async request(o: { workspace: string; workflow: string; text: string; author: string; receipt: string; by?: string; via: string; predecessor?: RunRef; node?: string; source?: import('../shared/intake.ts').SourceRef; input?: Extract<import('./runs.ts').CreateRunOptions['input'], { kind: 'request' }>; attachments?: import('./runs.ts').PinnedAttachment[] }): Promise<{ job: JobRow; ref: RunRef; duplicate: boolean }> {
     if (!/^[A-Za-z0-9:._/#-]{8,200}$/.test(o.receipt)) throw new RequestError(400, 'a request needs a receipt id (8–200 of A-Z a-z 0-9 : . _ / # -)')
     const seen = this.one<JobRow>('SELECT * FROM jobs WHERE receipt = ?', `request:${o.receipt}`)
     if (seen) return { job: seen, ref: { workflow: seen.workflow, run: seen.run }, duplicate: true }
     const ws = await this.workspace(o.workspace)
     // The run gets its own working copy (p9); the same receipt finds it again.
     const env = this.ctx.gitea ? await this.ctx.gitea.gitEnv() : {}
-    const created = await createRunInCopy(ws, { workflow: o.workflow, input: o.input ?? { kind: 'braindump', text: o.text, author: o.author, recordedBy: o.by, ...(o.source ? { source: o.source } : {}) }, executor: { host: this.executor, ...(o.node ? { node: o.node } : {}) }, by: o.by ?? o.author, via: o.via, area: this.ctx.area, receipt: `request:${o.receipt}`, ...(o.predecessor ? { predecessor: o.predecessor } : {}) }, env)
+    const attachments = o.attachments?.length ? { attachments: o.attachments } : {}
+    const created = await createRunInCopy(ws, { workflow: o.workflow, input: o.input ? { ...o.input, ...attachments } : { kind: 'braindump', text: o.text, author: o.author, recordedBy: o.by, ...(o.source ? { source: o.source } : {}), ...attachments }, executor: { host: this.executor, ...(o.node ? { node: o.node } : {}) }, by: o.by ?? o.author, via: o.via, area: this.ctx.area, receipt: `request:${o.receipt}`, ...(o.predecessor ? { predecessor: o.predecessor } : {}) }, env)
     const job = this.enqueue(ws.reg.id, created.ref, 'start', `request:${o.receipt}`, o.input ? `start: ${o.input.requester}'s request` : 'start: the person\'s request', this.nodeOf(created.record))
     return { job, ref: created.ref, duplicate: false }
   }
@@ -701,6 +717,7 @@ export class ExecStore {
     // new session (agent_session p1 ex2): a replacement or a fresh session
     // reconstructs from them, not only the run's first attempt.
     lines.push(`The ${r.input.kind === 'request' ? 'request' : 'person\'s request'} is ${runDir(ref)}/${r.input.file} (${r.input.kind === 'request' ? `requester ${r.input.requester}` : `author ${r.input.author}`})${r.input.original ? `; the person's own words are ${runDir(ref)}/${r.input.original}` : ''}.`)
+    lines.push(...attachmentBrief(r, runDir(ref)))
     if (job.kind !== 'start' && existsSync(join(ws.root, runDir(ref), 'plan.md'))) lines.push(`The current plan is ${runDir(ref)}/plan.md${r.nodes._plan?.agreement ? ` (agreed in ${r.nodes._plan.agreement.question})` : ''}.`)
     // The run this one follows (p9): its records and saved work, to reuse,
     // repair or reverse; wfe run reversal <run> lists what its integration brought.

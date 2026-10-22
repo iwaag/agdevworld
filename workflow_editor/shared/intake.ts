@@ -40,11 +40,17 @@ export interface ZulipSource { kind: 'zulip'; realm: string; message: number; st
 // the person's words as they were said at the entrance.
 // `invitation`: in a discussion (p16, docs/discussions.md), the invitation
 // the run was started for.
-export interface ConversationSource { kind: 'conversation'; conversation: string; message: number; author: string; at: string; invitation?: number }
+// `attachments` (challenge p1, docs/challenges.md): what the message carried,
+// each pinned to the revision it was sent with.
+export interface ConversationSource { kind: 'conversation'; conversation: string; message: number; author: string; at: string; invitation?: number; attachments?: AttachmentRef[] }
+// A challenge attached to a message or a request, at one revision of the
+// challenge repository: the commit, the title it had and the file's sha256.
+export interface AttachmentRef { kind: 'challenge'; id: string; commit: string; title: string; sha256: string }
+export const attachmentLabel = (a: AttachmentRef) => `challenge ${a.id} "${a.title}" at ${a.commit.slice(0, 12)}`
 export type SourceRef = ZulipSource | ConversationSource
 // How a source is named to a reader. The Zulip form is the one recorded
 // decisions were written with (their evidence is derived from it on replay).
-export const sourceLabel = (s: SourceRef) => s.kind === 'zulip' ? `Zulip message ${s.message}` : `conversation ${s.conversation} message #${s.message}${s.invitation ? ` (invitation ${s.invitation})` : ''}`
+export const sourceLabel = (s: SourceRef) => s.kind === 'zulip' ? `Zulip message ${s.message}` : `conversation ${s.conversation} message #${s.message}${s.invitation ? ` (invitation ${s.invitation})` : ''}${s.attachments?.length ? `, with ${s.attachments.map(attachmentLabel).join(', ')}` : ''}`
 
 // ---- topics ------------------------------------------------------------------------
 

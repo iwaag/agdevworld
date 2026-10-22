@@ -59,6 +59,10 @@ reason). Existing messages are kept.
   - `via`: the way the words came when not a page (`slack`, `slack-trial`;
     slack_connect p1). Clients show it beside the author;
   - `re`: the messages it answers, when the person names them.
+  - `attachments` (challenge p1, store v11): challenges it carries, each
+    pinned to the revision it was sent with (`challenges` on the post:
+    `["ch-0001", "ch-0002@<commit>"]`). See [challenges.md](challenges.md),
+    *Carrying a challenge into work*.
 - **Reply of the destination's agent**:
   - the text and the author (the run's agent);
   - the run and attempt that wrote it, `re` (what it answers) and its kind:
@@ -89,7 +93,9 @@ destination workflow**:
 - the words are the run's braindump;
 - the author is the person;
 - `input.source = {kind: conversation, conversation, message, author, at}`;
-- the request receipt is `conversation:<conversation>:<message>`.
+- the request receipt is `conversation:<conversation>:<message>`;
+- each attached challenge's file at its attached commit is in the run
+  folder (`attachments/<id>@<commit12>.md`, `input.attachments`).
 
 The message is stored before the request. A failed request, or a crash
 between the request and its record, is repaired by requesting again: the
@@ -133,7 +139,7 @@ is the only one pending.
 | --- | --- |
 | `GET api/conversations[?target=<ws>/<wf>]` | `{person, disabled, targets, conversations}`. Conversations are newest first, each with its `destination` and last message. `targets` are the configured ones as their projects say now: `target`, `workspace`, `workflow`, `project`, `projectName`, `workflowName`, `intent`, `agent`, `state` (`available` / `unavailable`) and `problem`. |
 | `GET api/conversations/<id>[?since=<id>]` | See *The view* below. 404 for an id not created yet. |
-| `POST api/conversations/<id>/messages {text, token, target?, re?, via?, author?}` | The person's message, then its turn. `target` (`<ws>/<wf>`) is required for a new id. On an existing id it must match the destination (409 otherwise). Answers `{sent, duplicate, reopened, message, run, destination}`. The author is the configured person, unless `author` names another (an automated trial actor). A client other than a page names `via`. |
+| `POST api/conversations/<id>/messages {text, token, target?, re?, via?, author?, challenges?}` | The person's message, then its turn. `challenges` are attached at their current revision unless one names `@<commit>`; an unknown or unpublished one refuses the message. `target` (`<ws>/<wf>`) is required for a new id. On an existing id it must match the destination (409 otherwise). Answers `{sent, duplicate, reopened, message, run, destination}`. The author is the configured person, unless `author` names another (an automated trial actor). A client other than a page names `via`. |
 | `POST api/conversations/<id>/close` | Closes the conversation. Runs continue. |
 
 **The view** is:

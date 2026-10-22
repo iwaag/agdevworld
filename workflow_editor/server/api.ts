@@ -273,7 +273,8 @@ export function createHandler(config: ServiceConfig) {
           // first message names the destination (`target`).
           const opt = (k: string) => input[k] === undefined ? undefined : str(input[k], k)
           const target = opt('target')
-          const r = await cs.post(wsId, { text: str(input.text, 'text'), author: opt('author') ?? cfg.person, token: str(input.token, 'token'), re: re as number[], via: opt('via'), target: target === undefined ? undefined : parseTarget(target) })
+          const { attachRequests } = await import('./conversations.ts')
+          const r = await cs.post(wsId, { text: str(input.text, 'text'), author: opt('author') ?? cfg.person, token: str(input.token, 'token'), re: re as number[], via: opt('via'), target: target === undefined ? undefined : parseTarget(target), challenges: attachRequests(input.challenges) })
           const v = await cs.view(wsId, { viewBase: viewBaseOf(area) })
           return send(res, 200, { sent: true, duplicate: r.duplicate, reopened: r.reopened, message: v.messages.find(m => m.id === r.message.id), run: r.message.dispatch_run, destination: v.conversation.destination })
         }
@@ -325,7 +326,8 @@ export function createHandler(config: ServiceConfig) {
           const author = opt('author') ?? c.person
           const r = ds.create(id, { title: str(input.title, 'title'), by: author, members: list('members'), category: opt('category') })
           let posted = null
-          if (input.text !== undefined) posted = await ds.post(id, { text: words('text'), author, token: str(input.token, 'token'), to: list('to'), re: nums('re'), via: opt('via') })
+          const { attachRequests } = await import('./conversations.ts')
+          if (input.text !== undefined) posted = await ds.post(id, { text: words('text'), author, token: str(input.token, 'token'), to: list('to'), re: nums('re'), via: opt('via'), challenges: attachRequests(input.challenges) })
           return send(res, r.duplicate ? 200 : 201, { created: !r.duplicate, posted: posted && { message: posted.message.id, duplicate: posted.duplicate, invitations: posted.invitations.map(i => ds.invitationView(i)) }, ...await view(id) })
         }
         if (wsId && !b && method === 'GET') {
@@ -334,7 +336,8 @@ export function createHandler(config: ServiceConfig) {
         }
         if (wsId && b === 'messages' && method === 'POST') {
           const c = need()
-          const r = await ds.post(wsId, { text: words('text'), author: opt('author') ?? c.person, token: str(input.token, 'token'), to: list('to'), re: nums('re'), via: opt('via') })
+          const { attachRequests } = await import('./conversations.ts')
+          const r = await ds.post(wsId, { text: words('text'), author: opt('author') ?? c.person, token: str(input.token, 'token'), to: list('to'), re: nums('re'), via: opt('via'), challenges: attachRequests(input.challenges) })
           return send(res, 200, { sent: true, duplicate: r.duplicate, reopened: r.reopened, message: ds.message(r.message, viewBaseOf(area)), invitations: r.invitations.map(i => ds.invitationView(i, viewBaseOf(area))) })
         }
         // Workflows in the discussion (argue p4 ex3, docs/discussions.md
@@ -653,7 +656,11 @@ export function createHandler(config: ServiceConfig) {
         if (!file && method === 'POST') {
           const input = await body(req) as Record<string, unknown>
           const predecessor = typeof input.predecessor === 'string' && input.predecessor ? await resolveRef(ws, input.predecessor) : undefined
-          const r = await needExec().request({ workspace: ws.reg.id, workflow: str(input.workflow, 'workflow'), text: str(input.text, 'the request text'), author: str(input.author, 'author'), receipt: str(input.receipt, 'receipt'), by: typeof input.by === 'string' ? input.by : undefined, via: 'browser', predecessor, ...(typeof input.node === 'string' && input.node ? { node: input.node } : {}) })
+          // Challenges named with the request (challenge p1), pinned now.
+          const { attachRequests, ConversationStore } = await import('./conversations.ts')
+          const wanted = attachRequests(input.challenges)
+          const attachments = wanted.length ? await (async () => { const cs = config.conversations ?? new ConversationStore({ area, exec: needExec() }); return cs.pinnedTexts(await cs.pinAll(wanted)) })() : []
+          const r = await needExec().request({ workspace: ws.reg.id, workflow: str(input.workflow, 'workflow'), text: str(input.text, 'the request text'), author: str(input.author, 'author'), receipt: str(input.receipt, 'receipt'), by: typeof input.by === 'string' ? input.by : undefined, via: 'browser', predecessor, ...(typeof input.node === 'string' && input.node ? { node: input.node } : {}), ...(attachments.length ? { attachments } : {}) })
           return send(res, r.duplicate ? 200 : 201, { ok: true, ...r })
         }
         const ref: RunRef = { workflow: parts[4] ?? '', run: parts[5] ?? '' }

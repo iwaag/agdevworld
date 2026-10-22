@@ -22,6 +22,13 @@ how the discussion proceeds as discussion **activities** (*Conductor*,
 ex1 ponderer also keeps the archive, the summaries and the evaluations
 (`pj-ponderer`); the `argue` project is retired.
 
+**Attachments** (challenge p1): a person's message may carry challenges
+(`challenges` on the post, `wfe discussion post --challenge`), pinned to the
+revision it was sent with. Whoever it invites gets them in the new run's
+input; a reply delivered to the run that asked carries them in its source;
+transcript `message` records carry `attachments`. See
+[challenges.md](challenges.md), *Carrying a challenge into work*.
+
 ## Configuration
 
 `<area>/conversations.json`, beside the conversation targets:

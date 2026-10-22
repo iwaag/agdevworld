@@ -29,7 +29,9 @@ import { existsSync, mkdirSync, readFileSync } from 'node:fs'
 import { createHash } from 'node:crypto'
 import { join } from 'node:path'
 import type { DatabaseSync } from 'node:sqlite'
-import type { ConversationSource } from '../shared/intake.ts'
+import type { AttachmentRef, ConversationSource } from '../shared/intake.ts'
+import type { ChallengeStore } from './challenges.ts'
+import type { PinnedAttachment } from './runs.ts'
 import type { Workflow } from '../shared/model.ts'
 import { runDisplayTitle, runKey, situation, type RunRecord, type RunRef } from '../shared/run.ts'
 import type { ExecStore } from './exec.ts'
@@ -110,7 +112,25 @@ export interface Message {
   id: number; role: 'person' | 'agent'; author: string; text: string; at: string; via: string | null; re: number[]; kind: MessageKind
   run: string | null; runUrl: string | null; question: string | null
   dispatch: { state: 'pending' | 'started' | 'failed'; run: string | null; error: string | null } | null
+  attachments: MessageAttachment[]
 }
+// A challenge a message carried (challenge p1): the revision it was sent
+// with, and — a separate, current read — the latest one when it moved since.
+export interface MessageAttachment extends AttachmentRef { latest: { commit: string; title: string; state: string } | null }
+// What a client names to attach: a challenge, optionally at a commit (else
+// its current revision when the message is accepted).
+export interface AttachRequest { id: string; at?: string }
+// `challenges` as a client sends it: ["ch-0001", "ch-0002@<commit>", {id, at?}].
+export function attachRequests(v: unknown): AttachRequest[] {
+  if (v === undefined || v === null) return []
+  if (!Array.isArray(v)) throw new RequestError(400, 'challenges is a list of ids (ch-0001, ch-0001@<commit>) or {id, at}')
+  return v.map(x => {
+    if (typeof x === 'string') { const [id, at] = x.split('@'); return { id: id!, ...(at ? { at } : {}) } }
+    if (typeof x === 'object' && x && typeof (x as AttachRequest).id === 'string') return { id: (x as AttachRequest).id, ...(typeof (x as AttachRequest).at === 'string' && (x as AttachRequest).at ? { at: (x as AttachRequest).at } : {}) }
+    throw new RequestError(400, 'challenges is a list of ids (ch-0001, ch-0001@<commit>) or {id, at}')
+  })
+}
+interface AttachmentRow { id: number; conv: string; message: number; kind: string; ref: string; commit_id: string; title: string; sha256: string; at: string }
 
 const now = () => new Date().toISOString()
 // A run as conversations name it: <workspace>/<workflow>/<run>.
@@ -125,9 +145,11 @@ export class ConversationStore {
   readonly db: DatabaseSync
   readonly area: string
   readonly exec?: ExecStore
-  constructor(o: { area: string; exec?: ExecStore }) {
+  private _challenges?: ChallengeStore
+  constructor(o: { area: string; exec?: ExecStore; challenges?: ChallengeStore }) {
     this.area = o.area
     this.exec = o.exec
+    this._challenges = o.challenges
     const dir = join(o.area, '.local', 'conversations')
     mkdirSync(dir, { recursive: true })
     this.db = openStore('conversation store', join(dir, 'conversations.sqlite'), [{
@@ -160,7 +182,7 @@ export class ConversationStore {
       },
     }, ...DISCUSSION_MIGRATIONS])
   }
-  close() { this.db.close(); this._presenter?.close() }
+  close() { this.db.close(); this._presenter?.close(); if (this.ownChallenges) this._challenges?.close() }
   // This host's presentation store, opened when a linked run has presentations.
   private _presenter: Presenter | null | undefined
   private presenter(): Presenter | null {
@@ -200,7 +222,9 @@ export class ConversationStore {
   // differs from an existing conversation's destination is refused: another
   // destination is another conversation. `via` names the way the words came
   // when not a page (e.g. slack).
-  async post(conv: string, o: { text: string; author: string; token: string; re?: number[]; title?: string; via?: string; target?: ConversationTarget }): Promise<{ message: MessageRow; duplicate: boolean; reopened: boolean }> {
+  // `challenges` (challenge p1): challenges the message carries, each pinned
+  // to the revision named (or the current one now) and kept with it.
+  async post(conv: string, o: { text: string; author: string; token: string; re?: number[]; title?: string; via?: string; target?: ConversationTarget; challenges?: AttachRequest[] }): Promise<{ message: MessageRow; duplicate: boolean; reopened: boolean }> {
     if (!CONVERSATION_ID.test(conv)) throw new RequestError(400, `conversation id must match ${CONVERSATION_ID.source}`)
     if (!o.text.trim()) throw new RequestError(400, 'the message is empty')
     if (o.text.length > MAX_TEXT) throw new RequestError(413, `a message is at most ${MAX_TEXT} characters`)
@@ -218,6 +242,7 @@ export class ConversationStore {
       if ('disabled' in cfg) throw new RequestError(503, cfg.disabled)
       if (!cfg.targets.some(t => t.workspace === o.target!.workspace && t.workflow === o.target!.workflow)) throw new RequestError(400, `${targetName(o.target)} is not a conversation target here (${cfg.targets.map(targetName).join(', ') || 'none configured'})`, { code: 'unknown-target' })
     }
+    const pins = this.one('SELECT 1 FROM messages WHERE conv = ? AND token = ?', conv, o.token) ? [] : await this.pinAll(o.challenges ?? [])
     const res = this.tx(() => {
       const seen = this.one<MessageRow>('SELECT * FROM messages WHERE conv = ? AND token = ?', conv, o.token)
       if (seen) return { message: seen, duplicate: true, reopened: false }
@@ -227,6 +252,7 @@ export class ConversationStore {
       if (!c) this.db.prepare('INSERT INTO conversations (id, title, created, updated, state, by, workspace, workflow) VALUES (?, ?, ?, ?, \'open\', ?, ?, ?)').run(conv, o.title?.trim() || firstLine(o.text), at, at, o.author, o.target!.workspace, o.target!.workflow)
       else this.db.prepare('UPDATE conversations SET updated = ?, state = \'open\' WHERE id = ?').run(at, conv)
       const id = Number(this.db.prepare('INSERT INTO messages (conv, role, author, text, at, token, via, re, kind, dispatch_state) VALUES (?, \'person\', ?, ?, ?, ?, ?, ?, \'message\', \'pending\')').run(conv, o.author, o.text, at, o.token, o.via ?? null, JSON.stringify(re)).lastInsertRowid)
+      this.attachRows(conv, id, pins)
       return { message: this.message(id)!, duplicate: false, reopened }
     })
     if (res.message.dispatch_state !== 'started') await this.dispatch(res.message.id)
@@ -248,7 +274,10 @@ export class ConversationStore {
       if (!c?.workspace || !c.workflow) throw new Error(`conversation ${m.conv} has no recorded destination`)
       if (!this.exec) throw new Error('execution is not configured here')
       const source: ConversationSource = { kind: 'conversation', conversation: m.conv, message: m.id, author: m.author, at: m.at }
-      const r = await this.exec.request({ workspace: c.workspace, workflow: c.workflow, text: m.text, author: m.author, receipt: `conversation:${m.conv}:${m.id}`, via: 'conversation', source })
+      // The challenges it carried, as they were when it was sent; a
+      // repository that cannot be read now leaves the turn failed and retried.
+      const attachments = await this.pinnedTexts(this.attachmentsOf([m.id]))
+      const r = await this.exec.request({ workspace: c.workspace, workflow: c.workflow, text: m.text, author: m.author, receipt: `conversation:${m.conv}:${m.id}`, via: 'conversation', source, ...(attachments.length ? { attachments } : {}) })
       const run = runName(c.workspace, r.ref)
       this.tx(() => {
         this.db.prepare('UPDATE messages SET dispatch_state = \'started\', dispatch_run = ?, dispatch_error = NULL, dispatch_tries = dispatch_tries + 1 WHERE id = ?').run(run, id)
@@ -334,6 +363,78 @@ export class ConversationStore {
     return [...new Set(re)]
   }
 
+  // ---- attachments (challenge p1, docs/challenges.md) ------------------------------------
+
+  // The challenge store of this area (the repository challenges.json names),
+  // or null where none is configured.
+  private ownChallenges = false
+  async challenges(): Promise<ChallengeStore | null> {
+    if (!this._challenges) {
+      const { ChallengeStore, loadChallengeConfig } = await import('./challenges.ts')
+      if ('disabled' in loadChallengeConfig(this.area)) return null
+      const gitea = this.exec?.ctx.gitea
+      this._challenges = new ChallengeStore({ area: this.area, env: async () => gitea ? gitea.gitEnv() : {} })
+      this.ownChallenges = true
+    }
+    return this._challenges
+  }
+
+  // Each named challenge at the revision named, or its current one. Refused
+  // (with the reason) when one is not published or cannot be read: a message
+  // never carries a reference that does not resolve.
+  async pinAll(refs: AttachRequest[]): Promise<AttachmentRef[]> {
+    if (!Array.isArray(refs)) throw new RequestError(400, 'challenges is a list of {id, at?}')
+    if (!refs.length) return []
+    if (refs.length > 20) throw new RequestError(400, 'a message carries at most 20 challenges')
+    const store = await this.challenges()
+    if (!store) throw new RequestError(503, 'no challenge repository is configured here (challenges.json): nothing can be attached', { code: 'no-challenges' })
+    const out: AttachmentRef[] = []
+    for (const r of refs) {
+      if (typeof r?.id !== 'string') throw new RequestError(400, 'challenges is a list of {id, at?}')
+      if (out.some(x => x.id === r.id)) continue
+      const p = await store.pin(r.id, r.at)
+      out.push({ kind: 'challenge', id: p.id, commit: p.commit, title: p.title, sha256: p.sha256 })
+    }
+    return out
+  }
+  // Inside the message's own transaction.
+  attachRows(conv: string, message: number, pins: AttachmentRef[]) {
+    const ins = this.db.prepare('INSERT INTO attachments (conv, message, kind, ref, commit_id, title, sha256, at) VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (message, kind, ref) DO NOTHING')
+    for (const p of pins) ins.run(conv, message, p.kind, p.id, p.commit, p.title, p.sha256, now())
+  }
+  // What the named messages carried, in order, each challenge once.
+  attachmentsOf(messages: number[]): AttachmentRef[] {
+    const out: AttachmentRef[] = []
+    for (const m of messages) for (const a of this.all<AttachmentRow>('SELECT * FROM attachments WHERE message = ? ORDER BY id', m)) {
+      if (!out.some(x => x.id === a.ref)) out.push({ kind: 'challenge', id: a.ref, commit: a.commit_id, title: a.title, sha256: a.sha256 })
+    }
+    return out
+  }
+  // The text of each attached revision, for the run that receives it.
+  async pinnedTexts(refs: AttachmentRef[]): Promise<PinnedAttachment[]> {
+    if (!refs.length) return []
+    const store = await this.challenges()
+    if (!store) throw new Error('the message carries challenges, but no challenge repository is configured here (challenges.json)')
+    const out: PinnedAttachment[] = []
+    for (const a of refs) out.push({ ...a, text: await store.text(a.id, a.commit) })
+    return out
+  }
+  // A conversation's attachments by message, with the latest revision of
+  // each challenge beside the attached one (the index; refreshed at most
+  // every few seconds).
+  async attachmentViews(conv: string): Promise<Map<number, MessageAttachment[]>> {
+    const rows = this.all<AttachmentRow>('SELECT * FROM attachments WHERE conv = ? ORDER BY id', conv)
+    const out = new Map<number, MessageAttachment[]>()
+    if (!rows.length) return out
+    const store = await this.challenges()
+    await store?.sync().catch(() => undefined)
+    for (const a of rows) {
+      const cur = store?.current(a.ref) ?? null
+      out.set(a.message, [...out.get(a.message) ?? [], { kind: 'challenge', id: a.ref, commit: a.commit_id, title: a.title, sha256: a.sha256, latest: cur ? { commit: cur.commit, title: cur.title, state: cur.state } : null }])
+    }
+    return out
+  }
+
   // ---- targets ---------------------------------------------------------------------
 
   // The configured targets as their projects say now: a target whose
@@ -405,6 +506,7 @@ export class ConversationStore {
     const rows = this.messages(conv)
     const links = this.links(conv)
     const asking = pendingQuestions(rows)
+    const attached = await this.attachmentViews(conv)
     // The runs linked to its messages, and the destination's own run of each
     // message (relation `turn`), with the shared status reading (p8 ex1).
     const turns = rows.filter(m => m.role === 'person' && m.dispatch_run).map(m => m.dispatch_run!)
@@ -414,6 +516,7 @@ export class ConversationStore {
     const message = (m: MessageRow): Message => ({
       id: m.id, role: m.role, author: m.author, text: m.text, at: m.at, via: m.via, re: JSON.parse(m.re) as number[], kind: m.kind, run: m.run ?? m.dispatch_run, runUrl: (m.run ?? m.dispatch_run) ? url((m.run ?? m.dispatch_run)!) : null, question: m.question,
       dispatch: m.role === 'person' ? { state: m.dispatch_state ?? 'pending', run: m.dispatch_run, error: m.dispatch_error } : null,
+      attachments: attached.get(m.id) ?? [],
     })
     const destination = c.workspace && c.workflow ? targetName({ workspace: c.workspace, workflow: c.workflow }) : null
     return { conversation: { ...c, destination }, messages: rows.filter(m => m.id > (o.since ?? 0)).map(message), links, runs, asking }

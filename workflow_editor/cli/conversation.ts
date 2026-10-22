@@ -4,7 +4,7 @@
 // uses.
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
-import { CONVERSATION_ID, ConversationStore, parseRunName, parseTarget, RELATIONS, runName, viewBaseOf, type MessageKind, type Relation } from '../server/conversations.ts'
+import { attachRequests, CONVERSATION_ID, ConversationStore, parseRunName, parseTarget, RELATIONS, runName, viewBaseOf, type MessageKind, type Relation } from '../server/conversations.ts'
 import type { ExecStore } from '../server/exec.ts'
 import { readRun } from '../server/runs.ts'
 import { RequestError } from '../server/workspace.ts'
@@ -47,7 +47,7 @@ link [<conv>] <message> --run <workspace>/<workflow>/<run> --as <relation> --not
                               never rewritten. 'turn' (the run started for a message) is
                               recorded by the store
 post <conv> (--text <t> | --file <f>) --author <person> [--to <workspace>/<workflow>] [--token <t>]
-     [--re <id>]… [--via <way>]
+     [--re <id>]… [--via <way>] [--challenge <id>[@<commit>]]…
                               a person's message from the command line (pages post the same
                               way); starts its turn. A new <conv> needs --to, one of the
                               targets; an existing one keeps its destination (another --to is
@@ -162,7 +162,7 @@ export async function conversationCommand(c: ConversationCli): Promise<number> {
         const id = args[0]; if (!id) throw c.usage('post needs <conv>')
         const author = c.opt('author'); if (!author) throw c.usage('--author <person> is required: whose words these are')
         const to = c.opt('to')
-        const r = await store.post(id, { text: text(), author, token: c.opt('token') ?? `cli-${Date.now()}-${process.pid}`, re: ids('re'), via: c.opt('via'), target: to ? parseTarget(to) : undefined })
+        const r = await store.post(id, { text: text(), author, token: c.opt('token') ?? `cli-${Date.now()}-${process.pid}`, re: ids('re'), via: c.opt('via'), target: to ? parseTarget(to) : undefined, challenges: attachRequests(c.opts('challenge')) })
         c.out(`${r.duplicate ? 'Already posted (same token)' : 'Posted'}: #${r.message.id} in ${id}; turn ${r.message.dispatch_state}${r.message.dispatch_run ? ` (${r.message.dispatch_run})` : ''}${r.message.dispatch_error ? ` — ${r.message.dispatch_error}` : ''}.`, { ok: true, ...r })
         return 0
       }

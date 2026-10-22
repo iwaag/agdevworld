@@ -56,7 +56,7 @@ import type { ConversationSource } from '../shared/intake.ts'
 import { ACTIVITIES, type Activity } from '../shared/model.ts'
 import { isOpenDelegation } from '../shared/delegation.ts'
 import { situation, type OpInput, type RunRecord } from '../shared/run.ts'
-import { CONVERSATION_ID, firstLine, loadConversationConfig, parseRunName, pendingQuestions, runName, runUrl, targetName, type ConversationRow, type ConversationStore, type ConversationTarget, type MessageKind, type MessageRow, type RunEntry, type TargetView } from './conversations.ts'
+import { CONVERSATION_ID, firstLine, loadConversationConfig, parseRunName, pendingQuestions, runName, runUrl, targetName, type ConversationRow, type ConversationStore, type ConversationTarget, type AttachRequest, type MessageAttachment, type MessageKind, type MessageRow, type RunEntry, type TargetView } from './conversations.ts'
 import { activeDefinition, adjustRun, readRun, runOp, usableRun } from './runs.ts'
 import { parseWorkflow, renderWorkflow } from './yamlDoc.ts'
 import { DiscussionWorkflows } from './discussionWorkflows.ts'
@@ -130,6 +130,7 @@ export interface DiscussionMessage {
   id: number; role: 'person' | 'agent'; author: string; participant: string | null; text: string; at: string; via: string | null; re: number[]; kind: MessageKind
   run: string | null; runUrl: string | null; attempt: string | null; question: string | null; invitation: number | null; addressed: string[]
   node: string | null
+  attachments?: MessageAttachment[] // challenges it carried (challenge p1)
 }
 // The live extent of a discussion's records, by table: what an export covers.
 export interface Horizon { message: number; link: number; membership: number; event: number; activity?: number; annotation?: number; meta?: number; overview?: number; workflow?: number; workflowEvent?: number }
@@ -352,7 +353,9 @@ export class DiscussionStore {
   // participant is invited with these words; without an addressee (or when
   // the facilitator is addressed) the facilitator is. The same token twice is
   // one message and the same invitations. A post reopens a closed discussion.
-  async post(conv: string, o: { text: string; author: string; token: string; re?: number[]; to?: string[]; via?: string }): Promise<{ message: MessageRow; duplicate: boolean; reopened: boolean; invitations: InvitationRow[] }> {
+  // `challenges` (challenge p1): challenges the message carries, pinned as in
+  // a conversation; whoever it invites is given them.
+  async post(conv: string, o: { text: string; author: string; token: string; re?: number[]; to?: string[]; via?: string; challenges?: AttachRequest[] }): Promise<{ message: MessageRow; duplicate: boolean; reopened: boolean; invitations: InvitationRow[] }> {
     const c = this.need(conv)
     if (!o.text.trim()) throw new RequestError(400, 'the message is empty')
     if (o.text.length > MAX_TEXT) throw new RequestError(413, `a message is at most ${MAX_TEXT} characters`)
@@ -381,6 +384,7 @@ export class DiscussionStore {
         if (conductor) asked.set(t.participant, { run: conductor, ...await this.conductorQuestion(conv, conductor, re, q) })
       }
     }
+    const pins = this.one('SELECT 1 FROM messages WHERE conv = ? AND token = ?', conv, o.token) ? [] : await this.cs.pinAll(o.challenges ?? [])
     const res = this.tx(() => {
       const seen = this.one<MessageRow>('SELECT * FROM messages WHERE conv = ? AND token = ?', conv, o.token)
       const reopened = !seen && c.state === 'closed'
@@ -390,6 +394,7 @@ export class DiscussionStore {
         this.db.prepare('UPDATE conversations SET updated = ?, state = \'open\' WHERE id = ?').run(at, conv)
         if (!this.members(conv).some(m => m.participant === o.author)) this.joinRow(conv, this.resolve(o.author, { person: true }), o.author, 'first message')
         id = Number(this.db.prepare('INSERT INTO messages (conv, role, author, text, at, token, via, re, kind, participant, addressed) VALUES (?, \'person\', ?, ?, ?, ?, ?, ?, \'message\', ?, ?)').run(conv, o.author, o.text, at, o.token, o.via ?? null, JSON.stringify(re), o.author, JSON.stringify(to)).lastInsertRowid)
+        this.cs.attachRows(conv, id, pins)
       }
       const m = this.cs.message(id!)!
       // The invitations of a resubmitted message are found by their tokens.
@@ -502,7 +507,10 @@ export class DiscussionStore {
       if (!first) throw new Error('the invitation names no message')
       const horizon = this.horizon(i.conv).message
       const source: ConversationSource = { kind: 'conversation', conversation: i.conv, message: first.id, author: first.author, at: first.at, invitation: i.id }
-      const r = await this.exec.request({ workspace: i.workspace, workflow: i.workflow, text: i.question, author: i.by, receipt: `discussion:${i.conv}:invitation:${i.id}`, via: 'discussion', source })
+      // The challenges the messages it is about carried (challenge p1), as
+      // they were when sent.
+      const attachments = await this.cs.pinnedTexts(this.cs.attachmentsOf(named))
+      const r = await this.exec.request({ workspace: i.workspace, workflow: i.workflow, text: i.question, author: i.by, receipt: `discussion:${i.conv}:invitation:${i.id}`, via: 'discussion', source, ...(attachments.length ? { attachments } : {}) })
       const run = runName(i.workspace, r.ref)
       // The facilitator's run started by an invitation conducts the
       // discussion unless another one still does (argue p4).
@@ -541,7 +549,8 @@ export class DiscussionStore {
       return false
     }
     const m = this.cs.message(JSON.parse(i.source)[0])!
-    const source: ConversationSource = { kind: 'conversation', conversation: i.conv, message: m.id, author: m.author, at: m.at, invitation: i.id }
+    const attached = this.cs.attachmentsOf(JSON.parse(i.source) as number[])
+    const source: ConversationSource = { kind: 'conversation', conversation: i.conv, message: m.id, author: m.author, at: m.at, invitation: i.id, ...(attached.length ? { attachments: attached } : {}) }
     const receipt = `discussion:${i.conv}:invitation:${i.id}`
     const q = d.question ? rec.questions[d.question] : undefined
     let how: string
@@ -1429,6 +1438,7 @@ export class DiscussionStore {
     // runs) keeps its run name; it gets no run-view link that opens nothing.
     const known = this.exec ? new Set((await loadRegistry(this.exec.ctx.registryFile)).workspaces.map(w => w.id)) : null
     const linkable = (run: string | null) => !run || !known || known.has(parseRunName(run).workspace)
+    const attached = await this.cs.attachmentViews(conv)
     return {
       discussion: { id: c.id, title: c.title, created: c.created, updated: c.updated, state: c.state, by: c.by, facilitator: `${c.workspace}/${c.workflow}`, conductor: c.conductor ?? null, requester: this.requester(conv), category: c.category ?? 'discussion', displayTitle: c.display_title ?? null },
       overview: this.overview(conv),
@@ -1441,7 +1451,7 @@ export class DiscussionStore {
       obligations: await this.obligations(conv),
       members: this.members(conv),
       membership: this.membership(conv),
-      messages: rows.filter(m => m.id > (o.since ?? 0)).map(m => this.message(m, o.viewBase)).map(m => linkable(m.run) ? m : { ...m, runUrl: null }),
+      messages: rows.filter(m => m.id > (o.since ?? 0)).map(m => ({ ...this.message(m, o.viewBase), attachments: attached.get(m.id) ?? [] })).map(m => linkable(m.run) ? m : { ...m, runUrl: null }),
       invitations: invitations.map(i => this.invitationView(i, o.viewBase)).map(i => linkable(i.run) ? i : { ...i, runUrl: null }),
       links,
       runs,

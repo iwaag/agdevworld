@@ -118,4 +118,16 @@ export const DISCUSSION_MIGRATIONS: Migration[] = [{
     CREATE TABLE workflow_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
     INSERT INTO workflow_meta (key, value) VALUES ('since', strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
   `),
+}, {
+  // Attachments (challenge p1, docs/challenges.md): what a person's message
+  // carried, for conversations and discussions alike — a challenge at the
+  // revision it was sent with (commit, the title it had, the file's sha256).
+  // Written with the message, never changed: a later edit of the challenge
+  // is a separate, current read.
+  version: 11,
+  up: db => db.exec(`
+    CREATE TABLE attachments (id INTEGER PRIMARY KEY AUTOINCREMENT, conv TEXT NOT NULL, message INTEGER NOT NULL, kind TEXT NOT NULL, ref TEXT NOT NULL,
+      commit_id TEXT NOT NULL, title TEXT NOT NULL, sha256 TEXT NOT NULL, at TEXT NOT NULL, UNIQUE (message, kind, ref));
+    CREATE INDEX attachments_conv ON attachments (conv, message);
+  `),
 }]

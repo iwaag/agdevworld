@@ -476,8 +476,8 @@ export interface CreateRunOptions {
   workflow: string // id or file name in devdocs/workflows
   name?: string // run id; default the next run-NNN
   input:
-    | { kind: 'braindump'; text: string; author: string; recordedBy?: string; source?: SourceRef }
-    | { kind: 'request'; text: string; requester: string; entrustedBy: EntrustRef; onBehalfOf?: string; original?: string; source?: SourceRef }
+    | { kind: 'braindump'; text: string; author: string; recordedBy?: string; source?: SourceRef; attachments?: PinnedAttachment[] }
+    | { kind: 'request'; text: string; requester: string; entrustedBy: EntrustRef; onBehalfOf?: string; original?: string; source?: SourceRef; attachments?: PinnedAttachment[] }
   // The agent identity. With `host`, the run is performed as the
   // definition's execution.agent (or as the host itself when none is
   // declared) and the host is recorded beside it (p6).
@@ -501,6 +501,9 @@ export interface CreateRunOptions {
 }
 
 export interface CreatedRun { ref: RunRef; dir: string; record: RunRecord; files: string[] }
+// A challenge attached to the input, with the text of its file at the
+// attached commit (challenge p1): written into the run folder as given.
+export type PinnedAttachment = import('../shared/intake.ts').AttachmentRef & { text: string }
 
 // The next run-NNN: past every run recorded, held by a copy or named by a
 // run branch (p9). Called under the workspace's allocation lock.
@@ -596,7 +599,9 @@ function inputOf(o: CreateRunOptions['input']): { input: RunInput; files: Record
     if (o.source) input.source = o.source
     input.sha256 = sha256(o.text) // what a request-sourced adjustment binds to (p7/ex1)
     withReferences(input, o.text)
-    return { input, files: { 'braindump.md': o.text } }
+    const files: Record<string, string> = { 'braindump.md': o.text }
+    withAttachments(input, files, o.attachments)
+    return { input, files }
   }
   if (!o.requester?.trim()) throw new RequestError(400, 'a request needs its requester: the agent that wrote it (--requester)')
   const input: RunInput = { kind: 'request', file: 'request.md', requester: o.requester.trim(), entrustedBy: validEntrust(o.entrustedBy), sha256: sha256(o.text) }
@@ -605,7 +610,27 @@ function inputOf(o: CreateRunOptions['input']): { input: RunInput; files: Record
   const files: Record<string, string> = { 'request.md': o.text }
   if (o.original !== undefined) { input.original = 'original-input.md'; files['original-input.md'] = o.original }
   withReferences(input, o.text)
+  withAttachments(input, files, o.attachments)
   return { input, files }
+}
+
+// What the words carried (challenge p1, docs/challenges.md): each attached
+// challenge's file as it was at its commit, in the run folder, and the
+// pinned reference in the input. A later edit of the challenge never changes
+// what this run was given; the current revision is a separate read.
+function withAttachments(input: RunInput, files: Record<string, string>, attachments: PinnedAttachment[] | undefined) {
+  if (!attachments?.length) return
+  const seen = new Set<string>()
+  input.attachments = []
+  for (const a of attachments) {
+    if (a.kind !== 'challenge' || !/^ch-[0-9]{4,}$/.test(a.id) || !/^[0-9a-f]{40,64}$/.test(a.commit)) throw new RequestError(400, `attachment ${a.id}@${a.commit} is not a pinned challenge`)
+    if (sha256(a.text) !== a.sha256) throw new RequestError(409, `attachment ${a.id}@${a.commit.slice(0, 12)}: its text is not the revision named (hash differs)`)
+    const file = `attachments/${a.id}@${a.commit.slice(0, 12)}.md`
+    if (seen.has(file)) continue
+    seen.add(file)
+    files[file] = a.text
+    input.attachments.push({ kind: 'challenge', id: a.id, commit: a.commit, title: a.title, sha256: a.sha256, file })
+  }
 }
 
 // The shared-area references the person wrote (project_migration p6): taken

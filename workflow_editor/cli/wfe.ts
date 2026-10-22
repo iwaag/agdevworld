@@ -357,6 +357,8 @@ Refuses an id already used by another workflow file. Writing the file by hand
 is equally valid; see docs/contract.md.`,
   request: `wfe request <workflow> --braindump <file|-> --author <person> [--predecessor <run>] [--node <worker>] [--receipt <id>] [--workspace <id>]
 wfe request <workflow> --request <file|-> [--requester <agent>] [--entrusted-by <ref>] [--on-behalf-of <person>] [--original <file>] [--predecessor <run>] [--node <worker>] [--receipt <id>] [--workspace <id>]
+Both take [--challenge <id>[@<commit>]]…: a challenge the work is about (wfe challenge help), given to
+the run as it is at that revision (its file in the run folder, input.attachments in run.json).
 
 --request is an agent's request (the run's request.md): what the agent wrote,
 not a person's words. From an executing attempt the requester is that run's
@@ -1461,7 +1463,16 @@ async function cmdRequest(p: Parsed): Promise<number> {
     const ev = own ? await discussionTurn(x, areaDir(p)) : null
     const journal = ev ? await quietly(async () => ev.wfs.beginRequest(ev.turn, { workspace: ws.reg.id, workflow, receipt })) : null
     let r: Awaited<ReturnType<typeof x.request>>
-    try { r = await x.request({ workspace: ws.reg.id, workflow, text, author: author ?? input?.requester ?? '', receipt, by: opt(p, 'by') ?? own?.agent, via: 'cli', predecessor, node: opt(p, 'node'), ...(input ? { input } : {}) }) } catch (e) { if (journal !== null) ev?.wfs.abort(journal); ev?.close(); throw e }
+    // Challenges named with the request (challenge p1), pinned now: the run
+    // is given each as it is at this revision.
+    const wanted = p.opts.get('challenge') ?? []
+    let attachments: import('../server/runs.ts').PinnedAttachment[] = []
+    if (wanted.length) {
+      const { attachRequests, ConversationStore } = await import('../server/conversations.ts')
+      const cs = new ConversationStore({ area: areaDir(p), exec: x })
+      try { attachments = await cs.pinnedTexts(await cs.pinAll(attachRequests(wanted))) } finally { cs.close() }
+    }
+    try { r = await x.request({ workspace: ws.reg.id, workflow, text, author: author ?? input?.requester ?? '', receipt, by: opt(p, 'by') ?? own?.agent, via: 'cli', predecessor, node: opt(p, 'node'), ...(input ? { input } : {}), ...(attachments.length ? { attachments } : {}) }) } catch (e) { if (journal !== null) ev?.wfs.abort(journal); ev?.close(); throw e }
     if (ev && journal !== null) { const rec = await quietly(() => ev.wfs.finishRequest(journal, `${ws.reg.id}/${r.ref.workflow}/${r.ref.run}`)); if (rec) process.stderr.write(`Recorded in discussion ${ev.turn.conv}: workflow record ${rec.id} (executed).\n`) }
     ev?.close()
     out(`${r.duplicate ? 'Already requested (same receipt)' : 'Requested'}: run ${r.ref.workflow}/${r.ref.run} in ${ws.reg.id}; job ${r.job.id} is ${r.job.state}${r.job.worker ? ` for execution node ${r.job.worker}` : ''}.`, r)

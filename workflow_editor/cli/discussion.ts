@@ -4,7 +4,7 @@
 // store and archive writer the service uses.
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
-import { CONVERSATION_ID, ConversationStore, parseRunName, RELATIONS, runName, viewBaseOf, type MessageKind, type Relation } from '../server/conversations.ts'
+import { attachRequests, CONVERSATION_ID, ConversationStore, parseRunName, RELATIONS, runName, viewBaseOf, type MessageKind, type Relation } from '../server/conversations.ts'
 import { DiscussionArchive } from '../server/discussionArchive.ts'
 import { DiscussionStore, type Requester } from '../server/discussions.ts'
 import { DiscussionWorkflows, type WorkflowRef, type WorkflowRelation, type WorkflowRole } from '../server/discussionWorkflows.ts'
@@ -92,10 +92,12 @@ create <id> --title <t> [--author <person>] [--member <project>]… [--category 
                               requester is whoever requested that run (a delegating run, an agent's
                               request, or the person it names)
 post <id> (--text <t> | --file <f>) --author <person> [--to <participant>]… [--re <msg>]…
-     [--token <t>] [--via <way>]
+     [--token <t>] [--via <way>] [--challenge <id>[@<commit>]]…
                               the person's message, verbatim (refused from an executing attempt:
                               a run speaks as itself with contribute or announce). --to invites those participants with
-                              it; without --to (or --to <facilitator>) the facilitator is invited
+                              it; without --to (or --to <facilitator>) the facilitator is invited.
+                              --challenge attaches a challenge (its current revision, or the
+                              commit named): whoever is invited is given that revision
 contribute [<id>] (--text <t> | --file <f|->) --re <msg>… [--kind reply|progress|result|synthesis]
            [--key <k>] [--completing <node>] [--workflow <record>]…
                               speak from an executing attempt: the message is your run's, its
@@ -311,7 +313,7 @@ export async function discussionCommand(c: DiscussionCli): Promise<number> {
         // attempt speaks as its own run.
         const o = await own()
         if (o) throw c.refused(`post is the person's route; ${o.run} speaks as itself: wfe discussion contribute, or announce from the conductor (quote the request and name whose it is)`, { code: 'not-person' })
-        const r = await ds.post(id, { text: text(), author, token: c.opt('token') ?? `cli-${Date.now()}-${process.pid}`, re: ids('re'), to: c.opts('to'), via: c.opt('via') })
+        const r = await ds.post(id, { text: text(), author, token: c.opt('token') ?? `cli-${Date.now()}-${process.pid}`, re: ids('re'), to: c.opts('to'), via: c.opt('via'), challenges: attachRequests(c.opts('challenge')) })
         c.out(`${r.duplicate ? 'Already posted (same token)' : 'Posted'}: #${r.message.id} in ${id}${r.reopened ? ' (reopened)' : ''}; ${r.invitations.map(i => `invitation ${i.id} → ${i.participant}: ${i.state}${i.run ? ` ${i.run}` : ''}${i.error ? ` — ${i.error}` : ''}`).join('; ')}.`, { ok: true, ...r })
         return 0
       }

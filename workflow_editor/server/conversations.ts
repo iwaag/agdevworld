@@ -421,4 +421,13 @@ function formerEntrance(area: string): ConversationTarget | null {
   } catch { return null }
 }
 
-export const firstLine = (t: string) => { const l = t.trim().split('\n')[0]; return l.length > 80 ? `${l.slice(0, 77)}…` : l }
+// An original title from words: the first nonempty line, whitespace
+// collapsed, shortened to 80 UTF-16 units at a character boundary (challenge
+// p4: a surrogate pair or a joined emoji is never cut).
+export function firstLine(t: string): string {
+  const l = t.split(/\r?\n/).map(x => x.replace(/\s+/gu, ' ').trim()).find(Boolean) ?? ''
+  if (l.length <= 80) return l
+  let out = ''
+  for (const { segment } of new Intl.Segmenter(undefined, { granularity: 'grapheme' }).segment(l)) { if (out.length + segment.length > 79) break; out += segment }
+  return `${out.trimEnd()}…`
+}

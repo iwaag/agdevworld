@@ -266,7 +266,7 @@ archive, starts runs). pj-ponderer `tools/discussions` reads both formats.
 | `POST …/requests {participant, question, re?, token?}`, `…/requests/<n>/withdraw {reason}`, `…/requests/<n>/retry` | the person's request; withdraw one not started; try a failed one again |
 | `POST …/resume {request?}` | run held continuations once |
 | `POST …/close`, `…/reopen` | |
-| `POST …/meta {category?, displayTitle?, note?}`, `GET`/`POST …/overview` | records about the conversation |
+| `POST …/meta {category?, displayTitle?, ifUntitled?, note?}`, `GET`/`POST …/overview` (`displayTitle?`, `ifUntitled?`) | records about the conversation; `skipped` says why an `ifUntitled` title was not written |
 | `GET …/workflows[/<n>[/current]]` | workflows beside the speech (reads only) |
 | `GET …/dialogue?lang=`, `POST …/dialogue/retry` | character dialogue ([dialogue.md](dialogue.md)) |
 | `GET`/`POST …/archive` | status / publish now (502 with the reason on failure) |
@@ -460,6 +460,25 @@ checks apart.
 explicitly (`meta --title`, or `overview --title`). The original title and
 the id stay and are shown in the room's details. No client derives a
 display title from the original by string rules.
+
+**Naming a room nobody has titled (challenge p4).** People do not name a
+conversation before saying what they want. The client derives the original
+title from the first nonempty line of the first message, and that title is
+readable at once. The facilitator then gives a display title with its first
+overview, using `--if-untitled` (API `ifUntitled: true` on `…/meta` and
+`…/overview`; usage in `wfe conversation help`).
+
+- The display title is written only if the conversation has no display
+  title and no display-title record at all. A person's edit wins, and so does
+  their reset to the original, which is a record whose value is none.
+- The check and the write happen in one write transaction. An edit that
+  lands first is kept. One that lands after is an ordinary later change.
+- When the title is skipped, the answer names the record that won
+  (`skipped`). The overview is still published.
+- A repeated or later overview with `--if-untitled` renames nothing.
+- Without the flag, a title replaces whatever was there, as before.
+- No new store or schema is involved. The rule reads the existing
+  `discussion_meta` history.
 
 Every change of either is an append-only `discussion_meta` record: field,
 value, who, run, when and why. A metadata write never touches messages,

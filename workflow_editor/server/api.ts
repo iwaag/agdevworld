@@ -372,8 +372,9 @@ export function createHandler(config: ServiceConfig) {
           const c = need()
           const t = input.displayTitle
           if (t !== undefined && t !== null && typeof t !== 'string') throw new RequestError(400, 'displayTitle is a string, or null to remove it')
-          const r = ds.setMeta(wsId, { category: opt('category'), displayTitle: t as string | null | undefined, by: opt('author') ?? c.person, note: opt('note') })
-          return send(res, 200, { ok: true, changed: r.changed, conversation: { id: wsId, category: r.conversation.category === 'check' ? 'check' : 'conversation', displayTitle: r.conversation.display_title ?? null } })
+          if (input.ifUntitled !== undefined && typeof input.ifUntitled !== 'boolean') throw new RequestError(400, 'ifUntitled is true or false')
+          const r = ds.setMeta(wsId, { category: opt('category'), displayTitle: t as string | null | undefined, ifUntitled: input.ifUntitled === true, by: opt('author') ?? c.person, note: opt('note') })
+          return send(res, 200, { ok: true, changed: r.changed, skipped: r.skipped, conversation: { id: wsId, category: r.conversation.category === 'check' ? 'check' : 'conversation', displayTitle: r.conversation.display_title ?? null } })
         }
         if (wsId && b === 'overview' && method === 'GET') { exists(wsId); return send(res, 200, { overview: ds.overview(wsId), revisions: ds.overviewRows(wsId).map(r => ds.overviewView(r)), brief: ds.brief(wsId) }) }
         if (wsId && b === 'overview' && method === 'POST') {
@@ -382,7 +383,8 @@ export function createHandler(config: ServiceConfig) {
           if (!Array.isArray(u) || !u.every(x => typeof x === 'string')) throw new RequestError(400, 'unresolved is a list of texts')
           const through = input.through === undefined ? undefined : Number(input.through)
           if (through !== undefined && !Number.isInteger(through)) throw new RequestError(400, 'through is a message id')
-          const r = ds.publishOverview(wsId, { purpose: words('purpose'), outcome: opt('outcome') ?? null, unresolved: u as string[], through, title: opt('displayTitle'), note: opt('note'), author: opt('author') ?? c.person, token: opt('token') })
+          if (input.ifUntitled !== undefined && typeof input.ifUntitled !== 'boolean') throw new RequestError(400, 'ifUntitled is true or false')
+          const r = ds.publishOverview(wsId, { purpose: words('purpose'), outcome: opt('outcome') ?? null, unresolved: u as string[], through, title: opt('displayTitle'), ifUntitled: input.ifUntitled === true, note: opt('note'), author: opt('author') ?? c.person, token: opt('token') })
           return send(res, 200, { ok: true, ...r })
         }
         if (wsId && b === 'close' && method === 'POST') { const c = need(); return send(res, 200, { ok: true, ...ds.close(wsId, { by: opt('author') ?? c.person }) }) }

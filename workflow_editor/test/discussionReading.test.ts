@@ -296,3 +296,46 @@ test('store v9: a v8 store\'s discussions become `discussion` explicitly; catego
   assert.deepEqual([v.conversation.state, v.conversation.category, v.conversation.displayTitle, v.overview?.purpose], ['open', 'check', 'v8の確認', `v8の記録を確かめる [#${m1.id}]`])
   cs2.close(); s.x.close()
 })
+
+// challenge p4: a room is named by the person's wish (its original title),
+// and ponderer gives it a display title with its first overview — only if
+// nobody has titled it, decided in the same write transaction as the write.
+test('ifUntitled titles an untitled conversation once; a person\'s edit or reset wins, also from another connection; a skip never blocks the overview', async () => {
+  const s = await setup()
+  s.ds.create('rd-t', { facilitate: true, title: 'ゲームの見た目を変えたい', by: 'Pat', members: ['forge'] })
+  const m1 = (await s.ds.post('rd-t', { text: 'ゲームの見た目を変えたい\n明るい色にしたい', author: 'Pat', token: 'tok-rd-t-001' })).message
+  const was = counts(s, 'rd-t')
+  const ov = (purpose: string, o: { title?: string; ifUntitled?: boolean; token?: string } = {}) => s.ds.publishOverview('rd-t', { purpose: `${purpose} [#${m1.id}]`, note: 'first overview', author: 'ponderer-agent', ...o })
+  const r1 = ov('見た目を明るくしたい', { title: '明るい見た目への変更', ifUntitled: true })
+  assert.deepEqual([r1.changed.map(m => m.value), r1.skipped], [['明るい見た目への変更'], null], 'an untitled room gets the title')
+  assert.equal(s.cs.conversation('rd-t')!.display_title, '明るい見た目への変更')
+  const r2 = ov('見た目を明るくしたい', { title: '別の題', ifUntitled: true })
+  assert.equal(r2.duplicate, true)
+  assert.deepEqual([r2.changed, r2.skipped?.value, r2.skipped?.by], [[], '明るい見た目への変更', 'ponderer-agent'], 'a duplicate overview renames nothing')
+  const r3 = ov('見た目を明るくし、席も変えたい', { title: 'さらに別の題', ifUntitled: true })
+  assert.deepEqual([r3.duplicate, r3.changed, s.cs.conversation('rd-t')!.display_title], [false, [], '明るい見た目への変更'], 'a later overview is published and renames nothing')
+  assert.deepEqual(counts(s, 'rd-t'), was, 'nothing sent, invited, started or reopened; the list order stays')
+
+  // A person's edit lands first, from another connection to the same store.
+  s.ds.create('rd-u', { facilitate: true, title: 'wish two', by: 'Pat' })
+  const m2 = (await s.ds.post('rd-u', { text: 'wish two', author: 'Pat', token: 'tok-rd-u-001' })).message
+  const other = new ConversationService(new ConversationStore({ area: s.area, exec: s.x }))
+  other.setMeta('rd-u', { displayTitle: '私が付けた題', by: 'Pat', note: 'aghangout から' })
+  const r4 = s.ds.publishOverview('rd-u', { purpose: `二つ目 [#${m2.id}]`, title: 'ponderer の題', ifUntitled: true, note: 'first', author: 'ponderer-agent' })
+  assert.deepEqual([r4.overview.purpose, r4.changed, r4.skipped?.by, s.cs.conversation('rd-u')!.display_title], [`二つ目 [#${m2.id}]`, [], 'Pat', '私が付けた題'], 'the edit is kept and the overview is still published')
+  // A reset to the original title is a decision too.
+  other.setMeta('rd-u', { displayTitle: null, by: 'Pat', note: 'the original reads fine' })
+  const r5 = s.ds.setMeta('rd-u', { displayTitle: 'ponderer の題', ifUntitled: true, by: 'ponderer-agent', note: 'first overview' })
+  assert.deepEqual([r5.changed, r5.skipped?.value, s.cs.conversation('rd-u')!.display_title], [[], null, null], 'a reset is kept')
+  // An explicit title still replaces, as before.
+  assert.deepEqual(s.ds.setMeta('rd-u', { displayTitle: '明示した題', by: 'ponderer-agent', note: 'asked to rename' }).changed.map(m => m.value), ['明示した題'])
+  // A display title set with no record (an old backfill) also counts.
+  s.ds.create('rd-v', { facilitate: true, title: 'old', by: 'Pat' })
+  s.cs.db.prepare('UPDATE conversations SET display_title = ? WHERE id = ?').run('昔の題', 'rd-v')
+  assert.equal(s.ds.setMeta('rd-v', { displayTitle: '新しい題', ifUntitled: true, by: 'ponderer-agent' }).skipped?.value, '昔の題')
+  // Refused before anything is written.
+  assert.throws(() => s.ds.setMeta('rd-v', { displayTitle: null, ifUntitled: true, by: 'ponderer-agent' }), /ifUntitled names a display title/)
+  const before = s.ds.overviewRows('rd-u').length
+  assert.throws(() => s.ds.publishOverview('rd-u', { purpose: `x [#${m2.id}]`, title: 'two\nlines', note: 'n', author: 'ponderer-agent' }), /one line/)
+  assert.equal(s.ds.overviewRows('rd-u').length, before, 'a bad title publishes no overview')
+})

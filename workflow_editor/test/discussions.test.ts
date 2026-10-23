@@ -475,6 +475,12 @@ test('HTTP: participants, create with a brief, an addressed post, the view with 
     assert.match(sh.stdout, /Overview of p16-http by Omni Agent, .*covers through #2 \(current\); cites #1/)
     const mt = await pexec(process.execPath, [join(pkg, 'cli', 'wfe.ts'), 'discussion', 'meta', 'p16-http', '--no-title', '--note', 'original is fine', '--author', 'Omni Agent', '--registry', s.registry, '--area', s.area])
     assert.match(mt.stdout, /Recorded for p16-http: displayTitle = \(none\)/)
+    // challenge p4: --if-untitled after that reset leaves the title alone and says who decided; the overview is still recorded.
+    const iu = await pexec(process.execPath, [join(pkg, 'cli', 'wfe.ts'), 'discussion', 'overview', 'p16-http', '--purpose', 'HTTP経路の確認（再） [#1]', '--title', '自動の題', '--if-untitled', '--note', 'cli', '--author', 'ponderer-agent', '--registry', s.registry, '--area', s.area])
+    assert.match(iu.stdout, /Recorded: overview 3 of p16-http.* Display title left as it is: Omni Agent titled it at .* \(the original title\)\./)
+    const hu = await (await post('conversations/p16-http/meta', { displayTitle: '自動の題', ifUntitled: true, note: 'http' })).json() as { changed: unknown[]; skipped: { by: string } }
+    assert.deepEqual([hu.changed, hu.skipped.by], [[], 'Omni Agent'])
+    assert.equal((await post('conversations/p16-http/meta', { displayTitle: 'x', ifUntitled: 'yes' })).status, 400)
     assert.match(stdout, /Pat \(person\) to sage/)
     assert.match(stdout, /Archive: behind|Archive: current/)
     const st = await pexec(process.execPath, [join(pkg, 'cli', 'wfe.ts'), 'discussion', 'archive', '--registry', s.registry, '--area', s.area])

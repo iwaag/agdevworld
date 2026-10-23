@@ -18,7 +18,7 @@ import { fileURLToPath } from 'node:url'
 import { promisify } from 'node:util'
 import { ConversationArchive } from '../server/conversationArchive.ts'
 import { ConversationService } from '../server/conversationService.ts'
-import { ConversationStore, pendingQuestions } from '../server/conversations.ts'
+import { ConversationStore, firstLine, pendingQuestions } from '../server/conversations.ts'
 import { createProject } from '../server/create.ts'
 import { ExecStore } from '../server/exec.ts'
 import { gitOk } from '../server/git.ts'
@@ -447,4 +447,12 @@ test('a reply whose text is given without --text is refused with that said first
   assert.match(lines.at(-1)!, /Nothing was posted or recorded/)
   assert.equal(s.ds.messages('c-u').length, 1)
   s.cs.close(); s.x.close()
+})
+
+// challenge p4: an original title derived from words.
+test('firstLine: the first nonempty line, whitespace collapsed, shortened at a character boundary', () => {
+  assert.equal(firstLine('\n \n  遊べる　 ゲームが欲しい \nsecond'), '遊べる ゲームが欲しい')
+  assert.equal(firstLine('x'.repeat(80)), 'x'.repeat(80))
+  const e = firstLine('👩‍👩‍👧'.repeat(20))
+  assert.ok(e.length <= 80 && e.endsWith('…') && /^(👩‍👩‍👧)+…$/u.test(e), e)
 })

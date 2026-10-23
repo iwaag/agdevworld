@@ -145,6 +145,10 @@ export interface AnnotationRow { id: number; conv: string; kind: string; author:
 // recorded for readers, and the overview — an interpretation with sources.
 export const CATEGORIES = ['conversation', 'check'] as const
 export type Category = typeof CATEGORIES[number]
+// Why an `ifUntitled` display title was not written: the record that titled
+// the conversation first (meta null: a title with no record, from before
+// records were kept).
+export interface TitleSkip { reason: 'titled'; value: string | null; by: string | null; run: string | null; at: string | null; meta: number | null }
 export interface MetaRow { id: number; conv: string; field: 'category' | 'displayTitle' | 'defaultTo'; value: string | null; by: string; run: string | null; at: string; note: string }
 export interface OverviewRow { id: number; conv: string; author: string; run: string | null; purpose: string; outcome: string | null; unresolved: string; through: number; sources: string; note: string; at: string; token: string }
 // `after`: messages newer than the newest one the overview covers.
@@ -164,6 +168,13 @@ export interface DiscussionStatus {
   continuations: { requests: number[]; awaitedBy: string | null; why: string }[] // continuations held for an explicit resume (challenge p2)
 }
 const MAX_TITLE = 200
+// A display title as given: undefined (not named), null (back to the
+// original) or one line; refused before anything is written.
+function displayTitleOf(t: string | null | undefined): string | null | undefined {
+  const title = t === undefined ? undefined : t?.trim() || null
+  if (title && (title.includes('\n') || title.length > MAX_TITLE)) throw new RequestError(400, `a display title is one line of at most ${MAX_TITLE} characters`)
+  return title
+}
 const MAX_OVERVIEW = 4000
 // A citation in an overview: [#123] (or [#123 #124]).
 const CITATION = /\[#(\d+)((?:[ ,]+#\d+)*)\]/g
@@ -1458,20 +1469,35 @@ export class ConversationService {
   // Corrects a discussion's category or display title, each change recorded
   // with who and why. Nothing else moves: no message, no invitation, no run,
   // no reopening, and not `updated` (the list's order is the conversation's).
-  setMeta(conv: string, o: { category?: string; displayTitle?: string | null; by: string; run?: string | null; note?: string }): { conversation: ConversationRow; changed: MetaRow[] } {
-    const c = this.need(conv)
+  //
+  // `ifUntitled` (challenge p4) names a conversation that nobody has titled
+  // yet: the display title is written only when the conversation has none
+  // and no display-title record at all — a person's edit, and their reset to
+  // the original too, are records and win. The check and the write are one
+  // write transaction, so an edit that lands first is kept; one that lands
+  // after is an ordinary later change. Otherwise `skipped` names the record
+  // that won, and nothing about the title is written.
+  setMeta(conv: string, o: { category?: string; displayTitle?: string | null; ifUntitled?: boolean; by: string; run?: string | null; note?: string }): { conversation: ConversationRow; changed: MetaRow[]; skipped: TitleSkip | null } {
+    this.need(conv)
     if (o.category === undefined && o.displayTitle === undefined) throw new RequestError(400, 'nothing to change: name a category or a display title')
     const category = o.category === undefined ? undefined : categoryOf(o.category)
-    const title = o.displayTitle === undefined ? undefined : o.displayTitle?.trim() || null
-    if (title && (title.includes('\n') || title.length > MAX_TITLE)) throw new RequestError(400, `a display title is one line of at most ${MAX_TITLE} characters`)
+    const title = displayTitleOf(o.displayTitle)
+    if (o.ifUntitled && !title) throw new RequestError(400, 'ifUntitled names a display title to give an untitled conversation')
     if (o.run) parseRunName(o.run)
     return this.tx(() => {
+      const c = this.cs.conversation(conv)!
       const ids: number[] = []
       const at = now()
       const record = (field: MetaRow['field'], value: string | null) => ids.push(Number(this.db.prepare('INSERT INTO discussion_meta (conv, field, value, by, run, at, note) VALUES (?, ?, ?, ?, ?, ?, ?)').run(conv, field, value, o.by, o.run ?? null, at, o.note?.trim() ?? '').lastInsertRowid))
       if (category !== undefined && category !== (c.category === 'check' ? 'check' : 'conversation')) { this.db.prepare('UPDATE conversations SET category = ? WHERE id = ?').run(category, conv); record('category', category) }
-      if (title !== undefined && title !== (c.display_title ?? null)) { this.db.prepare('UPDATE conversations SET display_title = ? WHERE id = ?').run(title, conv); record('displayTitle', title) }
-      return { conversation: this.cs.conversation(conv)!, changed: ids.map(id => this.one<MetaRow>('SELECT * FROM discussion_meta WHERE id = ?', id)!) }
+      let skipped: TitleSkip | null = null
+      if (title !== undefined && o.ifUntitled) {
+        const prior = this.one<MetaRow>('SELECT * FROM discussion_meta WHERE conv = ? AND field = \'displayTitle\' ORDER BY id DESC LIMIT 1', conv)
+        if (prior) skipped = { reason: 'titled', value: prior.value, by: prior.by, run: prior.run, at: prior.at, meta: prior.id }
+        else if (c.display_title) skipped = { reason: 'titled', value: c.display_title, by: null, run: null, at: null, meta: null }
+      }
+      if (title !== undefined && !skipped && title !== (c.display_title ?? null)) { this.db.prepare('UPDATE conversations SET display_title = ? WHERE id = ?').run(title, conv); record('displayTitle', title) }
+      return { conversation: this.cs.conversation(conv)!, changed: ids.map(id => this.one<MetaRow>('SELECT * FROM discussion_meta WHERE id = ?', id)!), skipped }
     })
   }
 
@@ -1493,8 +1519,16 @@ export class ConversationService {
   // discussion's execution state — and starts nothing. From a run it is the
   // facilitator's or the archive project's; outside a run it is whoever is
   // named (the person, an outside agent), as recorded.
-  publishOverview(conv: string, o: { purpose: string; outcome?: string | null; unresolved?: string[]; through?: number; title?: string | null; note?: string; author: string; run?: string | null; token?: string }): { overview: Overview; duplicate: boolean; changed: MetaRow[] } {
+  //
+  // A title given with it is written as `setMeta` writes one, after the
+  // overview, and `ifUntitled` applies there: a title that is skipped never
+  // keeps the overview from being published. A duplicate overview (the same
+  // token) still passes its title on, so `ifUntitled` is what keeps a
+  // repeated submission from renaming anything.
+  publishOverview(conv: string, o: { purpose: string; outcome?: string | null; unresolved?: string[]; through?: number; title?: string | null; ifUntitled?: boolean; note?: string; author: string; run?: string | null; token?: string }): { overview: Overview; duplicate: boolean; changed: MetaRow[]; skipped: TitleSkip | null } {
     this.need(conv)
+    const title = displayTitleOf(o.title)
+    if (o.ifUntitled && !title) throw new RequestError(400, 'ifUntitled names a display title to give an untitled conversation')
     const cfg = this.cfg()
     if (o.run) {
       const { workspace } = parseRunName(o.run)
@@ -1528,8 +1562,8 @@ export class ConversationService {
         .run(conv, o.author, o.run ?? null, purpose, outcome, JSON.stringify(unresolved), through, JSON.stringify(sources), o.note?.trim() ?? '', now(), token).lastInsertRowid)
       return { row: this.one<OverviewRow>('SELECT * FROM overviews WHERE id = ?', id)!, duplicate: false }
     })
-    const changed = o.title !== undefined ? this.setMeta(conv, { displayTitle: o.title, by: o.author, run: o.run, note: o.note?.trim() || 'with an overview' }).changed : []
-    return { overview: this.overviewView(r.row), duplicate: r.duplicate, changed }
+    const t = title !== undefined ? this.setMeta(conv, { displayTitle: title, ifUntitled: o.ifUntitled, by: o.author, run: o.run, note: o.note?.trim() || 'with an overview' }) : null
+    return { overview: this.overviewView(r.row), duplicate: r.duplicate, changed: t?.changed ?? [], skipped: t?.skipped ?? null }
   }
 
   // The opening request, for a discussion without an overview: the earliest

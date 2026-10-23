@@ -7,11 +7,14 @@ import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { attachRequests, CONVERSATION_ID, ConversationStore, parseRunName, RELATIONS, runName, viewBaseOf, type MessageKind, type Relation } from '../server/conversations.ts'
 import { ConversationArchive } from '../server/conversationArchive.ts'
-import { ConversationService, type Requester } from '../server/conversationService.ts'
+import { ConversationService, type Requester, type TitleSkip } from '../server/conversationService.ts'
 import { ConversationWorkflows, type WorkflowRef, type WorkflowRelation, type WorkflowRole } from '../server/conversationWorkflows.ts'
 import type { ExecStore } from '../server/exec.ts'
 import { readRun } from '../server/runs.ts'
 import { RequestError } from '../server/workspace.ts'
+
+// Why --if-untitled left the display title alone (challenge p4).
+const skippedWords = (k: TitleSkip | null) => !k ? '' : `Display title left as it is: ${k.by ? `${k.by} titled it${k.at ? ` at ${k.at}` : ''} (${k.value === null ? 'the original title' : `"${k.value}"`})` : `it already reads "${k.value}"`}.`
 
 export const CONVERSATION_HELP = `wfe conversation <subcommand> …   (conversations; docs/conversations.md)
 
@@ -133,13 +136,19 @@ reopen <id> [--author <who>]  continue it; nothing withdrawn, completed or held 
 resume <id> [<request>] [--author <who>]
                               run held continuations once (what a conductor awaited, resolved
                               while the room was closed or no longer facilitated)
-meta <id> [--category conversation|check] [--title <display title> | --no-title] --note <why> [--author <who>]
+meta <id> [--category conversation|check] [--title <display title> [--if-untitled] | --no-title] --note <why> [--author <who>]
                               correct how it is listed; recorded with who and why; sends nothing
-overview [<id>] --purpose <t> [--outcome <t>] [--unresolved <t>]… [--through <msg>] [--title <t>]
+overview [<id>] --purpose <t> [--outcome <t>] [--unresolved <t>]… [--through <msg>] [--title <t> [--if-untitled]]
          --note <what changed> [--author <who>]    (or --file <json|->; without either: show it)
                               the readers' overview: purpose, outcome, unresolved, each part citing
                               [#n]; an interpretation with sources, a new revision each time. From a
                               run: the conductor's or the archive project's
+  --if-untitled               give the display title only to a conversation nobody has titled: it is
+                              written when the conversation has no display title and no display-title
+                              record (a person's edit, or their reset to the original, wins); checked
+                              and written at once. Skipped, it says who titled it and changes nothing
+                              else: the overview is still published. Without it, --title sets the
+                              display title whatever it was
 annotate <id> --kind intervention|recovery|evaluation|correction|note (--text <t> | --file <f>)
          --author <who> [--re <msg>]… [--run <run>]
                               a record by someone outside the speech; never speech, starts nothing
@@ -457,8 +466,8 @@ export async function conversationCommand(c: ConversationCli): Promise<number> {
         const note = c.opt('note'); if (!note) throw c.usage('--note <why> is required: the reason is part of the record')
         const by = await who(); if (!by) throw c.usage('--author <who> is required outside an executing attempt')
         const title = c.flag('no-title') ? null : c.opt('title')
-        const r = ds.setMeta(id, { category: c.opt('category'), displayTitle: title, by, run: (await own())?.run ?? null, note })
-        c.out(r.changed.length ? `Recorded for ${id}: ${r.changed.map(m => `${m.field} = ${m.value ?? '(none)'}`).join('; ')}.` : `Nothing changed for ${id}: it already reads so.`, { ok: true, ...r })
+        const r = ds.setMeta(id, { category: c.opt('category'), displayTitle: title, ifUntitled: c.flag('if-untitled'), by, run: (await own())?.run ?? null, note })
+        c.out([r.changed.length ? `Recorded for ${id}: ${r.changed.map(m => `${m.field} = ${m.value ?? '(none)'}`).join('; ')}.` : r.skipped ? '' : `Nothing changed for ${id}: it already reads so.`, skippedWords(r.skipped)].filter(Boolean).join(' '), { ok: true, ...r })
         return 0
       }
       case 'overview': {
@@ -473,12 +482,12 @@ export async function conversationCommand(c: ConversationCli): Promise<number> {
         const o = await own()
         const author = o?.agent ?? c.opt('author'); if (!author) throw c.usage('--author <who> is required outside an executing attempt')
         const f = c.opt('file')
-        const given = f ? JSON.parse(readFileSync(f === '-' ? 0 : resolve(f), 'utf8')) as { purpose?: string; outcome?: string; unresolved?: string[]; through?: number; title?: string; note?: string } : null
+        const given = f ? JSON.parse(readFileSync(f === '-' ? 0 : resolve(f), 'utf8')) as { purpose?: string; outcome?: string; unresolved?: string[]; through?: number; title?: string; ifUntitled?: boolean; note?: string } : null
         const purpose = given?.purpose ?? c.opt('purpose'); if (!purpose) throw c.usage('--purpose <text> is required (or --file)')
         const note = given?.note ?? c.opt('note'); if (!note) throw c.usage('--note <what changed> is required: why this revision')
         const through = given?.through ?? (c.opt('through') ? Number(c.opt('through')!.replace(/^#/, '')) : undefined)
-        const r = ds.publishOverview(id, { purpose, outcome: given?.outcome ?? c.opt('outcome') ?? null, unresolved: given?.unresolved ?? c.opts('unresolved'), through, title: given?.title ?? c.opt('title'), note, author, run: o?.run ?? null })
-        c.out(`${r.duplicate ? 'Already recorded (same overview)' : 'Recorded'}: overview ${r.overview.id} of ${id}, through #${r.overview.through}, citing ${r.overview.sources.map(n => `#${n}`).join(' ')}${r.changed.length ? `; display title "${r.changed[0].value}"` : ''}. Nothing was sent or started.`, { ok: true, ...r })
+        const r = ds.publishOverview(id, { purpose, outcome: given?.outcome ?? c.opt('outcome') ?? null, unresolved: given?.unresolved ?? c.opts('unresolved'), through, title: given?.title ?? c.opt('title'), ifUntitled: given?.ifUntitled ?? c.flag('if-untitled'), note, author, run: o?.run ?? null })
+        c.out(`${r.duplicate ? 'Already recorded (same overview)' : 'Recorded'}: overview ${r.overview.id} of ${id}, through #${r.overview.through}, citing ${r.overview.sources.map(n => `#${n}`).join(' ')}${r.changed.length ? `; display title "${r.changed[0].value}"` : ''}. Nothing was sent or started.${r.skipped ? ` ${skippedWords(r.skipped)}` : ''}`, { ok: true, ...r })
         return 0
       }
       case 'withdraw': {

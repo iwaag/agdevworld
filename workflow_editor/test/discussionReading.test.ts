@@ -339,3 +339,18 @@ test('ifUntitled titles an untitled conversation once; a person\'s edit or reset
   assert.throws(() => s.ds.publishOverview('rd-u', { purpose: `x [#${m2.id}]`, title: 'two\nlines', note: 'n', author: 'ponderer-agent' }), /one line/)
   assert.equal(s.ds.overviewRows('rd-u').length, before, 'a bad title publishes no overview')
 })
+
+test('a facilitator that cannot take the brief leaves the room usable under its original title; a title change starts nothing', async () => {
+  const s = await setup()
+  const pond = join(s.area, 'pj-ponderer')
+  await gitOk(pond, ['rm', '-q', join('devdocs', 'workflows', 'conduct.yaml')]); await gitOk(pond, ['commit', '-q', '-m', 'no conduct'])
+  s.ds.create('rd-f', { facilitate: true, title: '会議の進め方を相談したい', by: 'Pat', members: ['forge'] })
+  const m = (await s.ds.post('rd-f', { text: '会議の進め方を相談したい', author: 'Pat', token: 'tok-rd-f-001' })).message
+  const req = s.ds.invitations('rd-f').find(i => i.source.includes(m.id))
+  assert.equal(req?.state, 'failed', `the conductor request fails visibly (${req?.state}: ${req?.error})`)
+  const v = await s.ds.view('rd-f')
+  assert.deepEqual([v.conversation.title, v.conversation.displayTitle, v.messages.length], ['会議の進め方を相談したい', null, 1], 'readable at once under the original title')
+  const was = counts(s, 'rd-f')
+  s.ds.setMeta('rd-f', { displayTitle: '会議の進め方', by: 'Pat', note: 'aghangout から' })
+  assert.deepEqual(counts(s, 'rd-f'), was, 'a title change sends, invites, starts and reopens nothing')
+})

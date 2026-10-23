@@ -70,7 +70,7 @@ export async function moveLayout(clone: string): Promise<LayoutPlan> {
       if (next !== target) plan.links.push({ file: now, from: target, to: next })
       return next
     }
-    const out = text.replace(LINK, (m, a, t, b, s1, t2, s2) => a ? `${a}${fix(t)}${b}` : `${s1}${fix(t2)}${s2}`)
+    const out = text.replace(LINK, (_m, a, t, b, s1, t2, s2) => a ? `${a}${fix(t)}${b}` : `${s1}${fix(t2)}${s2}`)
     if (out !== text) await writeFile(join(clone, now), out)
   }
   for (const keep of ['evidence/.gitkeep', 'challenges/.gitkeep']) {

@@ -46,7 +46,7 @@ export function freeworkWorkflow(settings: Pick<BasicSettings, 'repositories' | 
   const w = emptyWorkflow(id, name)
   w.intent = [
     'Serve the person\'s request starting from their braindump and one conversation.',
-    'Work out what to do, add that work to the run, do it,',
+    'Work out what to do, add that work to the run as nodes of its own, do it there,',
     'and talk with the person whenever that helps, until the request is served.',
   ].join('\n')
   w.documentation = { policy: 'custom', plan: false, reports: false, final: true }
@@ -54,7 +54,7 @@ export function freeworkWorkflow(settings: Pick<BasicSettings, 'repositories' | 
   w.execution = structuredClone(settings.execution)
   w.nodes.talk = {
     type: 'talk', name: 'Talk',
-    description: 'Understand the request, hold the consultation it needs, and make the next work concrete.',
+    description: 'Understand the request and hold the consultation it needs. The work itself is added as nodes of its own and done there, not in this talk.',
     repositories: [],
   }
   return w

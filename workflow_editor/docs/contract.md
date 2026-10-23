@@ -227,7 +227,7 @@ nodes:
   talk:
     type: talk
     name: Talk
-    description: Understand the request, hold the consultation it needs, and make the next work concrete.
+    description: Understand the request and hold the consultation it needs. The work itself is added as nodes of its own and done there, not in this talk.
 ```
 
 — with the braindump as its input. Its run grows its work in that

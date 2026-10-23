@@ -42,7 +42,7 @@ test('a new project has freework: one talk, final report only, its root editable
   assert.equal(w.id, FREEWORK)
   assert.deepEqual(Object.keys(w.nodes), ['talk'])
   assert.equal(w.nodes.talk.type, 'talk')
-  assert.match(w.nodes.talk.description, /make the next work concrete/)
+  assert.match(w.nodes.talk.description, /added as nodes of its own and done there, not in this talk/)
   assert.deepEqual(w.documentation, { policy: 'custom', plan: false, reports: false, final: true })
   assert.deepEqual(w.repositories, { project: { path: '.', access: 'editable' } })
   assert.deepEqual(w.execution, { agent: '', profile: '', guides: [] })

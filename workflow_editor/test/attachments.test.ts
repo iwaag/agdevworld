@@ -100,7 +100,7 @@ test('a conversation message carries a challenge; its turn gets that revision, n
   const r = await rec(s, run)
   assert.deepEqual(r.input.attachments, [{ kind: 'challenge', id: 'ch-0001', commit: first, title: 'Edge remnants', sha256: c.record!.sha256, file: `attachments/ch-0001@${first.slice(0, 12)}.md` }])
   assert.match(await file(s, run, r.input.attachments![0]!.file), /Version one\./)
-  assert.match(attachmentBrief(r, 'devdocs/runs/converse/run-001').join('\n'), /ch-0001 "Edge remnants" at [0-9a-f]{12}: devdocs\/runs\/converse\/run-001\/attachments\/ch-0001@[0-9a-f]{12}\.md; evidence: wfe challenge evidence ch-0001 --at/)
+  assert.match(attachmentBrief(r, 'devdocs/runs/converse/run-001').join('\n'), /ch-0001 "Edge remnants" at [0-9a-f]{12}: devdocs\/runs\/converse\/run-001\/attachments\/ch-0001@[0-9a-f]{12}\.md; its files and trials then: wfe challenge show ch-0001 --at/)
   // the challenge is edited later: the earlier turn's input is unchanged; the view says what moved
   const e = await s.ch.edit('ch-0001', { by: 'Pat', via: 'page', request: 'att-edit-1', base: first, body: 'Version two.' })
   second = e.record!.commit
@@ -115,7 +115,8 @@ test('a conversation message carries a challenge; its turn gets that revision, n
 test('unknown, unpublished or malformed references are refused and the message is not stored', async () => {
   const before = s.cs.messages('att-c1').length
   await assert.rejects(s.ds.post('att-c1', { text: 'x', author: 'Pat', token: 'tok-att-0003', challenges: [{ id: 'ch-0099' }] }), (e: unknown) => e instanceof RequestError && e.status === 404)
-  await assert.rejects(s.ds.post('att-c1', { text: 'x', author: 'Pat', token: 'tok-att-0004', challenges: [{ id: 'nope' }] }), /not a challenge id/)
+  await assert.rejects(s.ds.post('att-c1', { text: 'x', author: 'Pat', token: 'tok-att-0004', challenges: [{ id: '../nope' }] }), /not a challenge id/)
+  await assert.rejects(s.ds.post('att-c1', { text: 'x', author: 'Pat', token: 'tok-att-0006', challenges: [{ id: 'nope' }] }), /no challenge nope/)
   await assert.rejects(s.ds.post('att-c1', { text: 'x', author: 'Pat', token: 'tok-att-0005', challenges: [{ id: 'ch-0001', at: 'deadbeef' }] }), /no commit/)
   assert.equal(s.cs.messages('att-c1').length, before)
 })

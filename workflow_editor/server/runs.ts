@@ -623,7 +623,7 @@ function withAttachments(input: RunInput, files: Record<string, string>, attachm
   const seen = new Set<string>()
   input.attachments = []
   for (const a of attachments) {
-    if (a.kind !== 'challenge' || !/^ch-[0-9]{4,}$/.test(a.id) || !/^[0-9a-f]{40,64}$/.test(a.commit)) throw new RequestError(400, `attachment ${a.id}@${a.commit} is not a pinned challenge`)
+    if (a.kind !== 'challenge' || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(a.id) || !/^[0-9a-f]{40,64}$/.test(a.commit)) throw new RequestError(400, `attachment ${a.id}@${a.commit} is not a pinned challenge`)
     if (sha256(a.text) !== a.sha256) throw new RequestError(409, `attachment ${a.id}@${a.commit.slice(0, 12)}: its text is not the revision named (hash differs)`)
     const file = `attachments/${a.id}@${a.commit.slice(0, 12)}.md`
     if (seen.has(file)) continue

@@ -131,7 +131,7 @@ export interface Message {
 }
 // A challenge a message carried (challenge p1): the revision it was sent
 // with, and — a separate, current read — the latest one when it moved since.
-export interface MessageAttachment extends AttachmentRef { latest: { commit: string; title: string; state: string } | null }
+export interface MessageAttachment extends AttachmentRef { latest: { commit: string; title: string; state: string | null } | null }
 // What a client names to attach: a challenge, optionally at a commit (else
 // its current revision when the message is accepted).
 export interface AttachRequest { id: string; at?: string }

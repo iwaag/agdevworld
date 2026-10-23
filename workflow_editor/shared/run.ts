@@ -700,7 +700,7 @@ export function attachmentsOf(v: unknown): AttachmentRef[] {
   if (!Array.isArray(v)) return fail('shape', 'source.attachments must be a list')
   return v.map((a, i) => {
     const o = isObj(a) ? a as Record<string, unknown> : fail('shape', `source.attachments[${i}] must be an object`)
-    if (o.kind !== 'challenge' || typeof o.id !== 'string' || !/^ch-[0-9]{4,}$/.test(o.id)) fail('shape', `source.attachments[${i}] must be a challenge (ch-0001)`)
+    if (o.kind !== 'challenge' || typeof o.id !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(o.id)) fail('shape', `source.attachments[${i}] must be a challenge (ch-0001)`)
     if (typeof o.commit !== 'string' || !/^[0-9a-f]{40,64}$/.test(o.commit)) fail('shape', `source.attachments[${i}].commit must be a full commit id`)
     if (typeof o.sha256 !== 'string' || !/^[0-9a-f]{64}$/.test(o.sha256)) fail('shape', `source.attachments[${i}].sha256 must be 64 hex digits`)
     return { kind: 'challenge' as const, id: o.id as string, commit: o.commit as string, title: typeof o.title === 'string' ? o.title : '', sha256: o.sha256 as string }

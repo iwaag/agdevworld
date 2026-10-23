@@ -3,15 +3,18 @@
 // the configured person, a trial as its named author, the CLI as --by; a
 // stale base answers 409 with the current record; pinned and current reads
 // are told apart; the CLI goes through a service with --service; reads and
-// writes start no run.
+// writes start no run; a trial is published from a local directory and
+// read back file by file at a pinned commit; an oversized body is refused
+// before it is read.
 import { after, before, test } from 'node:test'
 import assert from 'node:assert/strict'
 import { execFile } from 'node:child_process'
-import { mkdtemp, rm, writeFile } from 'node:fs/promises'
-import { createServer, type Server } from 'node:http'
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { createServer, request, type Server } from 'node:http'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createHandler } from '../server/api.ts'
+import { MAX_REQUEST } from '../server/challengeApi.ts'
 import { gitOk } from '../server/git.ts'
 
 let root = '', base = '', server: Server
@@ -40,7 +43,7 @@ const wfe = (args: string[], env: Record<string, string> = {}) => new Promise<{ 
 })
 
 test('a page records, reads and edits as the person; pinned and current reads differ', async () => {
-  const c = await post('', { request: 'page-create-001', title: 'Edge remnants', body: 'From the chat.', projects: ['gimmickimg'], source: { conversation: 'conv-a', message: 310 }, evidence: [{ name: 'note.txt', base64: Buffer.from('evidence').toString('base64') }] })
+  const c = await post('', { request: 'page-create-001', title: 'Edge remnants', body: 'From the chat.', projects: ['gimmickimg'], source: { conversation: 'conv-a', message: 310 }, files: [{ name: 'note.txt', base64: Buffer.from('evidence').toString('base64') }] })
   assert.equal(c.status, 200)
   assert.equal(c.body.publication.state, 'published')
   assert.equal(c.body.record.created.by, 'iwaag')
@@ -59,8 +62,10 @@ test('a page records, reads and edits as the person; pinned and current reads di
   assert.equal(pinned.body.pinned, true)
   assert.equal(pinned.body.challenge.body, 'From the chat.')
   assert.equal(pinned.body.latest.commit, e.body.record.commit)
-  const ev = await fetch(`${base}/${id}/evidence/note.txt?at=${first}`)
+  const ev = await fetch(`${base}/${id}/files/note.txt?at=${first}`)
   assert.equal(await ev.text(), 'evidence')
+  assert.equal(ev.headers.get('x-content-type-options'), 'nosniff')
+  assert.equal(ev.headers.get('content-security-policy'), 'sandbox')
   const h = await get(`/${id}/history`)
   assert.deepEqual(h.body.history.map((x: { actor: string }) => x.actor), ['Omni Agent (test actor)', 'iwaag'])
   assert.equal(h.body.history[1].source, 'conversation conv-a#310')
@@ -91,4 +96,45 @@ test('the CLI writes as --by, derives a request identity, and works through a se
   const s = await wfe(['status'])
   assert.match(s.stdout, /index at [0-9a-f]{12}/)
   assert.equal((await wfe(['create', '--title', 'no writer', '--body', 'x'])).code, 2)
+})
+
+test('a trial from a local directory: published in one commit, listed, read at its commit; a later trial does not change that read', async () => {
+  const svc = base.replace(/api\/challenges$/, '')
+  const dir = join(root, 'take')
+  await mkdir(join(dir, 'audio'), { recursive: true })
+  await writeFile(join(dir, 'summary.md'), '# Stretched\n\n<script>alert(1)</script> [take](audio/out.wav) and [the input](../../voice.wav)\n')
+  await writeFile(join(dir, 'audio', 'out.wav'), 'RIFFxxxx')
+  const p = await wfe(['publish', 'ch-0002', '--trial', 'speech-stretch', dir, '--by', 'forge-agent', '--run', 'forge/freework/run-001', '--service', svc])
+  assert.equal(p.code, 0, p.stderr)
+  assert.match(p.stdout, /Published wedo\/speech-stretch of ch-0002: published as ([0-9a-f]{40}) \(operation \d+; 2 file\(s\) added\)/)
+  const at = /published as ([0-9a-f]{40})/.exec(p.stdout)![1]!
+  assert.match(await gitOk(join(root, 'remote.git'), ['log', '-1', '--format=%an %B', 'main']), /^forge-agent [\s\S]*Challenge-Trial: speech-stretch[\s\S]*Challenge-Run: forge\/freework\/run-001/)
+  const later = await wfe(['publish', 'ch-0002', '--trial', 'another', `${join(dir, 'summary.md')}=notes.md`, '--by', 'archsage-agent'])
+  assert.equal(later.code, 0, later.stderr)
+  const pinned = await get(`/ch-0002?at=${at}`)
+  assert.deepEqual(pinned.body.challenge.trials.map((t: { name: string }) => t.name), ['speech-stretch'])
+  assert.deepEqual(pinned.body.latest.trials.map((t: { name: string }) => t.name), ['another', 'speech-stretch'])
+  assert.equal(pinned.body.challenge.trials[0].summary.title, 'Stretched')
+  const wav = await fetch(`${base}/ch-0002/files/wedo/speech-stretch/audio/out.wav?at=${at}`)
+  assert.equal(wav.headers.get('content-type'), 'audio/wav')
+  assert.equal(await wav.text(), 'RIFFxxxx')
+  const dl = await fetch(`${base}/ch-0002/files/wedo/speech-stretch/audio/out.wav?download=1`)
+  assert.match(dl.headers.get('content-disposition')!, /^attachment; filename="out.wav"/)
+  const out = join(root, 'got', 'out.wav')
+  const f = await wfe(['file', 'ch-0002', 'audio/out.wav', '--trial', 'speech-stretch', '--at', at.slice(0, 10), '--out', out, '--service', svc])
+  assert.equal(f.code, 0, f.stderr)
+  assert.match(f.stdout, /Wrote 8 bytes/)
+  const ls = await wfe(['files', 'ch-0002', '--trial', 'speech-stretch'])
+  assert.match(ls.stdout, /wedo\/speech-stretch\/audio\/out\.wav {2}8 bytes/)
+  const show = await wfe(['show', 'ch-0002'])
+  assert.match(show.stdout, /trials \(2;[\s\S]*wedo\/another\/ {2}1 file\(s\), no summary[\s\S]*wedo\/speech-stretch\/ {2}2 file\(s\), summary: Stretched/)
+  const h = await get('/ch-0002/history?trial=speech-stretch')
+  assert.deepEqual(h.body.history.map((e: { actor: string; trial: string }) => [e.actor, e.trial]), [['forge-agent', 'speech-stretch']])
+  // a body larger than one write can be is refused from its declared length, before it is read
+  const status = await new Promise<number>((resolve, reject) => {
+    const r = request(`${base}/ch-0002`, { method: 'POST', headers: { 'content-type': 'application/json', 'content-length': String(MAX_REQUEST + 1) } }, res => { res.resume(); resolve(res.statusCode!) })
+    r.on('error', reject)
+    r.write('{')
+  })
+  assert.equal(status, 413)
 })

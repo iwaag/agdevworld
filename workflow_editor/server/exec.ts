@@ -118,13 +118,13 @@ export function documentationBrief(r: RunRecord): string[] {
 // unacknowledged ones in full, in arrival order. More may arrive while it
 // works; wfe run state shows them. Acknowledgment is a record, not a gate (p11).
 // Challenges the input carried (challenge p1, docs/challenges.md): each as
-// it was when attached, its file in the run folder, and how to read its
-// evidence and its current revision — a separate, explicit read.
+// it was when attached, its summary in the run folder, and how to read its
+// files and trials then and its current revision — a separate, explicit read.
 export function attachmentBrief(r: RunRecord, dir: string): string[] {
   const all = r.input.attachments ?? []
   if (!all.length) return []
   return [`Attached to the ${r.input.kind === 'request' ? 'request' : 'person\'s words'} (${all.length}): durable challenges, each as it was when attached (wfe challenge help):`,
-    ...all.map(a => `- ${a.id} "${a.title}" at ${a.commit.slice(0, 12)}: ${dir}/${a.file}; evidence: wfe challenge evidence ${a.id} --at ${a.commit.slice(0, 12)}; its latest revision: wfe challenge show ${a.id}`)]
+    ...all.map(a => `- ${a.id} "${a.title}" at ${a.commit.slice(0, 12)}: ${dir}/${a.file}; its files and trials then: wfe challenge show ${a.id} --at ${a.commit.slice(0, 12)}; its latest revision: wfe challenge show ${a.id}`)]
 }
 // Challenges carried by an answer's or an instruction's source.
 export const attachedLines = (s: import('../shared/intake.ts').SourceRef | undefined, indent = '    ') =>

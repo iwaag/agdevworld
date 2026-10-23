@@ -346,7 +346,7 @@ test('a facilitator that cannot take the brief leaves the room usable under its 
   await gitOk(pond, ['rm', '-q', join('devdocs', 'workflows', 'conduct.yaml')]); await gitOk(pond, ['commit', '-q', '-m', 'no conduct'])
   s.ds.create('rd-f', { facilitate: true, title: '会議の進め方を相談したい', by: 'Pat', members: ['forge'] })
   const m = (await s.ds.post('rd-f', { text: '会議の進め方を相談したい', author: 'Pat', token: 'tok-rd-f-001' })).message
-  const req = s.ds.invitations('rd-f').find(i => i.source.includes(m.id))
+  const req = s.ds.invitations('rd-f').find(i => (JSON.parse(i.source) as number[]).includes(m.id))
   assert.equal(req?.state, 'failed', `the conductor request fails visibly (${req?.state}: ${req?.error})`)
   const v = await s.ds.view('rd-f')
   assert.deepEqual([v.conversation.title, v.conversation.displayTitle, v.messages.length], ['会議の進め方を相談したい', null, 1], 'readable at once under the original title')

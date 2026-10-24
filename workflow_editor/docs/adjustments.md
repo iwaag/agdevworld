@@ -59,7 +59,7 @@ Evidence is checked when it is recorded:
 
 `--presentation <p>` links an existing presentation to the node with an
 additional `links` record. The original registration stays as it was.
-The node may follow completed nodes only.
+The node may follow nodes that are completed or under way (a talk it was done inside), never pending work.
 
 History keeps its words: the talk's outcome and earlier entries are not
 rewritten. The node appears from its revision on, marked "recorded

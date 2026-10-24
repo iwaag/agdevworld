@@ -333,13 +333,23 @@ test('record-done validates its evidence and placement and refuses without leavi
     assert.equal((await rec(s)).seq, seq)
     await assert.rejects(readdir(join(s.folder, 'definition', 'r2')), 'no revision file')
   }
+  const refusedAt = async (o: Partial<import('../server/runs.ts').RecordDoneOptions>, code: string) => {
+    const at = (await rec(s)).seq
+    await assert.rejects(done(s, o), (e: RequestError) => (e.detail as { code?: string } | undefined)?.code === code || assert.fail(`${code}: ${e.message}`))
+    assert.equal((await rec(s)).seq, at)
+  }
   await refused({ template: 'work', artifacts: ['out/missing.html'] }, 'evidence-unknown')
   await refused({ template: 'work', commits: [{ commit: 'deadbeefdeadbeef' }] }, 'evidence-unknown')
   await refused({ template: 'work', entries: [99] }, 'evidence-unknown')
   await refused({ template: 'work', presentation: 'p9' }, 'evidence-unknown')
   await refused({ template: 'nope' }, 'template-unknown')
-  await refused({ template: 'work', after: ['talk'] }, 'state') // talk is still running: work already done follows completed nodes
-  await refused({ type: 'do', name: 'X', node: 'talk' }, 'node-exists')
+  await adjust(s, flow(node('later', 'do'), [['talk', 'later']]))
+  await assert.rejects(readdir(join(s.folder, 'definition', 'r3')))
+  await refusedAt({ template: 'work', after: ['later'] }, 'state') // later is future work
+  await refusedAt({ type: 'do', name: 'X', node: 'talk' }, 'node-exists')
+  // Work done inside the running talk follows it.
+  const r = await done(s, { template: 'work', node: 'inside', after: ['talk'] })
+  assert.equal(r.revision, 'r3')
 })
 
 test('record-done on a work node clears the self-check, keeps the presentation reminder, and a linked presentation satisfies it', async () => {

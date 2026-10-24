@@ -1615,7 +1615,9 @@ export function apply(prev: RunState | null, e: HistoryEntry | (OpInput & EntryM
         const extra = diff.added.filter(n => n !== node && !nodes[n]?.step)
         if (extra.length || diff.removed.length || diff.changed.some(n => n !== node && !nodes[n]?.step) || diff.edgesRemoved.length) fail('adjust-graph', `a revision recording work done adds only "${node}" (and its generated steps); it ${extra.length ? `adds ${extra.join(', ')}` : diff.removed.length ? `removes ${diff.removed.join(', ')}` : 'changes other nodes or edges'}`)
         if (nodes[node].step) fail('adjust-graph', `"${node}" is a generated step`)
-        for (const ed of edges) if (ed.to === node && s.nodes[ed.from]?.state !== 'completed') fail('state', `${node} would follow ${ed.from}, which is ${s.nodes[ed.from]?.state ?? 'new'}; work already done follows completed nodes only`)
+        // It follows nodes that were done or under way when the work happened
+        // (a talk it was done inside is still running), never future work.
+        for (const ed of edges) if (ed.to === node && !['completed', 'running', 'waiting'].includes(s.nodes[ed.from]?.state ?? '')) fail('state', `${node} would follow ${ed.from}, which is ${s.nodes[ed.from]?.state ?? 'new'}; work already done follows nodes that are completed or under way, not future work`)
       }
       const rev: Revision = { revision: id, parent: active, file: e.file, sha256: e.sha256, definitionDigest: e.definitionDigest, effective: next as EffectiveGraph, reason: text(e.reason, 'the reason'), source, diff, at, by }
       s.definition = { ...s.definition, active: id, revisions: [...revisions, rev] }

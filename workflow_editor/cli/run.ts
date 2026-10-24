@@ -382,7 +382,8 @@ details and the history.
                    made from it, with its provenance. Without one, --type,
                    --name and --id describe the node.
   --id <node>      its id (default: the template's id, made unique).
-  --after/--before where it goes. It follows completed nodes only.
+  --after/--before where it goes: after nodes completed or under way (the talk
+                   it was done inside may still be running), never future work.
   --outcome        what the work produced or concluded.
   --reason         why it is recorded afterwards (where it was done, e.g.
                    inside the talk).

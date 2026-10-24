@@ -396,3 +396,31 @@ test('wfe run record-done from the command line: the help owns the usage, the re
   assert.match(show.out, /page +completed RECORDED AFTERWARDS by autolab at .* \(nothing ran it then: It was done inside the talk\.\); outcome: Made the page\./)
   assert.match(show.out, /run\.record-done +autolab \(cli\)  node page  \[page added as completed \(recorded afterwards\)\]/)
 })
+
+test('in a run\'s own copy, files written during a talk are a sign of work; files written while a node of their own ran are explained', async () => {
+  const s = await setup()
+  const { ExecStore } = await import('../server/exec.ts')
+  const { runSpace } = await import('../server/runspace.ts')
+  const x = new ExecStore({ registryFile: s.registry, area: s.area })
+  try {
+    const req = await x.request({ workspace: 'p', workflow: 'freework', text: 'make a page', author: 'Pat', receipt: 'rem-copy-0001', via: 'browser' })
+    const t = { ...s, ref: req.ref }
+    const root = (await runSpace(s.ws, req.ref)).root
+    await op(t, { op: 'node.start', node: 'talk' })
+    await writeFile(join(root, 'page.html'), '<p>made during the talk</p>')
+    const r = await reminded(op(t, { op: 'node.complete', node: 'talk', outcome: 'talked' }, ADVISE))
+    assert.deepEqual(r.codes, ['unrecorded-activity'])
+    assert.match(r.message, /the run's copy has 1 changed path outside its records, written while no node of its own was running \(page\.html\)/)
+    // The same kind of file written in a present node of its own: explained.
+    const req2 = await x.request({ workspace: 'p', workflow: 'freework', text: 'present a page', author: 'Pat', receipt: 'rem-copy-0002', via: 'browser' })
+    const u = { ...s, ref: req2.ref }
+    const root2 = (await runSpace(s.ws, req2.ref)).root
+    await op(u, { op: 'node.start', node: 'talk' })
+    await adjustRun(s.ws, req2.ref, { text: flow(node('show', 'do', tpl('present')), [['talk', 'show']]), reason: 'present', source: { kind: 'agent' } }, { by: 'autolab', via: 'cli' })
+    await op(u, { op: 'node.complete', node: 'talk', outcome: 'talked' }, ADVISE)
+    await op(u, { op: 'node.start', node: 'show' })
+    await writeFile(join(root2, 'shown.html'), '<p>copied for the presentation</p>')
+    await op(u, { op: 'node.complete', node: 'show', outcome: 'nothing served' }, ADVISE)
+    assert.equal((await readRun(s.ws, req2.ref)).record!.execution.state, 'completed')
+  } finally { x.close() }
+})

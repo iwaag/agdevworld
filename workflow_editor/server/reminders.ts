@@ -3,11 +3,13 @@
 // refusal an agent's operation gets when a reminder applies and it did not
 // say --yes. Evaluated inside the operation's own lock, against the record
 // the operation would change, before anything is written.
+import { stat } from 'node:fs/promises'
+import { join } from 'node:path'
 import { git } from './git.ts'
 import { RequestError, type Workspace } from './workspace.ts'
 import type { RunCatalog } from '../shared/catalog.ts'
 import type { Workflow } from '../shared/model.ts'
-import { evaluate, reminderText, type Boundary, type Reminder } from '../shared/reminders.ts'
+import { evaluate, nodeIntervals, reminderText, type Boundary, type Reminder } from '../shared/reminders.ts'
 import { runFolder, type RunGraph, type RunRecord } from '../shared/run.ts'
 
 // How an operation takes part (CLI and HTTP give it for an agent's or a
@@ -21,7 +23,12 @@ const SIGNAL_PATHS = 5
 
 // Paths of the run's own copy changed since it began, outside its record
 // folder: a sign that work was done, not where or as which activity.
-export async function workSignals(ws: Workspace, record: RunRecord): Promise<string[]> {
+// A path last written while a node of its own was running (`explained`,
+// nodeIntervals) is the graph's; the others are the signal. A path that is
+// gone counts as unexplained. gimmickimg/freework/run-011 copied files in
+// its present node: explained; run-005…008 wrote theirs during the talk.
+const SLACK_MS = 60_000
+export async function workSignals(ws: Workspace, record: RunRecord, explained: [number, number][] = []): Promise<string[]> {
   const out: string[] = []
   const own = `${runFolder(record)}/`
   const base = record.storage?.repositories.find(r => r.path === '.')?.base
@@ -31,8 +38,13 @@ export async function workSignals(ws: Workspace, record: RunRecord): Promise<str
     if (d.code === 0) for (const l of d.stdout.split('\n')) if (l.trim()) changed.add(l.trim())
     const u = await git(ws.root, ['status', '--porcelain', '--untracked-files=all'])
     if (u.code === 0) for (const l of u.stdout.split('\n')) if (l.length > 3) changed.add(l.slice(3).trim().replace(/^"|"$/g, ''))
-    const paths = [...changed].filter(p => !p.startsWith(own) && !p.startsWith('.local/')).sort()
-    if (paths.length) out.push(`the run's copy has ${paths.length} changed path${paths.length === 1 ? '' : 's'} outside its records (${paths.slice(0, SIGNAL_PATHS).join(', ')}${paths.length > SIGNAL_PATHS ? ', …' : ''})`)
+    const paths: string[] = []
+    for (const p of [...changed].filter(p => !p.startsWith(own) && !p.startsWith('.local/')).sort()) {
+      const t = (await stat(join(ws.root, p)).catch(() => null))?.mtimeMs
+      if (t !== undefined && explained.some(([a, b]) => t >= a - SLACK_MS && t <= b + SLACK_MS)) continue
+      paths.push(p)
+    }
+    if (paths.length) out.push(`the run's copy has ${paths.length} changed path${paths.length === 1 ? '' : 's'} outside its records, written while no node of its own was running (${paths.slice(0, SIGNAL_PATHS).join(', ')}${paths.length > SIGNAL_PATHS ? ', …' : ''})`)
   }
   const files = record.artifacts.filter(a => !a.path.startsWith(own)).map(a => a.path)
   if (files.length) out.push(`artifacts outside the run folder are recorded (${[...new Set(files)].slice(0, SIGNAL_PATHS).join(', ')})`)
@@ -48,7 +60,7 @@ export async function workSignals(ws: Workspace, record: RunRecord): Promise<str
 export async function adviseOrRefuse(ws: Workspace, advice: Advice | undefined, b: Boundary | Boundary[], f: { record: RunRecord; after: RunRecord; graph: RunGraph; authored: Pick<Workflow, 'nodes'> | undefined; catalog: RunCatalog }): Promise<void> {
   if (!advice || advice.yes) return
   const bs = [b].flat()
-  const signals = bs.every(x => x.kind === 'present') ? [] : await workSignals(ws, f.after)
+  const signals = bs.every(x => x.kind === 'present') ? [] : await workSignals(ws, f.after, nodeIntervals(f.after, f.graph, f.authored, new Date().toISOString()))
   const reminders: Reminder[] = []
   for (const x of bs) for (const r of evaluate(x, { ...f, signals, extra: advice.extra })) if (!reminders.some(y => y.code === r.code)) reminders.push(r)
   if (!reminders.length) return

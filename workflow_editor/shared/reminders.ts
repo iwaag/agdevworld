@@ -18,12 +18,13 @@ import { isOpen, questionState, runKey, type Presentation, type RunGraph, type R
 
 // What a node is for, as far as its structured records say. Never its name.
 // - present / cleanup: made from the catalog's seed templates (present,
-//   cleanup), drawn with their icon, or (present) a node a presentation was
-//   registered from. A presentation linked to work recorded afterwards
+//   cleanup), drawn with their icon, or (present) a node other than a talk or
+//   work node a presentation was registered from. A presentation linked to work recorded afterwards
 //   shows that work; it does not make the work a presentation node;
-// - work: made from the catalog's `work` template, or an untemplated `do`
-//   node the run added itself (not in its original definition): the work the
-//   agent decided on. A designed workflow's own nodes are the designer's;
+// - work: made from the catalog's `work` template — the work the person asked
+//   for, as the agent added it. Untemplated nodes are `other`: a designed
+//   workflow's nodes are the designer's, and nodes a run adds for other ends
+//   (front/converse's tell and report nodes) are not work to present;
 // - step: a generated documentation step; activity: a discussion activity;
 //   confirm: the result-confirmation talk; talk: any other talk.
 export type NodeRole = 'present' | 'cleanup' | 'work' | 'confirm' | 'talk' | 'activity' | 'step' | 'other'
@@ -35,12 +36,13 @@ export function roleOf(id: string, record: Pick<RunRecord, 'definition' | 'prese
   if (g.activity) return 'activity'
   const a: Partial<WorkflowNode> = authored?.nodes[id] ?? {}
   const pres = Object.values(record.presentations ?? {})
-  if (a.template?.id === PRESENT || a.appearance?.icon === PRESENT || pres.some(p => p.node === id)) return 'present'
+  if (a.template?.id === PRESENT || a.appearance?.icon === PRESENT) return 'present'
   if (a.template?.id === CLEANUP || a.appearance?.icon === CLEANUP) return 'cleanup'
   if (g.confirms === 'result') return 'confirm'
+  // A talk stays a talk when it registered a presentation (run-001…008).
   if (g.type === 'talk') return 'talk'
   if (a.template?.id === WORK) return 'work'
-  if (g.type === 'do' && !a.template && !record.definition.effective?.nodes[id]) return 'work'
+  if (pres.some(p => p.node === id)) return 'present'
   return 'other'
 }
 
@@ -95,6 +97,24 @@ export function runningTime(record: RunRecord, until = record.updated): Record<s
   }
   for (const [n, t] of Object.entries(since)) total[n] = (total[n] ?? 0) + Math.max(0, Date.parse(until) - t)
   return total
+}
+
+// When nodes that show work as a step of its own were running (work, present,
+// cleanup and the workflow's other nodes; not talks, activities or steps):
+// a file changed then is explained by the graph. Milliseconds, [from, to].
+export function nodeIntervals(record: RunRecord, graph: RunGraph, authored: Pick<Workflow, 'nodes'> | undefined, until = record.updated): [number, number][] {
+  const own = (id: string) => { const r = roleOf(id, record, graph, authored); return r === 'work' || r === 'present' || r === 'cleanup' || r === 'other' }
+  const since: Record<string, number> = {}
+  const out: [number, number][] = []
+  for (const e of record.history) {
+    for (const [n, [, to]] of Object.entries(e.change?.nodes ?? {})) {
+      const t = Date.parse(e.at)
+      if (since[n] !== undefined) { out.push([since[n], t]); delete since[n] }
+      if (to === 'running' && own(n)) since[n] = t
+    }
+  }
+  for (const t of Object.values(since)) out.push([t, Date.parse(until)])
+  return out
 }
 
 // The seq at which each node was last completed (or recorded as done).

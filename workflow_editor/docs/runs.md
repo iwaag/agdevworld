@@ -533,8 +533,9 @@ Roles come from structured records, never node names:
 - **present**: the catalog's `present` template, the `present` icon, or a
   node a presentation was registered from;
 - **cleanup**: the `cleanup` template or icon;
-- **work**: the `work` template, or an untemplated `do` node the run added
-  itself;
+- **work**: the `work` template. Untemplated nodes are the designer's or
+  serve other ends (front/converse adds `tell` and `report` nodes), so they
+  count as visible work for the self-check but are not presented;
 - `confirms: result`, talk, activity and documentation steps come from the
   graph.
 

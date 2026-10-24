@@ -104,7 +104,7 @@ repositories:            # binding key -> project-relative path and access
   root: {path: ., access: readonly}
 nodes:                   # node id -> node
   survey:
-    type: study          # study | do | delegate | talk
+    type: study          # study | do | delegate | talk | review
     name: Survey         # short card label, optional
     description: What this step does.
     repositories: [tools]
@@ -428,6 +428,7 @@ reports what is declared for a path (`shared/access.ts`).
 | `study` | Research: reading the web or files a person points to, and recording what was learned |
 | `do` | General work: coding, running and testing, file operations |
 | `talk` | Consulting a person, or an agent they entrusted, to agree on something or get permission |
+| `review` | A person's review of completed work (p17): the agent prepares it with the presentations to look at, then WFE manages the start, the person's decision and cleanup; no agent performs it ([reviews.md](reviews.md)) |
 | `delegate` | Entrusting work to another managed workflow (`workflow: <id>`, `project: <id>` across projects, `accepts`): the contract is [delegation.md](delegation.md) (p10). Definition and display only until its execution is released: runs of a workflow with a delegate node are refused |
 
 Submodules under `study/` conventionally accumulate the results of study
@@ -490,6 +491,7 @@ fulfils its intent.
 | `execution-guide-duplicate` | warning | a guide listed twice |
 | `intake-mode` | error | `intake.zulip` is text other than `requests` or `""` (another type is a shape problem) |
 | `activity-kind`, `activity-type` | error | `activity` other than announce / ask / ponder / talk, or on the wrong node type (argue p4) |
+| `review-repositories` | warning | a review node binds repositories (p17) |
 | `confirms-kind`, `confirms-type`, `confirms-duplicate` | error | `confirms` other than `result`, on a non-talk node, or on more than one node |
 
 Drafts with errors can be saved. They cannot be approved.

@@ -104,7 +104,7 @@ test('duplicate workflow ids, bad paths, types and access are reported', async (
   assert.ok(codes(validateWorkflow(w, ctx)).includes('id-duplicate'))
   const bad = cloneWorkflow(w)
   bad.repositories.tools = { path: '../outside', access: 'write' }
-  bad.nodes.check.type = 'review'
+  bad.nodes.check.type = 'inspect' // review is a node type since p17
   bad.nodes.scaffold.workflow = 'x'
   bad.edges.push({ from: 'check', to: 'check' })
   const issues = validateWorkflow(bad, await projectContext('repo-setup.yaml'))

@@ -363,7 +363,7 @@ run's behalf.
 ### Waiting
 
 A waiting node records `wait: {reason, holder, on}` where `on` is
-`{question: "q1"}`, `{external: "<reference>"}` or (p10) `{delegation: "d1"}`, and `holder` names who or
+`{question: "q1"}`, `{external: "<reference>"}`, (p10) `{delegation: "d1"}` or (p17) `{review: "rv1"}` (a human review round, [reviews.md](reviews.md)), and `holder` names who or
 what holds the next move: the person a question is addressed to or the named
 external party. An external wait may declare a `deadline` (observer p3,
 `wfe run wait … --deadline`): when the result is expected at the latest. It
@@ -475,7 +475,8 @@ Derived after every operation; the counts keep mixed facts visible.
 | `stopped` | none of the above: nothing runs, waits or is ready, and some node is `failed` or `cancelled` |
 
 A correction a delegating run returned the result with (fix6, below) keeps
-an otherwise `completed` execution `in-progress` until it is addressed.
+an otherwise `completed` execution `in-progress` until it is addressed; so
+do changes a person requested in a human review (p17, [reviews.md](reviews.md)).
 
 `execution` also lists `counts` per state, `ready` and `blocked` node ids, the
 `active` (running) and `waiting` nodes with holders, and `failed` nodes.

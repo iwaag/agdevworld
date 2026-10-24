@@ -77,6 +77,8 @@ export interface RenderContext {
   // p10: where a delegation's child is followed — its conversation, progress,
   // detailed IO and run view — as links (absent ones are left out).
   child?: (delegation: string) => { conversation?: string; progress?: string; io?: string; run?: string } | null
+  // p17: where the person starts a human review round (the review page).
+  review?: (id: string) => string | null
 }
 
 const cut = (text: string, n: number) => { const t = text.replace(/\s+/g, ' ').trim(); return t.length > n ? `${t.slice(0, Math.max(0, n - 1))}…` : t }
@@ -152,6 +154,15 @@ function lines(e: NotableEvent, c: RenderContext): { head: string; free: string;
     case 'integrated': return { head: '**Integrated** — the accepted result is on the project\'s shared branches:', free: e.text, tail: [] }
     // p10: this run entrusted a node's work to another workflow, and what came back.
     case 'corrected': return { head: `**Result returned for correction** (${e.correction}) — the delegating run asks for more before it takes this result; ${c.executor} adds the work and completes again.`, free: inRequest ? '' : e.text, tail: [] }
+    // p17: a human review round, the person's decision, a cleanup that failed.
+    case 'review-ready': {
+      const at = e.review ? c.review?.(e.review) : null
+      return { head: `**Work complete · Awaiting human review** (${e.review}${e.title ? `: ${e.title}` : ''}) — ${c.executor} finished its work; the review is ${e.holder}'s.`, free: e.text, tail: [at ? `Start review: ${at}` : 'Start review: in agdevworld\'s run view (Human review).', 'One button starts every page; Approve or Request changes is recorded there.'] }
+    }
+    case 'reviewed': return e.outcome === 'approved'
+      ? { head: `**Review approved** (${e.review}) by ${e.by}; WFE stops what the review started.`, free: e.text, tail: [] }
+      : { head: `**Changes requested** (${e.review}) by ${e.by}; ${c.executor} adds the work and prepares a new review.`, free: e.text, tail: [] }
+    case 'review-cleanup-failed': return { head: `**Review cleanup failed** (${e.review}) — an instance could not be verified as stopped; WFE retries. The approval stands.`, free: e.text, tail: [] }
     case 'delegated': return { head: `**Delegated** — ${node} to ${e.holder} (${e.delegation}); the request is posted in that workflow's channel.`, free: '', tail: c.next ? [`Next: ${c.next}`] : [] }
     case 'delegation': return { head: `**${e.holder} — ${e.delegationEvent === 'completed' ? 'result delivered' : e.delegationEvent === 'failed' ? 'failure' : 'cancelled'}** for ${node} (${e.delegation}):`, free: e.text, tail: [...childLine(c, e.delegation), `Next: ${c.executor} reviews it.`] }
   }

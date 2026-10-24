@@ -31,7 +31,12 @@ import { findCycle } from './validate.ts'
 // v3 (p8/ex2): the custom policy; graphs carry their normalized
 // `documentation`. Default and manual graphs are node for node and edge for
 // edge what v2 made, step instructions included.
-export const COMPILER_VERSION = 'ag.wfe-compile.v4'
+// v5 (workflow_editor p17): a `review` node (a person's review, managed by
+// WFE) gets no report step and does not hold the final report, which
+// follows the work before it instead: the agent finishes its work and the
+// review waits for the person alone. Graphs without review nodes are node
+// for node and edge for edge what v4 made.
+export const COMPILER_VERSION = 'ag.wfe-compile.v5'
 
 // Generated identities start with "_", which an authored id never does
 // (ID_PATTERN), so the two can never collide.
@@ -123,14 +128,20 @@ export function compile(w: Pick<Workflow, 'nodes' | 'edges' | 'documentation'>):
   const expanded: Edge[] = []
   const hasIncoming = new Set(edges.map(e => e.to))
   // What a successor (or the final report) waits for: the node's report, or the node itself.
-  const after = (id: string) => (docs.reports ? reportStep(id) : id)
+  const review = (id: string) => w.nodes[id].type === 'review'
+  const after = (id: string) => (docs.reports && !review(id) ? reportStep(id) : id)
+  // The final report follows the work: nodes whose successors are all
+  // human reviews (or none); review nodes themselves only when the graph
+  // has nothing else.
+  const workEnd = (id: string) => !review(id) && (out.get(id) ?? []).every(review)
+  const ends = ids.some(workEnd) ? ids.filter(workEnd) : ids.filter(id => !out.has(id))
   for (const id of ids) {
-    if (docs.reports) {
+    if (docs.reports && !review(id)) {
       nodes[reportStep(id)] = { type: 'report', step: step('report', id) }
       expanded.push({ from: id, to: reportStep(id) })
     }
     if (docs.plan && !hasIncoming.has(id)) expanded.push({ from: PLAN_STEP, to: id })
-    if (docs.final && !out.has(id)) expanded.push({ from: after(id), to: FINAL_STEP })
+    if (docs.final && ends.includes(id)) expanded.push({ from: after(id), to: FINAL_STEP })
   }
   for (const e of edges) expanded.push({ from: after(e.from), to: e.to })
   if (docs.final) nodes[FINAL_STEP] = { type: 'report', step: step('final-report', null, docs.reports) }

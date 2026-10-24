@@ -6,6 +6,7 @@
 // the full sentences (a hold's reason, a wait's reason) stay available as
 // detail. Shared by the service, the CLI, the browser and the Front Desk.
 import type { Delegation } from './delegation.ts'
+import { isAwaitingPerson, reviewStateText } from './humanReview.ts'
 import { dueReason, type HoldCause, type RunState } from './run.ts'
 
 export type StatusState =
@@ -20,7 +21,7 @@ export type StatusState =
 // the record's own words, `condition` what continues it.
 export interface StatusWait {
   node: string
-  kind: 'person' | 'delegation' | 'external'
+  kind: 'person' | 'review' | 'delegation' | 'external' // review (p17): a human review round
   target: string
   text: string
   condition: string
@@ -109,7 +110,7 @@ function relayedChild(d: Delegation): { hold: string | null } {
   return { hold }
 }
 
-export function waitsOf(s: Pick<RunState, 'nodes' | 'questions' | 'delegations' | 'execution' | 'input'>, facts: StatusFacts = {}): StatusWait[] {
+export function waitsOf(s: Pick<RunState, 'nodes' | 'questions' | 'delegations' | 'execution' | 'input'> & Partial<Pick<RunState, 'reviews'>>, facts: StatusFacts = {}): StatusWait[] {
   const person = facts.person ?? s.input.author ?? s.input.onBehalfOf ?? null
   const out: StatusWait[] = []
   for (const w of s.execution.waiting) {
@@ -130,6 +131,11 @@ export function waitsOf(s: Pick<RunState, 'nodes' | 'questions' | 'delegations' 
         condition: 'the child\'s question or result continues it', detail: `${detail}${words ? `; the child is ${words}` : ''}`,
         ...(d ? { child: { project: d.target.project, workflow: d.target.workflow, run: d.child?.run ?? null, state: words } } : {}),
       })
+    } else if ('review' in w.on) {
+      const r = s.reviews?.[w.on.review]
+      const open = !r || isAwaitingPerson(r)
+      const who = r?.reviewer ?? w.holder
+      out.push({ node: w.node, kind: 'review', target: open ? who : 'WFE', text: open ? (person && who === person ? 'Your review' : `Review by ${who}`) : r ? reviewStateText(r) : 'Human review', condition: open ? 'the person starts the review and approves or requests changes' : 'WFE stops what the review started', detail: r ? `${r.id}: ${r.summary.replace(/\s+/g, ' ').slice(0, 160)}` : detail })
     } else {
       const deadline = n?.wait?.deadline
       const over = deadline && Date.parse(deadline) < Date.now()
@@ -142,7 +148,7 @@ export function waitsOf(s: Pick<RunState, 'nodes' | 'questions' | 'delegations' 
 const status = (state: StatusState, label: string, reason: string, tone: RunStatus['tone'], waits: StatusWait[], extra: Partial<RunStatus> = {}): RunStatus =>
   ({ state, label, reason, text: `${label} · ${reason}`, tone, waits, detail: null, ...extra })
 
-export function runStatus(s: Pick<RunState, 'nodes' | 'questions' | 'delegations' | 'execution' | 'control' | 'cancelled' | 'decisions' | 'instructions' | 'input'>, facts: StatusFacts = {}): RunStatus {
+export function runStatus(s: Pick<RunState, 'nodes' | 'questions' | 'delegations' | 'execution' | 'control' | 'cancelled' | 'decisions' | 'instructions' | 'input'> & Partial<Pick<RunState, 'reviews' | 'corrections'>>, facts: StatusFacts = {}): RunStatus {
   const waits = waitsOf(s, facts)
   const names = facts.names ?? {}
   const ctl = s.control
@@ -168,8 +174,14 @@ export function runStatus(s: Pick<RunState, 'nodes' | 'questions' | 'delegations
   if (due) return facts.job === null
     ? status('stalled', 'Stalled', `${cap(due)}; nothing queued to continue it`, 'warn', waits, { detail: due })
     : status('due', 'Continuing', cap(due), 'queued', waits, { detail: due })
+  // p17: everything but human reviews is done: the agent's work is
+  // complete, and the run is not (its review is the person's).
+  if (waits.length && waits.every(w => w.kind === 'review') && Object.entries(s.nodes).every(([id, n]) => n.state === 'completed' || n.state === 'cancelled' || waits.some(w => w.node === id))) {
+    const open = waits.filter(w => w.target !== 'WFE')
+    return status('waiting', 'Work complete', open.length ? `Awaiting human review${waits.length > 1 ? ` (${waits.length} rounds)` : ''}` : waits[0].text, open.length ? 'waiting' : 'queued', waits, { detail: waits.map(w => w.detail).join('; ') })
+  }
   if (waits.length) {
-    const order = ['person', 'delegation', 'external']
+    const order = ['person', 'review', 'delegation', 'external']
     const first = [...waits].sort((a, b) => order.indexOf(a.kind) - order.indexOf(b.kind))[0]
     const more = waits.length - 1
     return status('waiting', 'Waiting', `${first.text}${more ? ` (+${more} more)` : ''}`, 'waiting', waits, { detail: waits.map(w => w.detail).join('; ') })

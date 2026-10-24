@@ -17,6 +17,7 @@ import { hostname } from 'node:os'
 import { promisify } from 'node:util'
 import { canonicalJson } from '../shared/canonical.ts'
 import { EXECUTOR_OPS, hostOf, questionState, replay, runKey, situation, type HoldCause, type RunRecord, type RunRef } from '../shared/run.ts'
+import { hostOwes, openContinuations, reviewStateText } from '../shared/humanReview.ts'
 import { DEFAULT_LANE, sessionPolicyOf } from '../shared/model.ts'
 import { laneOn } from './workers.ts'
 import { activityOf, logFacts } from './activity.ts'
@@ -185,11 +186,19 @@ function waitingOf(r: RunRecord, job: JobRow | null): ObservedRun['waiting'] {
       // The child's move (its own record says whose), or a dispatch that has no child yet.
       if (d?.child) return { reason: `delegation ${d.id} to ${d.target.project}/${d.target.workflow}: child ${d.child.run}`, responsible: `delegation:${d.child.uid}`, since: r.nodes[w.node]?.updated ?? null }
       if (d) return { reason: `delegation ${d.id} to ${d.target.project}/${d.target.workflow}: dispatched ${d.dispatched.at}, no child yet`, responsible: `delegation-unbound:${d.uid}`, since: d.dispatched.at }
+    } else if ('review' in w.on) {
+      // p17: a human review is the person's move while open, WFE's while
+      // its start or cleanup is owed; never the agent's.
+      const v = r.reviews?.[w.on.review]
+      if (v && hostOwes(v)) return { reason: `human review ${v.id}: ${reviewStateText(v)} (WFE's host)`, responsible: 'wfe:review', since: r.nodes[w.node]?.updated ?? null }
+      if (v) return { reason: `human review ${v.id}: ${reviewStateText(v)}${v.reviewer ? ` for ${v.reviewer}` : ''}`, responsible: `person:${v.reviewer ?? 'the person'}`, since: v.prepared.at }
     } else {
       const deadline = r.nodes[w.node]?.wait?.deadline
       return { reason: `external: ${w.on.external}${deadline ? ` (expected by ${deadline})` : ''}`, responsible: `external:${w.on.external}`, since: r.nodes[w.node]?.updated ?? null }
     }
   }
+  const owed = openContinuations(r)[0]
+  if (owed) return { reason: `changes requested in review ${owed.id} by ${owed.decision?.by}, not addressed, no job queued`, responsible: 'executor', since: owed.decision?.at ?? r.updated }
   if (r.execution.ready.length || r.execution.active.length) return { reason: `${r.execution.active.length ? `${r.execution.active.join(', ')} recorded as running` : `${r.execution.ready.join(', ')} ready`}, no attempt and no job`, responsible: 'executor', since: r.updated }
   if (r.execution.state === 'not-started') return { reason: 'not started, no job', responsible: 'executor', since: r.created }
   return { reason: `execution ${r.execution.state}`, responsible: 'none', since: r.updated }

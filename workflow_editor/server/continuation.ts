@@ -16,6 +16,7 @@
 // Later input is found at node boundaries (`wfe run state`) and by the
 // write-time refusals, as before.
 import { sourceLabel } from '../shared/intake.ts'
+import { openContinuations } from '../shared/humanReview.ts'
 import { effectiveOf, holderOf, questionState, replay, runKey, type HistoryEntry, type Question, type RunRecord } from '../shared/run.ts'
 import { attachedLines, delegationBrief, instructionBrief } from './exec.ts'
 import { answerReminder } from '../shared/reminders.ts'
@@ -62,11 +63,12 @@ export function stateLines(r: RunRecord): string[] {
   out.push(`Nodes: ${done} completed; ready: ${ex.ready.join(', ') || '(none)'}; running: ${ex.active.join(', ') || '(none)'}${ex.failed.length ? `; failed: ${ex.failed.join(', ')}` : ''}${ex.blocked.length ? `; blocked: ${ex.blocked.join(', ')}` : ''}.`)
   for (const w of ex.waiting) {
     const n = r.nodes[w.node]
-    out.push(`Waiting: ${w.node} — ${'question' in w.on ? `question ${w.on.question}` : 'external' in w.on ? `external ${w.on.external}` : `delegation ${w.on.delegation}`}; next move: ${holderOf(r, w.node)}${n?.wait?.reason && !('question' in w.on) ? ` (${one(n.wait.reason, 120)})` : ''}.`)
+    out.push(`Waiting: ${w.node} — ${'question' in w.on ? `question ${w.on.question}` : 'external' in w.on ? `external ${w.on.external}` : 'review' in w.on ? `human review ${w.on.review}` : `delegation ${w.on.delegation}`}; next move: ${holderOf(r, w.node)}${n?.wait?.reason && !('question' in w.on) ? ` (${one(n.wait.reason, 120)})` : ''}.`)
   }
   const pres = Object.values(r.presentations ?? {}).filter(p => p.state !== 'stopped')
   if (pres.length) out.push(`Presentations not stopped: ${pres.map(p => `${p.id} (${p.state}, from ${p.node}${Object.values(r.questions).filter(q => q.presentation?.id === p.id).map(q => `, asked in ${q.id}`).join('')})`).join('; ')}.`)
   for (const k of Object.values(r.corrections ?? {}).filter(x => !x.addressed)) out.push(`Correction ${k.id} from ${k.from} not addressed yet: the delegating run returned the result completed at seq ${k.result.seq} (wfe run correction ${runKey(r)}).`)
+  for (const v of openContinuations(r)) out.push(`Review ${v.id}: ${v.decision!.by} requested changes, not addressed yet (wfe review show ${runKey(r)} ${v.id}).`)
   if (r.definition.revisions?.length) out.push(`Definition: revision ${r.definition.active} in force (wfe run revisions <run>).`)
   for (const d of r.decisions) out.push(`Decision: ${d.decision} by ${d.by} at ${d.at}${d.confirmation ? ` (answer ${d.confirmation.answer} to ${d.confirmation.question})` : ''}.`)
   return out

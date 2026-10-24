@@ -17,6 +17,10 @@ import {
   DELEGATION_ID, DISPOSITIONS, EVENT_TYPES, WAKING, isOpenDelegation, latestResult, openRevision, pendingEvents, questionEvent,
   type ChildRef, type Delegation, type DelegationEvent, type DelegationRevision, type DelegationTarget, type ResultManifest, type TransportRef,
 } from './delegation.ts'
+import {
+  REVIEW_ID, REVIEW_OUTCOMES, isAwaitingPerson, openContinuations, startedInstances,
+  type CleanupResult, type ReviewRound, type ReviewSubject, type SubjectServing,
+} from './humanReview.ts'
 
 export const RUN_SCHEMA = 'ag.workflow-run.v2'
 // "plan, reports, final report" / "no generated documents", for messages.
@@ -227,7 +231,9 @@ export function anyRevisionNode(r: { definition: DefinitionRef }, id: string): E
 }
 export interface RepoContext { path: string; head: string | null; branch: string | null; dirty: number | null }
 
-export type WaitOn = { question: string } | { external: string } | { delegation: string }
+// `review` (p17, docs/reviews.md): a review node waits on its round: on the
+// person while it is open, on WFE's cleanup once approved.
+export type WaitOn = { question: string } | { external: string } | { delegation: string } | { review: string }
 // `deadline` (observer p3): when the awaited result is expected at the latest,
 // as the waiter declared it; a monitor treats a wait past it as uncertain. A
 // statement, not a timer: nothing changes state because of it.
@@ -411,6 +417,7 @@ export type HoldCause =
   | { code: 'left-running' | 'left-ready' | 'nothing-recorded'; nodes: string[] }
   | { code: 'missed-event'; events: { delegation: string; n: number; type: string }[] }
   | { code: 'missed-correction'; corrections: string[] } // fix6: a correction left unaddressed
+  | { code: 'missed-review'; reviews: string[] } // p17: requested changes left unaddressed
   | { code: 'process'; detail: string }
   | { code: 'lost' }
 // The person's words a recorder acted on (p9): when an agent stops, resumes
@@ -477,6 +484,7 @@ export interface RunState {
   sessions?: SessionRecord[] // present once an attempt recorded its session (agent_session p1); the last open one is current
   delegations?: Record<string, Delegation> // present once the first dispatch is recorded (p10, docs/delegation.md)
   corrections?: Record<string, Correction> // present once a delegating run first returned this run's result (fix6)
+  reviews?: Record<string, ReviewRound> // present once the first human review round is prepared (p17, docs/reviews.md)
   artifacts: Artifact[]
   decisions: Decision[]
   cancelled: { reason: string; at: string; by: string; because?: Because } | null
@@ -575,6 +583,15 @@ export type OpInput =
   // fix6: the person asked for a presentation to stay available after its
   // review; who stops it, and on whose words. A record, not a stop or a keep-alive.
   | { op: 'presentation.retain'; presentation: string; note: string; owner: string; because?: BecauseRef }
+  // p17 (docs/reviews.md): a human review round. prepare and take-up are the
+  // run's agent's (its attempt); start and decide the person's (or an
+  // identified actor's); serve and cleanup what WFE's host observed.
+  | { op: 'review.prepare'; review: string; node: string; summary: string; subjects?: Omit<ReviewSubject, 'n'>[]; reviewer?: string; previous?: string }
+  | { op: 'review.start'; review: string }
+  | { op: 'review.serve'; review: string; start: number; subjects: Omit<SubjectServing, 'at' | 'start'>[] }
+  | { op: 'review.decide'; review: string; outcome: string; feedback?: string; revisions?: string[]; synthetic?: boolean; because?: BecauseRef }
+  | { op: 'review.cleanup'; review: string; results: Omit<CleanupResult, 'at'>[] }
+  | { op: 'review.take-up'; review: string; note: string; noChange?: boolean }
 
 // What a recorder gives: the answer (by question and index, default the
 // latest) or the instruction; the reducer resolves and records whose words.
@@ -588,12 +605,14 @@ export const OPS = ['run.create', 'node.start', 'node.progress', 'node.wait', 'n
   'attempt.begin', 'attempt.end', 'run.stop', 'run.resume', 'presentation.register', 'presentation.observe', 'run.adjust', 'run.record-done', 'run.integrate', 'run.relocate', 'run.assign', 'run.recover', 'attempt.session', 'attempt.context', 'session.retire',
   'delegation.dispatch', 'delegation.bind', 'delegation.event', 'delegation.take-up', 'delegation.answer', 'delegation.instruct', 'delegation.dispose',
   'delegation.revise', 'correction.receive', 'correction.take-up', 'presentation.retain',
+  'review.prepare', 'review.start', 'review.serve', 'review.decide', 'review.cleanup', 'review.take-up',
   'input.select', 'input.observe', 'output.publish', 'output.observe'] as const
 // The executor's own reports. While an attempt is open they must carry its
 // id (`attempt`), so a stopped or superseded attempt cannot write into the
 // record of the one that replaced it.
 export const EXECUTOR_OPS: readonly string[] = ['node.start', 'node.progress', 'node.wait', 'node.complete', 'node.fail', 'question.ask', 'question.take-up', 'question.withdraw', 'instruction.ack', 'artifact.attach', 'presentation.register',
   'delegation.dispatch', 'delegation.take-up', 'delegation.answer', 'delegation.instruct', 'delegation.dispose', 'delegation.revise', 'correction.take-up',
+  'review.prepare', 'review.take-up',
   'input.select', 'output.publish']
 
 // Received instructions the executor has not acknowledged, in arrival order.
@@ -618,6 +637,7 @@ export interface Change {
   presentation?: [string, PresentationState | null, PresentationState] // id, from, to (p7)
   revision?: [string, string] // the revision in force before and after (p7)
   correction?: [string | null, string] // fix6: a correction received (null → id), or addressed (id → id)
+  review?: [string, string | null, string] // p17: a review round: id, from, to (or the continuation addressed: state → state)
 }
 export type HistoryEntry = OpInput & EntryMeta & { seq: number; at: string; by: string; via: string; change: Change }
 export interface RunRecord extends RunState { history: HistoryEntry[] }
@@ -676,7 +696,7 @@ export function readiness(nodes: Record<string, { state: NodeState }>, graph: Ru
 // An unaddressed correction (fix6) keeps a run whose nodes are all done
 // in progress: its agent owes the next move (adding the work), and the
 // result it returned is not announced again.
-export function summarize(s: Pick<RunState, 'nodes' | 'cancelled'> & Partial<Pick<RunState, 'corrections'>>, graph: RunGraph): Execution {
+export function summarize(s: Pick<RunState, 'nodes' | 'cancelled'> & Partial<Pick<RunState, 'corrections' | 'reviews'>>, graph: RunGraph): Execution {
   const counts = Object.fromEntries(NODE_STATES.map(k => [k, 0])) as Record<NodeState, number>
   const ids = Object.keys(s.nodes).sort()
   for (const id of ids) counts[s.nodes[id].state]++
@@ -690,7 +710,8 @@ export function summarize(s: Pick<RunState, 'nodes' | 'cancelled'> & Partial<Pic
   else if (counts.pending === ids.length) state = 'not-started'
   else if (active.length || waiting.length || ready.length) state = 'in-progress'
   else state = 'stopped'
-  if (state === 'completed' && openCorrections(s).length) state = 'in-progress'
+  // p17: so do changes a person requested in a human review.
+  if (state === 'completed' && (openCorrections(s).length || openContinuations(s).length)) state = 'in-progress'
   return { state, counts, ready, blocked, active, waiting, failed }
 }
 
@@ -706,6 +727,10 @@ export function holderOf(s: RunState, node: string): string {
     const d = s.delegations?.[w.on.delegation]
     const pending = d ? pendingEvents(d) : []
     if (pending.length) return `${s.executor.name} (delegation ${d!.id}: ${pending.map(e => `${e.type} #${e.n}`).join(', ')} not yet taken up)`
+  }
+  if ('review' in w.on) {
+    const r = s.reviews?.[w.on.review]
+    if (r && !isAwaitingPerson(r)) return r.state === 'approved' ? 'WFE (review cleanup)' : w.holder
   }
   return w.holder
 }
@@ -1275,6 +1300,15 @@ export function apply(prev: RunState | null, e: HistoryEntry | (OpInput & EntryM
       s.cancelled = { reason, at, by, ...(why ? { because: why } : {}) }
       // Open delegations close with the parent (p10); their children are
       // not cancelled by this — that is an explicit act of its own.
+      // Undecided and approved review rounds close with it (p17); what their
+      // reviews started is WFE's to stop (review.cleanup after the cancellation).
+      for (const r of Object.values(s.reviews ?? {})) {
+        if (r.state === 'complete' || r.state === 'cancelled') continue
+        const handed = r.state === 'changes-requested'
+        if (!handed) { r.cancelled = { at, by, reason }; r.state = 'cancelled' }
+        if (startedInstances(r).length && (!r.cleanup || r.cleanup.state !== 'done')) r.cleanup = { state: 'pending', owner: 'WFE (cancellation cleanup)', results: r.cleanup?.results ?? [], attempts: r.cleanup?.attempts ?? 0 }
+        else if (!handed) r.cleanup = r.cleanup ?? null
+      }
       for (const d of Object.values(s.delegations ?? {})) if (isOpenDelegation(d)) d.closed = { at, by, reason: `the parent run was cancelled: ${reason}; the child ${d.child ? `${d.child.workflow}/${d.child.run} in ${d.child.project}` : '(not created yet)'} is left as it is` }
       for (const [id, n] of Object.entries(s.nodes)) {
         if (n.state === 'pending' || n.state === 'running' || n.state === 'waiting') {
@@ -1406,6 +1440,13 @@ export function apply(prev: RunState | null, e: HistoryEntry | (OpInput & EntryM
         why = `the executor exited with correction${missedCorrections.length === 1 ? '' : 's'} ${missedCorrections.join(', ')} not addressed (no work added, no wfe run correction ${missedCorrections[0]} --no-change)${detail ? `; ${detail}` : ''}`
         cause = { code: 'missed-correction', corrections: missedCorrections }
       }
+      // p17: requested changes that were waiting for this attempt, likewise.
+      const missedReviews = openContinuations(s).filter(r => r.continuation!.during !== e.attempt).map(r => r.id)
+      if (outcome === 'exited' && !s.cancelled && missedReviews.length) {
+        outcome = 'interrupted'
+        why = `the executor exited with the changes requested in review ${missedReviews.join(', ')} not addressed (no work added, no wfe review take-up ${missedReviews[0]} --no-change)${detail ? `; ${detail}` : ''}`
+        cause = { code: 'missed-review', reviews: missedReviews }
+      }
       if (ctl.stop && outcome !== 'unknown') outcome = 'stopped'
       ctl.last = { id: ctl.attempt!.id, outcome, ended: at, detail: why, backend: ctl.attempt!.backend }
       ctl.attempt = null
@@ -1442,7 +1483,8 @@ export function apply(prev: RunState | null, e: HistoryEntry | (OpInput & EntryM
         // is queued is the execution host's fact: ExecStore.recover checks it.)
         const answered = s.execution.waiting.some(w => 'question' in w.on && (() => { const q = s.questions[w.on.question]; return !!q && q.answers.length > 0 && !q.takenUp && !q.withdrawn })())
         const relayed = Object.values(s.delegations ?? {}).some(d => isOpenDelegation(d) && pendingEvents(d).length > 0)
-        if (!s.execution.ready.length && !s.execution.active.length && !answered && !relayed && s.execution.state !== 'not-started') fail('state', 'the run is not held and nothing in it waits for the executor; there is nothing to recover')
+        const owed = openContinuations(s).length > 0
+        if (!s.execution.ready.length && !s.execution.active.length && !answered && !relayed && !owed && s.execution.state !== 'not-started') fail('state', 'the run is not held and nothing in it waits for the executor; there is nothing to recover')
       }
       const reason = text(e.reason, 'the reason for the recovery')
       let agent: RecoveryAgent | undefined
@@ -1942,11 +1984,189 @@ export function apply(prev: RunState | null, e: HistoryEntry | (OpInput & EntryM
       s.presentations = { ...s.presentations, [p!.id]: { ...p!, retained: { at, by, note: text(e.note, 'what the person asked for (the note)'), owner: text(e.owner, 'who stops it later (the owner)'), ...(why ? { because: why } : {}) } } }
       break
     }
+    case 'review.prepare': {
+      // p17: the run's agent hands its completed work to a person's review.
+      // The subjects were resolved and checked by the file layer (frozen by
+      // presentation revision); here, the node, the one open round per node
+      // and the shape. The node waits on the person; no process does.
+      live()
+      const n = node(e.node)
+      const gn = graph.nodes[e.node]
+      if (gn?.type !== 'review') fail('state', `node "${e.node}" is ${gn?.type ?? 'unknown'}; a human review is prepared on a review node`)
+      const all = s.reviews ?? {}
+      const id = `rv${Object.keys(all).length + 1}`
+      if (e.review !== id) fail('shape', `the next review round is ${id}, not ${String(e.review)}`)
+      const open = Object.values(all).find(r => r.node === e.node && r.state !== 'changes-requested' && r.state !== 'cancelled')
+      if (open) fail('review-open', `${e.node} already has review round ${open.id} (${open.state}); a new round is a new review node`)
+      if (n.state === 'pending') {
+        const ex = summarize(s, graph)
+        if (!ex.ready.includes(e.node)) fail('state', `${e.node} is not ready: ${(predecessors(graph).get(e.node) ?? []).filter(p => s.nodes[p]?.state !== 'completed').join(', ')} not completed yet; the review comes after the work it reviews`)
+        n.started = at
+        if (!s.started) s.started = at
+      } else if (n.state !== 'running') fail('state', `node "${e.node}" is ${n.state}; a review is prepared on a ready or running review node`)
+      if (!Array.isArray(e.subjects) || !e.subjects.length) fail('review-subjects', 'a review names at least one presentation for the person to look at (the file layer resolves --subject)')
+      const subjects: ReviewSubject[] = e.subjects!.map((x, i) => {
+        const o = x as unknown as Record<string, unknown>
+        if (!isObj(o) || ![o.workspace, o.project, o.workflow, o.run, o.creation, o.presentation, o.title].every(v => typeof v === 'string' && v)) return fail('shape', `subject ${i + 1} is {workspace, project, workflow, run, creation, presentation, revision, title}`)
+        if (typeof o.revision !== 'string' || !/^sha256:[0-9a-f]{64}$/.test(o.revision)) fail('shape', `subject ${i + 1}: revision is the presentation's manifest digest`)
+        if (!PRESENTATION_ID.test(o.presentation as string)) fail('shape', `subject ${i + 1}: presentation "${String(o.presentation)}" is not a presentation id`)
+        return { ...(x as Omit<ReviewSubject, 'n'>), n: i + 1 }
+      })
+      const keys = subjects.map(x => `${x.project}/${x.workflow}/${x.run}/${x.presentation}`)
+      if (new Set(keys).size !== keys.length) fail('review-subjects', 'a presentation is named twice')
+      let previous: string | null = null
+      if (e.previous !== undefined && e.previous !== null) {
+        const p = all[e.previous]
+        if (!p) fail('review-unknown', `review round "${String(e.previous)}" does not exist in this run`)
+        if (p!.state !== 'changes-requested') fail('review-state', `${p!.id} is ${p!.state}; a round follows one whose changes were requested`)
+        previous = p!.id
+      } else {
+        // The latest round whose requested changes no later round answers yet.
+        const answered = new Set(Object.values(all).map(r => r.previous))
+        previous = Object.values(all).filter(r => r.state === 'changes-requested' && !answered.has(r.id)).at(-1)?.id ?? null
+      }
+      const reviewer = optText(e.reviewer, 'reviewer').trim() || s.input.author || s.input.onBehalfOf || null
+      const r: ReviewRound = {
+        id, uid: `${s.project}/${s.workflow}/${s.run}#${s.created}/${id}`, node: e.node, previous,
+        prepared: { at, by, attempt: e.attempt ?? null, seq: e.seq }, summary: text(e.summary, 'the review summary (what was done and what to check)'),
+        responsible: s.executor.name, reviewer, subjects, state: 'awaiting', starts: [], serving: [], decision: null, cleanup: null, continuation: null,
+      }
+      s.reviews = { ...all, [id]: r }
+      n.wait = { reason: `human review ${id}`, holder: reviewer ?? 'the person', on: { review: id } }
+      move(e.node, 'waiting')
+      change.review = [id, null, 'awaiting']
+      break
+    }
+    case 'review.start': {
+      // The person's Start review: a durable request; the host starts the
+      // subjects and records what it found (review.serve). Not proof that
+      // anyone looked at anything.
+      live()
+      const r = review(e.review)
+      if (r.state === 'starting') fail('review-starting', `${r.id} is starting already (start ${r.starts.at(-1)!.n}); its result is recorded when the host finishes`)
+      if (!['awaiting', 'start-failed', 'reviewing'].includes(r.state)) fail('review-state', `${r.id} is ${r.state}; only an undecided round is started`)
+      const before = r.state
+      r.starts.push({ n: r.starts.length + 1, at, by, via: e.via, seq: e.seq })
+      r.state = 'starting'
+      change.review = [r.id, before, 'starting']
+      break
+    }
+    case 'review.serve': {
+      // What the host found for one start request: every subject available,
+      // or which ones are not. A subject that did not start is never
+      // dropped from the round.
+      live()
+      const r = review(e.review)
+      if (r.state !== 'starting') fail('review-state', `${r.id} is ${r.state}, not starting`)
+      if (e.start !== r.starts.at(-1)!.n) fail('review-stale', `start ${String(e.start)} is not ${r.id}'s latest start (${r.starts.at(-1)!.n})`)
+      if (!Array.isArray(e.subjects)) fail('shape', 'subjects lists what the host found for each subject')
+      const found = new Map<number, SubjectServing>()
+      for (const x of e.subjects) {
+        if (!isObj(x) || !r.subjects.some(y => y.n === x.subject) || !['available', 'failed'].includes(x.status as string)) fail('shape', 'each served subject is {subject, status: available|failed, instance, mode, detail}')
+        if (x.status === 'available' && (typeof x.instance !== 'string' || !/^pi-[0-9a-z-]{4,64}$/.test(x.instance) || !['started', 'reused'].includes(x.mode as string))) fail('shape', `subject ${x.subject}: an available subject names its instance and whether the review started or reused it`)
+        found.set(x.subject, { subject: x.subject, start: e.start, status: x.status, instance: x.instance ?? null, mode: x.status === 'available' ? x.mode : null, detail: optText(x.detail, 'detail'), at })
+      }
+      const missing = r.subjects.filter(y => !found.has(y.n))
+      if (missing.length) fail('review-subjects', `the host's result names no outcome for subject ${missing.map(y => y.n).join(', ')}; every subject is accounted for`)
+      r.serving = r.subjects.map(y => found.get(y.n)!)
+      r.state = r.serving.every(x => x.status === 'available') ? 'reviewing' : 'start-failed'
+      change.review = [r.id, 'starting', r.state]
+      break
+    }
+    case 'review.decide': {
+      // The person's decision on the round, bound to its frozen subjects.
+      // An agent's own assessment is never recorded as it: from an attempt
+      // (or another run's), only with the person's own words (`because`).
+      live()
+      const r = review(e.review)
+      if (r.decision) fail('review-closed', `${r.id} was already decided (${r.decision.outcome === 'approved' ? 'approved' : 'changes requested'} by ${r.decision.by} at ${r.decision.at}); a later round is reviewed on its own`)
+      if (r.state === 'cancelled') fail('review-closed', `${r.id} was cancelled with the run`)
+      if (!(REVIEW_OUTCOMES as readonly string[]).includes(e.outcome)) fail('shape', `outcome is ${REVIEW_OUTCOMES.join(' or ')}`)
+      const why = because(e.because)
+      if ((e.attempt || e.operator) && !why) fail('review-agent', `an agent's own review is not the person's: ${r.id} is decided by the person (Start review, then Approve or Request changes), or relayed with their words (--because answer:<q> or instruction:<i>)`)
+      if (why && why.from === s.executor.name) fail('because', `the words named are ${s.executor.name}'s own; because names a person's answer or instruction`)
+      if (e.revisions !== undefined && e.revisions !== null) {
+        if (!Array.isArray(e.revisions) || e.revisions.length !== r.subjects.length || e.revisions.some((v, i) => v !== r.subjects[i].revision)) fail('review-superseded', `the decision was made about other material than ${r.id} presents (${r.subjects.map(x => `${x.presentation} ${x.revision.slice(7, 19)}`).join(', ')}); reload the review`)
+      }
+      const feedback = optText(e.feedback, 'feedback').trim()
+      const before = r.state
+      if (e.outcome === 'approved') {
+        if (r.state !== 'reviewing') fail('review-unavailable', r.state === 'start-failed' ? `${r.id} cannot be approved: ${r.serving.filter(x => x.status !== 'available').map(x => `subject ${x.subject} (${r.subjects[x.subject - 1].presentation}) did not start: ${x.detail}`).join('; ')}. Start the review again, or request changes` : `${r.id} is ${r.state}; it is approved once every subject is available (Start review)`)
+      } else if (!feedback) fail('missing', 'requested changes need the feedback (what to change)')
+      const relayed = why && (e.attempt || e.operator) ? { by, because: why } : undefined
+      r.decision = { outcome: e.outcome as 'approved' | 'changes', by: relayed ? why!.from : by, at, via: e.via, seq: e.seq, feedback, subjects: r.subjects.map(x => ({ n: x.n, revision: x.revision })), ...(e.synthetic ? { synthetic: true } : {}), ...(relayed ? { relayed } : {}) }
+      const n = s.nodes[r.node]
+      const started = startedInstances(r)
+      if (e.outcome === 'approved') {
+        r.state = 'approved'
+        r.cleanup = { state: 'pending', owner: 'WFE (review cleanup)', results: [], attempts: 0 }
+        if (n?.state === 'waiting') n.wait = { reason: `cleanup of human review ${r.id} (approved by ${r.decision.by})`, holder: 'WFE (review cleanup)', on: { review: r.id } }
+      } else {
+        r.state = 'changes-requested'
+        r.cleanup = started.length ? { state: 'handed', owner: r.responsible, results: [], attempts: 0 } : null
+        r.continuation = { takenUp: null, addressed: null, during: ctl.attempt?.id ?? null }
+        if (n && (n.state === 'waiting' || n.state === 'running')) {
+          n.wait = null; n.ended = at
+          n.outcome = { text: `Changes requested by ${r.decision.by} in ${r.id}: ${feedback}`, artifacts: [] }
+          move(r.node, 'completed')
+        }
+      }
+      change.review = [r.id, before, r.state]
+      break
+    }
+    case 'review.cleanup': {
+      // What WFE's cleanup did with the instances the review started:
+      // stopped (verified), kept for another active review or on request,
+      // left to its own run, or a stop that failed (retried; never asks the
+      // person again). Recorded after a cancellation too.
+      const r = review(e.review)
+      if (!r.cleanup) fail('review-state', `${r.id} has no cleanup to record (${r.state})`)
+      if (!Array.isArray(e.results)) fail('shape', 'results lists what cleanup did with each instance')
+      const results: CleanupResult[] = e.results.map((x, i) => {
+        if (!isObj(x) || !r.subjects.some(y => y.n === x.subject) || !['stopped', 'stop-failed', 'kept', 'left'].includes(x.status as string)) return fail('shape', `result ${i + 1} is {subject, instance, status: stopped|stop-failed|kept|left, detail}`)
+        return { subject: x.subject, instance: x.instance ?? null, status: x.status, detail: optText(x.detail, 'detail'), at }
+      })
+      const before = r.state
+      const cl = r.cleanup!
+      cl.results = [...cl.results, ...results]
+      cl.attempts++
+      const failed = results.some(x => x.status === 'stop-failed')
+      const outstanding = startedInstances(r).filter(x => !cl.results.some(c => c.instance === x.instance && c.status === 'left'))
+      cl.state = failed || outstanding.length ? (cl.state === 'handed' ? 'handed' : 'failed') : 'done'
+      if (r.state === 'approved' && cl.state === 'done') {
+        r.state = 'complete'
+        const n = s.nodes[r.node]
+        if (n?.state === 'waiting' && n.wait && 'review' in n.wait.on && n.wait.on.review === r.id) {
+          n.wait = null; n.ended = at
+          n.outcome = { text: `Approved by ${r.decision!.by}${r.decision!.synthetic ? ' (synthetic check actor)' : ''} in ${r.id}${r.decision!.feedback ? `: ${r.decision!.feedback}` : ''}; review cleanup verified`, artifacts: [] }
+          move(r.node, 'completed')
+        }
+      }
+      change.review = [r.id, before, r.state]
+      break
+    }
+    case 'review.take-up': {
+      // The responsible agent read the requested changes. With noChange it
+      // records why nothing changes; otherwise the work it adds addresses them.
+      live()
+      const r = review(e.review)
+      if (r.state !== 'changes-requested' || !r.continuation) fail('review-state', `${r.id} is ${r.state}; only requested changes are taken up`)
+      if (r.continuation!.takenUp && !e.noChange) fail('review-closed', `the changes requested in ${r.id} were already taken up by ${r.continuation!.takenUp.by} at ${r.continuation!.takenUp.at}`)
+      if (r.continuation!.addressed) fail('review-closed', `the changes requested in ${r.id} are already addressed (${r.continuation!.addressed.how} at seq ${r.continuation!.addressed.seq})`)
+      const note = e.noChange ? text(e.note, 'why nothing changes (the note)') : optText(e.note, 'note')
+      r.continuation!.takenUp = r.continuation!.takenUp ?? { at, by, attempt: e.attempt ?? null, note }
+      if (e.noChange) { r.continuation!.addressed = { seq: e.seq, at, how: 'no-change' }; change.review = [r.id, r.state, r.state] }
+      break
+    }
     default:
       fail('op-unknown', `unknown operation "${(e as { op: string }).op}"`)
   }
 
   // The plan step completes on agreement to the plan.md it completes with: a
+  function review(id: unknown): ReviewRound {
+    if (typeof id !== 'string' || !REVIEW_ID.test(id) || !s.reviews?.[id]) fail('review-unknown', `review round "${String(id)}" does not exist in this run`)
+    return s.reviews![id as string]
+  }
   function delegation(id: unknown): Delegation {
     if (typeof id !== 'string' || !DELEGATION_ID.test(id) || !s.delegations?.[id]) fail('delegation-unknown', `delegation "${String(id)}" does not exist in this run`)
     return s.delegations![id as string]
@@ -1980,6 +2200,18 @@ export function apply(prev: RunState | null, e: HistoryEntry | (OpInput & EntryM
     if (open.length && summarize({ nodes: s.nodes, cancelled: s.cancelled }, graph).state !== 'completed') {
       for (const c of open) c.addressed = { seq: e.seq, at, how: 'work' }
       change.correction = [open[0].id, open[0].id]
+    }
+  }
+  // p17: requested changes are addressed once the run has work again after
+  // them — an adjustment that adds work, a completed node started again,
+  // work recorded as done, the same child asked again — or a new round.
+  if (e.op !== 'review.decide') {
+    const owed = openContinuations(s)
+    const added = (e.op === 'run.adjust' || e.op === 'run.record-done') && !!s.definition.revisions?.at(-1)?.diff.added.some(x => !x.startsWith('_'))
+    const reopened = e.op === 'node.start' && change.nodes?.[(e as { node: string }).node]?.[0] === 'completed'
+    if (owed.length && (added || reopened || e.op === 'delegation.revise' || e.op === 'review.prepare')) {
+      for (const r of owed) r.continuation!.addressed = { seq: e.seq, at, how: 'work' }
+      if (!change.review) change.review = [owed[0].id, owed[0].state, owed[0].state]
     }
   }
   const before = prev.execution.state
@@ -2092,8 +2324,8 @@ export const runKey = (r: RunRef) => `${r.workflow}/${r.run}`
 // external result — and `due` when the record owes the executor the next
 // move (an answer or a child's fact not taken up, an instruction not read,
 // work left ready). Short words and reasons: shared/status.ts.
-export type Situation = 'executing' | 'stopping' | 'awaiting-person' | 'awaiting-delegation' | 'awaiting-external' | 'due' | 'stopped' | 'interrupted' | 'unknown' | 'completed' | 'cancelled' | 'not-started' | 'idle'
-export function situation(s: Pick<RunState, 'control' | 'execution' | 'cancelled'> & Partial<Pick<RunState, 'questions' | 'delegations' | 'instructions' | 'corrections'>>): Situation {
+export type Situation = 'executing' | 'stopping' | 'awaiting-person' | 'awaiting-review' | 'awaiting-delegation' | 'awaiting-external' | 'due' | 'stopped' | 'interrupted' | 'unknown' | 'completed' | 'cancelled' | 'not-started' | 'idle'
+export function situation(s: Pick<RunState, 'control' | 'execution' | 'cancelled'> & Partial<Pick<RunState, 'questions' | 'delegations' | 'instructions' | 'corrections' | 'reviews'>>): Situation {
   if (s.cancelled) return 'cancelled'
   if (s.control.attempt) return s.control.stop ? 'stopping' : 'executing'
   if (s.control.hold) return s.control.hold.kind
@@ -2102,6 +2334,8 @@ export function situation(s: Pick<RunState, 'control' | 'execution' | 'cancelled
   if (dueReason(s)) return 'due'
   const on = s.execution.waiting.map(w => w.on)
   if (on.some(o => 'question' in o)) return 'awaiting-person'
+  // p17: a human review the person (or WFE's cleanup) holds; never the executor's.
+  if (on.some(o => 'review' in o)) return 'awaiting-review'
   if (on.some(o => 'delegation' in o)) return 'awaiting-delegation'
   if (on.length) return 'awaiting-external'
   return 'idle'
@@ -2109,7 +2343,7 @@ export function situation(s: Pick<RunState, 'control' | 'execution' | 'cancelled
 
 // Why the executor owes the run its next move, from the record alone; null
 // when the next move is someone else's (or nobody's).
-export function dueReason(s: Pick<RunState, 'execution'> & Partial<Pick<RunState, 'questions' | 'delegations' | 'instructions' | 'corrections'>>): string | null {
+export function dueReason(s: Pick<RunState, 'execution'> & Partial<Pick<RunState, 'questions' | 'delegations' | 'instructions' | 'corrections' | 'reviews'>>): string | null {
   for (const w of s.execution.waiting) {
     if ('question' in w.on) { const q = s.questions?.[w.on.question]; if (q && questionState(q) === 'answered') return `answer to ${q.id} arrived` }
   }
@@ -2121,6 +2355,8 @@ export function dueReason(s: Pick<RunState, 'execution'> & Partial<Pick<RunState
   if (ins && s.execution.state !== 'completed') return `instruction ${ins.id} arrived`
   const cor = openCorrections(s)[0]
   if (cor) return `correction ${cor.id} from ${cor.from} arrived`
+  const back = openContinuations(s)[0]
+  if (back) return `changes requested in review ${back.id} by ${back.decision?.by ?? 'the person'}`
   const and = (xs: string[]) => xs.length <= 2 ? xs.join(' and ') : `${xs.slice(0, -1).join(', ')} and ${xs.at(-1)}`
   if (s.execution.ready.length && !s.execution.waiting.length) return `${and(s.execution.ready)} ready`
   if (s.execution.active.length) return `${and(s.execution.active)} recorded as running`
@@ -2147,6 +2383,7 @@ export type NotableType = 'started' | 'question' | 'answered' | 'reported' | 'no
   | 'integrated' // p9: the accepted result reached the project's shared branches
   | 'delegated' | 'delegation' // p10: a delegate node's dispatch; a child's result, failure or cancellation relayed
   | 'corrected' // fix6: the delegating run returned this run's completed result for correction
+  | 'review-ready' | 'reviewed' | 'review-cleanup-failed' // p17: a human review prepared; the person's decision; its cleanup failed
 export interface NotableEvent {
   id: string
   seq: number
@@ -2168,6 +2405,8 @@ export interface NotableEvent {
   confirmation?: { question: string; from: string } // a decision from the person's confirmation (p6)
   instructions?: string[] // instructed / acknowledged (p6)
   correction?: string // corrected (fix6)
+  review?: string // review-ready / reviewed / review-cleanup-failed (p17)
+  outcome?: string // reviewed: approved | changes
   response?: string // acknowledged: incorporate | clarify | new-run
   confirms?: boolean // a question from the result-confirmation node
   presentation?: string // presented / cleanup-failed, and a question about a presentation (p7)
@@ -2194,6 +2433,9 @@ export function notableEvents(r: RunRecord, sinceSeq = 0): NotableEvent[] {
   // the reports setting, not the policy's name).
   const reporting = !!eff && docStepsOf(eff).reports
   const stepAt = (id: string) => anyRevisionNode(r, id)?.step
+  // p17: with human review nodes, the final report is the end of the agent's
+  // work, not of the run: the run completes when its review does.
+  const reviewing = [...(r.definition.revisions ?? []).map(x => x.effective), ...(eff ? [eff] : [])].some(g => Object.values(g.nodes).some(n => n.type === 'review'))
   let started = false
   for (const e of r.history) {
     const d = e as unknown as Record<string, string>
@@ -2209,6 +2451,7 @@ export function notableEvents(r: RunRecord, sinceSeq = 0): NotableEvent[] {
       push('question', true, d.text, { question: d.question, holder: d.to, node: step ? undefined : d.node, step: step ? d.node : undefined, document: q?.document?.path, ...(q?.subject ? { subject: q.presentation ? [] : q.subject.map(x => x.path), confirms: true } : {}), ...(q?.presentation ? { presentation: q.presentation.id } : {}) })
     } else if (e.op === 'question.answer') push('answered', false, `answer to ${d.question} recorded`, { question: d.question, holder: r.executor.name })
     else if (e.op === 'node.complete' && step?.kind === 'report') push('reported', false, d.outcome, { node: step.for ?? undefined, step: d.node, document: (e as unknown as { document?: DocumentEvidence }).document?.path })
+    else if (e.op === 'node.complete' && step?.kind === 'final-report' && reviewing && e.change.execution?.[1] !== 'completed') push('reported', false, d.outcome, { step: d.node, document: (e as unknown as { document?: DocumentEvidence }).document?.path })
     else if (e.op === 'node.complete' && step?.kind === 'final-report') push('completed', true, d.outcome, { step: d.node, document: (e as unknown as { document?: DocumentEvidence }).document?.path })
     // The node whose completion completes the execution is told once, as
     // the completion.
@@ -2233,6 +2476,15 @@ export function notableEvents(r: RunRecord, sinceSeq = 0): NotableEvent[] {
     // fix6: a correction the delegating run returned the result with.
     if (e.op === 'correction.receive') push('corrected', true, `${d.reason}\n\n${d.text}`, { correction: e.change.correction?.[1] ?? '', holder: r.executor.name })
     if (e.op === 'run.cancel') push('cancelled', true, d.reason)
+    if (e.op === 'review.prepare') {
+      const v = r.reviews?.[d.review]
+      push('review-ready', true, d.summary, { review: d.review, node: d.node, holder: v?.reviewer ?? 'the person', title: v?.subjects.map(x => x.title).join(' / ') })
+    }
+    if (e.op === 'review.decide' && e.change.review) {
+      const v = r.reviews?.[d.review]
+      push('reviewed', true, v?.decision?.feedback ?? d.feedback ?? '', { review: d.review, outcome: d.outcome, holder: d.outcome === 'changes' ? r.executor.name : 'WFE (review cleanup)', node: v?.node })
+    }
+    if (e.op === 'review.cleanup' && (e as unknown as { results: { status: string }[] }).results.some(x => x.status === 'stop-failed')) push('review-cleanup-failed', true, (e as unknown as { results: { status: string; detail: string }[] }).results.filter(x => x.status === 'stop-failed').map(x => x.detail).join('; '), { review: d.review })
     if (e.op === 'run.integrate') push('integrated', false, (d.repositories as unknown as IntegrationRecord['repositories']).filter(x => x.method !== 'already').map(x => `${x.path === '.' ? 'project root' : x.path} → ${x.target} (${x.method}, ${x.result.slice(0, 10)})`).join('; '))
     if (e.op === 'run.record-done') push('adjusted', false, `recorded afterwards as done: ${d.node} — ${d.reason}`, { revision: d.revision, node: d.node, adjusted: { added: [d.node], removed: [] } })
     if (e.op === 'run.adjust') {

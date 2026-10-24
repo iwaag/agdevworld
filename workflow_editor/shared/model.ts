@@ -4,7 +4,11 @@
 
 export const WORKFLOW_SCHEMA = 'ag.workflow.v2'
 export const PROJECT_SCHEMA = 'ag.project.v2'
-export const NODE_TYPES = ['study', 'do', 'delegate', 'talk'] as const
+// `review` (workflow_editor p17, docs/reviews.md): a person's review of
+// completed work, prepared by the run's agent and then managed by WFE —
+// starting the presentations, the person's decision, cleanup. No agent
+// process waits on it.
+export const NODE_TYPES = ['study', 'do', 'delegate', 'talk', 'review'] as const
 export type NodeType = typeof NODE_TYPES[number]
 // What a node is in a discussion (argue p4, docs/discussions.md *Activities*):
 // metadata on an ordinary node type, bound to the discussion's records by

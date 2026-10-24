@@ -197,7 +197,7 @@ test('file layer: custom steps are frozen, briefed and revisable', async () => {
   await writeFile(join(dir, 'devdocs', 'workflows', 'free.yaml'), text)
   const run = await createRun(ws, { workflow: 'free', input: { kind: 'braindump', text: 'Please.', author: 'Person' }, executor: { name: 'Agent', backend: null }, by: 'Agent', via: 'cli' })
   const eff = run.record.definition.effective!
-  assert.equal(eff.compiler, 'ag.wfe-compile.v4')
+  assert.equal(eff.compiler, 'ag.wfe-compile.v5')
   assert.deepEqual(eff.documentation, { plan: false, reports: false, final: true })
   assert.deepEqual(Object.keys(run.record.nodes).sort(), ['_final-report', 'talk'])
   // The run reads back usable; a later edit of the source does not touch it.
@@ -257,6 +257,6 @@ test('a run frozen by compiler v2 (no documentation field) reads, runs and adjus
   assert.ok(res.ok, JSON.stringify(res.problems))
   const after = await readRun(ws, run.ref)
   assert.ok(after.record, after.problem?.message)
-  assert.equal(after.record!.definition.revisions!.at(-1)!.effective.compiler, 'ag.wfe-compile.v4')
+  assert.equal(after.record!.definition.revisions!.at(-1)!.effective.compiler, 'ag.wfe-compile.v5')
   assert.deepEqual(Object.keys(after.record!.nodes).sort(), ['_final-report', '_plan', '_report.a', '_report.b', 'a', 'b'])
 })

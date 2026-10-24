@@ -103,7 +103,7 @@ test('the compiler (since v2) freezes the result confirmation with the graph', (
   assert.ok(r.ok)
   const c = compile(r.model)
   assert.ok(c.ok)
-  assert.equal(COMPILER_VERSION, 'ag.wfe-compile.v4') // v3 (p8/ex2): the custom documentation policy
+  assert.equal(COMPILER_VERSION, 'ag.wfe-compile.v5') // v3 (p8/ex2): the custom documentation policy
   assert.equal(c.graph.compiler, COMPILER_VERSION)
   assert.deepEqual(c.graph.nodes.present, { type: 'talk', confirms: 'result' })
   assert.deepEqual(c.graph.nodes.make, { type: 'do' })

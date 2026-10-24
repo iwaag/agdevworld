@@ -152,6 +152,9 @@ export function validateWorkflow(w: Workflow, ctx: ValidationContext = {}): Issu
       if (!(ACTIVITIES as readonly string[]).includes(n.activity)) issues.push(err('activity-kind', `Node "${id}" has activity "${n.activity}"; expected ${ACTIVITIES.join(', ')}.`, { node: id }))
       else if (n.type !== activityType(n.activity)) issues.push(err('activity-type', `Node "${id}" is the discussion activity "${n.activity}", which is a ${activityType(n.activity)} node, not "${n.type}".`, { node: id }))
     }
+    // A human review (p17) is WFE's to manage once prepared: it binds no
+    // repository of its own and is not a discussion activity.
+    if (n.type === 'review' && n.repositories.length) issues.push(warn('review-repositories', `Review node "${id}" binds repositories; a human review does no work of its own in them (its subjects are presentations).`, { node: id }))
     if (n.confirms) {
       if (!(CONFIRMS as readonly string[]).includes(n.confirms)) issues.push(err('confirms-kind', `Node "${id}" confirms "${n.confirms}"; expected ${CONFIRMS.join(' or ')}.`, { node: id }))
       else if (n.type !== 'talk') issues.push(err('confirms-type', `Node "${id}" confirms the result but is "${n.type}"; only a talk node asks the person.`, { node: id }))

@@ -1640,6 +1640,7 @@ export function apply(prev: RunState | null, e: HistoryEntry | (OpInput & EntryM
         const artifacts = (retro.artifacts ?? []).map(validArtifactPath)
         const reported = { started: isoOrNull(retro.reported?.started, 'reported.started'), ended: isoOrNull(retro.reported?.ended, 'reported.ended') }
         if (reported.started && reported.ended && reported.started > reported.ended) fail('shape', 'reported.started is after reported.ended')
+        for (const t of [reported.started, reported.ended]) if (t && t > at) fail('shape', `the reported work time ${t} is after this recording (${at}); work recorded as done happened before it`)
         const evidence = retroEvidence(retro.evidence, s, e.seq)
         n.outcome = { text: text(retro.outcome, 'the outcome'), artifacts }
         n.retrospective = { seq: e.seq, at, by, reason: text(retro.reason, 'why it is recorded afterwards'), reported, evidence }

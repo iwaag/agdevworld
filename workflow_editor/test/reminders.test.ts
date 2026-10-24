@@ -343,6 +343,7 @@ test('record-done validates its evidence and placement and refuses without leavi
   await refused({ template: 'work', entries: [99] }, 'evidence-unknown')
   await refused({ template: 'work', presentation: 'p9' }, 'evidence-unknown')
   await refused({ template: 'nope' }, 'template-unknown')
+  await refused({ template: 'work', reported: { started: '2999-01-01T00:00:00Z' } }, 'shape')
   await adjust(s, flow(node('later', 'do'), [['talk', 'later']]))
   await assert.rejects(readdir(join(s.folder, 'definition', 'r3')))
   await refusedAt({ template: 'work', after: ['later'] }, 'state') // later is future work

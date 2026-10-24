@@ -148,7 +148,7 @@ export function evaluate(b: Boundary, f: Facts): Reminder[] {
       : reviewed.length ? `${completing} took the person's answer to ${list(reviewed.map(q => q.id))} about ${list(reviewed.map(q => q.presentation!.id))}; if the review is finished, cleanup is due`
         : completesRun ? 'this completes the run' : 'this reports the result'
     add({
-      code: 'presentation-open', refs: open.map(p => p.id),
+      code: 'presentation-serving', refs: open.map(p => p.id),
       text: `${why}: ${list(about)} ${open.length === 1 ? 'is' : 'are'} still serving, and no cleanup node is planned. An answer may ask for changes or for the page to stay available; only the answer tells which. A page nobody stops serves on.`,
       repair: [`if the review is finished: wfe present stop ${run} ${open.length === 1 ? open[0].id : '--all'}, then wfe present status ${run} (stopped: process gone, port no longer answering)`,
         `or plan it: ${instantiate(CLEANUP, completing ? `--after ${completing}` : '')}`],

@@ -350,7 +350,10 @@ then was).
   warning instead of a record: the risk and the activity's command. The
   same command with `--yes` records it. A warning, not a refusal:
   conduct/run-020 completed its last ponder node so and left its conversation
-  open with nothing said.
+  open with nothing said. Since fix5 these are reminders of the shared
+  evaluator (`discussion-activity`, `discussion-open`; runs.md *Reminders at
+  operation boundaries*). `reply --kind result|synthesis` and `--completing`
+  are evaluated the same way before the post.
 - **Waits.** An ask waits `external: discussion:<id>:activity:<a>` (holder:
   the invited participants or the awaited run); a talk waits on its
   question; both free the slot.

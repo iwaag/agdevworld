@@ -169,7 +169,7 @@ test('an answer about a presentation reaches the agent with its reminder; comple
   await op(s, { op: 'question.take-up', question: 'q1' })
   assert.doesNotMatch(pendingAnswerLines(await rec(s)).join('\n'), /Reminder/, 'once, with the answer')
   const r = await reminded(op(s, { op: 'node.complete', node: 'review', outcome: 'reviewed' }, ADVISE))
-  assert.deepEqual(r.codes, ['presentation-open'])
+  assert.deepEqual(r.codes, ['presentation-serving'])
   assert.match(r.message, /review took the person's answer to q1 about p1; if the review is finished, cleanup is due: p1 "Result" \(available, registered from present; asked in q1, taken-up\)/)
   assert.match(r.message, /wfe present stop freework\/run-001 p1/)
   // The page stopped and verified: the reminder is gone.
@@ -194,7 +194,7 @@ test('a planned cleanup satisfies the review reminder; completing the cleanup wi
   await op(s, { op: 'node.complete', node: 'review', outcome: 'accepted' }, ADVISE)
   await op(s, { op: 'node.start', node: 'tidy' })
   const r = await reminded(op(s, { op: 'node.complete', node: 'tidy', outcome: 'stopped' }, ADVISE))
-  assert.deepEqual(r.codes, ['presentation-open'])
+  assert.deepEqual(r.codes, ['presentation-serving'])
   assert.match(r.message, /tidy is a cleanup node, yet this presentation is still recorded as serving/)
 })
 

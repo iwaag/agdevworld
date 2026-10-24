@@ -166,6 +166,19 @@ with the verified outcome. A failed stop leaves the node running or failed
 the person to accept the result again, because the decision is already
 recorded and bound to the presented revision.
 
+Reminders (workflow_editor fix5, runs.md *Reminders at operation
+boundaries*) note the following:
+
+- a registration from a talk or work node, or with no cleanup planned;
+- a review answer about a presentation, with the reminder to decide between
+  more work and cleanup;
+- a page still serving when the review node or the run completes and no
+  cleanup is planned;
+- completed work that no presentation covers.
+
+They are reminders, not gates. An answer may ask for changes or for the
+page to stay available, and nothing is stopped automatically.
+
 ## Confirmation bound to a presentation
 
 The result-confirmation question (`confirms: result`, [runs.md](runs.md))

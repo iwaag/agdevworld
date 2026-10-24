@@ -431,7 +431,10 @@ register <run> <node> --source <dir> --entry <file> --review <file.md> --title <
                                   review text and a manifest of hashes; the revision is
                                   the manifest's digest. From a running node, by the
                                   executing attempt (WFE_ATTEMPT). Later edits of <dir>
-                                  never change a registered presentation
+                                  never change a registered presentation. WFE may first
+                                  answer with reminders (registered from a talk or work
+                                  node, no cleanup planned); nothing is copied then, and
+                                  the refusal says how to continue
 start <run> <p>                   serve it on this host, in a session of its own (it
                                   outlives the attempt, a human wait, a stopped run and
                                   a service restart). Records it available only after

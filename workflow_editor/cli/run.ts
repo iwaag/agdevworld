@@ -36,6 +36,13 @@ export interface RunCli {
   area: () => string // the operating area (its node catalog is frozen into new runs, p7/ex1)
 }
 
+// Said once in each help of an operation WFE may answer with reminders
+// (workflow_editor fix5, docs/runs.md "Reminders at operation boundaries").
+const REMINDERS = `Before recording it, WFE may answer with reminders instead: work not
+presented, a page still serving with no cleanup planned, work that may have
+been done outside nodes. They record nothing; the refusal names the facts,
+the repair, and how to continue as it is.`
+
 const COMMON = `Common options: --by <name> (who records: your own name. An executing
   attempt (WFE_ATTEMPT) records as the run's agent and refuses another name;
   outside one, a run the execution host performs needs --by; otherwise the
@@ -127,16 +134,13 @@ ask. --deadline says when the result is expected at the latest (an ISO time
 or a duration from now); a monitor treats the wait as uncertain after it and
 looks into it, while a wait inside it is left alone. Nothing changes state
 because of a deadline. Writes run.json.`,
-  complete: `wfe run complete <run> <node> --outcome <text> [--artifact <path>]... [--agreement <question>] [--yes]
+  complete: `wfe run complete <run> <node> --outcome <text> [--artifact <path>]... [--agreement <question>]
 
 Records the outcome of a running node. Available documentation is recorded
 by hash. Documents, plan agreement, review decisions, acknowledged input and
 presentation shutdown are optional records and do not gate completion.
 A combined adjustment is available with --definition and --completing. Writes run.json.
-A warning records nothing and says the risk and the recommended way:
-completing a discussion activity's node (announce, ask, ponder) here, or
-completing a conductor run whose discussion is still open with no
-conclusion from it. --yes completes anyway.`,
+${REMINDERS}`,
   fail: `wfe run fail <run> <node> --reason <text>
 
 Records that a problem prevents the running or waiting node from continuing.
@@ -163,7 +167,8 @@ presentation with --presentation <p> (wfe present): its files by hash and its
 revision; the answer then binds that revision only. --output <o> presents an
 external output (wfe run publish): its bytes on the share are verified against
 its manifest in full, and the manifest is recorded as a subject, alone or
-with a presentation (a preview of it). Writes run.json.`,
+with a presentation (a preview of it). Writes run.json.
+${REMINDERS}`,
   answer: `wfe run answer <run> <question> --answer <text> [--from <person>] [--source-message <conversation>:<id>]
 
 Records an answer to that question. The waiting node stays waiting until the
@@ -172,7 +177,9 @@ else records it (default --by). Writes run.json.`,
   'take-up': `wfe run take-up <run> <question> [--index <n>]
 
 Records that the executor took up the latest answer (or answer --index, from
-0); a node waiting on that question resumes running. Writes run.json.`,
+0); a node waiting on that question resumes running. An answer about a
+presentation comes with a reminder: it may ask for more work, or the review
+is finished and cleanup is due; nothing is stopped by it. Writes run.json.`,
   withdraw: `wfe run withdraw <run> <question> --reason <text>
 
 Closes a question without an answer; a node waiting on it resumes running.
@@ -341,9 +348,11 @@ choices, including running and completed work. Default source is agent;
 no question, answer take-up or human agreement is a prerequisite.
 --dry-run shows changes without writing. --propose <name> saves an optional
 proposal. --completing <node> --outcome <text> records a revision and that
-running node's completion atomically (a discussion activity's node warns as
-in wfe run complete; --yes accepts). Stale revisions and writers receive
-concrete diagnostics so the agent can re-read and retry. Writes revision files and run.json.`,
+running node's completion atomically; the completion is checked for
+reminders as in wfe run complete, on the revised graph. Stale revisions and
+writers receive concrete diagnostics so the agent can re-read and retry.
+Work that already happened without a node is recorded with wfe run
+record-done instead. Writes revision files and run.json.`,
   nodes: `wfe run nodes <run> [--show <template>]
 
 The person's node catalog as this run was given it at creation (docs/catalog.md):

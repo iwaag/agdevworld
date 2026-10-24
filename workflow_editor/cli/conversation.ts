@@ -53,6 +53,10 @@ reply | contribute [<id>] (--text <t> | --file <f|->) --re <msg>… [--kind repl
                               synthesis is the conductor's project's or the archive project's.
                               --completing <node>: that node completes with the message (a turn
                               that spoke and left its node running is held interrupted).
+                              A result, synthesis or --completing post may first get WFE's
+                              reminders (work not presented, a page left serving, work done
+                              outside nodes); nothing is posted then, and the refusal says how
+                              to continue.
                               --workflow <record>: your turn's workflow records this is about
 link [<id>] <msg> --run <workspace>/<workflow>/<run> --as <relation> --note <why>
                               what a message is to a run: ${RELATIONS.filter(r => r !== 'turn').join(', ')}.

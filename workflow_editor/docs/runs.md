@@ -503,6 +503,79 @@ their own operations (`presentation.register`, `presentation.observe`,
 [adjustments.md](adjustments.md). Open presentations do not hold execution
 completion (p11); `wfe present status` shows them.
 
+### Reminders at operation boundaries (workflow_editor fix5)
+
+Before an agent's operation is recorded, WFE checks the run's records for
+omissions that are easy to miss and still easy to repair. The check runs
+inside the operation, against the record the operation would replace and
+under the run's lock. If a reminder applies, the operation is refused
+before anything is recorded, posted or queued. The refusal lists every
+applicable reminder in one response, with what the records show, what
+stays unknown, concrete repair commands, and that the same command with
+`--yes` continues. `--yes` passes these reminders only and only for that
+command. Invalid arguments, stale revisions or seqs, attempt ownership and
+invalid graphs stay errors. No human approval is involved.
+
+A reminder is not proof of an omission. WFE cannot observe every shell
+action, and cannot judge whether a result needs a presentation.
+
+| Code | At | When |
+| --- | --- | --- |
+| `presentation-missing` | the completion that completes the run; completing the last work node; an outward result report; a result-confirmation question that presents nothing | work completed after the latest presentation was registered (and not linked to it), and no present node is planned |
+| `presentation-serving` | the run-completing completion; a report; completing a cleanup node; completing a node that took an answer about a presentation | a presentation is still recorded as serving, and no cleanup node is planned |
+| `presentation-inside-work` | `wfe present register` | registered from a talk, work, confirmation or discussion-activity node |
+| `cleanup-unplanned` | `wfe present register` | no cleanup node is planned |
+| `unrecorded-activity` | a question, a report, the run-completing completion | the run's catalog has templates and no work node is visible, but something suggests work was done: changed paths in the run's copy outside its records, artifacts outside the run folder or published outputs, or a talk that has run for more than 10 minutes |
+| `discussion-activity`, `discussion-open` | completion | a discussion activity completed with a plain completion; a conductor run ending with its discussion open (fix3) |
+
+Roles come from structured records, never node names:
+
+- **present**: the catalog's `present` template, the `present` icon, or a
+  node a presentation was registered from;
+- **cleanup**: the `cleanup` template or icon;
+- **work**: the `work` template, or an untemplated `do` node the run added
+  itself;
+- `confirms: result`, talk, activity and documentation steps come from the
+  graph.
+
+"Planned" means pending, running or waiting. The completion that completes
+the run is the transition to execution `completed`. Documentation steps
+such as `_final-report` do not hold it.
+
+There are three responses to a reminder:
+
+- do the omitted work: add a present or cleanup node with `wfe nodes
+  instantiate … --run` and `wfe run adjust`, or stop the page with `wfe
+  present stop`;
+- record work already done (`wfe run record-done`, [adjustments.md](adjustments.md));
+- continue consciously with `--yes`.
+
+After a repair the ordinary command passes when its conditions no longer
+hold. A self-check that the records cannot resolve needs `--yes` once the
+agent has considered it.
+
+A person's incoming answer is never refused or delayed. When an answer
+concerns a presentation, it is shown with the pending answer in the brief,
+the continuation and `wfe run state`, and once at `wfe run take-up`, with
+a reminder: decide whether it asks for more work (present a new revision;
+the page may stay up) or whether the review is finished and cleanup is
+due. Nothing stops a page or adds work by itself. WFE's own records
+(attempt ends, intake, a discussion completing a node for a run) are not
+evaluated.
+
+Paths: the CLI (`--yes`; exit 1 with the reminders on stderr, detail under
+`--json`); HTTP `POST …/ops` and `POST …/adjust` (`"yes": true`; 409
+`{detail: {code: "reminder", reminders}}`; adjust also takes `completing`);
+a remote worker, which forwards `--yes` with the command; the run view,
+which shows the reminder and records only after the person explicitly
+continues. A retransmission with the same receipt records nothing and is
+not evaluated again.
+
+Why: gimmickimg/freework/run-010 recorded its experiment as nodes and
+completed with no presentation. run-011 presented it only because a
+separate request asked. run-001…008 did their work inside the talk and
+left review pages serving (workflow_editor fix4 report).
+
 ### Artifacts
 
 `attach` records a project-relative path (usually a report in the run
@@ -852,6 +925,7 @@ HTTP routes call them; neither needs the other running.
 | Integrate the accepted result (p9) | `integrate <run> [--dry-run\|--status]` | `GET/POST runs/<wf>/<run>/integration` | run view → Execution and publication → Integration |
 | Delegations (p10, [delegation.md](delegation.md)) | `wfe delegate request\|list\|show\|take-up\|answer\|instruct\|dispose\|file\|sync` | `GET runs/<wf>/<run>/delegations` | run view → Delegations |
 | The node catalog the run was given (p7/ex1) | `nodes <run> [--show <template>]` | `GET runs/<wf>/<run>` (`catalog`) | run view → Node catalog |
+| Record work already done as a completed node (fix5, [adjustments.md](adjustments.md)) | `record-done <run> …` | `POST runs/<wf>/<run>/record-done` | the node is marked "recorded afterwards" |
 
 The browser offers the person's operations: answering, deciding on the
 result, and stopping the run. Execution records (start, complete, wait, …)

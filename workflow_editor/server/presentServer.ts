@@ -22,7 +22,7 @@ export interface ServeConfig {
   run: string // <project> / <workflow>/<run>
   presentation: string
   revision: string
-  answer: { url: string | null; text: string } // where the person answers
+  answer: { url: string | null; text: string; lead?: string } // where the person answers; `lead` replaces the default sentence (p17: a review round's page)
 }
 export interface ManifestFile { kind: string; presentation: string; entry: string; review: string; files: { path: string; sha256: string; bytes: number }[] }
 
@@ -83,7 +83,7 @@ export function reviewPage(c: ServeConfig, manifest: ManifestFile, review: strin
 <aside><h1>${escapeHtml(c.title)}</h1>
 <div class="meta">${escapeHtml(c.run)} · presentation ${escapeHtml(c.presentation)} · revision ${escapeHtml(c.revision.replace(/^sha256:/, '').slice(0, 12))}</div>
 <div class="review">${review}</div>
-<div class="respond"><strong>Your feedback or acceptance</strong>Answer the review question of this run: ${answer}. This page records nothing.</div>
+<div class="respond"><strong>Your feedback or acceptance</strong>${escapeHtml(c.answer.lead ?? 'Answer the review question of this run')}: ${answer}. This page records nothing.</div>
 </aside></body></html>
 `
 }

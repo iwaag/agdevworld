@@ -166,8 +166,12 @@ export class ReviewHost {
           const p = orec.presentations?.[x.presentation]
           if (!p) throw new Error(`presentation ${x.presentation} is no longer in ${x.project}/${runKey(oref)}`)
           if (p.revision !== x.revision) throw new Error(`presentation ${x.presentation} has revision ${p.revision.slice(7, 19)} now, not the reviewed ${x.revision.slice(7, 19)}`)
-          let res = await pr.start(ows, oref, x.presentation, { by: REVIEWER, review: round0.uid })
-          for (let i = 0; res.state === 'starting' && i < 60; i++) { await sleep(500); res = await pr.start(ows, oref, x.presentation, { by: REVIEWER, review: round0.uid }) }
+          // The review screen sends the person to the round's page (p17 trial A:
+          // a reviewed page still said to answer in the child's request topic).
+          const page = this.pageOf(ws.reg.id, ref, id)
+          const answer = { url: page, text: `the human review page (${round0.id})`, lead: 'Approve or request changes on' }
+          let res = await pr.start(ows, oref, x.presentation, { by: REVIEWER, review: round0.uid, answer })
+          for (let i = 0; res.state === 'starting' && i < 60; i++) { await sleep(500); res = await pr.start(ows, oref, x.presentation, { by: REVIEWER, review: round0.uid, answer }) }
           if (res.state !== 'serving') throw new Error(`another start of ${x.presentation} did not finish`)
           const mode = pr.use({ instance: res.instance.id, review: round0.uid, workspace: x.workspace, workflow: x.workflow, run: x.run, presentation: x.presentation, subject: x.n }, res.reused)
           found.push({ subject: x.n, status: 'available', instance: res.instance.id, mode, detail: `${res.reused ? 'already served' : 'started'} for this review; identity, review screen and entry answered` })

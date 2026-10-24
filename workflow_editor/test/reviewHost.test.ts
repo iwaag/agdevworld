@@ -122,6 +122,8 @@ test('a completed child\'s stopped page is served again, exactly as frozen; appr
   assert.ok(view.subjectsNow[0].live && view.subjectsNow[0].url)
   const body = await (await fetch(`${view.subjectsNow[0].url!.replace('localhost', '127.0.0.1')}content/main.js`)).text()
   assert.equal(body, 'document.title = "game v1"\n')
+  const screen = await (await fetch(view.subjectsNow[0].url!.replace('localhost', '127.0.0.1'))).text()
+  assert.match(screen, /Approve or request changes on: <a class="answer" href="http:\/\/localhost:8093\/wfe\/#\/ws\/p\/review\/conduct\/run-\d+\/rv1"/, 'the review screen sends the person to the round\'s page')
   assert.equal((await rec(ws, c)).presentations!.p1.state, 'available', 'the owning run records its page serving again')
   // A second Start review reuses the instance; nothing is duplicated.
   const s2 = await host.start(ws, p, 'rv1', { by: 'Pat', via: 'browser' })

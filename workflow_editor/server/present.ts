@@ -192,7 +192,9 @@ export class Presenter {
   // `review` (p17): a human review round starts the presentation of a run
   // whose work is completed: its frozen bundle is served again as it was.
   // A cancelled run's presentations are never served again.
-  async start(ws: Workspace, ref: RunRef, presentation: string, o: { by?: string; review?: string } = {}): Promise<{ state: 'serving' | 'starting'; reused: boolean; instance: InstanceRow; url: string; local: boolean }> {
+  // `answer`: where the review screen says the answer goes (a review round's
+  // page; default the run's own route).
+  async start(ws: Workspace, ref: RunRef, presentation: string, o: { by?: string; review?: string; answer?: ServeConfig['answer'] } = {}): Promise<{ state: 'serving' | 'starting'; reused: boolean; instance: InstanceRow; url: string; local: boolean }> {
     const reading = await readRun(ws, ref)
     const rec = reading.record
     if (!rec) throw new RequestError(409, `run ${runKey(ref)} cannot be used: ${reading.problem?.message}`)
@@ -220,7 +222,7 @@ export class Presenter {
     mkdirSync(instDir, { recursive: true, mode: 0o700 })
     const tokenFile = join(instDir, 'token')
     writeFileSync(tokenFile, randomBytes(24).toString('hex'), { mode: 0o600 })
-    const serve: ServeConfig = { instance: id, folder, bind: cfg.bind, port, tokenFile, title: p.title, run: `${rec.project} / ${runKey(ref)}`, presentation, revision: p.revision, answer: this.answerOf(ws, rec) }
+    const serve: ServeConfig = { instance: id, folder, bind: cfg.bind, port, tokenFile, title: p.title, run: `${rec.project} / ${runKey(ref)}`, presentation, revision: p.revision, answer: o.answer ?? this.answerOf(ws, rec) }
     const configFile = join(instDir, 'config.json')
     writeFileSync(configFile, JSON.stringify(serve, null, 2), { mode: 0o600 })
     const log = join(instDir, 'serve.log')

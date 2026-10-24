@@ -215,6 +215,7 @@ test('a page still serving: an answered review with no cleanup is serving; an op
   await c.op({ op: 'question.answer', question: 'q1', text: 'Fine. Keep it up for my team until Friday.', from: 'Pat' }, 'Pat')
   a = await assess(c)
   assert.equal(status(a, 'presentation-serving'), 'serving')
+  assert.match(a.checks.find(x => x.code === 'presentation-serving')!.facts.join('\n'), /last answer q1: "Fine\. Keep it up for my team until Friday\." \(Pat\)/, 'the answer shows whether it asks for changes or to keep it')
   assert.ok(a.checks.find(x => x.code === 'presentation-serving')!.repair.some(r => /never stop the child's page from this run/.test(r)))
   // The person's request to keep it, recorded with who stops it.
   await c.op({ op: 'presentation.retain', presentation: 'p1', note: 'until Friday for the team', owner: 'kid-agent', because: { kind: 'answer', question: 'q1' } } as never, 'kid-agent')

@@ -177,7 +177,12 @@ export function assessResult(parent: RunRecord, d: Delegation, ev: DelegationEve
       if (p.retained) facts.push(`${p.id} serving now: kept on request (${p.retained.note}; stopped later by ${p.retained.owner})`)
       else if (qs.some(q => questionState(q) === 'open')) facts.push(`${p.id} serving now: its review is not answered yet (${review}); the person can still look at it`)
       else if (cleanup) facts.push(`${p.id} serving now: a cleanup node is planned`)
-      else { facts.push(`${p.id} "${p.title}" serving now (${review}), no cleanup planned, no request to keep it recorded`); forgotten.push(p.id) }
+      else {
+        // The latest answer about it, so a request for changes or to keep it is visible.
+        const last = qs.flatMap(q => q.answers.map(x => `${q.id}: "${x.text.replace(/\s+/g, ' ').slice(0, 120)}" (${x.from})`)).at(-1)
+        facts.push(`${p.id} "${p.title}" serving now (${review}${last ? `; last answer ${last}` : ''}), no cleanup planned, no request to keep it recorded`)
+        forgotten.push(p.id)
+      }
     }
     const stopped = Object.values(nowRec.presentations ?? {}).filter(p => !isOpen(p))
     if (stopped.length) facts.push(`stopped: ${list(stopped.map(p => `${p.id} (${p.state})`))}`)

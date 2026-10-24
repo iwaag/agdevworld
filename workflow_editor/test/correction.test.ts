@@ -11,7 +11,7 @@ import assert from 'node:assert/strict'
 import { mkdir, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { assessDelegation, delegatedReminders } from '../server/delegate.ts'
-import { adjustRun, readRun, registerPresentation, runOp } from '../server/runs.ts'
+import { adjustRun, adviseRun, readRun, registerPresentation, runOp } from '../server/runs.ts'
 import { runSpace } from '../server/runspace.ts'
 import { RequestError } from '../server/workspace.ts'
 import { reminderText } from '../shared/reminders.ts'
@@ -94,6 +94,10 @@ test('same-child correction: the result returned, delivered, the child reopened 
   const s = await setup()
   const { ref, p1, par } = await completedWithoutPresentation(s)
   await par({ op: 'delegation.take-up', delegation: 'd1', events: [1] } as never)
+  // The child's result is accepted before the correction (a person's decision, bound to its tree).
+  const first = await runOp(s.kid, kidRef, { op: 'run.decide', decision: 'accepted', evidence: 'Pat saw the paths' } as never, { by: 'Pat', via: 'cli' })
+  assert.ok(first.record.decisions[0].revision?.length)
+  await s.zulip.cycle()
   const p0 = await rec(s.par, ref)
   const manifest = p0.delegations!.d1.events[0].manifest!.digest
   const r = await s.x.delegate.revise(s.par, ref, 'd1', { instruction: 'Present out/icon.png through a present node, ask me about it, and plan its cleanup.', reason: 'The person has not seen the icon.', manifest }, { by: 'par-agent', via: 'cli', attempt: p1.attempt.id, receipt: 'revise-1' })
@@ -120,7 +124,7 @@ test('same-child correction: the result returned, delivered, the child reopened 
   assert.equal(child.history.filter(h => h.op === 'correction.receive').length, 1)
   // The parent learns the child took it, without being woken.
   let p = await rec(s.par, ref)
-  assert.deepEqual(p.delegations!.d1.events.map(e => [e.type, e.wakes]), [['completed', true], ['correcting', false]])
+  assert.deepEqual(p.delegations!.d1.events.filter(e => e.type !== 'decided').map(e => [e.type, e.wakes]), [['completed', true], ['correcting', false]])
   assert.equal(p.delegations!.d1.events.filter(e => e.type === 'completed').length, 1, 'the old result is not announced again')
   // The intake applying the post again changes nothing.
   s.i.db.prepare('UPDATE messages SET state = \'classified\', applied = NULL WHERE id = ?').run(posts[0].id)
@@ -171,6 +175,13 @@ test('same-child correction: the result returned, delivered, the child reopened 
   assert.equal(code(old), 'result-superseded')
   const done = await s.x.delegate.dispose(s.par, ref, 'd1', { disposition: 'satisfied', note: 'presented now' }, { by: 'par-agent', via: 'cli', attempt: p2.attempt.id })
   assert.equal(done.record.delegations!.d1.disposition?.event, results[1].n)
+  // The repaired omission is gone from the report's assessment too.
+  assert.deepEqual((await delegatedReminders(s.x.delegate, done.record)).filter(r => r.code === 'delegated-presentation-missing'), [])
+  await adviseRun(s.par, ref, [{ kind: 'report', messageKind: 'result' }], { assess: rec2 => delegatedReminders(s.x.delegate, rec2) })
+  // The child's earlier acceptance does not cover the corrected files: a new acceptance is recorded, not refused as already accepted.
+  const re = await runOp(s.kid, kidRef, { op: 'run.decide', decision: 'accepted', evidence: 'Pat reviewed p1' } as never, { by: 'Pat', via: 'cli' })
+  assert.equal(re.record.decisions.filter(d => d.decision === 'accepted').length, 2)
+  assert.notDeepEqual(re.record.decisions.at(-1)!.revision, re.record.decisions[0].revision)
   // Replay keeps both identities.
   const again2 = await readRun(await runSpace(s.par, ref), ref)
   assert.ok(again2.record, again2.problem?.message)

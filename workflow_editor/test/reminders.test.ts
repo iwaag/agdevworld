@@ -399,9 +399,10 @@ test('wfe run record-done from the command line: the help owns the usage, the re
   }
   const help = await cli(['run', 'help', 'record-done'])
   assert.match(help.out, /Records work that already happened, without its own node, as a completed\nnode/)
-  const r = await cli(['run', 'record-done', 'freework/run-001', '--template', 'work', '--id', 'page', '--after', 'talk', '--outcome', 'Made the page.', '--reason', 'It was done inside the talk.', '--artifact', 'out/index.html', '--entry', '3', '--by', 'autolab'])
+  const head = (await gitOk(s.dir, ['rev-parse', 'HEAD'])).trim()
+  const r = await cli(['run', 'record-done', 'freework/run-001', '--template', 'work', '--id', 'page', '--after', 'talk', '--outcome', 'Made the page.', '--reason', 'It was done inside the talk.', '--artifact', 'out/index.html', '--commit-id', head.slice(0, 10), '--entry', '3', '--by', 'autolab'])
   assert.equal(r.code, 0, r.err)
-  assert.match(r.out, /Recorded afterwards: page is completed in r2 \(nothing was run\)\. Evidence: out\/index\.html, entry 3 \(node\.complete\)/)
+  assert.match(r.out, new RegExp(`Recorded afterwards: page is completed in r2 \\(nothing was run\\)\\. Evidence: out/index\\.html, commit ${head.slice(0, 10)}, entry 3 \\(node\\.complete\\)`))
   const show = await cli(['run', 'show', 'freework/run-001', '--history'])
   assert.match(show.out, /page +completed RECORDED AFTERWARDS by autolab at .* \(nothing ran it then: It was done inside the talk\.\); outcome: Made the page\./)
   assert.match(show.out, /run\.record-done +autolab \(cli\)  node page  \[page added as completed \(recorded afterwards\)\]/)

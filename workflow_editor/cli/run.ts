@@ -368,7 +368,7 @@ current workflow (workflow_editor fix3). A node from one of them: wfe nodes inst
 Also says when the catalog was unavailable at creation, or when the run
 predates catalogs. Reads only.`,
   'record-done': `wfe run record-done <run> (--template <t> | --type do|study|talk --name <text> --id <node>) [--id <node>] [--after <node>]... [--before <node>]...
-    --outcome <text> --reason <text> [--artifact <path>]... [--commit <sha>[@<repository>]]... [--entry <seq>]...
+    --outcome <text> --reason <text> [--artifact <path>]... [--commit-id <sha>[@<repository>]]... [--entry <seq>]...
     [--question <q>]... [--output <o>]... [--presentation <p>] [--started-at <time>] [--ended-at <time>] [--expect-revision r<n>]
 
 Records work that already happened, without its own node, as a completed
@@ -388,7 +388,7 @@ details and the history.
   --reason         why it is recorded afterwards (where it was done, e.g.
                    inside the talk).
   Evidence, each checked to exist: --artifact (a file of the run's copy, by
-  hash), --commit (a commit of the run's copy or of a repository in it),
+  hash), --commit-id (a commit of the run's copy or of a repository in it),
   --entry (an earlier entry of this run, e.g. the talk's completion),
   --question, --output, --presentation (an existing presentation that shows
   this work: linked to the node; its registration stays as it was).
@@ -1082,7 +1082,7 @@ export async function runCommand(c: RunCli): Promise<number> {
     case 'record-done': {
       const r = await ref()
       const root = await rootOf(r)
-      const commits = c.opts('commit').map(v => { const [commit, repository] = v.split('@'); return { commit, ...(repository ? { repository } : {}) } })
+      const commits = c.opts('commit-id').map(v => { const [commit, repository] = v.split('@'); return { commit, ...(repository ? { repository } : {}) } })
       const entries = c.opts('entry').map(v => { const n = Number(v); if (!Number.isInteger(n) || n < 1) throw c.usage('--entry takes a history seq'); return n })
       const started = c.opt('started-at'), ended = c.opt('ended-at')
       const res = await wrap(async () => recordDone(ws, r, {

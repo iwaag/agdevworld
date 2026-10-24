@@ -824,6 +824,13 @@ export class ConversationService {
   // result or synthesis answers that invitation (late, after it was found
   // unanswered or withdrawn). The same key (default: the text's hash) from
   // the same run is one message.
+  // A post already made under this key by this run (its retransmission
+  // posts nothing new; fix5 evaluates no reminders for it).
+  posted(conv: string, run: string, text: string, key?: string): boolean {
+    const k = key ?? createHash('sha256').update(text).digest('hex').slice(0, 24)
+    return !!this.one<MessageRow>('SELECT * FROM messages WHERE conv = ? AND run IS ? AND key = ?', conv, run, k)
+  }
+
   async contribute(conv: string, o: { text: string; author: string; run: string; attempt?: string | null; invitation?: number | null; re?: number[]; kind?: MessageKind; question?: string | null; key?: string; node?: string | null; complete?: boolean }): Promise<{ message: MessageRow; duplicate: boolean; invitation: InvitationRow | null; completed?: string }> {
     this.need(conv)
     const cfg = this.cfg()

@@ -27,6 +27,8 @@ import { blobSizeAt, listAt, resolveRev, RevError, showAt, type DevdocsInfo, typ
 import { RequestError, WORKFLOWS_DIR, type Workspace } from './workspace.ts'
 import { allocating, listCopies, prepareCopy, runSpace, storageOf, usedRuns } from './runspace.ts'
 import { parseWorkflow } from './yamlDoc.ts'
+import { adviseOrRefuse, type Advice } from './reminders.ts'
+import type { Boundary } from '../shared/reminders.ts'
 
 export const RUN_FILE = 'run.json'
 export const DEFINITION_DIR = 'definition'
@@ -757,7 +759,9 @@ export async function findRunByReceipt(ws: Workspace, workflow: string, receipt:
 
 // ---- operations ------------------------------------------------------------------
 
-export interface OpContext { by?: string; via: string; expectSeq?: number; now?: Date }
+// advice (fix5): an agent's or a person's operation, evaluated for
+// reminders before it is written (server/reminders.ts); absent for WFE's own.
+export interface OpContext { by?: string; via: string; expectSeq?: number; now?: Date; advice?: Advice }
 
 async function writeRecord(dir: string, record: RunRecord) {
   await atomicWrite(join(dir, RUN_FILE), `${JSON.stringify(record, null, 2)}\n`)
@@ -786,10 +790,17 @@ export async function runOp(ws: Workspace, ref: RunRef, input: OpInput & EntryMe
 }
 
 export async function runOpLocked(ws: Workspace, ref: RunRef, input: OpInput & EntryMeta, ctx: OpContext): Promise<{ record: RunRecord; ref: RunRef; duplicate?: boolean }> {
-  const { record, graph, dir } = await usableRun(ws, ref)
+  const { record, graph, dir, bundle } = await usableRun(ws, ref)
   const prepared = await prepareOp(ws, ref, record, graph, input)
   const next = applyOp(record, prepared, graph, ctx)
   if (next === record) return { record, ref, duplicate: true }
+  // Reminders (fix5): a completion, a question; evaluated on what this
+  // write would record, before it is written.
+  const op = prepared.op
+  const boundary: Boundary | null = op.op === 'node.complete' ? { kind: 'complete', node: op.node }
+    : op.op === 'question.ask' ? { kind: 'ask', node: op.node ?? null, to: op.to, presents: op.presentation !== undefined || op.output !== undefined || !!op.subject?.length }
+      : null
+  if (boundary && ctx.advice) await adviseOrRefuse(ws, ctx.advice, boundary, { record, after: next, graph, authored: activeDefinition(record, bundle).workflow, catalog: catalogOf(record, bundle) })
   await writeRecord(dir, next)
   return { record: next, ref }
 }
@@ -894,6 +905,25 @@ function applyOp(record: RunRecord, { op, docProblem }: PreparedOp, graph: RunGr
     }
     throw e
   }
+}
+
+// Reminders for an operation recorded elsewhere (fix5): a conversation post
+// that reports a result or completes its node. Read under the run's lock;
+// the post itself is the conversation's, made after this returns.
+export async function adviseRun(ws: Workspace, ref: RunRef, bs: Boundary[], advice: Advice | undefined): Promise<void> {
+  if (!advice || advice.yes) return
+  ws = await runSpace(ws, ref)
+  const file = join(await inside(ws.root, runDir(ref)), RUN_FILE)
+  await withLock(file, async () => {
+    const { record, graph, bundle } = await usableRun(ws, ref)
+    let after = record
+    const done = bs.find(b => b.kind === 'complete')
+    if (done?.kind === 'complete' && record.nodes[done.node]?.state === 'running') {
+      try { after = applyOp(record, { op: { op: 'node.complete', node: done.node, outcome: '(the post)' } }, graph, { by: record.executor.name, via: 'conversation' }) } catch { after = record }
+    }
+    if (!bs.length) return
+    await adviseOrRefuse(ws, advice, bs, { record, after, graph, authored: activeDefinition(record, bundle).workflow, catalog: catalogOf(record, bundle) })
+  }, { what: `run ${runKey(ref)}` })
 }
 
 // ---- adjustments (p7, docs/adjustments.md) -----------------------------------------
@@ -1037,14 +1067,18 @@ export async function adjustRun(ws: Workspace, ref: RunRef, o: AdjustOptions, ct
       const g2 = graphOfState(adjusted) ?? graph
       return applyOp(adjusted, await prepareOp(ws, ref, adjusted, g2, completion), g2, { ...ctx, expectSeq: undefined })
     }
+    let tried: RunRecord | null = null
     if (input && !o.propose) {
-      try { await both() } catch (e) {
+      try { tried = await both() } catch (e) {
         if (!(e instanceof RequestError)) throw e
         const code = (e.detail as { code?: string } | undefined)?.code ?? 'refused'
         if (!problems.some(p => p.code === code)) problem(code, e.message)
       }
     }
     if (problems.length || o.dryRun) return { ok: !problems.length, ...base, problems }
+    // Reminders at the completion that goes with it (fix5), on the revised
+    // record, before the revision file or the record is written.
+    if (o.completing && tried && ctx.advice) await adviseOrRefuse(ws, ctx.advice, { kind: 'complete', node: o.completing.node }, { record, after: tried, graph: graphOfState(tried) ?? newGraph, authored: next, catalog: catalogOf(record, bundle) })
     if (o.propose) {
       if (!ID_PATTERN.test(o.propose)) throw new RequestError(400, `proposal name "${o.propose}" must match ${ID_PATTERN.source}`)
       const rel = `${DEFINITION_DIR}/proposals/${o.propose}.yaml`
@@ -1126,9 +1160,12 @@ export async function registerPresentation(ws: Workspace, ref: RunRef, o: Regist
   ws = await runSpace(ws, ref)
   const file = join(await inside(ws.root, runDir(ref)), RUN_FILE)
   return withLock(file, async () => {
-    const { record } = await usableRun(ws, ref)
+    const { record, graph, bundle } = await usableRun(ws, ref)
     const dup = ctx.receipt ? record.history.find(h => h.receipt === ctx.receipt) : undefined
     if (dup && dup.op === 'presentation.register') return { record, presentation: record.presentations![(dup as unknown as { presentation: string }).presentation], duplicate: true }
+    // Reminders (fix5) before anything is copied: where it is registered
+    // from, and whether anything is planned to stop it.
+    if (ctx.advice && record.nodes[o.node]?.state === 'running') await adviseOrRefuse(ws, ctx.advice, { kind: 'present', node: o.node }, { record, after: record, graph, authored: activeDefinition(record, bundle).workflow, catalog: catalogOf(record, bundle) })
     const id = `p${Object.keys(record.presentations ?? {}).length + 1}`
     const source = normalizeRepoPath(o.source)
     if (!source) throw new RequestError(400, `source "${o.source}" must be a project-relative directory`)

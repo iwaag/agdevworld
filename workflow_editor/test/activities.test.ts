@@ -425,8 +425,9 @@ test('wfe run complete on a ponder node that would end an open, unconcluded disc
   }
   const warned = await cli([])
   assert.equal(warned.code, 1)
-  assert.match(warned.err, /Not recorded — warning/)
-  assert.match(warned.err, /after is the ponder activity of a discussion.*Recommended: wfe discussion ponder --node after/)
+  assert.match(warned.err, /Not recorded — 2 reminders before completing after/)
+  assert.match(warned.err, /discussion-activity: after is the ponder activity of a discussion.*\n.*wfe discussion ponder --node after/)
+  assert.doesNotMatch(warned.err, /unrecorded-activity/, 'the run\'s own records are no sign of work')
   assert.match(warned.err, /conducts fix3-b: still open, and this run has announced no conclusion/)
   assert.match(warned.err, /--yes/)
   assert.equal((await rec(s, P)).nodes.after.state, 'running', 'nothing recorded')

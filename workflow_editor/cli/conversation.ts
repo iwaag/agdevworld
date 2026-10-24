@@ -10,7 +10,8 @@ import { ConversationArchive } from '../server/conversationArchive.ts'
 import { ConversationService, type Requester, type TitleSkip } from '../server/conversationService.ts'
 import { ConversationWorkflows, type WorkflowRef, type WorkflowRelation, type WorkflowRole } from '../server/conversationWorkflows.ts'
 import type { ExecStore } from '../server/exec.ts'
-import { readRun } from '../server/runs.ts'
+import { adviseRun, readRun } from '../server/runs.ts'
+import type { Boundary } from '../shared/reminders.ts'
 import { RequestError } from '../server/workspace.ts'
 
 // Why --if-untitled left the display title alone (challenge p4).
@@ -355,7 +356,16 @@ export async function conversationCommand(c: ConversationCli): Promise<number> {
         const complete = c.opt('completing')
         // One way to ask (workflow_editor fix3): WFE posts the run's question.
         if (c.opt('kind') === 'question' || c.opt('question')) throw c.refused('a question is your run\'s question: wfe run ask <run> <node> --to <whom> --question <q>. WFE posts it in this conversation and the reply comes back to your run as its answer', { code: 'question-is-run-ask' })
-        const r = await ds.contribute(id, { text: text(), author: o.agent, run: o.run, attempt: o.attempt, invitation: o.discussion === id ? o.invitation : null, re, kind: (c.opt('kind') ?? 'reply') as MessageKind, key: c.opt('key'), node: complete ?? null, complete: !!complete })
+        // Reminders before a post that reports a result or completes its node
+        // (workflow_editor fix5); a retransmission (same key) posts nothing new.
+        const kind = c.opt('kind') ?? 'reply'
+        const bounds: Boundary[] = [...(kind === 'result' || kind === 'synthesis' ? [{ kind: 'report' as const, messageKind: kind }] : []), ...(complete ? [{ kind: 'complete' as const, node: complete }] : [])]
+        const said = text()
+        if (bounds.length && !ds.posted(id, o.run, said, c.opt('key'))) {
+          const { workspace, ref } = parseRunName(o.run)
+          try { await adviseRun(await x.workspace(workspace), ref, bounds, c.flag('yes') ? { yes: true } : { what: `posting this ${kind}${complete ? ` and completing ${complete}` : ''}` }) } catch (e) { if (e instanceof RequestError) throw c.refused(e.message, e.detail); throw e }
+        }
+        const r = await ds.contribute(id, { text: said, author: o.agent, run: o.run, attempt: o.attempt, invitation: o.discussion === id ? o.invitation : null, re, kind: kind as MessageKind, key: c.opt('key'), node: complete ?? null, complete: !!complete })
         const wfs = new ConversationWorkflows(ds)
         const linked = c.opts('workflow').map(v => wfs.link(id, Number(v.replace(/^#/, '')), { message: r.message.id, by: o.agent, run: o.run }).ref.id)
         c.out(`${r.duplicate ? 'Already posted (same key); nothing changed' : 'Posted'}: #${r.message.id} in ${id} as ${r.message.participant} for ${o.run}${r.invitation ? `; request ${r.invitation.id} ${r.invitation.state}${r.invitation.late ? ' (late)' : ''}` : ''}${r.completed ? `; node ${r.completed} completed` : ''}${linked.length ? `; workflow record${linked.length === 1 ? '' : 's'} ${linked.join(', ')} shown with it` : ''}.`, { ok: true, ...r, workflows: linked })

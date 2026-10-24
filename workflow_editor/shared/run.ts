@@ -200,6 +200,7 @@ export type AdjustSource =
   | { kind: 'agent' } // an agent-selected revision, recorded with its actual actor
   | { kind: 'person'; by?: string } // a person applies it themselves
   | { kind: 'request'; input: string; sha256: string } // the run's original braindump or entrusted request asks for this work (p7/ex1); by file and hash
+  | { kind: 'record-done'; node: string } // fix5: the revision of run.record-done, adding work already done
 export interface AdjustDiff { added: string[]; removed: string[]; changed: string[]; edgesAdded: [string, string][]; edgesRemoved: [string, string][] }
 export interface Revision {
   revision: string // r2, r3, …
@@ -248,7 +249,22 @@ export interface NodeRecord {
   notes: Note[]
   document?: DocumentEvidence // a documentation step's checked document (p5)
   agreement?: { question: string } // the plan step: the question whose taken-up answer agreed to that document
+  retrospective?: Retrospective // recorded afterwards (fix5): work done before it was a node
 }
+// Work recorded as done after it happened (workflow_editor fix5,
+// docs/adjustments.md "Recording work already done"): the node was added and
+// completed in one entry (run.record-done). Nothing ran it then; `at` and
+// `by` say when and by whom it was recorded, `reported` the work's own times
+// as the recorder stated them (null: unknown), `evidence` what shows it
+// happened, each checked to exist when it was recorded.
+export interface Retrospective { seq: number; at: string; by: string; reason: string; reported: { started: string | null; ended: string | null }; evidence: RetroEvidence[] }
+export type RetroEvidence =
+  | { kind: 'artifact'; path: string; sha256: string; bytes: number }
+  | { kind: 'commit'; repository: string; commit: string }
+  | { kind: 'entry'; seq: number; op: string }
+  | { kind: 'presentation'; id: string; revision: string }
+  | { kind: 'output'; id: string; digest: string }
+  | { kind: 'question'; id: string }
 // `from` gave the answer; `by` recorded it (the same unless someone relays it).
 // `delegation` (p10): the answer came from the parent's agent of a delegated
 // request — which delegation and which of its answers.
@@ -310,6 +326,9 @@ export interface Presentation extends PresentationManifest {
   state: PresentationState
   instance: string | null // the serving instance last observed (a logical reference)
   last: { at: string; by: string; status: Observation; detail: string } | null
+  // Nodes recorded afterwards that this presentation shows (fix5): the
+  // registration stays as it was; a link is a later provenance record.
+  links?: { node: string; seq: number; at: string; by: string }[]
 }
 // Open: something may still be serving it.
 export const isOpen = (p: Pick<Presentation, 'state'>) => p.state === 'available' || p.state === 'stop-failed'
@@ -503,6 +522,9 @@ export type OpInput =
   // completing (p8/ex2): the adjustment is made at the completion of that
   // running node; the next entry is its node.complete (one locked write).
   | { op: 'run.adjust'; revision: string; parent: string; file: string; sha256: string; definitionDigest: string; effective: EffectiveGraph; reason: string; source: AdjustSource; diff?: AdjustDiff; completing?: string }
+  // fix5: a revision that adds one node and records it as already done, in
+  // one entry: no start, no completion event, nothing scheduled in between.
+  | { op: 'run.record-done'; revision: string; parent: string; file: string; sha256: string; definitionDigest: string; effective: EffectiveGraph; diff?: AdjustDiff; node: string; outcome: string; reason: string; artifacts?: string[]; evidence?: RetroEvidence[]; reported?: { started?: string | null; ended?: string | null }; presentation?: string }
   // p10 (docs/delegation.md). The parent agent's: dispatch, take-up, answer,
   // instruct, dispose. The system's: bind (the child the intake created
   // from the request post) and event (a fact of the child relayed).
@@ -523,7 +545,7 @@ export const CONTROL_OPS: readonly string[] = ['run.stop', 'run.resume', 'run.ca
 
 export const OPS = ['run.create', 'node.start', 'node.progress', 'node.wait', 'node.complete', 'node.fail', 'node.cancel',
   'question.ask', 'question.answer', 'question.take-up', 'question.withdraw', 'instruction.receive', 'instruction.ack', 'artifact.attach', 'run.cancel', 'run.decide',
-  'attempt.begin', 'attempt.end', 'run.stop', 'run.resume', 'presentation.register', 'presentation.observe', 'run.adjust', 'run.integrate', 'run.relocate', 'run.assign', 'run.recover', 'attempt.session', 'attempt.context', 'session.retire',
+  'attempt.begin', 'attempt.end', 'run.stop', 'run.resume', 'presentation.register', 'presentation.observe', 'run.adjust', 'run.record-done', 'run.integrate', 'run.relocate', 'run.assign', 'run.recover', 'attempt.session', 'attempt.context', 'session.retire',
   'delegation.dispatch', 'delegation.bind', 'delegation.event', 'delegation.take-up', 'delegation.answer', 'delegation.instruct', 'delegation.dispose',
   'input.select', 'input.observe', 'output.publish', 'output.observe'] as const
 // The executor's own reports. While an attempt is open they must carry its
@@ -741,6 +763,48 @@ function adjustSource(v: unknown): AdjustSource {
     return { kind: 'request', input: text(o.input, 'source.input'), sha256: o.sha256 as string }
   }
   return fail('shape', 'source.kind is answer, instruction, agreement, person or request')
+}
+
+const isoOrNull = (v: unknown, what: string): string | null => {
+  if (v === undefined || v === null || v === '') return null
+  if (typeof v !== 'string' || Number.isNaN(Date.parse(v))) return fail('shape', `${what} must be an ISO 8601 time`)
+  return new Date(v).toISOString()
+}
+
+// Evidence of work recorded afterwards (fix5): each item names something
+// that exists — in this record (an earlier entry, a presentation, an output,
+// a question) or as the file layer checked it (a file by hash, a commit).
+function retroEvidence(v: unknown, s: RunState, seq: number): RetroEvidence[] {
+  if (v === undefined || v === null) return []
+  if (!Array.isArray(v)) return fail('shape', 'evidence must be a list')
+  return v.map((x, i): RetroEvidence => {
+    if (!isObj(x)) return fail('shape', `evidence ${i + 1} must be an object`)
+    if (x.kind === 'artifact') return { kind: 'artifact', ...subjectOf(x, `evidence ${i + 1}`) }
+    if (x.kind === 'commit') {
+      if (typeof x.commit !== 'string' || !SHA.test(x.commit)) fail('shape', `evidence ${i + 1}: commit must be a full commit id`)
+      return { kind: 'commit', repository: typeof x.repository === 'string' && normalizeRepoPath(x.repository) ? normalizeRepoPath(x.repository)! : '.', commit: x.commit as string }
+    }
+    if (x.kind === 'entry') {
+      if (typeof x.seq !== 'number' || !Number.isInteger(x.seq) || x.seq < 1 || x.seq >= seq) fail('evidence-unknown', `evidence ${i + 1}: entry ${String(x.seq)} is not an earlier entry of this run`)
+      return { kind: 'entry', seq: x.seq as number, op: text(x.op, `evidence ${i + 1}: the entry's operation`) }
+    }
+    if (x.kind === 'presentation') {
+      const p = typeof x.id === 'string' ? s.presentations?.[x.id] : undefined
+      if (!p) fail('evidence-unknown', `evidence ${i + 1}: presentation ${String(x.id)} does not exist in this run`)
+      return { kind: 'presentation', id: p!.id, revision: p!.revision }
+    }
+    if (x.kind === 'output') {
+      const o = typeof x.id === 'string' ? s.outputs?.[x.id] : undefined
+      if (!o) fail('evidence-unknown', `evidence ${i + 1}: output ${String(x.id)} does not exist in this run`)
+      return { kind: 'output', id: o!.id, digest: o!.digest }
+    }
+    if (x.kind === 'question') {
+      const q = typeof x.id === 'string' ? s.questions[x.id] : undefined
+      if (!q) fail('evidence-unknown', `evidence ${i + 1}: question ${String(x.id)} does not exist in this run`)
+      return { kind: 'question', id: q!.id }
+    }
+    return fail('shape', `evidence ${i + 1}: kind is artifact, commit, entry, presentation, output or question`)
+  })
 }
 
 const hasCycle = (ids: string[], next: (id: string) => string[]): boolean => {
@@ -1498,11 +1562,15 @@ export function apply(prev: RunState | null, e: HistoryEntry | (OpInput & EntryM
       which.last = { at, by, status: e.status, detail: optText(e.detail, 'detail') }
       break
     }
-    case 'run.adjust': {
+    case 'run.adjust':
+    case 'run.record-done': {
       // A change of the run's future work (p7, docs/adjustments.md), at a
-      // node boundary, authorized by the person's records.
+      // node boundary, authorized by the person's records. run.record-done
+      // (fix5) is a revision that adds one node already done: the same
+      // revision rules, and the node is completed in the same entry.
       live()
-      const source = adjustSource(e.source)
+      const retro = e.op === 'run.record-done' ? e : null
+      const source: AdjustSource = retro ? { kind: 'record-done', node: text(retro.node, 'the node') } : adjustSource((e as { source?: unknown }).source)
       if (ctl.attempt) {
         if (e.attempt !== ctl.attempt.id) fail(e.attempt ? 'attempt-stale' : 'attempt-open', `attempt ${ctl.attempt.id} is executing this run; only it adjusts the run meanwhile${source.kind === 'person' ? ' (a person\'s adjustment waits until no attempt is open)' : ''}`)
       } else if (e.attempt) fail('attempt-stale', `attempt ${e.attempt} is not open`)
@@ -1516,7 +1584,7 @@ export function apply(prev: RunState | null, e: HistoryEntry | (OpInput & EntryM
       if (typeof e.definitionDigest !== 'string' || !/^sha256:[0-9a-f]{64}$/.test(e.definitionDigest)) fail('shape', 'definitionDigest must be sha256:<hex>')
       // At a node's completion (p8/ex2): that node may still be running —
       // its completion is the next entry — and nothing else may.
-      const completing = e.completing
+      const completing = retro ? undefined : (e as { completing?: string }).completing
       if (completing !== undefined) {
         if (typeof completing !== 'string' || !(completing in s.nodes)) fail('node-unknown', `node "${String(completing)}" is not in this run's definition`)
         if (s.nodes[completing].state !== 'running') fail('state', `${completing} is ${s.nodes[completing].state}; an adjustment at a completion names the running node it completes`)
@@ -1537,6 +1605,18 @@ export function apply(prev: RunState | null, e: HistoryEntry | (OpInput & EntryM
         if (source.input !== s.input.file || !s.input.sha256 || source.sha256 !== s.input.sha256) fail('adjust-source', 'the request citation does not identify the original input; use source kind agent for an agent-selected revision')
       }
       const diff = graphDiff(graph, { nodes, edges })
+      if (retro) {
+        // Only the one node and its generated steps are new; nothing else
+        // changes and nothing goes.
+        const node = retro.node
+        if (!ID_PATTERN.test(node)) fail('shape', `node id "${node}" is invalid`)
+        if (node in s.nodes) fail('node-exists', `node "${node}" is already in this run; recording work done afterwards adds a new node`)
+        if (!(node in nodes)) fail('adjust-graph', `the revision does not add node "${node}"`)
+        const extra = diff.added.filter(n => n !== node && !nodes[n]?.step)
+        if (extra.length || diff.removed.length || diff.changed.some(n => n !== node && !nodes[n]?.step) || diff.edgesRemoved.length) fail('adjust-graph', `a revision recording work done adds only "${node}" (and its generated steps); it ${extra.length ? `adds ${extra.join(', ')}` : diff.removed.length ? `removes ${diff.removed.join(', ')}` : 'changes other nodes or edges'}`)
+        if (nodes[node].step) fail('adjust-graph', `"${node}" is a generated step`)
+        for (const ed of edges) if (ed.to === node && s.nodes[ed.from]?.state !== 'completed') fail('state', `${node} would follow ${ed.from}, which is ${s.nodes[ed.from]?.state ?? 'new'}; work already done follows completed nodes only`)
+      }
       const rev: Revision = { revision: id, parent: active, file: e.file, sha256: e.sha256, definitionDigest: e.definitionDigest, effective: next as EffectiveGraph, reason: text(e.reason, 'the reason'), source, diff, at, by }
       s.definition = { ...s.definition, active: id, revisions: [...revisions, rev] }
       // Unchanged nodes keep their records; new work starts pending; removed
@@ -1546,6 +1626,25 @@ export function apply(prev: RunState | null, e: HistoryEntry | (OpInput & EntryM
       s.nodes = Object.fromEntries(Object.keys(s.nodes).sort().map(k2 => [k2, s.nodes[k2]]))
       change.revision = [active, id]
       graph = { nodes, edges }
+      if (retro) {
+        // The node as done: its outcome and evidence, who recorded it and
+        // when, the work's own times only as reported. No start, no end.
+        const n = s.nodes[retro.node]
+        const artifacts = (retro.artifacts ?? []).map(validArtifactPath)
+        const reported = { started: isoOrNull(retro.reported?.started, 'reported.started'), ended: isoOrNull(retro.reported?.ended, 'reported.ended') }
+        if (reported.started && reported.ended && reported.started > reported.ended) fail('shape', 'reported.started is after reported.ended')
+        const evidence = retroEvidence(retro.evidence, s, e.seq)
+        n.outcome = { text: text(retro.outcome, 'the outcome'), artifacts }
+        n.retrospective = { seq: e.seq, at, by, reason: text(retro.reason, 'why it is recorded afterwards'), reported, evidence }
+        for (const path of artifacts) s.artifacts.push({ path, node: retro.node, title: '', by, at })
+        move(retro.node, 'completed')
+        change.nodes = { ...change.nodes, [retro.node]: [null, 'completed'] } // added already done
+        if (retro.presentation !== undefined) {
+          const p = s.presentations?.[retro.presentation]
+          if (!p) fail('presentation-unknown', `presentation "${String(retro.presentation)}" does not exist in this run`)
+          s.presentations = { ...s.presentations, [p!.id]: { ...p!, links: [...(p!.links ?? []), { node: retro.node, seq: e.seq, at, by }] } }
+        }
+      }
       break
     }
     case 'presentation.observe': {
@@ -1757,7 +1856,7 @@ export function replay(history: unknown[], graph: RunGraph): { state: RunState; 
       const r = apply(state, e, g)
       state = r.state
       changes.push(r.change)
-      if (e.op === 'run.adjust') g = graphOfState(r.state) ?? g
+      if (e.op === 'run.adjust' || e.op === 'run.record-done') g = graphOfState(r.state) ?? g
     } catch (err) {
       if (err instanceof RunError) throw new RunError(err.code, `history ${e.seq} (${e.op}): ${err.message}`)
       throw new RunError('shape', `history ${e.seq} (${e.op}): ${(err as Error).message}`)
@@ -1973,6 +2072,7 @@ export function notableEvents(r: RunRecord, sinceSeq = 0): NotableEvent[] {
     if (e.op === 'instruction.ack') push('acknowledged', false, d.note, { instructions: (e as unknown as { instructions: string[] }).instructions, response: d.response })
     if (e.op === 'run.cancel') push('cancelled', true, d.reason)
     if (e.op === 'run.integrate') push('integrated', false, (d.repositories as unknown as IntegrationRecord['repositories']).filter(x => x.method !== 'already').map(x => `${x.path === '.' ? 'project root' : x.path} → ${x.target} (${x.method}, ${x.result.slice(0, 10)})`).join('; '))
+    if (e.op === 'run.record-done') push('adjusted', false, `recorded afterwards as done: ${d.node} — ${d.reason}`, { revision: d.revision, node: d.node, adjusted: { added: [d.node], removed: [] } })
     if (e.op === 'run.adjust') {
       const diff = (e as unknown as { diff?: AdjustDiff }).diff ?? r.definition.revisions?.find(x => x.revision === d.revision)?.diff
       push('adjusted', false, d.reason, { revision: d.revision, ...(diff ? { adjusted: { added: diff.added.filter(x => !x.startsWith('_')), removed: diff.removed.filter(x => !x.startsWith('_')) } } : {}) })

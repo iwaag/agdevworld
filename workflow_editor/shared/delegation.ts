@@ -95,6 +95,10 @@ export interface Delegation {
   answers: DelegationAnswer[]
   instructions: DelegationInstruction[]
   revisions?: DelegationRevision[] // present once the first correction is requested (fix6)
+  // p17: dispositions set aside by a follow-up after a person's requested
+  // changes (the agent had judged the result satisfied; the person's review
+  // asked for more). Kept in order; the delegation is open again.
+  reopened?: { disposition: Disposition; review: string; at: string; by: string; seq: number }[]
   disposition: Disposition | null
   closed: { at: string; by: string; reason: string } | null
 }

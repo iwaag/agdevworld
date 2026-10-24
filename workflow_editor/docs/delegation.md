@@ -314,6 +314,7 @@ never compiled into a rule.
 | --- | --- | --- |
 | Presentation missing | the child's completed work as of the result — `work` template nodes, and untemplated nodes it added with files beyond notes ([runs.md](runs.md) *Reminders*) — and viewable candidates by extension (manifest artifacts, node artifacts, files its copy changed, in every repository it owns: a signal, not proof); its presentations and when each was registered or linked | `missing` when work completed after the latest presentation (an earlier page does not cover later work), or viewable files with no presentation at all; else `ok` |
 | The person's review not recorded | only with `accepts: person` and a deliverable (work, viewable files or a presentation); the child's answers and decisions as of the result, and this delegation's answers and correction requests that relay words with `because` | `ok` when an answer from the person (`onBehalfOf`) about it is traceable; else `unknown` — a confirmation node, a decision or an agent's own answer alone does not show they reviewed it, and unknown is not a proven violation |
+| (p17) Human review | the parent's review rounds about this child | a round pending: `review-unrecorded` is `deferred` (handed to the person, not missing); decided: their review (a synthetic actor said so); a page a round serves or will serve again is the review's, not a forgotten cleanup |
 | Presentation still serving | the child's presentations now: review questions and their state, a planned cleanup, a recorded request to keep it (`presentation.retain`) | `serving` only for an answered (or never asked) review with no cleanup planned and no request to keep it; an unfinished review or a kept page is a fact, not an omission. Nothing stops a page because this ran |
 
 **Bound to the result.** Each assessment names the delegation, the result
@@ -398,6 +399,18 @@ the delegation, a second `revise` is refused (`delegation-correcting`);
 after a disposition, `revise` is refused (`delegation-closed`). Replay keeps
 both the returned and the corrected result (events, `revisions`, the child's
 `corrections`).
+
+**Follow-up after a person's review (p17).** A result the parent judged
+`satisfied` and handed to a human review ([reviews.md](reviews.md)) may
+come back with requested changes. `wfe delegate revise … --follow-up <rv>`
+(`followUp`) then reopens the delegation for the same child: the round
+must be `changes-requested` and must have reviewed this child; the
+`satisfied` disposition moves to `reopened[]` (kept, with the round, who and
+when), the completed delegate node waits again, the relay index row opens
+again, and the correction is delivered as above. Only a `satisfied`
+disposition is reopened; `rejected` and `abandoned` stay replacement. A
+cancelled, executing or unreadable child is refused by the file layer as
+before, never reopened in appearance only.
 
 Earlier acceptances and integrations of the child stay historical facts
 bound to their revisions: an acceptance binds its tree, so the corrected

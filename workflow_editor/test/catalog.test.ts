@@ -74,7 +74,7 @@ test('revisions follow content; stale edits, retired ids and invalid content are
 })
 
 test('an unreadable catalog is reported, refuses writes and is never replaced', async () => {
-  for (const text of ['{ not json', JSON.stringify({ schema: 'ag.node-catalog.v0', generation: 1, templates: [] }), JSON.stringify({ schema: 'ag.node-catalog.v1', generation: 1, templates: [{ id: 'x', revision: 1, name: 'X', type: 'review', description: 'd', expectation: 'e', updated: '', by: '' }] })]) {
+  for (const text of ['{ not json', JSON.stringify({ schema: 'ag.node-catalog.v0', generation: 1, templates: [] }), JSON.stringify({ schema: 'ag.node-catalog.v1', generation: 1, templates: [{ id: 'x', revision: 1, name: 'X', type: 'inspect', description: 'd', expectation: 'e', updated: '', by: '' }] })]) {
     const a = await area()
     const file = join(a.dir, 'node-catalog.json')
     await writeFile(file, text)
@@ -103,7 +103,7 @@ test('the browser route and wfe nodes read and change the same catalog', async (
     assert.equal(seen.status, 200)
     const ids = ((seen.body.catalog as { templates: { id: string }[] }).templates).map(t => t.id)
     assert.deepEqual(ids, ['present', 'cleanup', 'research'])
-    assert.deepEqual((seen.body.examples as { id: string }[]).map(x => x.id), ['preliminary-research'])
+    assert.deepEqual((seen.body.examples as { id: string }[]).map(x => x.id), ['human-review', 'preliminary-research']) // human-review: p17
     // Edited by the browser route, seen by the CLI.
     assert.equal((await http('PUT', '/research', { ...content({ name: 'Research first' }), expectRevision: 1, by: 'Pat' })).status, 200)
     const shown = await cli('show', 'research')

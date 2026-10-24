@@ -195,6 +195,7 @@ const ACTIVITY_DESCRIPTIONS: Record<Activity, string> = {
   ponder: 'Read what was said and what is owed (wfe discussion state), decide the next step and why (wfe discussion ponder).',
   talk: 'Consult the requester about intent or direction: wfe run ask on this node, to the requester (wfe discussion state names them); WFE posts the question here and their answer continues this run.',
 }
+const REVIEW_DESCRIPTION = 'The person reviews the delivered work: wfe review prepare with a summary and the presentations to look at (docs/reviews.md). WFE manages it from then on; nothing waits in a process.'
 const now = () => new Date().toISOString()
 function categoryOf(v: string): Category {
   // `discussion` was the ordinary category's name before challenge p2.
@@ -1208,7 +1209,9 @@ export class ConversationService {
     const seen = this.one<ActivityRow>('SELECT * FROM activities WHERE conv = ? AND token = ?', conv, `${o.run}:${o.node}`)
     if (seen) return { activity: this.activityView(seen), revision: (JSON.parse(seen.decision ?? 'null') as ActivityView['decision'])?.revision ?? null, duplicate: true }
     const next = o.next ?? []
-    for (const x of next) if (!(ACTIVITIES as readonly string[]).includes(x.activity)) throw new RequestError(400, `--next ${x.activity}:${x.node}: the activities are ${ACTIVITIES.join(', ')}`)
+    // `review` (p17) is not an activity: a human review node branching off
+    // here, so what follows does not wait for the person.
+    for (const x of next) if (!(ACTIVITIES as readonly string[]).includes(x.activity) && x.activity !== 'review') throw new RequestError(400, `--next ${x.activity}:${x.node}: the activities are ${ACTIVITIES.join(', ')} (and review:<node> for a human review node)`)
     const receipt = `discussion:${conv}:ponder:${o.run}:${o.node}`
     let revision: string | null = null
     if (next.length || o.definition) {
@@ -1223,6 +1226,11 @@ export class ConversationService {
         let prev = o.node
         for (const x of next) {
           if (x.node in w.nodes) throw new RequestError(409, `node ${x.node} is already in ${o.run}: a new activity is a new node (another id)`, { code: 'node-exists' })
+          if (x.activity === 'review') {
+            w.nodes[x.node] = { type: 'review', name: x.name ?? 'Human review', description: x.description ?? REVIEW_DESCRIPTION, repositories: [], appearance: { icon: 'review', color: 'green' } }
+            w.edges.push({ from: prev, to: x.node })
+            continue
+          }
           w.nodes[x.node] = { type: x.activity === 'talk' ? 'talk' : 'do', activity: x.activity, name: x.name ?? x.node, description: x.description ?? ACTIVITY_DESCRIPTIONS[x.activity as Activity], repositories: [] }
           w.edges.push({ from: prev, to: x.node })
           prev = x.node

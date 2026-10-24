@@ -13,7 +13,9 @@ export const CATALOG_FILE = 'node-catalog.json'
 // The types a template may have: the execution types a run performs.
 // p10: a delegate template describes a delegation task — optionally with its
 // target and acceptance scope; it is a description, not an executor.
-export const TEMPLATE_TYPES = ['study', 'do', 'talk', 'delegate'] as const
+// p17: a review template is a person's review of completed work, prepared by
+// the agent and managed by WFE (docs/reviews.md).
+export const TEMPLATE_TYPES = ['study', 'do', 'talk', 'delegate', 'review'] as const
 export type TemplateType = typeof TEMPLATE_TYPES[number]
 
 // What a template says. Everything here is its content: a change of any of
@@ -188,6 +190,12 @@ export const SEEDS: Record<string, TemplateContent> = {
 }
 // Offered, never added by itself: the person chooses and edits it.
 export const EXAMPLES: Record<string, TemplateContent> = {
+  // p17 (docs/reviews.md): the deferred human review fix6 trial A lacked.
+  'human-review': {
+    type: 'review', name: 'Human review', appearance: { icon: 'review', color: 'green' },
+    description: 'After your own review, hand the finished work to the person: wfe review prepare with a short summary of what was done and what to check, and the presentations to look at. Nothing waits in a process; the person starts the review with one button, then approves or requests changes.',
+    expectation: 'When a run delivers something I can look at, I expect a human review node at the end that hands it to me with its presentations, so I can start it with one button whenever I come back. You may review it yourself and stop the pages first; my review stays possible later.',
+  },
   'preliminary-research': {
     type: 'study', name: 'Preliminary research', appearance: { icon: 'study', color: 'violet' },
     description: [

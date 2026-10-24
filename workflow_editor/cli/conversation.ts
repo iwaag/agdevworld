@@ -86,7 +86,9 @@ settle [<id>] --node <n> --reason <why>
                               move on before an ask is resolved; later outcomes are told as late
 ponder [<id>] --node <n> --decision <text> --source <msg>… [--next <activity>:<node>[:<name>]]…
        [--definition <file>]  your decision, citing its sources; the node completes with it.
-                              --next adds a chain of activity nodes; --definition any revision
+                              --next adds a chain of activity nodes; --definition any revision.
+                              --next review:<node> adds a human review node beside the chain
+                              (what follows does not wait for the person; wfe review help prepare)
 talk                          (no command) a talk node's question is wfe run ask on that node,
                               --to the requester (state names them)
 state [<id>]                  what the conductor works from: facilitation, conductor and requester,

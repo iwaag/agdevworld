@@ -123,7 +123,7 @@ answer) and judge again, or give the same command with --yes when you judge
 it right as it is (for this command only; a later report is assessed again).
 This is your receipt of the result, not the child's acceptance (that is its
 own decision, from its confirmation) and not your run's result decision.`,
-  revise: `wfe delegate revise <run> <d> --instruction <text> --reason <text> [--event <n>] [--manifest <digest>] [--because answer:<q>[:<n>]|instruction:<i>]
+  revise: `wfe delegate revise <run> <d> --instruction <text> --reason <text> [--event <n>] [--manifest <digest>] [--because answer:<q>[:<n>]|instruction:<i>] [--follow-up <rv>]
 
 Returns the child's current completed result to the same child for
 correction (workflow_editor fix6), instead of closing the delegation:
@@ -140,6 +140,13 @@ The result must be the latest, taken up, and not already returned; the
 child must be completed (not cancelled, failed or executing). A closed
 delegation is not reopened: dispose rejected and --replaces is replacement.
 --because when the correction carries your person's words.
+--follow-up <rv> (p17): the person's human review <rv> of this child's
+presentation asked for changes after you had judged the result satisfied.
+The satisfied disposition is kept in the record (reopened) and the
+delegation is open again for this child; the delegate node waits for the
+corrected result. Name the person's feedback in --instruction. A child
+that is cancelled, executing or whose workspace is unavailable is refused,
+never reopened in appearance only.
 Acceptances and integrations of the earlier result stay as they were; the
 corrected result is accepted and integrated by the child's own rules.`,
   cancel: `wfe delegate cancel <run> <d> --reason <text> [--because answer:<q>[:<n>]|instruction:<i>]
@@ -346,7 +353,7 @@ export async function delegateCommand(c: RunCli): Promise<number> {
       const rec = await record(r)
       const d = delegation(rec, args[1])
       const ev = c.opt('event') !== undefined ? Number(c.opt('event')) : undefined
-      const res = await wrap(() => store.revise(ws, r, d.id, { instruction: need('instruction', 'what the child is to add or change'), reason: need('reason', 'why the result is returned'), event: ev, manifest: c.opt('manifest'), because: because() }, { by: recorder(rec), via: 'cli', ...meta() }))
+      const res = await wrap(() => store.revise(ws, r, d.id, { instruction: need('instruction', 'what the child is to add or change'), reason: need('reason', 'why the result is returned'), event: ev, manifest: c.opt('manifest'), because: because(), ...(c.opt('follow-up') ? { followUp: c.opt('follow-up') } : {}) }, { by: recorder(rec), via: 'cli', ...meta() }))
       const rv = res.record.delegations![d.id].revisions?.at(-1)
       return after(res.record, res.record.delegations![d.id], res.duplicate ? 'Already recorded (same receipt); nothing changed.' : `Returned result event ${rv?.event} of ${d.id} to the child ${d.child?.workflow}/${d.child?.run} for correction (request ${rv?.n}). It is posted in the child's request topic; the child reopens, adds the work and completes again — its new result resumes this run. End your attempt when only the child's work remains.`)
     }

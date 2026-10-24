@@ -15,6 +15,7 @@
 import type { RunCatalog } from './catalog.ts'
 import type { Workflow, WorkflowNode } from './model.ts'
 import { isOpen, questionState, runFolder, runKey, type Presentation, type RunGraph, type RunRecord } from './run.ts'
+import { roundsUsing } from './humanReview.ts'
 
 // What a node is for, as far as its structured records say. Never its name.
 // - present / cleanup: made from the catalog's seed templates (present,
@@ -31,13 +32,14 @@ import { isOpen, questionState, runFolder, runKey, type Presentation, type RunGr
 //   report nodes, reporting, coordination) are not work to present;
 // - step: a generated documentation step; activity: a discussion activity;
 //   confirm: the result-confirmation talk; talk: any other talk.
-export type NodeRole = 'present' | 'cleanup' | 'work' | 'confirm' | 'talk' | 'activity' | 'step' | 'other'
+export type NodeRole = 'present' | 'cleanup' | 'work' | 'confirm' | 'talk' | 'activity' | 'step' | 'review' | 'other'
 const PRESENT = 'present', CLEANUP = 'cleanup', WORK = 'work'
 
 export function roleOf(id: string, record: Pick<RunRecord, 'definition' | 'presentations'>, graph: RunGraph, authored: Pick<Workflow, 'nodes'> | undefined, substantive?: { has(id: string): boolean }): NodeRole {
   const g = graph.nodes[id]
   if (!g || g.step) return 'step'
   if (g.activity) return 'activity'
+  if (g.type === 'review') return 'review' // p17: a human review, WFE's once prepared
   const a: Partial<WorkflowNode> = authored?.nodes[id] ?? {}
   const pres = Object.values(record.presentations ?? {})
   if (a.template?.id === PRESENT || a.appearance?.icon === PRESENT) return 'present'
@@ -197,7 +199,8 @@ export function evaluate(b: Boundary, f: Facts): Reminder[] {
 
   // Open presentations and who stops them. One the person asked to keep
   // (presentation.retain, fix6) is not a forgotten cleanup.
-  const open = Object.values(after.presentations ?? {}).filter(p => isOpen(p) && !p.retained)
+  // Nor is one a human review round of this run serves (p17): its cleanup is WFE's.
+  const open = Object.values(after.presentations ?? {}).filter(p => isOpen(p) && !p.retained && !roundsUsing(after, after, p.id).length)
   const cleanupPlanned = ids.filter(id => id !== completing && role(id) === 'cleanup' && planned(after.nodes[id]?.state))
   const reviewed = completing ? Object.values(record.questions).filter(q => q.node === completing && q.presentation && q.answers.length) : []
   const presentationsChecked = completesRun || b.kind === 'report' || (completing && role(completing) === 'cleanup') || reviewed.length > 0

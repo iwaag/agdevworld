@@ -577,7 +577,7 @@ export type OpInput =
   // same child for correction (event and manifest name the result it saw);
   // the child's side: the intake records the delivered request on the
   // child, its agent takes it up (`noChange`: nothing needs to change).
-  | { op: 'delegation.revise'; delegation: string; instruction: string; reason: string; event?: number; manifest?: string; because?: BecauseRef }
+  | { op: 'delegation.revise'; delegation: string; instruction: string; reason: string; event?: number; manifest?: string; because?: BecauseRef; followUp?: string }
   | { op: 'correction.receive'; correction?: string; delegation: { uid: string; revision: number }; result: { seq: number }; text: string; reason: string; from: string; source?: SourceRef }
   | { op: 'correction.take-up'; correction: string; note: string; noChange?: boolean }
   // fix6: the person asked for a presentation to stay available after its
@@ -1912,7 +1912,24 @@ export function apply(prev: RunState | null, e: HistoryEntry | (OpInput & EntryM
       // records it (correction.receive) through its intake.
       live()
       const d = delegation(e.delegation)
-      if (d.disposition) fail('delegation-closed', `delegation ${d.id} was judged ${d.disposition.kind} by ${d.disposition.by}; a closed delegation is not reopened (dispatch a replacement with --replaces ${d.id})`)
+      // p17: a follow-up after a person's requested changes reopens a
+      // delegation the agent had judged satisfied, for the same child; the
+      // earlier disposition is kept (`reopened`), never erased.
+      if (e.followUp !== undefined && e.followUp !== null) {
+        const v = review(e.followUp)
+        if (v.state !== 'changes-requested') fail('review-state', `${v.id} is ${v.state}; a follow-up answers changes a person requested`)
+        const covers = v.subjects.some(x => x.delegation === d.id || (d.child && x.project === d.child.project && x.workflow === d.child.workflow && x.run === d.child.run))
+        if (!covers) fail('delegate-relation', `${v.id} reviewed nothing of ${d.id}'s child; its changes are not this child's to make`)
+        if (d.closed) fail('delegation-closed', `delegation ${d.id} is closed: ${d.closed.reason}`)
+        if (d.disposition) {
+          if (d.disposition.kind !== 'satisfied') fail('delegation-closed', `delegation ${d.id} was judged ${d.disposition.kind}; a follow-up reopens only a result judged satisfied (dispatch a replacement with --replaces ${d.id})`)
+          d.reopened = [...(d.reopened ?? []), { disposition: d.disposition, review: v.id, at, by, seq: e.seq }]
+          d.disposition = null
+          const dn = s.nodes[d.node]
+          if (dn?.state === 'completed') { dn.ended = null; move(d.node, 'running') }
+        }
+      }
+      if (d.disposition) fail('delegation-closed', `delegation ${d.id} was judged ${d.disposition.kind} by ${d.disposition.by}; a closed delegation is not reopened (dispatch a replacement with --replaces ${d.id}; after a person's review asked for changes: --follow-up <rv>)`)
       if (d.closed) fail('delegation-closed', `delegation ${d.id} is closed: ${d.closed.reason}`)
       if (!d.child) fail('delegation-unbound', `delegation ${d.id} has no child yet; there is no result to return`)
       const latest = latestResult(d)

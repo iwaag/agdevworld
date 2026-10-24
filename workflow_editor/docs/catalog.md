@@ -66,7 +66,7 @@ resource system are not part of p7/ex1.
 | `id` | Stable identity (`^[a-z0-9][a-z0-9_.-]{0,63}$`). It never changes. An id that was deleted is not reused (`deleted`), so provenance in old workflows never points at a different template |
 | `revision` | 1 at creation, +1 whenever the template's content (name, type, description, expectation, appearance) changes. A save that changes nothing keeps the revision |
 | `name` | The card label of nodes made from it. Required |
-| `type` | `study`, `do`, `talk` or (p10) `delegate`, the execution types |
+| `type` | `study`, `do`, `talk`, (p10) `delegate` or (p17) `review`, the execution types |
 | `target` | delegate templates only (p10): `{project?, workflow?, accepts?}`, copied into the node made from it; any of them may be left to the workflow's author ([delegation.md](delegation.md)) |
 | `description` | For the agent **performing** the activity: what to do and what to record. Copied into the node's `description`. Required |
 | `expectation` | For the agent or person **designing** the workflow: how the person expects this activity to appear. Required. It is not copied into the executed description |
@@ -114,8 +114,10 @@ operations (`server/catalog.ts`), with the same validation.
   `initialized`. Since the file then exists, a later release never seeds
   again, so deleting or editing these templates sticks. The palette has no
   built-in presets any more: they are catalog entries.
-- **Examples.** A *Preliminary research* example is offered (UI: "Add
-  example", CLI: `wfe nodes example`), never added by itself. Choosing it
+- **Examples.** A *Preliminary research* example and (p17) a *Human
+  review* example (`human-review`, type `review`, [reviews.md](reviews.md))
+  are offered (UI: "Add example", CLI: `wfe nodes example`), never added by
+  itself. Choosing it
   creates an ordinary template that the person edits. No preference is
   declared on the person's behalf.
 

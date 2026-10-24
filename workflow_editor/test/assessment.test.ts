@@ -228,3 +228,37 @@ test('a page still serving: an answered review with no cleanup is serving; an op
   a = await assess(c)
   assert.match(a.checks.find(x => x.code === 'presentation-serving')!.facts.join('\n'), /stopped: p1 \(stopped\)/)
 })
+
+// workflow_editor p17: a result handed to the person's human review is a
+// deferred review, not an unknown one; its stopped or serving page is the
+// review's, not a missing presentation or a forgotten cleanup.
+test('a pending human review of the child\'s presentation reads deferred; a decided one is the person\'s review; neither is a reminder', async () => {
+  const c = await child()
+  await c.op({ op: 'node.start', node: 'talk' })
+  await c.adjust(flow(node('show', 'do', tpl('present')), [['talk', 'show']]))
+  await c.op({ op: 'node.complete', node: 'talk', outcome: 'ok' })
+  await c.op({ op: 'node.start', node: 'show' })
+  await registerPresentation(c.ws, c.ref, { node: 'show', source: 'out', entry: 'index.html', review: 'review.md', title: 'Page' }, { by: 'kid-agent', via: 'cli' })
+  await c.op({ op: 'presentation.observe', presentation: 'p1', status: 'available', instance: 'pi-test-0001', detail: 'served' } as OpInput, 'wfe')
+  await c.op({ op: 'node.complete', node: 'show', outcome: 'presented' })
+  const subject = { n: 1, workspace: 'kid', project: 'kid', workflow: 'freework', run: c.ref.run, creation: 'x', presentation: 'p1', revision: `sha256:${'a'.repeat(64)}`, title: 'Page', delegation: 'd1' }
+  const round = (state: string, decision: unknown = null) => ({ rv1: { id: 'rv1', uid: 'par/use/run-001#p/rv1', node: 'review', previous: null, prepared: { at: '', by: 'par-agent', attempt: null, seq: 5 }, summary: 's', responsible: 'par-agent', reviewer: 'Pat', subjects: [subject], state, starts: [], serving: [], decision, cleanup: null, continuation: null } })
+  const withReviews = (reviews: unknown) => ({ ...parent, project: 'par', reviews }) as unknown as RunRecord
+  const { record, bundle } = await c.read()
+  const authored = bundle.revisions?.at(-1)?.workflow ?? bundle.entries[record.definition.root]?.workflow
+  const ev = { frozen: record, graph: graphOfState(record) ?? null, authored, now: record, catalog: catalogOf(record, bundle), changed: [], unavailable: [] }
+  const plain = assessResult(parent, delegation(), event(), ev)
+  assert.equal(status(plain, 'review-unrecorded'), 'unknown', 'no review handed over: still unknown')
+  assert.equal(status(plain, 'presentation-serving'), 'serving')
+  const pending = assessResult(withReviews(round('awaiting')), delegation(), event(), ev)
+  assert.equal(status(pending, 'review-unrecorded'), 'deferred')
+  assert.match(pending.checks.find(x => x.code === 'review-unrecorded')!.facts.join('\n'), /handed to Pat's human review rv1 \(Awaiting human review\): their review is pending, not missing/)
+  assert.equal(status(pending, 'presentation-serving'), 'ok')
+  assert.match(pending.checks.find(x => x.code === 'presentation-serving')!.facts.join('\n'), /p1 serving now for human review rv1/)
+  assert.deepEqual(assessmentReminders([pending]), [])
+  const decided = assessResult(withReviews(round('complete', { outcome: 'approved', by: 'Pat', at: '', via: 'browser', seq: 9, feedback: '', subjects: [] })), delegation(), event(), ev)
+  assert.equal(status(decided, 'review-unrecorded'), 'ok')
+  assert.match(decided.checks.find(x => x.code === 'review-unrecorded')!.facts.join('\n'), /human review rv1: approved by Pat$/m)
+  const synthetic = assessResult(withReviews(round('complete', { outcome: 'approved', by: 'check', at: '', via: 'cli', seq: 9, feedback: '', subjects: [], synthetic: true })), delegation(), event(), ev)
+  assert.match(synthetic.checks.find(x => x.code === 'review-unrecorded')!.facts.join('\n'), /a synthetic check actor, not the person/)
+})

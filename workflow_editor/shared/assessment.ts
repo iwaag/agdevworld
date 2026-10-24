@@ -18,11 +18,16 @@ import { latestResult, type Delegation, type DelegationEvent } from './delegatio
 import type { Workflow } from './model.ts'
 import { isNotes, isViewable, roleOf, substantiveNodes, type Reminder } from './reminders.ts'
 import { isOpen, questionState, runFolder, runKey, type RunGraph, type RunRecord } from './run.ts'
+import { isAwaitingPerson, reviewStateText, roundsUsing, type ReviewRound } from './humanReview.ts'
+
+// The parent's human review rounds about a delegation's child (p17).
+const childRounds = (parent: RunRecord, d: Delegation): ReviewRound[] => Object.values(parent.reviews ?? {}).filter(v => v.subjects.some(x => x.delegation === d.id || (!!d.child && x.project === d.child.project && x.workflow === d.child.workflow && x.run === d.child.run)))
 
 export type CheckCode = 'presentation-missing' | 'review-unrecorded' | 'presentation-serving'
 // ok: the records show it; missing / serving: the records show the omission;
-// unknown: the evidence to tell is not in the records (never a proven violation).
-export type CheckStatus = 'ok' | 'missing' | 'serving' | 'unknown'
+// unknown: the evidence to tell is not in the records (never a proven violation);
+// deferred (p17): handed to the person's human review, which is pending.
+export type CheckStatus = 'ok' | 'missing' | 'serving' | 'unknown' | 'deferred'
 export interface AssessmentCheck {
   code: CheckCode
   status: CheckStatus
@@ -152,7 +157,14 @@ export function assessResult(parent: RunRecord, d: Delegation, ev: DelegationEve
     }
     for (const a of d.answers) if (a.because && personal(a.from)) found.push(`answer ${a.n} to the child's ${a.question} relays ${a.from}'s words (${a.because.kind === 'answer' ? `answer to ${a.because.question}` : `instruction ${a.because.instruction}`})`)
     for (const r of d.revisions ?? []) if (r.because && personal(r.from)) found.push(`correction ${r.n} relays ${r.from}'s words`)
-    if (found.length) checks.push({ code: 'review-unrecorded', status: 'ok', facts: [...facts, ...found], expectations: [], summary: '', repair: [] })
+    // A human review round of this run about the child (p17): decided, it is
+    // the person's review (a synthetic actor is said so); pending, the review
+    // is deferred to them, not missing.
+    const rounds = childRounds(parent, d)
+    for (const v of rounds.filter(v => v.decision)) found.push(`human review ${v.id}: ${v.decision!.outcome === 'approved' ? 'approved' : 'changes requested'} by ${v.decision!.by}${v.decision!.synthetic ? ' (a synthetic check actor, not the person)' : ''}`)
+    const pending = rounds.filter(v => isAwaitingPerson(v))
+    if (!found.length && pending.length) checks.push({ code: 'review-unrecorded', status: 'deferred', facts: [...facts, `handed to ${person ?? 'the person'}'s human review ${pending.map(v => `${v.id} (${reviewStateText(v)})`).join(', ')}: their review is pending, not missing`], expectations: [], summary: '', repair: [] })
+    else if (found.length) checks.push({ code: 'review-unrecorded', status: 'ok', facts: [...facts, ...found], expectations: [], summary: '', repair: [] })
     else {
       facts.push(`no answer from ${person ?? 'the person'} about this result is traceable: a confirmation node, a decision or an agent's answer alone does not show that they reviewed it`)
       checks.push({
@@ -174,7 +186,9 @@ export function assessResult(parent: RunRecord, d: Delegation, ev: DelegationEve
       const qs = Object.values(nowRec.questions).filter(q => q.presentation?.id === p.id)
       const review = qs.length ? list(qs.map(q => `${q.id} ${questionState(q)}`)) : 'never asked about'
       const cleanup = Object.keys(nowRec.nodes).some(id => roleOf(id, nowRec, c.graph ?? { nodes: {}, edges: [] }, c.authored) === 'cleanup' && ['pending', 'running', 'waiting'].includes(nowRec.nodes[id].state))
-      if (p.retained) facts.push(`${p.id} serving now: kept on request (${p.retained.note}; stopped later by ${p.retained.owner})`)
+      const reviewing = roundsUsing(parent, nowRec, p.id)
+      if (reviewing.length) facts.push(`${p.id} serving now for ${list(reviewing.map(v => `human review ${v.id} (${reviewStateText(v)})`))}: WFE stops it with that review`)
+      else if (p.retained) facts.push(`${p.id} serving now: kept on request (${p.retained.note}; stopped later by ${p.retained.owner})`)
       else if (qs.some(q => questionState(q) === 'open')) facts.push(`${p.id} serving now: its review is not answered yet (${review}); the person can still look at it`)
       else if (cleanup) facts.push(`${p.id} serving now: a cleanup node is planned`)
       else {
@@ -185,7 +199,7 @@ export function assessResult(parent: RunRecord, d: Delegation, ev: DelegationEve
       }
     }
     const stopped = Object.values(nowRec.presentations ?? {}).filter(p => !isOpen(p))
-    if (stopped.length) facts.push(`stopped: ${list(stopped.map(p => `${p.id} (${p.state})`))}`)
+    if (stopped.length) facts.push(`stopped: ${list(stopped.map(p => `${p.id} (${p.state}${roundsUsing(parent, nowRec, p.id).length ? `; kept for human review ${list(roundsUsing(parent, nowRec, p.id).map(v => v.id))}, which starts it again` : ''})`))}`)
     if (forgotten.length) checks.push({
       code: 'presentation-serving', status: 'serving', facts, expectations: expectationsOf(c.catalog, ['cleanup']),
       summary: `${d.id}: the child's ${list(forgotten)} still serving after its review with no cleanup → ask the child to stop it (wfe delegate revise …), or relay the person's request to keep it`,
@@ -219,7 +233,7 @@ export function assessmentReminders(as: Assessment[]): Reminder[] {
   const out: Reminder[] = []
   for (const a of as) {
     for (const ch of a.checks) {
-      if (ch.status === 'ok') continue
+      if (ch.status === 'ok' || ch.status === 'deferred') continue
       const head = `${a.delegation} → ${a.childRun ?? 'child'}, result event ${a.event}${a.manifest ? ` (manifest ${a.manifest.slice(7, 19)})` : ''}${a.state !== 'open' ? `, judged ${a.state}` : ''}`
       out.push({
         code: `delegated-${ch.code}`, refs: [a.delegation, `event ${a.event}`],
@@ -233,10 +247,10 @@ export function assessmentReminders(as: Assessment[]): Reminder[] {
 
 // The assessment as text (wfe delegate show, take-up, the brief).
 export function assessmentLines(a: Assessment, indent = '  '): string[] {
-  const mark: Record<CheckStatus, string> = { ok: 'ok', missing: 'MISSING', serving: 'SERVING', unknown: 'UNKNOWN' }
+  const mark: Record<CheckStatus, string> = { ok: 'ok', missing: 'MISSING', serving: 'SERVING', unknown: 'UNKNOWN', deferred: 'DEFERRED' }
   return [
     `${indent}assessment of result event ${a.event}${a.manifest ? ` (manifest ${a.manifest.slice(7, 19)})` : ''}, child seq ${a.childSeq}${a.position ? ` (facts as of child seq ${a.position}, revision ${a.definition ?? 'r1'})` : ''}; catalog ${a.catalog ? a.catalog.slice(0, 12) : 'none'}; accepts: ${a.accepts}${a.person ? `, on behalf of ${a.person}` : ''}`,
-    ...a.checks.flatMap(c => [`${indent}  ${mark[c.status]} ${c.code}: ${c.facts.join('; ') || '—'}`, ...c.expectations.map(e => `${indent}      expects ${e}`), ...(c.status === 'ok' ? [] : c.repair.map(r => `${indent}      · ${r}`))]),
+    ...a.checks.flatMap(c => [`${indent}  ${mark[c.status]} ${c.code}: ${c.facts.join('; ') || '—'}`, ...c.expectations.map(e => `${indent}      expects ${e}`), ...(c.status === 'ok' || c.status === 'deferred' ? [] : c.repair.map(r => `${indent}      · ${r}`))]),
     ...a.integrations.map(i => `${indent}  ${i} (a historical fact; a corrected result is accepted and integrated anew)`),
     ...a.current.map(x => `${indent}  now: ${x}`),
     ...a.unavailable.map(x => `${indent}  unavailable: ${x}`),

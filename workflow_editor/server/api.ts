@@ -702,7 +702,7 @@ export function createHandler(config: ServiceConfig) {
           const because = input.because && typeof input.because === 'object' ? input.because as never : undefined
           const r = parts[8] === 'dispose'
             ? await store.dispose(ws, ref, parts[7], { disposition: str(input.disposition, 'disposition'), note: str(input.note, 'note'), event, manifest, yes: input.yes === true }, { by, via: 'browser', ...meta })
-            : await store.revise(ws, ref, parts[7], { instruction: str(input.instruction, 'instruction'), reason: str(input.reason, 'reason'), event, manifest, because }, { by, via: 'browser', ...meta })
+            : await store.revise(ws, ref, parts[7], { instruction: str(input.instruction, 'instruction'), reason: str(input.reason, 'reason'), event, manifest, because, ...(typeof input.followUp === 'string' ? { followUp: input.followUp } : {}) }, { by, via: 'browser', ...meta })
           return send(res, 200, { ok: true, duplicate: r.duplicate ?? false, seq: r.record.seq, delegation: r.record.delegations?.[parts[7]] })
         }
         // fix6: one delegation's result assessment (reads only).

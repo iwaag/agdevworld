@@ -36,10 +36,12 @@ const uidOf = (r: RunRecord) => `${r.project}/${r.workflow}/${r.run}#${creationO
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms))
 const RETRY_MS = 60_000 // a failed cleanup is retried by reconcile after this
 
+// `continued`: queues the responsible agent's continuation after requested
+// changes (the execution host's; reconcile queues a lost one again).
 export class ReviewHost {
-  readonly ctx: PresentContext
+  readonly ctx: PresentContext & { continued?: (ws: Workspace, ref: RunRef, id: string) => Promise<unknown> }
   private _pr?: Presenter
-  constructor(ctx: PresentContext) { this.ctx = ctx }
+  constructor(ctx: PresentContext & { continued?: (ws: Workspace, ref: RunRef, id: string) => Promise<unknown> }) { this.ctx = ctx }
   get presenter(): Presenter { return this._pr ??= new Presenter({ ...this.ctx, by: REVIEWER }) }
   close() { this._pr?.close() }
 
@@ -197,6 +199,7 @@ export class ReviewHost {
     }
     const r = await runOp(await runSpace(ws, ref), ref, { op: 'review.decide', review: id, outcome: o.outcome, ...(o.feedback ? { feedback: o.feedback } : {}), ...(o.revisions ? { revisions: o.revisions } : {}), ...(o.synthetic ? { synthetic: true } : {}), ...(o.because ? { because: o.because } : {}), ...(ctx.attempt ? { attempt: ctx.attempt } : {}), ...(ctx.receipt ? { receipt: ctx.receipt } : {}), ...(ctx.operator ? { operator: ctx.operator } : {}) } as never, ctx)
     const round = r.record.reviews![id]
+    if (round.state === 'changes-requested' && !r.duplicate) await this.ctx.continued?.(ws, ref, id).catch(() => null)
     const work = round.state === 'approved' ? this.cleanup(ws, ref, id).catch(e => { console.error(`review ${runKey(ref)} ${id}: cleanup: ${(e as Error).message}`); return null }) : Promise.resolve(round)
     if (w.wait !== false) await work
     const after = w.wait !== false ? await this.record(ws, ref) : r.record

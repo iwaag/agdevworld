@@ -490,7 +490,7 @@ export class ExecStore {
   }
   // The host side of human reviews: starting subjects, cleanup (p17).
   private _reviews?: ReviewHost
-  get reviews(): ReviewHost { return this._reviews ??= new ReviewHost({ registryFile: this.ctx.registryFile, area: this.ctx.area }) }
+  get reviews(): ReviewHost { return this._reviews ??= new ReviewHost({ registryFile: this.ctx.registryFile, area: this.ctx.area, continued: (ws, ref, id) => this.afterReview(ws, ref, id) }) }
 
   // The assessment of each delegated result the run has not taken up yet
   // (fix6), as brief lines: shown once with the result, not on every attempt.

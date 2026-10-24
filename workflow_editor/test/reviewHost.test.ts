@@ -207,3 +207,64 @@ test('a page the person asked to keep is kept by cleanup, with its owner', async
   assert.ok(alive(host.presenter.row(s.round.serving[0].instance!)!.pid!))
   await host.presenter.stop(ws, c, 'p1', { by: 'Pat' })
 })
+
+test('several subjects in one round; the CLI and the HTTP routes agree; a cancelled run stops what its review started', async () => {
+  const { ws, area, registry, host } = await setup()
+  const c1 = await child(ws, host), c2 = await child(ws, host)
+  const p = await parent(ws)
+  const { main } = await import('../cli/wfe.ts')
+  const cli = async (args: string[]) => {
+    const prev = { log: console.log, error: console.error }
+    const out: string[] = [], err: string[] = []
+    console.log = (...m: unknown[]) => { out.push(m.join(' ')) }
+    console.error = (...m: unknown[]) => { err.push(m.join(' ')) }
+    try { return { code: await main([...args, '--workspace', ws.reg.id, '--registry', registry, '--area', area]), out: out.join('\n'), err: err.join('\n') } } finally { console.log = prev.log; console.error = prev.error }
+  }
+  const run = `${p.workflow}/${p.run}`
+  const prep = await cli(['review', 'prepare', run, 'review', '--summary', 'Two figures.', '--subject', `p:${c1.workflow}/${c1.run}:p1`, '--subject', `p:${c2.workflow}/${c2.run}:p1`, '--by', 'agent'])
+  assert.equal(prep.code, 0, prep.err)
+  assert.match(prep.out, /Prepared rv1 on review: Awaiting human review, for Pat; 2 subjects/)
+  const noName = await cli(['review', 'start', run, 'rv1'])
+  assert.notEqual(noName.code, 0)
+  assert.match(noName.err, /--by <name>/, 'a person\'s act is never recorded under a default name')
+  const started = await cli(['review', 'start', run, 'rv1', '--by', 'Pat'])
+  assert.equal(started.code, 0, started.err + started.out)
+  assert.equal((started.out.match(/now: available — http/g) ?? []).length, 2, started.out)
+  const { createServer } = await import('node:http')
+  const { createHandler } = await import('../server/api.ts')
+  const { ExecStore } = await import('../server/exec.ts')
+  const x = new ExecStore({ registryFile: registry, area })
+  const srv = createServer(createHandler({ registryFile: registry, area, allowedOrigins: [], exec: x } as never))
+  await new Promise<void>(res => srv.listen(0, '127.0.0.1', () => res()))
+  try {
+    const base = `http://127.0.0.1:${(srv.address() as import('node:net').AddressInfo).port}/api/workspaces/${ws.reg.id}/runs/${p.workflow}/${p.run}/reviews`
+    const view = await (await fetch(`${base}/rv1`)).json() as { review: { state: string; subjectsNow: { live: boolean }[]; subjects: { revision: string }[] } }
+    assert.equal(view.review.state, 'reviewing')
+    assert.deepEqual(view.review.subjectsNow.map(x => x.live), [true, true])
+    const post = async (path: string, body: unknown) => { const r = await fetch(`${base}/${path}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }); return { status: r.status, body: await r.json() as { detail?: { code: string }; review?: { state: string } } } }
+    const stale = await post('rv1/decide', { by: 'Pat', outcome: 'approved', revisions: [`sha256:${'0'.repeat(64)}`, `sha256:${'0'.repeat(64)}`] })
+    assert.equal(stale.status, 422)
+    assert.equal(stale.body.detail?.code, 'review-superseded')
+    const ops = await fetch(`http://127.0.0.1:${(srv.address() as import('node:net').AddressInfo).port}/api/workspaces/${ws.reg.id}/runs/${p.workflow}/${p.run}/ops`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ op: 'review.serve', review: 'rv1', start: 1, subjects: [], by: 'Pat' }) })
+    assert.equal(ops.status, 400, 'host facts are never posted through the generic route')
+    const approve = await cli(['review', 'approve', run, 'rv1', '--by', 'Pat', '--feedback', 'Both fine.'])
+    assert.equal(approve.code, 0, approve.err + approve.out)
+    assert.match(approve.out, /cleanup: done/)
+    for (const c of [c1, c2]) assert.equal((await rec(ws, c)).presentations!.p1.state, 'stopped')
+
+    // A run cancelled while its review serves: the cancellation's cleanup stops it.
+    const q = await parent(ws)
+    await host.prepare(ws, q, 'review', { summary: 's', subjects: [`p:${c1.workflow}/${c1.run}:p1`] }, { by: 'agent', via: 'cli' })
+    const qs = await fetch(`http://127.0.0.1:${(srv.address() as import('node:net').AddressInfo).port}/api/workspaces/${ws.reg.id}/runs/${q.workflow}/${q.run}/reviews/rv1/start`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ by: 'Pat', wait: true }) })
+    assert.equal(qs.status, 200)
+    const served = (await rec(ws, q)).reviews!.rv1
+    assert.equal(served.state, 'reviewing')
+    const pid = host.presenter.row(served.serving[0].instance!)!.pid!
+    const cancelled = await x.cancel(ws, q, 'Pat', 'not needed any more', 'browser')
+    assert.ok(cancelled.cleanup.some(cl => cl.presentation === 'review rv1' && cl.ok), JSON.stringify(cancelled.cleanup))
+    assert.ok(!alive(pid))
+    const after = (await rec(ws, q)).reviews!.rv1
+    assert.equal(after.state, 'cancelled')
+    assert.equal(after.cleanup!.state, 'done')
+  } finally { srv.close(); x.close() }
+})

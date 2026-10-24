@@ -19,7 +19,8 @@ import { isOpen, questionState, runKey, type Presentation, type RunGraph, type R
 // What a node is for, as far as its structured records say. Never its name.
 // - present / cleanup: made from the catalog's seed templates (present,
 //   cleanup), drawn with their icon, or (present) a node a presentation was
-//   registered from or linked to;
+//   registered from. A presentation linked to work recorded afterwards
+//   shows that work; it does not make the work a presentation node;
 // - work: made from the catalog's `work` template, or an untemplated `do`
 //   node the run added itself (not in its original definition): the work the
 //   agent decided on. A designed workflow's own nodes are the designer's;
@@ -34,7 +35,7 @@ export function roleOf(id: string, record: Pick<RunRecord, 'definition' | 'prese
   if (g.activity) return 'activity'
   const a: Partial<WorkflowNode> = authored?.nodes[id] ?? {}
   const pres = Object.values(record.presentations ?? {})
-  if (a.template?.id === PRESENT || a.appearance?.icon === PRESENT || pres.some(p => p.node === id || p.links?.some(l => l.node === id))) return 'present'
+  if (a.template?.id === PRESENT || a.appearance?.icon === PRESENT || pres.some(p => p.node === id)) return 'present'
   if (a.template?.id === CLEANUP || a.appearance?.icon === CLEANUP) return 'cleanup'
   if (g.confirms === 'result') return 'confirm'
   if (g.type === 'talk') return 'talk'

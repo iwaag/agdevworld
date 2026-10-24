@@ -14,7 +14,7 @@ import { validateWorkflow } from '../shared/validate.ts'
 import {
   activeRevision, checkRecord, documentPath, graphOfState, hostOf, operate, presentationFolder, runDisplayTitle, type AdjustSource, type AdjustDiff, graphDiff, RUN_ID, RunError, runFolder, RUNS_ROOT, runKey, validRunRef, type Presentation,
   type BundleEntry, type DefinitionRef, type DocumentEvidence, type EntrustRef, type Executor, type OpInput, type RepoContext, type RunGraph,
-  type EntryMeta, type RunInput, type RunRecord, type RunRef, type RunState, type RunStorage,
+  type EntryMeta, type RetroEvidence, type RunInput, type RunRecord, type RunRef, type RunState, type RunStorage,
 } from '../shared/run.ts'
 import { runStatus } from '../shared/status.ts'
 import type { SourceRef } from '../shared/intake.ts'
@@ -26,7 +26,9 @@ import { withLock } from './lock.ts'
 import { blobSizeAt, listAt, resolveRev, RevError, showAt, type DevdocsInfo, type DevdocsRev } from './devdocs.ts'
 import { RequestError, WORKFLOWS_DIR, type Workspace } from './workspace.ts'
 import { allocating, listCopies, prepareCopy, runSpace, storageOf, usedRuns } from './runspace.ts'
-import { parseWorkflow } from './yamlDoc.ts'
+import { parseWorkflow, renderWorkflow } from './yamlDoc.ts'
+import { git } from './git.ts'
+import { CatalogError, instantiate } from '../shared/catalog.ts'
 import { adviseOrRefuse, type Advice } from './reminders.ts'
 import type { Boundary } from '../shared/reminders.ts'
 
@@ -1098,6 +1100,118 @@ export async function adjustRun(ws: Workspace, ref: RunRef, o: AdjustOptions, ct
       const r = await both()
       await writeRecord(dir, r)
       return { ok: true, ...base, revision, problems, record: r }
+    } catch (e) {
+      await rm(join(dir, DEFINITION_DIR, revision), { recursive: true, force: true })
+      throw e
+    }
+  }, { what: `run ${runKey(ref)}` })
+}
+
+// ---- work recorded as done afterwards (fix5, docs/adjustments.md) ------------------------
+
+export interface RecordDoneOptions {
+  node?: string // the new node's id (default: the template's id, made unique)
+  template?: string // a template of the run's catalog snapshot
+  type?: string; name?: string; description?: string // a node without a template
+  after?: string[]; before?: string[] // where it goes; it follows completed nodes only
+  outcome: string
+  reason: string // why it is recorded afterwards
+  artifacts?: string[] // project-relative files it produced; each must exist
+  commits?: { commit: string; repository?: string }[] // commits it made; each must exist
+  entries?: number[] // earlier entries of this run that show it (e.g. the talk's completion)
+  questions?: string[]; outputs?: string[]
+  presentation?: string // an existing presentation that shows it: linked, its registration unchanged
+  reported?: { started?: string; ended?: string } // the work's own times, as the recorder states them
+  expectRevision?: string
+}
+
+// Adds a node and records it as already done, in one entry under the run's
+// lock: the revision file first, then run.json; a refusal removes the file.
+// Nothing is started, launched, dispatched or answered.
+export async function recordDone(ws: Workspace, ref: RunRef, o: RecordDoneOptions, ctx: OpContext & { attempt?: string; receipt?: string }): Promise<{ record: RunRecord; revision: string; node: string; duplicate?: boolean }> {
+  ws = await runSpace(ws, ref)
+  const file = join(await inside(ws.root, runDir(ref)), RUN_FILE)
+  return withLock(file, async () => {
+    const { record, graph, dir, bundle } = await usableRun(ws, ref)
+    const seen = ctx.receipt ? record.history.find(h => h.receipt === ctx.receipt) : undefined
+    if (seen) {
+      if (seen.op !== 'run.record-done') throw new RequestError(409, `receipt ${ctx.receipt} already recorded ${seen.op} at seq ${seen.seq}`, { code: 'receipt-reused' })
+      const d = seen as unknown as { revision: string; node: string }
+      return { record, revision: d.revision, node: d.node, duplicate: true }
+    }
+    const parent = activeRevision(record.definition)
+    if (o.expectRevision && o.expectRevision !== parent) throw new RequestError(409, `${parent} is in force, not ${o.expectRevision}; read the run again`, { code: 'revision-outdated' })
+    const active = activeDefinition(record, bundle)
+    const parsed = parseWorkflow(active.text)
+    if (!parsed.ok) throw new RequestError(409, `the definition in force cannot be read: ${parsed.problem.message}`)
+    const after = [...new Set(o.after ?? [])], before = [...new Set(o.before ?? [])]
+    let next: Workflow, node: string
+    if (o.template) {
+      const cat = catalogOf(record, bundle)
+      const t = cat.state === 'supplied' ? cat.snapshot.templates.find(x => x.id === o.template) : undefined
+      if (!t) throw new RequestError(422, `the run's catalog has no template "${o.template}" (${cat.state === 'supplied' ? cat.snapshot.templates.map(x => x.id).join(', ') || 'none' : `catalog ${cat.state}`})`, { code: 'template-unknown' })
+      try { ({ workflow: next, node } = instantiate(parsed.model, t, { id: o.node, after, before })) } catch (e) {
+        if (e instanceof CatalogError) throw new RequestError(422, e.message, { code: e.code })
+        throw e
+      }
+    } else {
+      if (!o.type || !o.name?.trim()) throw new RequestError(400, 'without a template, give the node\'s type and name')
+      node = o.node ?? ''
+      if (!ID_PATTERN.test(node)) throw new RequestError(400, `node id "${node}" must match ${ID_PATTERN.source}`)
+      if (node in parsed.model.nodes) throw new RequestError(422, `the run already has a node "${node}"`, { code: 'node-exists' })
+      for (const n of [...after, ...before]) if (!(n in parsed.model.nodes)) throw new RequestError(422, `node "${n}" is not in the run's definition`, { code: 'node-unknown' })
+      next = structuredClone(parsed.model)
+      next.nodes[node] = { type: o.type, name: o.name.trim(), description: o.description?.trim() || o.name.trim(), repositories: [] }
+      for (const a of after) next.edges.push({ from: a, to: node })
+      for (const b of before) next.edges.push({ from: node, to: b })
+    }
+    const text = renderWorkflow(parsed.doc, next)
+    const errors = validateWorkflow(next).filter(i => i.severity === 'error')
+    if (errors.length) throw new RequestError(422, `the definition with ${node} does not validate: ${errors.map(i => i.message).join('; ')}`, { code: 'adjust-graph' })
+    const compiled = compile(next)
+    if (!compiled.ok) throw new RequestError(422, compiled.message, { code: 'adjust-graph' })
+    // The evidence, checked to exist now.
+    const evidence: RetroEvidence[] = []
+    const artifacts: string[] = []
+    for (const p of o.artifacts ?? []) {
+      const n = normalizeRepoPath(p)
+      if (!n || n === '.') throw new RequestError(400, `artifact "${p}" must be a project-relative file`)
+      const abs = await inside(ws.root, n)
+      const l = await lstat(abs).catch(() => null)
+      if (!l?.isFile()) throw new RequestError(422, `${n} does not exist as a file in the run's copy; evidence names what exists`, { code: 'evidence-unknown' })
+      const bytes = await readFile(abs)
+      artifacts.push(n)
+      evidence.push({ kind: 'artifact', path: n, sha256: sha256(bytes), bytes: bytes.length })
+    }
+    for (const c of o.commits ?? []) {
+      const repo = normalizeRepoPath(c.repository ?? '.') ?? '.'
+      const r = await git(await inside(ws.root, repo), ['rev-parse', '--verify', '--quiet', `${c.commit}^{commit}`])
+      if (r.code !== 0) throw new RequestError(422, `commit ${c.commit} does not exist in ${repo === '.' ? 'the run\'s copy' : repo}`, { code: 'evidence-unknown' })
+      evidence.push({ kind: 'commit', repository: repo, commit: r.stdout.trim() })
+    }
+    for (const seq of o.entries ?? []) {
+      const e = record.history[seq - 1]
+      if (!e) throw new RequestError(422, `entry ${seq} is not in this run's history`, { code: 'evidence-unknown' })
+      evidence.push({ kind: 'entry', seq, op: e.op })
+    }
+    for (const id of o.questions ?? []) evidence.push({ kind: 'question', id } as RetroEvidence)
+    for (const id of o.outputs ?? []) evidence.push({ kind: 'output', id, digest: '' } as RetroEvidence)
+    if (o.presentation) evidence.push({ kind: 'presentation', id: o.presentation, revision: '' } as RetroEvidence)
+    const revision = `r${(record.definition.revisions?.length ?? 0) + 2}`
+    const revFile = `${DEFINITION_DIR}/${revision}/${record.definition.root}.yaml`
+    const input = {
+      op: 'run.record-done' as const, revision, parent, file: revFile, sha256: sha256(text), definitionDigest: await semanticDigest('definition', next), effective: compiled.graph,
+      node, outcome: o.outcome, reason: o.reason, artifacts, evidence,
+      ...(o.reported && (o.reported.started || o.reported.ended) ? { reported: { started: o.reported.started ?? null, ended: o.reported.ended ?? null } } : {}),
+      ...(o.presentation ? { presentation: o.presentation } : {}),
+      ...(ctx.attempt ? { attempt: ctx.attempt } : {}), ...(ctx.receipt ? { receipt: ctx.receipt } : {}),
+    }
+    const r = applyOp(record, { op: structuredClone(input) }, graph, ctx) // every record rule, before anything is written
+    await mkdir(join(dir, DEFINITION_DIR, revision), { recursive: true })
+    await atomicWrite(join(dir, revFile), text)
+    try {
+      await writeRecord(dir, r)
+      return { record: r, revision, node }
     } catch (e) {
       await rm(join(dir, DEFINITION_DIR, revision), { recursive: true, force: true })
       throw e

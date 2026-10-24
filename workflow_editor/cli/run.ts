@@ -9,7 +9,7 @@ import { normalizeRepoPath, sessionPolicyOf } from '../shared/model.ts'
 import { docStepsOf, hasDocSteps, splitCounts } from '../shared/compile.ts'
 import { describeSteps, effectiveOf, EXECUTOR_OPS, holderOf, hostOf, notableEvents, questionState, runKey, type BecauseRef, type EntrustRef, type HistoryEntry, type Instruction, type OpInput, type RunRecord, type RunRef } from '../shared/run.ts'
 import {
-  adjustRun, checkRun, createRun, listRuns, readRun, resolveRef, runDir, runOp, runResponse, usableRun, type AdjustResult, type CreateRunOptions,
+  adjustRun, checkRun, createRun, listRuns, readRun, recordDone, resolveRef, runDir, runOp, runResponse, usableRun, type AdjustResult, type CreateRunOptions,
 } from '../server/runs.ts'
 import { RequestError, type Workspace } from '../server/workspace.ts'
 import { humanBytes } from '../shared/shares.ts'
@@ -358,6 +358,37 @@ current workflow (workflow_editor fix3). A node from one of them: wfe nodes inst
 <template> --run <run> --file <draft> (wfe nodes help), then wfe run adjust.
 Also says when the catalog was unavailable at creation, or when the run
 predates catalogs. Reads only.`,
+  'record-done': `wfe run record-done <run> (--template <t> | --type do|study|talk --name <text> --id <node>) [--id <node>] [--after <node>]... [--before <node>]...
+    --outcome <text> --reason <text> [--artifact <path>]... [--commit <sha>[@<repository>]]... [--entry <seq>]...
+    [--question <q>]... [--output <o>]... [--presentation <p>] [--started-at <time>] [--ended-at <time>] [--expect-revision r<n>]
+
+Records work that already happened, without its own node, as a completed
+node (workflow_editor fix5). One entry adds a revision with the node and
+records it done: no start, no completion event, nothing scheduled in
+between, and nothing is run, launched, dispatched or answered. The run's
+history stays as it was (a talk's outcome keeps its words); the node appears
+from the new revision on, marked "recorded afterwards" in the graph, its
+details and the history.
+  --template <t>   a template of the run's catalog (wfe run nodes): the node is
+                   made from it, with its provenance. Without one, --type,
+                   --name and --id describe the node.
+  --id <node>      its id (default: the template's id, made unique).
+  --after/--before where it goes. It follows completed nodes only.
+  --outcome        what the work produced or concluded.
+  --reason         why it is recorded afterwards (where it was done, e.g.
+                   inside the talk).
+  Evidence, each checked to exist: --artifact (a file of the run's copy, by
+  hash), --commit (a commit of the run's copy or of a repository in it),
+  --entry (an earlier entry of this run, e.g. the talk's completion),
+  --question, --output, --presentation (an existing presentation that shows
+  this work: linked to the node; its registration stays as it was).
+  --started-at/--ended-at: the work's own times as you know them, recorded
+  as reported; leave them out when unknown.
+Work that has not happened yet is not recorded here: add it as pending work
+with wfe run adjust and do it there. A presentation that was never made is
+not repaired by declaring it done. Refused while another attempt executes
+the run. Retransmission with the same --receipt records nothing new.
+Writes the revision file and run.json.`,
   revisions: `wfe run revisions <run> [--show r<n>] [--diff r<a> r<b>]
 
 The run's definition revisions: the original (r1) and each adjustment —
@@ -402,6 +433,7 @@ export function runIndex(): string {
   integrate <run>          bring saved work into the shared branches (or --dry-run, --status)
   reversal <run>           what undoing the run involves (facts only)
   adjust <run>             change the run's future work (a recorded revision)
+  record-done <run>        record work already done without a node as a completed node
   revisions <run>          the original definition and each adjustment
   nodes <run>              the person's node catalog as this run was given it
 
@@ -466,7 +498,7 @@ function entryLine(e: HistoryEntry): string {
   const d = e as unknown as Record<string, unknown>
   const subject = [d.node && `node ${d.node}`, d.question && `question ${d.question}`, d.path && `${d.path}`,
     e.op === 'instruction.receive' && `instruction ${e.change.instruction?.[1] ?? ''}`, Array.isArray(d.instructions) && `instructions ${(d.instructions as string[]).join(', ')} (${String(d.response)})`].filter(Boolean).join(', ')
-  const moves = Object.entries(e.change.nodes ?? {}).map(([n, [a, b]]) => `${n} ${a}→${b}`)
+  const moves = Object.entries(e.change.nodes ?? {}).map(([n, [a, b]]) => a === null ? `${n} added as ${b} (recorded afterwards)` : `${n} ${a}→${b}`)
   if (e.change.execution) moves.push(`run ${e.change.execution[0] ?? '—'}→${e.change.execution[1]}`)
   const detail = (d.reason ?? d.outcome ?? d.text ?? d.evidence ?? d.external ?? d.note ?? '') as string
   return `  ${String(e.seq).padStart(3)} ${e.at}  ${e.op.padEnd(17)} ${e.by} (${e.via})${subject ? `  ${subject}` : ''}${moves.length ? `  [${moves.join(', ')}]` : ''}${detail ? `\n${' '.repeat(30)}${first(detail, 140)}` : ''}`
@@ -517,7 +549,7 @@ export function describeRun(r: RunResponse, opts: { history?: boolean; url?: str
     if (n.state === 'pending') what = ex.ready.includes(id) ? 'READY to start' : ex.blocked.includes(id) ? 'blocked: a predecessor failed or was cancelled' : 'waits for predecessors'
     else if (n.state === 'running') what = `reported started ${n.started}; last update ${ago(n.updated)}`
     else if (n.state === 'waiting' && n.wait) what = `waits: ${n.wait.reason}; next move: ${holderOf(rec, id)}${'external' in n.wait.on ? `; awaiting ${n.wait.on.external}` : ''}`
-    else if (n.state === 'completed') what = `outcome: ${first(n.outcome?.text ?? '', 120)}`
+    else if (n.state === 'completed') what = `${n.retrospective ? `RECORDED AFTERWARDS by ${n.retrospective.by} at ${n.retrospective.at} (nothing ran it then: ${first(n.retrospective.reason, 80)}${n.retrospective.reported.started || n.retrospective.reported.ended ? `; reported work time ${n.retrospective.reported.started ?? '?'} – ${n.retrospective.reported.ended ?? '?'}` : ''}); ` : ''}outcome: ${first(n.outcome?.text ?? '', 120)}`
     else if (n.state === 'failed') what = `failure: ${n.failure?.reason}`
     else if (n.state === 'cancelled') what = `cancelled: ${n.cancellation?.reason}`
     const last = n.notes.at(-1)
@@ -1036,6 +1068,21 @@ export async function runCommand(c: RunCli): Promise<number> {
       }
       c.out(adjustText(res, runKey(r)), res)
       return res.ok ? 0 : 1
+    }
+    case 'record-done': {
+      const r = await ref()
+      const root = await rootOf(r)
+      const commits = c.opts('commit').map(v => { const [commit, repository] = v.split('@'); return { commit, ...(repository ? { repository } : {}) } })
+      const entries = c.opts('entry').map(v => { const n = Number(v); if (!Number.isInteger(n) || n < 1) throw c.usage('--entry takes a history seq'); return n })
+      const started = c.opt('started-at'), ended = c.opt('ended-at')
+      const res = await wrap(async () => recordDone(ws, r, {
+        node: c.opt('id'), template: c.opt('template'), type: c.opt('type'), name: c.opt('name'), description: c.opt('description'),
+        after: c.opts('after'), before: c.opts('before'), outcome: need(c, 'outcome', 'what the work produced or concluded'), reason: need(c, 'reason', 'why it is recorded afterwards'),
+        artifacts: c.opts('artifact').map(p => artifactPath(root, r, p)), commits, entries, questions: c.opts('question'), outputs: c.opts('output'), presentation: c.opt('presentation'),
+        ...(started || ended ? { reported: { started, ended } } : {}), expectRevision: c.opt('expect-revision'),
+      }, { by: await recorder(r), via: 'cli', expectSeq, attempt, receipt }))
+      const n = res.record.nodes[res.node]
+      return report(r, res.record, res.duplicate ? `Already recorded (same receipt): ${res.node} in ${res.revision}; nothing written again.` : `Recorded afterwards: ${res.node} is completed in ${res.revision} (nothing was run). Evidence: ${n.retrospective?.evidence.map(e => e.kind === 'artifact' ? e.path : e.kind === 'commit' ? `commit ${e.commit.slice(0, 10)}` : e.kind === 'entry' ? `entry ${e.seq} (${e.op})` : `${e.kind} ${e.id}`).join(', ') || 'none named'}.`)
     }
     case 'nodes': {
       const r = await ref()

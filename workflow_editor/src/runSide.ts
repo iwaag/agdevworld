@@ -742,6 +742,11 @@ export class RunSide {
       box.append(h('p.small', 'Its report: ', nodeLink(rs, `report-${id}.md`), ` — ${nodeLabel(rec, rs).label}`, h('span.d-only', '. Successors wait for the report, not only for this work.'), rf ? h('span.s-only', ' · ', fileLink(`${r.dir}/${rf.name}`, 'Read it')) : null))
     }
     if (n.outcome) box.append(h('div.outcome', h('strong', 'Recorded outcome: '), n.outcome.text, ...n.outcome.artifacts.map(a => h('div.small', fileLink(a)))))
+    // Work recorded as done afterwards (workflow_editor fix5): said as such.
+    const rt = n.retrospective
+    if (rt) box.append(h('div.retro-box', h('strong', 'Recorded afterwards: '), `${rt.by}, ${when(rt.at)} (entry ${rt.seq}). Nothing ran this node; the work was done before it was a node. Why: ${rt.reason}`,
+      h('div.small', `Work time as reported: ${rt.reported.started ? when(rt.reported.started) : 'unknown'} – ${rt.reported.ended ? when(rt.reported.ended) : 'unknown'}`),
+      rt.evidence.length ? h('div.small', 'Evidence: ', ...rt.evidence.flatMap((e, i) => [i ? ', ' : '', e.kind === 'artifact' ? fileLink(e.path) : e.kind === 'commit' ? `commit ${e.commit.slice(0, 10)}${e.repository !== '.' ? ` in ${e.repository}` : ''}` : e.kind === 'entry' ? `entry ${e.seq} (${e.op})` : `${e.kind} ${e.id}`])) : h('div.small.muted', 'No evidence named.')))
     if (n.wait) {
       const on = n.wait.on
       box.append(h('div.wait-box', h('strong', 'Waiting: '), n.wait.reason, h('br'), 'Next move: ', h('strong', holderOf(rec, id)),
@@ -954,7 +959,7 @@ export class RunSide {
     patchContent(this.definition.content.children[0] as HTMLElement,
       h('p.small', h('strong', 'r1'), ` original snapshot — definition/${rec.definition.root}.yaml, ${when(rec.created)}`),
       ...revs.map(v => h('div.revision', { dataset: { revision: v.revision, key: `r:${v.revision}` } },
-        h('p.small', h('strong', v.revision), ` from ${v.parent} · ${v.by} · ${when(v.at)} · source: ${v.source.kind === 'request' ? `the original request (${v.source.input})` : v.source.kind}${'question' in v.source ? ` ${v.source.question}` : 'instruction' in v.source ? ` ${v.source.instruction}` : ''}`),
+        h('p.small', h('strong', v.revision), ` from ${v.parent} · ${v.by} · ${when(v.at)} · source: ${v.source.kind === 'request' ? `the original request (${v.source.input})` : v.source.kind === 'record-done' ? `work recorded afterwards (${v.source.node})` : v.source.kind}${'question' in v.source ? ` ${v.source.question}` : 'instruction' in v.source ? ` ${v.source.instruction}` : ''}`),
         h('p.small', v.reason),
         h('p.small.muted', `added ${list(v.diff.added)}; removed ${list(v.diff.removed)}; ${v.file}`))),
       revs.length ? null : h('p.small.muted', 'Not adjusted: the run follows its original snapshot.'))
@@ -1281,7 +1286,7 @@ export class RunSide {
     setText(this.history.title, `History (${history.length})`)
     patchContent(this.history.content.children[0] as HTMLElement, ...history.map(e => {
       const d = e as unknown as Record<string, unknown>
-      const moves = Object.entries(e.change.nodes ?? {}).map(([n, [a, b]]) => `${n}: ${a ?? '—'} → ${b}`)
+      const moves = Object.entries(e.change.nodes ?? {}).map(([n, [a, b]]) => a === null ? `${n}: added as ${b} (recorded afterwards)` : `${n}: ${a} → ${b}`)
       if (e.change.execution) moves.push(`run: ${e.change.execution[0] ?? '—'} → ${e.change.execution[1]}`)
       const detail = (d.reason ?? d.outcome ?? d.text ?? d.evidence ?? d.external ?? d.path ?? '') as string
       return h('li', { value: e.seq, dataset: { key: `h:${e.seq}` } }, h('div', h('code', e.op), ` ${d.node ? `${d.node} ` : ''}${d.question ? `${d.question} ` : ''}`, h('span.muted.small', `· ${e.by} via ${e.via} · ${when(e.at)}`)),

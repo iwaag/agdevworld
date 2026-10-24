@@ -273,3 +273,126 @@ test('reminders are evaluated under the lock on the current record: a stale writ
   assert.equal((loser.reason.detail as { code: string }).code, 'state')
   assert.equal((await rec(s)).history.filter(e => e.op === 'node.complete' && (e as { node?: string }).node === 'build').length, 1)
 })
+
+// ---- work recorded as done afterwards (fix5 step 3) ----------------------------------
+
+const done = (s: S, o: Partial<import('../server/runs.ts').RecordDoneOptions>, receipt?: string) => import('../server/runs.ts').then(m => m.recordDone(s.ws, s.ref, { outcome: 'did it', reason: 'done inside the talk', ...o }, { by: 'autolab', via: 'cli', ...(receipt ? { receipt } : {}) }))
+
+test('record-done adds and completes a catalog node in one entry: no start, no completion event, honest provenance, nothing executed', async () => {
+  const s = await setup()
+  await op(s, { op: 'node.start', node: 'talk' })
+  await writeFile(join(s.dir, 'out', 'index.html'), '<p>made in the talk</p>')
+  await gitOk(s.dir, ['add', '-A']); await gitOk(s.dir, ['commit', '-q', '-m', 'made in the talk'])
+  const commit = (await gitOk(s.dir, ['rev-parse', 'HEAD'])).trim()
+  await op(s, { op: 'node.complete', node: 'talk', outcome: 'Built the page while we talked.' }, { yes: true })
+  const before = await rec(s)
+  assert.equal(before.execution.state, 'completed')
+  const r = await done(s, { template: 'work', node: 'page', after: ['talk'], artifacts: ['out/index.html'], commits: [{ commit: commit.slice(0, 10) }], entries: [before.seq], reported: { started: '2026-10-24T01:00:00Z' } }, 'rd-1')
+  assert.equal(r.node, 'page')
+  assert.equal(r.revision, 'r2')
+  const now = await rec(s)
+  assert.equal(now.history.length, before.history.length + 1, 'one entry')
+  const e = now.history.at(-1)!
+  assert.equal(e.op, 'run.record-done')
+  assert.deepEqual(e.change.nodes, { page: [null, 'completed'] })
+  assert.equal(e.change.execution, undefined, 'the run stays completed: no second completion')
+  const n = now.nodes.page
+  assert.equal(n.state, 'completed')
+  assert.equal(n.started, null, 'no synthesized start')
+  assert.equal(n.ended, null, 'no synthesized end')
+  assert.deepEqual(n.retrospective?.reported, { started: '2026-10-24T01:00:00.000Z', ended: null })
+  assert.equal(n.retrospective?.by, 'autolab')
+  assert.deepEqual(n.retrospective?.evidence.map(x => x.kind), ['artifact', 'commit', 'entry'])
+  assert.equal((n.retrospective?.evidence[1] as { commit: string }).commit, commit, 'the short commit is resolved to the full id')
+  assert.equal(now.nodes.talk.outcome?.text, 'Built the page while we talked.', 'the talk keeps its words')
+  assert.deepEqual(now.history.slice(0, before.history.length), before.history, 'history unchanged')
+  const { notableEvents } = await import('../shared/run.ts')
+  const evs = notableEvents(now)
+  assert.equal(evs.filter(x => x.type === 'completed').length, 1, 'one completion notification')
+  assert.match(evs.at(-1)!.text, /recorded afterwards as done: page/)
+  // Its revision carries the template's provenance; older revisions do not have it.
+  assert.equal(now.definition.revisions?.at(-1)?.source.kind, 'record-done')
+  const { readFile } = await import('node:fs/promises')
+  assert.match(await readFile(join(s.folder, 'definition', 'r2', 'freework.yaml'), 'utf8'), /page:[\s\S]*template:[\s\S]*id: work/)
+  assert.ok(!('page' in (now.definition.effective?.nodes ?? {})), 'not retroactively in r1')
+  // The record replays exactly.
+  const { checkRun } = await import('../server/runs.ts')
+  assert.ok((await checkRun(s.ws, s.ref)).ok)
+  // A retransmission records nothing; on a completed run nothing is queued.
+  const again = await done(s, { template: 'work', node: 'page', after: ['talk'], artifacts: ['out/index.html'] }, 'rd-1')
+  assert.equal(again.duplicate, true)
+  assert.equal((await rec(s)).seq, now.seq)
+})
+
+test('record-done validates its evidence and placement and refuses without leaving a revision file', async () => {
+  const s = await setup()
+  await op(s, { op: 'node.start', node: 'talk' })
+  const seq = (await rec(s)).seq
+  const refused = async (o: Partial<import('../server/runs.ts').RecordDoneOptions>, code: string) => {
+    await assert.rejects(done(s, o), (e: RequestError) => (e.detail as { code?: string } | undefined)?.code === code || assert.fail(`${code}: ${e.message}`))
+    assert.equal((await rec(s)).seq, seq)
+    await assert.rejects(readdir(join(s.folder, 'definition', 'r2')), 'no revision file')
+  }
+  await refused({ template: 'work', artifacts: ['out/missing.html'] }, 'evidence-unknown')
+  await refused({ template: 'work', commits: [{ commit: 'deadbeefdeadbeef' }] }, 'evidence-unknown')
+  await refused({ template: 'work', entries: [99] }, 'evidence-unknown')
+  await refused({ template: 'work', presentation: 'p9' }, 'evidence-unknown')
+  await refused({ template: 'nope' }, 'template-unknown')
+  await refused({ template: 'work', after: ['talk'] }, 'state') // talk is still running: work already done follows completed nodes
+  await refused({ type: 'do', name: 'X', node: 'talk' }, 'node-exists')
+})
+
+test('record-done on a work node clears the self-check, keeps the presentation reminder, and a linked presentation satisfies it', async () => {
+  const s = await setup()
+  await op(s, { op: 'node.start', node: 'talk' })
+  await op(s, { op: 'artifact.attach', path: 'out/index.html' })
+  // Work hid in the talk (gimmickimg/freework/run-001…008): the self-check names it.
+  let r = await reminded(op(s, { op: 'node.complete', node: 'talk', outcome: 'built it here' }, ADVISE))
+  assert.deepEqual(r.codes, ['unrecorded-activity'])
+  assert.match(r.message, /the graph shows no work node, yet artifacts outside the run folder are recorded \(out\/index\.html\)/)
+  assert.match(r.message, /WFE cannot tell whether work was done/)
+  assert.match(r.message, /wfe run record-done freework\/run-001 --template <id>/)
+  // A presentation was registered from the talk earlier (with --yes).
+  await registerPresentation(s.ws, s.ref, { node: 'talk', source: 'out', entry: 'index.html', review: 'review.md', title: 'Page' }, { by: 'autolab', via: 'cli', advice: { yes: true } })
+  await adjust(s, flow(node('cleanup', 'do', tpl('cleanup')), [['talk', 'cleanup']]))
+  await op(s, { op: 'node.complete', node: 'talk', outcome: 'built it here' }, { yes: true })
+  await done(s, { template: 'work', node: 'page', after: ['talk'], artifacts: ['out/index.html'], presentation: 'p1' })
+  const now = await rec(s)
+  assert.deepEqual(now.presentations?.p1.links?.map(l => l.node), ['page'])
+  assert.equal(now.presentations?.p1.node, 'talk', 'the registration stays as it was')
+  // The work is visible and presented through the link: completing the cleanup warns of nothing.
+  await op(s, { op: 'node.start', node: 'cleanup' })
+  r = { codes: [], message: '' }
+  await op(s, { op: 'node.complete', node: 'cleanup', outcome: 'nothing served' }, ADVISE)
+  assert.equal((await rec(s)).execution.state, 'completed')
+  // Without the link, the recorded work still asks for a presentation.
+  const t = await setup()
+  await op(t, { op: 'node.start', node: 'talk' })
+  await adjust(t, flow(node('wrap', 'do', tpl('cleanup')), [['talk', 'wrap']]))
+  await op(t, { op: 'node.complete', node: 'talk', outcome: 'built it here' }, { yes: true })
+  await done(t, { template: 'work', node: 'page', after: ['talk'] })
+  await op(t, { op: 'node.start', node: 'wrap' })
+  r = await reminded(op(t, { op: 'node.complete', node: 'wrap', outcome: 'done' }, ADVISE))
+  assert.deepEqual(r.codes, ['presentation-missing'])
+})
+
+test('wfe run record-done from the command line: the help owns the usage, the record says "recorded afterwards"', async () => {
+  const s = await setup()
+  await op(s, { op: 'node.start', node: 'talk' })
+  await op(s, { op: 'node.complete', node: 'talk', outcome: 'did it in the talk' }, { yes: true })
+  const cli = async (args: string[]) => {
+    const prev = { log: console.log, error: console.error }
+    const out: string[] = [], err: string[] = []
+    console.log = (...m: unknown[]) => { out.push(m.join(' ')) }
+    console.error = (...m: unknown[]) => { err.push(m.join(' ')) }
+    try { return { code: await main([...args, '--workspace', 'p', '--registry', s.registry, '--area', s.area]), out: out.join('\n'), err: err.join('\n') } } finally { console.log = prev.log; console.error = prev.error }
+  }
+  const help = await cli(['run', 'help', 'record-done'])
+  assert.match(help.out, /Records work that already happened, without its own node, as a completed\nnode/)
+  const r = await cli(['run', 'record-done', 'freework/run-001', '--template', 'work', '--id', 'page', '--after', 'talk', '--outcome', 'Made the page.', '--reason', 'It was done inside the talk.', '--artifact', 'out/index.html', '--entry', '3', '--by', 'autolab'])
+  assert.equal(r.code, 0, r.err)
+  assert.match(r.out, /Recorded afterwards: page is completed in r2 \(nothing was run\)\. Evidence: out\/index\.html, entry 3 \(node\.complete\)/)
+  const show = await cli(['run', 'show', 'freework/run-001', '--history'])
+  assert.match(show.out, /page +completed RECORDED AFTERWARDS by autolab at .* \(nothing ran it then: It was done inside the talk\.\); outcome: Made the page\./)
+  assert.match(show.out, /run\.record-done +autolab \(cli\)  node page  \[page added as completed \(recorded afterwards\)\]/)
+})

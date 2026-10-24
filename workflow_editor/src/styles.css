@@ -540,6 +540,9 @@ a.button.panel-toggle[hidden] { display: none; }
 .node.run-waiting, .step-card.run-waiting { box-shadow: 0 0 0 3px #e0b35c; }
 .node.run-failed, .step-card.run-failed { box-shadow: 0 0 0 3px #e2a7a2; }
 .node.run-completed, .step-card.run-completed { box-shadow: 0 0 0 2px #8dc9a7; }
+/* fix5: work recorded as done afterwards — drawn apart from work that ran as a node. */
+.node.run-retro { box-shadow: none; outline: 2px dashed #8dc9a7; outline-offset: 1px; }
+.retro-box { border: 1px dashed #8dc9a7; border-radius: 8px; padding: 8px 10px; font-size: 13px; margin: 6px 0; }
 .node.in-run.selected, .step-card.in-run.selected { box-shadow: 0 0 0 3px var(--accent), 0 4px 14px rgba(20,24,30,.16); }
 
 .run-side { background: #fff; border-left: 1px solid var(--line); padding: 14px 18px; overflow-y: auto; display: flex; flex-direction: column; gap: 6px; position: sticky; top: 0; max-height: 100vh; min-height: calc(100vh - 160px); overflow-anchor: none; /* the view holds the reading position itself (runSide.ts) */ }

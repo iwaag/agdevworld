@@ -56,6 +56,7 @@ export function nodeLabel(rec: RunRecord, id: string): { state: string; label: s
     label = q && q.answers.length && !q.takenUp && !q.withdrawn ? `Answered · ${rec.executor.name} to take up` : `Waiting · ${n.wait.holder}`
     title = `${n.wait.reason}; next move: ${holderOf(rec, id)}`
   } else if (n.state === 'running') title = `The executor recorded a start at ${when(n.started ?? '')}; last update ${ago(n.updated)}. This is reported progress, not a check that anything runs.`
+  else if (n.retrospective) { label = 'Done · recorded afterwards'; title = `Recorded afterwards by ${n.retrospective.by} at ${when(n.retrospective.at)}: nothing ran this node; the work was done before it was a node. ${n.retrospective.reason}` }
   else if (state === 'blocked') title = 'A predecessor failed or was cancelled; this node cannot become ready.'
   else if (state === 'ready') title = 'Every predecessor completed; the executor can start it.'
   return { state, label, title }

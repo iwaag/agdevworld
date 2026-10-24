@@ -84,7 +84,7 @@ function entryLine(e: HistoryEntry): string {
   const d = e as unknown as Record<string, unknown>
   const subject = [d.node && `node ${d.node}`, d.question && `question ${d.question}`, d.presentation && `presentation ${d.presentation}`, d.revision && `revision ${d.revision}`, d.delegation && `delegation ${d.delegation}`,
     e.op === 'instruction.receive' && `instruction ${e.change.instruction?.[1] ?? ''}`, Array.isArray(d.instructions) && `instructions ${(d.instructions as string[]).join(', ')}`].filter(Boolean).join(', ')
-  const moves = Object.entries(e.change.nodes ?? {}).map(([n, [a, b]]) => `${n} ${a}→${b}`)
+  const moves = Object.entries(e.change.nodes ?? {}).map(([n, [a, b]]) => a === null ? `${n} added as ${b} (recorded afterwards)` : `${n} ${a}→${b}`)
   if (e.change.execution) moves.push(`run ${e.change.execution[0] ?? '—'}→${e.change.execution[1]}`)
   if (e.change.hold) moves.push(`hold ${e.change.hold[0] ?? '—'}→${e.change.hold[1] ?? '—'}`)
   const detail = (d.reason ?? d.outcome ?? d.text ?? d.evidence ?? d.note ?? d.status ?? d.decision ?? '') as string

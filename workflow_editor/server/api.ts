@@ -752,6 +752,23 @@ export function createHandler(config: ServiceConfig) {
           const r = await adjustRun(ws, ref, { text: str(input.text, 'the adjusted definition'), reason: str(input.reason, 'the reason'), source, dryRun: input.dryRun === true, expectRevision: typeof input.expectRevision === 'string' ? input.expectRevision : undefined, completing }, { by, via: 'browser', expectSeq: typeof input.expectSeq === 'number' ? input.expectSeq : undefined, advice: { yes: input.yes === true }, ...(typeof input.receipt === 'string' ? { receipt: input.receipt } : {}), ...(typeof input.attempt === 'string' ? { attempt: input.attempt } : {}) })
           return send(res, r.ok ? 200 : 422, r)
         }
+        // Work already done, recorded as a completed node (fix5): wfe run record-done.
+        if (sub === 'record-done' && method === 'POST') {
+          const input = await body(req) as Record<string, unknown>
+          const by = typeof input.by === 'string' ? input.by.trim() : ''
+          if (!by) throw new RequestError(400, 'by is required: the name of who records it')
+          const { recordDone } = await import('./runs.ts')
+          const list = (k: string) => (Array.isArray(input[k]) ? (input[k] as unknown[]).map(String) : [])
+          const opt = (k: string) => (typeof input[k] === 'string' ? input[k] as string : undefined)
+          const r = await recordDone(ws, ref, {
+            node: opt('node'), template: opt('template'), type: opt('type'), name: opt('name'), description: opt('description'), after: list('after'), before: list('before'),
+            outcome: str(input.outcome, 'the outcome'), reason: str(input.reason, 'why it is recorded afterwards'), artifacts: list('artifacts'),
+            commits: Array.isArray(input.commits) ? (input.commits as { commit: string; repository?: string }[]) : [], entries: Array.isArray(input.entries) ? (input.entries as number[]) : [],
+            questions: list('questions'), outputs: list('outputs'), presentation: opt('presentation'),
+            reported: input.reported && typeof input.reported === 'object' ? input.reported as { started?: string; ended?: string } : undefined, expectRevision: opt('expectRevision'),
+          }, { by, via: 'browser', expectSeq: typeof input.expectSeq === 'number' ? input.expectSeq : undefined, ...(opt('receipt') ? { receipt: opt('receipt') } : {}) })
+          return send(res, 200, { ok: true, ...r })
+        }
         if (sub === 'ops' && method === 'POST') {
           const input = await body(req) as Record<string, unknown>
           // Attempts and presentation facts are the execution host's; adjustments have their own route.

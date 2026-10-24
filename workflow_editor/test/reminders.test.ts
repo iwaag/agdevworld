@@ -229,3 +229,47 @@ test('the CLI gives one refusal and exit 1; the same command with --yes records 
   assert.match(again.out, /Already recorded \(same receipt\)/)
   assert.equal((await rec(s)).seq, seq, 'a retransmission records nothing')
 })
+
+test('HTTP: the operations route refuses with the same reminders and records nothing; yes continues; a person\'s answer is never refused', async () => {
+  const s = await setup()
+  const { createServer } = await import('node:http')
+  const { createHandler } = await import('../server/api.ts')
+  const srv = createServer(createHandler({ registryFile: s.registry, area: s.area, allowedOrigins: [] }))
+  await new Promise<void>(res => srv.listen(0, '127.0.0.1', () => res()))
+  try {
+    const base = `http://127.0.0.1:${(srv.address() as import('node:net').AddressInfo).port}/api/workspaces/p/runs/freework/run-001`
+    const post = async (path: string, body: unknown) => { const r = await fetch(`${base}/${path}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }); return { status: r.status, body: await r.json() as { error?: string; detail?: { code: string; reminders: { code: string }[] }; ok?: boolean } } }
+    await op(s, { op: 'node.start', node: 'talk' })
+    await adjust(s, WORK)
+    await op(s, { op: 'node.complete', node: 'talk', outcome: 'ok' })
+    await op(s, { op: 'node.start', node: 'build' })
+    const warned = await post('ops', { op: 'node.complete', node: 'build', outcome: 'built', by: 'Pat' })
+    assert.equal(warned.status, 409)
+    assert.equal(warned.body.detail?.code, 'reminder')
+    assert.deepEqual(warned.body.detail?.reminders.map(r => r.code), ['presentation-missing'])
+    assert.equal((await rec(s)).nodes.build.state, 'running')
+    // The combined route behaves as wfe run adjust --completing.
+    const combined = await post('adjust', { text: flow(node('build', 'do', tpl('work')) + node('notes', 'study'), [['talk', 'build'], ['build', 'notes']]), reason: 'notes', by: 'Pat', completing: { node: 'build', outcome: 'built' } })
+    assert.equal(combined.status, 409)
+    assert.equal(combined.body.detail?.code, 'reminder')
+    assert.equal((await rec(s)).definition.active, 'r2')
+    const ok = await post('ops', { op: 'node.complete', node: 'build', outcome: 'built', by: 'Pat', yes: true })
+    assert.equal(ok.status, 200, JSON.stringify(ok.body))
+    assert.equal((await rec(s)).execution.state, 'completed')
+  } finally { srv.close() }
+})
+
+test('reminders are evaluated under the lock on the current record: a stale writer is refused as before, concurrent completions record once', async () => {
+  const s = await setup()
+  await op(s, { op: 'node.start', node: 'talk' })
+  await adjust(s, WORK)
+  await op(s, { op: 'node.complete', node: 'talk', outcome: 'ok' })
+  await op(s, { op: 'node.start', node: 'build' })
+  const seq = (await rec(s)).seq
+  await assert.rejects(runOp(s.ws, s.ref, { op: 'node.complete', node: 'build', outcome: 'x' }, { by: 'autolab', via: 'cli', expectSeq: seq - 1, advice: { yes: true } }), (e: RequestError) => (e.detail as { code: string }).code === 'outdated')
+  const both = await Promise.allSettled([1, 2].map(i => op(s, { op: 'node.complete', node: 'build', outcome: `built ${i}` }, { yes: true })))
+  assert.equal(both.filter(r => r.status === 'fulfilled').length, 1)
+  const loser = both.find(r => r.status === 'rejected') as PromiseRejectedResult
+  assert.equal((loser.reason.detail as { code: string }).code, 'state')
+  assert.equal((await rec(s)).history.filter(e => e.op === 'node.complete' && (e as { node?: string }).node === 'build').length, 1)
+})

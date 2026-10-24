@@ -117,7 +117,7 @@ export const api = {
   runFile: (id: string, workflow: string, run: string, path: string, rev?: string, signal?: AbortSignal) =>
     call<{ path: string; text: string }>('GET', `${ws(id)}/runs/${encodeURIComponent(workflow)}/${encodeURIComponent(run)}/file?path=${encodeURIComponent(path)}${rev ? `&rev=${encodeURIComponent(rev)}` : ''}`, undefined, [], signal),
   // One run operation (docs/runs.md); `by` is the declared actor, `expectSeq` the sequence the view showed.
-  runOp: (id: string, workflow: string, run: string, op: Record<string, unknown> & { op: string; by: string; expectSeq?: number }) =>
+  runOp: (id: string, workflow: string, run: string, op: Record<string, unknown> & { op: string; by: string; expectSeq?: number; yes?: boolean }) =>
     call<RunOpResponse>('POST', `${ws(id)}/runs/${encodeURIComponent(workflow)}/${encodeURIComponent(run)}/ops`, op),
   runExec: (id: string, workflow: string, run: string, signal?: AbortSignal) => call<RunExecView>('GET', `${ws(id)}/runs/${encodeURIComponent(workflow)}/${encodeURIComponent(run)}/exec`, undefined, [], signal),
   runNotify: (id: string, workflow: string, run: string, signal?: AbortSignal) => call<RunNotifyView>('GET', `${ws(id)}/runs/${encodeURIComponent(workflow)}/${encodeURIComponent(run)}/notify`, undefined, [], signal),

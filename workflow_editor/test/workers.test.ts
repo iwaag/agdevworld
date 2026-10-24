@@ -253,3 +253,23 @@ test('workers: a wrong token is refused; a retransmitted claim gets the same att
   assert.match(rc2.notes.join('\n'), new RegExp(`attempt ${c2.attempt.id}: process gone; recorded interrupted`))
   s.x.close()
 })
+
+test('workers: a forwarded command gets the same reminder as on the coordinator, records nothing, and --yes continues (workflow_editor fix5)', async () => {
+  const s = await setup()
+  const a = await request(s.x, s.id, 'onpc', 'workers-req-fix5')
+  const claim = JSON.parse((await s.wfe(['exec', 'claim', ...OFFER, '--json'])).stdout)
+  const tree = join(s.warea, 'copies', s.id, 'onpc', a.ref.run, 'tree')
+  assert.equal((await s.wfe(['exec', 'started', claim.attempt.id, '--pid', String(process.pid), '--json'])).code, 0)
+  assert.equal((await s.wfe(['run', 'start', `onpc/${a.ref.run}`, 'build', '--json'], { cwd: tree, attempt: claim.attempt.id })).code, 0)
+  await mkdir(join(tree, 'out'), { recursive: true })
+  await writeFile(join(tree, 'out', 'index.html'), '<p>built</p>')
+  await writeFile(join(tree, 'review.md'), '# Review\n')
+  const args = ['present', 'register', `onpc/${a.ref.run}`, 'build', '--source', 'out', '--entry', 'index.html', '--review', 'review.md', '--title', 'Built']
+  const warned = await s.wfe(args, { cwd: tree, attempt: claim.attempt.id })
+  assert.equal(warned.code, 1, warned.stdout)
+  assert.match(warned.stderr, /Not recorded — a reminder before registering a presentation from build:\n- cleanup-unplanned/)
+  assert.equal((await readRun(await runSpace(s.ws, a.ref), a.ref)).record!.presentations, undefined, 'nothing registered on the coordinator')
+  const ok = await s.wfe([...args, '--yes', '--json'], { cwd: tree, attempt: claim.attempt.id })
+  assert.equal(ok.code, 0, ok.stderr + ok.stdout)
+  assert.equal((await readRun(await runSpace(s.ws, a.ref), a.ref)).record!.presentations?.p1?.node, 'build')
+})

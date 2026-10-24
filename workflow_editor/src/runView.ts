@@ -196,12 +196,20 @@ export function renderRunView(root: HTMLElement, wsId: string, workflow: string,
     if (!name) return { ok: false, kind: 'error', text: 'Enter your name in “Recording as” first: nothing was recorded. Your text is kept.' }
     let out: OpResult
     try {
-      const r = await api.runOp(wsId, workflow, run, { ...op, by: name, expectSeq: rec.seq })
+      let r: Awaited<ReturnType<typeof api.runOp>>
+      try { r = await api.runOp(wsId, workflow, run, { ...op, by: name, expectSeq: rec.seq }) } catch (e) {
+        // Reminders (workflow_editor fix5): nothing was recorded. Shown in
+        // full; continuing is the person's explicit choice, never implied.
+        const err = e as ApiError
+        if ((err.detail as { code?: string } | undefined)?.code !== 'reminder' || !confirm(`${err.message}\n\nRecord it anyway?`)) throw e
+        r = await api.runOp(wsId, workflow, run, { ...op, by: name, expectSeq: rec.seq, yes: true })
+      }
       out = { ok: true, kind: 'ok', text: typeof done === 'string' ? done : done(r) }
     } catch (e) {
       const err = e as ApiError
       const code = (err.detail as { code?: string } | undefined)?.code
-      out = err.status === 409 && /changed since/.test(err.message)
+      out = code === 'reminder' ? { ok: false, kind: 'warn', text: `${err.message} Your text is kept.` }
+        : err.status === 409 && /changed since/.test(err.message)
         ? { ok: false, kind: 'warn', text: 'The run changed since this view was read, so nothing was recorded. The view is reloaded; check it and submit again (your text is kept).' }
         : code === 'already-accepted' ? { ok: false, kind: 'warn', text: `Nothing recorded: ${err.message}` }
           : { ok: false, kind: 'error', text: `Not recorded: ${/[.!?。]\s*$/.test(err.message) ? err.message.trim() : `${err.message.trim()}.`} Your text is kept.` }

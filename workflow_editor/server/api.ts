@@ -745,7 +745,11 @@ export function createHandler(config: ServiceConfig) {
           if (!by) throw new RequestError(400, 'by is required: the name of who adjusts the run')
           const { adjustRun } = await import('./runs.ts')
           const source = (input.source && typeof input.source === 'object' ? input.source : { kind: 'person', by }) as never
-          const r = await adjustRun(ws, ref, { text: str(input.text, 'the adjusted definition'), reason: str(input.reason, 'the reason'), source, dryRun: input.dryRun === true, expectRevision: typeof input.expectRevision === 'string' ? input.expectRevision : undefined }, { by, via: 'browser', expectSeq: typeof input.expectSeq === 'number' ? input.expectSeq : undefined })
+          // completing (p8/ex2) and yes (fix5): the same combined operation
+          // and the same reminders as wfe run adjust --completing [--yes].
+          const c = input.completing as Record<string, unknown> | undefined
+          const completing = c && typeof c === 'object' ? { node: str(c.node, 'completing.node'), outcome: str(c.outcome, 'completing.outcome'), artifacts: Array.isArray(c.artifacts) ? c.artifacts.map(String) : [] } : undefined
+          const r = await adjustRun(ws, ref, { text: str(input.text, 'the adjusted definition'), reason: str(input.reason, 'the reason'), source, dryRun: input.dryRun === true, expectRevision: typeof input.expectRevision === 'string' ? input.expectRevision : undefined, completing }, { by, via: 'browser', expectSeq: typeof input.expectSeq === 'number' ? input.expectSeq : undefined, advice: { yes: input.yes === true }, ...(typeof input.receipt === 'string' ? { receipt: input.receipt } : {}), ...(typeof input.attempt === 'string' ? { attempt: input.attempt } : {}) })
           return send(res, r.ok ? 200 : 422, r)
         }
         if (sub === 'ops' && method === 'POST') {
@@ -760,7 +764,9 @@ export function createHandler(config: ServiceConfig) {
           const by = typeof input.by === 'string' ? input.by : ''
           if (!by.trim()) throw new RequestError(400, 'by is required: the name of who records this')
           const expectSeq = typeof input.expectSeq === 'number' ? input.expectSeq : undefined
-          const { by: _b, expectSeq: _e, ...op } = input
+          // yes (fix5): continue past this operation's reminders, as --yes does.
+          const { by: _b, expectSeq: _e, yes, ...op } = input
+          const advice = { yes: yes === true }
           const x = config.exec
           const reason = typeof op.reason === 'string' ? op.reason : ''
           // The person's control operations go through execution management,
@@ -768,7 +774,7 @@ export function createHandler(config: ServiceConfig) {
           if (x && op.op === 'run.stop') { const rec = await x.stop(ws, ref, by, reason, 'browser'); return send(res, 200, { ok: true, seq: rec.seq, record: rec }) }
           if (x && op.op === 'run.cancel') { const { record: rec, cleanup } = await x.cancel(ws, ref, by, reason, 'browser'); return send(res, 200, { ok: true, seq: rec.seq, record: rec, cleanup }) }
           if (x && op.op === 'run.resume') { const r = await x.resume(ws, ref, by, reason, 'browser', typeof op.receipt === 'string' ? op.receipt : undefined, typeof op.profile === 'string' && op.profile.trim() ? { profile: op.profile.trim() } : {}); return send(res, 200, { ok: true, seq: r.record.seq, record: r.record, job: r.job }) }
-          const r = await runOp(ws, ref, op as unknown as OpInput, { by, via: 'browser', expectSeq })
+          const r = await runOp(ws, ref, op as unknown as OpInput, { by, via: 'browser', expectSeq, advice })
           const extra: Record<string, unknown> = { duplicate: r.duplicate ?? false }
           // The host that executes the run (executor.host); executor.name is
           // the agent identity since p6 and differs from it when a workflow

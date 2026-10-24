@@ -438,7 +438,7 @@ async function runContext(c: WorkerConfig): Promise<(Pick<Held, 'workspace' | 'w
   return h ? { ...runKeyOf(h), tree: h.tree, rel: '.' } : null
 }
 
-const PATH_OPTIONS = new Set(['file', 'from', 'braindump', 'original', 'document', 'subject', 'request', 'draft', 'manifest', 'out', 'dir'])
+const PATH_OPTIONS = new Set(['file', 'from', 'braindump', 'original', 'document', 'subject', 'request', 'draft', 'manifest', 'out', 'dir', 'source', 'review']) // source, review: wfe present register, wfe run publish (fix5)
 const looksLikePath = (v: string) => v.includes('/') || v.startsWith('.') || /\.[A-Za-z0-9]{1,8}$/.test(v)
 
 export async function forward(c: WorkerConfig, argv: string[]): Promise<number> {

@@ -1027,7 +1027,7 @@ async function cmdDelegate(p: Parsed): Promise<number> {
 // `wfe review …` (p17, docs/reviews.md): a person's review of completed work.
 async function cmdReview(p: Parsed): Promise<number> {
   const { reviewCommand } = await import('./review.ts')
-  await openExec(p)
+  if (p.positional[0] !== 'help' && p.positional.length && !p.flags.has('help')) await openExec(p)
   return reviewCommand({
     positional: p.positional, opt: k => opt(p, k), opts: k => p.opts.get(k) ?? [], flag: k => p.flags.has(k),
     workspace: () => workspace(p), out, usage: m => new UsageError(m), refused: (m, detail) => new Refused(m, detail),

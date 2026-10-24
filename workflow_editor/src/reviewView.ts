@@ -94,7 +94,7 @@ export function renderReviewView(app: HTMLElement, wsId: string, workflow: strin
     const decided = !!r.decision
     const canStart = ['awaiting', 'start-failed', 'reviewing'].includes(r.state)
     const allLive = r.subjectsNow.every(x => x.live)
-    const head = h('div.review-head',
+    const head = h('div.card.review-head',
       h('h1', 'Human review'),
       h(`span.chip.review-state.${r.state}`, r.text),
       h('p.muted.small', `${r.id} of ${workflow}/${run} · prepared by ${r.prepared.by} at ${when(r.prepared.at)}${r.reviewer ? ` · for ${r.reviewer}` : ''}${r.previous ? ' · answers the changes requested in ' : ''}`, r.previous ? h('a', { href: reviewHref(r.previous) }, r.previous) : null))

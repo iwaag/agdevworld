@@ -1175,3 +1175,5 @@ html[data-display="detail"] .dash-glance { max-width: none; padding: 0; }
 .review-page .notice { padding: 8px 12px; border-radius: 8px; margin: 0; }
 .review-page .notice.ok { background: var(--ok-bg); color: var(--ok); }
 .review-page .notice.error { background: var(--error-bg); color: var(--error); }
+.review-main > p.small a { color: var(--top-text); }
+.review-head p { margin: 4px 0 0; }

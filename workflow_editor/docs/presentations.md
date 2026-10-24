@@ -159,6 +159,7 @@ manage instances in `present.sqlite`:
 | `run.cancel` — final | the cancellation is recorded first; then every open presentation of the run is stopped through the cancellation's own cleanup path (`ExecStore.cancel` → `Presenter.stop(…, 'all')`), whatever successors the graph has. Failures are recorded as `stop-failed`, shown beside the cancellation, and retried with `wfe present stop <run> --all`; the run stays `cancelled` |
 | Result accepted, cleanup not done | the run view and messages say **accepted; cleanup pending** |
 | Execution completion | not held by open presentations (p11; `presentation-open` no longer exists); they keep serving until stopped or the run is cancelled |
+| Completed, then reviewed by a person (p17) | a completed run's presentation is started again only for a human review round ([reviews.md](reviews.md)): the same frozen bundle (hashes checked at start), a new instance recorded on this run as `available`, stopped by the review's cleanup and recorded `stopped` here. A cancelled run's presentations are never served again |
 
 The cleanup node of a workflow stops the run's presentations and completes
 with the verified outcome. A failed stop leaves the node running or failed
@@ -188,6 +189,15 @@ visible, and `presentation-serving` (the run's own, and a delegating run's
 assessment of it, [delegation.md](delegation.md) *Assessing a result*) no
 longer calls it a forgotten cleanup. A disposable review page is still
 stopped by its cleanup node.
+
+**Used by human reviews (p17).** `present.sqlite` (store version 2) keeps
+`usages`: which review round uses which instance, `started` by it or
+`reused` (already serving), and while it is `active`. A round's cleanup
+keeps an instance another active round uses, or one kept on request; `wfe
+present status` names the rounds. Bundles live in the run's copy, which is
+never deleted by WFE (storage.md *Lifetime*), so a referenced bundle stays
+readable after the child's integration; a missing or altered one is a
+visible start failure of the round, never replaced.
 
 ## Confirmation bound to a presentation
 

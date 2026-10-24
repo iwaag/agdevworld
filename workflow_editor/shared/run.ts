@@ -586,7 +586,7 @@ export type OpInput =
   // p17 (docs/reviews.md): a human review round. prepare and take-up are the
   // run's agent's (its attempt); start and decide the person's (or an
   // identified actor's); serve and cleanup what WFE's host observed.
-  | { op: 'review.prepare'; review: string; node: string; summary: string; subjects?: Omit<ReviewSubject, 'n'>[]; reviewer?: string; previous?: string }
+  | { op: 'review.prepare'; review: string; uid: string; node: string; summary: string; subjects?: Omit<ReviewSubject, 'n'>[]; reviewer?: string; previous?: string }
   | { op: 'review.start'; review: string }
   | { op: 'review.serve'; review: string; start: number; subjects: Omit<SubjectServing, 'at' | 'start'>[] }
   | { op: 'review.decide'; review: string; outcome: string; feedback?: string; revisions?: string[]; synthetic?: boolean; because?: BecauseRef }
@@ -1996,6 +1996,7 @@ export function apply(prev: RunState | null, e: HistoryEntry | (OpInput & EntryM
       const all = s.reviews ?? {}
       const id = `rv${Object.keys(all).length + 1}`
       if (e.review !== id) fail('shape', `the next review round is ${id}, not ${String(e.review)}`)
+      if (typeof e.uid !== 'string' || !e.uid.endsWith(`/${id}`) || !e.uid.startsWith(`${s.project}/${s.workflow}/${s.run}#`)) fail('shape', `the review uid is <this run's uid>/${id}`)
       const open = Object.values(all).find(r => r.node === e.node && r.state !== 'changes-requested' && r.state !== 'cancelled')
       if (open) fail('review-open', `${e.node} already has review round ${open.id} (${open.state}); a new round is a new review node`)
       if (n.state === 'pending') {
@@ -2027,7 +2028,7 @@ export function apply(prev: RunState | null, e: HistoryEntry | (OpInput & EntryM
       }
       const reviewer = optText(e.reviewer, 'reviewer').trim() || s.input.author || s.input.onBehalfOf || null
       const r: ReviewRound = {
-        id, uid: `${s.project}/${s.workflow}/${s.run}#${s.created}/${id}`, node: e.node, previous,
+        id, uid: e.uid, node: e.node, previous,
         prepared: { at, by, attempt: e.attempt ?? null, seq: e.seq }, summary: text(e.summary, 'the review summary (what was done and what to check)'),
         responsible: s.executor.name, reviewer, subjects, state: 'awaiting', starts: [], serving: [], decision: null, cleanup: null, continuation: null,
       }

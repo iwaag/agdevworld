@@ -40,6 +40,8 @@ import { withLock } from './lock.ts'
 import { catalogBrief } from '../shared/catalog.ts'
 import { activityOf } from './activity.ts'
 import { DelegateStore, assessDelegation } from './delegate.ts'
+import { ReviewHost } from './reviews.ts'
+import { hostOwes, openContinuations, owedContinuation, roundLine, roundOf, startedInstances } from '../shared/humanReview.ts'
 import { assessmentLines } from '../shared/assessment.ts'
 import { delegationState, isOpenDelegation, pendingEvents } from '../shared/delegation.ts'
 import { named, openStore, transaction } from './sqlite.ts'
@@ -199,6 +201,7 @@ export function delegationBrief(r: RunRecord, assessed: Record<string, string[]>
       `${person ? `The work is for ${person}; ` : ''}${r.input.requester} relays between you: your questions reach it through the request topic, as they would a person (ask them --to ${r.input.requester}), and what you present reaches ${person ?? 'its person'} through it — a presentation you register and ask about is relayed with its link. A report of file paths to ${r.input.requester} is not a presentation to ${person ?? 'the person'}. Who accepts the result: ${ent.accepts === 'person' ? `${person ?? 'the person'} (their answer, relayed)` : `${r.input.requester}`}; the requesting agent records its own answers and decisions.`)
   }
   out.push(...correctionBrief(r))
+  out.push(...reviewBrief(r))
   const all = Object.values(r.delegations ?? {})
   if (!all.length) return out
   out.push('', 'Delegations of this run (wfe delegate show <run> <d>; help: wfe delegate help):')
@@ -215,6 +218,28 @@ export function delegationBrief(r: RunRecord, assessed: Record<string, string[]>
     if (rv && delegationState(d) === 'correcting') out.push(`  - result event ${rv.event} was returned for correction (request ${rv.n}, ${rv.at}); the child continues and its next completion comes back as a new result.`)
   }
   if (all.some(d => isOpenDelegation(d) && pendingEvents(d).length)) out.push('Facts can be marked taken up (wfe delegate take-up <run> <d> <n>…); answer with wfe delegate answer, record a result judgment with wfe delegate dispose, or return a result to the same child for what it left out with wfe delegate revise. When only the child\'s work remains, end the attempt: your attempt holds your worker\'s slot, the child may need it, and its next fact resumes you.')
+  return out
+}
+
+// Human reviews (p17, docs/reviews.md): a review node ready to be prepared,
+// rounds and where they stand, and requested changes in full.
+export function reviewBrief(r: RunRecord): string[] {
+  const run = runKey(r)
+  const graph = effectiveOf(r)
+  const ready = r.execution.ready.filter(id => graph?.nodes[id]?.type === 'review' && !roundOf(r, id))
+  const rounds = Object.values(r.reviews ?? {})
+  if (!ready.length && !rounds.length) return []
+  const out = ['', 'Human review (wfe review help):']
+  for (const id of ready) out.push(`- ${id} is a human review node, ready: after your own review, hand the result to the person with wfe review prepare ${run} ${id} --summary "<what was done, what to check>" --subject <p1 | d1[:p2] | workspace:workflow/run:p1>…. Their review needs no process: end the attempt once your other work is done; the person starts it with one button, and approval or requested changes come back as records.`)
+  for (const v of rounds) {
+    out.push(`- ${roundLine(v)}`)
+    if (owedContinuation(v)) {
+      const handed = v.cleanup?.state === 'handed' ? startedInstances(v) : []
+      out.push(`    ${v.decision!.by}${v.decision!.synthetic ? ' (a synthetic check actor)' : ''} requested changes at ${v.decision!.at}: ${v.decision!.feedback.split('\n').join('\n    ')}`,
+        `    Take them up (wfe review take-up ${run} ${v.id}) and append the work as nodes after ${v.node} — your own work node, or the same child again (reopen its delegate node with wfe run start ${run} <node> --reason "…", then wfe delegate revise ${run} <d> --follow-up ${v.id} --instruction "…" --reason "…") — and a new human review node after it (wfe nodes instantiate human-review --run ${run} --after <work>), prepared with the corrected presentations. The run stays open until then. If nothing should change: wfe review take-up ${run} ${v.id} --no-change --note "why".`,
+        ...(handed.length ? [`    The review left ${handed.map(x => x.instance).join(', ')} serving; it is yours now: keep it to compare, or stop it (wfe review cleanup ${run} ${v.id}). The next approval stops what is left.`] : []))
+    }
+  }
   return out
 }
 
@@ -348,7 +373,7 @@ export class ExecStore {
   // Whether the process of an attempt can be looked at from this process:
   // only the local worker's pids are this host's (p7).
   private localPid(a: AttemptRow): boolean { return !this.isRemote(a.worker) && a.host === hostname() }
-  close() { this.db.close(); this._delegate?.close() }
+  close() { this.db.close(); this._delegate?.close(); this._reviews?.close() }
   get logsDir() { return join(this.ctx.area, '.local', 'exec', 'logs') }
   get executor() { return this.ctx.executor ?? EXECUTOR }
 
@@ -452,6 +477,20 @@ export class ExecStore {
     if (!k || k.addressed) return null
     return this.enqueue(ws.reg.id, ref, 'resume', `correction:${ws.reg.id}/${runKey(ref)}/${correction}`, `resume: correction ${correction} from ${k.from} (the delegating run returned the result)`, this.nodeOf(r))
   }
+
+  // After a person requested changes in a human review (p17, docs/reviews.md):
+  // the responsible agent is continued once per round to take them up;
+  // queued again by reconcile and after an attempt while not addressed.
+  async afterReview(ws: Workspace, ref: RunRef, review: string): Promise<JobRow | null> {
+    const r = (await readRun(ws, ref)).record
+    if (!r || hostOf(r.executor) !== this.executor || r.cancelled || r.control.hold || r.control.attempt) return null
+    const v = r.reviews?.[review]
+    if (!v || !owedContinuation(v)) return null
+    return this.enqueue(ws.reg.id, ref, 'resume', `review:${ws.reg.id}/${runKey(ref)}/${review}`, `resume: changes requested in review ${review} by ${v.decision?.by ?? 'the person'}`, this.nodeOf(r))
+  }
+  // The host side of human reviews: starting subjects, cleanup (p17).
+  private _reviews?: ReviewHost
+  get reviews(): ReviewHost { return this._reviews ??= new ReviewHost({ registryFile: this.ctx.registryFile, area: this.ctx.area }) }
 
   // The assessment of each delegated result the run has not taken up yet
   // (fix6), as brief lines: shown once with the result, not on every attempt.
@@ -921,6 +960,8 @@ export class ExecStore {
     if (!resumeJob && Object.values(rec.delegations ?? {}).some(d => isOpenDelegation(d) && pendingEvents(d).length)) resumeJob = await this.afterDelegation(ws, ref)
     // A correction that arrived while the attempt ran (fix6) queues the next one.
     for (const k of openCorrections(rec)) resumeJob = resumeJob ?? await this.afterCorrection(ws, ref, k.id)
+    // So do changes requested in a human review meanwhile (p17).
+    for (const v of openContinuations(rec)) resumeJob = resumeJob ?? await this.afterReview(ws, ref, v.id)
     return { outcome: rec.control.last?.outcome ?? outcome, checkpoint, resumeJob }
   }
 
@@ -1035,6 +1076,11 @@ export class ExecStore {
       const { Presenter } = await import('./present.ts')
       const pr = new Presenter({ registryFile: this.ctx.registryFile, area: this.ctx.area, by })
       try { cleanup = await pr.stop(ws, ref, 'all', { by }) } catch (e) { cleanup = [{ presentation: '*', ok: false, detail: (e as Error).message }] } finally { pr.close() }
+    }
+    // What its human reviews started (p17) is stopped through the owning runs.
+    for (const v of Object.values(r.record.reviews ?? {}).filter(hostOwes)) {
+      const after = await this.reviews.cleanup(ws, ref, v.id).catch(e => { cleanup.push({ presentation: `${v.id}`, ok: false, detail: (e as Error).message }); return null })
+      if (after) cleanup.push({ presentation: `review ${v.id}`, ok: after.cleanup?.state === 'done', detail: after.cleanup?.results.map(c => `${c.instance}: ${c.status} (${c.detail})`).join('; ') || 'nothing to stop' })
     }
     return { record: (await readRun(ws, ref)).record ?? r.record, cleanup }
   }
@@ -1298,9 +1344,13 @@ export class ExecStore {
       if (!(await observe(w)).available) continue
       const ws = new Workspace(w)
       for (const s of await listRuns(ws)) {
-        if (s.problem || s.executorHost !== this.executor) continue
+        if (s.problem) continue
         const ref = { workflow: s.workflow, run: s.run }
         const rec = (await readRun(ws, ref)).record
+        // Human review rounds whose start or cleanup is owed (p17): WFE's
+        // host work, whatever the run's executor or hold.
+        if (rec && Object.values(rec.reviews ?? {}).some(hostOwes)) notes.push(...await this.reviews.reconcileRun(ws, rec).catch(e => [`${w.id} ${s.ref}: reviews: ${(e as Error).message}`]))
+        if (s.executorHost !== this.executor) continue
         if (!rec || rec.cancelled || rec.control.hold || rec.control.attempt) continue
         const jobs = this.all<JobRow>('SELECT * FROM jobs WHERE workspace = ? AND workflow = ? AND run = ?', w.id, s.workflow, s.run)
         if (rec.execution.state === 'not-started' && rec.control.attempts === 0 && !jobs.length) {
@@ -1321,6 +1371,11 @@ export class ExecStore {
         for (const k of openCorrections(rec)) {
           const j = await this.afterCorrection(ws, ref, k.id)
           if (j && !jobs.some(x => x.id === j.id)) notes.push(`${w.id} ${s.ref}: resume for correction ${k.id} queued again`)
+        }
+        // Requested changes whose continuation was lost (p17).
+        for (const v of openContinuations(rec)) {
+          const j = await this.afterReview(ws, ref, v.id)
+          if (j && !jobs.some(x => x.id === j.id)) notes.push(`${w.id} ${s.ref}: resume for review ${v.id} queued again`)
         }
         // An instruction for a run nobody executes, whose continuation was
         // lost (project_migration p8 ex1): queued again under its receipt.

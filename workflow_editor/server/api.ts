@@ -664,7 +664,7 @@ export function createHandler(config: ServiceConfig) {
         }
         const ref: RunRef = { workflow: parts[4] ?? '', run: parts[5] ?? '' }
         const sub = parts[6]
-        if (!ref.workflow || !ref.run || (parts.length > 7 && sub !== 'checkpoints' && sub !== 'presentations' && sub !== 'delegations')) throw new RequestError(404, 'not found')
+        if (!ref.workflow || !ref.run || (parts.length > 7 && sub !== 'checkpoints' && sub !== 'presentations' && sub !== 'delegations' && sub !== 'reviews')) throw new RequestError(404, 'not found')
         if (!sub && method === 'GET') return send(res, 200, await runResponse(ws, ref, { rev: url.searchParams.get('rev') || undefined }))
         if (sub === 'exec' && method === 'GET') return send(res, 200, await needExec().runView(ws.reg.id, ref))
         // What each attempt was prepared with and the next attempt now (p13, docs/context.md).
@@ -741,6 +741,42 @@ export function createHandler(config: ServiceConfig) {
             return send(res, 200, { ok: true, ...(await x.integrateRun(ws, ref, { by, via: 'browser', dryRun: input.dryRun === true })) })
           }
         }
+        // Human review rounds (p17, docs/reviews.md): each with its subjects
+        // as served now; the person's Start review, decision and cleanup.
+        // A start or an approval answers once the request is recorded; the
+        // host work goes on and the page follows the round's state.
+        if (sub === 'reviews') {
+          const host = needExec().reviews
+          if (!parts[7] && method === 'GET') {
+            const rec = (await runResponse(ws, ref)).record
+            return send(res, 200, { reviews: rec ? await host.view(ws, rec) : [] })
+          }
+          if (parts[7] && !parts[8] && method === 'GET') {
+            const rec = (await runResponse(ws, ref)).record
+            const v = rec ? (await host.view(ws, rec)).find(x => x.id === parts[7]) : undefined
+            if (!v) throw new RequestError(404, `run ${ref.workflow}/${ref.run} has no review round ${parts[7]}`, { code: 'review-unknown' })
+            return send(res, 200, { review: v, run: { project: rec!.project, workflow: rec!.workflow, run: rec!.run, seq: rec!.seq, title: rec!.input.file } })
+          }
+          if (parts[7] && ['start', 'decide', 'cleanup'].includes(parts[8] ?? '') && method === 'POST') {
+            const input = await body(req) as Record<string, unknown>
+            const by = typeof input.by === 'string' ? input.by.trim() : ''
+            if (!by) throw new RequestError(400, 'by is required: the name of who acts')
+            const receipt = typeof input.receipt === 'string' ? { receipt: input.receipt } : {}
+            const id = parts[7]
+            if (parts[8] === 'start') {
+              const r = await host.start(ws, ref, id, { by, via: 'browser', ...receipt }, { wait: input.wait === true })
+              return send(res, 200, { ok: true, review: r.round })
+            }
+            if (parts[8] === 'decide') {
+              const outcome = input.outcome === 'approved' || input.outcome === 'changes' ? input.outcome : (() => { throw new RequestError(400, 'outcome is approved or changes') })()
+              const r = await host.decide(ws, ref, id, { outcome, ...(typeof input.feedback === 'string' && input.feedback.trim() ? { feedback: input.feedback } : {}), ...(Array.isArray(input.revisions) ? { revisions: input.revisions.map(String) } : {}), ...(input.synthetic === true ? { synthetic: true } : {}) }, { by, via: 'browser', ...receipt }, { wait: input.wait === true })
+              return send(res, 200, { ok: true, review: r.round })
+            }
+            const after = await host.cleanup(ws, ref, id, { by, via: 'browser' })
+            return send(res, 200, { ok: true, review: after })
+          }
+          throw new RequestError(404, `no route for ${method} ${url.pathname}`)
+        }
         // Presentations (p7): what each record says and what this host
         // observes now; the person's start (recovery) and stop.
         if (sub === 'presentations') {
@@ -803,7 +839,7 @@ export function createHandler(config: ServiceConfig) {
           // domain operations (target resolution, worker and process checks:
           // wfe delegate, wfe run assign|session), never as a bare record
           // (project_migration p8).
-          const offered = OPS.filter(o => o !== 'run.create' && !o.startsWith('attempt.') && !o.startsWith('presentation.') && !o.startsWith('input.') && !o.startsWith('output.') && !o.startsWith('delegation.') && !(['run.adjust', 'run.integrate', 'run.relocate', 'run.recover', 'run.assign', 'session.retire'] as string[]).includes(o))
+          const offered = OPS.filter(o => o !== 'run.create' && !o.startsWith('attempt.') && !o.startsWith('presentation.') && !o.startsWith('input.') && !o.startsWith('output.') && !o.startsWith('delegation.') && !o.startsWith('review.') && !(['run.adjust', 'run.integrate', 'run.relocate', 'run.recover', 'run.assign', 'session.retire'] as string[]).includes(o))
           if (!(offered as readonly string[]).includes(input.op as string)) throw new RequestError(400, `op must be one of ${offered.join(', ')} (attempts and presentation facts are the execution host's)`)
           const by = typeof input.by === 'string' ? input.by : ''
           if (!by.trim()) throw new RequestError(400, 'by is required: the name of who records this')

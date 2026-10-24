@@ -45,7 +45,7 @@ function prepared(): RunRecord {
   let r = op(null, { op: 'run.create', project: 'ponderer', workflow: 'conduct', run: 'run-040', input: { kind: 'request', file: 'request.md', requester: 'front-agent', onBehalfOf: 'iwaag' }, executor: { name: 'ponderer-agent', backend: null }, predecessor: null, definition: { root: 'conduct', workflows: {}, warnings: [] }, context: { repositories: [] }, nodes: Object.keys(GRAPH.nodes) }, 'wfe')
   r = op(r, { op: 'attempt.begin', attempt: A, reason: 'start' }, 'autolab')
   for (const n of ['work', '_final']) { r = op(r, { op: 'node.start', node: n, attempt: A }); r = op(r, { op: 'node.complete', node: n, outcome: 'done', attempt: A } as OpInput) }
-  r = op(r, { op: 'review.prepare', review: 'rv1', node: 'review', summary: 'A torus figure by misc; check the shading.', subjects: [SUBJECT], attempt: A } as OpInput)
+  r = op(r, { op: 'review.prepare', review: 'rv1', uid: 'ponderer/conduct/run-040#abc/rv1', node: 'review', summary: 'A torus figure by misc; check the shading.', subjects: [SUBJECT], attempt: A } as OpInput)
   return op(r, { op: 'attempt.end', attempt: A, outcome: 'exited', waits: 'defer-ready', explain: 'cause' } as OpInput, 'autolab')
 }
 
@@ -66,11 +66,11 @@ test('prepared: the agent\'s work is complete, the run is not; no hold, no execu
 test('a review is prepared only on a ready review node, once, with subjects', () => {
   let r = op(null, { op: 'run.create', project: 'ponderer', workflow: 'conduct', run: 'run-041', input: { kind: 'braindump', file: 'braindump.md', author: 'iwaag' }, executor: { name: 'ponderer-agent', backend: null }, predecessor: null, definition: { root: 'conduct', workflows: {}, warnings: [] }, context: { repositories: [] }, nodes: Object.keys(GRAPH.nodes) }, 'wfe')
   r = op(r, { op: 'attempt.begin', attempt: A, reason: 'start' }, 'autolab')
-  assert.throws(() => op(r, { op: 'review.prepare', review: 'rv1', node: 'review', summary: 's', subjects: [SUBJECT], attempt: A } as OpInput), /not ready: work/)
-  assert.throws(() => op(r, { op: 'review.prepare', review: 'rv1', node: 'work', summary: 's', subjects: [SUBJECT], attempt: A } as OpInput), /review node/)
+  assert.throws(() => op(r, { op: 'review.prepare', review: 'rv1', uid: 'ponderer/conduct/run-041#abc/rv1', node: 'review', summary: 's', subjects: [SUBJECT], attempt: A } as OpInput), /not ready: work/)
+  assert.throws(() => op(r, { op: 'review.prepare', review: 'rv1', uid: 'ponderer/conduct/run-041#abc/rv1', node: 'work', summary: 's', subjects: [SUBJECT], attempt: A } as OpInput), /review node/)
   r = op(r, { op: 'node.start', node: 'work', attempt: A }); r = op(r, { op: 'node.complete', node: 'work', outcome: 'done', attempt: A } as OpInput)
-  assert.throws(() => op(r, { op: 'review.prepare', review: 'rv1', node: 'review', summary: 's', subjects: [], attempt: A } as OpInput), /at least one presentation/)
-  assert.throws(() => op(r, { op: 'review.prepare', review: 'rv1', node: 'review', summary: 's', subjects: [SUBJECT] } as OpInput), /attempt-required|carry its id/, 'the agent\'s own operation, fenced by its attempt')
+  assert.throws(() => op(r, { op: 'review.prepare', review: 'rv1', uid: 'ponderer/conduct/run-041#abc/rv1', node: 'review', summary: 's', subjects: [], attempt: A } as OpInput), /at least one presentation/)
+  assert.throws(() => op(r, { op: 'review.prepare', review: 'rv1', uid: 'ponderer/conduct/run-041#abc/rv1', node: 'review', summary: 's', subjects: [SUBJECT] } as OpInput), /attempt-required|carry its id/, 'the agent\'s own operation, fenced by its attempt')
 })
 
 test('one Start review; the host\'s result; approval only when every subject is available; cleanup completes the node and the run', () => {
@@ -147,7 +147,7 @@ test('requested changes close the round, keep the run open, continue the agent a
   assert.equal(r.reviews!.rv1.continuation!.addressed!.how, 'work')
   GRAPH = g2
   r = op(r, { op: 'node.start', node: 'fix', attempt: B }); r = op(r, { op: 'node.complete', node: 'fix', outcome: 'blue', attempt: B } as OpInput)
-  r = op(r, { op: 'review.prepare', review: 'rv2', node: 'review-2', summary: 'Blue now.', subjects: [{ ...SUBJECT, presentation: 'p2', revision: `sha256:${'e'.repeat(64)}` }], attempt: B } as OpInput)
+  r = op(r, { op: 'review.prepare', review: 'rv2', uid: 'ponderer/conduct/run-040#abc/rv2', node: 'review-2', summary: 'Blue now.', subjects: [{ ...SUBJECT, presentation: 'p2', revision: `sha256:${'e'.repeat(64)}` }], attempt: B } as OpInput)
   assert.equal(r.reviews!.rv2.previous, 'rv1')
   assert.throws(() => op(r, { op: 'review.decide', review: 'rv1', outcome: 'approved' } as OpInput, 'fix-check'), /already decided/, 'an old round is never approved again')
   assert.equal(replay(r.history, { nodes: { work: { type: 'do' }, review: { type: 'review' }, _final: GRAPH.nodes._final }, edges: [{ from: 'work', to: 'review' }, { from: 'work', to: '_final' }] }).state.reviews!.rv1.state, 'changes-requested', 'the rejected round stays in the record')

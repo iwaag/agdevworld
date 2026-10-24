@@ -44,7 +44,7 @@ class Refused extends Error { detail?: unknown; constructor(m: string, detail?: 
 // ---- arguments ---------------------------------------------------------------
 
 interface Parsed { positional: string[]; opts: Map<string, string[]>; flags: Set<string> }
-const FLAGS = new Set(['json', 'help', 'resume', 'h', 'new', 'history', 'no-gitea', 'reuse', 'lost', 'uncertain', 'found', 'complete', 'not-posted', 'ok', 'about-plan', 'all', 'dry-run', 'commit', 'push', 'status', 'rebuild', 'allow-live-executor', 'terminal', 'missing', 'retire', 'upstream', 'published', 'regex', 'ignore-case', 'refresh', 'quick', 'verify-all', 'rendered', 'delivered', 'undelivered', 'partial', 'person', 'integration', 'conclude', 'close', 'no-title', 'if-untitled', 'queue', 'yes', 'no-default', 'none']) // p7: present stop --all, run adjust --dry-run
+const FLAGS = new Set(['json', 'help', 'resume', 'h', 'new', 'history', 'no-gitea', 'reuse', 'lost', 'uncertain', 'found', 'complete', 'not-posted', 'ok', 'about-plan', 'all', 'dry-run', 'commit', 'push', 'status', 'rebuild', 'allow-live-executor', 'terminal', 'missing', 'retire', 'upstream', 'published', 'regex', 'ignore-case', 'refresh', 'quick', 'verify-all', 'rendered', 'delivered', 'undelivered', 'partial', 'person', 'integration', 'conclude', 'close', 'no-title', 'if-untitled', 'queue', 'yes', 'no-default', 'none', 'no-change', 'synthetic']) // p7: present stop --all, run adjust --dry-run
 function parse(argv: string[]): Parsed {
   const p: Parsed = { positional: [], opts: new Map(), flags: new Set() }
   for (let i = 0; i < argv.length; i++) {
@@ -1024,6 +1024,18 @@ async function cmdDelegate(p: Parsed): Promise<number> {
   }).finally(() => { execStore?.close(); execStore = undefined })
 }
 
+// `wfe review …` (p17, docs/reviews.md): a person's review of completed work.
+async function cmdReview(p: Parsed): Promise<number> {
+  const { reviewCommand } = await import('./review.ts')
+  await openExec(p)
+  return reviewCommand({
+    positional: p.positional, opt: k => opt(p, k), opts: k => p.opts.get(k) ?? [], flag: k => p.flags.has(k),
+    workspace: () => workspace(p), out, usage: m => new UsageError(m), refused: (m, detail) => new Refused(m, detail),
+    serviceUrl: async () => { const s = await serviceState(p); return s.running && s.sameRegistry ? s.url : null },
+    exec: () => execStore!, area: () => areaDir(p),
+  }).finally(() => { execStore?.close(); execStore = undefined })
+}
+
 let execStore: ExecStore | undefined
 async function openExec(p: Parsed): Promise<ExecStore> {
   execStore ??= new ExecStore({ registryFile: registryFile(p), area: areaDir(p), gitea: await giteaOf(p) })
@@ -1157,7 +1169,7 @@ async function cmdPresent(p: Parsed): Promise<number> {
           if (!rec?.presentations) continue
           views.push({ ref: `${r.workflow}/${r.run}`, presentations: await pr.view(ws, rec) })
         }
-        out(views.length ? views.flatMap(v => [v.ref, ...v.presentations.map(x => `  ${x.id} ${x.state.padEnd(11)} ${x.title} — ${x.live ? `LIVE ${x.url}${x.local ? ' (this host)' : ''}` : x.observed ? `not live: ${x.observed.detail}${['available', 'stop-failed'].includes(x.state) ? ' (recover: wfe present start or stop)' : ''}` : 'never served'}  revision ${x.revision.slice(7, 19)}…`)]).join('\n') : 'No presentations.', { ok: true, runs: views })
+        out(views.length ? views.flatMap(v => [v.ref, ...v.presentations.map(x => `  ${x.id} ${x.state.padEnd(11)} ${x.title} — ${x.live ? `LIVE ${x.url}${x.local ? ' (this host)' : ''}` : x.observed ? `not live: ${x.observed.detail}${['available', 'stop-failed'].includes(x.state) ? ' (recover: wfe present start or stop)' : ''}` : 'never served'}  revision ${x.revision.slice(7, 19)}…${x.reviews.length ? `\n      for human review ${x.reviews.map(u => `${u.review} (${u.mode} ${u.instance})`).join(', ')}` : ''}`)]).join('\n') : 'No presentations.', { ok: true, runs: views })
         return 0
       }
     }
@@ -1677,7 +1689,7 @@ async function cmdMigrate(p: Parsed): Promise<number> {
 }
 
 const COMMANDS: Record<string, (p: Parsed) => Promise<number>> = {
-  runs: cmdRuns, observe: cmdObserve, projects: cmdProjects, run: cmdRun, delegate: cmdDelegate, present: cmdPresent, share: cmdShare, project: cmdProject, repo: cmdRepo, gitea: cmdGitea, dashboard: cmdDashboard, exec: cmdExec, request: cmdRequest, notify: cmdNotify, intake: cmdIntake,
+  runs: cmdRuns, observe: cmdObserve, projects: cmdProjects, run: cmdRun, delegate: cmdDelegate, review: cmdReview, present: cmdPresent, share: cmdShare, project: cmdProject, repo: cmdRepo, gitea: cmdGitea, dashboard: cmdDashboard, exec: cmdExec, request: cmdRequest, notify: cmdNotify, intake: cmdIntake,
   create: cmdCreate, register: cmdRegister, list: cmdList, status: cmdStatus, validate: cmdValidate,
   approve: cmdApprove, arrange: cmdArrange, 'add-repo': cmdAddRepo, workflow: cmdWorkflow, serve: cmdServe, setup: cmdSetup,
   version: cmdVersion, nodes: cmdNodes, boast: cmdBoast, context: cmdContext, challenge: cmdChallenge, conversation: cmdConversation, discussion: cmdConversation, dialogue: cmdDialogue,
@@ -1790,13 +1802,14 @@ export async function main(argv: string[]): Promise<number> {
     const topic = cmd === 'help' ? rest[0] : undefined
     if (topic === 'run') console.log(runIndex())
     else if (topic === 'delegate') console.log((await import('./delegate.ts')).DELEGATE_INDEX)
+    else if (topic === 'review') console.log((await import('./review.ts')).REVIEW_INDEX)
     else if (topic && HELP[topic]) console.log(HELP[topic])
     else if (topic) { console.error(`wfe: no command "${topic}"\n`); console.log(index(p)); return 2 }
     else console.log(index(p))
     return 0
   }
   if (!COMMANDS[cmd]) { console.error(`wfe: no command "${cmd}" (see: wfe help)`); return 2 }
-  if (p.flags.has('help') && cmd !== 'run' && cmd !== 'delegate') { console.log(HELP[cmd]); return 0 }
+  if (p.flags.has('help') && cmd !== 'run' && cmd !== 'delegate' && cmd !== 'review') { console.log(HELP[cmd]); return 0 }
   p.positional = rest
   // Shared-area references resolve against this area's shares.json
   // (docs/shares.md); a command without a registry (setup) has no area yet.
@@ -1804,7 +1817,7 @@ export async function main(argv: string[]): Promise<number> {
   try {
     return await COMMANDS[cmd](p)
   } catch (e) {
-    if (e instanceof UsageError) { console.error(`wfe ${cmd}: ${e.message}\n\n${cmd === 'run' ? 'See: wfe run help <subcommand>' : cmd === 'delegate' ? 'See: wfe delegate help <subcommand>' : cmd === 'conversation' || cmd === 'discussion' ? 'Nothing was posted or recorded. See: wfe conversation help' : cmd === 'challenge' ? 'Nothing was written. See: wfe challenge help' : HELP[cmd]}`); return 2 }
+    if (e instanceof UsageError) { console.error(`wfe ${cmd}: ${e.message}\n\n${cmd === 'run' ? 'See: wfe run help <subcommand>' : cmd === 'delegate' ? 'See: wfe delegate help <subcommand>' : cmd === 'review' ? 'See: wfe review help <subcommand>' : cmd === 'conversation' || cmd === 'discussion' ? 'Nothing was posted or recorded. See: wfe conversation help' : cmd === 'challenge' ? 'Nothing was written. See: wfe challenge help' : HELP[cmd]}`); return 2 }
     if (e instanceof RequestError && !(e instanceof Refused)) e = new Refused(e.message, e.detail)
     // A store that could not be opened or written: store, operation, SQLite code.
     if (e instanceof StoreError) e = new Refused(e.message)

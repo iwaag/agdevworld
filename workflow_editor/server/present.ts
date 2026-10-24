@@ -69,6 +69,7 @@ export interface PresentationView {
   observed: (Observed & { instance: string; port: number; pid: number | null; state: InstanceState }) | null
   live: boolean // recorded open and observed serving now
   files: number
+  reviews: { review: string; mode: string; instance: string }[] // p17: active human review rounds using it (its bundle is retained for them)
 }
 
 export interface PresentContext { registryFile: string; area: string; by?: string }
@@ -86,6 +87,20 @@ export class Presenter {
         CREATE TABLE IF NOT EXISTS instances (id TEXT PRIMARY KEY, workspace TEXT NOT NULL, workflow TEXT NOT NULL, run TEXT NOT NULL, presentation TEXT NOT NULL, revision TEXT NOT NULL,
           host TEXT NOT NULL, pid INTEGER, signature TEXT, port INTEGER NOT NULL, bind TEXT NOT NULL, state TEXT NOT NULL, created TEXT NOT NULL, updated TEXT NOT NULL, detail TEXT, log TEXT NOT NULL);
         CREATE INDEX IF NOT EXISTS instances_run ON instances (workspace, workflow, run, presentation);
+      `),
+    }, {
+      // p17 (docs/reviews.md): which human review rounds use which instance,
+      // started by the review or reused, and while the round needs it
+      // (`active`) or no longer (`released`). Cleanup of one review never
+      // stops an instance another active round uses. `review_work`: a host
+      // operation on a round in progress in some process (a start or a
+      // cleanup), so reconcile does not run it twice at once.
+      version: 2,
+      up: db => db.exec(`
+        CREATE TABLE IF NOT EXISTS usages (instance TEXT NOT NULL, review TEXT NOT NULL, workspace TEXT NOT NULL, workflow TEXT NOT NULL, run TEXT NOT NULL, presentation TEXT NOT NULL, subject INTEGER NOT NULL,
+          mode TEXT NOT NULL, state TEXT NOT NULL, created TEXT NOT NULL, updated TEXT NOT NULL, PRIMARY KEY (instance, review));
+        CREATE INDEX IF NOT EXISTS usages_review ON usages (review);
+        CREATE TABLE IF NOT EXISTS review_work (review TEXT PRIMARY KEY, kind TEXT NOT NULL, pid INTEGER NOT NULL, host TEXT NOT NULL, started TEXT NOT NULL);
       `),
     }])
   }
@@ -174,14 +189,17 @@ export class Presenter {
     return (await runOp(ws, ref, { op: 'presentation.observe', presentation, status, ...(instance ? { instance } : {}), detail }, { by: by ?? this.ctx.by ?? PRESENTER, via: 'present' })).record
   }
 
-  async start(ws: Workspace, ref: RunRef, presentation: string, o: { by?: string } = {}): Promise<{ state: 'serving' | 'starting'; reused: boolean; instance: InstanceRow; url: string; local: boolean }> {
+  // `review` (p17): a human review round starts the presentation of a run
+  // whose work is completed: its frozen bundle is served again as it was.
+  // A cancelled run's presentations are never served again.
+  async start(ws: Workspace, ref: RunRef, presentation: string, o: { by?: string; review?: string } = {}): Promise<{ state: 'serving' | 'starting'; reused: boolean; instance: InstanceRow; url: string; local: boolean }> {
     const reading = await readRun(ws, ref)
     const rec = reading.record
     if (!rec) throw new RequestError(409, `run ${runKey(ref)} cannot be used: ${reading.problem?.message}`)
     const p = rec.presentations?.[presentation]
     if (!p) throw new RequestError(404, `presentation "${presentation}" does not exist in ${runKey(ref)}`)
     if (rec.cancelled) throw new RequestError(409, `run ${runKey(ref)} is cancelled; its presentations are not served again`)
-    if (rec.execution.state === 'completed') throw new RequestError(409, `run ${runKey(ref)} is completed; its presentations are not served again`)
+    if (rec.execution.state === 'completed' && !o.review) throw new RequestError(409, `run ${runKey(ref)} is completed; its presentations are served again only for a human review (wfe review start)`)
     // One start per presentation: an instance observed serving is returned;
     // a start in progress is reported; one observed gone is replaced.
     for (const row of this.instancesOf(ws.reg.id, ref, presentation).filter(r => ['starting', 'serving', 'stopping'].includes(r.state))) {
@@ -301,6 +319,39 @@ export class Presenter {
     return out
   }
 
+  // ---- usage by human reviews (p17) ---------------------------------------------------------
+
+  use(row: { instance: string; review: string; workspace: string; workflow: string; run: string; presentation: string; subject: number }, reused: boolean): 'started' | 'reused' {
+    const had = this.one<{ mode: string }>('SELECT mode FROM usages WHERE instance = ? AND review = ?', row.instance, row.review)
+    const mode = (had?.mode as 'started' | 'reused' | undefined) ?? (reused ? 'reused' : 'started')
+    named('present store', 'a write', () => this.db.prepare(`INSERT INTO usages (instance, review, workspace, workflow, run, presentation, subject, mode, state, created, updated) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)
+      ON CONFLICT (instance, review) DO UPDATE SET state = 'active', updated = excluded.updated`).run(row.instance, row.review, row.workspace, row.workflow, row.run, row.presentation, row.subject, mode, now(), now()))
+    return mode
+  }
+  release(review: string, instance?: string) {
+    if (instance) named('present store', 'a write', () => this.db.prepare('UPDATE usages SET state = \'released\', updated = ? WHERE review = ? AND instance = ?').run(now(), review, instance))
+    else named('present store', 'a write', () => this.db.prepare('UPDATE usages SET state = \'released\', updated = ? WHERE review = ?').run(now(), review))
+  }
+  // Other rounds that still use an instance.
+  usersOf(instance: string, except?: string): { review: string; mode: string }[] {
+    return this.all<{ review: string; mode: string }>('SELECT review, mode FROM usages WHERE instance = ? AND state = \'active\' AND review != ?', instance, except ?? '')
+  }
+  usagesOf(workspace: string, ref: RunRef, presentation?: string): { instance: string; review: string; mode: string; state: string }[] {
+    return presentation
+      ? this.all('SELECT instance, review, mode, state FROM usages WHERE workspace = ? AND workflow = ? AND run = ? AND presentation = ? ORDER BY created', workspace, ref.workflow, ref.run, presentation)
+      : this.all('SELECT instance, review, mode, state FROM usages WHERE workspace = ? AND workflow = ? AND run = ? ORDER BY created', workspace, ref.workflow, ref.run)
+  }
+  // A host operation on a round, claimed by a living process of this host.
+  claimWork(review: string, kind: string): boolean {
+    return this.tx(() => {
+      const w = this.one<{ pid: number; host: string; started: string }>('SELECT * FROM review_work WHERE review = ?', review)
+      if (w && w.host === hostname() && w.pid !== process.pid && (() => { try { process.kill(w.pid, 0); return true } catch { return false } })() && Date.now() - Date.parse(w.started) < 120_000) return false
+      named('present store', 'a write', () => this.db.prepare('INSERT INTO review_work (review, kind, pid, host, started) VALUES (?, ?, ?, ?, ?) ON CONFLICT (review) DO UPDATE SET kind = excluded.kind, pid = excluded.pid, host = excluded.host, started = excluded.started').run(review, kind, process.pid, hostname(), now()))
+      return true
+    })
+  }
+  doneWork(review: string) { named('present store', 'a write', () => this.db.prepare('DELETE FROM review_work WHERE review = ? AND pid = ?').run(review, process.pid)) }
+
   // ---- views and recovery -------------------------------------------------------------------
 
   async view(ws: Workspace, rec: RunRecord): Promise<PresentationView[]> {
@@ -312,7 +363,8 @@ export class Presenter {
       const observed = row && row.state !== 'stopped' && row.state !== 'failed' ? { ...(await this.observe(row)), instance: row.id, port: row.port, pid: row.pid, state: row.state } : row ? { alive: false, identity: false, detail: row.detail ?? row.state, instance: row.id, port: row.port, pid: row.pid, state: row.state } : null
       const addr = row ? this.urlOf(row) : null
       const live = isOpen(p) && !!observed?.alive && !!observed.identity
-      out.push({ id: p.id, title: p.title, node: p.node, revision: p.revision, state: p.state, instance: p.instance, url: addr?.url ?? null, local: addr?.local ?? true, observed, live, files: p.files.length })
+      const reviews = this.usagesOf(ws.reg.id, ref, p.id).filter(u => u.state === 'active').map(u => ({ review: u.review, mode: u.mode, instance: u.instance }))
+      out.push({ id: p.id, title: p.title, node: p.node, revision: p.revision, state: p.state, instance: p.instance, url: addr?.url ?? null, local: addr?.local ?? true, observed, live, files: p.files.length, reviews })
     }
     return out
   }

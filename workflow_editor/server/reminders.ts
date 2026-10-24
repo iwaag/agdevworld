@@ -20,7 +20,10 @@ import { runFolder, type RunGraph, type RunRecord } from '../shared/run.ts'
 // `assess` (fix6): the delegated results this run reports, assessed by the
 // caller that can read its children (server/delegate.ts); asked for at an
 // outward report and at the completion that completes the run.
-export interface Advice { yes?: boolean; extra?: Reminder[]; what?: string; assess?: (record: RunRecord) => Promise<Reminder[]> }
+// `delegatedOnly` (fix6): an outward message whose own checks are not
+// fix5's (a conductor's announcement): only the delegated results it reports
+// are assessed.
+export interface Advice { yes?: boolean; extra?: Reminder[]; what?: string; assess?: (record: RunRecord) => Promise<Reminder[]>; delegatedOnly?: boolean }
 
 const SIGNAL_PATHS = 5
 
@@ -112,12 +115,12 @@ export async function adviseOrRefuse(ws: Workspace, advice: Advice | undefined, 
   if (!advice || advice.yes) return
   const bs = [b].flat()
   const now = new Date().toISOString()
-  const paths = bs.every(x => x.kind === 'present') ? null : await changedPaths(ws, f.after)
-  const signals = bs.every(x => x.kind === 'present') ? [] : await workSignals(ws, f.after, nodeIntervals(f.after, f.graph, f.authored, now), paths)
+  const paths = advice.delegatedOnly || bs.every(x => x.kind === 'present') ? null : await changedPaths(ws, f.after)
+  const signals = advice.delegatedOnly || bs.every(x => x.kind === 'present') ? [] : await workSignals(ws, f.after, nodeIntervals(f.after, f.graph, f.authored, now), paths)
   const changedByNode = paths ? pathsByNode(paths, f.after, now) : {}
   const reminders: Reminder[] = []
   const put = (r: Reminder) => { if (!reminders.some(y => y.code === r.code && y.refs.join() === r.refs.join())) reminders.push(r) }
-  for (const x of bs) for (const r of evaluate(x, { ...f, signals, changedByNode, extra: advice.extra })) put(r)
+  if (!advice.delegatedOnly) for (const x of bs) for (const r of evaluate(x, { ...f, signals, changedByNode, extra: advice.extra })) put(r)
   const completesRun = bs.some(x => x.kind === 'complete') && f.record.execution.state !== 'completed' && f.after.execution.state === 'completed'
   if (advice.assess && (bs.some(x => x.kind === 'report') || completesRun) && Object.keys(f.after.delegations ?? {}).length) for (const r of await advice.assess(f.after)) put(r)
   if (!reminders.length) return

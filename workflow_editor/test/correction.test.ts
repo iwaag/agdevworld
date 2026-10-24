@@ -73,7 +73,7 @@ test('the parent\'s brief and take-up carry the assessment; satisfied is refused
   s.i.close(); s.n.close(); s.x.close()
 })
 
-test('a parent without work nodes is reminded when it completes its run; the reminder merges with its own; --yes passes it once', async () => {
+test('a parent without work nodes is reminded when it completes its run or announces; the reminder merges with its own; --yes passes it once', async () => {
   const s = await setup()
   const { ref, p1, par } = await completedWithoutPresentation(s)
   await par({ op: 'delegation.take-up', delegation: 'd1', events: [1] } as never)
@@ -85,6 +85,9 @@ test('a parent without work nodes is reminded when it completes its run; the rem
   assert.equal(code(e), 'reminder', String(e))
   assert.ok(reminders(e).includes('delegated-presentation-missing'), reminders(e).join())
   assert.equal((await rec(s.par, ref)).nodes.use.state, 'running', 'nothing recorded')
+  // A conductor's announcement (fix6 trial A) is assessed for its delegated results only.
+  const an = await adviseRun(s.par, ref, [{ kind: 'report', messageKind: 'announcement' }], { assess, delegatedOnly: true }).catch(x => x)
+  assert.deepEqual(reminders(an), ['delegated-presentation-missing'])
   await runOp(s.par, ref, { op: 'node.complete', node: 'use', outcome: 'used', attempt: p1.attempt.id } as never, { by: 'par-agent', via: 'cli', advice: { yes: true, assess } })
   assert.equal((await rec(s.par, ref)).execution.state, 'completed')
   s.i.close(); s.n.close(); s.x.close()

@@ -72,7 +72,10 @@ announce [<id>] --node <n> (--text <t> | --file <f|->) --re <msg>… [--conclude
                               speak to the room (agenda, context, interim synthesis, conclusion);
                               waits for nobody; the node completes with the message. --conclude
                               records what is still owed and who receives it later; --close then
-                              closes the conversation (it cancels nothing)
+                              closes the conversation (it cancels nothing). When this run
+                              delegated, what a child's result left out may first come back
+                              as reminders (wfe delegate show); nothing is posted then (--yes:
+                              as it is, for this message only)
 ask [<id>] <participant>… --node <n> --question <q> --re <msg>…
 ask [<id>] --node <n> --run <workspace>/<workflow>/<run> --question <what> [--re <msg>…]
                               ask participants with one question, or await the result of a run
@@ -418,6 +421,14 @@ export async function conversationCommand(c: ConversationCli): Promise<number> {
         if (sub === 'announce') {
           // The opening of a discussion the conductor created has nothing to name.
           const re = ids('re'); if (!re.length && ds.horizon(id).message) throw c.usage('--re <msg> is required: what the announcement is about')
+          // fix6: an announcement reports to the person; the delegated results
+          // of this run are assessed first (fix6 trial A, ponderer/conduct/run-037
+          // reported misc/freework/run-007's result with announce).
+          if (!ds.posted(id, o.run, text(), undefined)) {
+            const { workspace, ref } = parseRunName(o.run)
+            const assess = async (rec: RunRecord) => { const { delegatedReminders } = await import('../server/delegate.ts'); return delegatedReminders(x.delegate, rec) }
+            try { await adviseRun(await x.workspace(workspace), ref, [{ kind: 'report', messageKind: 'announcement' }], c.flag('yes') ? { yes: true } : { what: 'announcing this', assess, delegatedOnly: true }) } catch (e) { if (e instanceof RequestError) throw c.refused(e.message, e.detail); throw e }
+          }
           const r = await ds.announce(id, { ...base, text: text(), re, invitation: o.discussion === id ? o.invitation : null, conclude: c.flag('conclude'), close: c.flag('close') })
           const ob = r.activity.obligations
           c.out(`${r.duplicate ? 'Already announced' : 'Announced'}: #${r.message.id}; node ${node} completed${ob ? `; ${ob.length ? `outstanding:\n${ob.map(b => `  ${b.ref}: ${b.owes} — owner ${b.owner}; later to ${b.receiver}`).join('\n')}` : 'nothing outstanding'}` : ''}${r.closed ? `\nClosed ${id}.` : ''}`, { ok: true, ...r })

@@ -34,6 +34,7 @@ const TYPE_HINT: Record<string, string> = {
   do: 'Change or produce something',
   talk: 'Ask or agree with a person',
   delegate: 'Entrust work to another workflow and use its result',
+  review: 'The person reviews finished work later (WFE serves it, records the decision, cleans up)',
 }
 
 export function renderWorkflowView(root: HTMLElement, wsId: string, file: string, opts: { context?: boolean } = {}): ViewHandle {

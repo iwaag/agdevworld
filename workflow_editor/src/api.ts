@@ -4,6 +4,7 @@ import type {
   WorkflowResponse, WorkspacesResponse,
 } from '../shared/api.ts'
 import type { ApprovalState } from '../shared/canonical.ts'
+import type { RoundView } from '../shared/humanReview.ts'
 import type { BudgetBoard, Period, SourceState, UsageResponse } from '../shared/usage.ts'
 import type { ApprovalKind, Documentation, Project, Workflow } from '../shared/model.ts'
 import type { Catalog, NodeTemplate, TemplateContent } from '../shared/catalog.ts'
@@ -124,6 +125,10 @@ export const api = {
   runDelegations: (id: string, workflow: string, run: string, signal?: AbortSignal) => call<DelegationsView>('GET', `${ws(id)}/runs/${encodeURIComponent(workflow)}/${encodeURIComponent(run)}/delegations`, undefined, [], signal),
   runIo: (id: string, workflow: string, run: string, attempt: string, line: number) => call<IoEntryView>('GET', `${ws(id)}/runs/${encodeURIComponent(workflow)}/${encodeURIComponent(run)}/io?attempt=${encodeURIComponent(attempt)}&line=${line}`),
   runPresentations: (id: string, workflow: string, run: string, signal?: AbortSignal) => call<{ presentations: PresentationView[] }>('GET', `${ws(id)}/runs/${encodeURIComponent(workflow)}/${encodeURIComponent(run)}/presentations`, undefined, [], signal),
+  // p17 (docs/reviews.md): human review rounds of a run, and the person's operations on one.
+  runReviews: (id: string, workflow: string, run: string, signal?: AbortSignal) => call<{ reviews: RoundView[] }>('GET', `${ws(id)}/runs/${encodeURIComponent(workflow)}/${encodeURIComponent(run)}/reviews`, undefined, [], signal),
+  review: (id: string, workflow: string, run: string, rv: string, signal?: AbortSignal) => call<{ review: RoundView; run: { project: string; workflow: string; run: string; seq: number } }>('GET', `${ws(id)}/runs/${encodeURIComponent(workflow)}/${encodeURIComponent(run)}/reviews/${encodeURIComponent(rv)}`, undefined, [], signal),
+  reviewAct: (id: string, workflow: string, run: string, rv: string, action: 'start' | 'decide' | 'cleanup', body: { by: string; outcome?: 'approved' | 'changes'; feedback?: string; revisions?: string[]; receipt?: string }) => call<{ ok: boolean; review: RoundView }>('POST', `${ws(id)}/runs/${encodeURIComponent(workflow)}/${encodeURIComponent(run)}/reviews/${encodeURIComponent(rv)}/${action}`, body),
   presentation: (id: string, workflow: string, run: string, p: string, action: 'start' | 'stop', by: string) => call<{ ok: boolean }>('POST', `${ws(id)}/runs/${encodeURIComponent(workflow)}/${encodeURIComponent(run)}/presentations/${encodeURIComponent(p)}/${action}`, { by }),
   // A full check of an input set's or output's bytes (project_migration p6).
   verifyShared: (id: string, workflow: string, run: string, setId: string, by: string) => call<{ ok: boolean; status: string; detail: string }>('POST', `${ws(id)}/runs/${encodeURIComponent(workflow)}/${encodeURIComponent(run)}/verify`, { id: setId, by }),

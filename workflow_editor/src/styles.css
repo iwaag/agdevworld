@@ -266,6 +266,7 @@ button.ghost-dark:hover:not(:disabled) { border-color: #8a93a0; }
 .add-node.type-study { background: var(--study-bg); border-color: var(--study); }
 .add-node.type-do { background: var(--do-bg); border-color: var(--do); }
 .add-node.type-talk { background: var(--talk-bg); border-color: var(--talk); }
+.add-node.type-review { background: #eaf6ec; border-color: #7fbf8e; }
 .add-node.type-delegate { background: var(--delegate-bg); border-color: var(--delegate); color: #fff; }
 .canvas {
   position: relative; flex: 1; min-height: 480px; overflow: hidden; border-radius: 14px; border: 1px solid var(--line); outline: none;
@@ -302,6 +303,7 @@ button.ghost-dark:hover:not(:disabled) { border-color: #8a93a0; }
 .node.type-do { background: var(--do-bg); border-color: #e8c98a; }
 .node.type-talk, .step-card.type-talk { background: var(--talk-bg); border-color: #a9dccd; }
 .node.type-delegate { background: #f1ecf9; border-color: #b9a7d8; }
+.node.type-review { background: #eaf6ec; border-color: #9fd0aa; }
 .node.type-unknown { background: var(--unknown-bg); border-color: var(--unknown); border-style: dashed; }
 /* A node's own color (p7) replaces its type's fill and border only; the run state keeps its own ring, pill, glyph and words. */
 .node.color-blue { background: var(--c-blue-bg); border-color: var(--c-blue); }
@@ -1156,3 +1158,20 @@ html[data-display="detail"] .dash-glance { max-width: none; padding: 0; }
 @media (max-width: 640px) { .dashboard { padding: 12px 16px; } .u-table { font-size: 12px; } .u-table th, .u-table td { padding: 5px 4px; } }
 .topbar .top-actions { flex-wrap: wrap; justify-content: flex-end; }
 @media (max-width: 640px) { .topbar { padding: 12px 16px; } .crumbs { font-size: 18px; } }
+
+/* Human review (p17): the review page. */
+.review-main { max-width: 860px; margin: 0 auto; padding: 16px 20px 32px; display: flex; flex-direction: column; gap: 14px; }
+.review-head h1 { margin: 0 0 6px; font-size: 22px; display: inline-block; margin-right: 10px; }
+.review-summary { white-space: pre-wrap; margin: 0; }
+.review-subjects { list-style: none; padding: 0; margin: 8px 0 0; display: flex; flex-direction: column; gap: 10px; }
+.review-subject { border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; }
+.review-subject-state { display: flex; align-items: center; gap: 8px; margin-top: 6px; flex-wrap: wrap; }
+.review-subject-state a.button.primary { background: var(--accent); border-color: var(--accent); color: #fff; padding: 6px 14px; }
+.review-actions { display: flex; gap: 10px; margin: 10px 0 4px; flex-wrap: wrap; }
+.review-page textarea { width: 100%; box-sizing: border-box; margin-top: 8px; }
+.review-state.awaiting, .review-state.reviewing { background: var(--accent); color: #fff; }
+.review-state.start-failed { background: #b45309; color: #fff; }
+@media (max-width: 600px) { .review-main { padding: 12px 16px 24px; } }
+.review-page .notice { padding: 8px 12px; border-radius: 8px; margin: 0; }
+.review-page .notice.ok { background: var(--ok-bg); color: var(--ok); }
+.review-page .notice.error { background: var(--error-bg); color: var(--error); }

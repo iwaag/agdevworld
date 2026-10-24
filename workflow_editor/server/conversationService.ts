@@ -1698,6 +1698,9 @@ export class ConversationService {
       requests: invitations.map(i => this.invitationView(i, o.viewBase)).map(i => linkable(i.run) ? i : { ...i, runUrl: null }),
       links,
       runs,
+      // p17: every human review round of the runs serving this room, so the
+      // person starts one from the room (docs/reviews.md).
+      reviews: runs.flatMap(r => (r.reviews ?? []).map(v => ({ ...v, runKey: r.key }))),
       asking: await this.openAsking(conv, rows),
       horizon: this.horizon(conv),
     }

@@ -9,10 +9,10 @@ import { METRICS, PAD, positions, STEP_X, type DisplayMode, type Metrics } from 
 import { FINAL_STEP, PLAN_STEP, type EffectiveGraph } from '../shared/compile.ts'
 
 const NS = 'http://www.w3.org/2000/svg'
-export const TYPE_LABEL: Record<string, string> = { study: 'Study', do: 'Do', delegate: 'Delegate', talk: 'Talk' }
+export const TYPE_LABEL: Record<string, string> = { study: 'Study', do: 'Do', delegate: 'Delegate', talk: 'Talk', review: 'Human review' }
 // A discussion activity (argue p4), shown on the card in every display mode.
 export const ACTIVITY_LABEL: Record<string, string> = { announce: 'Announce', ask: 'Ask', ponder: 'Ponder', talk: 'Talk' }
-const EDGE_COLOR: Record<string, string> = { study: '#9aaedc', do: '#e2b867', delegate: '#9c84c4', talk: '#8fd3c0', unknown: '#a9afb8' }
+const EDGE_COLOR: Record<string, string> = { study: '#9aaedc', do: '#e2b867', delegate: '#9c84c4', talk: '#8fd3c0', review: '#7fbf8e', unknown: '#a9afb8' }
 
 // `step`: a generated documentation step (p5) — the plan talk, a report
 // icon or the final report. It is shown, selectable and inspectable, never

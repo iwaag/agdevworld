@@ -139,3 +139,18 @@ export function roundLine(r: ReviewRound): string {
   const who = r.decision ? ` — ${r.decision.outcome === 'approved' ? 'approved' : 'changes requested'} by ${r.decision.by}${r.decision.synthetic ? ' (synthetic check actor)' : ''}${r.decision.relayed ? ` (relayed by ${r.decision.relayed.by})` : ''}` : r.reviewer ? `, for ${r.reviewer}` : ''
   return `${r.id} on ${r.node}: ${reviewStateText(r)}${who}; ${r.subjects.length} subject${r.subjects.length === 1 ? '' : 's'} (${r.subjects.map(subjectLabel).join(', ')})`
 }
+
+// A round as the views read it (server/reviews.ts view): each subject as it
+// is served now — a link resolved from the host's state, never replayed.
+export interface SubjectView extends ReviewSubject {
+  status: 'available' | 'failed' | 'not-started' | 'stopped'
+  url: string | null // resolved from this host's state now, never replayed
+  local: boolean
+  live: boolean
+  instance: string | null
+  mode: string | null
+  detail: string
+  newer: string[] // later presentations of the owning run (shown beside it, never replacing it)
+  usedBy: string[] // other rounds that use the same instance
+}
+export interface RoundView extends ReviewRound { text: string; subjectsNow: SubjectView[]; workspace: string; workflow: string; runId: string; page: string | null }

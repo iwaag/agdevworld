@@ -41,7 +41,7 @@ function stored(key: string, fallback: string) { try { return localStorage.getIt
 function store(key: string, value: string) { try { localStorage.setItem(key, value) } catch { /* per-viewer convenience only */ } }
 
 const SITUATION: Record<string, string> = {
-  executing: 'Executor: executing', stopping: 'Executor: stop requested', 'awaiting-person': 'Executor: idle, waiting for a person',
+  executing: 'Executor: executing', stopping: 'Executor: stop requested', 'awaiting-person': 'Executor: idle, waiting for a person', 'awaiting-review': 'Executor: idle, the work awaits a human review',
   'awaiting-delegation': 'Executor: idle, waiting for a delegated run', 'awaiting-external': 'Executor: idle, waiting for an external result', due: 'Executor: its move (continuation owed)',
   stopped: 'Executor: held (stopped)', interrupted: 'Executor: held (interrupted)', unknown: 'Executor: unknown — look before resuming',
   completed: 'Executor: idle', cancelled: 'Executor: idle (cancelled)', 'not-started': 'Executor: not started', idle: 'Executor: idle',
@@ -536,7 +536,7 @@ export function renderRunView(root: HTMLElement, wsId: string, workflow: string,
     for (const d of delegView?.delegations ?? []) {
       const st = status[d.node]
       if (!st) continue
-      const CHILD: Record<string, string> = { executing: 'child working', stopping: 'child stopping', 'awaiting-person': 'child waiting', 'awaiting-delegation': 'child waiting', 'awaiting-external': 'child waiting', due: 'child continuing', stopped: 'child paused', interrupted: 'child interrupted', unknown: 'child interrupted', completed: 'child done', cancelled: 'child cancelled', 'not-started': 'child queued', idle: 'child queued' }
+      const CHILD: Record<string, string> = { executing: 'child working', stopping: 'child stopping', 'awaiting-person': 'child waiting', 'awaiting-review': 'child awaiting human review', 'awaiting-delegation': 'child waiting', 'awaiting-external': 'child waiting', due: 'child continuing', stopped: 'child paused', interrupted: 'child interrupted', unknown: 'child interrupted', completed: 'child done', cancelled: 'child cancelled', 'not-started': 'child queued', idle: 'child queued' }
       const child = d.childNow ? CHILD[d.childNow.situation] ?? `child ${d.childNow.situation}` : d.child ? 'child' : 'request on its way'
       const base = rec.nodes[d.node]?.state === 'waiting' ? 'Waiting' : st.label
       status[d.node] = { ...st, label: `${base} · ${d.pending.length ? 'news to take up' : d.disposition ? d.disposition.kind : child}`, title: `${st.title}\nDelegation ${d.id} to ${d.target.project}/${d.target.workflow}: ${d.state}${d.child ? `; child ${d.child.workflow}/${d.child.run}` : ''}` }

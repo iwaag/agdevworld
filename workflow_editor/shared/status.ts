@@ -86,6 +86,7 @@ function childWords(state: string | null | undefined, hold?: string | null): str
     case 'executing': return 'working'
     case 'stopping': return 'stopping'
     case 'awaiting-person': return 'waiting for an answer'
+    case 'awaiting-review': return 'awaiting a human review'
     case 'awaiting-delegation': return 'waiting for its own delegation'
     case 'awaiting-external': return 'waiting for an external result'
     case 'due': return 'continuing'

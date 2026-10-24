@@ -958,6 +958,8 @@ export class NotifyStore {
     }
     const ctx: RenderContext = {
       presentation: id => addresses.get(id) ?? null,
+      // p17: a human review round's page on this host's editor.
+      review: id => cfg.viewBase ? `${cfg.viewBase.replace(/\/?$/, '/')}#/ws/${encodeURIComponent(r.workspace)}/review/${encodeURIComponent(r.workflow)}/${encodeURIComponent(ref.run)}/${encodeURIComponent(id)}` : null,
       openPresentations: rec ? openPresentations(rec).map(p => p.id) : [],
       ref: label, executor: rec?.executor.name ?? 'the executor', request, answerRoute, runLink: runView, link,
       label: id => authored?.nodes[id]?.name || id, openQuestion: id => !!rec?.questions[id] && ['open', 'answered'].includes(questionState(rec.questions[id])),

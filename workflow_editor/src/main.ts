@@ -3,7 +3,8 @@
 // #/ws/<workspace>/run/<workflow>/<run>[/at/<devdocs commit>] (run view) and
 // #/ws/<workspace>/run/<workflow>/<run>/io/<attempt>/<line> (one IO entry in full, p10)
 // and #/context[/<workspace>[/<workflow>]] (the scoped context overview, p13)
-// and #/usage (subscription windows and what executions used, retire_old_ui p1).
+// and #/usage (subscription windows and what executions used, retire_old_ui p1)
+// and #/ws/<workspace>/review/<workflow>/<run>/<rv> (a human review round, p17).
 // A trailing /context on Home (#/home/context), a project or a workflow opens
 // that editor's Context section (p13 ex1).
 import './styles.css'
@@ -12,6 +13,7 @@ import { renderNodesView } from './nodesView.ts'
 import { renderProjectView } from './projectView.ts'
 import { renderRunView } from './runView.ts'
 import { renderIoEntry } from './ioEntryView.ts'
+import { renderReviewView } from './reviewView.ts'
 import { renderWorkflowView } from './workflowView.ts'
 import { renderContextChooser, renderContextView } from './contextView.ts'
 import { renderUsageView } from './usageView.ts'
@@ -36,6 +38,8 @@ function route() {
   app.replaceChildren()
   if (parts[0] === 'ws' && parts[1] && parts[2] === 'run' && parts[3] && parts[4] && parts[5] === 'io' && parts[6] && parts[7]) {
     current = renderIoEntry(app, parts[1], parts[3], parts[4], parts[6], Number(parts[7]))
+  } else if (parts[0] === 'ws' && parts[1] && parts[2] === 'review' && parts[3] && parts[4] && parts[5]) {
+    current = renderReviewView(app, parts[1], parts[3], parts[4], parts[5])
   } else if (parts[0] === 'ws' && parts[1] && parts[2] === 'run' && parts[3] && parts[4]) {
     current = renderRunView(app, parts[1], parts[3], parts[4], parts[5] === 'at' ? parts[6] : undefined)
   } else if (parts[0] === 'ws' && parts[1] && parts[2] === 'wf' && parts[3]) {

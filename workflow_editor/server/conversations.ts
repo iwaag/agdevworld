@@ -18,6 +18,7 @@ import type { ChallengeStore } from './challenges.ts'
 import type { PinnedAttachment } from './runs.ts'
 import type { Workflow } from '../shared/model.ts'
 import { runDisplayTitle, runKey, situation, type RunRecord, type RunRef } from '../shared/run.ts'
+import { reviewStateText, subjectRun } from '../shared/humanReview.ts'
 import type { ExecStore } from './exec.ts'
 import { presenterOf, type Presenter } from './present.ts'
 import { nodeNames, readRun } from './runs.ts'
@@ -368,7 +369,13 @@ export class ConversationStore {
         const status = runStatus(rec, { names: nodeNames(reading.bundle, rec), job: job && { state: job.state as 'queued' | 'claimed', reason: job.reason }, person })
         const presenter = rec.presentations ? this.presenter() : null
         const shown = presenter ? (await presenter.view(ws, rec).catch(() => [])).filter(p => p.live && p.url && !p.local).map(p => ({ id: p.id, title: p.title, url: p.url! })) : []
-        runs.push({ ...entry, situation: situation(rec), execution: rec.execution.state, title: runDisplayTitle(rec), waiting: rec.execution.waiting.map(w => w.node), status, presentations: shown })
+        const reviews = Object.values(rec.reviews ?? {}).map((v): ConversationReview => ({
+          id: v.id, state: v.state, text: reviewStateText(v), summary: v.summary, reviewer: v.reviewer, prepared: { at: v.prepared.at, by: v.prepared.by },
+          subjects: v.subjects.map(x => ({ title: x.title, presentation: x.presentation, run: subjectRun(x) })),
+          decision: v.decision ? { outcome: v.decision.outcome, by: v.decision.by, at: v.decision.at, synthetic: !!v.decision.synthetic } : null,
+          page: reviewPage(viewBase, workspace, ref, v.id), api: `api/workspaces/${encodeURIComponent(workspace)}/runs/${encodeURIComponent(ref.workflow)}/${encodeURIComponent(ref.run)}/reviews/${encodeURIComponent(v.id)}`,
+        }))
+        runs.push({ ...entry, situation: situation(rec), execution: rec.execution.state, title: runDisplayTitle(rec), waiting: rec.execution.waiting.map(w => w.node), status, presentations: shown, ...(reviews.length ? { reviews } : {}) })
       } catch (e) {
         // A run of a project no longer registered here (a retired one, argue
         // p4 ex1) has no run view to open: no link is made up for it.
@@ -384,7 +391,18 @@ export class ConversationStore {
 export interface RunEntry {
   key: string; workspace: string; workflow: string; run: string; relation: string; url: string | null; files: string | null
   situation: string; execution: string; title: string | null; waiting: string[]; status: RunStatus | null; presentations: { id: string; title: string; url: string }[]; problem?: string
+  // p17 (docs/reviews.md): the run's human review rounds, for the person's
+  // Start review in the room; `page` is WFE's review page, `api` the
+  // route a client posts start to (relative to the WFE base).
+  reviews?: ConversationReview[]
 }
+export interface ConversationReview {
+  id: string; state: string; text: string; summary: string; reviewer: string | null; prepared: { at: string; by: string }
+  subjects: { title: string; presentation: string; run: string }[]
+  decision: { outcome: string; by: string; at: string; synthetic: boolean } | null
+  page: string | null; api: string
+}
+export const reviewPage = (viewBase: string | null | undefined, workspace: string, ref: RunRef, id: string) => viewBase ? `${viewBase.replace(/\/?$/, '/')}#/ws/${encodeURIComponent(workspace)}/review/${encodeURIComponent(ref.workflow)}/${encodeURIComponent(ref.run)}/${encodeURIComponent(id)}` : null
 export const runUrl = (viewBase: string | null | undefined, run: string) => { if (!viewBase) return null; const { workspace, ref } = parseRunName(run); return `${viewBase.replace(/\/?$/, '/')}#/ws/${encodeURIComponent(workspace)}/run/${encodeURIComponent(ref.workflow)}/${encodeURIComponent(ref.run)}` }
 
 // The destination's questions not yet answered by the person: named by a later

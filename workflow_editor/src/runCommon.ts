@@ -5,6 +5,7 @@
 import type { RunResponse } from '../shared/api.ts'
 import type { RunExecView } from './api.ts'
 import { holderOf, runDisplayTitle, type RunRecord } from '../shared/run.ts'
+import { reviewStateText } from '../shared/humanReview.ts'
 import { h, when } from './dom.ts'
 
 export const STATE_LABEL: Record<string, string> = {
@@ -53,7 +54,8 @@ export function nodeLabel(rec: RunRecord, id: string): { state: string; label: s
   if (n.state === 'waiting' && n.wait) {
     const on = n.wait.on
     const q = 'question' in on ? rec.questions[on.question] : undefined
-    label = q && q.answers.length && !q.takenUp && !q.withdrawn ? `Answered · ${rec.executor.name} to take up` : `Waiting · ${n.wait.holder}`
+    const v = 'review' in on ? rec.reviews?.[on.review] : undefined // p17: a human review round
+    label = q && q.answers.length && !q.takenUp && !q.withdrawn ? `Answered · ${rec.executor.name} to take up` : v ? reviewStateText(v) : `Waiting · ${n.wait.holder}`
     title = `${n.wait.reason}; next move: ${holderOf(rec, id)}`
   } else if (n.state === 'running') title = `The executor recorded a start at ${when(n.started ?? '')}; last update ${ago(n.updated)}. This is reported progress, not a check that anything runs.`
   else if (n.retrospective) { label = 'Done · recorded afterwards'; title = `Recorded afterwards by ${n.retrospective.by} at ${when(n.retrospective.at)}: nothing ran this node; the work was done before it was a node. ${n.retrospective.reason}` }

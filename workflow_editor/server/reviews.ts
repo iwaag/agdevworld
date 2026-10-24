@@ -20,7 +20,8 @@
 import { createHash } from 'node:crypto'
 import { canonicalJson } from '../shared/canonical.ts'
 import { latestResult } from '../shared/delegation.ts'
-import { hostOwes, reviewStateText, startedInstances, subjectLabel, type CleanupResult, type ReviewRound, type ReviewSubject, type SubjectServing } from '../shared/humanReview.ts'
+import { hostOwes, reviewStateText, startedInstances, subjectLabel, type CleanupResult, type ReviewRound, type ReviewSubject, type RoundView, type SubjectServing, type SubjectView } from '../shared/humanReview.ts'
+export type { RoundView, SubjectView }
 import { isOpen, runKey, type BecauseRef, type RunRecord, type RunRef } from '../shared/run.ts'
 import { loadBoundary, assertWorkspaceAllowed } from './boundary.ts'
 import { loadRegistry } from './registry.ts'
@@ -34,19 +35,6 @@ const creationOf = (r: RunRecord) => createHash('sha256').update(canonicalJson(r
 const uidOf = (r: RunRecord) => `${r.project}/${r.workflow}/${r.run}#${creationOf(r)}`
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms))
 const RETRY_MS = 60_000 // a failed cleanup is retried by reconcile after this
-
-export interface SubjectView extends ReviewSubject {
-  status: 'available' | 'failed' | 'not-started' | 'stopped'
-  url: string | null // resolved from this host's state now, never replayed
-  local: boolean
-  live: boolean
-  instance: string | null
-  mode: string | null
-  detail: string
-  newer: string[] // later presentations of the owning run (shown beside it, never replacing it)
-  usedBy: string[] // other rounds that use the same instance
-}
-export interface RoundView extends ReviewRound { text: string; subjectsNow: SubjectView[]; workspace: string; workflow: string; runId: string; page: string | null }
 
 export class ReviewHost {
   readonly ctx: PresentContext

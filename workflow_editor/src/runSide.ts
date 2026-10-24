@@ -17,6 +17,7 @@
 // the data it is given and asks the view to act.
 import type { RunOpResponse, RunResponse } from '../shared/api.ts'
 import { effectiveOf, holderOf, isOpen, questionState, runKey, situation, type Because, type Question, type RunRecord } from '../shared/run.ts'
+import { hostOwes, isAwaitingPerson, owedContinuation, reviewStateText } from '../shared/humanReview.ts'
 import { reportStep } from '../shared/compile.ts'
 import { sessionPolicyOf } from '../shared/model.ts'
 import type { AdjustView, DelegationsView, DelegationView, PresentationView, RunExecView, RunNotifyView } from './api.ts'
@@ -86,7 +87,7 @@ const setText = (el: HTMLElement, text: string) => { if (el.textContent !== text
 const show = (el: HTMLElement, on: boolean) => { if (el.hidden === on) el.hidden = !on }
 const setDisabled = (el: HTMLButtonElement, off: boolean) => { if (el.disabled !== off) el.disabled = off }
 // A delegated child's situation in plain words (p10).
-const CHILD_WORDS: Record<string, string> = { executing: 'working', stopping: 'stopping', 'awaiting-person': 'waiting for an answer', 'awaiting-delegation': 'waiting for its own delegation', 'awaiting-external': 'waiting for an external result', due: 'continuing', stopped: 'paused by a person', interrupted: 'interrupted', unknown: 'interrupted (execution lost)', completed: 'done', cancelled: 'cancelled', 'not-started': 'queued to start', idle: 'between steps' }
+const CHILD_WORDS: Record<string, string> = { executing: 'working', stopping: 'stopping', 'awaiting-person': 'waiting for an answer', 'awaiting-review': 'awaiting a human review', 'awaiting-delegation': 'waiting for its own delegation', 'awaiting-external': 'waiting for an external result', due: 'continuing', stopped: 'paused by a person', interrupted: 'interrupted', unknown: 'interrupted (execution lost)', completed: 'done', cancelled: 'cancelled', 'not-started': 'queued to start', idle: 'between steps' }
 const childWords = (s?: string) => (s ? CHILD_WORDS[s] ?? s : 'not readable here')
 const list = (xs: string[]) => xs.filter(x => !x.startsWith('_')).join(', ') || '—'
 // Recorded text as one sentence: its own final stop, or one added.
@@ -531,6 +532,15 @@ export class RunSide {
     else if (ex.state === 'completed') { kind = 'completed'; head = !last ? 'Completed' : accepted ? (this.approval?.kind === 'integrated' ? 'Completed, accepted and integrated' : this.approval?.kind === 'integrating' ? 'Accepted — integrating' : 'Completed and accepted') : 'Completed — result rejected'; lead = !last ? 'Work completed. Reviews and decisions can be recorded independently of integration.' : h('span', `${last.decision === 'accepted' ? 'Accepted' : 'Rejected'}${last.confirmation ? ` from ${last.confirmation.from}'s answer` : ` by ${last.by}`}`, h('span.d-only', `${last.confirmation ? ` (${last.confirmation.question}, recorded by ${last.by})` : ''}, ${when(last.at)}`), '.') }
     else if (ex.active.length || rec.control.attempt) { kind = 'working'; head = 'Work in progress'; lead = this.observation(rec)[0] === 'warn' ? 'Recorded as in progress, but this host does not see the work running: look below.' : 'Nothing is needed from you now.' }
     else if (ex.state === 'not-started') { kind = 'not-started'; head = st.text; lead = `Waiting for ${rec.executor.name} to start.` }
+    // A human review (p17): the agent's work is done; the person starts it on its review page.
+    else if (!d.rev && Object.values(rec.reviews ?? {}).some(v => isAwaitingPerson(v) || hostOwes(v) || owedContinuation(v))) {
+      const rounds = Object.values(rec.reviews ?? {}).filter(v => isAwaitingPerson(v) || hostOwes(v) || owedContinuation(v))
+      kind = 'humanreview'
+      head = st.text
+      const href = (id: string) => `#/ws/${encodeURIComponent(d.wsId)}/review/${encodeURIComponent(rec.workflow)}/${encodeURIComponent(rec.run)}/${encodeURIComponent(id)}`
+      lead = h('span', ...rounds.flatMap((v, i) => [i ? ' ' : '', isAwaitingPerson(v) ? h('a.button.primary', { href: href(v.id) }, v.state === 'reviewing' ? `Continue the review (${v.id})` : `Start review (${v.id})`) : h('a', { href: href(v.id) }, `${v.id}: ${reviewStateText(v)}`)]),
+        h('span.d-only.muted', ` ${rounds.map(v => `${v.id}: ${v.subjects.length} presentation${v.subjects.length === 1 ? '' : 's'}, prepared by ${v.prepared.by}`).join('; ')}. No process runs meanwhile.`))
+    }
     // A delegate node waits on its child (p10): the next move is the child's, or this run's agent's when a fact came back.
     else if (ex.waiting.some(w => 'delegation' in w.on)) {
       const w = ex.waiting.find(x => 'delegation' in x.on)!
@@ -544,7 +554,7 @@ export class RunSide {
     if (this.focus.dataset.kind !== kind) this.focus.dataset.kind = kind
 
     // The situation's icon, large: what kind of task this is before any word is read (p8/ex1).
-    const FOCUS_ICON: Record<string, string> = { delegated: 'delegate', waiting: 'history', reaccept: 'alert', integration: 'alert', review: 'present', question: 'question', answered: 'history', held: 'stop', failed: 'alert', accepted: 'check', completed: 'check', cancelled: 'stop', working: 'play', history: 'history', 'not-started': 'play', idle: 'play' }
+    const FOCUS_ICON: Record<string, string> = { humanreview: 'review', delegated: 'delegate', waiting: 'history', reaccept: 'alert', integration: 'alert', review: 'present', question: 'question', answered: 'history', held: 'stop', failed: 'alert', accepted: 'check', completed: 'check', cancelled: 'stop', working: 'play', history: 'history', 'not-started': 'play', idle: 'play' }
     const done = kind === 'completed' && last?.decision === 'rejected' ? 'failed' : kind === 'completed' && !last ? 'pending' : kind
     const blocks: (Node | null)[] = [h('div.focus-top', h(`span.focus-icon.tone-${done}`, icon(FOCUS_ICON[kind] ?? 'flag', 'icon')), h('div.focus-words', h('h2.focus-head', { dataset: { status: st.state } }, head), h('p.focus-lead', lead), more))]
     // The one-click review, while it is served (p7); otherwise what became of it.
@@ -1164,7 +1174,7 @@ export class RunSide {
     this.attend(this.execution, problems ? 'error' : d.execError || rec.control.hold ? 'warn' : null)
     const open = ev?.attempts.find(a => a.state !== 'ended')
     const SIT: Record<string, string> = {
-      executing: 'Executing', stopping: 'Stop requested — waiting for the process to end', 'awaiting-person': 'Awaiting a person — no process runs meanwhile',
+      executing: 'Executing', stopping: 'Stop requested — waiting for the process to end', 'awaiting-person': 'Awaiting a person — no process runs meanwhile', 'awaiting-review': 'Work complete, awaiting a human review — no process runs meanwhile',
       stopped: 'Stopped (held) — its work is kept; resumes only when you resume it', interrupted: 'Interrupted — a recovery agent or you look at the working tree, then continue it', unknown: 'Unknown — the process was lost; a recovery agent or you look, then continue it',
       completed: 'Completed', cancelled: 'Cancelled', 'not-started': 'Not started', idle: 'Idle',
     }

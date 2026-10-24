@@ -164,7 +164,7 @@ export interface RunView { execution: ExecutionState; cancelled: boolean; questi
 // A post a delegation's delivery recorded (p10, docs/delegation.md): which
 // delegation of which parent run, and which of its request, answers or
 // instructions it carries. Bound by the delivered message id, never by text.
-export interface DelegationPostRef { uid: string; workspace: string; workflow: string; run: string; delegation: string; kind: 'request' | 'answer' | 'instruction'; index: number; question?: string }
+export interface DelegationPostRef { uid: string; workspace: string; workflow: string; run: string; delegation: string; kind: 'request' | 'answer' | 'instruction' | 'revision'; index: number; question?: string } // revision (fix6): the parent returned the child's result for correction
 
 export type Classification =
   | { kind: 'ignored'; reason: 'bot' | 'unauthorized' }

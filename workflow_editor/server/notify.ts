@@ -102,7 +102,7 @@ export interface RunRow { key: string; project: string; workflow: string; run: s
 export interface IoAttemptRow { attempt: string; run_key: string; log: string | null; ino: number | null; offset: number; line: number; reader: string; began_queued: number; ended_queued: number; gap: string | null; updated: string }
 // What a delegation's outbox event carries: enough to find the parent's
 // record and the one answer or instruction it is (docs/delegation.md).
-export interface DelegationOutEvent { id: string; seq: number; type: 'delegation-request' | 'delegation-answer' | 'delegation-instruction'; at: string; by: string; critical: true; parent: { workspace: string; project: string; workflow: string; run: string }; delegation: string; uid: string; index: number; question?: string }
+export interface DelegationOutEvent { id: string; seq: number; type: 'delegation-request' | 'delegation-answer' | 'delegation-instruction' | 'delegation-revision'; at: string; by: string; critical: true; parent: { workspace: string; project: string; workflow: string; run: string }; delegation: string; uid: string; index: number; question?: string }
 // The conversation key and request topic of a delegation (labels; the
 // delivery's recorded message id is the identity).
 export const delegationLabel = (parent: { project: string; workflow: string; run: string }, d: string) => `from-${parent.project}.${parent.workflow}.${parent.run}.${d}`
@@ -593,12 +593,12 @@ export class NotifyStore {
         // answers and instructions, into its target workflow's channel, in
         // record order, each a delivery of its own.
         for (const h of rec.history) {
-          if (h.seq <= row!.scan_seq || !['delegation.dispatch', 'delegation.answer', 'delegation.instruct'].includes(h.op)) continue
+          if (h.seq <= row!.scan_seq || !['delegation.dispatch', 'delegation.answer', 'delegation.instruct', 'delegation.revise'].includes(h.op)) continue
           const d = rec.delegations?.[(h as { delegation?: string }).delegation ?? '']
           if (!d) continue
           const conv = this.delegationThread(ws.reg.id, rec, d)
-          const type = h.op === 'delegation.dispatch' ? 'delegation-request' : h.op === 'delegation.answer' ? 'delegation-answer' : 'delegation-instruction'
-          const index = type === 'delegation-answer' ? d.answers.find(a => a.seq === h.seq)?.n ?? 0 : type === 'delegation-instruction' ? d.instructions.find(a => a.seq === h.seq)?.n ?? 0 : 0
+          const type = h.op === 'delegation.dispatch' ? 'delegation-request' : h.op === 'delegation.answer' ? 'delegation-answer' : h.op === 'delegation.revise' ? 'delegation-revision' : 'delegation-instruction'
+          const index = type === 'delegation-answer' ? d.answers.find(a => a.seq === h.seq)?.n ?? 0 : type === 'delegation-instruction' ? d.instructions.find(a => a.seq === h.seq)?.n ?? 0 : type === 'delegation-revision' ? d.revisions?.find(a => a.seq === h.seq)?.n ?? 0 : 0
           const ev: DelegationOutEvent = { id: `${key}#${h.seq}:${type}@${d.id}`, seq: h.seq, type, at: h.at, by: h.by, critical: true, parent: { workspace: ws.reg.id, project: rec.project, workflow: rec.workflow, run: rec.run }, delegation: d.id, uid: d.uid, index, ...(type === 'delegation-answer' ? { question: (h as { question?: string }).question } : {}) }
           insert(ev.id, h.seq, type, true, ev, conv)
         }
@@ -614,7 +614,8 @@ export class NotifyStore {
       if (d.disposition || d.closed) continue
       const owed = [...(d.child ? [] : [{ seq: d.dispatched.seq, type: 'delegation-request' as const, index: 0 }]),
         ...d.answers.map(a => ({ seq: a.seq, type: 'delegation-answer' as const, index: a.n, question: a.question })),
-        ...d.instructions.map(i => ({ seq: i.seq, type: 'delegation-instruction' as const, index: i.n }))]
+        ...d.instructions.map(i => ({ seq: i.seq, type: 'delegation-instruction' as const, index: i.n })),
+        ...(d.revisions ?? []).map(r => ({ seq: r.seq, type: 'delegation-revision' as const, index: r.n }))]
       for (const o of owed) {
         const id = `${key}#${o.seq}:${o.type}@${d.id}`
         if (this.one('SELECT 1 FROM outbox WHERE id = ?', id) || this.one('SELECT 1 FROM delivery_events WHERE event = ?', id)) continue
@@ -1005,6 +1006,11 @@ export class NotifyStore {
     if (ev.type === 'delegation-request') {
       const text = await readFile(join(space.root, d.request.path), 'utf8')
       return { content: renderDelegationPost({ ...base, kind: 'request', from: rec.executor.name, text }), marker, unpublished: [] }
+    }
+    if (ev.type === 'delegation-revision') {
+      const r = d.revisions?.find(a => a.n === ev.index)
+      if (!r) throw new Error(`delegation ${ev.uid} has no correction request ${ev.index}`)
+      return { content: renderDelegationPost({ ...base, kind: 'revision', from: r.from, by: r.by, text: r.instruction, reason: r.reason, result: r.event }), marker, unpublished: [] }
     }
     const item = ev.type === 'delegation-answer' ? d.answers.find(a => a.n === ev.index) : d.instructions.find(a => a.n === ev.index)
     if (!item) throw new Error(`delegation ${ev.uid} has no ${ev.type === 'delegation-answer' ? 'answer' : 'instruction'} ${ev.index}`)

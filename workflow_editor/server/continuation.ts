@@ -66,6 +66,7 @@ export function stateLines(r: RunRecord): string[] {
   }
   const pres = Object.values(r.presentations ?? {}).filter(p => p.state !== 'stopped')
   if (pres.length) out.push(`Presentations not stopped: ${pres.map(p => `${p.id} (${p.state}, from ${p.node}${Object.values(r.questions).filter(q => q.presentation?.id === p.id).map(q => `, asked in ${q.id}`).join('')})`).join('; ')}.`)
+  for (const k of Object.values(r.corrections ?? {}).filter(x => !x.addressed)) out.push(`Correction ${k.id} from ${k.from} not addressed yet: the delegating run returned the result completed at seq ${k.result.seq} (wfe run correction ${runKey(r)}).`)
   if (r.definition.revisions?.length) out.push(`Definition: revision ${r.definition.active} in force (wfe run revisions <run>).`)
   for (const d of r.decisions) out.push(`Decision: ${d.decision} by ${d.by} at ${d.at}${d.confirmation ? ` (answer ${d.confirmation.answer} to ${d.confirmation.question})` : ''}.`)
   return out

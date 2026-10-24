@@ -7,7 +7,7 @@ import type { RunResponse } from '../shared/api.ts'
 import { accessAt } from '../shared/access.ts'
 import { normalizeRepoPath, sessionPolicyOf } from '../shared/model.ts'
 import { docStepsOf, hasDocSteps, splitCounts } from '../shared/compile.ts'
-import { describeSteps, effectiveOf, EXECUTOR_OPS, holderOf, hostOf, notableEvents, questionState, runKey, type BecauseRef, type EntrustRef, type HistoryEntry, type Instruction, type OpInput, type RunRecord, type RunRef } from '../shared/run.ts'
+import { describeSteps, effectiveOf, EXECUTOR_OPS, holderOf, hostOf, notableEvents, questionState, runKey, type BecauseRef, type Correction, type EntrustRef, type HistoryEntry, type Instruction, type OpInput, type RunRecord, type RunRef } from '../shared/run.ts'
 import {
   adjustRun, checkRun, createRun, listRuns, readRun, recordDone, resolveRef, runDir, runOp, runResponse, usableRun, type AdjustResult, type CreateRunOptions,
 } from '../server/runs.ts'
@@ -40,8 +40,10 @@ export interface RunCli {
 // (workflow_editor fix5, docs/runs.md "Reminders at operation boundaries").
 const REMINDERS = `Before recording it, WFE may answer with reminders instead: work not
 presented, a page still serving with no cleanup planned, work that may have
-been done outside nodes. They record nothing; the refusal names the facts,
-the repair, and how to continue as it is.`
+been done outside nodes; when it completes a run that delegated, what its
+children's results left out (wfe delegate show). They record nothing; the
+refusal names the facts and the repair, ends with both in short, and says
+how to continue as it is.`
 
 const COMMON = `Common options: --by <name> (who records: your own name. An executing
   attempt (WFE_ATTEMPT) records as the run's agent and refuses another name;
@@ -202,6 +204,21 @@ Records that the executor took up these instructions and what it will do:
 incorporate them into upcoming work, clarify them with a question to the
 person, or explain why they need a new run. It tells the person their words
 reached the executor; no transition waits for it. Writes run.json.`,
+  correction: `wfe run correction <run> [<c>] [--note <text>] [--no-change --note <why>]
+
+A correction is the run that delegated this one returning its completed
+result (workflow_editor fix6): what to add, why, and whose words. While it is
+not addressed this run is not completed, and its agent owes the next move.
+Without <c>: lists the corrections. With <c>: records that you read it
+(--note says what you will do). Then add the missing work as new nodes —
+wfe run adjust (catalog templates with wfe nodes instantiate, e.g. a
+present node and its cleanup) — and perform it; that addresses it. Completed
+work is kept and not repeated. The next completion is a new result for the
+delegating run.
+--no-change --note <why>: nothing needs to change; the run completes again
+as it is and the delegating run is told why. Ending an attempt with a
+correction that arrived before it still unaddressed holds the run as
+interrupted, like work left ready. Writes run.json.`,
   integrate: `wfe run integrate <run> [--dry-run|--status] [--by <actor>]
 
 Integrates the actual saved run copy into its recorded target branches.
@@ -435,6 +452,7 @@ export function runIndex(): string {
   io <run>                 the run's detailed IO channel; one IO entry in full (--attempt, --line)
   ask / answer / take-up / withdraw    questions
   instructions / instruct / ack       additional instructions: list, give, acknowledge
+  correction <run> [<c>]   a delegating run returned this run's result: list, take up, --no-change
   access <run> [<path>]... what the run's definition declares for a path
   attach <run> <path>      record an artifact
   input / inputs <run>     select an input set from a shared:// reference; list and verify them
@@ -512,6 +530,12 @@ function entryLine(e: HistoryEntry): string {
   if (e.change.execution) moves.push(`run ${e.change.execution[0] ?? '—'}→${e.change.execution[1]}`)
   const detail = (d.reason ?? d.outcome ?? d.text ?? d.evidence ?? d.external ?? d.note ?? '') as string
   return `  ${String(e.seq).padStart(3)} ${e.at}  ${e.op.padEnd(17)} ${e.by} (${e.via})${subject ? `  ${subject}` : ''}${moves.length ? `  [${moves.join(', ')}]` : ''}${detail ? `\n${' '.repeat(30)}${first(detail, 140)}` : ''}`
+}
+
+// A correction as the run's agent reads it (fix6).
+export function correctionLines(k: Correction): string[] {
+  return [`  ${k.id} ${k.addressed ? `addressed (${k.addressed.how}, seq ${k.addressed.seq})` : k.takenUp ? 'taken up, not addressed yet' : 'received, not addressed'} — from ${k.from}${k.by !== k.from ? ` (relayed by ${k.by})` : ''} at ${k.at}, returning the result completed at seq ${k.result.seq} (delegation ${k.delegation.uid}, request ${k.delegation.revision})`,
+    `     why: ${first(k.reason, 400)}`, `     add: ${first(k.text, 600)}`, ...(k.takenUp?.note ? [`     note: ${first(k.takenUp.note, 300)}`] : [])]
 }
 
 export function describeRun(r: RunResponse, opts: { history?: boolean; url?: string | null } = {}): string {
@@ -750,10 +774,12 @@ export async function runCommand(c: RunCli): Promise<number> {
         const run = `${ws.reg.id}/${runKey(r)}`
         const open = await quietly(() => discussions(async ds => ds.conductedBy(run).filter(id => ds.conversation(id)?.state === 'open'
           && !ds.activityRows(id).some(a => a.run === run && a.kind === 'announce' && a.obligations !== null)))) ?? []
-        if (open.length) extra.push({ code: 'discussion-open', refs: open, text: `This completes ${run}, which conducts ${open.join(', ')}: still open, and this run has announced no conclusion there. A completed run can no longer speak; the discussion would wait for the next message.`, repair: ['if it is finished, add a conclusion first: wfe discussion ponder --node <a ponder node> --next announce:<id>, then wfe discussion announce --node <id> --conclude [--close]', 'if it is not, say there what happens next'] })
+        if (open.length) extra.push({ code: 'discussion-open', refs: open, text: `This completes ${run}, which conducts ${open.join(', ')}: still open, and this run has announced no conclusion there. A completed run can no longer speak; the discussion would wait for the next message.`, repair: ['if it is finished, add a conclusion first: wfe discussion ponder --node <a ponder node> --next announce:<id>, then wfe discussion announce --node <id> --conclude [--close]', 'if it is not, say there what happens next'], summary: `${open.join(', ')} still open with no conclusion from this run → wfe discussion ponder … --next announce:<id>, then wfe discussion announce --conclude` })
       }
     }
-    return { extra, what }
+    // fix6: the delegated results this run reports, when its completion completes the run.
+    const assess = async (rec: RunRecord) => { const { delegatedReminders } = await import('../server/delegate.ts'); return delegatedReminders(c.exec().delegate, rec) }
+    return { extra, what, assess }
   }
 
   switch (sub) {
@@ -952,6 +978,20 @@ export async function runCommand(c: RunCli): Promise<number> {
       const ids = args.slice(1)
       if (!ids.length) throw c.usage('<instruction>... is required (i1 i2 …)')
       return op({ op: 'instruction.ack', instructions: ids, response: need(c, 'response', 'incorporate, clarify or new-run'), note: need(c, 'note', 'what you will do about it') }, () => `Recorded: ${ids.join(', ')} acknowledged.`)
+    }
+    case 'correction': {
+      const id = args[1]
+      if (!id) {
+        const r = await ref()
+        const { record } = await wrap(() => usableRun(ws, r))
+        const all = Object.values(record.corrections ?? {})
+        c.out(all.length ? all.flatMap(correctionLines).join('\n') : 'No corrections were received.', { ref: runKey(r), corrections: all })
+        return 0
+      }
+      const noChange = c.flag('no-change')
+      return op({ op: 'correction.take-up', correction: id, note: noChange ? need(c, 'note', 'why nothing needs to change') : c.opt('note') ?? '', ...(noChange ? { noChange: true } : {}) }, (rec) => noChange
+        ? `Recorded: correction ${id} needs no change (${rec.execution.state === 'completed' ? 'the run is completed again; the delegating run is told' : `the run is ${rec.execution.state}`}).`
+        : `Taken up: correction ${id}. Add the missing work as new nodes (wfe run adjust; wfe nodes instantiate <template> --run ${runKey(rec)} …) and perform it; that addresses it.`)
     }
     case 'io': {
       const r = await ref()

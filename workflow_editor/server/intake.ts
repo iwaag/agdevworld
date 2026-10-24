@@ -304,7 +304,7 @@ export class IntakeStore {
     let c: Classification
     if (dp?.state === 'sent') {
       const ev = dp.event
-      const ref: DelegationPostRef = { uid: ev.uid, workspace: ev.parent.workspace, workflow: ev.parent.workflow, run: ev.parent.run, delegation: ev.delegation, kind: ev.type === 'delegation-request' ? 'request' : ev.type === 'delegation-answer' ? 'answer' : 'instruction', index: ev.index, ...(ev.question ? { question: ev.question } : {}) }
+      const ref: DelegationPostRef = { uid: ev.uid, workspace: ev.parent.workspace, workflow: ev.parent.workflow, run: ev.parent.run, delegation: ev.delegation, kind: ev.type === 'delegation-request' ? 'request' : ev.type === 'delegation-answer' ? 'answer' : ev.type === 'delegation-revision' ? 'revision' : 'instruction', index: ev.index, ...(ev.question ? { question: ev.question } : {}) }
       if (earlier) return 'waiting'
       const problem = (detail: string) => { done(route, null, 'problem', detail, binding?.key ?? null); this.finish(row); return 'ok' as const }
       if (ref.kind === 'request') {
@@ -317,6 +317,8 @@ export class IntakeStore {
         const ent = child?.input.entrustedBy
         if (!child || ent?.kind !== 'delegation' || ent.delegation !== ref.uid) return problem(`${ref.kind} ${ref.index} of delegation ${ref.uid} was posted in request ${binding.key}, whose run was not created from that delegation; nothing is applied`)
         if (child.cancelled || child.execution.state === 'cancelled') c = { kind: 'closed', reason: 'cancelled' } as Classification
+        // A correction (fix6) is for a completed result; the child's record decides at application.
+        else if (ref.kind === 'revision') c = { kind: 'instruction', delegation: ref }
         else if (child.execution.state === 'completed') c = { kind: 'closed', reason: 'completed' } as Classification
         else c = ref.kind === 'answer' ? { kind: 'answer', question: ref.question ?? '', by: 'delegation', delegation: ref } : { kind: 'instruction', delegation: ref }
       }
@@ -485,15 +487,25 @@ export class IntakeStore {
   private async applyDelegationPost(row: MessageRow, b: RequestRow, ws: Workspace, c: Classification & { kind: 'answer' | 'instruction' }, ref: DelegationPostRef, receipt: string): Promise<'ok'> {
     const parent = { workspace: ref.workspace, workflow: ref.workflow, run: ref.run }
     const { delegation } = await this.delegate.requestOf(parent, ref.delegation)
-    const item = ref.kind === 'answer' ? delegation.answers.find(a => a.n === ref.index) : delegation.instructions.find(a => a.n === ref.index)
-    if (!item) throw new Error(`delegation ${ref.uid} has no ${ref.kind} ${ref.index}`)
     const childRef = { workflow: b.run_workflow!, run: b.run! }
-    const op = c.kind === 'answer'
-      ? { op: 'question.answer' as const, question: c.question, text: item.text, from: item.from, source: this.source(row), delegation: { uid: ref.uid, answer: ref.index }, receipt }
-      : { op: 'instruction.receive' as const, text: item.text, from: item.from, source: this.source(row), receipt }
-    const told = async (reason: string) => this.delegate.refused(parent, ref.delegation, { kind: ref.kind as 'answer' | 'instruction', index: ref.index, reason, ...(ref.question ? { question: ref.question } : {}) }).catch(() => undefined)
+    let op
+    if (ref.kind === 'revision') {
+      // fix6: the parent returned the child's result; the words, the reason
+      // and the result it returns come from the parent's record.
+      const r = delegation.revisions?.find(a => a.n === ref.index)
+      if (!r) throw new Error(`delegation ${ref.uid} has no correction request ${ref.index}`)
+      op = { op: 'correction.receive' as const, delegation: { uid: ref.uid, revision: r.n }, result: { seq: r.childSeq }, text: r.instruction, reason: r.reason, from: r.from, source: this.source(row), receipt }
+    } else {
+      const item = ref.kind === 'answer' ? delegation.answers.find(a => a.n === ref.index) : delegation.instructions.find(a => a.n === ref.index)
+      if (!item) throw new Error(`delegation ${ref.uid} has no ${ref.kind} ${ref.index}`)
+      op = c.kind === 'answer'
+        ? { op: 'question.answer' as const, question: c.question, text: item.text, from: item.from, source: this.source(row), delegation: { uid: ref.uid, answer: ref.index }, receipt }
+        : { op: 'instruction.receive' as const, text: item.text, from: item.from, source: this.source(row), receipt }
+    }
+    const by = ref.kind === 'revision' ? delegation.revisions!.find(a => a.n === ref.index)!.by : (ref.kind === 'answer' ? delegation.answers.find(a => a.n === ref.index) : delegation.instructions.find(a => a.n === ref.index))!.by
+    const told = async (reason: string) => this.delegate.refused(parent, ref.delegation, { kind: ref.kind as 'answer' | 'instruction' | 'revision', index: ref.index, reason, ...(ref.question ? { question: ref.question } : {}) }).catch(() => undefined)
     try {
-      const r = await runOp(ws, childRef, op, { by: item.by, via: 'zulip' })
+      const r = await runOp(ws, childRef, op as never, { by, via: 'zulip' })
       const seq = r.record.history.find(h => h.receipt === receipt)?.seq ?? r.record.seq
       this.move(row, 'applied', { applied: JSON.stringify({ ...childRef, seq }) })
     } catch (e) {
@@ -508,7 +520,7 @@ export class IntakeStore {
         await told(`the child is ${code === 'run-completed' ? 'completed' : 'cancelled'}`)
         return 'ok'
       }
-      if (e instanceof RequestError && e.status === 422) {
+      if (e instanceof RequestError && (e.status === 422 || (ref.kind === 'revision' && code === 'result-superseded'))) {
         this.move(row, 'done', { notice: 'problem', detail: `the run refused it: ${e.message}` })
         await told(`the child refused it: ${e.message}`)
         return 'ok'
@@ -545,6 +557,9 @@ export class IntakeStore {
       const rec = (await readRun(ws, ref)).record
       const id = Object.values(rec?.instructions ?? {}).find(i => i.source?.kind === 'zulip' && i.source.message === row.id)?.id
       if (id) await this.exec.afterInstruction(ws, ref, id)
+      // fix6: a correction continues the completed child it reopened.
+      const k = Object.values(rec?.corrections ?? {}).find(x => x.source?.kind === 'zulip' && x.source.message === row.id)?.id
+      if (k) await this.exec.afterCorrection(ws, ref, k)
     }
     this.move(row, 'done')
     return 'ok'

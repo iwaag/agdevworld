@@ -151,6 +151,7 @@ function lines(e: NotableEvent, c: RenderContext): { head: string; free: string;
     case 'cancelled': return { head: `**Run cancelled** by ${e.by}:`, free: e.text, tail: [] }
     case 'integrated': return { head: '**Integrated** — the accepted result is on the project\'s shared branches:', free: e.text, tail: [] }
     // p10: this run entrusted a node's work to another workflow, and what came back.
+    case 'corrected': return { head: `**Result returned for correction** (${e.correction}) — the delegating run asks for more before it takes this result; ${c.executor} adds the work and completes again.`, free: inRequest ? '' : e.text, tail: [] }
     case 'delegated': return { head: `**Delegated** — ${node} to ${e.holder} (${e.delegation}); the request is posted in that workflow's channel.`, free: '', tail: c.next ? [`Next: ${c.next}`] : [] }
     case 'delegation': return { head: `**${e.holder} — ${e.delegationEvent === 'completed' ? 'result delivered' : e.delegationEvent === 'failed' ? 'failure' : 'cancelled'}** for ${node} (${e.delegation}):`, free: e.text, tail: [...childLine(c, e.delegation), `Next: ${c.executor} reviews it.`] }
   }
@@ -164,11 +165,13 @@ function lines(e: NotableEvent, c: RenderContext): { head: string; free: string;
 export const quietMentions = (text: string) => text.replace(/@(_?\*)/g, '@\u200b$1')
 export const DELEGATION_POST_MAX = 8000
 export interface DelegationPost {
-  kind: 'request' | 'answer' | 'instruction'
+  kind: 'request' | 'answer' | 'instruction' | 'revision' // revision (fix6): the result returned for correction
   from: string // whose words
   by: string // who sent them (the parent's agent)
   text: string
   question?: string
+  reason?: string // revision: why the result was returned
+  result?: number // revision: the parent's result event it returns
   parent: string // <project>/<workflow>/<run>, node
   node: string
   onBehalfOf?: string | null
@@ -180,8 +183,10 @@ export function renderDelegationPost(p: DelegationPost): string {
   const relayed = p.from !== p.by ? ` (${p.from}'s words, relayed by ${p.by})` : ''
   const head = p.kind === 'request'
     ? `**Request from ${p.by}**${p.onBehalfOf ? ` for ${p.onBehalfOf}` : ''} — delegated by ${p.parent} (node ${p.node}).`
-    : p.kind === 'answer' ? `**${p.question}: answer from ${p.from}**${relayed}` : `**Instruction from ${p.from}**${relayed}`
-  return [head, '', body, '', ...(p.parentLink ? [`Delegating run: ${p.parentLink}`] : []), 'Questions here reach the requesting run; its agent answers here.', p.marker].join('\n')
+    : p.kind === 'answer' ? `**${p.question}: answer from ${p.from}**${relayed}`
+      : p.kind === 'revision' ? `**Result returned for correction by ${p.from}**${relayed} — the completed result (its event ${p.result}) does not serve the request yet; this run continues with the work below, and its next completion is a new result.`
+        : `**Instruction from ${p.from}**${relayed}`
+  return [head, '', ...(p.kind === 'revision' && p.reason ? [`Why: ${quietMentions(p.reason.trim())}`, '', 'What to add:'] : []), body, '', ...(p.parentLink ? [`Delegating run: ${p.parentLink}`] : []), 'Questions here reach the requesting run; its agent answers here.', p.marker].join('\n')
 }
 
 // The last line of a message: which run and entries it carries. Searching a

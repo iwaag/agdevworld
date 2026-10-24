@@ -1061,7 +1061,7 @@ export class RunSide {
     const links = d.childNow?.links
     const a = (label: string, url: string | null | undefined) => (url ? h('a', { href: url, target: '_blank', rel: 'noopener' }, label) : null)
     const linkRow = [childHref ? h('a', { href: childHref }, 'child run view') : null, a('conversation', links?.conversation), a('progress', links?.progress), a('detailed IO', links?.io)].filter(Boolean)
-    const next = d.closed ? 'nobody (closed)' : d.disposition ? 'nobody (judged)' : d.pending.length ? `${d.requester}: take up ${d.pending.map(n => `#${n}`).join(', ')}` : d.childNow?.waiting.length ? `the child: ${d.childNow.waiting.map(w => `${w.node} waits for ${w.holder}`).join('; ')}` : d.child ? `the child (${d.childNow?.situation ?? 'its record cannot be read here'})` : 'the delivery of the request'
+    const next = d.closed ? 'nobody (closed)' : d.disposition ? 'nobody (judged)' : d.state === 'correcting' ? `the child: it was returned its result for correction and adds the work (${d.childNow ? childWords(d.childNow.situation) : 'its record cannot be read here'})` : d.pending.length ? `${d.requester}: take up ${d.pending.map(n => `#${n}`).join(', ')}` : d.childNow?.waiting.length ? `the child: ${d.childNow.waiting.map(w => `${w.node} waits for ${w.holder}`).join('; ')}` : d.child ? `the child (${d.childNow?.situation ?? 'its record cannot be read here'})` : 'the delivery of the request'
     const result = [...d.events].reverse().find(e => e.type === 'completed')?.manifest
     const questions = d.events.filter(e => e.type === 'question')
     return h('div.delegation', { dataset: { key: `dl:${d.id}`, delegation: d.id, state: d.state } },
@@ -1073,14 +1073,32 @@ export class RunSide {
       questions.length ? h('ul.small.dl-questions', ...questions.map(q => h('li', `${q.question}${q.confirms ? ' (confirm the result)' : q.plan ? ' (agree the plan)' : ''}: ${q.text}`, q.takenUp ? h('span.muted', ` — taken up; ${d.answers.filter(x => x.question === q.question).map(x => `answered “${x.text.slice(0, 80)}” (${x.from})`).join('; ') || 'not answered yet'}`) : h('span.warn-text', ' — not taken up yet')))) : null,
       result ? h('div.small.dl-result', h('span.muted', `Result (${result.digest.slice(7, 19)}): `), result.outcome || result.execution, result.decision ? h('span.muted', ` · the child's decision: ${result.decision.decision} by ${result.decision.by}`) : null,
         h('ul', ...[...(result.report ? [result.report] : []), ...result.artifacts].map(f => h('li', h('code', f.path), h('span.muted', ` ${f.bytes} B · ${f.sha256.slice(0, 12)}`))))) : null,
+      // fix6: results returned to the same child, and the latest result's
+      // assessment (the child's records beside its catalog's expectations).
+      d.revisions?.length ? h('ul.small.dl-revisions', ...d.revisions.map(r => h('li', h('span.muted', `Returned result #${r.event} for correction (${r.from}, ${r.at.slice(0, 16).replace('T', ' ')}): `), r.reason, h('div', h('span.muted', 'Asked to add: '), r.instruction)))) : null,
+      !compact && d.assessment ? this.assessmentBlock(d.assessment) : null,
       d.disposition ? h(`p.small.${d.disposition.kind === 'satisfied' ? 'ok-text' : 'warn-text'}`, `Judged ${d.disposition.kind} by ${d.disposition.by}: ${d.disposition.note}`) : d.closed ? h('p.small.muted', d.closed.reason) : null)
+  }
+
+  private assessmentBlock(a: NonNullable<DelegationView['assessment']>): HTMLElement {
+    const word: Record<string, string> = { ok: 'ok', missing: 'missing', serving: 'serving', unknown: 'unknown' }
+    const names: Record<string, string> = { 'presentation-missing': 'Presented', 'review-unrecorded': 'The person\'s review', 'presentation-serving': 'Pages still serving' }
+    return h('div.small.dl-assessment', { dataset: { key: `as:${a.delegation}:${a.event}` } },
+      h('div', h('span.muted', `Assessment of result #${a.event} (child seq ${a.childSeq}; facts as of seq ${a.position ?? '?'}):`)),
+      h('ul', ...a.checks.map(c => h('li', { dataset: { check: c.code, status: c.status } }, chip(c.status === 'ok' ? 'completed' : c.status === 'unknown' ? 'waiting' : 'failed', word[c.status]), ' ', h('strong', names[c.code] ?? c.code), ': ', c.facts.join('; ') || '—',
+        ...c.expectations.map(e => h('div.muted', `Expects ${e}`))))),
+      ...a.integrations.map(i => h('div.muted', i)),
+      ...a.unavailable.map(u => h('div.warn-text', `Not readable: ${u}`)))
   }
 
   private updateRelated(r: RunResponse, rec: RunRecord) {
     const wsId = this.data.wsId
     const input = rec.input
     const parent = this.data.delegView?.parent
+    // fix6: the delegating run returned this run's result for correction.
+    const corrections = Object.values(rec.corrections ?? {})
     const rel = [
+      ...corrections.map(k => h('div.small', { dataset: { correction: k.id } }, h('span', k.addressed ? 'Returned for correction (addressed): ' : h('strong.warn-text', 'Returned for correction — not addressed yet: ')), `${k.id} from ${k.from}: ${k.reason}`, h('div.muted', `Asked to add: ${k.text}`))),
       r.predecessor ? h('div', 'Predecessor: ', h('a', { href: runHash(wsId, r.predecessor.ref) }, r.predecessor.ref)) : null,
       // A delegated child (p10): the run that asked for it.
       parent ? h('div', 'Delegated by: ', parent.workspace ? h('a', { href: runHash(parent.workspace, `${parent.parent.workflow}/${parent.parent.run}`) }, `${parent.parent.project} ${parent.parent.workflow}/${parent.parent.run}`) : `${parent.parent.project} ${parent.parent.workflow}/${parent.parent.run}`, h('span.muted', ` (node ${parent.parent.node})`)) : null,

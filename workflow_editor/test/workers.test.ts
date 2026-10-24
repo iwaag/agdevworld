@@ -267,7 +267,7 @@ test('workers: a forwarded command gets the same reminder as on the coordinator,
   const args = ['present', 'register', `onpc/${a.ref.run}`, 'build', '--source', 'out', '--entry', 'index.html', '--review', 'review.md', '--title', 'Built']
   const warned = await s.wfe(args, { cwd: tree, attempt: claim.attempt.id })
   assert.equal(warned.code, 1, warned.stdout)
-  assert.match(warned.stderr, /Not recorded — a reminder before registering a presentation from build:\n- cleanup-unplanned/)
+  assert.match(warned.stderr, /Not recorded — a reminder before registering a presentation from build: cleanup-unplanned\.\n- cleanup-unplanned/)
   assert.equal((await readRun(await runSpace(s.ws, a.ref), a.ref)).record!.presentations, undefined, 'nothing registered on the coordinator')
   const ok = await s.wfe([...args, '--yes', '--json'], { cwd: tree, attempt: claim.attempt.id })
   assert.equal(ok.code, 0, ok.stderr + ok.stdout)

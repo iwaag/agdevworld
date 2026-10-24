@@ -861,6 +861,13 @@ async function prepareOp(ws: Workspace, ref: RunRef, record: RunRecord, graph: R
     }
     delete op.subjects
   }
+  // fix6: a correction returns one particular completion; the run may have
+  // completed again since (a stale request is refused, not applied to the
+  // newer result).
+  if (op.op === 'correction.receive') {
+    const last = [...record.history].reverse().find(h => h.change?.execution?.[1] === 'completed')
+    if (last && op.result && last.seq !== op.result.seq) throw new RequestError(409, `this run completed again at seq ${last.seq}, after the result (seq ${op.result.seq}) the correction returns; it is not applied to the newer result`, { code: 'result-superseded' })
+  }
   if (op.op === 'run.decide') {
     delete op.subject
     const q = op.question ? record.questions[op.question] : undefined

@@ -135,6 +135,8 @@ export function createHandler(config: ServiceConfig) {
 
   const agdev: AgdevContext = { registryFile: config.registryFile, area, gitea: config.gitea, giteaProblem: config.giteaProblem, executor: config.exec ? async () => config.exec!.executorState() : undefined, workers: config.exec ? async () => config.exec!.workersState().map(w => ({ id: w.id, label: w.label, local: w.local, state: w.state, at: w.at, detail: w.detail })) : undefined }
   const needExec = () => { if (!config.exec) throw new RequestError(503, 'execution is not configured on this service'); return config.exec }
+  // fix6: the delegated results a run reports are assessed with its completion (reads children through this host's delegation store).
+  const assessAdvice = () => config.exec ? { assess: async (rec: import('../shared/run.ts').RunRecord) => (await import('./delegate.ts')).delegatedReminders(config.exec!.delegate, rec) } : {}
   const str = (v: unknown, what: string) => { if (typeof v !== 'string' || !v.trim()) throw new RequestError(400, `${what} is required`); return v.trim() }
   const category = (v: unknown): RepoCategory => { if (!REPO_CATEGORIES.includes(v as RepoCategory)) throw new RequestError(400, `category must be one of ${REPO_CATEGORIES.join(', ')}`); return v as RepoCategory }
 
@@ -662,7 +664,7 @@ export function createHandler(config: ServiceConfig) {
         }
         const ref: RunRef = { workflow: parts[4] ?? '', run: parts[5] ?? '' }
         const sub = parts[6]
-        if (!ref.workflow || !ref.run || (parts.length > 7 && sub !== 'checkpoints' && sub !== 'presentations')) throw new RequestError(404, 'not found')
+        if (!ref.workflow || !ref.run || (parts.length > 7 && sub !== 'checkpoints' && sub !== 'presentations' && sub !== 'delegations')) throw new RequestError(404, 'not found')
         if (!sub && method === 'GET') return send(res, 200, await runResponse(ws, ref, { rev: url.searchParams.get('rev') || undefined }))
         if (sub === 'exec' && method === 'GET') return send(res, 200, await needExec().runView(ws.reg.id, ref))
         // What each attempt was prepared with and the next attempt now (p13, docs/context.md).
@@ -681,9 +683,34 @@ export function createHandler(config: ServiceConfig) {
         }
         // Delegations (p10, docs/delegation.md): the parent's, with each child's
         // current situation; and, for a child, who delegated it. Reads only.
-        if (sub === 'delegations' && method === 'GET') {
+        if (sub === 'delegations' && !parts[7] && method === 'GET') {
           const { delegationsView } = await import('./delegate.ts')
           return send(res, 200, await delegationsView(needExec().delegate, ws, ref))
+        }
+        // fix6: judging a delegated result and returning it for correction,
+        // the same operations as wfe delegate dispose|revise. `yes` continues
+        // past the assessment's reminders for this one request; a client shows
+        // the reminders and asks before sending it, never sets it by itself.
+        if (sub === 'delegations' && parts[7] && (parts[8] === 'dispose' || parts[8] === 'revise') && method === 'POST') {
+          const input = await body(req) as Record<string, unknown>
+          const by = typeof input.by === 'string' ? input.by.trim() : ''
+          if (!by) throw new RequestError(400, 'by is required: the name of who records this')
+          const store = needExec().delegate
+          const meta = { ...(typeof input.receipt === 'string' ? { receipt: input.receipt } : {}), ...(typeof input.attempt === 'string' ? { attempt: input.attempt } : {}) }
+          const event = typeof input.event === 'number' ? input.event : undefined
+          const manifest = typeof input.manifest === 'string' ? input.manifest : undefined
+          const because = input.because && typeof input.because === 'object' ? input.because as never : undefined
+          const r = parts[8] === 'dispose'
+            ? await store.dispose(ws, ref, parts[7], { disposition: str(input.disposition, 'disposition'), note: str(input.note, 'note'), event, manifest, yes: input.yes === true }, { by, via: 'browser', ...meta })
+            : await store.revise(ws, ref, parts[7], { instruction: str(input.instruction, 'instruction'), reason: str(input.reason, 'reason'), event, manifest, because }, { by, via: 'browser', ...meta })
+          return send(res, 200, { ok: true, duplicate: r.duplicate ?? false, seq: r.record.seq, delegation: r.record.delegations?.[parts[7]] })
+        }
+        // fix6: one delegation's result assessment (reads only).
+        if (sub === 'delegations' && parts[7] && parts[8] === 'assessment' && method === 'GET') {
+          const store = needExec().delegate
+          const { record, d } = await store.parentDelegation(ws, ref, parts[7])
+          const { assessDelegation } = await import('./delegate.ts')
+          return send(res, 200, { assessment: await assessDelegation(store, record, d) })
         }
         // Zulip coordination of this run: its topic, what is still owed, problems.
         if (sub === 'notify' && method === 'GET') {
@@ -749,7 +776,7 @@ export function createHandler(config: ServiceConfig) {
           // and the same reminders as wfe run adjust --completing [--yes].
           const c = input.completing as Record<string, unknown> | undefined
           const completing = c && typeof c === 'object' ? { node: str(c.node, 'completing.node'), outcome: str(c.outcome, 'completing.outcome'), artifacts: Array.isArray(c.artifacts) ? c.artifacts.map(String) : [] } : undefined
-          const r = await adjustRun(ws, ref, { text: str(input.text, 'the adjusted definition'), reason: str(input.reason, 'the reason'), source, dryRun: input.dryRun === true, expectRevision: typeof input.expectRevision === 'string' ? input.expectRevision : undefined, completing }, { by, via: 'browser', expectSeq: typeof input.expectSeq === 'number' ? input.expectSeq : undefined, advice: { yes: input.yes === true }, ...(typeof input.receipt === 'string' ? { receipt: input.receipt } : {}), ...(typeof input.attempt === 'string' ? { attempt: input.attempt } : {}) })
+          const r = await adjustRun(ws, ref, { text: str(input.text, 'the adjusted definition'), reason: str(input.reason, 'the reason'), source, dryRun: input.dryRun === true, expectRevision: typeof input.expectRevision === 'string' ? input.expectRevision : undefined, completing }, { by, via: 'browser', expectSeq: typeof input.expectSeq === 'number' ? input.expectSeq : undefined, advice: { yes: input.yes === true, ...assessAdvice() }, ...(typeof input.receipt === 'string' ? { receipt: input.receipt } : {}), ...(typeof input.attempt === 'string' ? { attempt: input.attempt } : {}) })
           return send(res, r.ok ? 200 : 422, r)
         }
         // Work already done, recorded as a completed node (fix5): wfe run record-done.
@@ -783,7 +810,7 @@ export function createHandler(config: ServiceConfig) {
           const expectSeq = typeof input.expectSeq === 'number' ? input.expectSeq : undefined
           // yes (fix5): continue past this operation's reminders, as --yes does.
           const { by: _b, expectSeq: _e, yes, ...op } = input
-          const advice = { yes: yes === true }
+          const advice = { yes: yes === true, ...assessAdvice() }
           const x = config.exec
           const reason = typeof op.reason === 'string' ? op.reason : ''
           // The person's control operations go through execution management,

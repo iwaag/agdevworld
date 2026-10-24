@@ -12,6 +12,7 @@ import { ConversationWorkflows, type WorkflowRef, type WorkflowRelation, type Wo
 import type { ExecStore } from '../server/exec.ts'
 import { adviseRun, readRun } from '../server/runs.ts'
 import type { Boundary } from '../shared/reminders.ts'
+import type { RunRecord } from '../shared/run.ts'
 import { RequestError } from '../server/workspace.ts'
 
 // Why --if-untitled left the display title alone (challenge p4).
@@ -55,8 +56,9 @@ reply | contribute [<id>] (--text <t> | --file <f|->) --re <msg>… [--kind repl
                               that spoke and left its node running is held interrupted).
                               A result, synthesis or --completing post may first get WFE's
                               reminders (work not presented, a page left serving, work done
-                              outside nodes); nothing is posted then, and the refusal says how
-                              to continue.
+                              outside nodes, and what a delegated child's result left out —
+                              wfe delegate show); nothing is posted then, and the refusal says
+                              how to continue (--yes: as it is, for this post only).
                               --workflow <record>: your turn's workflow records this is about
 link [<id>] <msg> --run <workspace>/<workflow>/<run> --as <relation> --note <why>
                               what a message is to a run: ${RELATIONS.filter(r => r !== 'turn').join(', ')}.
@@ -367,7 +369,9 @@ export async function conversationCommand(c: ConversationCli): Promise<number> {
         const said = text()
         if (bounds.length && !ds.posted(id, o.run, said, c.opt('key'))) {
           const { workspace, ref } = parseRunName(o.run)
-          try { await adviseRun(await x.workspace(workspace), ref, bounds, c.flag('yes') ? { yes: true } : { what: `posting this ${kind}${complete ? ` and completing ${complete}` : ''}` }) } catch (e) { if (e instanceof RequestError) throw c.refused(e.message, e.detail); throw e }
+          // fix6: the delegated results it reports are assessed too, in the same response.
+          const assess = async (rec: RunRecord) => { const { delegatedReminders } = await import('../server/delegate.ts'); return delegatedReminders(x.delegate, rec) }
+          try { await adviseRun(await x.workspace(workspace), ref, bounds, c.flag('yes') ? { yes: true } : { what: `posting this ${kind}${complete ? ` and completing ${complete}` : ''}`, assess }) } catch (e) { if (e instanceof RequestError) throw c.refused(e.message, e.detail); throw e }
         }
         const r = await ds.contribute(id, { text: said, author: o.agent, run: o.run, attempt: o.attempt, invitation: o.discussion === id ? o.invitation : null, re, kind: kind as MessageKind, key: c.opt('key'), node: complete ?? null, complete: !!complete })
         const wfs = new ConversationWorkflows(ds)

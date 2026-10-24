@@ -1,0 +1,229 @@
+// workflow_editor fix6: the delegated-result assessment (shared/assessment.ts)
+// and the wider coverage of the child's own presentation reminder. Child
+// runs are real records made through the operations; the delegation around
+// them is the parent's record shape. Observations are kept apart from
+// judgement: a coordination or report-only result raises nothing, a file
+// extension is a signal, a missing human answer is unknown, not a violation.
+import { after, before, test } from 'node:test'
+import assert from 'node:assert/strict'
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { createProject } from '../server/create.ts'
+import { createTemplate } from '../server/catalog.ts'
+import { gitOk } from '../server/git.ts'
+import { loadRegistry } from '../server/registry.ts'
+import { adjustRun, catalogOf, createRun, readRun, registerPresentation, runOp } from '../server/runs.ts'
+import { RequestError, Workspace } from '../server/workspace.ts'
+import { assessResult, assessmentReminders, type ChildEvidence } from '../shared/assessment.ts'
+import type { Delegation, DelegationEvent } from '../shared/delegation.ts'
+import { graphOfState, type OpInput, type RunRecord } from '../shared/run.ts'
+
+let root = ''
+before(async () => {
+  root = await mkdtemp(join(tmpdir(), 'wfe-assessment-'))
+  await writeFile(join(root, 'gitconfig'), '[user]\n\tname = Test Person\n\temail = t@example.invalid\n')
+  process.env.GIT_CONFIG_GLOBAL = join(root, 'gitconfig')
+  process.env.WFE_LOCK_DIR = join(root, 'locks')
+})
+after(async () => { await rm(root, { recursive: true, force: true }) })
+
+const HEAD = `schema: ag.workflow.v2
+id: freework
+name: Free work
+intent: |
+  Serve the request.
+documentation: {policy: manual}
+repositories:
+  project: {path: ., access: editable}
+nodes:
+  talk:
+    type: talk
+    description: Consult.
+    repositories: []
+`
+const tpl = (id: string) => `    template: {id: ${id}, revision: 1, expectation: "${id} as its own node."}\n`
+const node = (id: string, type: string, extra = '') => `  ${id}:\n    type: ${type}\n    description: ${id}.\n    repositories: []\n${extra}`
+const flow = (nodes: string, edges: [string, string][]) => `${HEAD}${nodes}edges:\n${edges.map(([a, b]) => `  - {from: ${a}, to: ${b}}`).join('\n')}\n`
+
+let k = 0
+async function child() {
+  const area = join(root, `area-${++k}`)
+  const registry = join(area, 'registry.json')
+  const dir = join(area, 'pj-kid')
+  const r = await createProject({ dir, id: 'kid', name: 'Kid', intent: 'x', goals: [], devdocs: 'directory', sourcesDir: join(area, 'sources'), registryFile: registry })
+  assert.ok(r.ok, r.message)
+  await writeFile(join(dir, 'devdocs', 'workflows', 'freework.yaml'), flow('', []).replace('edges:\n\n', 'edges: []\n'))
+  await mkdir(join(dir, 'out'), { recursive: true })
+  await writeFile(join(dir, 'out', 'index.html'), '<p>result</p>')
+  await writeFile(join(dir, 'review.md'), '# Review\n')
+  await gitOk(dir, ['add', '-A']); await gitOk(dir, ['commit', '-q', '-m', 'workflow'])
+  await createTemplate(area, 'work', { name: 'Work', type: 'do', description: 'Do it.', expectation: 'The work on its own nodes.' }, 'Pat')
+  const ws = new Workspace((await loadRegistry(registry)).workspaces[0])
+  const created = await createRun(ws, { workflow: 'freework', executor: { host: 'autolab' }, by: 'par-agent', via: 'cli', area, input: { kind: 'request', text: 'make it', requester: 'par-agent', onBehalfOf: 'Pat', entrustedBy: { kind: 'note', text: 'test' } } })
+  const ref = created.ref
+  const op = (o: OpInput, by = 'kid-agent') => runOp(ws, ref, o, { by, via: 'cli' })
+  const adjust = async (text: string) => { const a = await adjustRun(ws, ref, { text, reason: 'test', source: { kind: 'agent' } }, { by: 'kid-agent', via: 'cli' }); assert.ok(a.ok, JSON.stringify(a.problems)); return a }
+  const read = async () => { const x = await readRun(ws, ref); assert.ok(x.record, x.problem?.message); return { record: x.record!, bundle: x.bundle } }
+  return { ws, ref, op, adjust, read, dir }
+}
+type C = Awaited<ReturnType<typeof child>>
+
+const event = (n = 1): DelegationEvent => ({ n, type: 'completed', at: '2026-10-24T00:00:00.000Z', seq: 9, during: null, child: { seq: 9, at: '2026-10-24T00:00:00.000Z', by: 'kid-agent' }, wakes: true, text: 'done', manifest: { digest: 'sha256:' + 'a'.repeat(64), child: 'kid/freework/run-001#x', execution: 'completed', outcome: 'done', report: null, artifacts: [], decision: null, branch: null }, takenUp: null })
+const delegation = (o: Partial<Delegation> = {}): Delegation => ({
+  id: 'd1', uid: 'par/use/run-001#p/d1', node: 'asset', target: { project: 'kid', workflow: 'freework', workspace: 'kid' }, request: { path: 'r', sha256: 'x', bytes: 1 },
+  requester: 'par-agent', onBehalfOf: 'Pat', accepts: 'person', dispatched: { at: '', by: 'par-agent', attempt: null, seq: 1 }, child: { uid: 'kid/freework/run-001#x', workspace: 'kid', project: 'kid', workflow: 'freework', run: 'run-001', created: '' },
+  transport: null, events: [event()], answers: [], instructions: [], disposition: null, closed: null, ...o,
+})
+const parent = { executor: { name: 'par-agent' }, workflow: 'use', run: 'run-001' } as unknown as RunRecord
+
+async function assess(c: C, o: { d?: Partial<Delegation>; changed?: ChildEvidence['changed'] } = {}) {
+  const { record, bundle } = await c.read()
+  const authored = bundle.revisions?.at(-1)?.workflow ?? bundle.entries[record.definition.root]?.workflow
+  return assessResult(parent, delegation(o.d), event(), { frozen: record, graph: graphOfState(record) ?? null, authored, now: record, catalog: catalogOf(record, bundle), changed: o.changed ?? [], unavailable: [] })
+}
+const status = (a: Awaited<ReturnType<typeof assess>>, code: string) => a.checks.find(c => c.code === code)?.status
+
+test('work-template output with nothing presented is missing; a later or linked presentation covers it; an older page does not cover later work', async () => {
+  const c = await child()
+  await c.op({ op: 'node.start', node: 'talk' })
+  await c.adjust(flow(node('present', 'do', tpl('present')) + node('build', 'do', tpl('work')), [['talk', 'present'], ['present', 'build']]))
+  await c.op({ op: 'node.complete', node: 'talk', outcome: 'ok' })
+  await c.op({ op: 'node.start', node: 'present' })
+  await registerPresentation(c.ws, c.ref, { node: 'present', source: 'out', entry: 'index.html', review: 'review.md', title: 'Old page' }, { by: 'kid-agent', via: 'cli' })
+  await c.op({ op: 'node.complete', node: 'present', outcome: 'presented the plan' })
+  await c.op({ op: 'node.start', node: 'build' })
+  await c.op({ op: 'node.complete', node: 'build', outcome: 'built' })
+  const a = await assess(c)
+  assert.equal(status(a, 'presentation-missing'), 'missing')
+  const facts = a.checks.find(x => x.code === 'presentation-missing')!.facts.join('\n')
+  assert.match(facts, /build completed after the latest presentation: an earlier page does not cover later work/)
+  assert.match(a.checks.find(x => x.code === 'presentation-missing')!.expectations.join('\n'), /^present r1: /m, 'the frozen expectation beside the evidence')
+  // A presentation registered after the work covers it.
+  await c.adjust(flow(node('present', 'do', tpl('present')) + node('build', 'do', tpl('work')) + node('show', 'do', tpl('present')), [['talk', 'present'], ['present', 'build'], ['build', 'show']]))
+  await c.op({ op: 'node.start', node: 'show' })
+  await registerPresentation(c.ws, c.ref, { node: 'show', source: 'out', entry: 'index.html', review: 'review.md', title: 'New page' }, { by: 'kid-agent', via: 'cli' })
+  await c.op({ op: 'node.complete', node: 'show', outcome: 'presented' })
+  assert.equal(status(await assess(c), 'presentation-missing'), 'ok')
+})
+
+test('untemplated substantive work and screenshots/video are covered; a report-only or coordination result raises nothing', async () => {
+  const c = await child()
+  await c.op({ op: 'node.start', node: 'talk' })
+  // As misc/freework/run-002/003: work nodes written by hand, files beyond notes.
+  await c.adjust(flow(node('godot-demo', 'do') + node('notes', 'do') + node('relay', 'do'), [['talk', 'godot-demo'], ['godot-demo', 'notes'], ['notes', 'relay']]))
+  await c.op({ op: 'node.complete', node: 'talk', outcome: 'ok' })
+  for (const [n, artifacts] of [['godot-demo', ['out/index.html']], ['notes', ['out/notes.md']], ['relay', []]] as const) {
+    await c.op({ op: 'node.start', node: n })
+    await c.op({ op: 'node.complete', node: n, outcome: 'done', artifacts: [...artifacts] })
+  }
+  const a = await assess(c, { changed: [{ path: 'wedo/trial/shots/a.png', nodes: ['godot-demo'] }, { path: 'wedo/trial/video/spin.mp4', nodes: ['godot-demo'] }] })
+  const pm = a.checks.find(x => x.code === 'presentation-missing')!
+  assert.equal(pm.status, 'missing')
+  assert.match(pm.facts.join('\n'), /completed work: godot-demo \(added by the child, with files\)$/m, 'notes (only .md) and relay (no files) are not work')
+  assert.match(pm.facts.join('\n'), /viewable candidates \(by extension, a signal not proof\): wedo\/trial\/shots\/a\.png, wedo\/trial\/video\/spin\.mp4, out\/index\.html/)
+  assert.match(pm.summary, /^d1 \(freework\/run-001\) completed godot-demo with .* and presented nothing → wfe delegate revise use\/run-001 d1/)
+
+  // A study's report: a node with only notes, nothing viewable.
+  const r = await child()
+  await r.op({ op: 'node.start', node: 'talk' })
+  await r.adjust(flow(node('survey', 'study'), [['talk', 'survey']]))
+  await r.op({ op: 'node.complete', node: 'talk', outcome: 'ok' })
+  await r.op({ op: 'node.start', node: 'survey' })
+  await r.op({ op: 'node.complete', node: 'survey', outcome: 'surveyed', artifacts: ['out/notes.md'] })
+  const b = await assess(r)
+  assert.equal(status(b, 'presentation-missing'), 'ok')
+  assert.equal(status(b, 'review-unrecorded'), undefined, 'nothing to review: no obligation from accepts alone')
+  assert.deepEqual(assessmentReminders([b]), [])
+})
+
+test('the child\'s own completion warns for untemplated substantive work (run-002 was never asked)', async () => {
+  const c = await child()
+  await c.op({ op: 'node.start', node: 'talk' })
+  await c.adjust(flow(node('work-2d', 'do'), [['talk', 'work-2d']]))
+  await c.op({ op: 'node.complete', node: 'talk', outcome: 'ok' })
+  await c.op({ op: 'node.start', node: 'work-2d' })
+  await writeFile(join(c.dir, 'out', 'eqtc.cpp'), 'int main(){}')
+  const e = await runOp(c.ws, c.ref, { op: 'node.complete', node: 'work-2d', outcome: 'built', artifacts: ['out/eqtc.cpp'] }, { by: 'kid-agent', via: 'cli', advice: {} }).catch(x => x)
+  assert.ok(e instanceof RequestError, String(e))
+  assert.deepEqual(((e as RequestError).detail as { reminders: { code: string }[] }).reminders.map(r => r.code), ['presentation-missing'])
+  assert.match(e.message, /work-2d \(added by this run, with files\) is work this run completed/)
+  assert.doesNotMatch(e.message, /records that need no viewing/)
+})
+
+test('the person\'s review: a confirm node and an agent\'s answer are unknown; the person\'s own or relayed answer is traceable; accepts: parent needs none', async () => {
+  const c = await child()
+  await c.op({ op: 'node.start', node: 'talk' })
+  await c.adjust(flow(node('build', 'do', tpl('work')) + node('present', 'do', tpl('present')) + node('confirm', 'talk', '    confirms: result\n'), [['talk', 'build'], ['build', 'present'], ['present', 'confirm']]))
+  await c.op({ op: 'node.complete', node: 'talk', outcome: 'ok' })
+  await c.op({ op: 'node.start', node: 'build' })
+  await c.op({ op: 'node.complete', node: 'build', outcome: 'built' })
+  await c.op({ op: 'node.start', node: 'present' })
+  await registerPresentation(c.ws, c.ref, { node: 'present', source: 'out', entry: 'index.html', review: 'review.md', title: 'Page' }, { by: 'kid-agent', via: 'cli' })
+  await c.op({ op: 'presentation.observe', presentation: 'p1', status: 'available', instance: 'pi-test-0001', detail: 'serving' }, 'presenter')
+  await c.op({ op: 'node.complete', node: 'present', outcome: 'presented' })
+  await c.op({ op: 'node.start', node: 'confirm' })
+  await c.op({ op: 'question.ask', question: '', node: 'confirm', text: 'OK?', to: 'par-agent', presentation: 'p1' })
+  await c.op({ op: 'question.answer', question: 'q1', text: 'OK, finish', from: 'par-agent' }, 'par-agent')
+  await c.op({ op: 'question.take-up', question: 'q1' })
+  await c.op({ op: 'run.decide', decision: 'accepted', question: 'q1' })
+  await c.op({ op: 'presentation.observe', presentation: 'p1', status: 'stopped', detail: 'process gone' }, 'presenter')
+  // run-005: a decision from the requester agent's own answer.
+  const a = await assess(c)
+  assert.equal(status(a, 'review-unrecorded'), 'unknown')
+  assert.match(a.checks.find(x => x.code === 'review-unrecorded')!.facts.join('\n'), /decision accepted by kid-agent from q1 answered by par-agent[\s\S]*no answer from Pat about this result is traceable/)
+  const rs = assessmentReminders([a])
+  assert.deepEqual(rs.map(r => r.code), ['delegated-review-unrecorded'])
+  assert.match(rs[0].text, /Unknown is not a proven omission/)
+  assert.ok(!rs[0].repair.some(x => /impersonat|answer for/.test(x)))
+  // The parent relayed the person's words to the child (because → Pat).
+  const relayed = await assess(c, { d: { answers: [{ n: 1, question: 'q1', event: 1, text: 'OK', from: 'Pat', by: 'par-agent', at: '', attempt: null, seq: 5, because: { kind: 'answer', question: 'q3', answer: 0, from: 'Pat' } }] } })
+  assert.equal(status(relayed, 'review-unrecorded'), 'ok')
+  // accepts: parent: the parent's agent may accept; nothing to check.
+  assert.equal(status(await assess(c, { d: { accepts: 'parent' } }), 'review-unrecorded'), undefined)
+  // The person answered the child's question themselves.
+  const p = await child()
+  await p.op({ op: 'node.start', node: 'talk' })
+  await p.adjust(flow(node('build', 'do', tpl('work')) + node('present', 'do', tpl('present')) + node('confirm', 'talk', '    confirms: result\n'), [['talk', 'build'], ['build', 'present'], ['present', 'confirm']]))
+  await p.op({ op: 'node.complete', node: 'talk', outcome: 'ok' })
+  await p.op({ op: 'node.start', node: 'build' })
+  await p.op({ op: 'node.complete', node: 'build', outcome: 'built' })
+  await p.op({ op: 'node.start', node: 'present' })
+  await registerPresentation(p.ws, p.ref, { node: 'present', source: 'out', entry: 'index.html', review: 'review.md', title: 'Page' }, { by: 'kid-agent', via: 'cli' })
+  await p.op({ op: 'presentation.observe', presentation: 'p1', status: 'available', instance: 'pi-test-0003', detail: 'serving' }, 'presenter')
+  await p.op({ op: 'node.complete', node: 'present', outcome: 'presented' })
+  await p.op({ op: 'node.start', node: 'confirm' })
+  await p.op({ op: 'question.ask', question: '', node: 'confirm', text: 'Look?', to: 'Pat', presentation: 'p1' })
+  await p.op({ op: 'question.answer', question: 'q1', text: 'Looks right.', from: 'Pat' }, 'Pat')
+  assert.equal(status(await assess(p), 'review-unrecorded'), 'ok')
+})
+
+test('a page still serving: an answered review with no cleanup is serving; an open review, a request to keep it and a verified stop are not', async () => {
+  const c = await child()
+  await c.op({ op: 'node.start', node: 'talk' })
+  await c.adjust(flow(node('present', 'do', tpl('present')) + node('confirm', 'talk', '    confirms: result\n'), [['talk', 'present'], ['present', 'confirm']]))
+  await c.op({ op: 'node.complete', node: 'talk', outcome: 'ok' })
+  await c.op({ op: 'node.start', node: 'present' })
+  await registerPresentation(c.ws, c.ref, { node: 'present', source: 'out', entry: 'index.html', review: 'review.md', title: 'Page' }, { by: 'kid-agent', via: 'cli' })
+  await c.op({ op: 'presentation.observe', presentation: 'p1', status: 'available', instance: 'pi-test-0001', detail: 'serving' }, 'presenter')
+  await c.op({ op: 'node.complete', node: 'present', outcome: 'presented' })
+  await c.op({ op: 'node.start', node: 'confirm' })
+  await c.op({ op: 'question.ask', question: '', node: 'confirm', text: 'Look?', to: 'Pat', presentation: 'p1' })
+  let a = await assess(c)
+  assert.equal(status(a, 'presentation-serving'), 'ok')
+  assert.match(a.checks.find(x => x.code === 'presentation-serving')!.facts.join('\n'), /its review is not answered yet/)
+  await c.op({ op: 'question.answer', question: 'q1', text: 'Fine. Keep it up for my team until Friday.', from: 'Pat' }, 'Pat')
+  a = await assess(c)
+  assert.equal(status(a, 'presentation-serving'), 'serving')
+  assert.ok(a.checks.find(x => x.code === 'presentation-serving')!.repair.some(r => /never stop the child's page from this run/.test(r)))
+  // The person's request to keep it, recorded with who stops it.
+  await c.op({ op: 'presentation.retain', presentation: 'p1', note: 'until Friday for the team', owner: 'kid-agent', because: { kind: 'answer', question: 'q1' } } as never, 'kid-agent')
+  a = await assess(c)
+  assert.equal(status(a, 'presentation-serving'), 'ok')
+  assert.match(a.checks.find(x => x.code === 'presentation-serving')!.facts.join('\n'), /kept on request \(until Friday for the team; stopped later by kid-agent\)/)
+  const { record } = await c.read()
+  assert.equal(record.presentations!.p1.retained?.because?.from, 'Pat')
+  await c.op({ op: 'presentation.observe', presentation: 'p1', status: 'stopped', detail: 'process gone' }, 'presenter')
+  a = await assess(c)
+  assert.match(a.checks.find(x => x.code === 'presentation-serving')!.facts.join('\n'), /stopped: p1 \(stopped\)/)
+})

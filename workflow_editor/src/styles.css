@@ -424,7 +424,7 @@ label.inline { display: flex; align-items: center; gap: 6px; }
 .state-chip.state-pending, .state-chip.state-not-started { color: #59616d; border-color: #b9c0ca; background: #f1f2f4; }
 .state-chip.state-ready { color: #1f4fb8; border-color: #8aa9ea; background: #e8effc; }
 .state-chip.state-running, .state-chip.state-in-progress { color: #0d5f8a; border-color: #6fb3d6; background: #e3f2fa; }
-.state-chip.state-waiting { color: #8a5a00; border-color: #e0b35c; background: #fdf1d8; }
+.state-chip.state-waiting, .state-chip.state-correcting { color: #8a5a00; border-color: #e0b35c; background: #fdf1d8; }
 .state-chip.state-completed { color: var(--ok); border-color: #8dc9a7; background: var(--ok-bg); }
 .state-chip.state-failed, .state-chip.state-stopped { color: var(--error); border-color: #e2a7a2; background: var(--error-bg); }
 .state-chip.state-cancelled { color: #59616d; border-color: #b9c0ca; background: #e4e6ea; text-decoration: line-through; }

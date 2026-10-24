@@ -14,7 +14,7 @@
 // their work inside the talk.
 import type { RunCatalog } from './catalog.ts'
 import type { Workflow, WorkflowNode } from './model.ts'
-import { isOpen, questionState, runKey, type Presentation, type RunGraph, type RunRecord } from './run.ts'
+import { isOpen, questionState, runFolder, runKey, type Presentation, type RunGraph, type RunRecord } from './run.ts'
 
 // What a node is for, as far as its structured records say. Never its name.
 // - present / cleanup: made from the catalog's seed templates (present,
@@ -22,15 +22,19 @@ import { isOpen, questionState, runKey, type Presentation, type RunGraph, type R
 //   work node a presentation was registered from. A presentation linked to work recorded afterwards
 //   shows that work; it does not make the work a presentation node;
 // - work: made from the catalog's `work` template — the work the person asked
-//   for, as the agent added it. Untemplated nodes are `other`: a designed
-//   workflow's nodes are the designer's, and nodes a run adds for other ends
-//   (front/converse's tell and report nodes) are not work to present;
+//   for, as the agent added it; or (fix6) an untemplated do/study node the run
+//   added itself whose records show substantive work (`substantiveNodes`:
+//   files outside its run folder that are not only notes). misc/freework/
+//   run-002 wrote its work nodes by hand and was never asked to present. Other
+//   untemplated nodes are `other`: a designed workflow's nodes are the
+//   designer's, and nodes a run adds for other ends (front/converse's tell and
+//   report nodes, reporting, coordination) are not work to present;
 // - step: a generated documentation step; activity: a discussion activity;
 //   confirm: the result-confirmation talk; talk: any other talk.
 export type NodeRole = 'present' | 'cleanup' | 'work' | 'confirm' | 'talk' | 'activity' | 'step' | 'other'
 const PRESENT = 'present', CLEANUP = 'cleanup', WORK = 'work'
 
-export function roleOf(id: string, record: Pick<RunRecord, 'definition' | 'presentations'>, graph: RunGraph, authored: Pick<Workflow, 'nodes'> | undefined): NodeRole {
+export function roleOf(id: string, record: Pick<RunRecord, 'definition' | 'presentations'>, graph: RunGraph, authored: Pick<Workflow, 'nodes'> | undefined, substantive?: { has(id: string): boolean }): NodeRole {
   const g = graph.nodes[id]
   if (!g || g.step) return 'step'
   if (g.activity) return 'activity'
@@ -43,7 +47,35 @@ export function roleOf(id: string, record: Pick<RunRecord, 'definition' | 'prese
   if (g.type === 'talk') return 'talk'
   if (a.template?.id === WORK) return 'work'
   if (pres.some(p => p.node === id)) return 'present'
+  if (substantive?.has(id)) return 'work'
   return 'other'
+}
+
+// Files a person can look at or try, by extension: a signal, never proof
+// that a result needs a presentation (fix6).
+const VIEWABLE = /\.(png|jpe?g|gif|webp|svg|bmp|tiff?|mp4|webm|mov|mkv|avi|gif|mp3|wav|ogg|flac|html?|pdf|glb|gltf|obj|fbx|blend|ply|stl|tscn|godot|exe|apk|wasm)$/i
+const NOTES = /\.(md|markdown|txt|rst|log|csv|tsv|json|ya?ml)$/i
+export const isViewable = (path: string) => VIEWABLE.test(path)
+export const isNotes = (path: string) => NOTES.test(path)
+
+// Untemplated do/study nodes the run added itself (in a revision) whose
+// records show work beyond notes: artifacts, or files of the run's copy
+// written while the node ran (`changed`, from the file layer), outside the
+// run's folder, of which at least one is not a note. Returns each node's
+// evidence paths. Coordination, reporting and documentation nodes record no
+// such files and stay `other`.
+export function substantiveNodes(record: Pick<RunRecord, 'workflow' | 'run' | 'definition' | 'nodes'>, graph: RunGraph, authored: Pick<Workflow, 'nodes'> | undefined, changed: Record<string, string[]> = {}): Map<string, string[]> {
+  const out = new Map<string, string[]>()
+  const original = record.definition.effective?.nodes ?? {}
+  const own = `${runFolder(record)}/`
+  for (const [id, g] of Object.entries(graph.nodes)) {
+    if (id in original || g.step || g.activity || g.confirms || !['do', 'study'].includes(g.type)) continue
+    const a: Partial<WorkflowNode> = authored?.nodes[id] ?? {}
+    if (a.template) continue
+    const paths = [...new Set([...(record.nodes[id]?.outcome?.artifacts ?? []), ...(changed[id] ?? [])])].filter(p => !p.startsWith(own) && !p.startsWith('.local/'))
+    if (paths.some(p => !isNotes(p))) out.set(id, paths)
+  }
+  return out
 }
 
 // The operation about to be recorded.
@@ -65,6 +97,9 @@ export interface Facts {
   // File-layer observations that work may have been done (changed paths in
   // the run's copy outside its records, …), each as a short phrase.
   signals: string[]
+  // Paths of the run's copy (every repository it owns) changed outside its
+  // records, by the node that was running when each was written (fix6).
+  changedByNode?: Record<string, string[]>
   // Checks made elsewhere for the same operation (a conductor's open
   // discussion), merged into one response.
   extra?: Reminder[]
@@ -75,6 +110,11 @@ export interface Reminder {
   text: string // the observed facts and what stays unknown
   repair: string[] // concrete commands or acts
   refs: string[] // nodes, presentations, questions it is about
+  // One line: the observed omission and its concrete repair, repeated at the
+  // end of the refusal so a truncated read (`| tail -3`) still carries the
+  // reason to act (fix6: misc/freework/run-003 and run-004 read only the
+  // tail of fix5's warning, which was directions to --yes).
+  summary: string
 }
 
 // How long a talk may run before work inside it is plausible (a signal for
@@ -131,7 +171,8 @@ function registeredAt(record: RunRecord, p: Presentation): number {
 export function evaluate(b: Boundary, f: Facts): Reminder[] {
   const { record, after, graph, authored } = f
   const run = runKey(record)
-  const role = (id: string) => roleOf(id, after, graph, authored)
+  const substantive = substantiveNodes(after, graph, authored, f.changedByNode)
+  const role = (id: string) => roleOf(id, after, graph, authored, substantive)
   const ids = Object.keys(after.nodes)
   const out: Reminder[] = [...(f.extra ?? [])]
   const add = (r: Reminder) => { if (!out.some(x => x.code === r.code)) out.push(r) }
@@ -151,11 +192,12 @@ export function evaluate(b: Boundary, f: Facts): Reminder[] {
       ask: `let WFE complete it when its invitations are resolved, or move on with wfe discussion settle --node ${completing} --reason …`,
       ponder: `wfe discussion ponder --node ${completing} --decision … --source … (--next adds what comes next)`,
     }
-    if (how[a]) add({ code: 'discussion-activity', refs: [completing], text: `${completing} is the ${a} activity of a discussion. Completed this way, the discussion gets no record of it (no message, decision or outcomes).`, repair: [how[a]] })
+    if (how[a]) add({ code: 'discussion-activity', refs: [completing], text: `${completing} is the ${a} activity of a discussion. Completed this way, the discussion gets no record of it (no message, decision or outcomes).`, repair: [how[a]], summary: `${completing} is a ${a} activity completed outside the discussion → ${how[a].split(' (')[0]}` })
   }
 
-  // Open presentations and who stops them.
-  const open = Object.values(after.presentations ?? {}).filter(isOpen)
+  // Open presentations and who stops them. One the person asked to keep
+  // (presentation.retain, fix6) is not a forgotten cleanup.
+  const open = Object.values(after.presentations ?? {}).filter(p => isOpen(p) && !p.retained)
   const cleanupPlanned = ids.filter(id => id !== completing && role(id) === 'cleanup' && planned(after.nodes[id]?.state))
   const reviewed = completing ? Object.values(record.questions).filter(q => q.node === completing && q.presentation && q.answers.length) : []
   const presentationsChecked = completesRun || b.kind === 'report' || (completing && role(completing) === 'cleanup') || reviewed.length > 0
@@ -167,11 +209,14 @@ export function evaluate(b: Boundary, f: Facts): Reminder[] {
     const why = completing && role(completing) === 'cleanup' ? `${completing} is a cleanup node, yet ${open.length === 1 ? 'this presentation is' : 'these presentations are'} still recorded as serving`
       : reviewed.length ? `${completing} took the person's answer to ${list(reviewed.map(q => q.id))} about ${list(reviewed.map(q => q.presentation!.id))}; if the review is finished, cleanup is due`
         : completesRun ? 'this completes the run' : 'this reports the result'
+    const stop = `wfe present stop ${run} ${open.length === 1 ? open[0].id : '--all'}`
     add({
       code: 'presentation-serving', refs: open.map(p => p.id),
       text: `${why}: ${list(about)} ${open.length === 1 ? 'is' : 'are'} still serving, and no cleanup node is planned. An answer may ask for changes or for the page to stay available; only the answer tells which. A page nobody stops serves on.`,
-      repair: [`if the review is finished: wfe present stop ${run} ${open.length === 1 ? open[0].id : '--all'}, then wfe present status ${run} (stopped: process gone, port no longer answering)`,
-        `or plan it: ${instantiate(CLEANUP, completing ? `--after ${completing}` : '')}`],
+      repair: [`if the review is finished: ${stop}, then wfe present status ${run} (stopped: process gone, port no longer answering)`,
+        `or plan it: ${instantiate(CLEANUP, completing ? `--after ${completing}` : '')}`,
+        `if the person asked for it to stay available: wfe present keep ${run} ${open[0].id} --because answer:<q> --owner <who stops it> --note "…"`],
+      summary: `${list(open.map(p => p.id))} still serving with no cleanup planned → if the review is finished, ${stop} (or plan a cleanup node)`,
     })
   }
 
@@ -188,11 +233,19 @@ export function evaluate(b: Boundary, f: Facts): Reminder[] {
   const confirmWithout = b.kind === 'ask' && !b.presents && !!b.node && role(b.node) === 'confirm'
   if ((completesRun || lastWork || b.kind === 'report' || confirmWithout) && unpresented.length && !presentPlanned) {
     const since = pres.length ? `after the latest presentation (${pres.at(-1)!.id}) was registered` : 'and the run has no presentation'
+    // What the records show of the work: the files it produced, viewable
+    // ones first (an extension is a signal, not proof).
+    const files = [...new Set(unpresented.flatMap(id => [...(after.nodes[id]?.outcome?.artifacts ?? []), ...(f.changedByNode?.[id] ?? []), ...(substantive.get(id) ?? [])]))]
+    const viewable = files.filter(isViewable)
+    const shown = (viewable.length ? viewable : files).slice(0, 4)
+    const what = shown.length ? `; ${viewable.length ? 'viewable files' : 'files'}: ${shown.join(', ')}${(viewable.length || files.length) > shown.length ? ', …' : ''}` : ''
+    const how = (id: string) => substantive.has(id) ? `${id} (added by this run, with files)` : id
+    const repair = `add a present node after ${unpresented.at(-1)}: ${instantiate(PRESENT, `--after ${unpresented.at(-1)}`)}; in it, wfe present register / start, then wfe run ask … --presentation <p>`
     add({
       code: 'presentation-missing', refs: unpresented,
-      text: `${list(unpresented)} ${unpresented.length === 1 ? 'is' : 'are'} work this run completed ${since}, and no presentation node is planned. Whether this result needs one is your judgement: the person's catalog expects a node that presents what they can look at or try, before they confirm it.`,
-      repair: [`present it through its own node: ${instantiate(PRESENT, `--after ${unpresented.at(-1)}`)}; in it, wfe present register / start, then ask with wfe run ask … --presentation <p>`,
-        'if the work only produced records that need no viewing, continue with --yes'],
+      text: `${list(unpresented.map(how))} ${unpresented.length === 1 ? 'is' : 'are'} work this run completed ${since}${what}. No presentation node is planned. The person's catalog expects a node that presents what they can look at or try, before they confirm it.`,
+      repair: [repair],
+      summary: `${list(unpresented)} completed with nothing presenting ${shown.length ? shown.slice(0, 2).join(', ') : 'it'} → add a present node after ${unpresented.at(-1)} (wfe nodes instantiate ${has(PRESENT) ? PRESENT : '…'} --run ${run} …)`,
     })
   }
 
@@ -205,6 +258,7 @@ export function evaluate(b: Boundary, f: Facts): Reminder[] {
         code: 'presentation-inside-work', refs: [b.node],
         text: `${b.node} is a ${r === 'work' ? 'work' : r === 'confirm' ? 'result-confirmation' : r === 'activity' ? 'discussion activity' : 'talk'} node; a presentation registered from it does not appear as a step of its own (gimmickimg/freework/run-001…008 presented from inside the talk).`,
         repair: [`add a present node and register from it: ${instantiate(PRESENT, `--after ${b.node}`)}; then complete ${b.node}, start the new node and wfe present register ${run} <it> …`],
+        summary: `registering from ${b.node} (a ${r} node) → add a present node after it and register from there`,
       })
     }
     if (!ids.some(id => role(id) === 'cleanup' && planned(after.nodes[id]?.state))) {
@@ -212,6 +266,7 @@ export function evaluate(b: Boundary, f: Facts): Reminder[] {
         code: 'cleanup-unplanned', refs: [b.node],
         text: 'No cleanup node is planned: the page keeps serving after your session ends, until someone stops it (fix4: three review pages of run-005…008 served on).',
         repair: [`plan its stop: ${instantiate(CLEANUP, '--after <the node that takes the review answer>')}`],
+        summary: `no cleanup node is planned for this page → plan one (wfe nodes instantiate ${has(CLEANUP) ? CLEANUP : '…'} --run ${run} --after <review node> …)`,
       })
     }
   }
@@ -229,19 +284,22 @@ export function evaluate(b: Boundary, f: Facts): Reminder[] {
         code: 'unrecorded-activity', refs: talks,
         text: `Before this ${b.kind === 'ask' ? 'question' : b.kind === 'report' ? 'report' : 'completion'}: the graph shows no work node, yet ${list(signals)}. WFE cannot tell whether work was done inside a talk or outside the run's nodes. The person's catalog names ${list(templates.map(t => t.id))} as steps they expect to see.`,
         repair: [`if such an activity was already performed without its own node, record it as done: wfe run record-done ${run} --template <id> --id <node> --after <node> --outcome "…" --reason "…" (wfe run help record-done)`,
-          `if it has not happened yet, add it as pending work (wfe run adjust) and do it there`,
-          'if nothing was done outside nodes, continue with --yes'],
+          `if it has not happened yet, add it as pending work (wfe run adjust) and do it there`],
+        summary: `no work node, yet ${signals[0].split(' (')[0]} → if work was done outside nodes, wfe run record-done ${run} …`,
       })
     }
   }
   return out
 }
 
-// The refusal text, one for every reminder of the operation.
+// The refusal text, one for every reminder of the operation. The decisive
+// facts and repairs come first and again, compressed, in the last line, so a
+// read of only the tail still says why to act and what to do (fix6).
 export function reminderText(rs: Reminder[], what: string): string {
-  return [`Not recorded — ${rs.length === 1 ? 'a reminder' : `${rs.length} reminders`} before ${what}:`,
+  return [`Not recorded — ${rs.length === 1 ? 'a reminder' : `${rs.length} reminders`} before ${what}: ${rs.map(r => r.code).join(', ')}.`,
     ...rs.flatMap(r => [`- ${r.code}: ${r.text}`, ...r.repair.map(x => `    · ${x}`)]),
-    'Nothing was recorded, posted or queued. A reminder is not proof of an omission: after repairing, give the command again; if you judge continuing right as it is, give the same command with --yes. --yes passes these reminders only, for this one command.'].join('\n')
+    'Nothing was recorded, posted or queued. A reminder is not proof of an omission: repair it and give the command again, or, if you judge continuing as it is right, give the same command with --yes (for this one command only).',
+    `In short: ${rs.map(r => `${r.code}: ${r.summary}`).join(' | ')}`].join('\n')
 }
 
 // What a person's answer about a presentation means for the agent taking it

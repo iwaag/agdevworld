@@ -94,6 +94,7 @@ is recorded):
 | `transport` | `{realm, message, stream, topic}` of the request post once bound |
 | `events` | facts relayed from the child, numbered `1, 2, …` (below), each with `wakes`, and `takenUp` once the parent's agent read it |
 | `answers`, `instructions` | what the parent's agent sent, in order, with `from` (whose words), `because` (the parent record they rest on) and the question they answer |
+| `revisions` | (fix6, present once used) results returned to the same child for correction: `{n, event, manifest, childSeq, instruction, reason, from, by, at, attempt, seq, because?}` |
 | `disposition` | `{kind: satisfied \| rejected \| abandoned, note, event, manifest, at, by}` or null |
 | `closed` | `{reason, at, by}` when the parent run was cancelled with the delegation open, or the disposition closed it |
 
@@ -185,6 +186,7 @@ States of a delegation on the parent, derived from its record:
 | `working` | bound; no event waits for the parent |
 | `attention` | an event that wakes the parent is not taken up |
 | `result` | the child completed and the result event is taken up, no disposition yet |
+| `correcting` | (fix6) the latest result was returned for correction and no newer result came back (a correction the child refused does not count) |
 | `stopped` | the child's execution stopped (a failure or cancellation) and the parent has not closed the delegation |
 | `satisfied`, `rejected`, `abandoned` | the disposition (closed) |
 | `orphaned` | the parent run was cancelled while it was open (closed; the child keeps running unless cancelled explicitly) |
@@ -206,6 +208,7 @@ waits again after an answer or instruction is sent.
 | 9 | Child completes | execution `completed` | `delegation.event completed` (wakes) with the result manifest; state `attention` → `result` on take-up | `running` on take-up | the parent's agent |
 | 10 | Parent reviews | — | `delegation.dispose satisfied` (event + manifest digest); closed | `node.complete` allowed | the parent's agent |
 | 11 | Result does not serve the request | — | `delegation.dispose rejected`; a replacement may be dispatched (new id, predecessor) | `running`; replace, fail or cancel the node | the parent's agent |
+| 11a | Result left something out (fix6) | after the post is bound: `correction.receive`; execution `in-progress`; continuation queued | `delegation.revise` (event + manifest digest); state `correcting`; `delegation.event correcting` (no wake) once the child recorded it | `waiting` | the child's agent: adds the work, completes again → row 9 with a new result |
 | 12 | Child fails (a node failed, execution stopped) | as recorded | `delegation.event failed` (wakes); state `stopped` | `running` on take-up | the parent's agent: wait for the child's person or Observer, `abandon` and replace, or fail the node |
 | 13 | Child held (stopped by a person, interrupted, unknown) | as recorded; Observer handles interruptions | `delegation.event held` (no wake), `resumed` later | `waiting` | the child's holder |
 | 14 | Child cancelled | `run.cancel` | `delegation.event cancelled` (wakes); state `stopped` | `running` on take-up | the parent's agent |
@@ -215,7 +218,9 @@ waits again after an answer or instruction is sent.
 
 Events that wake the parent: `question`, `answer-refused`, `completed`,
 `failed`, `cancelled`. Recorded without waking it: `held`, `resumed`,
-`decided`, `integrated`, `withdrawn` (the child withdrew a question). A
+`decided`, `integrated`, `withdrawn` (the child withdrew a question),
+`correcting` (the child recorded a correction, fix6). A correction the child
+refused comes back as `answer-refused` with `revision: <n>`. A
 parent attempt that ends with a waking event recorded before it began and
 not taken up is `interrupted`, like an exit with work left ready.
 
@@ -266,7 +271,8 @@ not taken up is `interrupted`, like an exit with work left ready.
 | `delegation.take-up` | the parent's agent | `take-up <run> <d> <n>…` | the facts are read; the node resumes |
 | `delegation.answer` | the parent's agent | `answer <run> <d> <q> --answer <text> [--because answer:<q>]` | posted in the child's request topic and recorded there as the answer; the node waits |
 | `delegation.instruct` | the parent's agent | `instruct <run> <d> --instruction <text>` | recorded as the child's additional instruction |
-| `delegation.dispose` | the parent's agent | `dispose <run> <d> --disposition satisfied\|rejected\|abandoned --note <text>` | closes the delegation; `satisfied` lets the node complete |
+| `delegation.dispose` | the parent's agent | `dispose <run> <d> --disposition satisfied\|rejected\|abandoned --note <text> [--event <n>] [--manifest <digest>] [--yes]` | closes the delegation; `satisfied` lets the node complete; `satisfied` is assessed first (fix6) |
+| `delegation.revise` | the parent's agent | `revise <run> <d> --instruction <text> --reason <text> [--event <n>] [--manifest <digest>] [--because …]` | (fix6) returns the latest result to the same child; posted in its request topic; the node waits |
 
 Reading: `wfe delegate list|show <run> [<d>]`, `wfe delegate file <run> <d>
 <path> [--out <file>]` (a file of the child's copy, compared with the hash a
@@ -286,7 +292,118 @@ Error codes: `delegate-target`, `delegate-cycle`,
 `delegate-relation`, `delegation-open`, `delegation-predecessor`,
 `delegation-unknown`, `delegation-unbound`, `delegation-event`,
 `delegation-result`, `result-superseded`, `delegation-closed`,
-`delegation-unsatisfied`.
+`delegation-unsatisfied`; fix6: `result-returned`, `delegation-correcting`,
+`child-stopped`, `child-active`, `correction-state`.
+
+HTTP (fix6): `POST runs/<wf>/<run>/delegations/<d>/dispose` and `…/revise`
+take the same fields (`by`, `event`, `manifest`, `yes`, `receipt`,
+`attempt`; `because` for revise) and refuse with 409 `{detail: {code:
+"reminder", reminders, assessment}}`; `GET …/delegations/<d>/assessment`
+reads one; `GET …/delegations` carries each latest result's assessment. A
+remote worker forwards `wfe delegate …` with its flags like every command.
+
+## Assessing a result (workflow_editor fix6)
+
+Where the parent receives a result, WFE assesses it from the child's
+records (`shared/assessment.ts`, file layer in `server/delegate.ts`). It
+separates what the records show from what the child's frozen node catalog
+expects: an expectation is the person's prose, shown beside the evidence,
+never compiled into a rule.
+
+| Check | Evidence | Status |
+| --- | --- | --- |
+| Presentation missing | the child's completed work as of the result — `work` template nodes, and untemplated nodes it added with files beyond notes ([runs.md](runs.md) *Reminders*) — and viewable candidates by extension (manifest artifacts, node artifacts, files its copy changed, in every repository it owns: a signal, not proof); its presentations and when each was registered or linked | `missing` when work completed after the latest presentation (an earlier page does not cover later work), or viewable files with no presentation at all; else `ok` |
+| The person's review not recorded | only with `accepts: person` and a deliverable (work, viewable files or a presentation); the child's answers and decisions as of the result, and this delegation's answers and correction requests that relay words with `because` | `ok` when an answer from the person (`onBehalfOf`) about it is traceable; else `unknown` — a confirmation node, a decision or an agent's own answer alone does not show they reviewed it, and unknown is not a proven violation |
+| Presentation still serving | the child's presentations now: review questions and their state, a planned cleanup, a recorded request to keep it (`presentation.retain`) | `serving` only for an answered (or never asked) review with no cleanup planned and no request to keep it; an unfinished review or a kept page is a fact, not an omission. Nothing stops a page because this ran |
+
+**Bound to the result.** Each assessment names the delegation, the result
+event, its manifest digest, the child's completing seq, the history position
+its frozen facts come from (the entry after which the attempt that completed
+it ended; the child's own history replayed to it), the child's revision in
+force then and its catalog snapshot. What changed in the child since
+(entries after that position, corrections) and its integrations (historical
+facts bound to their own revisions) are listed apart. What could not be read
+(the child's record, its copy, its catalog) is said explicitly. The child is
+read without its lock; the parent's lock holds the result's identity.
+
+**Where.** `wfe delegate show`; the take-up of a result (printed once); the
+brief and continuation of the parent's next attempt while the result is not
+taken up; `GET …/delegations`. As reminders (codes `delegated-<check>`,
+merged with the parent's own into one response, refused before anything is
+recorded, `--yes` / `yes` for that command only):
+
+- `wfe delegate dispose --disposition satisfied` (HTTP `…/dispose`), under
+  the parent's lock, before the delegation closes;
+- the parent's outward report — `wfe conversation reply|contribute --kind
+  result|synthesis`, with or without `--completing` — and the completion
+  that completes the parent run (`wfe run complete`, `adjust --completing`,
+  HTTP `ops`/`adjust`), whether or not the parent has work nodes of its own.
+
+At report time every delegation's latest result is assessed — open or judged
+`satisfied` (an earlier `--yes` exempts nothing later); `rejected`,
+`abandoned` and orphaned ones are not. A corrected result is assessed anew,
+so a repaired omission disappears. The repairs offered are the parent's:
+inspect the child's evidence, relay an actual answer of the person, return
+the result to the child, or continue as it is. They never ask the parent to
+act as the child or to record a review nobody gave. A stale result
+(`result-superseded`), a result returned for correction (`result-returned`)
+and attempt ownership stay errors that `--yes` does not pass.
+
+**At dispatch.** `wfe delegate request` prints, as information, who accepts
+the child's result, that the parent relays its questions and presentations
+to the person, and the target's node catalog expectations as they are now (a
+preview: the child freezes its own snapshot at creation, and that snapshot
+is what its result is assessed against). The child's brief names the person
+the parent acts for and the parent's relay role; the request itself is
+delivered unchanged.
+
+## Correction (workflow_editor fix6)
+
+`wfe delegate revise` returns the child's current completed result to the
+same child instead of closing the delegation (`dispose rejected` stays
+closure and replacement):
+
+1. **Parent.** `delegation.revise` under the parent's lock: the delegation
+   is open and bound; the result is the latest completed event, taken up,
+   with the manifest digest given (if any); no correction stands for it; the
+   child did not fail or get cancelled after it. The file layer also
+   refuses a child that is cancelled, executing, or not completed now. The
+   delegate node waits (`correcting`).
+2. **Delivery.** The notifier's delegation conversation posts it in the
+   child's request topic (`…:delegation-revision@<d>`, critical, alone), as
+   answers and instructions are; a lost acknowledgment is found by its
+   marker; a missing outbox row is queued again from the record.
+3. **Child.** The intake binds the post by message id and records
+   `correction.receive` under the post's receipt (a repeated application is
+   one record). A completed child is reopened: its execution is
+   `in-progress` while the correction is unaddressed, so the scheduler
+   continues it (one job per correction, reconcile queues a lost one) and
+   the relay does not announce the old result again. A refusal (the child
+   completed again since — `result-superseded` —, is no longer completed,
+   or is cancelled) is told to the parent as `answer-refused` with
+   `revision`, which ends `correcting`.
+4. **Work.** The child's agent reads it ("This attempt", `wfe run
+   correction`), adds the missing work as nodes with its ordinary adjustment
+   and performs it — present, feedback, cleanup as its catalog expects;
+   completed work is kept — or records `--no-change` with why.
+5. **New result.** Its next completion is a new `completed` event with a new
+   manifest; the parent takes it up and assesses that version before it
+   judges or reports it.
+
+A held parent records the child's facts and launches nothing until resumed;
+cancelling the parent never cancels the child. Competing requests are
+ordered by the parent's lock: after `revise`, `dispose satisfied|rejected`
+of the returned result is refused (`result-returned`), `abandoned` closes
+the delegation, a second `revise` is refused (`delegation-correcting`);
+after a disposition, `revise` is refused (`delegation-closed`). Replay keeps
+both the returned and the corrected result (events, `revisions`, the child's
+`corrections`).
+
+Earlier acceptances and integrations of the child stay historical facts
+bound to their revisions: an acceptance binds its tree, so the corrected
+files need a new acceptance, and integration follows the child's own rules
+([integration.md](integration.md)). When integration is permitted is not
+changed.
 
 ## Views and observation
 

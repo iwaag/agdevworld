@@ -28,14 +28,19 @@ import {
   type ChildRef, type Delegation, type ManifestFile, type ResultManifest, type TransportRef,
 } from '../shared/delegation.ts'
 import { normalizeRepoPath } from '../shared/model.ts'
-import { hostOf, questionState, runKey, type BecauseRef, type DocumentEvidence, type RunRecord, type RunRef } from '../shared/run.ts'
+import { graphOfState, hostOf, questionState, replay, runKey, type BecauseRef, type DocumentEvidence, type RunRecord, type RunRef } from '../shared/run.ts'
+import { assessResult, assessmentReminders, type Assessment, type ChildEvidence } from '../shared/assessment.ts'
+import { latestResult, openRevision as openRevisionOf } from '../shared/delegation.ts'
 import { assertWorkspaceAllowed, loadBoundary } from './boundary.ts'
 import type { ExecStore, JobRow } from './exec.ts'
 import { atomicWrite, inside } from './files.ts'
 import { git } from './git.ts'
 import { creationOf } from './observe.ts'
 import { loadRegistry, observe, type Registration } from './registry.ts'
-import { listRuns, readRun, runDir, runOp, type OpContext } from './runs.ts'
+import { RUN_FILE, catalogOf, listRuns, readRun, runDir, runOp, runOpLocked, type OpContext } from './runs.ts'
+import { withLock } from './lock.ts'
+import { reminderText } from '../shared/reminders.ts'
+import { changedPaths, pathsByNode } from './reminders.ts'
 import { runSpace } from './runspace.ts'
 import { named, openStore } from './sqlite.ts'
 import { RequestError, Workspace } from './workspace.ts'
@@ -246,14 +251,14 @@ export class DelegateStore {
 
   // A post for this delegation was not applied to the child (late, the
   // child closed, refused): the parent is told, and woken.
-  async refused(parent: { workspace: string; workflow: string; run: string }, id: string, o: { kind: 'answer' | 'instruction'; index: number; reason: string; question?: string }): Promise<void> {
+  async refused(parent: { workspace: string; workflow: string; run: string }, id: string, o: { kind: 'answer' | 'instruction' | 'revision'; index: number; reason: string; question?: string }): Promise<void> {
     const ws = await this.workspace(parent.workspace)
     const ref = { workflow: parent.workflow, run: parent.run }
     const space = await runSpace(ws, ref)
     const rec = (await readRun(space, ref)).record
     const d = rec?.delegations?.[id]
     if (!rec || !d || rec.cancelled || d.closed) return
-    await runOp(space, ref, { op: 'delegation.event', delegation: id, event: { type: 'answer-refused', child: { seq: 0, at: now(), by: 'intake' }, text: `${o.kind} ${o.index} was not applied to the child: ${o.reason}`, ...(o.question ? { question: o.question } : {}), answer: o.index }, receipt: `delegation:${d.uid}:${o.kind}:${o.index}:refused` } as never, { by: 'wfe', via: 'delegation' })
+    await runOp(space, ref, { op: 'delegation.event', delegation: id, event: { type: 'answer-refused', child: { seq: 0, at: now(), by: 'intake' }, text: `${o.kind === 'revision' ? 'correction request' : o.kind} ${o.index} was not applied to the child: ${o.reason}`, ...(o.question ? { question: o.question } : {}), ...(o.kind === 'revision' ? { revision: o.index } : { answer: o.index }) }, receipt: `delegation:${d.uid}:${o.kind}:${o.index}:refused` } as never, { by: 'wfe', via: 'delegation' })
     await this.continuation(space, ref)
   }
 
@@ -398,6 +403,49 @@ export class DelegateStore {
     return runOp(await runSpace(ws, ref), ref, { op: 'delegation.answer', delegation: id, question, text, ...(ctx.because ? { because: ctx.because } : {}), ...(ctx.attempt ? { attempt: ctx.attempt } : {}), ...(ctx.receipt ? { receipt: ctx.receipt } : {}) } as never, ctx)
   }
 
+  // Judges the delegation (fix6): under the parent's lock, the result judged
+  // is the latest one (or the one named, which must be it), its manifest the
+  // one the caller assessed; `satisfied` is assessed first and refused with
+  // the reminders unless `yes`. Correctness errors (a stale result, a result
+  // returned for correction) are never passed with yes.
+  async dispose(ws: Workspace, ref: RunRef, id: string, o: { disposition: string; note: string; event?: number; manifest?: string; yes?: boolean; advise?: boolean }, ctx: OpContext & { attempt?: string; receipt?: string }) {
+    const space = await runSpace(ws, ref)
+    const file = join(await inside(space.root, runDir(ref)), RUN_FILE)
+    return withLock(file, async () => {
+      const { record, d } = await this.parentDelegation(space, ref, id)
+      const op = { op: 'delegation.dispose', delegation: id, disposition: o.disposition, note: o.note, ...(o.event !== undefined ? { event: o.event } : {}), ...(o.manifest ? { manifest: o.manifest } : {}), ...(ctx.attempt ? { attempt: ctx.attempt } : {}), ...(ctx.receipt ? { receipt: ctx.receipt } : {}) }
+      const retransmitted = !!ctx.receipt && record.history.some(h => h.receipt === ctx.receipt)
+      if (o.disposition === 'satisfied' && o.advise !== false && !o.yes && !retransmitted && !d.disposition) {
+        const ev = o.event !== undefined ? d.events.find(e => e.n === o.event) : latestResult(d)
+        const latest = latestResult(d)
+        // Only a judgment the reducer would record is assessed; its own
+        // refusal (stale, returned, closed) comes first.
+        if (ev && ev.type === 'completed' && latest?.n === ev.n && (!o.manifest || o.manifest === ev.manifest?.digest) && !openRevisionOf(d)) {
+          const a = await assessDelegation(this, record, d, ev)
+          const rs = a ? assessmentReminders([a]) : []
+          if (rs.length) throw new RequestError(409, reminderText(rs, `judging ${id} satisfied`), { code: 'reminder', boundaries: ['dispose'], reminders: rs, assessment: a })
+        }
+      }
+      return runOpLocked(space, ref, op as never, ctx)
+    }, { what: `run ${runKey(ref)}` })
+  }
+
+  // Returns the child's current completed result to the same child for
+  // correction (fix6, `wfe delegate revise`). The reducer checks the result's
+  // identity and the delegation's state under the parent's lock; the
+  // notifier delivers it into the child's request topic, and the child's
+  // intake records it there and continues the child.
+  async revise(ws: Workspace, ref: RunRef, id: string, o: { instruction: string; reason: string; event?: number; manifest?: string; because?: BecauseRef }, ctx: OpContext & { attempt?: string; receipt?: string }) {
+    const { d } = await this.parentDelegation(ws, ref, id)
+    if (d.child) {
+      const c = await this.child(d).catch(() => null)
+      if (c?.record.cancelled) throw new RequestError(409, `the child ${d.child.workflow}/${d.child.run} is cancelled (${c.record.cancelled.reason}); a correction does not undo that`, { code: 'child-stopped' })
+      if (c && c.record.control.attempt) throw new RequestError(409, `the child ${d.child.workflow}/${d.child.run} has attempt ${c.record.control.attempt.id} open; its result is not settled — wait for it to end`, { code: 'child-active' })
+      if (c && c.record.execution.state !== 'completed' && !(c.record.corrections && Object.values(c.record.corrections).some(k => k.delegation.uid === d.uid && !k.addressed))) throw new RequestError(409, `the child ${d.child.workflow}/${d.child.run} is ${c.record.execution.state} now, not completed; a correction returns a completed result`, { code: 'child-active' })
+    }
+    return runOp(await runSpace(ws, ref), ref, { op: 'delegation.revise', delegation: id, instruction: o.instruction, reason: o.reason, ...(o.event !== undefined ? { event: o.event } : {}), ...(o.manifest ? { manifest: o.manifest } : {}), ...(o.because ? { because: o.because } : {}), ...(ctx.attempt ? { attempt: ctx.attempt } : {}), ...(ctx.receipt ? { receipt: ctx.receipt } : {}) } as never, ctx)
+  }
+
   async parentDelegation(ws: Workspace, ref: RunRef, id: string): Promise<{ record: RunRecord; d: Delegation }> {
     const record = (await readRun(await runSpace(ws, ref), ref)).record
     if (!record) throw new RequestError(409, `run ${runKey(ref)} cannot be read`)
@@ -451,6 +499,73 @@ export class DelegateStore {
   }
 }
 
+// ---- assessing a result (fix6, shared/assessment.ts) ------------------------------
+
+// Where the facts of a result are frozen: the first entry at or after the
+// completing one after which no attempt of the child is open (the relay
+// tells a completion once the attempt that completed it ended).
+export function resultPosition(child: RunRecord, completingSeq: number): number {
+  let open = false
+  for (const h of child.history) {
+    if (h.op === 'attempt.begin') open = true
+    if (h.op === 'attempt.end') open = false
+    if (h.seq >= completingSeq && !open) return h.seq
+  }
+  return child.seq
+}
+
+// The child's record as of a history position, replayed from its own history.
+export function recordAt(child: RunRecord, seq: number): RunRecord | null {
+  const g = child.definition.effective
+  if (!g) return null
+  if (seq >= child.seq) return child
+  try {
+    const history = child.history.slice(0, seq)
+    return { ...replay(history, { nodes: g.nodes, edges: g.edges }).state, history }
+  } catch { return null }
+}
+
+export async function assessDelegation(store: DelegateStore, parent: RunRecord, d: Delegation, ev = latestResult(d)): Promise<Assessment | null> {
+  if (!ev) return null
+  const unavailable: string[] = []
+  let c: { record: RunRecord; space: Workspace } | null = null
+  try { c = await store.child(d) } catch (e) { unavailable.push(`the child: ${(e as Error).message}`) }
+  if (!c && !unavailable.length) unavailable.push(d.child ? `the child ${d.child.workflow}/${d.child.run} cannot be read on this host` : 'no child is bound')
+  let frozen: RunRecord | null = null
+  let authored: ChildEvidence['authored']
+  let catalog: ChildEvidence['catalog'] = { state: 'none' }
+  let changed: ChildEvidence['changed'] = null
+  if (c) {
+    const reading = await readRun(c.space, { workflow: c.record.workflow, run: c.record.run })
+    frozen = recordAt(c.record, resultPosition(c.record, ev.child.seq))
+    if (!frozen) unavailable.push('the child\'s record as of the result does not replay')
+    const active = frozen?.definition.active
+    authored = (active ? reading.bundle.revisions?.find(r => r.revision === active)?.workflow : undefined) ?? reading.bundle.entries[c.record.definition.root]?.workflow
+    catalog = catalogOf(c.record, reading.bundle)
+    const paths = await changedPaths(c.space, c.record).catch(() => null)
+    if (paths === null) unavailable.push('the child\'s working copy (its changed files) is not readable here')
+    else {
+      const by = pathsByNode(paths, frozen ?? c.record, (frozen ?? c.record).updated)
+      changed = paths.map(p => ({ path: p.path, nodes: Object.entries(by).filter(([, ps]) => ps.includes(p.path)).map(([n]) => n) }))
+    }
+  }
+  return assessResult(parent, d, ev, { frozen, graph: frozen ? graphOfState(frozen) ?? null : null, authored, now: c?.record ?? null, catalog, changed, unavailable })
+}
+
+// The reminders of every delegated result a run reports (fix6): each
+// delegation's latest result, open or judged satisfied; a repaired omission
+// (a corrected result) is assessed anew and its old warning is gone.
+export async function delegatedReminders(store: DelegateStore, parent: RunRecord): Promise<ReturnType<typeof assessmentReminders>> {
+  const out: Assessment[] = []
+  for (const d of Object.values(parent.delegations ?? {})) {
+    if (d.disposition && d.disposition.kind !== 'satisfied') continue
+    if (d.closed && !d.disposition) continue
+    const a = await assessDelegation(store, parent, d).catch(() => null)
+    if (a) out.push(a)
+  }
+  return assessmentReminders(out)
+}
+
 // A run's delegations for the views (p10): each with its state and its
 // child's situation now; for a child, the delegation it came from.
 export async function delegationsView(store: DelegateStore, ws: Workspace, ref: RunRef) {
@@ -466,8 +581,10 @@ export async function delegationsView(store: DelegateStore, ws: Workspace, ref: 
     for (const d of Object.values(rec.delegations ?? {})) {
       const c = await store.child(d).catch(() => null)
       const links = c ? await n.runStatusOf(d.child!.project, c.space.shared, { workflow: d.child!.workflow, run: d.child!.run }).then(st => ({ conversation: st.request?.url ?? null, progress: st.topic?.url ?? null, io: st.io?.url ?? null }), () => null) : null
+      // fix6: the latest result's assessment, beside the delegation.
+      const assessment = latestResult(d) ? await assessDelegation(store, rec, d).catch(() => null) : null
       delegations.push({
-        ...d, state: delegationState(d), pending: pendingEvents(d).map(e => e.n),
+        ...d, state: delegationState(d), pending: pendingEvents(d).map(e => e.n), assessment,
         childNow: c ? { situation: situation(c.record), execution: c.record.execution.state, seq: c.record.seq, waiting: c.record.execution.waiting.map(w => ({ node: w.node, holder: holderOf(c.record, w.node) })), decisions: c.record.decisions.length, links, hold: c.record.control.hold?.kind ?? null, status: runStatus(c.record) } : null,
       })
     }

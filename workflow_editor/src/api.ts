@@ -166,6 +166,8 @@ export interface DelegationView {
   events: { n: number; type: string; at: string; wakes: boolean; text: string; question?: string; confirms?: boolean; plan?: boolean; document?: { path: string; sha256: string }; subject?: { path: string; sha256: string; bytes: number }[]; manifest?: { digest: string; execution: string; outcome: string; report: { path: string; sha256: string; bytes: number } | null; artifacts: { path: string; sha256: string; bytes: number; commit: string | null }[]; decision: { decision: string; by: string } | null }; takenUp: { at: string; by: string } | null }[]
   answers: { n: number; question: string; text: string; from: string; by: string; at: string }[]
   instructions: { n: number; text: string; from: string; at: string }[]
+  revisions?: { n: number; event: number; manifest: string | null; instruction: string; reason: string; from: string; by: string; at: string }[] // fix6: results returned for correction
+  assessment?: import('../shared/assessment.ts').Assessment | null // fix6: the latest result's assessment
   disposition: { kind: string; note: string; manifest: string | null; at: string; by: string } | null
   closed: { reason: string; at: string } | null
   pending: number[]

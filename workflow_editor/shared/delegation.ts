@@ -19,7 +19,10 @@ export interface TransportRef { realm: string; message: number; stream: number; 
 // Facts of the child relayed to the parent. `wakes`: the parent's agent is
 // owed a look (a continuation is queued, and an attempt that ends without
 // taking it up is interrupted); the others are recorded for the record.
-export const EVENT_TYPES = ['question', 'withdrawn', 'answer-refused', 'completed', 'failed', 'held', 'resumed', 'decided', 'integrated', 'cancelled'] as const
+// `correcting` (fix6): the child received a correction the parent returned
+// its result with, and is open for it again (no wake: the next completion is
+// what the parent waits for).
+export const EVENT_TYPES = ['question', 'withdrawn', 'answer-refused', 'completed', 'failed', 'held', 'resumed', 'decided', 'integrated', 'cancelled', 'correcting'] as const
 export type DelegationEventType = typeof EVENT_TYPES[number]
 export const WAKING: ReadonlySet<string> = new Set(['question', 'answer-refused', 'completed', 'failed', 'cancelled'])
 
@@ -56,6 +59,7 @@ export interface DelegationEvent {
   subject?: DocumentEvidence[] // what a result confirmation presents, by hash
   presentation?: { id: string; revision: string }
   answer?: number // answer-refused: the parent's answer that was not applied
+  revision?: number // answer-refused: the parent's correction request that was not applied; correcting: the one received (fix6)
   hold?: string
   decision?: string
   manifest?: ResultManifest
@@ -66,6 +70,11 @@ export interface DelegationEvent {
 export interface DelegationAnswer { n: number; question: string; event: number; text: string; from: string; by: string; at: string; attempt: string | null; seq: number; because?: Because }
 export interface DelegationInstruction { n: number; text: string; from: string; by: string; at: string; attempt: string | null; seq: number; because?: Because }
 export interface Disposition { kind: DispositionKind; note: string; event: number | null; manifest: string | null; at: string; by: string }
+// A completed result the parent returned to the same child for correction
+// (fix6, `wfe delegate revise`): the result it returns (event and manifest
+// digest), why, and what the child is asked to add. The child adds and
+// performs the missing work itself; its next completion is a new result.
+export interface DelegationRevision { n: number; event: number; manifest: string | null; childSeq: number; instruction: string; reason: string; from: string; by: string; at: string; attempt: string | null; seq: number; because?: Because }
 
 export interface Delegation {
   id: string
@@ -85,6 +94,7 @@ export interface Delegation {
   events: DelegationEvent[]
   answers: DelegationAnswer[]
   instructions: DelegationInstruction[]
+  revisions?: DelegationRevision[] // present once the first correction is requested (fix6)
   disposition: Disposition | null
   closed: { at: string; by: string; reason: string } | null
 }
@@ -93,11 +103,12 @@ export const delegationFolder = (runFolder: string, id: string) => `${runFolder}
 export const isOpenDelegation = (d: Pick<Delegation, 'disposition' | 'closed'>) => !d.disposition && !d.closed
 export const pendingEvents = (d: Pick<Delegation, 'events'>) => d.events.filter(e => e.wakes && !e.takenUp)
 
-export type DelegationState = 'dispatching' | 'working' | 'attention' | 'result' | 'stopped' | DispositionKind | 'orphaned'
+export type DelegationState = 'dispatching' | 'working' | 'attention' | 'result' | 'correcting' | 'stopped' | DispositionKind | 'orphaned'
 export function delegationState(d: Delegation): DelegationState {
   if (d.disposition) return d.disposition.kind
   if (d.closed) return 'orphaned'
   if (pendingEvents(d).length) return 'attention'
+  if (openRevision(d)) return 'correcting'
   const last = [...d.events].reverse().find(e => ['completed', 'failed', 'cancelled', 'resumed'].includes(e.type))
   if (last?.type === 'completed') return 'result'
   if (last?.type === 'failed' || last?.type === 'cancelled') return 'stopped'
@@ -109,6 +120,15 @@ export function questionEvent(d: Pick<Delegation, 'events'>, question: string): 
   return [...d.events].reverse().find(e => e.type === 'question' && e.question === question)
 }
 export const latestResult = (d: Pick<Delegation, 'events'>) => [...d.events].reverse().find(e => e.type === 'completed')
+// The correction request that returned the latest result and still stands
+// (fix6): no newer result came back, and the child did not refuse it.
+export function openRevision(d: Pick<Delegation, 'events' | 'revisions'>): DelegationRevision | undefined {
+  const r = d.revisions?.at(-1)
+  const latest = latestResult(d)
+  if (!r || !latest || r.event !== latest.n) return undefined
+  if (d.events.some(e => e.type === 'answer-refused' && e.revision === r.n)) return undefined
+  return r
+}
 
 // ---- relaying a child's history --------------------------------------------------
 
@@ -164,6 +184,10 @@ export function childFacts(uid: string, child: RunRecord, sinceSeq = 0): ChildFa
     if (h.op === 'run.decide') push('decided', String(e.evidence ?? e.note ?? ''), { decision: e.decision as string })
     if (h.op === 'run.integrate') push('integrated', 'the accepted result was integrated into the child project\'s shared branches')
     if (h.op === 'run.cancel') push('cancelled', String(e.reason ?? ''))
+    if (h.op === 'correction.receive') {
+      const dl = e.delegation as { uid?: string; revision?: number } | undefined
+      if (dl?.uid === uid) push('correcting', `the child received correction ${String(h.change.correction?.[1] ?? '')} and is open for it again`, { revision: dl.revision })
+    }
   }
   return out
 }

@@ -220,7 +220,7 @@ test('the CLI gives one refusal and exit 1; the same command with --yes records 
   }
   const warned = await cli([])
   assert.equal(warned.code, 1)
-  assert.match(warned.err, /Not recorded — a reminder before completing build:\n- presentation-missing/)
+  assert.match(warned.err, /Not recorded — a reminder before completing build: presentation-missing\.\n- presentation-missing/)
   assert.equal((await rec(s)).nodes.build.state, 'running')
   assert.equal((await cli(['--yes'])).code, 0)
   const seq = (await rec(s)).seq

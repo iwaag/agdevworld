@@ -179,6 +179,16 @@ boundaries*) note the following:
 They are reminders, not gates. An answer may ask for changes or for the
 page to stay available, and nothing is stopped automatically.
 
+**Kept on request (fix6).** When the person asks for a page to stay
+available after its review, `wfe present keep <run> <p> --note <what they
+asked> --owner <who stops it later> [--because answer:<q>]` records it
+(`presentation.retain`: `retained {at, by, note, owner, because?}`). It
+starts, stops or keeps no process; the page's cleanup ownership becomes
+visible, and `presentation-serving` (the run's own, and a delegating run's
+assessment of it, [delegation.md](delegation.md) *Assessing a result*) no
+longer calls it a forgotten cleanup. A disposable review page is still
+stopped by its cleanup node.
+
 ## Confirmation bound to a presentation
 
 The result-confirmation question (`confirms: result`, [runs.md](runs.md))

@@ -14,8 +14,8 @@ import {
 } from './shares.ts'
 import { ID_PATTERN, NODE_PATTERN, PROFILE_PATTERN, normalizeRepoPath, type Edge } from './model.ts'
 import {
-  DELEGATION_ID, DISPOSITIONS, EVENT_TYPES, WAKING, isOpenDelegation, latestResult, pendingEvents, questionEvent,
-  type ChildRef, type Delegation, type DelegationEvent, type DelegationTarget, type ResultManifest, type TransportRef,
+  DELEGATION_ID, DISPOSITIONS, EVENT_TYPES, WAKING, isOpenDelegation, latestResult, openRevision, pendingEvents, questionEvent,
+  type ChildRef, type Delegation, type DelegationEvent, type DelegationRevision, type DelegationTarget, type ResultManifest, type TransportRef,
 } from './delegation.ts'
 
 export const RUN_SCHEMA = 'ag.workflow-run.v2'
@@ -284,6 +284,30 @@ export interface Instruction {
   ack: { by: string; at: string; attempt: string | null; response: string; note: string } | null
 }
 export const INSTRUCTION_ID = /^i[0-9]{1,6}$/
+// A correction a delegating run returned this run's completed result with
+// (fix6, docs/delegation.md "Correction"): recorded by the intake from the
+// parent's delivered request, on a completed execution only. While it is
+// not addressed the run is not completed: its agent owes the next move.
+// `addressed`: work was added or reopened after it arrived (`work`: the
+// ordinary adjustment, or a completed node started again), or the agent
+// recorded that nothing needs to change (`no-change`).
+export interface Correction {
+  id: string
+  delegation: { uid: string; revision: number }
+  result: { seq: number } // the completing entry of the result it returns
+  text: string // what the child is asked to add
+  reason: string // why the result was returned
+  from: string // whose words (the parent's agent, or the person it relays)
+  by: string
+  at: string
+  via: string
+  source?: SourceRef
+  during: string | null // the attempt open when it arrived
+  takenUp: { at: string; by: string; attempt: string | null; note: string } | null
+  addressed: { seq: number; at: string; how: 'work' | 'no-change' } | null
+}
+export const CORRECTION_ID = /^c[0-9]{1,4}$/
+export const openCorrections = (s: Pick<RunState, 'corrections'>): Correction[] => Object.values(s.corrections ?? {}).filter(c => !c.addressed)
 export interface Question {
   id: string
   node: string | null
@@ -329,6 +353,10 @@ export interface Presentation extends PresentationManifest {
   // Nodes recorded afterwards that this presentation shows (fix5): the
   // registration stays as it was; a link is a later provenance record.
   links?: { node: string; seq: number; at: string; by: string }[]
+  // fix6: the person asked for it to stay available after the review; who
+  // stops it later (`owner`), on whose words. Serving on is then not a
+  // forgotten cleanup.
+  retained?: { at: string; by: string; note: string; owner: string; because?: Because }
 }
 // Open: something may still be serving it.
 export const isOpen = (p: Pick<Presentation, 'state'>) => p.state === 'available' || p.state === 'stop-failed'
@@ -382,6 +410,7 @@ export type HoldKind = 'stopped' | 'interrupted' | 'unknown'
 export type HoldCause =
   | { code: 'left-running' | 'left-ready' | 'nothing-recorded'; nodes: string[] }
   | { code: 'missed-event'; events: { delegation: string; n: number; type: string }[] }
+  | { code: 'missed-correction'; corrections: string[] } // fix6: a correction left unaddressed
   | { code: 'process'; detail: string }
   | { code: 'lost' }
 // The person's words a recorder acted on (p9): when an agent stops, resumes
@@ -447,6 +476,7 @@ export interface RunState {
   assignments?: NodeAssignment[] // present once the first run.assign is recorded (project_migration p7)
   sessions?: SessionRecord[] // present once an attempt recorded its session (agent_session p1); the last open one is current
   delegations?: Record<string, Delegation> // present once the first dispatch is recorded (p10, docs/delegation.md)
+  corrections?: Record<string, Correction> // present once a delegating run first returned this run's result (fix6)
   artifacts: Artifact[]
   decisions: Decision[]
   cancelled: { reason: string; at: string; by: string; because?: Because } | null
@@ -534,7 +564,17 @@ export type OpInput =
   | { op: 'delegation.take-up'; delegation: string; events: number[] }
   | { op: 'delegation.answer'; delegation: string; question: string; text: string; because?: BecauseRef }
   | { op: 'delegation.instruct'; delegation: string; text: string; because?: BecauseRef }
-  | { op: 'delegation.dispose'; delegation: string; disposition: string; note: string; event?: number }
+  | { op: 'delegation.dispose'; delegation: string; disposition: string; note: string; event?: number; manifest?: string }
+  // fix6: the parent returns the child's current completed result to the
+  // same child for correction (event and manifest name the result it saw);
+  // the child's side: the intake records the delivered request on the
+  // child, its agent takes it up (`noChange`: nothing needs to change).
+  | { op: 'delegation.revise'; delegation: string; instruction: string; reason: string; event?: number; manifest?: string; because?: BecauseRef }
+  | { op: 'correction.receive'; correction?: string; delegation: { uid: string; revision: number }; result: { seq: number }; text: string; reason: string; from: string; source?: SourceRef }
+  | { op: 'correction.take-up'; correction: string; note: string; noChange?: boolean }
+  // fix6: the person asked for a presentation to stay available after its
+  // review; who stops it, and on whose words. A record, not a stop or a keep-alive.
+  | { op: 'presentation.retain'; presentation: string; note: string; owner: string; because?: BecauseRef }
 
 // What a recorder gives: the answer (by question and index, default the
 // latest) or the instruction; the reducer resolves and records whose words.
@@ -547,12 +587,13 @@ export const OPS = ['run.create', 'node.start', 'node.progress', 'node.wait', 'n
   'question.ask', 'question.answer', 'question.take-up', 'question.withdraw', 'instruction.receive', 'instruction.ack', 'artifact.attach', 'run.cancel', 'run.decide',
   'attempt.begin', 'attempt.end', 'run.stop', 'run.resume', 'presentation.register', 'presentation.observe', 'run.adjust', 'run.record-done', 'run.integrate', 'run.relocate', 'run.assign', 'run.recover', 'attempt.session', 'attempt.context', 'session.retire',
   'delegation.dispatch', 'delegation.bind', 'delegation.event', 'delegation.take-up', 'delegation.answer', 'delegation.instruct', 'delegation.dispose',
+  'delegation.revise', 'correction.receive', 'correction.take-up', 'presentation.retain',
   'input.select', 'input.observe', 'output.publish', 'output.observe'] as const
 // The executor's own reports. While an attempt is open they must carry its
 // id (`attempt`), so a stopped or superseded attempt cannot write into the
 // record of the one that replaced it.
 export const EXECUTOR_OPS: readonly string[] = ['node.start', 'node.progress', 'node.wait', 'node.complete', 'node.fail', 'question.ask', 'question.take-up', 'question.withdraw', 'instruction.ack', 'artifact.attach', 'presentation.register',
-  'delegation.dispatch', 'delegation.take-up', 'delegation.answer', 'delegation.instruct', 'delegation.dispose',
+  'delegation.dispatch', 'delegation.take-up', 'delegation.answer', 'delegation.instruct', 'delegation.dispose', 'delegation.revise', 'correction.take-up',
   'input.select', 'output.publish']
 
 // Received instructions the executor has not acknowledged, in arrival order.
@@ -576,6 +617,7 @@ export interface Change {
   hold?: [HoldKind | null, HoldKind | null]
   presentation?: [string, PresentationState | null, PresentationState] // id, from, to (p7)
   revision?: [string, string] // the revision in force before and after (p7)
+  correction?: [string | null, string] // fix6: a correction received (null → id), or addressed (id → id)
 }
 export type HistoryEntry = OpInput & EntryMeta & { seq: number; at: string; by: string; via: string; change: Change }
 export interface RunRecord extends RunState { history: HistoryEntry[] }
@@ -631,7 +673,10 @@ export function readiness(nodes: Record<string, { state: NodeState }>, graph: Ru
   return { ready, blocked }
 }
 
-export function summarize(s: Pick<RunState, 'nodes' | 'cancelled'>, graph: RunGraph): Execution {
+// An unaddressed correction (fix6) keeps a run whose nodes are all done
+// in progress: its agent owes the next move (adding the work), and the
+// result it returned is not announced again.
+export function summarize(s: Pick<RunState, 'nodes' | 'cancelled'> & Partial<Pick<RunState, 'corrections'>>, graph: RunGraph): Execution {
   const counts = Object.fromEntries(NODE_STATES.map(k => [k, 0])) as Record<NodeState, number>
   const ids = Object.keys(s.nodes).sort()
   for (const id of ids) counts[s.nodes[id].state]++
@@ -645,6 +690,7 @@ export function summarize(s: Pick<RunState, 'nodes' | 'cancelled'>, graph: RunGr
   else if (counts.pending === ids.length) state = 'not-started'
   else if (active.length || waiting.length || ready.length) state = 'in-progress'
   else state = 'stopped'
+  if (state === 'completed' && openCorrections(s).length) state = 'in-progress'
   return { state, counts, ready, blocked, active, waiting, failed }
 }
 
@@ -1351,6 +1397,15 @@ export function apply(prev: RunState | null, e: HistoryEntry | (OpInput & EntryM
         why = `the executor exited without taking up delegation event${missed.length === 1 ? '' : 's'} ${missed.join(', ')}${detail ? `; ${detail}` : ''}`
         cause = { code: 'missed-event', events: missedEvents }
       }
+      // fix6: a correction that was waiting for this attempt and is still
+      // not addressed: like a fact not taken up. One that arrived during it
+      // queues the next attempt instead.
+      const missedCorrections = openCorrections(s).filter(c => c.during !== e.attempt).map(c => c.id)
+      if (outcome === 'exited' && !s.cancelled && missedCorrections.length) {
+        outcome = 'interrupted'
+        why = `the executor exited with correction${missedCorrections.length === 1 ? '' : 's'} ${missedCorrections.join(', ')} not addressed (no work added, no wfe run correction ${missedCorrections[0]} --no-change)${detail ? `; ${detail}` : ''}`
+        cause = { code: 'missed-correction', corrections: missedCorrections }
+      }
       if (ctl.stop && outcome !== 'unknown') outcome = 'stopped'
       ctl.last = { id: ctl.attempt!.id, outcome, ended: at, detail: why, backend: ctl.attempt!.backend }
       ctl.attempt = null
@@ -1799,8 +1854,92 @@ export function apply(prev: RunState | null, e: HistoryEntry | (OpInput & EntryM
         ev = e.event !== undefined && e.event !== null ? d.events.find(x => x.n === e.event) : latest
         if (!ev || ev.type !== 'completed') fail('delegation-result', `delegation ${d.id} has ${ev ? `no result at event ${e.event} (it is ${ev.type})` : 'no result yet'}; a result is judged once the child completed (abandoned needs none)`)
         if (latest && ev!.n !== latest.n) fail('result-superseded', `event ${ev!.n} is not ${d.id}'s latest result (event ${latest.n} is); judge the latest`)
+        if (e.manifest !== undefined && e.manifest !== null && e.manifest !== (ev!.manifest?.digest ?? null)) fail('result-superseded', `result event ${ev!.n} carries manifest ${ev!.manifest?.digest ?? 'none'}, not ${String(e.manifest)}; the result you judged is not the one recorded`)
+        // fix6: a result returned for correction is not judged as it was;
+        // the corrected result comes back as a new event (abandoning stays open).
+        const back = openRevision(d)
+        if (back) fail('result-returned', `result event ${back.event} of ${d.id} was returned to the child for correction (revision ${back.n}, ${back.at}); judge the corrected result when it comes back, or abandon the delegation`)
       }
       d.disposition = { kind: e.disposition as typeof DISPOSITIONS[number], note, event: ev?.n ?? null, manifest: ev?.manifest?.digest ?? null, at, by }
+      break
+    }
+    case 'delegation.revise': {
+      // fix6: the parent returns the child's current completed result to the
+      // same child, with what to add. The delegation stays open; the node
+      // waits for the corrected result. Delivery is the notifier's; the child
+      // records it (correction.receive) through its intake.
+      live()
+      const d = delegation(e.delegation)
+      if (d.disposition) fail('delegation-closed', `delegation ${d.id} was judged ${d.disposition.kind} by ${d.disposition.by}; a closed delegation is not reopened (dispatch a replacement with --replaces ${d.id})`)
+      if (d.closed) fail('delegation-closed', `delegation ${d.id} is closed: ${d.closed.reason}`)
+      if (!d.child) fail('delegation-unbound', `delegation ${d.id} has no child yet; there is no result to return`)
+      const latest = latestResult(d)
+      if (!latest) fail('delegation-result', `delegation ${d.id} has no result yet; a correction returns a completed result`)
+      const ev = e.event !== undefined && e.event !== null ? d.events.find(x => x.n === e.event) : latest
+      if (!ev || ev.type !== 'completed') fail('delegation-result', `delegation ${d.id} has no result at event ${String(e.event)}`)
+      if (ev!.n !== latest!.n) fail('result-superseded', `event ${ev!.n} is not ${d.id}'s latest result (event ${latest!.n} is); return the latest`)
+      if (e.manifest !== undefined && e.manifest !== null && e.manifest !== (ev!.manifest?.digest ?? null)) fail('result-superseded', `result event ${ev!.n} carries manifest ${ev!.manifest?.digest ?? 'none'}, not ${String(e.manifest)}; the result you assessed is not the one recorded`)
+      if (!ev!.takenUp) fail('delegation-result', `result event ${ev!.n} of ${d.id} is not taken up yet; read it first (wfe delegate take-up)`)
+      const back = openRevision(d)
+      if (back) fail('delegation-correcting', `result event ${back.event} of ${d.id} was already returned for correction (revision ${back.n}, ${back.at}); the corrected result has not come back yet`)
+      const after = d.events.filter(x => x.n > ev!.n)
+      const stop = after.find(x => x.type === 'cancelled' || x.type === 'failed')
+      if (stop) fail('child-stopped', `the child ${stop.type === 'cancelled' ? 'was cancelled' : 'failed'} after this result (event ${stop.n}); a correction does not undo that`)
+      const why = because(e.because)
+      if (why && why.from === s.executor.name) fail('because', `the words named are ${s.executor.name}'s own; because names a person's answer or instruction`)
+      const r: DelegationRevision = { n: (d.revisions?.length ?? 0) + 1, event: ev!.n, manifest: ev!.manifest?.digest ?? null, childSeq: ev!.child.seq, instruction: text(e.instruction, 'what the child is asked to add (the instruction)'), reason: text(e.reason, 'why the result is returned (the reason)'), from: why?.from ?? by, by, at, attempt: e.attempt ?? null, seq: e.seq, ...(why ? { because: why } : {}) }
+      d.revisions = [...(d.revisions ?? []), r]
+      waitOnDelegation(d)
+      break
+    }
+    case 'correction.receive': {
+      // fix6: a delegating run returned this run's completed result (the
+      // intake records the delivered request). Only on a completed execution,
+      // and only for the result it returns: the latest completion.
+      live()
+      const ent = s.input.entrustedBy
+      const dl = e.delegation as unknown as Record<string, unknown>
+      if (!isObj(dl) || typeof dl.uid !== 'string' || typeof dl.revision !== 'number' || !Number.isInteger(dl.revision) || dl.revision < 1) fail('shape', 'delegation is {uid, revision}')
+      if (ent?.kind !== 'delegation' || ent.delegation !== dl.uid) fail('delegate-relation', `this run was not created from delegation ${String(dl.uid)}; its correction does not belong here`)
+      const base = summarize({ nodes: s.nodes, cancelled: s.cancelled }, graph)
+      if (base.state !== 'completed' || openCorrections(s).length) fail('correction-state', `this run is ${openCorrections(s).length ? `already open for correction ${openCorrections(s)[0].id}` : base.state}; a correction returns a completed result`)
+      // Which completion it returns is checked against the history by the
+      // file layer (server/runs.ts), under the same lock.
+      const res = e.result as unknown as Record<string, unknown>
+      if (!isObj(res) || typeof res.seq !== 'number' || !Number.isInteger(res.seq) || res.seq < 1 || res.seq > s.seq) fail('shape', 'result is {seq}: the completing entry of the result it returns')
+      const all = s.corrections ?? {}
+      const id = e.correction || `c${Object.keys(all).length + 1}`
+      if (!CORRECTION_ID.test(id)) fail('shape', `correction id "${id}" must match ${CORRECTION_ID.source}`)
+      if (id in all) fail('correction-exists', `correction ${id} already exists`)
+      const c: Correction = { id, delegation: { uid: dl.uid as string, revision: dl.revision as number }, result: { seq: res.seq as number }, text: text(e.text, 'the instruction'), reason: text(e.reason, 'the reason'), from: text(e.from, 'whose words they are (from)'), by, at, via: e.via, during: ctl.attempt?.id ?? null, takenUp: null, addressed: null }
+      if (e.source !== undefined) c.source = sourceOf(e.source)
+      s.corrections = { ...all, [id]: c }
+      change.correction = [null, id]
+      break
+    }
+    case 'correction.take-up': {
+      // fix6: the child's agent read the correction. With noChange it records
+      // that nothing needs to change (the run completes again as it is);
+      // otherwise the work it adds addresses it.
+      live()
+      const c = typeof e.correction === 'string' ? s.corrections?.[e.correction] : undefined
+      if (!c) fail('correction-unknown', `correction "${String(e.correction)}" does not exist in this run`)
+      if (c!.takenUp && !e.noChange) fail('correction-closed', `correction ${c!.id} was already taken up by ${c!.takenUp.by} at ${c!.takenUp.at}`)
+      if (c!.addressed) fail('correction-closed', `correction ${c!.id} is already addressed (${c!.addressed.how} at seq ${c!.addressed.seq})`)
+      const note = e.noChange ? text(e.note, 'why nothing needs to change (the note)') : optText(e.note, 'note')
+      c!.takenUp = c!.takenUp ?? { at, by, attempt: e.attempt ?? null, note }
+      if (e.noChange) { c!.addressed = { seq: e.seq, at, how: 'no-change' }; change.correction = [c!.id, c!.id] }
+      break
+    }
+    case 'presentation.retain': {
+      // fix6: the person asked for the page to stay available after its
+      // review. Recorded with whose words and who stops it later; nothing
+      // starts, stops or keeps a process.
+      live()
+      const p = s.presentations?.[e.presentation]
+      if (!p) fail('presentation-unknown', `presentation "${String(e.presentation)}" does not exist in this run`)
+      const why = because(e.because)
+      s.presentations = { ...s.presentations, [p!.id]: { ...p!, retained: { at, by, note: text(e.note, 'what the person asked for (the note)'), owner: text(e.owner, 'who stops it later (the owner)'), ...(why ? { because: why } : {}) } } }
       break
     }
     default:
@@ -1834,6 +1973,15 @@ export function apply(prev: RunState | null, e: HistoryEntry | (OpInput & EntryM
     }
   }
 
+  // fix6: a correction is addressed once the run has work again after it
+  // arrived — an adjustment that adds work, a completed node started again.
+  if (e.op !== 'correction.receive') {
+    const open = openCorrections(s)
+    if (open.length && summarize({ nodes: s.nodes, cancelled: s.cancelled }, graph).state !== 'completed') {
+      for (const c of open) c.addressed = { seq: e.seq, at, how: 'work' }
+      change.correction = [open[0].id, open[0].id]
+    }
+  }
   const before = prev.execution.state
   s.execution = summarize(s, graph)
   if (s.execution.state !== before) {
@@ -1945,7 +2093,7 @@ export const runKey = (r: RunRef) => `${r.workflow}/${r.run}`
 // move (an answer or a child's fact not taken up, an instruction not read,
 // work left ready). Short words and reasons: shared/status.ts.
 export type Situation = 'executing' | 'stopping' | 'awaiting-person' | 'awaiting-delegation' | 'awaiting-external' | 'due' | 'stopped' | 'interrupted' | 'unknown' | 'completed' | 'cancelled' | 'not-started' | 'idle'
-export function situation(s: Pick<RunState, 'control' | 'execution' | 'cancelled'> & Partial<Pick<RunState, 'questions' | 'delegations' | 'instructions'>>): Situation {
+export function situation(s: Pick<RunState, 'control' | 'execution' | 'cancelled'> & Partial<Pick<RunState, 'questions' | 'delegations' | 'instructions' | 'corrections'>>): Situation {
   if (s.cancelled) return 'cancelled'
   if (s.control.attempt) return s.control.stop ? 'stopping' : 'executing'
   if (s.control.hold) return s.control.hold.kind
@@ -1961,7 +2109,7 @@ export function situation(s: Pick<RunState, 'control' | 'execution' | 'cancelled
 
 // Why the executor owes the run its next move, from the record alone; null
 // when the next move is someone else's (or nobody's).
-export function dueReason(s: Pick<RunState, 'execution'> & Partial<Pick<RunState, 'questions' | 'delegations' | 'instructions'>>): string | null {
+export function dueReason(s: Pick<RunState, 'execution'> & Partial<Pick<RunState, 'questions' | 'delegations' | 'instructions' | 'corrections'>>): string | null {
   for (const w of s.execution.waiting) {
     if ('question' in w.on) { const q = s.questions?.[w.on.question]; if (q && questionState(q) === 'answered') return `answer to ${q.id} arrived` }
   }
@@ -1971,6 +2119,8 @@ export function dueReason(s: Pick<RunState, 'execution'> & Partial<Pick<RunState
   }
   const ins = Object.values(s.instructions ?? {}).find(i => !i.ack)
   if (ins && s.execution.state !== 'completed') return `instruction ${ins.id} arrived`
+  const cor = openCorrections(s)[0]
+  if (cor) return `correction ${cor.id} from ${cor.from} arrived`
   const and = (xs: string[]) => xs.length <= 2 ? xs.join(' and ') : `${xs.slice(0, -1).join(', ')} and ${xs.at(-1)}`
   if (s.execution.ready.length && !s.execution.waiting.length) return `${and(s.execution.ready)} ready`
   if (s.execution.active.length) return `${and(s.execution.active)} recorded as running`
@@ -1996,6 +2146,7 @@ export type NotableType = 'started' | 'question' | 'answered' | 'reported' | 'no
   | 'adjusted' // p7: the run's future work was adjusted (a new revision)
   | 'integrated' // p9: the accepted result reached the project's shared branches
   | 'delegated' | 'delegation' // p10: a delegate node's dispatch; a child's result, failure or cancellation relayed
+  | 'corrected' // fix6: the delegating run returned this run's completed result for correction
 export interface NotableEvent {
   id: string
   seq: number
@@ -2016,6 +2167,7 @@ export interface NotableEvent {
   subject?: string[] // the deliverables a result-confirmation question presents (p6)
   confirmation?: { question: string; from: string } // a decision from the person's confirmation (p6)
   instructions?: string[] // instructed / acknowledged (p6)
+  correction?: string // corrected (fix6)
   response?: string // acknowledged: incorporate | clarify | new-run
   confirms?: boolean // a question from the result-confirmation node
   presentation?: string // presented / cleanup-failed, and a question about a presentation (p7)
@@ -2078,6 +2230,8 @@ export function notableEvents(r: RunRecord, sinceSeq = 0): NotableEvent[] {
     }
     if (e.op === 'instruction.receive') push('instructed', false, d.text, { instructions: [e.change.instruction?.[1] ?? ''], holder: r.executor.name })
     if (e.op === 'instruction.ack') push('acknowledged', false, d.note, { instructions: (e as unknown as { instructions: string[] }).instructions, response: d.response })
+    // fix6: a correction the delegating run returned the result with.
+    if (e.op === 'correction.receive') push('corrected', true, `${d.reason}\n\n${d.text}`, { correction: e.change.correction?.[1] ?? '', holder: r.executor.name })
     if (e.op === 'run.cancel') push('cancelled', true, d.reason)
     if (e.op === 'run.integrate') push('integrated', false, (d.repositories as unknown as IntegrationRecord['repositories']).filter(x => x.method !== 'already').map(x => `${x.path === '.' ? 'project root' : x.path} → ${x.target} (${x.method}, ${x.result.slice(0, 10)})`).join('; '))
     if (e.op === 'run.record-done') push('adjusted', false, `recorded afterwards as done: ${d.node} — ${d.reason}`, { revision: d.revision, node: d.node, adjusted: { added: [d.node], removed: [] } })

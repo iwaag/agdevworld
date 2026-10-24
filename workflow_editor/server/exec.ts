@@ -26,7 +26,7 @@ import { DEFAULT_LANE, sessionPolicyOf, type Workflow } from '../shared/model.ts
 import { attemptContext, renderContext, type AttemptContext } from '../shared/context.ts'
 import { contextErrors, resolveContext } from './context.ts'
 import { ContextStore } from './contextStore.ts'
-import { configChanges, currentSession, unverifiedReason, unverifiedSession, describeSteps, effectiveOf, holderOf, hostOf, pendingInstructions, runKey, sameConfig, sessionConfig, situation, type AttemptSession, type AttemptSettings, type BecauseRef, type RecoveryAgent, type RunRecord, type RunRef } from '../shared/run.ts'
+import { configChanges, currentSession, unverifiedReason, unverifiedSession, describeSteps, effectiveOf, holderOf, hostOf, openCorrections, pendingInstructions, runKey, sameConfig, sessionConfig, situation, type AttemptSession, type AttemptSettings, type BecauseRef, type RecoveryAgent, type RunRecord, type RunRef } from '../shared/run.ts'
 import { git } from './git.ts'
 import { docStepsOf } from '../shared/compile.ts'
 import { assertWorkspaceAllowed, loadBoundary } from './boundary.ts'
@@ -39,7 +39,8 @@ import { readCopy, runSpace } from './runspace.ts'
 import { withLock } from './lock.ts'
 import { catalogBrief } from '../shared/catalog.ts'
 import { activityOf } from './activity.ts'
-import { DelegateStore } from './delegate.ts'
+import { DelegateStore, assessDelegation } from './delegate.ts'
+import { assessmentLines } from '../shared/assessment.ts'
 import { delegationState, isOpenDelegation, pendingEvents } from '../shared/delegation.ts'
 import { named, openStore, transaction } from './sqlite.ts'
 import { briefedSteps, changeLines, newStepLines, pendingAnswerLines, stateLines } from './continuation.ts'
@@ -184,12 +185,20 @@ export function presentationBrief(r: RunRecord): string[] {
 // The run's delegations as the attempt starts (p10, docs/delegation.md):
 // each with its state, the facts relayed and not yet taken up in full, and
 // what is owed. A child created from a delegation is told who asked.
-export function delegationBrief(r: RunRecord): string[] {
+// `assessed` (fix6): the assessment lines of each delegation's result that
+// is not taken up yet, from the file layer (ExecStore.assessedLines).
+export function delegationBrief(r: RunRecord, assessed: Record<string, string[]> = {}): string[] {
   const out: string[] = []
   const ent = r.input.entrustedBy
   if (ent?.kind === 'delegation') {
-    out.push('', `This run was requested by another run's agent: ${r.input.requester}, delegating node ${ent.parent.node} of ${ent.parent.project}/${ent.parent.workflow}/${ent.parent.run}${r.input.onBehalfOf ? ` for ${r.input.onBehalfOf}` : ''}. Its request is ${runDir(r)}/${r.input.file}${r.input.original ? ` (the person's own words: ${runDir(r)}/${r.input.original})` : ''}. Your questions reach that agent through the request topic, as they would a person; ask them --to ${r.input.requester}. The requesting agent can record its own answers and decisions; acceptance scope is descriptive.`)
+    // Whom the work is for, and who relays it (fix6): misc/freework/run-001…004
+    // were asked by ponderer's agent and ended with a file-path report to it;
+    // the person it asked for never saw a presentation.
+    const person = r.input.onBehalfOf
+    out.push('', `This run was requested by another run's agent: ${r.input.requester}, delegating node ${ent.parent.node} of ${ent.parent.project}/${ent.parent.workflow}/${ent.parent.run}${person ? `, on behalf of ${person}` : ''}. Its request is ${runDir(r)}/${r.input.file}, exactly as that agent wrote it${r.input.original ? ` (the person's own words: ${runDir(r)}/${r.input.original})` : ''}.`,
+      `${person ? `The work is for ${person}; ` : ''}${r.input.requester} relays between you: your questions reach it through the request topic, as they would a person (ask them --to ${r.input.requester}), and what you present reaches ${person ?? 'its person'} through it — a presentation you register and ask about is relayed with its link. A report of file paths to ${r.input.requester} is not a presentation to ${person ?? 'the person'}. Who accepts the result: ${ent.accepts === 'person' ? `${person ?? 'the person'} (their answer, relayed)` : `${r.input.requester}`}; the requesting agent records its own answers and decisions.`)
   }
+  out.push(...correctionBrief(r))
   const all = Object.values(r.delegations ?? {})
   if (!all.length) return out
   out.push('', 'Delegations of this run (wfe delegate show <run> <d>; help: wfe delegate help):')
@@ -200,10 +209,24 @@ export function delegationBrief(r: RunRecord): string[] {
       if (e.document) out.push(`      document: ${e.document.path} (${e.document.sha256.slice(0, 12)})`)
       for (const f of e.subject ?? []) out.push(`      presented: ${f.path} (${f.sha256.slice(0, 12)})`)
       if (e.manifest) out.push(`      result manifest ${e.manifest.digest.slice(7, 19)}: ${e.manifest.execution}; report ${e.manifest.report?.path ?? '(none)'}; ${e.manifest.artifacts.length} artifact(s)`)
+      if (e.type === 'completed' && assessed[d.id]) out.push(...assessed[d.id].map(l => `    ${l}`))
     }
+    const rv = (d.revisions ?? []).at(-1)
+    if (rv && delegationState(d) === 'correcting') out.push(`  - result event ${rv.event} was returned for correction (request ${rv.n}, ${rv.at}); the child continues and its next completion comes back as a new result.`)
   }
-  if (all.some(d => isOpenDelegation(d) && pendingEvents(d).length)) out.push('Facts can be marked taken up (wfe delegate take-up <run> <d> <n>…); answer with wfe delegate answer, record a result judgment with wfe delegate dispose. When only the child\'s work remains, end the attempt: your attempt holds your worker\'s slot, the child may need it, and its next fact resumes you.')
+  if (all.some(d => isOpenDelegation(d) && pendingEvents(d).length)) out.push('Facts can be marked taken up (wfe delegate take-up <run> <d> <n>…); answer with wfe delegate answer, record a result judgment with wfe delegate dispose, or return a result to the same child for what it left out with wfe delegate revise. When only the child\'s work remains, end the attempt: your attempt holds your worker\'s slot, the child may need it, and its next fact resumes you.')
   return out
+}
+
+// Corrections the delegating run returned this run's result with, not yet
+// addressed (fix6), in full.
+export function correctionBrief(r: RunRecord): string[] {
+  const open = openCorrections(r)
+  if (!open.length) return []
+  const run = runKey(r)
+  return ['', `The delegating run returned your completed result for correction; this run is open for it again (wfe run correction ${run}):`,
+    ...open.flatMap(k => [`- ${k.id} from ${k.from}${k.by !== k.from ? ` (relayed by ${k.by})` : ''} at ${k.at}, returning the result completed at seq ${k.result.seq}:`, `    why: ${k.reason.split('\n').join(' ')}`, `    add: ${k.text.split('\n').join('\n    ')}`]),
+    `Add the missing work as new nodes with your ordinary adjustment (wfe nodes instantiate <template> --run ${run} --file <draft> …, then wfe run adjust ${run} --definition <draft> --reason "…") and perform it; completed work stays as it is and is not repeated to obtain a new result. Present what the person should see through a present node, take its feedback and plan its cleanup as the catalog expects. If nothing needs to change: wfe run correction ${run} ${open[0].id} --no-change --note "why". Your next completion is a new result for the delegating run.`]
 }
 
 // The attempts of a session from the last one that was given the whole
@@ -415,6 +438,31 @@ export class ExecStore {
     const ins = r.instructions?.[instruction]
     if (!ins || ins.ack || r.execution.state === 'completed') return null
     return this.enqueue(ws.reg.id, ref, 'resume', `instruction:${ws.reg.id}/${runKey(ref)}/${instruction}`, `resume: instruction ${instruction} received`, this.nodeOf(r))
+  }
+
+  // After a correction is recorded (fix6): the completed child it reopened is
+  // continued so its agent adds the work. One job per correction; a held,
+  // cancelled or executing child is left as it is (the open attempt reads it
+  // at its next boundary, a hold waits for its resume). Queued again by
+  // reconcile while the correction is not addressed.
+  async afterCorrection(ws: Workspace, ref: RunRef, correction: string): Promise<JobRow | null> {
+    const r = (await readRun(ws, ref)).record
+    if (!r || hostOf(r.executor) !== this.executor || r.cancelled || r.control.hold || r.control.attempt) return null
+    const k = r.corrections?.[correction]
+    if (!k || k.addressed) return null
+    return this.enqueue(ws.reg.id, ref, 'resume', `correction:${ws.reg.id}/${runKey(ref)}/${correction}`, `resume: correction ${correction} from ${k.from} (the delegating run returned the result)`, this.nodeOf(r))
+  }
+
+  // The assessment of each delegated result the run has not taken up yet
+  // (fix6), as brief lines: shown once with the result, not on every attempt.
+  async assessedLines(r: RunRecord): Promise<Record<string, string[]>> {
+    const out: Record<string, string[]> = {}
+    for (const d of Object.values(r.delegations ?? {})) {
+      if (!isOpenDelegation(d) || !pendingEvents(d).some(e => e.type === 'completed')) continue
+      const a = await assessDelegation(this.delegate, r, d).catch(() => null)
+      if (a) out[d.id] = assessmentLines(a, '')
+    }
+    return out
   }
 
   // The parent's continuation for a delegation fact (p10): one job per fact.
@@ -741,7 +789,7 @@ export class ExecStore {
     lines.push(...instructionBrief(r))
     lines.push(...presentationBrief(r))
     lines.push(...await shareBrief(ws, ref, r, job.kind === 'start' ? null : { by: this.executor }, view))
-    lines.push(...delegationBrief(r))
+    lines.push(...delegationBrief(r, await this.assessedLines(r)))
     lines.push(...catalogBrief(catalogOf(r, reading.bundle), runKey(ref)))
     if (r.definition.revisions?.length) lines.push('', `Definition: revision ${r.definition.active} is in force (adjusted ${r.definition.revisions.length} time${r.definition.revisions.length === 1 ? '' : 's'}; wfe run revisions <run>); the original is definition/${r.definition.root}.yaml.`)
     lines.push(...documentationBrief(r))
@@ -776,7 +824,7 @@ export class ExecStore {
     const delta = changeLines(r, since, [previous, attempts.at(-1)].filter((a): a is string => !!a))
     lines.push('', delta.count ? `Recorded since your previous attempt began (after seq ${since}), not by it (${delta.count}):` : `Nothing was recorded since your previous attempt began (seq ${since}) except by it.`, ...delta.lines)
     lines.push('', ...stateLines(r))
-    lines.push(...pendingAnswerLines(r), ...instructionBrief(r), ...delegationBrief(r))
+    lines.push(...pendingAnswerLines(r), ...instructionBrief(r), ...delegationBrief(r, await this.assessedLines(r)))
     lines.push(...await shareBrief(ws, ref, r, { by: this.executor }, view))
     lines.push(...newStepLines(r, briefedSteps(r, sinceBootstrap(r, attempts.slice(0, -1)))))
     lines.push('', `Unchanged and not repeated: the contract, the context (the same bundle, fingerprint ${currentSession(r)?.config.context?.fingerprint.slice(7, 19) ?? 'not recorded'}), the node catalog (wfe run nodes ${runKey(ref)}) and the documentation policy you were given. This is the record at seq ${r.seq}; wfe run state ${runKey(ref)} --since ${r.seq} shows what is recorded after it, wfe run show ${runKey(ref)} the full record.`)
@@ -871,6 +919,8 @@ export class ExecStore {
     for (const w of rec.execution.waiting) if ('question' in w.on) resumeJob = resumeJob ?? await this.afterAnswer(ws, ref, w.on.question)
     // A child's fact relayed while the attempt ran (p10) queues the next one.
     if (!resumeJob && Object.values(rec.delegations ?? {}).some(d => isOpenDelegation(d) && pendingEvents(d).length)) resumeJob = await this.afterDelegation(ws, ref)
+    // A correction that arrived while the attempt ran (fix6) queues the next one.
+    for (const k of openCorrections(rec)) resumeJob = resumeJob ?? await this.afterCorrection(ws, ref, k.id)
     return { outcome: rec.control.last?.outcome ?? outcome, checkpoint, resumeJob }
   }
 
@@ -1266,6 +1316,11 @@ export class ExecStore {
         if (Object.values(rec.delegations ?? {}).some(d => isOpenDelegation(d) && pendingEvents(d).length)) {
           const j = await this.afterDelegation(ws, ref)
           if (j && !jobs.some(x => x.id === j.id)) notes.push(`${w.id} ${s.ref}: resume for a relayed delegation fact queued again`)
+        }
+        // A correction not addressed whose continuation was lost (fix6).
+        for (const k of openCorrections(rec)) {
+          const j = await this.afterCorrection(ws, ref, k.id)
+          if (j && !jobs.some(x => x.id === j.id)) notes.push(`${w.id} ${s.ref}: resume for correction ${k.id} queued again`)
         }
         // An instruction for a run nobody executes, whose continuation was
         // lost (project_migration p8 ex1): queued again under its receipt.

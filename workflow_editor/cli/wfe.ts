@@ -446,6 +446,12 @@ stop <run> <p> | stop <run> --all stop the run's own instances and verify they a
 status [<run>]                    what each presentation's record says and what this host
                                   observes now; the review link only when it is live
 reconcile                         after a restart: mark instances whose process is gone
+keep <run> <p> --note <text> --owner <who> [--because answer:<q>[:<n>]]
+                                  record that the person asked for it to stay
+                                  available after the review (fix6): on whose words,
+                                  and who stops it later. It starts, stops or keeps
+                                  nothing; reminders then no longer call it a
+                                  forgotten cleanup
 Ask about a presentation: wfe run ask <run> <node> --presentation <p> … (the
 result-confirmation question; the answer binds that revision). Host settings:
 <area>/present.json {bind, publicBase, ports, answerBase}.`,
@@ -1132,6 +1138,17 @@ async function cmdPresent(p: Parsed): Promise<number> {
         out(res.length ? res.map(x => `${x.presentation}: ${x.ok ? 'stopped' : 'NOT VERIFIED'} — ${x.detail}`).join('\n') : 'Nothing of this run is served or open.', { ok: !bad.length, results: res })
         return bad.length ? 1 : 0
       }
+      case 'keep': {
+        const r = await ref()
+        if (!third) throw new UsageError('keep <run> <presentation> --note <text> --owner <who>')
+        const b = opt(p, 'because')
+        const m = b ? /^answer:([a-z0-9]+)(?::(\d+))?$/.exec(b) : null
+        if (b && !m) throw new UsageError('--because is answer:<question>[:<answer index>]')
+        const { runOp } = await import('../server/runs.ts')
+        const res = await runOp(ws, r, { op: 'presentation.retain', presentation: third, note: need('note'), owner: need('owner'), ...(m ? { because: { kind: 'answer', question: m[1], ...(m[2] ? { answer: Number(m[2]) } : {}) } } : {}) } as never, { by: opt(p, 'by'), via: 'cli' })
+        out(`${res.duplicate ? 'Already recorded' : 'Recorded'}: ${third} stays available on request; ${need('owner')} stops it later (wfe present stop ${r.workflow}/${r.run} ${third}).`, { ok: true, presentation: res.record.presentations?.[third] })
+        return 0
+      }
       case 'status': {
         const refs = runArg ? [await ref()] : (await import('../server/runs.ts').then(m => m.listRuns(ws))).map(x => ({ workflow: x.workflow, run: x.run }))
         const views = []
@@ -1148,7 +1165,7 @@ async function cmdPresent(p: Parsed): Promise<number> {
     if (e instanceof RequestError) throw new Refused(e.message, e.detail)
     throw e
   } finally { pr.close() }
-  throw new UsageError('wfe present register|start|stop|status|reconcile')
+  throw new UsageError('wfe present register|start|stop|keep|status|reconcile')
 }
 
 // The executor's interface to this host's execution management. Every

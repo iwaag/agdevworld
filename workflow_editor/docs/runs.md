@@ -422,7 +422,38 @@ this: `wfe run instruct`, the run view, the Zulip intake.
 
 Completed nodes can be started again and the graph revised (`wfe run
 adjust`), so an instruction that changes completed work is incorporated like
-any other. The execution brief and a resumed session's continuation list the
+any other.
+
+### Corrections (workflow_editor fix6)
+
+A run created from a delegation can have its completed result returned by
+the delegating run (`wfe delegate revise`, [delegation.md](delegation.md)
+*Correction*). The intake records the delivered request on the child as
+`correction.receive`: `corrections.<c>` (`c1`, `c2`, …) with the delegation
+uid and request number, the result it returns (the completing entry's seq),
+the reason, what to add, whose words (`from`), the post (`source`) and the
+attempt open then (`during`). It is refused (`correction-state`) unless the
+execution is completed with no other open correction, and
+(`result-superseded`, checked against the history under the same lock)
+when the run completed again after the result it returns.
+
+While a correction is not addressed the execution is `in-progress` with no
+ready node, the situation is `due` ("correction c1 from … arrived") and the
+run gets a continuation job (receipt `correction:<ws>/<wf>/<run>/<c>`; queued
+again by reconcile and after an attempt that ended while it arrived). The
+result it returned is not announced again: its completion was followed by a
+change of execution, so the next completion is a new result.
+
+It is addressed by the first entry after which the run has work again — an
+adjustment that adds nodes, a completed node started again (`addressed.how:
+work`) — or by `correction.take-up` with `noChange` and a note (`no-change`:
+the run completes again as it is). `correction.take-up` without `noChange`
+records only that it was read (executor operation; `wfe run correction`).
+An attempt that ends with a correction that arrived before it still not
+addressed is held `interrupted` (cause `missed-correction`), like work left
+ready. The brief and the continuation show open corrections in full; `wfe
+run state` names them. The request topic gets a critical "Result returned
+for correction" message. The execution brief and a resumed session's continuation list the
 unacknowledged instructions in full; `wfe run state` shows them with the
 answers not yet taken up, and `wfe run instructions` and the run view show
 them all.
@@ -442,6 +473,9 @@ Derived after every operation; the counts keep mixed facts visible.
 | `not-started` | every node is `pending` |
 | `in-progress` | some node is `running` or `waiting`, or some node is ready |
 | `stopped` | none of the above: nothing runs, waits or is ready, and some node is `failed` or `cancelled` |
+
+A correction a delegating run returned the result with (fix6, below) keeps
+an otherwise `completed` execution `in-progress` until it is addressed.
 
 `execution` also lists `counts` per state, `ready` and `blocked` node ids, the
 `active` (running) and `waiting` nodes with holders, and `failed` nodes.
@@ -527,21 +561,38 @@ action, and cannot judge whether a result needs a presentation.
 | `cleanup-unplanned` | `wfe present register` | no cleanup node is planned |
 | `unrecorded-activity` | a question, a report, the run-completing completion | the run's catalog has templates and no work node is visible, but something suggests work was done: changed paths in the run's copy outside its records, artifacts outside the run folder or published outputs, or a talk that has run for more than 10 minutes |
 | `discussion-activity`, `discussion-open` | completion | a discussion activity completed with a plain completion; a conductor run ending with its discussion open (fix3) |
+| `delegated-presentation-missing`, `delegated-review-unrecorded`, `delegated-presentation-serving` | a delegating run's outward report, the completion that completes it, `wfe delegate dispose --disposition satisfied` | the assessment of a delegated result found the child's omission or an unknown (fix6, [delegation.md](delegation.md) *Assessing a result*) |
 
 Roles come from structured records, never node names:
 
 - **present**: the catalog's `present` template, the `present` icon, or a
   node a presentation was registered from;
 - **cleanup**: the `cleanup` template or icon;
-- **work**: the `work` template. Untemplated nodes are the designer's or
-  serve other ends (front/converse adds `tell` and `report` nodes), so they
-  count as visible work for the self-check but are not presented;
+- **work**: the `work` template; or (fix6) an untemplated `do`/`study` node
+  the run added itself (not in its original definition) whose records show
+  substantive work: artifacts, or files of the run's copy written while it
+  ran, outside the run folder, at least one of them not a note (`.md`,
+  `.txt`, `.json`, …). misc/freework/run-002 wrote its work nodes by hand
+  and was never asked to present. Other untemplated nodes are the
+  designer's or serve other ends (front/converse adds `tell` and `report`
+  nodes; reporting, documentation, coordination record no such files), so
+  they count as visible work for the self-check but are not presented;
 - `confirms: result`, talk, activity and documentation steps come from the
   graph.
 
 "Planned" means pending, running or waiting. The completion that completes
 the run is the transition to execution `completed`. Documentation steps
 such as `_final-report` do not hold it.
+
+The files are read from every repository the run owns (the root and its
+sub-repositories) and attributed to the node that was running when each was
+last written (fix6). The refusal text names the facts first and ends with
+one line, `In short: <code>: <omission> → <repair> | …`, so a read of only
+its tail (`| tail -3`) still carries why to act and what to do
+(misc/freework/run-003 and run-004 read only the tail of fix5's wording,
+which was directions to `--yes`). Each reminder's `summary` is in the
+structured detail too. fix5's "records that need no viewing" escape is gone;
+the common sentence about `--yes` and uncertainty stays.
 
 There are three responses to a reminder:
 
@@ -571,6 +622,10 @@ a remote worker, which forwards `--yes` with the command; the run view,
 which shows the reminder and records only after the person explicitly
 continues. A retransmission with the same receipt records nothing and is
 not evaluated again.
+
+A presentation the person asked to keep after the review (`wfe present
+keep`, `presentation.retain`, fix6: the note, whose words and who stops it
+later) is not a forgotten cleanup for `presentation-serving`.
 
 Why: gimmickimg/freework/run-010 recorded its experiment as nodes and
 completed with no presentation. run-011 presented it only because a

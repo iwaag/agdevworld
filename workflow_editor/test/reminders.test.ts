@@ -434,3 +434,19 @@ test('in a run\'s own copy, files written during a talk are a sign of work; file
     assert.equal((await readRun(s.ws, req2.ref)).record!.execution.state, 'completed')
   } finally { x.close() }
 })
+
+test('record-done in a workflow with a final report: the report step follows the new node; inserted between two nodes, their direct edge goes', async () => {
+  const s = await setup()
+  const final = (nodes: string, edges: [string, string][]) => flow(nodes, edges).replace('documentation: {policy: manual}', 'documentation: {policy: custom, plan: false, reports: false, final: true}')
+  await writeFile(join(s.dir, 'devdocs', 'workflows', 'freework.yaml'), final(node('wrap', 'do'), [['talk', 'wrap']]))
+  await gitOk(s.dir, ['add', '-A']); await gitOk(s.dir, ['commit', '-q', '-m', 'final report'])
+  const created = await createRun(s.ws, { workflow: 'freework', name: 'run-002', executor: { host: 'autolab' }, by: 'Pat', via: 'cli', input: { kind: 'braindump', text: 'x', author: 'Pat' }, area: s.area })
+  const t = { ...s, ref: created.ref }
+  await op(t, { op: 'node.start', node: 'talk' })
+  const m = await import('../server/runs.ts')
+  const r = await m.recordDone(s.ws, created.ref, { template: 'work', node: 'page', after: ['talk'], before: ['wrap'], outcome: 'made', reason: 'inside the talk' }, { by: 'autolab', via: 'cli' })
+  const g = (await rec(t)).definition.revisions!.at(-1)!.effective
+  assert.ok(g.edges.some(e => e.from === 'page' && e.to === 'wrap') && !g.edges.some(e => e.from === 'talk' && e.to === 'wrap'), 'inserted between talk and wrap')
+  assert.equal(r.revision, 'r2')
+  assert.equal((await rec(t)).nodes.page.state, 'completed')
+})

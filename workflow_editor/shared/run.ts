@@ -1613,7 +1613,12 @@ export function apply(prev: RunState | null, e: HistoryEntry | (OpInput & EntryM
         if (node in s.nodes) fail('node-exists', `node "${node}" is already in this run; recording work done afterwards adds a new node`)
         if (!(node in nodes)) fail('adjust-graph', `the revision does not add node "${node}"`)
         const extra = diff.added.filter(n => n !== node && !nodes[n]?.step)
-        if (extra.length || diff.removed.length || diff.changed.some(n => n !== node && !nodes[n]?.step) || diff.edgesRemoved.length) fail('adjust-graph', `a revision recording work done adds only "${node}" (and its generated steps); it ${extra.length ? `adds ${extra.join(', ')}` : diff.removed.length ? `removes ${diff.removed.join(', ')}` : 'changes other nodes or edges'}`)
+        // Edges that go: those of generated steps (a final report follows the
+        // last nodes), and the direct edge a placement between two nodes bypasses.
+        const isStep = (n: string) => !!(nodes[n]?.step ?? graph.nodes[n]?.step)
+        const pre = new Set(edges.filter(ed => ed.to === node).map(ed => ed.from)), post = new Set(edges.filter(ed => ed.from === node).map(ed => ed.to))
+        const cut = diff.edgesRemoved.filter(([a, b]) => !isStep(a) && !isStep(b) && !(pre.has(a) && post.has(b)))
+        if (extra.length || diff.removed.length || diff.changed.some(n => n !== node && !nodes[n]?.step) || cut.length) fail('adjust-graph', `a revision recording work done adds only "${node}" (and its generated steps); it ${extra.length ? `adds ${extra.join(', ')}` : diff.removed.length ? `removes ${diff.removed.join(', ')}` : cut.length ? `removes the edge${cut.length === 1 ? '' : 's'} ${cut.map(([a, b]) => `${a} → ${b}`).join(', ')}` : 'changes other nodes'}`)
         if (nodes[node].step) fail('adjust-graph', `"${node}" is a generated step`)
         // It follows nodes that were done or under way when the work happened
         // (a talk it was done inside is still running), never future work.

@@ -41,7 +41,7 @@ import { catalogBrief } from '../shared/catalog.ts'
 import { activityOf } from './activity.ts'
 import { DelegateStore, assessDelegation } from './delegate.ts'
 import { ReviewHost } from './reviews.ts'
-import { hostOwes, openContinuations, owedContinuation, roundLine, roundOf, startedInstances } from '../shared/humanReview.ts'
+import { hostOwes, openContinuations, openReleases, owedContinuation, owedRelease, roundLine, roundOf, startedInstances, stillServing } from '../shared/humanReview.ts'
 import { assessmentLines } from '../shared/assessment.ts'
 import { delegationState, isOpenDelegation, pendingEvents } from '../shared/delegation.ts'
 import { named, openStore, transaction } from './sqlite.ts'
@@ -238,6 +238,14 @@ export function reviewBrief(r: RunRecord): string[] {
       out.push(`    ${v.decision!.by}${v.decision!.synthetic ? ' (a synthetic check actor)' : ''} requested changes at ${v.decision!.at}: ${v.decision!.feedback.split('\n').join('\n    ')}`,
         `    Take them up (wfe review take-up ${run} ${v.id}) and append the work as nodes after ${v.node} — your own work node, or the same child again (reopen its delegate node with wfe run start ${run} <node> --reason "…", then wfe delegate revise ${run} <d> --follow-up ${v.id} --instruction "…" --reason "…") — and a new human review node after it (wfe nodes instantiate human-review --run ${run} --after <work>), prepared with the corrected presentations. The run stays open until then. If nothing should change: wfe review take-up ${run} ${v.id} --no-change --note "why".`,
         ...(handed.length ? [`    The review left ${handed.map(x => x.instance).join(', ')} serving; it is yours now: keep it to compare, or stop it (wfe review cleanup ${run} ${v.id}). The next approval stops what is left.`] : []))
+    }
+    // The work an approval made ready (p17 ex1), while it is still ready.
+    const next = v.release?.unlocked.filter(n => r.execution.ready.includes(n)) ?? []
+    if (v.state === 'complete' && next.length) {
+      const stopped = v.cleanup?.results.filter(c => c.status === 'stopped').map(c => c.instance) ?? []
+      const on = stillServing(v)
+      out.push(`    ${v.decision!.by}${v.decision!.synthetic ? ' (a synthetic check actor)' : ''} approved it at ${v.decision!.at}${v.decision!.feedback ? `: ${v.decision!.feedback.split('\n').join('\n    ')}` : ''}`,
+        `    Ready now because of it: ${next.join(', ')}. Do that work as usual. ${stopped.length ? `WFE's review cleanup already stopped and verified ${stopped.join(', ')}; stopping it again reports that nothing serves it. ` : ''}${on.length ? `Not stopped by the review: ${on.map(c => `${c.instance} (${c.status === 'left' ? `serving for ${c.owner ?? 'its run'}` : `kept${c.owner ? ` for ${c.owner}` : ''}`})`).join(', ')}. ` : ''}The approval asks for nothing more of the person.`)
     }
   }
   return out
@@ -488,9 +496,28 @@ export class ExecStore {
     if (!v || !owedContinuation(v)) return null
     return this.enqueue(ws.reg.id, ref, 'resume', `review:${ws.reg.id}/${runKey(ref)}/${review}`, `resume: changes requested in review ${review} by ${v.decision?.by ?? 'the person'}`, this.nodeOf(r))
   }
+  // After an approval's cleanup completed its round (p17 ex1): the work the
+  // review node's completion made ready is continued once per completion,
+  // by an ordinary attempt on the run's own node. The one rule for its three
+  // deliveries — the cleanup's callback, the end of an attempt that was open
+  // meanwhile, reconcile after a lost callback or queue write: nothing
+  // executes the run now (an open attempt is reassessed when it ends), it is
+  // not held (a resume picks the work up), cancelled or completed, and no
+  // attempt has begun since the completion (the first one that did owns the
+  // work: the release is consumed by its attempt.begin). The receipt binds
+  // the job to the round (whose uid carries the run's creation) and the
+  // completing entry, so a later round never reuses it.
+  async afterRelease(ws: Workspace, ref: RunRef, review: string): Promise<JobRow | null> {
+    const r = (await readRun(ws, ref)).record
+    if (!r || hostOf(r.executor) !== this.executor || r.cancelled || r.control.hold || r.control.attempt || r.execution.state === 'completed') return null
+    const v = r.reviews?.[review]
+    if (!v || !owedRelease(v, r)) return null
+    const ready = v.release!.unlocked.filter(n => r.execution.ready.includes(n))
+    return this.enqueue(ws.reg.id, ref, 'resume', `review-approved:${ws.reg.id}/${v.uid}@${v.release!.seq}`, `resume: ${ready.join(', ')} ready after ${v.decision?.by ?? 'the person'} approved review ${review}`, this.nodeOf(r))
+  }
   // The host side of human reviews: starting subjects, cleanup (p17).
   private _reviews?: ReviewHost
-  get reviews(): ReviewHost { return this._reviews ??= new ReviewHost({ registryFile: this.ctx.registryFile, area: this.ctx.area, continued: (ws, ref, id) => this.afterReview(ws, ref, id) }) }
+  get reviews(): ReviewHost { return this._reviews ??= new ReviewHost({ registryFile: this.ctx.registryFile, area: this.ctx.area, continued: (ws, ref, id) => this.afterReview(ws, ref, id), released: (ws, ref, id) => this.afterRelease(ws, ref, id) }) }
 
   // The assessment of each delegated result the run has not taken up yet
   // (fix6), as brief lines: shown once with the result, not on every attempt.
@@ -960,8 +987,10 @@ export class ExecStore {
     if (!resumeJob && Object.values(rec.delegations ?? {}).some(d => isOpenDelegation(d) && pendingEvents(d).length)) resumeJob = await this.afterDelegation(ws, ref)
     // A correction that arrived while the attempt ran (fix6) queues the next one.
     for (const k of openCorrections(rec)) resumeJob = resumeJob ?? await this.afterCorrection(ws, ref, k.id)
-    // So do changes requested in a human review meanwhile (p17).
+    // So do changes requested in a human review meanwhile (p17), and work an
+    // approval made ready meanwhile (p17 ex1).
     for (const v of openContinuations(rec)) resumeJob = resumeJob ?? await this.afterReview(ws, ref, v.id)
+    for (const v of openReleases(rec)) resumeJob = resumeJob ?? await this.afterRelease(ws, ref, v.id)
     return { outcome: rec.control.last?.outcome ?? outcome, checkpoint, resumeJob }
   }
 
@@ -1346,10 +1375,14 @@ export class ExecStore {
       for (const s of await listRuns(ws)) {
         if (s.problem) continue
         const ref = { workflow: s.workflow, run: s.run }
-        const rec = (await readRun(ws, ref)).record
+        let rec = (await readRun(ws, ref)).record
         // Human review rounds whose start or cleanup is owed (p17): WFE's
-        // host work, whatever the run's executor or hold.
-        if (rec && Object.values(rec.reviews ?? {}).some(hostOwes)) notes.push(...await this.reviews.reconcileRun(ws, rec).catch(e => [`${w.id} ${s.ref}: reviews: ${(e as Error).message}`]))
+        // host work, whatever the run's executor or hold. What it changed is
+        // read again before anything is scheduled from it (p17 ex1).
+        if (rec && Object.values(rec.reviews ?? {}).some(hostOwes)) {
+          notes.push(...await this.reviews.reconcileRun(ws, rec).catch(e => [`${w.id} ${s.ref}: reviews: ${(e as Error).message}`]))
+          rec = (await readRun(ws, ref)).record
+        }
         if (s.executorHost !== this.executor) continue
         if (!rec || rec.cancelled || rec.control.hold || rec.control.attempt) continue
         const jobs = this.all<JobRow>('SELECT * FROM jobs WHERE workspace = ? AND workflow = ? AND run = ?', w.id, s.workflow, s.run)
@@ -1376,6 +1409,11 @@ export class ExecStore {
         for (const v of openContinuations(rec)) {
           const j = await this.afterReview(ws, ref, v.id)
           if (j && !jobs.some(x => x.id === j.id)) notes.push(`${w.id} ${s.ref}: resume for review ${v.id} queued again`)
+        }
+        // Work an approval made ready whose continuation was lost (p17 ex1).
+        for (const v of openReleases(rec)) {
+          const j = await this.afterRelease(ws, ref, v.id)
+          if (j && !jobs.some(x => x.id === j.id)) notes.push(`${w.id} ${s.ref}: resume after the approval of review ${v.id} queued`)
         }
         // An instruction for a run nobody executes, whose continuation was
         // lost (project_migration p8 ex1): queued again under its receipt.

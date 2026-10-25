@@ -219,6 +219,9 @@ test('deferred human review: prepared without a waiting process, one start, chan
   assert.equal(p.reviews!.rv1.cleanup!.state, 'done', 'what rv1 handed over and nobody stopped went with the approval')
   assert.ok(!alive(pid1) && !alive(pid2), 'no review instance is left serving')
   assert.equal(p.execution.state, 'completed')
+  assert.equal(jobs(s).length, 0, 'a final review completes the run on the host: no agent turn (p17 ex1)')
+  await s.x.reconcile()
+  assert.equal(jobs(s).length, 0)
   const kid = (await readRun(await runSpace(s.kid, kidRef), kidRef)).record!
   assert.equal(kid.presentations!.p1.state, 'stopped')
   assert.equal(kid.presentations!.p2.state, 'stopped')

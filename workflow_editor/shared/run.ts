@@ -590,7 +590,7 @@ export type OpInput =
   | { op: 'review.start'; review: string }
   | { op: 'review.serve'; review: string; start: number; subjects: Omit<SubjectServing, 'at' | 'start'>[] }
   | { op: 'review.decide'; review: string; outcome: string; feedback?: string; revisions?: string[]; synthetic?: boolean; because?: BecauseRef }
-  | { op: 'review.cleanup'; review: string; results: Omit<CleanupResult, 'at'>[] }
+  | { op: 'review.cleanup'; review: string; results: Omit<CleanupResult, 'at'>[]; release?: boolean }
   | { op: 'review.take-up'; review: string; note: string; noChange?: boolean }
 
 // What a recorder gives: the answer (by question and index, default the
@@ -1328,6 +1328,8 @@ export function apply(prev: RunState | null, e: HistoryEntry | (OpInput & EntryM
       ctl.attempt = { id: e.attempt, reason: text(e.reason, 'the reason'), began: at, backend: optText(e.backend, 'backend') || null }
       if (e.settings !== undefined) ctl.attempt.settings = attemptSettings(e.settings)
       ctl.attempts++
+      // Work an approval made ready (p17 ex1) is this attempt's from now on.
+      for (const r of Object.values(s.reviews ?? {})) if (r.release && !r.release.continued) r.release.continued = { attempt: e.attempt, seq: e.seq }
       // The attempt's session (agent_session p1): a resumed one must be the
       // run's current session; a new one supersedes it.
       const ss = ctl.attempt.settings?.session
@@ -1409,10 +1411,14 @@ export function apply(prev: RunState | null, e: HistoryEntry | (OpInput & EntryM
       let why = detail
       let cause: HoldCause | undefined = outcome === 'unknown' ? { code: 'lost' } : outcome === 'interrupted' ? { code: 'process', detail: detail || 'the process did not end normally' } : undefined
       const deferred = e.waits === 'defer-ready' && ex.waiting.length > 0
-      if (outcome === 'exited' && !s.cancelled && ex.state === 'in-progress' && (ex.active.length || (ex.ready.length && !deferred))) {
+      // Work an approval made ready while this attempt ran (p17 ex1) is the
+      // next attempt's: the executor queues it after this end.
+      const arrived = new Set(Object.values(s.reviews ?? {}).flatMap(r => r.release && !r.release.continued && r.release.during === e.attempt ? r.release.unlocked : []))
+      const ownReady = ex.ready.filter(id => !arrived.has(id))
+      if (outcome === 'exited' && !s.cancelled && ex.state === 'in-progress' && (ex.active.length || (ownReady.length && !deferred))) {
         outcome = 'interrupted'
-        why = `the executor exited with ${ex.active.length ? `${ex.active.join(', ')} recorded as running` : `${ex.ready.join(', ')} ready and nothing waiting`}${detail ? `; ${detail}` : ''}`
-        cause = ex.active.length ? { code: 'left-running', nodes: ex.active } : { code: 'left-ready', nodes: ex.ready }
+        why = `the executor exited with ${ex.active.length ? `${ex.active.join(', ')} recorded as running` : `${ownReady.join(', ')} ready and nothing waiting`}${detail ? `; ${detail}` : ''}`
+        cause = ex.active.length ? { code: 'left-running', nodes: ex.active } : { code: 'left-ready', nodes: ownReady }
       }
       // An attempt after which nothing of the run's work is recorded (p8 ex1,
       // new entries only): the work it did is in no record.
@@ -2142,7 +2148,8 @@ export function apply(prev: RunState | null, e: HistoryEntry | (OpInput & EntryM
       if (!Array.isArray(e.results)) fail('shape', 'results lists what cleanup did with each instance')
       const results: CleanupResult[] = e.results.map((x, i) => {
         if (!isObj(x) || !r.subjects.some(y => y.n === x.subject) || !['stopped', 'stop-failed', 'kept', 'left'].includes(x.status as string)) return fail('shape', `result ${i + 1} is {subject, instance, status: stopped|stop-failed|kept|left, detail}`)
-        return { subject: x.subject, instance: x.instance ?? null, status: x.status, detail: optText(x.detail, 'detail'), at }
+        const owner = optText(x.owner, 'owner')
+        return { subject: x.subject, instance: x.instance ?? null, status: x.status, detail: optText(x.detail, 'detail'), at, ...(owner ? { owner } : {}) }
       })
       const before = r.state
       const cl = r.cleanup!
@@ -2158,6 +2165,13 @@ export function apply(prev: RunState | null, e: HistoryEntry | (OpInput & EntryM
           n.wait = null; n.ended = at
           n.outcome = { text: `Approved by ${r.decision!.by}${r.decision!.synthetic ? ' (synthetic check actor)' : ''} in ${r.id}${r.decision!.feedback ? `: ${r.decision!.feedback}` : ''}; review cleanup verified`, artifacts: [] }
           move(r.node, 'completed')
+          // p17 ex1 (entries that say so): the successors this made ready
+          // are the executor's to continue; an attempt open now is not
+          // blamed for them at its end.
+          if (e.release === true) {
+            const next = new Set(graph.edges.filter(x => x.from === r.node).map(x => x.to))
+            r.release = { seq: e.seq, at, during: ctl.attempt?.id ?? null, unlocked: readiness(s.nodes, graph).ready.filter(id => next.has(id)), continued: null }
+          }
         }
       }
       change.review = [r.id, before, r.state]

@@ -3,7 +3,7 @@
 // is done; the person (or an identified check actor) starts it, approves it
 // or requests changes; WFE stops what it started. Thin over
 // server/reviews.ts; no command needs the service.
-import { roundLine, startedInstances, subjectLabel, type ReviewRound } from '../shared/humanReview.ts'
+import { roundLine, startedInstances, stillServing, subjectLabel, type ReviewRound } from '../shared/humanReview.ts'
 import { runKey, type BecauseRef, type RunRecord, type RunRef } from '../shared/run.ts'
 import { readRun, resolveRef } from '../server/runs.ts'
 import { runSpace } from '../server/runspace.ts'
@@ -55,9 +55,10 @@ start is not a view and not an approval.`,
   approve: `wfe review approve <run> <rv> [--feedback <text>] [--synthetic]
 
 Records the person's approval of exactly the round's frozen revisions, then
-stops what the review started (verified; a failed stop is retried and never
-asks again). Refused unless every subject is available (start-failed names
-which are not). Approval is an assessment of the result: it is not
+stops what the review used (verified; a failed stop is retried and never
+asks again), and the work after the review node continues: the run's agent
+is queued for it once, without another approval or a resume. Refused unless
+every subject is available (start-failed names which are not). Approval is an assessment of the result: it is not
 permission to run, revise, deploy or integrate anything.
   --synthetic  the actor (--by) is a named check actor standing in for
                nobody's real review; shown as such everywhere.
@@ -71,11 +72,15 @@ responsible agent is continued, takes the changes up, appends work and a new
 review node. What the review started is handed to that agent.`,
   cleanup: `wfe review cleanup <run> <rv>
 
-Stops what the round started (through each owning run), unless another
-active round uses it, the person asked to keep it, or it serves its own
-run's unfinished review. WFE does this after an approval or a cancellation
-by itself; after requested changes the responsible agent may run it, or
-leave the page up to compare (the next approval stops it).`,
+Stops what the round started or reused (through each owning run), unless
+another active round uses it (kept), the person asked to keep it (kept), or
+it was serving before the review for a different run still under way (left:
+that run still serves it, named as its owner; it is not stopped). A page of
+the reviewed run itself is stopped. WFE does this after an approval or a
+cancellation by itself; after requested changes the responsible agent may
+run it, or leave the page up to compare (the next approval stops it). An
+explicit cleanup node after the review still runs as ordinary work; a page
+the review already stopped makes its wfe present stop a verified no-op.`,
   'take-up': `wfe review take-up <run> <rv> [--note <text>] [--no-change --note <why>]
 
 The responsible agent read the changes requested in <rv>. Appending work as
@@ -106,6 +111,8 @@ function roundText(v: RoundView | ReviewRound): string {
   if (v.starts.length) lines.push(`  starts: ${v.starts.map(s => `${s.n} by ${s.by} (${s.via}) at ${s.at}`).join('; ')}`)
   if (v.decision) lines.push(`  decision: ${v.decision.outcome === 'approved' ? 'approved' : 'changes requested'} by ${v.decision.by}${v.decision.synthetic ? ' (synthetic check actor)' : ''}${v.decision.relayed ? ` (relayed by ${v.decision.relayed.by})` : ''} at ${v.decision.at}${v.decision.feedback ? `: ${v.decision.feedback}` : ''}`)
   if (v.cleanup) lines.push(`  cleanup: ${v.cleanup.state} (owner ${v.cleanup.owner})${v.cleanup.results.length ? `: ${v.cleanup.results.map(c => `${c.instance} ${c.status}`).join(', ')}` : ''}${startedInstances(v).length && v.cleanup.state !== 'done' ? `; still serving: ${startedInstances(v).map(x => x.instance).join(', ')}` : ''}`)
+  for (const c of stillServing(v)) lines.push(`  still serving: ${c.instance} (${c.status === 'left' ? `for ${c.owner ?? 'its run'}, which stops it` : `kept${c.owner ? ` for ${c.owner}` : ''}`})`)
+  if (v.release) lines.push(`  after the approval: ${v.release.unlocked.length ? `${v.release.unlocked.join(', ')} made ready; ${v.release.continued ? `continued by attempt ${v.release.continued.attempt}` : `the run's agent continues it${v.release.during ? ' after the attempt that was running' : ''}`}` : 'nothing made ready (the review was the end of the run)'}`)
   if (v.continuation) lines.push(`  continuation: ${v.continuation.addressed ? `addressed (${v.continuation.addressed.how}, seq ${v.continuation.addressed.seq})` : v.continuation.takenUp ? `taken up by ${v.continuation.takenUp.by}; no work added yet` : 'not taken up yet'}`)
   if ('page' in v && v.page) lines.push(`  review page: ${v.page}`)
   return lines.join('\n')

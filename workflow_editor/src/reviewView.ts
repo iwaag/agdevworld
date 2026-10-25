@@ -8,13 +8,13 @@
 import { api, ApiError } from './api.ts'
 import { h, when } from './dom.ts'
 import type { ViewHandle } from './main.ts'
-import type { RoundView, SubjectView } from '../shared/humanReview.ts'
+import { stillServing, type RoundView, type SubjectView } from '../shared/humanReview.ts'
 
 const ACTOR_KEY = 'workflow-editor.actor'
 const stored = () => { try { return localStorage.getItem(ACTOR_KEY) ?? '' } catch { return '' } }
 const store = (v: string) => { try { localStorage.setItem(ACTOR_KEY, v) } catch { /* per-viewer convenience only */ } }
 
-const STATUS_WORDS: Record<SubjectView['status'], string> = { available: 'Ready', failed: 'Did not start', 'not-started': 'Not started yet', stopped: 'Stopped after the review' }
+const STATUS_WORDS: Record<SubjectView['status'], string> = { available: 'Ready', failed: 'Did not start', 'not-started': 'Not started yet', stopped: 'Stopped after the review', kept: 'Kept serving', handed: 'Still serving for its run' }
 
 export function renderReviewView(app: HTMLElement, wsId: string, workflow: string, run: string, rv: string): ViewHandle {
   const runHref = `#/ws/${encodeURIComponent(wsId)}/run/${encodeURIComponent(workflow)}/${encodeURIComponent(run)}`
@@ -79,7 +79,7 @@ export function renderReviewView(app: HTMLElement, wsId: string, workflow: strin
     return h('li.review-subject',
       h('div.review-subject-head', h('strong', x.title), ' ', h('span.muted.small', `${x.presentation} · revision ${x.revision.slice(7, 19)}`)),
       h('div.small', 'From ', h('a', { href: ownerHref }, `${x.project} / ${x.workflow}/${x.run}`), x.delegation ? ` (delegation ${x.delegation}${x.result ? `, result ${x.result.event}` : ''})` : ''),
-      h('div.review-subject-state', h(`span.chip.${open ? 'ok' : x.status === 'failed' ? 'warn' : 'muted'}`, open ? 'Ready' : STATUS_WORDS[x.status]),
+      h('div.review-subject-state', h(`span.chip.${open ? 'ok' : x.status === 'failed' ? 'warn' : 'muted'}`, x.status === 'kept' || x.status === 'handed' ? `${STATUS_WORDS[x.status]}${x.owner ? ` · ${x.owner}` : ''}` : open ? 'Ready' : STATUS_WORDS[x.status]),
         open ? h('a.button.primary', { href: x.url!, target: '_blank', rel: 'noopener' }, 'Open ↗') : null,
         open && x.local ? h('span.muted.small', ' opens on the execution host only') : null,
         !open && x.status === 'available' && r.state === 'reviewing' ? h('span.muted.small', ' not serving now — Start review again') : null),
@@ -114,8 +114,9 @@ export function renderReviewView(app: HTMLElement, wsId: string, workflow: strin
     const outcome = decided ? h('section.card', h('h2', r.decision!.outcome === 'approved' ? 'Approved' : 'Changes requested'),
       h('p', `${r.decision!.by}${r.decision!.synthetic ? ' (a synthetic check actor)' : ''}${r.decision!.relayed ? ` (relayed by ${r.decision!.relayed.by})` : ''} at ${when(r.decision!.at)}`),
       r.decision!.feedback ? h('p.review-summary', r.decision!.feedback) : null,
-      r.cleanup ? h('p.small', r.cleanup.state === 'done' ? 'Cleanup verified: what the review started is stopped.' : r.cleanup.state === 'handed' ? `The pages the review started are ${r.cleanup.owner}'s now (kept to compare, or stopped).` : r.cleanup.state === 'failed' ? 'Cleanup failed for an instance; WFE retries. Your decision stands and is not asked again.' : 'Cleanup in progress…') : null,
+      r.cleanup ? h('p.small', r.cleanup.state === 'done' ? (stillServing(r).length ? `Review complete. Not stopped by it: ${stillServing(r).map(c => `${c.instance} (${c.status === 'left' ? `serving for ${c.owner ?? 'its run'}, which stops it` : `kept${c.owner ? ` for ${c.owner}` : ''}`})`).join('; ')}.` : 'Cleanup verified: what the review used is stopped.') : r.cleanup.state === 'handed' ? `The pages the review started are ${r.cleanup.owner}'s now (kept to compare, or stopped).` : r.cleanup.state === 'failed' ? 'Cleanup failed for an instance; WFE retries. Your decision stands and is not asked again.' : 'Cleanup in progress…') : null,
       r.cleanup?.results.length ? h('ul.small', r.cleanup.results.map(c => h('li', `subject ${c.subject}: ${c.status} — ${c.detail}`))) : null,
+      r.release?.unlocked.length ? h('p.small', r.release.continued ? `The work after the review (${r.release.unlocked.join(', ')}) was continued by the run's agent (attempt ${r.release.continued.attempt}).` : `The work after the review (${r.release.unlocked.join(', ')}) is the run's agent's next move; WFE continues it${r.release.during ? ' after the attempt that is running now' : ''}.`) : null,
       r.continuation ? h('p.small', r.continuation.addressed ? `The agent ${r.continuation.addressed.how === 'no-change' ? 'answered that nothing changes' : 'added work'}; a new review follows.` : r.continuation.takenUp ? 'The agent read your feedback and is working on it.' : 'Waiting for the agent to take up your feedback.') : null) : null
     const cancelled = r.state === 'cancelled' ? h('section.card', h('p', `The run was cancelled${r.cancelled ? `: ${r.cancelled.reason}` : ''}. Nothing more is decided here.`)) : null
     const past = others.length ? h('section.card', h('h2', 'Other rounds of this run'), h('ul', others.map(o => h('li', h('a', { href: reviewHref(o.id) }, o.id), ` — ${o.text}${o.decision ? ` (${o.decision.by})` : ''}`)))) : null

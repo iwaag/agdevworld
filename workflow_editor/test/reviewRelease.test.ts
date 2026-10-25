@@ -126,7 +126,7 @@ async function cleanupNode(s: S, attempt: string) {
   await kid({ op: 'node.complete', node: 'cleanup', outcome: 'p1 is stopped (verified)' })
 }
 
-test('incident shape: same-run reused page stopped on approval, the cleanup successor continued once, the child completes and its parent receives it, with no recovery', { todo: 'fails before p17 ex1 steps 2–3' }, async () => {
+test('incident shape: same-run reused page stopped on approval, the cleanup successor continued once, the child completes and its parent receives it, with no recovery', async () => {
   const s = await setup({ parent: PARENT, kid: KID })
   try {
     const { ref } = await child(s, [18900, 18919])
@@ -174,7 +174,7 @@ test('incident shape: same-run reused page stopped on approval, the cleanup succ
   } finally { sweep(s); s.i.close(); s.n.close(); s.x.close() }
 })
 
-test('approval while the attempt is still open: no concurrent execution, a normal end, one later attempt', { todo: 'fails before p17 ex1 steps 2–3' }, async () => {
+test('approval while the attempt is still open: no concurrent execution, a normal end, one later attempt', async () => {
   const s = await setup({ parent: PARENT, kid: KID })
   try {
     await child(s, [18920, 18939])
@@ -206,7 +206,7 @@ test('approval while the attempt is still open: no concurrent execution, a norma
   } finally { sweep(s); s.i.close(); s.n.close(); s.x.close() }
 })
 
-test('a lost continuation after the review completed is queued again by reconcile after a restart', { todo: 'fails before p17 ex1 steps 2–3' }, async () => {
+test('a lost continuation after the review completed is queued again by reconcile after a restart', async () => {
   let s = await setup({ parent: PARENT, kid: KID })
   try {
     await child(s, [18940, 18959])
@@ -240,3 +240,60 @@ async function claimOf(s: S) {
   const c = await claim(s)
   return (await rec(s.kid, kidRef)).control.attempt ?? { id: c.attempt.id }
 }
+
+test('holds, cancellation and duplicates: one rule for every delivery; a held run waits for its resume, which owns the work', async () => {
+  const s = await setup({ parent: PARENT, kid: KID })
+  try {
+    await child(s, [18960, 18979])
+    const a = await claimOf(s)
+    await presentAndPrepare(s, a.id)
+    // A person stops the attempt; the approval comes while it is stopping.
+    await s.x.stop(s.kid, kidRef, 'Pat', 'pause it', 'browser')
+    await s.x.reviews.start(s.kid, kidRef, 'rv1', { by: ACTOR, via: 'browser' })
+    await s.x.reviews.decide(s.kid, kidRef, 'rv1', { outcome: 'approved', synthetic: true }, { by: ACTOR, via: 'browser' })
+    await s.x.finished(a.id, { code: 0, signal: null })
+    let k = await rec(s.kid, kidRef)
+    assert.equal(k.control.hold?.kind, 'stopped')
+    assert.equal(open(s, 'kid').length, 0, 'a held run stays held')
+    assert.equal(await s.x.afterRelease(s.kid, kidRef, 'rv1'), null, 'the callback queues nothing either')
+    await s.x.reconcile()
+    assert.equal(open(s, 'kid').length, 0)
+    const { job } = await s.x.resume(s.kid, kidRef, 'Pat', 'go on', 'browser')
+    assert.ok(job)
+    assert.equal(open(s, 'kid').length, 1, 'the ordinary resume, nothing beside it')
+    const c = await claim(s)
+    k = await rec(s.kid, kidRef)
+    assert.equal(k.reviews!.rv1.release!.continued!.attempt, c.attempt.id)
+    assert.match(c.brief, /Ready now because of it: cleanup/)
+    assert.match(c.brief, /already stopped and verified/)
+    await s.x.reconcile()
+    assert.equal(await s.x.afterRelease(s.kid, kidRef, 'rv1'), null, 'handled: a late duplicate callback launches nothing')
+    assert.equal(open(s, 'kid').length, 1)
+    await s.x.finished(c.attempt.id, { code: 0, signal: null })
+    assert.equal((await rec(s.kid, kidRef)).control.hold?.kind, 'interrupted', 'the attempt that owned it and left it is held as usual')
+    // Cancelled: nothing more is queued, whatever reconcile finds.
+    await s.x.cancel(s.kid, kidRef, 'Pat', 'not needed', 'browser')
+    await s.x.reconcile()
+    assert.equal(open(s, 'kid').length, 0)
+  } finally { sweep(s); s.i.close(); s.n.close(); s.x.close() }
+})
+
+test('a run assigned to a remote worker gets its continuation on that worker, through the job; a duplicate callback finds the same job', async () => {
+  const s = await setup({ parent: PARENT, kid: KID })
+  try {
+    await writeFile(join(s.area, 'workers.json'), JSON.stringify({ default: 'studio', workers: { studio: { local: true }, pc: { tokenFile: 'pc.token' } } }))
+    await child(s, [18980, 18999])
+    const a = await claimOf(s)
+    await presentAndPrepare(s, a.id)
+    await s.x.finished(a.id, { code: 0, signal: null })
+    await s.x.assign(s.kid, kidRef, 'pc', 'Pat', 'its tools are on the PC', 'browser')
+    await s.x.reviews.start(s.kid, kidRef, 'rv1', { by: ACTOR, via: 'browser' })
+    await s.x.reviews.decide(s.kid, kidRef, 'rv1', { outcome: 'approved', synthetic: true }, { by: ACTOR, via: 'browser' })
+    const q = open(s, 'kid')
+    assert.equal(q.length, 1)
+    assert.equal((s.x.db.prepare('SELECT worker FROM jobs WHERE id = ?').get(q[0].id) as { worker: string }).worker, 'pc')
+    const again = await s.x.afterRelease(s.kid, kidRef, 'rv1')
+    assert.equal(again!.id, q[0].id)
+    assert.ok('idle' in await s.x.claim('test'), 'the coordinator\'s own worker does not take it')
+  } finally { sweep(s); s.i.close(); s.n.close(); s.x.close() }
+})

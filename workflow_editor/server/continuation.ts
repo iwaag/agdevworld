@@ -69,6 +69,10 @@ export function stateLines(r: RunRecord): string[] {
   if (pres.length) out.push(`Presentations not stopped: ${pres.map(p => `${p.id} (${p.state}, from ${p.node}${Object.values(r.questions).filter(q => q.presentation?.id === p.id).map(q => `, asked in ${q.id}`).join('')})`).join('; ')}.`)
   for (const k of Object.values(r.corrections ?? {}).filter(x => !x.addressed)) out.push(`Correction ${k.id} from ${k.from} not addressed yet: the delegating run returned the result completed at seq ${k.result.seq} (wfe run correction ${runKey(r)}).`)
   for (const v of openContinuations(r)) out.push(`Review ${v.id}: ${v.decision!.by} requested changes, not addressed yet (wfe review show ${runKey(r)} ${v.id}).`)
+  for (const v of Object.values(r.reviews ?? {})) {
+    const next = v.state === 'complete' ? v.release?.unlocked.filter(n => ex.ready.includes(n)) ?? [] : []
+    if (next.length) out.push(`Review ${v.id}: approved by ${v.decision!.by}; ${next.join(', ')} ready after it (wfe review show ${runKey(r)} ${v.id}).`)
+  }
   if (r.definition.revisions?.length) out.push(`Definition: revision ${r.definition.active} in force (wfe run revisions <run>).`)
   for (const d of r.decisions) out.push(`Decision: ${d.decision} by ${d.by} at ${d.at}${d.confirmation ? ` (answer ${d.confirmation.answer} to ${d.confirmation.question})` : ''}.`)
   return out

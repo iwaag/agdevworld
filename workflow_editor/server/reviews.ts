@@ -9,8 +9,11 @@
 //   its owning run's Presenter (an instance already serving is reused,
 //   never duplicated) and records what it found;
 // - decide: records the person's decision, then (approved) cleanup;
-// - cleanup: stops what the review started, through each owning run,
-//   unless another active round uses it or the person asked to keep it;
+// - cleanup: stops what the review started or reused, through each owning
+//   run, unless another active round uses it, the person asked to keep it,
+//   or it serves a different unfinished run (p17 ex1: ownership decides,
+//   not whether the review found it serving); an approval that completes
+//   the round hands the work it made ready to the executor (`released`);
 // - reconcile: a round left starting, or a cleanup owed or failed, is
 //   continued — after a restart, or by another process.
 //
@@ -37,11 +40,14 @@ const sleep = (ms: number) => new Promise(r => setTimeout(r, ms))
 const RETRY_MS = 60_000 // a failed cleanup is retried by reconcile after this
 
 // `continued`: queues the responsible agent's continuation after requested
-// changes (the execution host's; reconcile queues a lost one again).
+// changes; `released`: the continuation of work an approval's completed
+// cleanup made ready (p17 ex1). Both are the execution host's; reconcile and
+// the end of an attempt queue a lost or deferred one again.
+type Callbacks = { continued?: (ws: Workspace, ref: RunRef, id: string) => Promise<unknown>; released?: (ws: Workspace, ref: RunRef, id: string) => Promise<unknown> }
 export class ReviewHost {
-  readonly ctx: PresentContext & { continued?: (ws: Workspace, ref: RunRef, id: string) => Promise<unknown> }
+  readonly ctx: PresentContext & Callbacks
   private _pr?: Presenter
-  constructor(ctx: PresentContext & { continued?: (ws: Workspace, ref: RunRef, id: string) => Promise<unknown> }) { this.ctx = ctx }
+  constructor(ctx: PresentContext & Callbacks) { this.ctx = ctx }
   get presenter(): Presenter { return this._pr ??= new Presenter({ ...this.ctx, by: REVIEWER }) }
   close() { this._pr?.close() }
 
@@ -228,15 +234,19 @@ export class ReviewHost {
 
   // Stops what a round started, through each owning run, and records what
   // it did. An instance another active round uses, or one the person asked
-  // to keep, is kept; one that was already serving its own unfinished run's
-  // review is left to it. `as`: who records (WFE's host, or the responsible
-  // agent for instances handed to it).
+  // to keep, is kept; one that was already serving before the review for a
+  // different run still under way is left to that run (named as `owner`).
+  // A page of the review's own run is that run's to stop now, whether the
+  // review started or reused it (p17 ex1: run-013's own page was left to
+  // itself and stayed serving). `by`/`via`: who records (WFE's host, or the
+  // responsible agent for instances handed to it).
   async cleanup(ws: Workspace, ref: RunRef, id: string, o: { by?: string; via?: string; attempt?: string } = {}): Promise<ReviewRound | null> {
     const pr = this.presenter
     const rec = await this.record(ws, ref)
     const round = rec.reviews?.[id]
     if (!round || !round.cleanup || round.cleanup.state === 'done') return round ?? null
     if (!pr.claimWork(round.uid, 'cleanup')) return null
+    const own = (x: ReviewSubject) => x.workspace === ws.reg.id && x.workflow === rec.workflow && x.run === rec.run && x.creation === creationOf(rec)
     try {
       const results: Omit<CleanupResult, 'at'>[] = []
       const done = new Set(round.cleanup.results.filter(c => c.status === 'stopped' || c.status === 'kept' || c.status === 'left').map(c => c.instance))
@@ -250,10 +260,10 @@ export class ReviewHost {
           const others = pr.usersOf(x.instance!, round.uid).filter(u => u.review !== round.uid)
           const stillOpen: string[] = []
           for (const u of others) if (await this.roundOpen(u.review)) stillOpen.push(u.review); else pr.release(u.review, x.instance!)
-          if (stillOpen.length) { results.push({ subject: x.subject, instance: x.instance, status: 'kept', detail: `still used by review ${stillOpen.join(', ')}` }); continue }
-          if (p?.retained) { results.push({ subject: x.subject, instance: x.instance, status: 'kept', detail: `kept on request: ${p.retained.note} (${p.retained.owner} stops it later)` }); continue }
-          if (x.mode === 'reused' && orec.execution.state !== 'completed' && !orec.cancelled && p && isOpen(p)) {
-            results.push({ subject: x.subject, instance: x.instance, status: 'left', detail: `it was serving before this review, for ${orec.project}/${runKey(orec)}, which is still under way; that run stops it` })
+          if (stillOpen.length) { results.push({ subject: x.subject, instance: x.instance, status: 'kept', detail: `still used by review ${stillOpen.join(', ')}`, owner: stillOpen.join(', ') }); continue }
+          if (p?.retained) { results.push({ subject: x.subject, instance: x.instance, status: 'kept', detail: `kept on request: ${p.retained.note} (${p.retained.owner} stops it later)`, owner: p.retained.owner }); continue }
+          if (x.mode === 'reused' && !own(sub) && orec.execution.state !== 'completed' && !orec.cancelled && p && isOpen(p)) {
+            results.push({ subject: x.subject, instance: x.instance, status: 'left', detail: `it was serving before this review, for ${orec.project}/${runKey(orec)}, a different run still under way; it still serves it and stops it (not stopped by this review)`, owner: `${orec.project}/${runKey(orec)}` })
             continue
           }
           const row = pr.row(x.instance!)
@@ -269,9 +279,11 @@ export class ReviewHost {
           results.push({ subject: x.subject, instance: x.instance, status: 'stop-failed', detail: (e as Error).message.replace(/\s+/g, ' ').slice(0, 400) })
         }
       }
-      const r = await runOp(await runSpace(ws, ref), ref, { op: 'review.cleanup', review: id, results, ...(o.attempt ? { attempt: o.attempt } : {}) } as never, { by: o.by ?? REVIEWER, via: o.via ?? 'review' })
+      const r = await runOp(await runSpace(ws, ref), ref, { op: 'review.cleanup', review: id, results, release: true, ...(o.attempt ? { attempt: o.attempt } : {}) } as never, { by: o.by ?? REVIEWER, via: o.via ?? 'review' })
       const after = r.record.reviews![id]
       if (after.cleanup?.state === 'done') pr.release(round.uid)
+      // The approval completed the round: the work it made ready continues.
+      if (after.release && round.state === 'approved' && after.state === 'complete') await this.ctx.released?.(ws, ref, id).catch(e => console.error(`review ${runKey(ref)} ${id}: continuation: ${(e as Error).message}`))
       // What earlier rounds handed to the agent and nobody stopped goes with
       // the approval of the round that answers them.
       if (after.state === 'complete') {
@@ -334,8 +346,9 @@ export class ReviewHost {
           const orec = await this.record(await this.workspace(x.workspace), { workflow: x.workflow, run: x.run })
           newer = Object.values(orec.presentations ?? {}).filter(p => Number(p.id.slice(1)) > Number(x.presentation.slice(1))).map(p => `${p.id} "${p.title}"`)
         } catch { /* shown as it was recorded */ }
-        const stopped = r.cleanup?.results.some(c => c.instance === s?.instance && c.status === 'stopped')
-        subjectsNow.push({ ...x, status: !s ? 'not-started' : stopped ? 'stopped' : s.status, url, local, live, instance: s?.instance ?? null, mode: s?.mode ?? null, detail: s?.detail ?? '', newer, usedBy })
+        const last = r.cleanup?.results.filter(c => c.instance === s?.instance).at(-1)
+        const after = last?.status === 'stopped' ? 'stopped' : last?.status === 'kept' ? 'kept' : last?.status === 'left' ? 'handed' : null
+        subjectsNow.push({ ...x, status: !s ? 'not-started' : after ?? s.status, owner: after === 'kept' || after === 'handed' ? last!.owner ?? null : null, url, local, live, instance: s?.instance ?? null, mode: s?.mode ?? null, detail: s?.detail ?? '', newer, usedBy })
       }
       out.push({ ...r, text: reviewStateText(r), subjectsNow, workspace: ws.reg.id, workflow: rec.workflow, runId: rec.run, page: this.pageOf(ws.reg.id, ref, r.id) })
     }

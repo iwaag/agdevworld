@@ -61,6 +61,24 @@ nodes:
 edges:
   - {from: work, to: review}
 `
+// A run that reviews its own page, with explicit cleanup after the review
+// (p17 ex1, gimmickimg/freework/run-013's shape).
+const GATE = `schema: ag.workflow.v2
+id: gate
+name: Gate
+intent: |
+  Present, have it reviewed, clean up.
+documentation: {policy: manual}
+repositories:
+  root: {path: ., access: editable}
+nodes:
+  present: {type: do, description: Present.}
+  review: {type: review, name: Human review, description: The person reviews it.}
+  cleanup: {type: do, description: Stop what this run started.}
+edges:
+  - {from: present, to: review}
+  - {from: review, to: cleanup}
+`
 let k = 0
 async function setup() {
   const area = join(root, `area-${++k}`)
@@ -70,6 +88,7 @@ async function setup() {
   assert.ok(r.ok, r.message)
   await writeFile(join(dir, 'devdocs', 'workflows', 'show.yaml'), SHOW)
   await writeFile(join(dir, 'devdocs', 'workflows', 'conduct.yaml'), CONDUCT)
+  await writeFile(join(dir, 'devdocs', 'workflows', 'gate.yaml'), GATE)
   await mkdir(join(dir, 'game'), { recursive: true })
   await writeFile(join(dir, 'game', 'index.html'), '<!doctype html><title>game</title><script src="main.js"></script><p>Play</p>')
   await writeFile(join(dir, 'game', 'main.js'), 'document.title = "game v1"\n')
@@ -269,4 +288,68 @@ test('several subjects in one round; the CLI and the HTTP routes agree; a cancel
     assert.equal(after.state, 'cancelled')
     assert.equal(after.cleanup!.state, 'done')
   } finally { srv.close(); x.close() }
+})
+
+test('a page serving for a different unfinished run is left to it, named, and not shown as stopped (p17 ex1)', async () => {
+  const { ws, host } = await setup()
+  const { ref: c } = await createRun(ws, { workflow: 'show', executor: { host: 'autolab' }, by: 'Pat', via: 'cli', input: { kind: 'braindump', text: 'a torus', author: 'Pat' } })
+  await op(ws, c, { op: 'node.start', node: 'build' }); await op(ws, c, { op: 'node.complete', node: 'build', outcome: 'built' })
+  await op(ws, c, { op: 'node.start', node: 'present' })
+  await registerPresentation(ws, c, { node: 'present', source: 'game', entry: 'index.html', review: 'review.md', title: 'Torus' }, { via: 'cli', by: 'agent' })
+  const pid = (await host.presenter.start(ws, c, 'p1', { by: 'agent' })).instance.pid!
+  const p = await parent(ws)
+  await host.prepare(ws, p, 'review', { summary: 's', subjects: [`p:${c.workflow}/${c.run}:p1`] }, { by: 'agent', via: 'cli' })
+  const s = await host.start(ws, p, 'rv1', { by: 'Pat', via: 'browser' })
+  assert.equal(s.round.serving[0].mode, 'reused')
+  const d = await host.decide(ws, p, 'rv1', { outcome: 'approved' }, { by: 'Pat', via: 'browser' })
+  assert.equal(d.round.state, 'complete')
+  assert.equal(d.round.cleanup!.results[0].status, 'left')
+  assert.equal(d.round.cleanup!.results[0].owner, `p/${c.workflow}/${c.run}`)
+  assert.ok(alive(pid), 'the other run still serves it')
+  assert.equal((await rec(ws, c)).presentations!.p1.state, 'available')
+  const v = (await host.view(ws, await rec(ws, p)))[0]
+  assert.equal(v.subjectsNow[0].status, 'handed')
+  assert.equal(v.subjectsNow[0].owner, `p/${c.workflow}/${c.run}`)
+  assert.match(v.text, /still serving \(for p\/show\/run-/)
+  await host.presenter.stop(ws, c, 'p1', { by: 'agent' })
+  assert.ok(!alive(pid))
+})
+
+test('the review\'s own reused page: a failed stop keeps the approval and releases nothing; the verified retry stops it and releases the cleanup successor once (p17 ex1)', async () => {
+  const { ws, registry, area } = await setup()
+  const released: string[] = []
+  const host = new ReviewHost({ registryFile: registry, area, released: async (_w, ref, id) => { released.push(`${ref.run}/${id}`) } })
+  hosts.push(host)
+  const { ref } = await createRun(ws, { workflow: 'gate', executor: { host: 'autolab' }, by: 'Pat', via: 'cli', input: { kind: 'braindump', text: 'a torus', author: 'Pat' } })
+  await op(ws, ref, { op: 'node.start', node: 'present' })
+  await registerPresentation(ws, ref, { node: 'present', source: 'game', entry: 'index.html', review: 'review.md', title: 'Torus' }, { via: 'cli', by: 'agent' })
+  const pid = (await host.presenter.start(ws, ref, 'p1', { by: 'agent' })).instance.pid!
+  await op(ws, ref, { op: 'node.complete', node: 'present', outcome: 'presented, serving' })
+  await host.prepare(ws, ref, 'review', { summary: 's', subjects: ['p1'] }, { by: 'agent', via: 'cli' })
+  const s = await host.start(ws, ref, 'rv1', { by: 'Pat', via: 'browser' })
+  assert.equal(s.round.serving[0].mode, 'reused')
+  const real = host.presenter.stopInstance.bind(host.presenter)
+  host.presenter.stopInstance = async () => ({ ok: false, detail: 'stop not verified: port still answers (test)' })
+  const d = await host.decide(ws, ref, 'rv1', { outcome: 'approved' }, { by: 'Pat', via: 'browser' })
+  assert.equal(d.round.state, 'approved')
+  assert.equal(d.round.cleanup!.state, 'failed')
+  assert.equal(d.round.decision!.by, 'Pat', 'the decision stands and is not asked again')
+  assert.deepEqual(released, [])
+  let r = await rec(ws, ref)
+  assert.deepEqual(r.execution.ready, [], 'the successor waits for the verified stop')
+  assert.ok(alive(pid))
+  host.presenter.stopInstance = real
+  const after = await host.cleanup(ws, ref, 'rv1')
+  assert.equal(after!.state, 'complete')
+  assert.deepEqual(after!.cleanup!.results.map(c => c.status), ['stop-failed', 'stopped'])
+  assert.ok(!alive(pid))
+  r = await rec(ws, ref)
+  assert.equal(r.presentations!.p1.state, 'stopped')
+  assert.deepEqual(r.execution.ready, ['cleanup'])
+  assert.deepEqual(r.reviews!.rv1.release!.unlocked, ['cleanup'])
+  assert.deepEqual(released, [`${ref.run}/rv1`])
+  assert.equal(await host.cleanup(ws, ref, 'rv1').then(x => x!.state), 'complete', 'a repeated cleanup records nothing more')
+  assert.deepEqual(released, [`${ref.run}/rv1`], 'and calls back once')
+  // The explicit cleanup node: the page is already stopped; stopping again is an idempotent success.
+  assert.deepEqual(await host.presenter.stop(ws, ref, 'all', { by: 'agent' }), [])
 })

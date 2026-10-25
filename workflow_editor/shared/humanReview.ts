@@ -54,8 +54,18 @@ export const subjectLabel = (x: ReviewSubject) => `${subjectRun(x)} ${x.presenta
 export interface SubjectServing { subject: number; start: number; status: 'available' | 'failed'; instance: string | null; mode: 'started' | 'reused' | null; detail: string; at: string }
 // What cleanup did with an instance: stopped (verified), stop-failed
 // (retried), kept (another active review needs it, or the person asked to
-// keep it), left (it serves its own run's unfinished review).
-export interface CleanupResult { subject: number; instance: string | null; status: 'stopped' | 'stop-failed' | 'kept' | 'left'; detail: string; at: string }
+// keep it), left (it was serving before the review for a different run that
+// is still under way: that run still serves it and stops it). `owner`: who
+// serves it on after a kept or left result (p17 ex1: a `left` page was the
+// review's own run's, and nothing stopped it).
+export interface CleanupResult { subject: number; instance: string | null; status: 'stopped' | 'stop-failed' | 'kept' | 'left'; detail: string; at: string; owner?: string }
+
+// The work an approved round's completion made ready (p17 ex1): its node's
+// successors, ready when the cleanup completed the round. `during`: the
+// attempt open then (it ends normally with that work left; the next attempt
+// does it). `continued`: the first attempt that began afterwards, which
+// owns it from then on (its ordinary interruption rules apply).
+export interface ReviewRelease { seq: number; at: string; during: string | null; unlocked: string[]; continued: { attempt: string; seq: number } | null }
 
 export interface ReviewDecision {
   outcome: ReviewOutcome
@@ -92,6 +102,7 @@ export interface ReviewRound {
   // `during`: the attempt open when the decision was recorded (one that
   // arrived before an attempt and was left unaddressed holds the run).
   continuation: { takenUp: { at: string; by: string; attempt: string | null; note: string } | null; addressed: { seq: number; at: string; how: 'work' | 'no-change' } | null; during: string | null } | null
+  release?: ReviewRelease | null // after approval completed the round (p17 ex1)
   cancelled?: { at: string; by: string; reason: string }
 }
 
@@ -103,6 +114,17 @@ export const hostOwes = (r: Pick<ReviewRound, 'state' | 'cleanup'>) => r.state =
 // Requested changes the responsible agent has not addressed yet.
 export const owedContinuation = (r: Pick<ReviewRound, 'state' | 'continuation'>) => r.state === 'changes-requested' && !!r.continuation && !r.continuation.addressed
 export const openContinuations = (s: { reviews?: Record<string, ReviewRound> }): ReviewRound[] => Object.values(s.reviews ?? {}).filter(owedContinuation)
+// Work an approval completed into readiness that no attempt has begun on
+// since: the executor continues it (one job per completion).
+export const owedRelease = (r: Pick<ReviewRound, 'state' | 'release'>, s: { execution: { ready: string[] } }) => r.state === 'complete' && !!r.release && !r.release.continued && r.release.unlocked.some(n => s.execution.ready.includes(n))
+export const openReleases = (s: { reviews?: Record<string, ReviewRound>; execution: { ready: string[] } }): ReviewRound[] => Object.values(s.reviews ?? {}).filter(r => owedRelease(r, s))
+// Instances the cleanup did not stop: kept (another round, or on request) or
+// left serving for a different unfinished run. Latest result per instance.
+export function stillServing(r: Pick<ReviewRound, 'cleanup'>): CleanupResult[] {
+  const last = new Map<string, CleanupResult>()
+  for (const c of r.cleanup?.results ?? []) if (c.instance) last.set(c.instance, c)
+  return [...last.values()].filter(c => c.status === 'kept' || c.status === 'left')
+}
 export const awaitingReviews = (s: { reviews?: Record<string, ReviewRound> }): ReviewRound[] => Object.values(s.reviews ?? {}).filter(isAwaitingPerson)
 // The latest round of a node (a review node holds one round; a new round is a new node).
 export const roundOf = (s: { reviews?: Record<string, ReviewRound> }, node: string): ReviewRound | undefined => Object.values(s.reviews ?? {}).filter(r => r.node === node).at(-1)
@@ -130,6 +152,10 @@ const STATE_WORDS: Record<ReviewState, string> = {
 }
 export function reviewStateText(r: ReviewRound): string {
   if (r.state === 'approved' && r.cleanup?.state === 'failed') return 'Approved · cleanup failed (retried)'
+  if (r.state === 'complete') {
+    const on = stillServing(r)
+    if (on.length) return `Approved · complete · ${on.length === 1 ? 'a page' : `${on.length} pages`} still serving (${[...new Set(on.map(c => c.status === 'left' ? `for ${c.owner ?? 'its run'}` : 'kept'))].join(', ')})`
+  }
   if (r.state === 'changes-requested' && r.continuation?.addressed) return `Changes requested · ${r.continuation.addressed.how === 'no-change' ? 'answered without changes' : 'work added'}`
   return STATE_WORDS[r.state]
 }
@@ -143,7 +169,8 @@ export function roundLine(r: ReviewRound): string {
 // A round as the views read it (server/reviews.ts view): each subject as it
 // is served now — a link resolved from the host's state, never replayed.
 export interface SubjectView extends ReviewSubject {
-  status: 'available' | 'failed' | 'not-started' | 'stopped'
+  status: 'available' | 'failed' | 'not-started' | 'stopped' | 'kept' | 'handed' // kept / handed: cleanup left it serving (kept, or for its own unfinished run)
+  owner: string | null // who serves it on after cleanup (kept or handed)
   url: string | null // resolved from this host's state now, never replayed
   local: boolean
   live: boolean

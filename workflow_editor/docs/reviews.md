@@ -10,7 +10,8 @@ review for the person:
    names, through each presentation's owning run, and shows them when they
    answer;
 2. **Approve** — records the person's decision about exactly those
-   revisions, then WFE stops what the review started; or
+   revisions, then WFE stops what the review used, through each page's
+   owner, and the work after the review continues by itself; or
 3. **Request changes** — records the feedback, closes this round and hands
    the work back to the responsible agent, which appends work and a new
    review node.
@@ -85,6 +86,7 @@ edges:
 | `decision` | `{outcome, by, at, via, seq, feedback, subjects: [{n, revision}], synthetic?, relayed?}` |
 | `cleanup` | `{state: pending/failed/done/handed, owner, results[], attempts}` |
 | `continuation` | after requested changes: `{takenUp, addressed, during}` |
+| `release` | after approval completed the round (p17 ex1): `{seq, at, during, unlocked, continued}` — below |
 
 **Subjects are frozen when the round is prepared.** Each names its owning
 run (workspace and creation-qualified identity), the presentation id and
@@ -104,7 +106,7 @@ against them: `review-superseded`).
 | `reviewing` | every subject answered | the person: Approve or Request changes |
 | `start-failed` | some subject did not start (named, with why); nothing is rebuilt or lost | the person: Start review again, or Request changes |
 | `approved` | the decision is recorded once; cleanup is pending or failed | the host: stop and verify, retried |
-| `complete` | cleanup verified; the node is completed | — |
+| `complete` | cleanup verified; the node is completed | the run's agent, when the node's completion made work ready (below) |
 | `changes-requested` | feedback recorded; the round and its node are closed | the responsible agent: take up, append work and a new review node |
 | `cancelled` | the run was cancelled before a decision | the host: stop what the review started |
 
@@ -130,6 +132,75 @@ ends leaving it unaddressed is held `interrupted` (`missed-review`), like a
 correction. The rejected round stays in the record with its evidence; the
 next round names it as `previous` and is reviewed on its own, with new
 frozen subjects: an old approval never covers it.
+
+## After approval (p17 ex1)
+
+Why: conversation `20261025-013759-jz8ebz`. gimmickimg/freework/run-013
+had `present → review → cleanup`; its page served before the review and
+was reused by it. Approval recorded cleanup `left` ("that run stops it"),
+although that run was the review's own, so the page kept serving. The
+round completed and `cleanup` became ready, but nothing queued it:
+continuations existed only for requested changes. Recovery-agent resumed
+the run 4.5 minutes later.
+
+**Cleanup decides by ownership, not by how the review got the page.**
+`reused` says the page was serving before; it is no exemption. For each
+instance the round served:
+
+| Found | Result | Serving afterwards |
+| --- | --- | --- |
+| another undecided (or handed) round uses it | `kept`, `owner` that round | yes, for it |
+| the person asked to keep it (`wfe present keep`) | `kept`, `owner` who stops it | yes |
+| reused, owned by a **different** run still under way | `left`, `owner` that run | yes: that run serves it and stops it |
+| otherwise — including the review's own run's page, started or reused | stopped and verified; `presentation.observe stopped` on the owning run | no |
+| the stop could not be verified | `stop-failed`: the round stays `approved`, cleanup `failed`, retried by reconcile | — (owed) |
+
+A `left` or `kept` result resolves the round's cleanup, but never reads as
+stopped: the round's text is "Approved · complete · a page still serving
+(for <owner>)", the review page shows the subject "Still serving for its
+run · <owner>" or "Kept serving", and `wfe review show` lists it under
+`still serving`. A failed stop never completes the round and never asks the
+person again.
+
+**The work an approval made ready continues by itself.** When the cleanup
+completes an approved round, the review node completes; the entry records
+`release`:
+
+- `unlocked`: the review node's successors that became ready;
+- `during`: the attempt open at that moment, if any;
+- `continued`: set by the first `attempt.begin` afterwards — that attempt
+  owns the work from then on, with the ordinary rules (it is held
+  `left-ready` if it ends leaving it).
+
+The executor (`afterRelease`) queues one ordinary `resume` for it, receipt
+`review-approved:<ws>/<round uid>@<seq>` (the uid carries the run's
+creation, the seq the completing entry). One rule decides for all three
+deliveries:
+
+1. the cleanup's callback, at once (browser, CLI, reconcile's retry);
+2. the end of the attempt that was open meanwhile (`during`): that end is
+   not `left-ready` because of the unlocked nodes — only its own ready
+   work counts — and the continuation is queued after it;
+3. reconcile, after a lost callback or queue write, from the run read
+   again after its review host work.
+
+It queues only when the run is not executing (an open attempt is
+reassessed when it ends), not held (a resume picks the work up and its
+attempt consumes the release), not cancelled and not completed, and the
+release is not consumed. The job goes to the run's assigned node through
+the ordinary queue (a remote worker claims it there); the browser acting
+on the coordinator does not matter. A final review with no successors
+makes nothing ready: the run completes on the host with no agent turn.
+
+An explicit cleanup node after the review is still ordinary work: the run's
+agent does it. When the review already stopped the page, `wfe present stop`
+reports it already stopped by the review's cleanup and succeeds. The brief
+of the continuing attempt says the approval, what it made ready and what
+the review stopped or left serving. The approval reopens nothing and asks
+the person for nothing more.
+
+Entries before p17 ex1 have no `release` flag and replay as they were
+decided.
 
 ## Edges of the lifecycle
 
@@ -165,7 +236,7 @@ frozen subjects: an old approval never covers it.
 | `review.start` | person | a durable start request |
 | `review.serve` | WFE's host | what serves each subject for that start; `reviewing` or `start-failed` |
 | `review.decide` | person (or relayed words) | approved (cleanup pending) or changes (round closed, continuation owed) |
-| `review.cleanup` | WFE's host (or the responsible agent for handed instances) | what was stopped, kept or left; completes an approved round when verified |
+| `review.cleanup` | WFE's host (or the responsible agent for handed instances) | what was stopped, kept or left (with `owner`); completes an approved round when verified, recording `release` (`release: true` entries) |
 | `review.take-up` | the responsible agent (attempt) | the requested changes were read (`noChange`: nothing changes, with why) |
 
 Error codes: `review-unknown`, `review-open`, `review-subjects`,

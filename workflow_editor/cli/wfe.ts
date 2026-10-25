@@ -18,7 +18,7 @@ import { ExecStore } from '../server/exec.ts'
 import { StoreError } from '../server/sqlite.ts'
 import { loadRegistry, observe, registerWorkspace, RegistryError, unregisterProject, workspaceAt, type Registration } from '../server/registry.ts'
 import { RequestError, Workspace } from '../server/workspace.ts'
-import { listRuns } from '../server/runs.ts'
+import { listRuns, readRun } from '../server/runs.ts'
 import { setupArea } from './setup.ts'
 import { runCommand, runIndex } from './run.ts'
 import { NODES_HELP, nodesCommand } from './nodes.ts'
@@ -1147,7 +1147,10 @@ async function cmdPresent(p: Parsed): Promise<number> {
         if (!which) throw new UsageError('stop <run> <presentation> | stop <run> --all')
         const res = await pr.stop(ws, r, which, { by: opt(p, 'by') })
         const bad = res.filter(x => !x.ok)
-        out(res.length ? res.map(x => `${x.presentation}: ${x.ok ? 'stopped' : 'NOT VERIFIED'} — ${x.detail}`).join('\n') : 'Nothing of this run is served or open.', { ok: !bad.length, results: res })
+        // Already stopped (p17 ex1: a human review's cleanup may have stopped
+        // it first): an idempotent success that says by whom.
+        const last = !res.length && which !== 'all' ? (await readRun(ws, r)).record?.presentations?.[which]?.last : undefined
+        out(res.length ? res.map(x => `${x.presentation}: ${x.ok ? 'stopped' : 'NOT VERIFIED'} — ${x.detail}`).join('\n') : last?.status === 'stopped' ? `${which} is already stopped (recorded by ${last.by} at ${last.at}: ${last.detail}); nothing to stop.` : 'Nothing of this run is served or open.', { ok: !bad.length, results: res })
         return bad.length ? 1 : 0
       }
       case 'keep': {

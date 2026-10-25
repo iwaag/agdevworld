@@ -29,6 +29,7 @@ import { patchContent } from './patch.ts'
 import { activeWorkflow, ago, chip, descendants, fileLink, nodeFacts, nodeLabel, nodeLink, runHash, topoOrder } from './runCommon.ts'
 import { approvalOf, integrationStatus, type Approval } from './integrationState.ts'
 import { viewStatus } from './runStatus.ts'
+import { conversationHref } from './site.ts'
 export { integrationStatus }
 
 // Who a hold or a stop acted for (p9): the person's words named by the recorder.
@@ -529,6 +530,16 @@ export class RunSide {
     }
     else if (this.approval?.kind === 'integration-problem') { kind = 'integration'; head = 'Accepted — not integrated'; lead = 'The accepted result could not be brought into the shared branch. The integration record below says why.' }
     else if (accepted && ex.state !== 'completed') { kind = 'accepted'; head = 'Accepted — cleanup is still running'; lead = h('span', 'The result was accepted', last!.confirmation ? h('span.d-only', ` from ${last!.confirmation.question}`) : null, '; the run completes after its remaining steps.') }
+    // p18: a conversation's standing conductor at rest (or finalized while its room is closed).
+    else if (rec.standing && (ex.state === 'idle' || ex.state === 'completed')) {
+      const st2 = rec.standing
+      kind = 'standing'
+      head = st.text
+      lead = h('span', ex.state === 'completed' ? `The conversation ${st2.conversation} is closed; this run is its conductor and continues when the conversation reopens.` : st2.state === 'open' ? `This run conducts the conversation ${st2.conversation} for its whole life. It rests between turns, holding no slot; the conversation's next message wakes it with a new ponder node.` : `Facilitation of ${st2.conversation} ended: nothing unsolicited reaches this run; what it asked still does.`,
+        ' ', h('a', { href: conversationHref(st2.conversation), target: '_blank', rel: 'noopener' }, 'Open the conversation ↗'),
+        st2.held.length ? h('span.d-only.muted', ` Held until the person resumes: ${st2.held.join(', ')}.`) : null,
+        st2.replaces ? h('span.d-only.muted', ` Replaces the cancelled ${st2.replaces}.`) : null)
+    }
     else if (ex.state === 'completed') { kind = 'completed'; head = !last ? 'Completed' : accepted ? (this.approval?.kind === 'integrated' ? 'Completed, accepted and integrated' : this.approval?.kind === 'integrating' ? 'Accepted — integrating' : 'Completed and accepted') : 'Completed — result rejected'; lead = !last ? 'Work completed. Reviews and decisions can be recorded independently of integration.' : h('span', `${last.decision === 'accepted' ? 'Accepted' : 'Rejected'}${last.confirmation ? ` from ${last.confirmation.from}'s answer` : ` by ${last.by}`}`, h('span.d-only', `${last.confirmation ? ` (${last.confirmation.question}, recorded by ${last.by})` : ''}, ${when(last.at)}`), '.') }
     else if (ex.active.length || rec.control.attempt) { kind = 'working'; head = 'Work in progress'; lead = this.observation(rec)[0] === 'warn' ? 'Recorded as in progress, but this host does not see the work running: look below.' : 'Nothing is needed from you now.' }
     else if (ex.state === 'not-started') { kind = 'not-started'; head = st.text; lead = `Waiting for ${rec.executor.name} to start.` }
@@ -554,7 +565,7 @@ export class RunSide {
     if (this.focus.dataset.kind !== kind) this.focus.dataset.kind = kind
 
     // The situation's icon, large: what kind of task this is before any word is read (p8/ex1).
-    const FOCUS_ICON: Record<string, string> = { humanreview: 'review', delegated: 'delegate', waiting: 'history', reaccept: 'alert', integration: 'alert', review: 'present', question: 'question', answered: 'history', held: 'stop', failed: 'alert', accepted: 'check', completed: 'check', cancelled: 'stop', working: 'play', history: 'history', 'not-started': 'play', idle: 'play' }
+    const FOCUS_ICON: Record<string, string> = { standing: 'talk', humanreview: 'review', delegated: 'delegate', waiting: 'history', reaccept: 'alert', integration: 'alert', review: 'present', question: 'question', answered: 'history', held: 'stop', failed: 'alert', accepted: 'check', completed: 'check', cancelled: 'stop', working: 'play', history: 'history', 'not-started': 'play', idle: 'play' }
     const done = kind === 'completed' && last?.decision === 'rejected' ? 'failed' : kind === 'completed' && !last ? 'pending' : kind
     const blocks: (Node | null)[] = [h('div.focus-top', h(`span.focus-icon.tone-${done}`, icon(FOCUS_ICON[kind] ?? 'flag', 'icon')), h('div.focus-words', h('h2.focus-head', { dataset: { status: st.state } }, head), h('p.focus-lead', lead), more))]
     // The one-click review, while it is served (p7); otherwise what became of it.

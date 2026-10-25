@@ -264,7 +264,8 @@ test('a conductor run created by a delegation: the requesting run is the request
   const created = await s.x.request({ workspace: 'ponderer', workflow: 'conduct', text: 'Hold a discussion about seats.', author: 'front-agent', receipt: 'test:conduct:1', via: 'cli' })
   const run = `ponderer/${created.ref.workflow}/${created.ref.run}`
   s.ds.create('p4-d', { facilitate: true, title: 'Seats', by: 'front-agent', members: ['forge'], conductor: run, requester: req })
-  assert.match((await s.ds.syncStanding('p4-d'))!, /standing.establish/, 'what wfe conversation create does from the attempt')
+  assert.equal(await s.ds.syncStanding('p4-d'), null, 'reconcile alone never establishes a run that does not stand')
+  assert.match((await s.ds.syncStanding('p4-d', { establish: true }))!, /standing.establish/, 'what wfe conversation create does from the attempt')
   assert.equal((await rec(s, run)).standing!.state, 'open')
   assert.equal(s.ds.requester('p4-d')!.kind, 'run')
   assert.deepEqual(s.ds.members('p4-d').map(m => m.participant), ['forge', 'ponderer'], 'an agent requester does not join as a person')

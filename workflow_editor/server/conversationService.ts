@@ -62,6 +62,7 @@ import { CONVERSATION_ID, firstLine, loadConversationConfig, parseRunName, pendi
 import { activeDefinition, adjustRun, readRun, runOp, usableRun } from './runs.ts'
 import { parseWorkflow, renderWorkflow } from './yamlDoc.ts'
 import { ConversationWorkflows } from './conversationWorkflows.ts'
+import { progression } from './progression.ts'
 import { loadRegistry } from './registry.ts'
 import { transaction } from './sqlite.ts'
 import { withLock } from './lock.ts'
@@ -593,11 +594,11 @@ export class ConversationService {
   // facilitated, suspended otherwise. A transition is recorded on the run
   // under the receipt of the room event that caused it, so the operation
   // that changed the room and reconcile record it once. A conductor that does
-  // not stand yet is established only while it is open (one created from
-  // its own attempt, or one working when p18 arrived); a completed one that
-  // never stood is left to the explicit transition (wfe conversation
-  // transition). A cancelled conductor records nothing.
-  async syncStanding(conv: string, why?: string): Promise<string | null> {
+  // not stand yet is established only when asked (`establish`: the run that
+  // created the room from its attempt), and only while it is open; one from
+  // before p18 is the explicit transition's (server/transition.ts). A
+  // cancelled conductor records nothing.
+  async syncStanding(conv: string, o: { why?: string; establish?: boolean } = {}): Promise<string | null> {
     const c = this.cs.conversation(conv)
     const cur = await this.conductorRecord(conv)
     if (!c || !cur?.record || cur.record.cancelled || !this.exec) return null
@@ -605,14 +606,14 @@ export class ConversationService {
     const want: StandingState = c.state === 'closed' ? 'closed' : this.facilitation(conv) ? 'open' : 'suspended'
     let input: OpInput
     if (!st) {
-      if (['completed', 'cancelled'].includes(situation(cur.record))) return null
+      if (!o.establish || ['completed', 'cancelled'].includes(situation(cur.record))) return null
       input = { op: 'standing.establish', conversation: conv, state: want, reason: '' }
     } else if (st.state === want) return null
     else if (st.state === 'closed') input = { op: 'standing.reopen', reason: '', state: want as 'open' | 'suspended' }
     else if (want === 'closed') input = { op: 'standing.close', reason: '' }
     else input = want === 'open' ? { op: 'standing.facilitate', reason: '' } : { op: 'standing.suspend', reason: '' }
     const event = this.one<{ id: number; note: string }>('SELECT id, note FROM activity_events WHERE conv = ? AND kind IN (\'room\', \'facilitation\', \'conductor\') ORDER BY id DESC LIMIT 1', conv)
-    const reason = why ?? event?.note ?? `the conversation is ${want}`
+    const reason = o.why ?? event?.note ?? `the conversation is ${want}`
     const { workspace, ref } = parseRunName(cur.run)
     await runOp(await this.exec.workspace(workspace), ref, { ...input, reason, receipt: `standing:${conv}:${input.op}:e${event?.id ?? 0}` } as OpInput & { receipt: string }, { by: 'conversation', via: 'conversation' })
     return `${cur.run}: ${input.op} (${st?.state ?? 'not standing'} → ${want})`
@@ -1895,6 +1896,8 @@ export class ConversationService {
       // p17: every human review round of the runs serving this room, so the
       // person starts one from the room (docs/reviews.md).
       reviews: runs.flatMap(r => (r.reviews ?? []).map(v => ({ ...v, runKey: r.key }))),
+      // p18: the conductor's one run as the room's growing progression.
+      progression: await progression(this, conv, { viewBase: o.viewBase, runs, messages: rows, activities: this.activityRows(conv), invitations }),
       asking: await this.openAsking(conv, rows),
       horizon: this.horizon(conv),
     }

@@ -158,6 +158,11 @@ resume <id> [<request>] [--author <who>]
                               run held continuations once (what a conductor awaited, resolved
                               while the room was closed or no longer facilitated) and release what
                               the conductor's standing held
+transition [<id>…] [--apply --author <who>]
+                              (p18) give existing rooms their one standing conductor: the latest
+                              conductor run continues the room (a completed one comes to rest), with
+                              what it left held; a cancelled or unreadable one is recorded as such.
+                              Without --apply: what it would do. Nothing is started or sent
 conductor <id> [--replace --reason <why> [--author <person>]]
                               the conductor: its run, standing (open, suspended, closed), status,
                               wakes and held events. --replace: a new conductor for a cancelled one,
@@ -321,7 +326,7 @@ export async function conversationCommand(c: ConversationCli): Promise<number> {
         if (!author) throw c.usage('--author <person> is required: who opens it')
         const r = ds.create(id, { title, by: author, members: c.opts('member'), category: c.opt('category'), ...(c.flag('no-default') ? { defaultTo: null } : c.opt('default') ? { defaultTo: c.opt('default')! } : {}), ...(conducting ? { conductor: conducting.run, requester } : {}) })
         // p18: the run that created it conducts it for its whole life.
-        if (conducting) await ds.syncStanding(id)
+        if (conducting) await ds.syncStanding(id, { establish: true })
         c.out(`${r.duplicate ? 'Already exists' : 'Created'}: ${r.conversation.category === 'check' ? 'check' : 'conversation'} ${id} with ${ds.members(id).map(m => m.participant).join(', ')}${r.conversation.default_to ? `; default addressee ${r.conversation.default_to}` : ''}${ds.facilitation(id) ? `; led by ${conducting?.run}` : ''}.`, { ok: true, ...r, members: ds.members(id) })
         return 0
       }
@@ -582,6 +587,20 @@ export async function conversationCommand(c: ConversationCli): Promise<number> {
         ds.conversation(id) ?? (() => { throw c.refused(`no conversation ${id}`) })()
         const r = cs.link(id, { message: msg, run, relation, note: c.opt('note') ?? '', by, attempt: (await own())?.attempt ?? null })
         c.out(`${r.duplicate ? 'Already linked' : 'Linked'}: #${msg} is ${relation} of ${run}.`, { ok: true, ...r })
+        return 0
+      }
+      case 'transition': {
+        // workflow_editor p18: existing rooms get their one standing conductor
+        // through an explicit recorded transition (server/transition.ts).
+        const { planTransition, applyTransition } = await import('../server/transition.ts')
+        const plans = await planTransition(ds, args)
+        const apply = c.flag('apply')
+        const by = apply ? await who() : null
+        if (apply && !by) throw c.usage('--author <who> is required with --apply: who records the transition')
+        const done = apply ? await applyTransition(ds, plans, { by: by! }) : []
+        const lines = plans.map(p => `${p.conv} [${p.room}${p.facilitated ? ', facilitated' : ''}]: ${p.decision}${p.recorded ? ' (recorded before)' : ''} — ${p.note}`)
+        const counts = Object.entries(plans.reduce<Record<string, number>>((a, p) => ({ ...a, [p.decision]: (a[p.decision] ?? 0) + 1 }), {})).map(([k, n]) => `${k} ${n}`).join(', ')
+        c.out([...lines, '', `${plans.length} room${plans.length === 1 ? '' : 's'}: ${counts || 'none'}. ${apply ? `Recorded ${done.filter(d => d.recorded).length} transition${done.filter(d => d.recorded).length === 1 ? '' : 's'}; established ${done.filter(d => d.established).length} conductor run${done.filter(d => d.established).length === 1 ? '' : 's'}. Nothing was started, replayed or sent.` : 'Dry run: nothing was recorded (--apply --author <who> records it).'}`].join('\n'), { ok: true, plans, applied: done })
         return 0
       }
       case 'conductor': {

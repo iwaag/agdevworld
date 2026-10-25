@@ -275,7 +275,7 @@ lets the person start a child's review from the room without a manual link.
 | --- | --- |
 | `GET api/conversations[?category=&state=&with=&mode=&limit=&offset=]` | `{person, disabled, participants, counts, total, offset, conversations}`; participants are each project (with `converse` and `discuss`) and the facilitator as their projects say now; each row with `mode`, `members`, `participants`, `defaultTo`, `facilitation`, `category`, `displayTitle`, `newest`, `last`, `overview` or `brief`, `status`, `activity`, `archive` |
 | `POST api/conversations {id, title, members?, defaultTo?, facilitate?, category?, text?, token?, to?, re?, author?}` | creates (201; the same id by the same author is 200), and posts the first message when `text` is given |
-| `GET api/conversations/<id>[?since=<msg>]` | `conversation` (`mode`, `defaultTo`, `facilitation`, `conductor`, `requester`, `category`, `displayTitle`, `origin`), `facilitations`, `overview`, `overviews`, `brief`, `status` (with `continuations` held), `meta`, `activities`, `annotations`, `obligations`, `members`, `membership`, `messages` (with `participant`, `run`, `runUrl`, `invitation`, `addressed`, `node`, `requests`, `attachments`), `requests` (role, workflow, state, run, receipt, held, …), `links`, `runs` (shared status, run view, file route, presentations), `asking`, `horizon`, `archive`; (p17) `reviews`: the human review rounds of the runs serving the room (`id`, `state`, `text`, `summary`, `subjects`, `decision`, `page`, `api`, `runKey`; [reviews.md](reviews.md)) |
+| `GET api/conversations/<id>[?since=<msg>]` | `conversation` (`mode`, `defaultTo`, `facilitation`, `conductor`, `requester`, `category`, `displayTitle`, `origin`), `facilitations`, `overview`, `overviews`, `brief`, `status` (with `continuations` held), `meta`, `activities`, `annotations`, `obligations`, `members`, `membership`, `messages` (with `participant`, `run`, `runUrl`, `invitation`, `addressed`, `node`, `requests`, `attachments`), `requests` (role, workflow, state, run, receipt, held, …), `links`, `runs` (shared status, run view, file route, presentations), `asking`, `horizon`, `archive`; (p17) `reviews`: the human review rounds of the runs serving the room (`id`, `state`, `text`, `summary`, `subjects`, `decision`, `page`, `api`, `runKey`; [reviews.md](reviews.md)); (p18) `progression` (*Progression*) |
 | `POST api/conversations/<id>/messages {text, token, with?, title?, to?, runs?, re?, author?, via?, challenges?}` | the person's words; `{sent, duplicate, reopened, created, message, requests}`; 409 `choose-recipient` when it reaches nobody |
 | `POST …/facilitation {action: start, text, token, re?, challenges?} \| {action: end, note?}` | start (with the brief) or end facilitation |
 | `POST …/default {participant \| null, note?}` | the default addressee |
@@ -426,6 +426,23 @@ then was).
 - `wfe conversation state` is the compact read the conductor works from: the
   conductor and requester, its graph with each node's activity, open
   invitations, questions, obligations, annotations.
+
+## Progression (workflow_editor p18)
+
+The view's `progression` is the conductor's one run read as the room's
+growing graph (`server/progression.ts`), from records only:
+
+| Field | |
+| --- | --- |
+| `conductor` | its run, run view, status (*Idle · …*, *Suspended · …*, *Closed · …*, or what it does now) and `standing` (state, wakes, held, replaces) |
+| `stretches[]` | the opening (`n: 0`) and one per wake: `at`, `topic` (a ponder's `--topic`), `open` (some node not completed), `wake` (its node, the instructions and the messages they carry) and `nodes[]` |
+| a node | `id`, `name`, `type`, `activity`, `state`, times, a short `outcome` and `wait`, the `messages` it concerns (spoken for it, its activity's message, the messages it rests on), its `topic`, its human `review` round, and `recipients[]` |
+| a recipient | for an ask: the project asked, its run, run view, the request's state, the recipient run's status and the question; for a delegate node: the target project and workflow, the child run, the delegation's state, the node's purpose, and how many times its result went back to the same child (`corrections`: fix6 corrections and p17 follow-ups). The recipient's own nodes are not here: they are its run's to show |
+| `earlier[]` | the room's other conductor runs (before p18, or the cancelled one a replacement names: `relation: replaced`), each with its run view and status |
+
+A client shows the current stretch and what is open, folds completed
+stretches, and opens a recipient's run on demand. Topics only name
+stretches: they never make a run.
 
 ## Annotations (argue p4)
 

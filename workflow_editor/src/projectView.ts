@@ -451,6 +451,8 @@ export function renderProjectView(root: HTMLElement, wsId: string, opts: { conte
       if (st.state === 'paused' || st.state === 'interrupted' || st.state === 'unknown') return h('span.run-badge.warn', icon('stop', 'icon'), st.label)
       if (st.state === 'queued' || st.state === 'due') return h('span.run-badge.active', icon('play', 'icon'), st.label)
       if (st.state === 'stalled') return h('span.run-badge.error', icon('alert', 'icon'), st.label)
+      // p18: a conversation's standing conductor at rest is not work in progress.
+      if (st.state === 'listening' || st.state === 'suspended' || st.state === 'closed') return h('span.run-badge.muted', icon('talk', 'icon'), st.label)
     }
     if (r.waiting?.length) return h('span.run-badge.attention', icon('question', 'icon'), 'Waits for you')
     if (r.failed?.length) return h('span.run-badge.error', icon('alert', 'icon'), 'Failed')

@@ -350,6 +350,8 @@ test('a cancelled conductor is never replaced silently: the request fails with t
   const again = await s.ds.retry('room-x', p.invitations[0].id)
   assert.deepEqual([again.state, again.run], ['started', N])
   await assert.rejects(s.ds.replaceConductor('room-x', { by: 'Pat', reason: 'again' }), /not cancelled/)
+  const v = await s.ds.view('room-x')
+  assert.deepEqual([v.progression.conductor?.run, v.progression.earlier.map(e => [e.run, e.relation])], [N, [[C, 'replaced']]], 'the cancelled run stays reachable as the one replaced')
   s.cs.close(); s.x.close()
 })
 
@@ -421,5 +423,20 @@ test('recipient runs keep their boundaries: two independent commissions are two 
   r = await rec(s, C)
   assert.deepEqual([r.standing!.state, r.execution.state], ['closed', 'in-progress'], 'the conductor keeps waiting for the slogan, nothing asserted')
   assert.deepEqual(s.ds.activityRows('room-w').filter(a => a.topic).map(a => a.topic), ['ロゴ', 'スローガン'])
+  // The room's progression: one run, its stretches with topics, recipients as links with their state.
+  const v = await s.ds.view('room-w')
+  const p = v.progression
+  assert.equal(p.conductor?.run, C)
+  assert.equal(p.conductor?.standing?.state, 'closed')
+  const want: unknown[] = [[0, 'ロゴ', ['ponder', 'ask-logo']], [1, 'スローガン', ['ponder-w1', 'ask-slogan']]]
+  if (p.stretches.length > 2) want.push([2, null, ['ponder-w2']]) // the logo's outcome woke it while the room was open
+  assert.deepEqual(p.stretches.map(x => [x.n, x.topic, x.nodes.map(n => n.id)]), want)
+  assert.deepEqual(p.stretches[1].wake?.messages, [m2.id], 'the wake names the message that started the stretch')
+  const askLogo = p.stretches[0].nodes.find(n => n.id === 'ask-logo')!
+  assert.deepEqual(askLogo.recipients.map(r => [r.kind, r.participant, r.run, r.state]), [['ask', 'kid', logo.run, 'answered']])
+  assert.ok(askLogo.messages.includes(m1.id))
+  const askSlogan = p.stretches[1].nodes.find(n => n.id === 'ask-slogan')!
+  assert.deepEqual([askSlogan.state, askSlogan.recipients[0].run, askSlogan.recipients[0].state], ['waiting', slogan.run, 'started'])
+  assert.deepEqual(p.earlier, [])
   s.cs.close(); s.x.close()
 })

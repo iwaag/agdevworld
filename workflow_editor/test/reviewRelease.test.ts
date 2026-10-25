@@ -278,7 +278,7 @@ test('holds, cancellation and duplicates: one rule for every delivery; a held ru
   } finally { sweep(s); s.i.close(); s.n.close(); s.x.close() }
 })
 
-test('a run assigned to a remote worker gets its continuation on that worker, through the job; a duplicate callback finds the same job', async () => {
+test('a run assigned to a remote worker gets its continuation on that worker, through the job; approved through the CLI; a duplicate callback finds the same job', async () => {
   const s = await setup({ parent: PARENT, kid: KID })
   try {
     await writeFile(join(s.area, 'workers.json'), JSON.stringify({ default: 'studio', workers: { studio: { local: true }, pc: { tokenFile: 'pc.token' } } }))
@@ -287,8 +287,20 @@ test('a run assigned to a remote worker gets its continuation on that worker, th
     await presentAndPrepare(s, a.id)
     await s.x.finished(a.id, { code: 0, signal: null })
     await s.x.assign(s.kid, kidRef, 'pc', 'Pat', 'its tools are on the PC', 'browser')
-    await s.x.reviews.start(s.kid, kidRef, 'rv1', { by: ACTOR, via: 'browser' })
-    await s.x.reviews.decide(s.kid, kidRef, 'rv1', { outcome: 'approved', synthetic: true }, { by: ACTOR, via: 'browser' })
+    // The CLI route (wfe review start/approve), as a check actor would use it.
+    const { main } = await import('../cli/wfe.ts')
+    const cli = async (args: string[]) => {
+      const prev = { log: console.log, error: console.error }
+      const out: string[] = []
+      console.log = (...m: unknown[]) => { out.push(m.join(' ')) }; console.error = (...m: unknown[]) => { out.push(m.join(' ')) }
+      try { return { code: await main([...args, '--workspace', s.kid.reg.id, '--registry', s.registry, '--area', s.area]), out: out.join('\n') } } finally { console.log = prev.log; console.error = prev.error }
+    }
+    const run = `${kidRef.workflow}/${kidRef.run}`
+    assert.equal((await cli(['review', 'start', run, 'rv1', '--by', ACTOR])).code, 0)
+    const ap = await cli(['review', 'approve', run, 'rv1', '--by', ACTOR, '--synthetic'])
+    assert.equal(ap.code, 0, ap.out)
+    const shown = await cli(['review', 'show', run, 'rv1'])
+    assert.match(shown.out, /after the approval: cleanup made ready; the run's agent continues it/)
     const q = open(s, 'kid')
     assert.equal(q.length, 1)
     assert.equal((s.x.db.prepare('SELECT worker FROM jobs WHERE id = ?').get(q[0].id) as { worker: string }).worker, 'pc')
@@ -296,4 +308,28 @@ test('a run assigned to a remote worker gets its continuation on that worker, th
     assert.equal(again!.id, q[0].id)
     assert.ok('idle' in await s.x.claim('test'), 'the coordinator\'s own worker does not take it')
   } finally { sweep(s); s.i.close(); s.n.close(); s.x.close() }
+})
+
+test('the browser route: start and approve over HTTP queue the continuation once', async () => {
+  const s = await setup({ parent: PARENT, kid: KID })
+  const { createServer } = await import('node:http')
+  const { createHandler } = await import('../server/api.ts')
+  const srv = createServer(createHandler({ registryFile: s.registry, area: s.area, allowedOrigins: [], exec: s.x } as never))
+  await new Promise<void>(res => srv.listen(0, '127.0.0.1', () => res()))
+  try {
+    await child(s, [19000, 19019])
+    const a = await claimOf(s)
+    await presentAndPrepare(s, a.id)
+    await s.x.finished(a.id, { code: 0, signal: null })
+    const base = `http://127.0.0.1:${(srv.address() as import('node:net').AddressInfo).port}/api/workspaces/kid/runs/${kidRef.workflow}/${kidRef.run}/reviews/rv1`
+    const post = async (path: string, body: unknown) => (await fetch(`${base}/${path}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) })).json() as Promise<{ review: { state: string } }>
+    assert.equal((await post('start', { by: ACTOR, wait: true })).review.state, 'reviewing')
+    assert.equal((await post('decide', { by: ACTOR, outcome: 'approved', synthetic: true, wait: true, receipt: 'review:rv1:decide:approved:1' })).review.state, 'complete')
+    await post('decide', { by: ACTOR, outcome: 'approved', synthetic: true, wait: true, receipt: 'review:rv1:decide:approved:1' }).catch(() => null)
+    assert.equal(open(s, 'kid').length, 1, 'a retransmitted click queues nothing more')
+    const v = await (await fetch(base)).json() as { review: { text: string; release: { unlocked: string[] }; subjectsNow: { status: string }[] } }
+    assert.deepEqual(v.review.release.unlocked, ['cleanup'])
+    assert.equal(v.review.subjectsNow[0].status, 'stopped')
+    assert.equal(v.review.text, 'Approved · complete')
+  } finally { srv.close(); sweep(s); s.i.close(); s.n.close(); s.x.close() }
 })

@@ -450,7 +450,7 @@ export class DelegateStore {
     // A follow-up reopened a judged delegation (p17): its child's next
     // result is relayed again.
     const nd = r.record.delegations?.[id]
-    if (o.followUp && nd) this.index(ws.reg.id, r.record, nd)
+    if ((o.followUp || o.because) && nd) this.index(ws.reg.id, r.record, nd)
     return r
   }
 

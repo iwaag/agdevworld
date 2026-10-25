@@ -396,7 +396,13 @@ cancelling the parent never cancels the child. Competing requests are
 ordered by the parent's lock: after `revise`, `dispose satisfied|rejected`
 of the returned result is refused (`result-returned`), `abandoned` closes
 the delegation, a second `revise` is refused (`delegation-correcting`);
-after a disposition, `revise` is refused (`delegation-closed`). Replay keeps
+after a disposition, `revise` is refused (`delegation-closed`), with two
+exceptions for a result judged `satisfied`: a human review's requested
+changes (`--follow-up <rv>`, p17), and the person's later words naming that
+result (`--because answer:…|instruction:…`, p18: a standing conductor hears
+them after it accepted the result). Either reopens the same delegation for
+the same child, keeps the earlier disposition in `reopened` (with the
+review or the words), and waits again on the delegate node. Replay keeps
 both the returned and the corrected result (events, `revisions`, the child's
 `corrections`).
 

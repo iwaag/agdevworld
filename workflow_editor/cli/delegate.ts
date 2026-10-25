@@ -139,7 +139,10 @@ correction (workflow_editor fix6), instead of closing the delegation:
 The result must be the latest, taken up, and not already returned; the
 child must be completed (not cancelled, failed or executing). A closed
 delegation is not reopened: dispose rejected and --replaces is replacement.
---because when the correction carries your person's words.
+--because when the correction carries your person's words. Those words
+also reopen a result you had judged satisfied (p18: the person asks later
+for a change to what you accepted): the same child corrects it, and the
+satisfied disposition is kept in the record (reopened).
 --follow-up <rv> (p17): the person's human review <rv> of this child's
 presentation asked for changes after you had judged the result satisfied.
 The satisfied disposition is kept in the record (reopened) and the

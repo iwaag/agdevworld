@@ -2102,7 +2102,21 @@ export function apply(prev: RunState | null, e: HistoryEntry | (OpInput & EntryM
           if (dn?.state === 'completed') { dn.ended = null; move(d.node, 'running') }
         }
       }
-      if (d.disposition) fail('delegation-closed', `delegation ${d.id} was judged ${d.disposition.kind} by ${d.disposition.by}; a closed delegation is not reopened (dispatch a replacement with --replaces ${d.id}; after a person's review asked for changes: --follow-up <rv>)`)
+      // p18: a standing conductor hears later words about a result it
+      // already accepted. The person's words (an answer or an instruction,
+      // named by `because`) reopen a delegation judged satisfied for the same
+      // child, as a review's requested changes do; the disposition is kept.
+      if (d.disposition?.kind === 'satisfied' && (e.followUp === undefined || e.followUp === null)) {
+        const said = because(e.because)
+        if (said && said.from !== s.executor.name) {
+          if (d.closed) fail('delegation-closed', `delegation ${d.id} is closed: ${d.closed.reason}`)
+          d.reopened = [...(d.reopened ?? []), { disposition: d.disposition, review: null, because: said, at, by, seq: e.seq }]
+          d.disposition = null
+          const dn = s.nodes[d.node]
+          if (dn?.state === 'completed') { dn.ended = null; move(d.node, 'running') }
+        }
+      }
+      if (d.disposition) fail('delegation-closed', `delegation ${d.id} was judged ${d.disposition.kind} by ${d.disposition.by}; a closed delegation is not reopened (dispatch a replacement with --replaces ${d.id}; after a person's review asked for changes: --follow-up <rv>; a result judged satisfied that the person now wants changed: --because with their words)`)
       if (d.closed) fail('delegation-closed', `delegation ${d.id} is closed: ${d.closed.reason}`)
       if (!d.child) fail('delegation-unbound', `delegation ${d.id} has no child yet; there is no result to return`)
       const latest = latestResult(d)

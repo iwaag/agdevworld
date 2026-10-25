@@ -70,3 +70,42 @@ test('a standing parent: its child\'s result goes back to the same child for cor
   assert.equal((await readRun(await runSpace(s.kid, kidRef), kidRef)).record!.history.filter(h => h.op === 'correction.receive').length, 1)
   s.i.close(); s.n.close(); s.x.close()
 })
+
+test('a result the standing parent accepted, which the person later wants changed: their words reopen the same child; the acceptance is kept; nothing else reopens it', async () => {
+  const s = await (await import('./delegateFixture.ts')).setup()
+  const { ref, a } = await dispatched(s)
+  await runOp(await runSpace(s.par, ref), ref, { op: 'standing.establish', conversation: 'room-q', state: 'open', reason: 'test: the conductor of room-q' } as never, { by: 'conversation', via: 'conversation' })
+  await s.x.finished(a.attempt.id, { code: 0, signal: null })
+  await s.zulip.cycle()
+  const c1 = await claim(s)
+  const kid = as(s.kid, kidRef, c1.attempt.id, 'kid-agent')
+  for (const n of ['scope', 'build', 'confirm']) { await kid({ op: 'node.start', node: n }); await kid({ op: 'node.complete', node: n, outcome: `${n} done` }) }
+  await s.x.finished(c1.attempt.id, { code: 0, signal: null })
+  await s.zulip.cycle()
+  // The parent accepts the result and comes to rest.
+  const p1 = await claim(s)
+  const par = as(s.par, ref, p1.attempt.id, 'par-agent')
+  await par({ op: 'delegation.take-up', delegation: 'd1', events: [1] } as never)
+  await s.x.delegate.dispose(s.par, ref, 'd1', { disposition: 'satisfied', note: 'as asked', yes: true }, { by: 'par-agent', via: 'cli', attempt: p1.attempt.id })
+  await par({ op: 'node.complete', node: 'asset', outcome: 'the icon' })
+  await par({ op: 'node.start', node: 'use' })
+  await par({ op: 'node.complete', node: 'use', outcome: 'used' })
+  await s.x.finished(p1.attempt.id, { code: 0, signal: null })
+  assert.equal((await rec(s.par, ref)).execution.state, 'idle')
+  // Later the person asks for a change; the parent is continued with their words.
+  await runOp(await runSpace(s.par, ref), ref, { op: 'instruction.receive', text: 'Make the icon blue, please.', from: 'Pat' } as never, { by: 'Pat', via: 'conversation' })
+  await runOp(await runSpace(s.par, ref), ref, { op: 'run.adjust', revision: 'wake', source: { kind: 'wake', events: ['i1'] }, nodes: { 'ponder-w1': { type: 'do', name: 'Ponder', description: 'x' } }, edges: [{ from: 'use', to: 'ponder-w1' }] } as never, { by: 'conversation', via: 'conversation' }).catch(() => null)
+  const manifest = (await rec(s.par, ref)).delegations!.d1.events[0].manifest!.digest
+  // Without the person's words it stays closed.
+  await assert.rejects(s.x.delegate.revise(s.par, ref, 'd1', { instruction: 'blue', reason: 'r', manifest }, { by: 'par-agent', via: 'cli', receipt: 'revise-x' }), /judged satisfied.*--because/)
+  await s.x.delegate.revise(s.par, ref, 'd1', { instruction: 'Make it blue.', reason: 'The person asked for a blue icon after it was accepted.', manifest, because: { kind: 'instruction', instruction: 'i1' } }, { by: 'par-agent', via: 'cli', receipt: 'revise-q' })
+  const p = await rec(s.par, ref)
+  const d = p.delegations!.d1
+  assert.deepEqual([d.disposition, d.reopened?.length, d.reopened?.[0]?.disposition.kind, d.reopened?.[0]?.review, d.reopened?.[0]?.because?.from], [null, 1, 'satisfied', null, 'Pat'], 'reopened by the person\'s words; the acceptance kept')
+  assert.ok(openRevision(d), 'the result went back for correction')
+  assert.equal(p.nodes.asset!.state, 'waiting', 'the delegate node waits for the corrected result')
+  await s.zulip.cycle()
+  const child = await rec(s.kid, kidRef)
+  assert.deepEqual(Object.keys(child.corrections ?? {}), ['c1'], 'the same child receives it')
+  s.i.close(); s.n.close(); s.x.close()
+})

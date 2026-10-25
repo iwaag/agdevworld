@@ -98,7 +98,7 @@ export interface Delegation {
   // p17: dispositions set aside by a follow-up after a person's requested
   // changes (the agent had judged the result satisfied; the person's review
   // asked for more). Kept in order; the delegation is open again.
-  reopened?: { disposition: Disposition; review: string; at: string; by: string; seq: number }[]
+  reopened?: { disposition: Disposition; review: string | null; because?: Because; at: string; by: string; seq: number }[] // p17 a review's follow-up; p18 the person's words
   disposition: Disposition | null
   closed: { at: string; by: string; reason: string } | null
 }

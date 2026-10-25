@@ -23,6 +23,7 @@ import type { ExecStore } from './exec.ts'
 import { presenterOf, type Presenter } from './present.ts'
 import { nodeNames, readRun } from './runs.ts'
 import { runStatus, type RunStatus } from '../shared/status.ts'
+import { creationOf } from './observe.ts'
 import { openStore, transaction } from './sqlite.ts'
 import { RequestError } from './workspace.ts'
 import { CONVERSATION_MIGRATIONS } from './conversationSchema.ts'
@@ -351,12 +352,16 @@ export class ConversationStore {
   // where its results open — its file route (a path in the run folder
   // appended) and its presentations that serve now. A run that cannot be
   // read is listed with the reason, never left out.
-  async runEntries(keys: { key: string; relation: string }[], viewBase?: string | null): Promise<RunEntry[]> {
+  async runEntries(keys: { key: string; relation: string }[], viewBase?: string | null, delegated = false): Promise<RunEntry[]> {
     const files = (workspace: string, ref: RunRef) => viewBase ? `${viewBase.replace(/\/?$/, '/')}api/projects/${encodeURIComponent(workspace)}/runs/${encodeURIComponent(ref.workflow)}/${encodeURIComponent(ref.run)}/raw?path=` : null
     const cfg = loadConversationConfig(this.area)
     const person = 'disabled' in cfg ? null : cfg.person
     const runs: RunEntry[] = []
-    for (const { key, relation } of keys) {
+    const queue: { key: string; relation: string; uid?: string }[] = [...keys]
+    const seen = new Set<string>()
+    for (const { key, relation, uid } of queue) {
+      if (seen.has(key)) continue
+      seen.add(key)
       const { workspace, ref } = parseRunName(key)
       const entry = { key, workspace, workflow: ref.workflow, run: ref.run, relation, url: runUrl(viewBase, key), files: files(workspace, ref) }
       try {
@@ -365,6 +370,14 @@ export class ConversationStore {
         const reading = await readRun(ws, ref)
         const rec = reading.record as RunRecord | null
         if (!rec) throw new Error('the run cannot be read')
+        if (uid && `${rec.project}/${rec.workflow}/${rec.run}#${creationOf(rec)}` !== uid) throw new Error('the delegated run identity changed; its review cannot be substituted')
+        // A child can prepare its own human review before it completes, so
+        // it has no result to relay yet. Follow recorded bindings directly,
+        // including satisfied delegations, rather than waiting for a result.
+        if (delegated) for (const d of Object.values(rec.delegations ?? {})) {
+          const c = d.child
+          if (c) queue.push({ key: `${c.workspace}/${c.workflow}/${c.run}`, relation: `delegated by ${key} (${d.id})`, uid: c.uid })
+        }
         const job = this.exec.runRows(workspace, ref).jobs.find(j => j.state === 'queued' || j.state === 'claimed') ?? null
         const status = runStatus(rec, { names: nodeNames(reading.bundle, rec), job: job && { state: job.state as 'queued' | 'claimed', reason: job.reason }, person })
         const presenter = rec.presentations ? this.presenter() : null

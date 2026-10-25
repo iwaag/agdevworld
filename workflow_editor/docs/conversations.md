@@ -254,6 +254,11 @@ archive, starts runs). pj-ponderer `tools/discussions` reads both formats.
 
 ## HTTP
 
+The room's `runs` and `reviews` include bound delegation descendants, even
+before a child completes and relays a result. Traversal uses recorded child
+identities, deduplicates runs, and retains completed review rounds. This
+lets the person start a child's review from the room without a manual link.
+
 | Route | |
 | --- | --- |
 | `GET api/conversations[?category=&state=&with=&mode=&limit=&offset=]` | `{person, disabled, participants, counts, total, offset, conversations}`; participants are each project (with `converse` and `discuss`) and the facilitator as their projects say now; each row with `mode`, `members`, `participants`, `defaultTo`, `facilitation`, `category`, `displayTitle`, `newest`, `last`, `overview` or `brief`, `status`, `activity`, `archive` |

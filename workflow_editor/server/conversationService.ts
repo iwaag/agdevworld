@@ -1675,7 +1675,7 @@ export class ConversationService {
     for (const i of invitations) if (i.run) add(i.run, i.awaits ? `awaited result (request ${i.id})` : `request ${i.id}`)
     for (const l of links) add(l.run, l.relation)
     if (c.conductor) add(c.conductor, 'conductor')
-    const runs: RunEntry[] = await this.cs.runEntries([...keys].map(([key, rel]) => ({ key, relation: [...rel].join(', ') })), o.viewBase)
+    const runs: RunEntry[] = await this.cs.runEntries([...keys].map(([key, rel]) => ({ key, relation: [...rel].join(', ') })), o.viewBase, true)
     // Speech of a project no longer registered here (argue p4 ex1: argue's
     // runs) keeps its run name; it gets no run-view link that opens nothing.
     const known = this.exec ? new Set((await loadRegistry(this.exec.ctx.registryFile)).workspaces.map(w => w.id)) : null

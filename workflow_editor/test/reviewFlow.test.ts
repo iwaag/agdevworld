@@ -11,6 +11,7 @@ import assert from 'node:assert/strict'
 import { mkdir, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { Presenter } from '../server/present.ts'
+import { ConversationStore } from '../server/conversations.ts'
 import { adjustRun, readRun, registerPresentation, runOp } from '../server/runs.ts'
 import { runSpace } from '../server/runspace.ts'
 import { situation } from '../shared/run.ts'
@@ -62,6 +63,36 @@ edges: []
 const kidRef = { workflow: 'make', run: 'run-001' }
 const jobs = (s: S) => (s.x.db.prepare('SELECT * FROM jobs WHERE state IN (\'queued\', \'claimed\')').all() as { workspace: string; run: string; receipt: string }[])
 const alive = (pid: number) => { try { process.kill(pid, 0); return true } catch { return false } }
+
+test('a room discovers a delegated child review before the child completes, deduplicates linked children and retains completed rounds', async () => {
+  const s = await setup({ parent: PARENT, kid: KID.replace('edges: []', '  review:\n    type: review\n    description: Review the figure.\nedges:\n  - {from: build, to: review}') })
+  await writeFile(join(s.area, 'present.json'), JSON.stringify({ ports: [18830, 18849], answerBase: 'http://localhost:8093/wfe/' }))
+  const cs = new ConversationStore({ area: s.area, exec: s.x })
+  try {
+    const { ref } = await s.x.request({ workspace: 'par', workflow: 'use', text: 'A figure.', author: 'Pat', receipt: 'room-child-review', via: 'browser' })
+    const p = await claim(s)
+    await as(s.par, ref, p.attempt.id, 'par-agent')({ op: 'node.start', node: 'asset' })
+    await s.x.delegate.dispatch(s.par, ref, 'asset', { request: 'Make a figure.', attempt: p.attempt.id, by: 'par-agent', via: 'cli' })
+    await s.x.finished(p.attempt.id, { code: 0, signal: null })
+    await s.zulip.cycle()
+    const k = await claim(s)
+    await present(s, k.attempt.id, 'build', 1, 'a figure for the person')
+    await s.x.reviews.prepare(s.kid, kidRef, 'review', { summary: 'Please check the figure.', subjects: ['p1'] }, { by: 'kid-agent', via: 'cli', attempt: k.attempt.id })
+    await s.x.finished(k.attempt.id, { code: 0, signal: null })
+    const keys = [{ key: 'par/use/run-001', relation: 'turn' }]
+    assert.equal((await cs.runEntries(keys)).length, 1, 'other readers retain direct-run behavior')
+    const view = await cs.runEntries(keys, 'http://localhost/wfe/', true)
+    assert.equal(view.length, 2)
+    const child = view.find(r => r.key === 'kid/make/run-001')!
+    assert.equal(child.reviews![0].state, 'awaiting')
+    assert.match(child.reviews![0].page!, /kid\/review\/make\/run-001\/rv1/)
+    assert.match(child.relation, /delegated by par\/use\/run-001/)
+    assert.equal((await cs.runEntries([...keys, { key: child.key, relation: 'linked' }], undefined, true)).filter(r => r.key === child.key).length, 1)
+    await s.x.reviews.start(s.kid, kidRef, 'rv1', { by: 'Pat', via: 'browser' })
+    await s.x.reviews.decide(s.kid, kidRef, 'rv1', { outcome: 'approved' }, { by: 'Pat', via: 'browser' })
+    assert.equal((await cs.runEntries(keys, undefined, true)).find(r => r.key === child.key)!.reviews![0].state, 'complete', 'the room keeps the review history after approval')
+  } finally { cs.close(); s.i.close(); s.n.close(); s.x.close() }
+})
 
 // The child builds a page, presents it, starts and stops it (its own look),
 // and completes.

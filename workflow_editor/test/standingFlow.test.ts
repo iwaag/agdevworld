@@ -378,3 +378,48 @@ test('a turn that stays silent settles the request it took up as unanswered; a r
   assert.equal((await s.ds.status('room-s')).working, 0)
   s.cs.close(); s.x.close()
 })
+
+test('recipient runs keep their boundaries: two independent commissions are two runs; a clarification reaches the first run with its message; it completes while the room stays open; closing cancels nothing', async () => {
+  const s = await setup()
+  s.ds.create('room-w', { title: 'Room W', by: 'Pat', members: ['kid'], facilitate: true })
+  const m1 = (await s.ds.post('room-w', { text: 'Ask kid for a logo.', author: 'Pat', token: 'tok-w-0001' })).message
+  const C = s.cs.conversation('room-w')!.conductor!
+  const a1 = (await claim(s))!
+  await s.ds.ponder('room-w', { run: C, attempt: a1.attempt, author: 'ponderer-agent', node: 'ponder', decision: 'Commission the logo.', sources: [m1.id], next: [{ activity: 'ask', node: 'ask-logo' }], topic: 'ロゴ' })
+  const logo = (await s.ds.ask('room-w', { run: C, attempt: a1.attempt, author: 'ponderer-agent', node: 'ask-logo', participants: ['kid'], question: 'Make a logo.', re: [m1.id] })).invitations[0]
+  await end(s, a1)
+  // An unrelated deliverable in the same room: a second, separate run.
+  const m2 = (await s.ds.post('room-w', { text: 'Also a slogan, separately.', author: 'Pat', token: 'tok-w-0002' })).message
+  const a2 = (await claim(s))!
+  assert.equal(a2.run, C, 'woken although the logo ask still waits')
+  await s.ds.ponder('room-w', { run: C, attempt: a2.attempt, author: 'ponderer-agent', node: 'ponder-w1', decision: 'Commission the slogan apart.', sources: [m2.id], next: [{ activity: 'ask', node: 'ask-slogan' }], topic: 'スローガン' })
+  const slogan = (await s.ds.ask('room-w', { run: C, attempt: a2.attempt, author: 'ponderer-agent', node: 'ask-slogan', participants: ['kid'], question: 'Write a slogan.', re: [m2.id] })).invitations[0]
+  await end(s, a2)
+  assert.notEqual(logo.run, slogan.run)
+  assert.equal(await runsOf(s, 'kid'), 2, 'two commissions, two recipient runs')
+  // The person's clarification for the logo reaches that run, with its message; the conductor is not woken.
+  const wakes = (await rec(s, C)).standing!.wakes.length
+  const m3 = await s.ds.post('room-w', { text: 'The logo should be round.', author: 'Pat', token: 'tok-w-0003', runs: [logo.run!] })
+  assert.deepEqual(m3.invitations.map(i => [i.role, i.run]), [['deliver', logo.run]])
+  const k1 = await rec(s, logo.run!)
+  const clar = Object.values(k1.instructions ?? {}).find(i => i.text === 'The logo should be round.')!
+  assert.deepEqual([clar.from, (clar.source as { message: number }).message], ['Pat', m3.message.id])
+  assert.equal((await rec(s, C)).standing!.wakes.length, wakes)
+  // The logo run completes with its result while the slogan run still works.
+  await s.ds.contribute('room-w', { text: 'A round logo.', author: 'kid-agent', run: logo.run!, invitation: logo.id, re: [m1.id], kind: 'result' })
+  await op(s, logo.run!, { op: 'node.start', node: 'talk' } as never, 'kid-agent'); await op(s, logo.run!, { op: 'node.complete', node: 'talk', outcome: 'done' } as never, 'kid-agent')
+  await s.ds.reconcile()
+  let r = await rec(s, C)
+  assert.equal(r.nodes['ask-logo'].state, 'completed')
+  assert.equal(r.nodes['ask-slogan'].state, 'waiting', 'the other commission is not waited for, nor completed')
+  assert.equal((await rec(s, logo.run!)).execution.state, 'completed')
+  assert.equal(s.cs.conversation('room-w')!.state, 'open')
+  // Closing the room cancels, accepts and integrates nothing of the slogan run.
+  await s.ds.close('room-w', { by: 'Pat' })
+  const k2 = await rec(s, slogan.run!)
+  assert.deepEqual([k2.cancelled, k2.decisions.length, k2.execution.state], [null, 0, 'not-started'])
+  r = await rec(s, C)
+  assert.deepEqual([r.standing!.state, r.execution.state], ['closed', 'in-progress'], 'the conductor keeps waiting for the slogan, nothing asserted')
+  assert.deepEqual(s.ds.activityRows('room-w').filter(a => a.topic).map(a => a.topic), ['ロゴ', 'スローガン'])
+  s.cs.close(); s.x.close()
+})

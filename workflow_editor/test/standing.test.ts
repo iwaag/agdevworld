@@ -24,7 +24,7 @@ function turn(r: RunRecord, a: string, node = 'ponder', graph = G): RunRecord {
 }
 // The revision a wake records: the graph with one new ponder node after `after`.
 function wake(r: RunRecord, node: string, events: string[], after = 'ponder'): { r: RunRecord; graph: RunGraph } {
-  const prev = r.definition.revisions?.at(-1)?.effective ?? { nodes: G.nodes, edges: G.edges }
+  const prev = r.definition.revisions?.at(-1)?.effective ?? r.definition.effective ?? { nodes: G.nodes, edges: G.edges }
   const graph: RunGraph = { nodes: { ...prev.nodes, [node]: { type: 'do', activity: 'ponder' } }, edges: [...prev.edges, { from: after, to: node }] }
   const n = (r.definition.revisions?.length ?? 0) + 2
   const prevGraph: RunGraph = { nodes: prev.nodes, edges: prev.edges }
@@ -183,4 +183,36 @@ test('a child\'s fact that arrives while the room is closed is not the executor\
   assert.equal(r.control.hold, null)
   o({ op: 'standing.release', reason: 'Pat resumed' }, 'Pat')
   assert.match(dueReason(r) ?? '', /result from kid make arrived/)
+})
+
+test('a human review on the standing conductor: work complete, awaiting review; a new topic wakes a ponder beside it; approval and cleanup bring the run to rest, not completion', () => {
+  const R: RunGraph = { nodes: { ponder: { type: 'do', activity: 'ponder' }, review: { type: 'review' } }, edges: [{ from: 'ponder', to: 'review' }] }
+  const SUBJECT = { workspace: 'misc', project: 'misc', workflow: 'freework', run: 'run-007', creation: '2026-10-24T09:00:00.000Z', presentation: 'p1', revision: `sha256:${'a'.repeat(64)}`, title: 'Torus figure', delegation: 'd1' }
+  let r = op(null, { op: 'run.create', project: 'ponderer', workflow: 'conduct', run: 'run-004', input: { kind: 'braindump', file: 'braindump.md', author: 'Pat' }, executor: { name: 'ponderer-agent', backend: null }, predecessor: null, definition: { root: 'conduct', workflows: {}, warnings: [], effective: { compiler: 'c', ...R } as never }, context: { repositories: [] }, nodes: ['ponder', 'review'], standing: { conversation: 'room-r' } }, 'wfe', 'cli', R)
+  let g = R
+  const o = (x: OpInput & { attempt?: string }, by = 'ponderer-agent', via = 'cli') => { r = op(r, x, by, via, g) }
+  o({ op: 'attempt.begin', attempt: 'atest-000001', reason: 'turn' }, 'autolab')
+  o({ op: 'node.start', node: 'ponder', attempt: 'atest-000001' }); o({ op: 'node.complete', node: 'ponder', outcome: 'judged misc\'s figure', attempt: 'atest-000001' } as OpInput)
+  o({ op: 'review.prepare', review: 'rv1', uid: 'ponderer/conduct/run-004#abc/rv1', node: 'review', summary: 'トーラスの図です。陰影を確認してください。', subjects: [SUBJECT], attempt: 'atest-000001' } as OpInput)
+  o({ op: 'attempt.end', attempt: 'atest-000001', outcome: 'exited', waits: 'defer-ready', explain: 'cause' } as OpInput, 'autolab')
+  assert.deepEqual([r.execution.state, situation(r), runStatus(r).text], ['in-progress', 'awaiting-review', 'Work complete · Awaiting human review'])
+  // A new topic while the review waits: woken beside it, not behind it.
+  o({ op: 'instruction.receive', text: 'Unrelated: what about sound?', from: 'Pat' } as OpInput, 'Pat', 'conversation')
+  assert.equal(situation(r), 'due')
+  const w = wake(r, 'ponder-w1', ['i1'])
+  r = w.r; g = w.graph
+  assert.deepEqual(r.execution.ready, ['ponder-w1'])
+  assert.equal(r.nodes.review.state, 'waiting', 'the review still waits for the person')
+  o({ op: 'attempt.begin', attempt: 'atest-000002', reason: 'wake' }, 'autolab')
+  o({ op: 'node.start', node: 'ponder-w1', attempt: 'atest-000002' }); o({ op: 'node.complete', node: 'ponder-w1', outcome: 'answered about sound', attempt: 'atest-000002' } as OpInput)
+  o({ op: 'attempt.end', attempt: 'atest-000002', outcome: 'exited', waits: 'defer-ready', explain: 'cause' } as OpInput, 'autolab')
+  assert.deepEqual([situation(r), r.control.hold], ['awaiting-review', null])
+  // The person's review: start, serve, approve, cleanup — then the run rests.
+  o({ op: 'review.start', review: 'rv1' }, 'Pat', 'browser')
+  o({ op: 'review.serve', review: 'rv1', start: 1, subjects: [{ subject: 1, status: 'available', instance: 'pi-test-0001', mode: 'started', detail: 'served' }] } as OpInput, 'wfe', 'review')
+  o({ op: 'review.decide', review: 'rv1', outcome: 'approved', revisions: [SUBJECT.revision] } as OpInput, 'Pat', 'browser')
+  o({ op: 'review.cleanup', review: 'rv1', results: [{ subject: 1, instance: 'pi-test-0001', status: 'stopped', detail: 'verified gone' }], release: true } as OpInput, 'wfe', 'review')
+  assert.equal(r.nodes.review.state, 'completed')
+  assert.deepEqual([r.execution.state, situation(r)], ['idle', 'awaiting-input'], 'the conductor returns to rest')
+  assert.deepEqual(r.reviews!.rv1.release!.unlocked, [], 'nothing was waiting on the review')
 })

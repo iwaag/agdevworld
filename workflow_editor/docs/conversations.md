@@ -1,4 +1,4 @@
-# Conversations (project_migration p8, workflow_editor p15–p16, argue p3–p5, challenge p1–p2)
+# Conversations (project_migration p8, workflow_editor p15–p16, p18, argue p3–p5, challenge p1–p2)
 
 A conversation is a person talking with project agents, each agent speaking
 through runs of its own project's workflows, with its own guide, mission and
@@ -13,7 +13,7 @@ attachments; configuration), `server/conversationService.ts` (everything
 that routes, delivers and reads), `server/conversationArchive.ts`,
 `server/conversationWorkflows.ts`; CLI: `wfe conversation` (`wfe
 discussion` is the same command); HTTP: `api/conversations`; store:
-`<area>/.local/conversations/conversations.sqlite` (version 12).
+`<area>/.local/conversations/conversations.sqlite` (version 13).
 
 WFE owns identity, membership, messages, delivery, execution, recovery and
 the archive. A client (aghangout, the Slack integration, the CLI) owns
@@ -80,9 +80,11 @@ A person's message reaches the first of these that applies:
    a run that is not work of this conversation is refused;
 3. the open questions it replies to (`re` naming a question message whose
    run is open): that run gets the words as the answer to its question;
-4. the conductor while the room is facilitated: its open run gets the words
+4. the conductor while the room is facilitated: its one run gets the words
    (as the answer to its question that `re` names or its only open one, else
-   as an instruction); without an open conductor run a new one starts;
+   as an instruction — which wakes it if it rests, *Conductor (p18)*); only a
+   room without a conductor gets a new run, and a cancelled conductor's
+   request fails visibly until it is replaced explicitly;
 5. the default addressee;
 6. otherwise nothing is recorded and the post is refused (409
    `choose-recipient`, with the project members) so the client can ask whom
@@ -134,10 +136,11 @@ request event (archived).
 | --- | --- |
 | New message to a project | one request per recipient, one bounded run by receipt |
 | Reply to an open run question | delivered to the asking run as its answer; no other run for that recipient |
-| Message to an active conductor | its open run continues with the answer or instruction |
+| Message to an active conductor | its one run continues with the answer or instruction, woken if it rests |
 | Explicit instruction | delivered to the run named, with words, source message and attachments; an ended run fails |
 | Agent contribution | speech with provenance; nobody is awakened |
 | Late result | settles the awaited request; the continuation follows `awaited_by` (*Conductor continuation*) |
+| A turn of the conductor that took words up and ended without answering | the request is `unanswered` then (not when the run ends: it does not) |
 | Unavailable recipient | `failed`, shown, retried at that recipient |
 | Repeated submission, restart | the same token is the same message and requests; the same receipt the same run |
 
@@ -158,8 +161,10 @@ Ending it (`wfe conversation end`, `POST …/facilitation {action: end}`)
 changes future routing only: messages naming nobody go to the default
 addressee, or must name someone. Nothing is stopped (stopping a run is the
 run's own control); what the conductor asked of others stays its own, and
-its outcomes still reach it while it is open. A continuation that would need
-a new conductor turn is held.
+its outcomes still reach it while it works or waits. Its run stands
+`suspended` (p18): at rest, nothing wakes it — a continuation that would
+is held until the person resumes it. Starting facilitation again reuses the
+same run (`open` again) and delivers the brief to it.
 
 ## Conductor continuation
 
@@ -168,28 +173,35 @@ conductor makes its node wait and ends its attempt, freeing the slot. When
 everything it awaits is resolved (answered, unanswered, failed, withdrawn),
 it is given **one instruction** listing each outcome (receipt
 `discussion:<id>:continue:<run>:<outcomes>`), which continues the waiting
-run ([runs.md](runs.md), *An instruction continues a run nobody executes*).
-Each outcome is told once; a late answer is a new outcome. While the
-conductor's attempt is open it is told nothing (it reads the results);
-reconcile tells it once its attempt ended. A conductor run that has
-**completed** meanwhile is replaced by a new conductor turn (by
-`discussion`, receipt-bound, once) whose question lists the outcomes — while
-the room is open and facilitated. A cancelled conductor run is told nothing.
+run ([runs.md](runs.md), *An instruction continues a run nobody executes*),
+or wakes it when it rests (p18). Each outcome is told once; a late answer is
+a new outcome. While the conductor's attempt is open it is told nothing (it
+reads the results); reconcile tells it once its attempt ended. The
+conductor is never replaced to take outcomes up: a cancelled one is told
+nothing, and a completed one that never stood (before the p18 transition)
+holds them for the person's resume.
 
 **Held continuations.** When the outcomes come due while the conversation is
-closed, or when a new conductor turn would be needed while nobody
-facilitates, they are **held**: each request's `held` says why, the room's
-status and obligations show them, and nothing is started. Reopening replays
-nothing. `wfe conversation resume <id> [<request>]` (`POST …/resume`) runs
-them once, in an open conversation.
+closed, or while the conductor rests and nobody facilitates, they are
+**held**: each request's `held` says why, the room's status and obligations
+show them, and nothing is started. Reopening replays nothing. `wfe
+conversation resume <id> [<request>]` (`POST …/resume`) runs them once, in
+an open conversation — also waking a conductor that stands suspended — and
+releases what the conductor's own standing held (p18: a child's fact that
+arrived while the room was closed).
 
 ## Closing and reopening
 
 Closing withdraws requests not yet started (`pending`, `failed`); started
-runs finish and their contributions are recorded; nothing is cancelled; no
-conductor is continued (its continuation is held). Late results stay
-readable. Reopening (or a person's post) continues the conversation; nothing
-withdrawn, completed or held is replayed — ask again, or resume.
+runs finish and their contributions are recorded; nothing is cancelled, no
+review approved; no conductor is continued (its continuation is held). The
+conductor's run stands `closed`: at rest it is finalized (`completed`),
+with work open it keeps waiting and nothing is asserted done; a child's fact
+that reaches it then continues nothing. Late results stay readable.
+Reopening (or a person's post) continues the conversation with the same
+conductor, which rests again; nothing withdrawn, completed or held is
+replayed — ask again, or resume. Both are activity events (`room` closed /
+reopened).
 
 ## Archive
 
@@ -270,7 +282,8 @@ lets the person start a child's review from the room without a manual link.
 | `POST …/members {participant, action: join\|leave, note?}` | membership; starts nothing |
 | `POST …/requests {participant, question, re?, token?}`, `…/requests/<n>/withdraw {reason}`, `…/requests/<n>/retry` | the person's request; withdraw one not started; try a failed one again |
 | `POST …/resume {request?}` | run held continuations once |
-| `POST …/close`, `…/reopen` | |
+| `POST …/close`, `…/reopen` | the conductor's run stands closed / open again (p18) |
+| `GET …/conductor`, `POST …/conductor {action: replace, reason, token?}` | (p18) the conductor's run, standing and status; a new conductor for a cancelled one, naming it |
 | `POST …/meta {category?, displayTitle?, ifUntitled?, note?}`, `GET`/`POST …/overview` (`displayTitle?`, `ifUntitled?`) | records about the conversation; `skipped` says why an `ifUntitled` title was not written |
 | `GET …/workflows[/<n>[/current]]` | workflows beside the speech (reads only) |
 | `GET …/dialogue?lang=`, `POST …/dialogue/retry` | character dialogue ([dialogue.md](dialogue.md)) |
@@ -316,16 +329,39 @@ Acting on another run from an attempt (`wfe run instruct|answer … --from
 <person> --source-message <conv>:<msg>`) records the agent as `by` and the
 person's words with their origin.
 
-## Conductor (argue p4)
+## Conductor (argue p4, workflow_editor p18)
 
 `conversations.conductor` names the facilitator's run that owns the
-conversation's progression. It is set when a conductor request starts a facilitator
-run while no other conductor is open, or when the facilitator's attempt
-creates the conversation (`wfe conversation create` from that attempt). A
-conductor that completes leaves the conversation open: while it is
-facilitated, the next message for the conductor, or a late outcome it
-awaited, starts a new conductor run. The
-conversation id stays independent of runs.
+conversation's progression — **one run for the conversation's life**
+(p18; before, each response ended in a run of its own). It is set when a
+conductor request starts a facilitator run in a room without a conductor
+(under the conversation's lock, so racing messages make one run), or when
+the facilitator's attempt creates the conversation (`wfe conversation
+create` from that attempt, which establishes it). The conversation id stays
+independent of runs.
+
+**The standing conductor** ([runs.md](runs.md) *Standing runs*). Its run
+carries `standing` and grows turn by turn:
+
+| Event | What happens |
+| --- | --- |
+| it replies and nothing is left | its attempt ends normally; the run **rests** (`idle`, *Idle · Ready for the conversation's next message*): no attempt, no slot, no polling turn; its turn's changes are integrated as a completed run's are |
+| the person's words, a late outcome (an instruction) | with work ready it is continued as any run; with nothing ready or running WFE **wakes** it: one new `ponder` node (after its latest completed ponder, so unrelated asks, reviews and children are not waited for) and one attempt, under the run's lock — two callers append one node; words that arrive during an attempt wake it after that attempt if it did not get them |
+| an answer to its question, a child's fact, a review decision | continues the node that waits for it, as before |
+| a new topic | a new stretch of the same graph (a wake, or the agent's `ponder --next`); `ponder --topic <label>` names it for readers |
+| facilitation ends / starts again | `suspended` / `open`: the same run |
+| the room closes / reopens | `closed` (finalized at rest) / `open` again, holding what waited |
+| it is cancelled | it stays cancelled: requests for the conductor fail with the reason until `wfe conversation conductor <id> --replace --reason …` (`POST …/conductor {action: replace, reason}`) starts a new run that names it (`standing.replaces`) |
+
+Each transition is recorded on the run by WFE under the receipt of the room
+event that caused it; reconcile records any it could not (and establishes
+an open conductor from before p18). A request delivered to the conductor
+is answered by a reply that names its message (`--re`); a turn that took it
+up and ended without answering settles it `unanswered`. The conductor at
+rest never counts as work: the room's `working` and obligations leave it
+out. `wfe conversation conductor <id>` shows its run, standing, wakes and
+held events; `wfe conversation state` shows the current stretch and open
+work in full and folds earlier completed stretches.
 
 `conversations.requester` is whom the conductor's `talk` consults:
 `{kind: person, id}` (the person who opened it, or on whose behalf the
@@ -370,7 +406,8 @@ then was).
   outcomes of that ask. Unavailable participants fail at once.
 - **Graph.** `--next` appends a chain of new nodes after the ponder node
   (`announce:agenda`, `ask:facts`, `ponder:after-facts`). Another round is
-  new nodes; completed ones and their records stay; no cycle.
+  new nodes; completed ones and their records stay; no cycle. A wake (p18)
+  appends `ponder-w<n>` itself.
 - **A turn that spoke and left its node running** (p3:
   rts-vs-bot/discuss/run-001, run-004): `wfe conversation contribute
   --completing <node>` speaks and completes in one command. Reconcile

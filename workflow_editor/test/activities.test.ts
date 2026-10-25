@@ -257,13 +257,15 @@ test('talk: the person\'s reply, addressed to nobody, is the conductor\'s answer
   s.cs.close(); s.x.close()
 })
 
-test('a conductor run created by a delegation: the requesting run is the requester and talk is addressed to its agent; a completed conductor\'s late outcome starts a new conductor run', async () => {
+test('a conductor run created by a delegation: the requesting run is the requester and talk is addressed to its agent; it stands for the room (p18), and an outcome after its turn ended continues the same run', async () => {
   const s = await setup()
   const req = { kind: 'run' as const, run: 'front/converse/run-007', agent: 'front-agent' }
   // The conductor run requested as work (not invited), then opening the discussion.
   const created = await s.x.request({ workspace: 'ponderer', workflow: 'conduct', text: 'Hold a discussion about seats.', author: 'front-agent', receipt: 'test:conduct:1', via: 'cli' })
   const run = `ponderer/${created.ref.workflow}/${created.ref.run}`
   s.ds.create('p4-d', { facilitate: true, title: 'Seats', by: 'front-agent', members: ['forge'], conductor: run, requester: req })
+  assert.match((await s.ds.syncStanding('p4-d'))!, /standing.establish/, 'what wfe conversation create does from the attempt')
+  assert.equal((await rec(s, run)).standing!.state, 'open')
   assert.equal(s.ds.requester('p4-d')!.kind, 'run')
   assert.deepEqual(s.ds.members('p4-d').map(m => m.participant), ['forge', 'ponderer'], 'an agent requester does not join as a person')
   s.x.db.prepare('UPDATE jobs SET state = \'done\' WHERE workspace = \'ponderer\'').run()
@@ -278,15 +280,17 @@ test('a conductor run created by a delegation: the requesting run is the request
   await op(s, run, { op: 'node.complete', node: 'ask-front', outcome: 'withdrawn', attempt: 'a1' } as never, 'ponderer-agent')
   const q = await s.ds.ask('p4-d', { run, attempt: 'a1', ...who, node: 'facts', participants: ['forge'], question: 'Facts?', re: [brief.id] })
   await end(s, run, 'a1')
-  // forge's run ends silent: the ask completes, and the run (no node left)
-  // completes with it; the outcome then goes to a new conductor run.
+  // forge's run ends silent: the ask completes, the run (no node left)
+  // rests, and the outcome wakes the same run with one new ponder node.
   const fr = q.invitations[0].run!
   await op(s, fr, { op: 'node.start', node: 'talk' } as never); await op(s, fr, { op: 'node.complete', node: 'talk', outcome: 'x' } as never)
   const notes = await s.ds.reconcile()
-  assert.equal((await rec(s, run)).execution.state, 'completed', notes.join('\n'))
-  const turn = s.ds.invitations('p4-d').find(i => i.participant === 'ponderer' && i.by === 'discussion')
-  assert.ok(turn?.run && turn.run !== run, notes.join('\n'))
-  assert.equal(s.cs.conversation('p4-d')!.conductor, turn!.run, 'the new run conducts')
+  const after = await rec(s, run)
+  assert.equal(after.nodes.facts.state, 'completed', notes.join('\n'))
+  assert.deepEqual(after.execution.ready, ['ponder-w1'], notes.join('\n'))
+  assert.equal(after.standing!.wakes.length, 1)
+  assert.ok(!s.ds.invitations('p4-d').some(i => i.participant === 'ponderer' && i.by === 'discussion'), 'no new conductor turn')
+  assert.equal(s.cs.conversation('p4-d')!.conductor, run, 'the same run conducts')
   s.cs.close(); s.x.close()
 })
 
@@ -409,7 +413,7 @@ test('a conductor\'s question on any node is posted by WFE, awaits the person an
   s.cs.close(); s.x.close()
 })
 
-test('wfe run complete on a ponder node that would end an open, unconcluded discussion warns and records nothing; --yes completes it (workflow_editor fix3: ponderer/conduct/run-020)', async () => {
+test('wfe run complete on a conductor\'s ponder node warns and records nothing; --yes completes it, and the standing conductor rests (workflow_editor fix3: ponderer/conduct/run-020; p18)', async () => {
   const s = await setup()
   const brief = await opened(s, 'fix3-b')
   await begin(s, P, 'a1')
@@ -425,13 +429,15 @@ test('wfe run complete on a ponder node that would end an open, unconcluded disc
   }
   const warned = await cli([])
   assert.equal(warned.code, 1)
-  assert.match(warned.err, /Not recorded — 2 reminders before completing after/)
+  assert.match(warned.err, /Not recorded — a reminder before completing after/)
   assert.match(warned.err, /discussion-activity: after is the ponder activity of a discussion.*\n.*wfe discussion ponder --node after/)
   assert.doesNotMatch(warned.err, /unrecorded-activity/, 'the run\'s own records are no sign of work')
-  assert.match(warned.err, /conducts fix3-b: still open, and this run has announced no conclusion/)
+  // p18: the standing conductor's last node leaves it at rest, not ended: it
+  // speaks again at the room's next words, so discussion-open does not apply.
+  assert.doesNotMatch(warned.err, /discussion-open/)
   assert.match(warned.err, /--yes/)
   assert.equal((await rec(s, P)).nodes.after.state, 'running', 'nothing recorded')
   assert.equal((await cli(['--yes'])).code, 0)
-  assert.equal((await rec(s, P)).execution.state, 'completed', 'accepted with --yes')
+  assert.equal((await rec(s, P)).execution.state, 'idle', 'accepted with --yes; the conductor rests')
   s.cs.close(); s.x.close()
 })

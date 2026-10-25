@@ -499,6 +499,8 @@ export interface CreateRunOptions {
   // from the project workspace `ws`, as the person sees and edits it.
   into?: Workspace
   storage?: RunStorage
+  // p18: created as a conversation's standing conductor (docs/runs.md *Standing runs*).
+  standing?: { conversation: string; replaces?: string }
   by: string
   via: string
   now?: Date
@@ -729,12 +731,12 @@ async function createRunUnlocked(ws: Workspace, o: CreateRunOptions): Promise<Cr
   return writeRun(dest, ref, files, record)
 }
 
-function createRecord(project: string, ref: RunRef, input: RunInput, o: Pick<CreateRunOptions, 'predecessor' | 'by' | 'via' | 'now'> & { executor: Executor }, definition: DefinitionRef, context: RunState['context'], graph: RunGraph, receipt?: string, storage?: RunStorage): RunRecord {
+function createRecord(project: string, ref: RunRef, input: RunInput, o: Pick<CreateRunOptions, 'predecessor' | 'by' | 'via' | 'now' | 'standing'> & { executor: Executor }, definition: DefinitionRef, context: RunState['context'], graph: RunGraph, receipt?: string, storage?: RunStorage): RunRecord {
   const executor: Executor = { name: o.executor.name.trim(), backend: o.executor.backend?.trim() || null, ...(o.executor.host ? { host: o.executor.host } : {}), ...(o.executor.node ? { node: o.executor.node } : {}), ...(o.executor.lane ? { lane: o.executor.lane } : {}) }
   try {
     return operate(null, {
       op: 'run.create', project, workflow: ref.workflow, run: ref.run, input, executor, predecessor: o.predecessor ?? null,
-      definition, context, nodes: Object.keys(graph.nodes).sort(), ...(receipt ? { receipt } : {}), ...(storage ? { storage } : {}),
+      definition, context, nodes: Object.keys(graph.nodes).sort(), ...(receipt ? { receipt } : {}), ...(storage ? { storage } : {}), ...(o.standing ? { standing: o.standing } : {}),
     }, { at: (o.now ?? new Date()).toISOString(), by: o.by, via: o.via, graph })
   } catch (e) {
     if (e instanceof RunError) throw new RequestError(e.code === 'delegate-unsupported' ? 422 : 400, e.message, { code: e.code })
@@ -950,6 +952,10 @@ export interface AdjustOptions {
   // node's completion are recorded together, in one locked write. Needed
   // when that completion would otherwise complete the run.
   completing?: { node: string; outcome: string; artifacts?: string[]; agreement?: string }
+  // p18: the revision is derived under the run's lock from the record as it
+  // is then (a wake decides there whether the run still rests); `skip` says
+  // why nothing is adjusted. `text`, `reason` and `source` are then ignored.
+  derive?: (record: RunRecord, active: { text: string; workflow: Workflow }) => { text: string; reason: string; source: AdjustSource } | { skip: string }
 }
 export interface AuthoredDiff { added: string[]; removed: string[]; changed: { id: string; fields: string[] }[]; restyled: string[] }
 export interface AdjustResult {
@@ -957,6 +963,7 @@ export interface AdjustResult {
   dryRun: boolean
   parent: string // the revision it was made from
   revision?: string // the revision it became (applied)
+  skipped?: string // p18: a derived revision that did not apply now, and why
   proposal?: string // run-relative proposal file (propose)
   authored: AuthoredDiff // what the author changed
   graph: AdjustDiff // the effective graph's difference, generated steps included
@@ -1016,6 +1023,11 @@ export async function adjustRun(ws: Workspace, ref: RunRef, o: AdjustOptions, ct
     const { record, graph, dir, bundle } = await usableRun(ws, ref)
     const parent = activeRevision(record.definition)
     const active = activeDefinition(record, bundle)
+    if (o.derive && !(ctx.receipt && record.history.some(h => h.receipt === ctx.receipt))) {
+      const d = o.derive(record, active)
+      if ('skip' in d) return { ok: false, dryRun: !!o.dryRun, parent, authored: { added: [], removed: [], changed: [], restyled: [] }, graph: graphDiff(graph, graph), problems: [], skipped: d.skip, record }
+      o = { ...o, text: d.text, reason: d.reason, source: d.source }
+    }
     const problems: AdjustResult['problems'] = []
     const problem = (code: string, message: string) => problems.push({ code, message })
     const empty: AuthoredDiff = { added: [], removed: [], changed: [], restyled: [] }

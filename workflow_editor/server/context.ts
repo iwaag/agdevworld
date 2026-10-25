@@ -94,7 +94,10 @@ export async function resolveContext(ctx: AccessContext, i: ResolveInput): Promi
     else guides.set(k, { scope: 'workflow', provenance: ['workflow execution.guides'], ref: g })
   }
   const guideSources: ContextSource[] = []
-  for (const [k, g] of guides) guideSources.push(await guideSource(ctx, i.ws, k, g))
+  // p18: a standing run (a conversation's conductor) lives as long as its
+  // conversation; its copy is as old as the conversation, so its own guides
+  // are read from its project's committed main, as another project's are.
+  for (const [k, g] of guides) guideSources.push(await guideSource(ctx, i.ws, k, g, i.run?.standing ? projectId : null))
   sources.push(...guideSources.filter(s => s.scope === 'project'))
   sources.push(...await blockSources(store, { scope: 'project', project: projectId }, both))
 
@@ -134,7 +137,7 @@ async function blockSources(store: ContextStore, t: ScopeTarget, applies: Contex
   return out
 }
 
-async function guideSource(ctx: AccessContext, ws: Workspace, key: string, g: { scope: 'project' | 'workflow'; provenance: string[]; ref: string }): Promise<ContextSource> {
+async function guideSource(ctx: AccessContext, ws: Workspace, key: string, g: { scope: 'project' | 'workflow'; provenance: string[]; ref: string }, fromMain: string | null = null): Promise<ContextSource> {
   const ref = guideRef(g.ref)
   const base = { key: `guide/${key}`, scope: g.scope, category: 'default' as const, kind: 'guide' as const, applies: ['execution', 'authoring'] as ContextSource['applies'], title: `guide ${key}`, provenance: g.provenance }
   if (ref.project) {
@@ -150,12 +153,20 @@ async function guideSource(ctx: AccessContext, ws: Workspace, key: string, g: { 
   }
   const path = normalizeRepoPath(g.ref)
   if (!path || path === '.') return { ...base, origin: {}, delivery: 'error', note: `"${g.ref}" is not a project-relative path` }
+  let unread = ''
+  if (fromMain) {
+    try {
+      const { committedText } = await import('./access.ts')
+      const r = await committedText({ ...ctx, refresh: true }, fromMain, path)
+      return { ...base, origin: { project: fromMain, file: path, commit: r.commit }, delivery: 'body', text: r.text, sha256: r.sha256, note: 'a standing run reads its own guides from its project\'s committed main' }
+    } catch (e) { unread = `its project's committed main could not be read (${(e as Error).message}); read from this run's copy` }
+  }
   try {
     const abs = await inside(ws.root, path)
     const l = await lstat(abs)
     if (!l.isFile() || l.isSymbolicLink() || !(await realpath(abs)).startsWith(await realpath(ws.root))) return { ...base, origin: { file: path }, delivery: 'error', note: `${path} is not a regular file of the project` }
     const bytes = await readFile(abs)
-    return { ...base, origin: { file: path }, delivery: 'body', text: bytes.toString('utf8'), sha256: sha256(bytes) }
+    return { ...base, origin: { file: path }, delivery: 'body', text: bytes.toString('utf8'), sha256: sha256(bytes), ...(unread ? { note: unread } : {}) }
   } catch (e) {
     return { ...base, origin: { file: path }, delivery: 'error', note: `${path} cannot be read: ${(e as NodeJS.ErrnoException).code === 'ENOENT' ? 'no such file' : (e as Error).message}` }
   }

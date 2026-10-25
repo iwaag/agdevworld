@@ -26,7 +26,8 @@ import { DEFAULT_LANE, sessionPolicyOf, type Workflow } from '../shared/model.ts
 import { attemptContext, renderContext, type AttemptContext } from '../shared/context.ts'
 import { contextErrors, resolveContext } from './context.ts'
 import { ContextStore } from './contextStore.ts'
-import { configChanges, currentSession, unverifiedReason, unverifiedSession, describeSteps, effectiveOf, holderOf, hostOf, openCorrections, pendingInstructions, runKey, sameConfig, sessionConfig, situation, type AttemptSession, type AttemptSettings, type BecauseRef, type RecoveryAgent, type RunRecord, type RunRef } from '../shared/run.ts'
+import { configChanges, currentSession, unverifiedReason, unverifiedSession, describeSteps, effectiveOf, holderOf, hostOf, openCorrections, pendingInstructions, runKey, sameConfig, sessionConfig, situation, standingEvents, type AttemptSession, type AttemptSettings, type BecauseRef, type RecoveryAgent, type RunRecord, type RunRef } from '../shared/run.ts'
+import { wake } from './standing.ts'
 import { git } from './git.ts'
 import { docStepsOf } from '../shared/compile.ts'
 import { assertWorkspaceAllowed, loadBoundary } from './boundary.ts'
@@ -178,10 +179,31 @@ function workerFactLines(f: WorkerFacts): string[] {
   return host.length ? ['This execution node:', ...host.map(([k, v]) => `  ${k}: ${v}`)] : []
 }
 
+// p18: a long-lived run's lists stay short — what is open in full, the
+// latest few closed ones, and a count of the rest with where to read them.
+const BRIEF_CLOSED = 3
+function recentClosed<T>(all: T[], open: (x: T) => boolean): { shown: T[]; folded: number } {
+  const closed = all.filter(x => !open(x))
+  const keep = new Set(closed.slice(-BRIEF_CLOSED))
+  const shown = all.filter(x => open(x) || keep.has(x))
+  return { shown, folded: all.length - shown.length }
+}
+// A standing conductor's own facts (p18, docs/runs.md *Standing runs*).
+export function standingBrief(r: RunRecord): string[] {
+  const st = r.standing
+  if (!st) return []
+  const out = ['', `This run is the standing conductor of conversation ${st.conversation} (${st.state} since ${st.since}): one run for the conversation's whole life. When nothing of it is ready or running it rests, holding no attempt and no slot, and the conversation's next words wake it with a new ponder node. Its graph keeps every earlier turn as recorded; wfe conversation state ${st.conversation} shows the current stretch and what is open in full and folds completed stretches.`]
+  const w = st.wakes.at(-1)
+  if (w && r.nodes[w.node] && r.nodes[w.node].state !== 'completed') out.push(`This turn: wake ${w.n}, node ${w.node}, for ${w.events.join(', ')} (the instructions below). Completed nodes stay completed and are not repeated; earlier work that is still open (an ask, a review, a child) keeps its own nodes and does not wait on this one.`)
+  if (st.held.length) out.push(`Held until the person resumes (wfe conversation resume ${st.conversation}): ${st.held.join(', ')}. They waited while the room was closed (or before this run stood); they are here for context, not to be taken up unless the person asks.`)
+  return out
+}
+
 export function presentationBrief(r: RunRecord): string[] {
-  const all = Object.values(r.presentations ?? {})
-  if (!all.length) return []
-  return ['', 'Presentations of this run (wfe present status <run> says what is served now):',
+  const every = Object.values(r.presentations ?? {})
+  if (!every.length) return []
+  const { shown: all, folded } = recentClosed(every, p => p.state !== 'stopped')
+  return ['', `Presentations of this run (wfe present status <run> says what is served now)${folded ? `; ${folded} earlier stopped one${folded === 1 ? ' is' : 's are'} not listed` : ''}:`,
     ...all.map(p => `- ${p.id} "${p.title}" from ${p.node}: ${p.state}${p.last ? ` (${p.last.detail})` : ''}; revision ${p.revision.slice(7, 19)}…${Object.values(r.questions).filter(q => q.presentation?.id === p.id).map(q => `; asked in ${q.id}`).join('')}`)]
 }
 // The run's delegations as the attempt starts (p10, docs/delegation.md):
@@ -202,9 +224,10 @@ export function delegationBrief(r: RunRecord, assessed: Record<string, string[]>
   }
   out.push(...correctionBrief(r))
   out.push(...reviewBrief(r))
-  const all = Object.values(r.delegations ?? {})
-  if (!all.length) return out
-  out.push('', 'Delegations of this run (wfe delegate show <run> <d>; help: wfe delegate help):')
+  const every = Object.values(r.delegations ?? {})
+  if (!every.length) return out
+  const { shown: all, folded } = recentClosed(every, d => isOpenDelegation(d) || pendingEvents(d).length > 0)
+  out.push('', `Delegations of this run (wfe delegate show <run> <d>; help: wfe delegate help)${folded ? `; ${folded} earlier closed one${folded === 1 ? ' is' : 's are'} not listed (wfe delegate list ${runKey(r)})` : ''}:`)
   for (const d of all) {
     out.push(`- ${d.id} from ${d.node} to ${d.target.project}/${d.target.workflow}: ${delegationState(d)}${d.child ? `; child ${d.child.workflow}/${d.child.run} in ${d.child.workspace}` : '; no child yet (the request is being delivered)'}${d.disposition ? ` — judged ${d.disposition.kind}: ${d.disposition.note}` : ''}`)
     for (const e of pendingEvents(d)) {
@@ -227,9 +250,10 @@ export function reviewBrief(r: RunRecord): string[] {
   const run = runKey(r)
   const graph = effectiveOf(r)
   const ready = r.execution.ready.filter(id => graph?.nodes[id]?.type === 'review' && !roundOf(r, id))
-  const rounds = Object.values(r.reviews ?? {})
-  if (!ready.length && !rounds.length) return []
-  const out = ['', 'Human review (wfe review help):']
+  const every = Object.values(r.reviews ?? {})
+  if (!ready.length && !every.length) return []
+  const { shown: rounds, folded } = recentClosed(every, v => v.state !== 'complete' && v.state !== 'cancelled' || owedContinuation(v) || !!v.release?.unlocked.some(n => r.execution.ready.includes(n)))
+  const out = ['', `Human review (wfe review help)${folded ? `; ${folded} earlier finished round${folded === 1 ? ' is' : 's are'} not listed (wfe review list ${run})` : ''}:`]
   for (const id of ready) out.push(`- ${id} is a human review node, ready: after your own review, hand the result to the person with wfe review prepare ${run} ${id} --summary "<what was done, what to check>" --subject <p1 | d1[:p2] | workspace:workflow/run:p1>…. Their review needs no process: end the attempt once your other work is done; the person starts it with one button, and approval or requested changes come back as records.`)
   for (const v of rounds) {
     out.push(`- ${roundLine(v)}`)
@@ -420,7 +444,8 @@ export class ExecStore {
   // `source`: where the person's words were said (a conversation message, p8).
   // `attachments` (challenge p1): challenges the words carried, each with its
   // file's text at the attached commit, written into the new run's folder.
-  async request(o: { workspace: string; workflow: string; text: string; author: string; receipt: string; by?: string; via: string; predecessor?: RunRef; node?: string; source?: import('../shared/intake.ts').SourceRef; input?: Extract<import('./runs.ts').CreateRunOptions['input'], { kind: 'request' }>; attachments?: import('./runs.ts').PinnedAttachment[] }): Promise<{ job: JobRow; ref: RunRef; duplicate: boolean }> {
+  // `standing` (p18): the run is created as a conversation's standing conductor.
+  async request(o: { workspace: string; workflow: string; text: string; author: string; receipt: string; by?: string; via: string; predecessor?: RunRef; node?: string; source?: import('../shared/intake.ts').SourceRef; input?: Extract<import('./runs.ts').CreateRunOptions['input'], { kind: 'request' }>; attachments?: import('./runs.ts').PinnedAttachment[]; standing?: { conversation: string; replaces?: string } }): Promise<{ job: JobRow; ref: RunRef; duplicate: boolean }> {
     if (!/^[A-Za-z0-9:._/#-]{8,200}$/.test(o.receipt)) throw new RequestError(400, 'a request needs a receipt id (8–200 of A-Z a-z 0-9 : . _ / # -)')
     const seen = this.one<JobRow>('SELECT * FROM jobs WHERE receipt = ?', `request:${o.receipt}`)
     if (seen) return { job: seen, ref: { workflow: seen.workflow, run: seen.run }, duplicate: true }
@@ -428,7 +453,7 @@ export class ExecStore {
     // The run gets its own working copy (p9); the same receipt finds it again.
     const env = this.ctx.gitea ? await this.ctx.gitea.gitEnv() : {}
     const attachments = o.attachments?.length ? { attachments: o.attachments } : {}
-    const created = await createRunInCopy(ws, { workflow: o.workflow, input: o.input ? { ...o.input, ...attachments } : { kind: 'braindump', text: o.text, author: o.author, recordedBy: o.by, ...(o.source ? { source: o.source } : {}), ...attachments }, executor: { host: this.executor, ...(o.node ? { node: o.node } : {}) }, by: o.by ?? o.author, via: o.via, area: this.ctx.area, receipt: `request:${o.receipt}`, ...(o.predecessor ? { predecessor: o.predecessor } : {}) }, env)
+    const created = await createRunInCopy(ws, { workflow: o.workflow, input: o.input ? { ...o.input, ...attachments } : { kind: 'braindump', text: o.text, author: o.author, recordedBy: o.by, ...(o.source ? { source: o.source } : {}), ...attachments }, executor: { host: this.executor, ...(o.node ? { node: o.node } : {}) }, by: o.by ?? o.author, via: o.via, area: this.ctx.area, receipt: `request:${o.receipt}`, ...(o.predecessor ? { predecessor: o.predecessor } : {}), ...(o.standing ? { standing: o.standing } : {}) }, env)
     const job = this.enqueue(ws.reg.id, created.ref, 'start', `request:${o.receipt}`, o.input ? `start: ${o.input.requester}'s request` : 'start: the person\'s request', this.nodeOf(created.record))
     return { job, ref: created.ref, duplicate: false }
   }
@@ -467,10 +492,38 @@ export class ExecStore {
   // attempt reads it at its next boundary, a hold waits for its resume).
   async afterInstruction(ws: Workspace, ref: RunRef, instruction: string): Promise<JobRow | null> {
     const r = (await readRun(ws, ref)).record
+    if (r?.standing) return this.afterStanding(ws, ref)
     if (!r || hostOf(r.executor) !== this.executor || r.cancelled || r.control.hold || r.control.attempt) return null
     const ins = r.instructions?.[instruction]
     if (!ins || ins.ack || r.execution.state === 'completed') return null
     return this.enqueue(ws.reg.id, ref, 'resume', `instruction:${ws.reg.id}/${runKey(ref)}/${instruction}`, `resume: instruction ${instruction} received`, this.nodeOf(r))
+  }
+
+  // A standing conductor (p18, docs/runs.md *Standing runs*) is continued for
+  // the conversation's words no attempt was briefed with: with work ready,
+  // as any run (one job); with nothing ready or running — at rest, or only
+  // waiting on asks, reviews or children — WFE first appends one ponder node
+  // (the wake, decided under the run's lock: two callers append one) and
+  // queues one attempt for it. A room that is not open, a hold or an open
+  // attempt wakes nothing: the attempt reads them at its next boundary and
+  // the end of the attempt calls here again; a hold waits for its resume.
+  // `resume`: the person's explicit resume also continues a conductor that
+  // stands suspended (facilitation ended) for what it was given.
+  async afterStanding(ws: Workspace, ref: RunRef, o: { resume?: boolean } = {}): Promise<JobRow | null> {
+    let r = (await readRun(ws, ref)).record
+    if (!r?.standing || hostOf(r.executor) !== this.executor || r.cancelled || r.control.hold || r.control.attempt || r.standing.state === 'closed' || (r.standing.state === 'suspended' && !o.resume)) return null
+    const events = standingEvents(r)
+    if (!events.length) return null
+    if (!r.execution.ready.length && !r.execution.active.length) {
+      const w = await wake(ws, ref, o)
+      if (w.record) r = w.record
+      if (w.wake) return this.enqueue(ws.reg.id, ref, 'resume', `wake:${ws.reg.id}/${runKey(ref)}/w${w.wake.n}`, `resume: woken by the conversation for ${w.wake.events.join(', ')} (node ${w.wake.node})`, this.nodeOf(r))
+      r = (await readRun(ws, ref)).record ?? r
+      if (!r.execution.ready.length && !r.execution.active.length) return null
+    }
+    const pending = standingEvents(r)
+    if (!pending.length || r.control.attempt || r.control.hold) return null
+    return this.enqueue(ws.reg.id, ref, 'resume', `instruction:${ws.reg.id}/${runKey(ref)}/${pending[0]}`, `resume: instruction ${pending.join(', ')} received; ${r.execution.ready.join(', ') || r.execution.active.join(', ')} takes ${pending.length === 1 ? 'it' : 'them'} up`, this.nodeOf(r))
   }
 
   // After a correction is recorded (fix6): the completed child it reopened is
@@ -599,6 +652,8 @@ export class ExecStore {
       if (rec.cancelled) { drop('the run is cancelled'); continue }
       if (rec.control.hold) { drop(`the run is held (${rec.control.hold.kind}); a person resumes it`); continue }
       if (rec.control.attempt) { drop(`attempt ${rec.control.attempt.id} is still open in run.json`); continue }
+      // p18: a standing conductor at rest (or finalized with its room closed) has nothing to do; the conversation wakes it.
+      if (rec.standing && (rec.execution.state === 'idle' || rec.execution.state === 'completed')) { drop(`the run rests (${rec.execution.state}): nothing is ready; the conversation's next event wakes it`); continue }
       const execution = await this.execution(space, rec, activeWorkflow(rec, reading.bundle), backend, offer)
       if ('refused' in execution) { if (execution.wait) wait(`waiting for worker ${worker}: ${execution.refused}`); else drop(execution.refused); continue }
       const session = this.sessionFor(rec, execution, sessionPolicyOf(reading.bundle.entries[rec.definition.root]?.workflow?.execution), offer)
@@ -827,6 +882,7 @@ export class ExecStore {
       lines.push(`Working copy: ${ws.root} — this run's own copy of the project; it is saved to branch ${r.storage.branch} (${owned.join(', ')}), never to a shared branch.`, `Project workspace: ${ws.shared.root} — the person's; this run reads its .local/ resources from there by name and changes nothing in it.`)
     } else lines.push(`Workspace: ${ws.root}`)
     lines.push(`Why this attempt: ${job.reason}`)
+    lines.push(...standingBrief(r))
     // The original requirement and the current plan, on every attempt of a
     // new session (agent_session p1 ex2): a replacement or a fresh session
     // reconstructs from them, not only the run's first attempt.
@@ -876,7 +932,7 @@ export class ExecStore {
     const previous = attempts.at(-2)
     const begin = (a?: string) => r.history.find(e => e.op === 'attempt.begin' && (e as { attempt?: string }).attempt === a)
     const since = begin(previous)?.seq ?? 0
-    const lines = [`Run: ${r.project} / ${runKey(ref)} (record ${runDir(ref)}/run.json).`, `Why this attempt: ${job.reason}`]
+    const lines = [`Run: ${r.project} / ${runKey(ref)} (record ${runDir(ref)}/run.json).`, `Why this attempt: ${job.reason}`, ...standingBrief(r)]
     const last = r.control.last
     if (last) {
       lines.push(`The previous attempt ${last.id} ended: ${last.outcome}${last.detail ? ` — ${last.detail}` : ''}.`)
@@ -979,7 +1035,8 @@ export class ExecStore {
     // completion, which may itself wait on a delegation that wants this
     // result on main (workflow_editor p12).
     const accepted = rec.decisions.at(-1)?.decision === 'accepted' && rec.decisions.some(d => d.decision === 'accepted' && d.at >= a.began)
-    if ((rec.execution.state === 'completed' || accepted) && rec.storage) await this.queueIntegration(ws, ref, this.executor).catch(() => null)
+    // p18: a standing conductor at rest publishes what its turn changed, as a completed run does.
+    if ((rec.execution.state === 'completed' || rec.execution.state === 'idle' || accepted) && rec.storage) await this.queueIntegration(ws, ref, this.executor).catch(() => null)
     // An answer may have arrived while the attempt was still running.
     let resumeJob: JobRow | null = null
     for (const w of rec.execution.waiting) if ('question' in w.on) resumeJob = resumeJob ?? await this.afterAnswer(ws, ref, w.on.question)
@@ -991,6 +1048,9 @@ export class ExecStore {
     // approval made ready meanwhile (p17 ex1).
     for (const v of openContinuations(rec)) resumeJob = resumeJob ?? await this.afterReview(ws, ref, v.id)
     for (const v of openReleases(rec)) resumeJob = resumeJob ?? await this.afterRelease(ws, ref, v.id)
+    // p18: the conversation's words that arrived while the attempt ran wake
+    // a standing conductor that has nothing else to do now.
+    if (rec.standing) resumeJob = resumeJob ?? await this.afterStanding(ws, ref)
     return { outcome: rec.control.last?.outcome ?? outcome, checkpoint, resumeJob }
   }
 
@@ -1415,9 +1475,14 @@ export class ExecStore {
           const j = await this.afterRelease(ws, ref, v.id)
           if (j && !jobs.some(x => x.id === j.id)) notes.push(`${w.id} ${s.ref}: resume after the approval of review ${v.id} queued`)
         }
+        // A standing conductor's words whose wake or job was lost (p18).
+        if (rec.standing) {
+          const j = await this.afterStanding(ws, ref)
+          if (j && !jobs.some(x => x.id === j.id)) notes.push(`${w.id} ${s.ref}: standing conductor continued (${j.reason})`)
+        }
         // An instruction for a run nobody executes, whose continuation was
         // lost (project_migration p8 ex1): queued again under its receipt.
-        for (const ins of Object.values(rec.instructions ?? {})) {
+        for (const ins of rec.standing ? [] : Object.values(rec.instructions ?? {})) {
           if (ins.ack) continue
           const j = await this.afterInstruction(ws, ref, ins.id)
           if (j && !jobs.some(x => x.id === j.id)) notes.push(`${w.id} ${s.ref}: resume for instruction ${ins.id} queued again`)

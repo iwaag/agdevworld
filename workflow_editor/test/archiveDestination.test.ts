@@ -85,7 +85,7 @@ async function history(s: S) {
   for (const id of ['d-closed', 'd-open']) s.cs.db.prepare('UPDATE conversations SET kind = \'discussion\' WHERE id = ?').run(id)
   await s.ds.post('d-closed', { text: 'First words.', author: 'Pat', token: 'tok-dest-c001', to: ['forge'] })
   await s.ds.post('d-open', { text: 'Other words.', author: 'Pat', token: 'tok-dest-o001', to: ['forge'] })
-  s.ds.close('d-closed', { by: 'Pat' })
+  await s.ds.close('d-closed', { by: 'Pat' })
   const r = await a.publish()
   assert.deepEqual(r.failed, [])
   return a

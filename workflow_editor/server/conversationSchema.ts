@@ -202,4 +202,12 @@ export const CONVERSATION_MIGRATIONS: Migration[] = [{
       db.prepare('UPDATE messages SET participant = CASE WHEN instr(coalesce(run, \'\'), \'/\') > 0 THEN substr(run, 1, instr(run, \'/\') - 1) ELSE ? END WHERE conv = ? AND role = \'agent\' AND participant IS NULL').run(c.workspace, c.id)
     }
   },
+}, {
+  // workflow_editor p18: one standing conductor per conversation. Its
+  // lifecycle lives in its run (docs/runs.md *Standing runs*); the room's
+  // transitions are activity events (`room` closed / reopened beside the
+  // facilitation and conductor events). A ponder may label the stretch of
+  // the conversation it opens (`topic`): navigation, never a run identity.
+  version: 13,
+  up: db => { if (!(db.prepare('PRAGMA table_info(activities)').all() as { name: string }[]).some(c => c.name === 'topic')) db.exec('ALTER TABLE activities ADD COLUMN topic TEXT') },
 }]

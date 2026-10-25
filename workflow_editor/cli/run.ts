@@ -770,7 +770,9 @@ export async function runCommand(c: RunCli): Promise<number> {
     if (o.completing) {
       const { record } = await wrap(() => usableRun(ws, r))
       const others = Object.entries(record.nodes).filter(([id]) => id !== o.completing)
-      if (others.every(([, x]) => x.state === 'completed' || x.state === 'cancelled')) {
+      // p18: a standing conductor's last node leaves it at rest, not ended: it
+      // speaks again at the room's next words, so nothing is left unsaid.
+      if (!record.standing && others.every(([, x]) => x.state === 'completed' || x.state === 'cancelled')) {
         const run = `${ws.reg.id}/${runKey(r)}`
         const open = await quietly(() => discussions(async ds => ds.conductedBy(run).filter(id => ds.conversation(id)?.state === 'open'
           && !ds.activityRows(id).some(a => a.run === run && a.kind === 'announce' && a.obligations !== null)))) ?? []

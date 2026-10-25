@@ -98,7 +98,7 @@ test('facilitation ended: the resting conductor is suspended, its words wake not
   assert.equal(runStatus(r).text, 'Suspended · Facilitation ended; nothing unsolicited comes to it')
   r = op(r, { op: 'instruction.receive', text: 'late', from: 'Pat' } as OpInput, 'Pat', 'conversation')
   assert.equal(dueReason(r), null, 'nothing is owed while it is suspended')
-  assert.throws(() => wake(r, 'ponder-w1', ['i1']), /stands suspended/)
+  assert.equal(situation(r), 'suspended', 'not due: WFE wakes a suspended conductor only on the person\'s resume (server/standing.ts)')
   assert.throws(() => op(r, { op: 'standing.suspend', reason: 'again' }, 'conversation', 'conversation'), /standing-state|stands suspended/)
   r = op(r, { op: 'standing.facilitate', reason: 'Pat asked ponderer to lead again' }, 'conversation', 'conversation')
   assert.equal(r.standing!.state, 'open')
@@ -115,6 +115,7 @@ test('a room closed at rest finalizes the run (completed, ended); reopening reus
   assert.ok(standingHold(r))
   // A word recorded directly while closed (not through the room, which reopens first).
   r = op(r, { op: 'instruction.receive', text: 'while closed', from: 'someone' } as OpInput, 'someone', 'cli')
+  assert.throws(() => wake(r, 'ponder-w1', ['i1']), /stands closed/)
   r = op(r, { op: 'standing.reopen', reason: 'Pat reopened the room', state: 'open' }, 'conversation', 'conversation')
   assert.equal(r.execution.state, 'idle')
   assert.equal(r.ended, null)
@@ -156,4 +157,30 @@ test('establishing an existing run (the p18 transition) turns a completed conduc
   const closed = op(turn(create(), 'atest-000001'), { op: 'standing.establish', conversation: 'room-d', state: 'closed', reason: 'p18 transition of a closed room' }, 'migration', 'migration')
   assert.equal(closed.execution.state, 'completed', 'a closed room stays finalized')
   assert.deepEqual(closed.history.at(-1)!.change, { standing: [null, 'closed'] })
+})
+
+test('a child\'s fact that arrives while the room is closed is not the executor\'s move; reopening holds it (no missed event at the next attempt\'s end); release makes it due', () => {
+  const D: RunGraph = { nodes: { asset: { type: 'delegate', project: 'kid', workflow: 'make' } }, edges: [] }
+  const H = '0'.repeat(64)
+  let r = op(null, { op: 'run.create', project: 'ponderer', workflow: 'conduct', run: 'run-003', input: { kind: 'braindump', file: 'braindump.md', author: 'Pat' }, executor: { name: 'ponderer-agent', backend: null, host: 'autolab' }, predecessor: null, definition: { root: 'conduct', workflows: {}, warnings: [] }, context: { repositories: [] }, nodes: ['asset'], standing: { conversation: 'room-e' } }, 'wfe', 'cli', D)
+  const o = (x: OpInput & { attempt?: string }, by = 'ponderer-agent') => { r = op(r, x, by, 'cli', D) }
+  o({ op: 'attempt.begin', attempt: 'atest-000001', reason: 'turn' }, 'autolab')
+  o({ op: 'node.start', node: 'asset', attempt: 'atest-000001' })
+  o({ op: 'delegation.dispatch', delegation: 'd1', uid: 'ponderer/conduct/run-003#0123456789abcdef/d1', node: 'asset', target: { project: 'kid', workflow: 'make', workspace: 'kid' }, request: { path: 'devdocs/runs/conduct/run-003/delegations/d1/request.md', sha256: H, bytes: 10 }, attempt: 'atest-000001' } as never)
+  o({ op: 'attempt.end', attempt: 'atest-000001', outcome: 'exited', waits: 'defer-ready', explain: 'cause' } as OpInput, 'autolab')
+  o({ op: 'delegation.bind', delegation: 'd1', child: { uid: 'kid/make/run-001#fedcba9876543210', workspace: 'kid', project: 'kid', workflow: 'make', run: 'run-001', created: at() }, transport: { realm: 'z', message: 5, stream: 7, topic: 'request-x' } } as never, 'wfe')
+  o({ op: 'standing.close', reason: 'Pat closed the room' }, 'conversation')
+  o({ op: 'delegation.event', delegation: 'd1', event: { child: { seq: 3, at: at(), by: 'kid-agent' }, text: 'done', type: 'completed' } } as never, 'wfe')
+  assert.equal(dueReason(r), null, 'closed: the child\'s result continues nothing')
+  assert.equal(situation(r), 'awaiting-delegation')
+  o({ op: 'standing.reopen', reason: 'reopened', state: 'open' }, 'conversation')
+  assert.deepEqual(r.standing!.held, ['d1#1'])
+  assert.equal(dueReason(r), null, 'held across the reopening')
+  // An attempt the room's next words start, ending without taking it up, is not interrupted for it.
+  o({ op: 'instruction.receive', text: 'new words', from: 'Pat' } as OpInput, 'Pat')
+  o({ op: 'attempt.begin', attempt: 'atest-000002', reason: 'wake' }, 'autolab')
+  o({ op: 'attempt.end', attempt: 'atest-000002', outcome: 'exited', waits: 'defer-ready', explain: 'cause' } as OpInput, 'autolab')
+  assert.equal(r.control.hold, null)
+  o({ op: 'standing.release', reason: 'Pat resumed' }, 'Pat')
+  assert.match(dueReason(r) ?? '', /result from kid make arrived/)
 })

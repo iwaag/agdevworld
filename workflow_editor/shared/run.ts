@@ -795,6 +795,12 @@ export function questionState(q: Question): 'open' | 'answered' | 'taken-up' | '
 
 // ---- standing runs (p18) ----------------------------------------------------------
 
+// Whether an operation ends the run's work: it completes the run, or (p18)
+// leaves a standing run at rest — the conductor's turn ends there, and the
+// reminders that ask about finished work ask then.
+export const endsWork = (before: Pick<RunState, 'execution'>, after: Pick<RunState, 'execution'>) =>
+  (after.execution.state === 'completed' && before.execution.state !== 'completed') || (after.execution.state === 'idle' && before.execution.state !== 'idle')
+
 // The events a resting standing run is continued for: instructions not
 // acknowledged, not yet briefed to an attempt and not held. Delegation
 // facts, answers, corrections and review decisions continue the node that
@@ -1121,7 +1127,11 @@ export function apply(prev: RunState | null, e: HistoryEntry | (OpInput & EntryM
     return { state, change: { execution: [null, state.execution.state] } }
   }
   if (!prev) return fail('order', 'the first history entry must be run.create')
-  const s: RunState = structuredClone(prev)
+  // The definition is replaced, never changed in place (run.adjust,
+  // run.record-done): it is shared with the previous state rather than
+  // copied for every entry, so a long-lived run (p18: a standing conductor,
+  // whose revisions grow with its turns) replays in time linear in them.
+  const s = Object.fromEntries(Object.entries(prev).map(([key, v]) => [key, key === 'definition' ? v : structuredClone(v)])) as unknown as RunState
   s.seq = e.seq
   s.updated = at
   const change: Change = {}
@@ -1815,12 +1825,13 @@ export function apply(prev: RunState | null, e: HistoryEntry | (OpInput & EntryM
       const retro = e.op === 'run.record-done' ? e : null
       const source: AdjustSource = retro ? { kind: 'record-done', node: text(retro.node, 'the node') } : adjustSource((e as { source?: unknown }).source)
       // p18: a wake continues a resting standing run, outside any attempt,
-      // only while nothing of it is ready or running, for events that are
-      // its to continue for.
+      // only while nothing of it is ready or running and its room is not
+      // closed (one suspended is woken only on the person's resume: WFE's
+      // decision, server/standing.ts), for events that are its to continue for.
       if (source.kind === 'wake') {
         const st = s.standing
         if (!st) fail('standing-none', 'only a standing run is woken')
-        if (st!.state !== 'open') fail('standing-state', `the run stands ${st!.state} in ${st!.conversation}; only an open conductor is woken`)
+        if (st!.state === 'closed') fail('standing-state', `the run stands closed in ${st!.conversation}; a closed room's conductor is not woken`)
         if (s.execution.ready.length || s.execution.active.length) fail('standing-busy', `${[...s.execution.active, ...s.execution.ready].join(', ')} ${s.execution.active.length ? 'is running' : 'is ready'}; the run is continued there, not woken`)
         const due = standingEvents(s)
         for (const x of source.events) if (!due.includes(x)) fail('standing-event', `${x} is not an event this run waits to be continued for (${due.join(', ') || 'none'})`)
@@ -2661,7 +2672,8 @@ export function notableEvents(r: RunRecord, sinceSeq = 0): NotableEvent[] {
     if (e.op === 'run.resume') push('resumed', false, d.reason)
     // observer p3: continued by a recovering agent, said as such.
     if ((e.op as string) === 'run.recover') push('resumed', false, `continued by recovery (${e.by}, incident ${String(d.incident)}): ${String(d.reason)}`)
-    if (e.change.execution?.[1] === 'completed' && !(step?.kind === 'final-report')) push('completed', true, d.outcome ?? 'every node completed', e.op === 'node.complete' && !step ? { node: d.node } : {})
+    // p18: a standing conductor completes only when its room closes while it rests.
+    if (e.change.execution?.[1] === 'completed' && !(step?.kind === 'final-report')) push('completed', true, e.op === 'standing.close' ? `conversation ${r.standing?.conversation ?? ''} closed while the conductor rested: finalized until it reopens (${d.reason})` : d.outcome ?? 'every node completed', e.op === 'node.complete' && !step ? { node: d.node } : {})
     if (e.op === 'run.decide') {
       const dec = r.decisions.find(x => x.at === e.at && x.by === e.by && x.decision === d.decision)
       push('decided', true, dec?.evidence ?? d.evidence ?? '', { decision: d.decision as 'accepted' | 'rejected', ...(dec?.confirmation ? { confirmation: { question: dec.confirmation.question, from: dec.confirmation.from }, subject: dec.confirmation.presentation ? [] : dec.confirmation.subject.map(x => x.path), ...(dec.confirmation.presentation ? { presentation: dec.confirmation.presentation.id } : {}) } : {}) })

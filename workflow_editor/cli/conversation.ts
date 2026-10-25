@@ -11,6 +11,7 @@ import { ConversationService, type Requester, type TitleSkip } from '../server/c
 import { ConversationWorkflows, type WorkflowRef, type WorkflowRelation, type WorkflowRole } from '../server/conversationWorkflows.ts'
 import type { ExecStore } from '../server/exec.ts'
 import { adviseRun, readRun } from '../server/runs.ts'
+import { stretchesOf } from '../shared/stretches.ts'
 import type { Boundary } from '../shared/reminders.ts'
 import type { RunRecord } from '../shared/run.ts'
 import { RequestError } from '../server/workspace.ts'
@@ -33,8 +34,8 @@ The person's message reaches, in this order: the participants it names
 (--to); else the runs it names (--run: an instruction to work under way);
 else the questions it replies to (--re naming an open run's question: that
 run gets the answer); else the conductor while the room is facilitated (its
-open run gets the words, or a new conductor run starts); else the default
-addressee. With none of these it is refused: name whom it is for. Each
+one run gets the words, waking it if it rests; only a room without a
+conductor gets a new run); else the default addressee. With none of these it is refused: name whom it is for. Each
 request records the workflow chosen for it: a project's converse workflow
 when it is the only project and nobody leads, its discuss workflow
 otherwise, the conductor's for the conductor. A contribution never starts
@@ -66,7 +67,9 @@ link [<id>] <msg> --run <workspace>/<workflow>/<run> --as <relation> --note <why
 
 The conductor's run is an ordinary graph whose nodes carry an activity
 (announce | ask | ponder | talk), each performed with its command from the
-conductor's executing attempt:
+conductor's executing attempt. It is one standing run for the room's life
+(docs/runs.md *Standing runs*): when its nodes are done it rests (Idle) and
+holds nothing; the room's next words wake it with a new ponder node.
 
 announce [<id>] --node <n> (--text <t> | --file <f|->) --re <msg>… [--conclude [--close]]
                               speak to the room (agenda, context, interim synthesis, conclusion);
@@ -85,15 +88,20 @@ ask [<id>] --node <n> --run <workspace>/<workflow>/<run> --question <what> [--re
 settle [<id>] --node <n> --reason <why>
                               move on before an ask is resolved; later outcomes are told as late
 ponder [<id>] --node <n> --decision <text> --source <msg>… [--next <activity>:<node>[:<name>]]…
-       [--definition <file>]  your decision, citing its sources; the node completes with it.
+       [--definition <file>] [--topic <label>]
+                              your decision, citing its sources; the node completes with it.
+                              --topic labels the stretch of the conversation this decision opens or
+                              continues (readers navigate by it; it is never a new run).
                               --next adds a chain of activity nodes; --definition any revision.
                               --next review:<node> adds a human review node beside the chain
                               (what follows does not wait for the person; wfe review help prepare)
 talk                          (no command) a talk node's question is wfe run ask on that node,
                               --to the requester (state names them)
-state [<id>]                  what the conductor works from: facilitation, conductor and requester,
-                              members, activities and the graph, open requests, questions,
-                              obligations (held continuations included)
+state [<id>] [--all]          what the conductor works from: facilitation, conductor (its standing
+                              and wakes) and requester, members, the graph — the current stretch and
+                              open work in full, earlier completed stretches in one line each (--all:
+                              every node) —, recent activities, open requests, questions, obligations
+                              (held continuations and held events included)
 invite [<id>] <participant> --question <q> [--re <msg>]… [--token <t>] [--author <person>]
                               ask a participant: from the conductor's run it is awaited (wait with
                               wfe run wait … --external conversation:<id> and end your attempt).
@@ -144,10 +152,17 @@ retry <id> <request>          try a failed request again, at the same recipient
 close <id> [--author <who>]   end automatic dispatch: requests not started are withdrawn; started
                               runs finish and are recorded; nothing is cancelled; a continuation
                               that comes due is held
-reopen <id> [--author <who>]  continue it; nothing withdrawn, completed or held is replayed
+reopen <id> [--author <who>]  continue it with the same conductor; nothing withdrawn, completed or held
+                              is replayed
 resume <id> [<request>] [--author <who>]
                               run held continuations once (what a conductor awaited, resolved
-                              while the room was closed or no longer facilitated)
+                              while the room was closed or no longer facilitated) and release what
+                              the conductor's standing held
+conductor <id> [--replace --reason <why> [--author <person>]]
+                              the conductor: its run, standing (open, suspended, closed), status,
+                              wakes and held events. --replace: a new conductor for a cancelled one,
+                              named as its replacement (never done by itself; refused while the
+                              conductor is not cancelled)
 meta <id> [--category conversation|check] [--title <display title> [--if-untitled] | --no-title] --note <why> [--author <who>]
                               correct how it is listed; recorded with who and why; sends nothing
 overview [<id>] --purpose <t> [--outcome <t>] [--unresolved <t>]… [--through <msg>] [--title <t> [--if-untitled]]
@@ -305,6 +320,8 @@ export async function conversationCommand(c: ConversationCli): Promise<number> {
         }
         if (!author) throw c.usage('--author <person> is required: who opens it')
         const r = ds.create(id, { title, by: author, members: c.opts('member'), category: c.opt('category'), ...(c.flag('no-default') ? { defaultTo: null } : c.opt('default') ? { defaultTo: c.opt('default')! } : {}), ...(conducting ? { conductor: conducting.run, requester } : {}) })
+        // p18: the run that created it conducts it for its whole life.
+        if (conducting) await ds.syncStanding(id)
         c.out(`${r.duplicate ? 'Already exists' : 'Created'}: ${r.conversation.category === 'check' ? 'check' : 'conversation'} ${id} with ${ds.members(id).map(m => m.participant).join(', ')}${r.conversation.default_to ? `; default addressee ${r.conversation.default_to}` : ''}${ds.facilitation(id) ? `; led by ${conducting?.run}` : ''}.`, { ok: true, ...r, members: ds.members(id) })
         return 0
       }
@@ -332,7 +349,7 @@ export async function conversationCommand(c: ConversationCli): Promise<number> {
         const id = args[0]; if (!id) throw c.usage('end needs <id>')
         const o = await own()
         const by = await who(); if (!by) throw c.usage('--author <who> is required outside an executing attempt')
-        const r = ds.endFacilitation(id, { by, run: o?.run ?? null, note: c.opt('note') })
+        const r = await ds.endFacilitation(id, { by, run: o?.run ?? null, note: c.opt('note') })
         c.out(r.ended ? `Facilitation of ${id} ended. Later messages go to ${ds.conversation(id)?.default_to ?? 'whom they name (no default addressee)'}; nothing was stopped.` : `${id} is not facilitated; nothing changed.`, { ok: true, ...r })
         return 0
       }
@@ -454,7 +471,7 @@ export async function conversationCommand(c: ConversationCli): Promise<number> {
           const decision = c.opt('decision') ?? (c.opt('file') ? text() : undefined); if (!decision) throw c.usage('--decision <text> is required: what you decided and why')
           const next = c.opts('next').map(v => { const [activity, n, ...name] = v.split(':'); if (!activity || !n) throw c.usage(`--next ${v}: write <activity>:<node>[:<name>]`); return { activity, node: n, ...(name.length ? { name: name.join(':') } : {}) } })
           const def = c.opt('definition')
-          const r = await ds.ponder(id, { ...base, decision, sources: ids('source'), next, ...(def ? { definition: readFileSync(def === '-' ? 0 : resolve(def), 'utf8') } : {}) })
+          const r = await ds.ponder(id, { ...base, decision, sources: ids('source'), next, ...(def ? { definition: readFileSync(def === '-' ? 0 : resolve(def), 'utf8') } : {}), ...(c.opt('topic') ? { topic: c.opt('topic')! } : {}) })
           c.out(`${r.duplicate ? 'Already decided' : 'Decided'} (activity ${r.activity.id}): node ${node} completed${r.revision ? `; revision ${r.revision}${next.length ? ` adds ${next.map(x => `${x.activity}:${x.node}`).join(' → ')}` : ''}` : ''}.`, { ok: true, ...r })
           return 0
         }
@@ -472,10 +489,26 @@ export async function conversationCommand(c: ConversationCli): Promise<number> {
             const { workspace, ref } = parseRunName(d.conductor)
             const read = await readRun(await x.workspace(workspace), ref)
             const rec = read.record
-            if (rec) lines.push('Conductor graph:', ...Object.entries(rec.nodes).map(([n, s]) => { const a = v.activities.find(y => y.run === d.conductor && y.node === n); return `  ${n}: ${s.state}${a ? ` — ${a.kind} (activity ${a.id}, ${a.state})${a.kind === 'ponder' ? `: ${a.text.split('\n')[0].slice(0, 120)}` : ''}` : ''}${s.wait ? ` — waits: ${s.wait.reason}` : ''}` }))
+            const node = (n: string) => { const s = rec!.nodes[n]; const a = v.activities.find(y => y.run === d.conductor && y.node === n); return `  ${n}: ${s.state}${a ? ` — ${a.kind} (activity ${a.id}, ${a.state})${a.topic ? ` [${a.topic}]` : ''}${a.kind === 'ponder' ? `: ${a.text.split('\n')[0].slice(0, 120)}` : ''}` : ''}${s.wait ? ` — waits: ${s.wait.reason}` : ''}` }
+            if (rec?.standing) {
+              // p18: one standing run for the room's life; the current stretch
+              // and open work in full, earlier completed stretches folded.
+              const st = rec.standing
+              lines.push(`Standing: ${st.state} since ${st.since} (${st.reason})${st.replaces ? `; replaces ${st.replaces}` : ''}; ${st.wakes.length} wake${st.wakes.length === 1 ? '' : 's'}${st.held.length ? `; held until the person resumes: ${st.held.join(', ')}` : ''}.`)
+              const all = stretchesOf(rec)
+              lines.push('Conductor graph, by stretch:')
+              for (const x of all) {
+                const head = x.n === 0 ? 'opening' : `w${x.n} (${x.wake!.events.join(', ')}, ${x.at})`
+                const topic = v.activities.find(a => a.run === d.conductor && a.topic && x.nodes.includes(a.node))?.topic
+                if (c.flag('all') || x.open || x === all.at(-1)) lines.push(` ${head}${topic ? ` — ${topic}` : ''}:`, ...x.nodes.map(node))
+                else lines.push(` ${head}${topic ? ` — ${topic}` : ''}: ${x.nodes.length} node${x.nodes.length === 1 ? '' : 's'} completed (--all to list)`)
+              }
+            } else if (rec) lines.push('Conductor graph:', ...Object.keys(rec.nodes).map(node))
           } catch (e) { lines.push(`Conductor graph: unreadable (${(e as Error).message})`) }
         }
-        lines.push('Activities:', ...(v.activities.length ? v.activities.map(a => `  ${a.id} ${a.kind.padEnd(8)} ${a.state.padEnd(9)} ${a.run}#${a.node}${a.message ? ` #${a.message}` : ''}${a.invitations.length ? ` invitations ${a.invitations.join(', ')}` : ''}${a.question ? ` ${a.question}` : ''}${a.text ? ` — ${a.text.split('\n')[0].slice(0, 100)}` : ''}`) : ['  (none)']))
+        const recent = c.flag('all') ? v.activities : v.activities.filter(a => a.state === 'waiting' || v.activities.indexOf(a) >= v.activities.length - 12)
+        if (recent.length < v.activities.length) lines.push(`Activities (${v.activities.length - recent.length} earlier completed ones not listed; --all):`)
+        lines.push(...(recent.length < v.activities.length ? [] : ['Activities:']), ...(recent.length ? recent.map(a => `  ${a.id} ${a.kind.padEnd(8)} ${a.state.padEnd(9)} ${a.run}#${a.node}${a.message ? ` #${a.message}` : ''}${a.invitations.length ? ` invitations ${a.invitations.join(', ')}` : ''}${a.question ? ` ${a.question}` : ''}${a.text ? ` — ${a.text.split('\n')[0].slice(0, 100)}` : ''}`) : ['  (none)']))
         const open = v.requests.filter(i => i.state === 'pending' || i.state === 'started')
         lines.push('Open requests:', ...(open.length ? open.map(i => `  ${i.id} → ${i.participant}${i.run ? ` ${i.run}` : ''} (${i.state}${i.awaits ? ', awaited result' : ''}${i.activity ? `, activity ${i.activity}` : ''})`) : ['  (none)']))
         lines.push(`Waiting for the person: ${v.asking.length ? v.asking.map(n => `#${n}`).join(', ') : 'nothing'}`)
@@ -551,16 +584,38 @@ export async function conversationCommand(c: ConversationCli): Promise<number> {
         c.out(`${r.duplicate ? 'Already linked' : 'Linked'}: #${msg} is ${relation} of ${run}.`, { ok: true, ...r })
         return 0
       }
+      case 'conductor': {
+        const id = args[0]; if (!id) throw c.usage('conductor needs <id>')
+        if (c.flag('replace')) {
+          const reason = c.opt('reason'); if (!reason) throw c.usage('--reason <why> is required: why a new conductor replaces the cancelled one')
+          const by = await who(); if (!by) throw c.usage('--author <person> is required')
+          if (await own()) throw c.refused('replacing the conductor is the person\'s act', { code: 'not-person' })
+          const r = await ds.replaceConductor(id, { by, reason, token: c.opt('token') })
+          c.out(`Replacing ${r.replaces}: request ${r.invitation.id} (${r.invitation.state}${r.invitation.run ? ` ${r.invitation.run}` : ''}${r.invitation.error ? ` — ${r.invitation.error}` : ''}).`, { ok: r.invitation.state !== 'failed', ...r })
+          return r.invitation.state === 'failed' ? 1 : 0
+        }
+        const cur = await ds.conductorRecord(id)
+        if (!cur) { c.out(`${id} has no conductor.`, { conductor: null }); return 0 }
+        const rec = cur.record
+        const st = rec?.standing
+        const { runStatus } = await import('../shared/status.ts')
+        const lines = [`Conductor of ${id}: ${cur.run}${rec ? ` — ${runStatus(rec).text}` : ' (unreadable here)'}`,
+          st ? `Standing: ${st.state} since ${st.since} (${st.reason}; by ${st.by})${st.replaces ? `; replaces ${st.replaces}` : ''}` : rec ? 'Standing: none (a run from before p18, or not established yet)' : '',
+          ...(st?.wakes.length ? [`Wakes (${st.wakes.length}):`, ...st.wakes.slice(-10).map(w => `  w${w.n} ${w.at} ${w.node} for ${w.events.join(', ')}`)] : []),
+          ...(st?.held.length ? [`Held until the person resumes: ${st.held.join(', ')} (wfe conversation resume ${id})`] : [])].filter(Boolean)
+        c.out(lines.join('\n'), { conductor: cur.run, standing: st ?? null, status: rec ? runStatus(rec) : null })
+        return 0
+      }
       case 'close': {
         const id = args[0]; if (!id) throw c.usage('close needs <id>')
         const by = await who() ?? 'person'
-        const r = ds.close(id, { by })
+        const r = await ds.close(id, { by })
         c.out(`Closed ${id}${r.withdrawn.length ? `; withdrawn requests ${r.withdrawn.join(', ')}` : ''}. Started runs finish and are recorded.`, { ok: true, ...r })
         return 0
       }
       case 'reopen': {
         const id = args[0]; if (!id) throw c.usage('reopen needs <id>')
-        const r = ds.reopen(id, { by: await who() ?? 'person' })
+        const r = await ds.reopen(id, { by: await who() ?? 'person' })
         c.out(`Reopened ${id}.${ds.invitations(id).some(i => i.held) ? ` Held continuations stay held: wfe conversation resume ${id}.` : ''}`, { ok: true, conversation: r })
         return 0
       }

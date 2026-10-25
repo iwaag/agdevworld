@@ -216,7 +216,7 @@ test('closing withdraws invitations not started, keeps started ones and continue
   const started = (await s.ds.invite('p16-e', { participant: 'sage', question: 'Q', re: [m1.id], by: 'argue-agent', byRun: F })).invitation
   const failed = (await s.ds.invite('p16-e', { participant: 'ghost', question: 'Q', re: [m1.id], by: 'argue-agent', byRun: F })).invitation
   await waitOn(s, F)
-  const closed = s.ds.close('p16-e', { by: 'Pat' })
+  const closed = await s.ds.close('p16-e', { by: 'Pat' })
   assert.deepEqual(closed.withdrawn, [failed.id])
   await s.ds.contribute('p16-e', { text: 'Answer after close.', author: 'sage-agent', run: started.run!, invitation: started.id, re: [m1.id] })
   assert.equal(s.ds.invitation(started.id)!.state, 'answered', 'its contribution is recorded')
@@ -224,7 +224,7 @@ test('closing withdraws invitations not started, keeps started ones and continue
   await assert.rejects(s.ds.invite('p16-e', { participant: 'forge', question: 'Q', re: [m1.id], by: 'Pat' }), /closed/)
   await s.ds.reconcile()
   assert.equal(s.ds.invitation(failed.id)!.state, 'withdrawn', 'reconcile starts nothing in a closed discussion')
-  s.ds.reopen('p16-e', { by: 'Pat' })
+  await s.ds.reopen('p16-e', { by: 'Pat' })
   await s.ds.reconcile()
   assert.equal(s.ds.invitation(failed.id)!.state, 'withdrawn', 'reopening replays nothing withdrawn')
   assert.equal(s.ds.invitations('p16-e').length, 3, 'the facilitator\'s, sage\'s and ghost\'s')
@@ -322,7 +322,7 @@ test('argue p3: the facilitator awaits the result of a participant\'s run still 
   s.cs.close(); s.x.close()
 })
 
-test('argue p3: what a completed facilitator run awaited resolves into a new facilitator turn, once, across a restart; a run that ended silent is unanswered; an ended run settles at once', async () => {
+test('argue p3, p18: what a facilitator awaited while it rests continues the same run, once, across a restart; a run that ended silent is unanswered; an ended run settles at once', async () => {
   const s = await setup()
   s.ds.create('p3-b', { facilitate: true, title: 'Ended facilitator', by: 'Pat' })
   const m1 = (await s.ds.post('p3-b', { text: 'Go.', author: 'Pat', token: 'tok-p3-b001' })).message
@@ -331,8 +331,9 @@ test('argue p3: what a completed facilitator run awaited resolves into a new fac
   const inv = (await s.ds.invite('p3-b', { participant: 'sage', question: 'Run it.', re: [m1.id], by: 'argue-agent', byRun: F })).invitation
   await s.ds.contribute('p3-b', { text: 'Started.', author: 'sage-agent', run: inv.run!, invitation: inv.id, re: [m1.id] })
   const aw = await s.ds.awaitResult('p3-b', { run: inv.run!, note: 'sage\'s result', by: 'argue-agent', byRun: F })
-  // The facilitator's turn completes instead of waiting.
+  // The facilitator's turn ends instead of waiting: it rests (p18), it does not complete.
   await finish(s, F)
+  assert.equal((await rec(s, F)).execution.state, 'idle')
   await s.ds.reconcile()
   assert.equal(s.ds.invitations('p3-b').length, 3, 'nothing new while the result is open')
   // A restart: a fresh store over the same records; sage's run ends without a word.
@@ -341,19 +342,22 @@ test('argue p3: what a completed facilitator run awaited resolves into a new fac
   const ds2 = new ConversationService(cs2)
   const notes = await ds2.reconcile()
   assert.equal(ds2.invitation(aw.invitation.id)!.state, 'unanswered', notes.join('\n'))
-  const turn = ds2.invitations('p3-b').at(-1)!
-  assert.deepEqual([turn.participant, turn.by, turn.awaited_by, turn.state, turn.run], ['argue', 'discussion', null, 'started', 'argue/facilitate/run-002'])
-  assert.match(turn.question, /awaited result of sage\/discuss\/run-001 .*unanswered: .*ended without a message here since the await/)
-  assert.ok(notes.some(n => /new facilitator turn/.test(n)), notes.join('\n'))
-  assert.equal((await rec(s, 'argue/facilitate/run-002')).input.source?.kind, 'conversation')
+  assert.equal(ds2.invitations('p3-b').length, 3, 'no new request: the conductor is continued, not replaced')
+  let f = await rec(s, F)
+  const told = Object.values(f.instructions ?? {})
+  assert.equal(told.length, 1)
+  assert.match(told[0].text, /awaited result of sage\/discuss\/run-001 .*unanswered: .*ended without a message here since the await/)
+  assert.deepEqual(f.standing!.wakes.map(w => w.events), [[told[0].id]], 'woken once, for that instruction')
+  assert.ok(notes.some(n => /told argue\/facilitate\/run-001/.test(n)), notes.join('\n'))
   await ds2.reconcile(); await s.ds.reconcile()
-  assert.equal(ds2.invitations('p3-b').length, 4, 'one new turn, however often reconcile runs')
+  f = await rec(s, F)
+  assert.deepEqual([Object.keys(f.instructions ?? {}).length, f.standing!.wakes.length, ds2.invitations('p3-b').length], [1, 1, 3], 'once, however often reconcile runs')
   // Awaiting a run that has already ended settles at once, by its last message since.
-  const F2 = 'argue/facilitate/run-002'
+  const F2 = F
   const done = await ds2.awaitResult('p3-b', { run: 'sage/discuss/run-001', note: 'again', by: 'argue-agent', byRun: F2 })
   assert.equal(done.invitation.state, 'unanswered')
   // Closed: nobody is continued and nothing new is invited.
-  ds2.close('p3-b', { by: 'Pat' })
+  await ds2.close('p3-b', { by: 'Pat' })
   await assert.rejects(ds2.awaitResult('p3-b', { run: inv.run!, note: 'x', by: 'argue-agent', byRun: F2 }), /closed/)
   cs2.close(); s.cs.close(); s.x.close()
 })
@@ -407,7 +411,7 @@ test('archive: published incrementally from the repository\'s own horizon; a cra
   }
   assert.ok((await readFile(join(fresh, 'knowledge.md'), 'utf8')).includes('knowledge'), 'the other writer\'s work is kept')
   // Closing is published as the final catch-up.
-  s.ds.close('p16-g', { by: 'Pat' })
+  await s.ds.close('p16-g', { by: 'Pat' })
   assert.deepEqual(a.due(), ['p16-g'])
   await a.publish()
   const { stdout } = await pexec('git', ['-C', fresh, 'pull', '-q'])

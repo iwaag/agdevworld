@@ -10,7 +10,7 @@ import { RequestError, type Workspace } from './workspace.ts'
 import type { RunCatalog } from '../shared/catalog.ts'
 import type { Workflow } from '../shared/model.ts'
 import { evaluate, nodeIntervals, reminderText, type Boundary, type Reminder } from '../shared/reminders.ts'
-import { runFolder, type RunGraph, type RunRecord } from '../shared/run.ts'
+import { endsWork, runFolder, type RunGraph, type RunRecord } from '../shared/run.ts'
 
 // How an operation takes part (CLI and HTTP give it for an agent's or a
 // person's operation; absent for WFE's own records: an attempt's end, an
@@ -121,7 +121,7 @@ export async function adviseOrRefuse(ws: Workspace, advice: Advice | undefined, 
   const reminders: Reminder[] = []
   const put = (r: Reminder) => { if (!reminders.some(y => y.code === r.code && y.refs.join() === r.refs.join())) reminders.push(r) }
   if (!advice.delegatedOnly) for (const x of bs) for (const r of evaluate(x, { ...f, signals, changedByNode, extra: advice.extra })) put(r)
-  const completesRun = bs.some(x => x.kind === 'complete') && f.record.execution.state !== 'completed' && f.after.execution.state === 'completed'
+  const completesRun = bs.some(x => x.kind === 'complete') && endsWork(f.record, f.after)
   if (advice.assess && (bs.some(x => x.kind === 'report') || completesRun) && Object.keys(f.after.delegations ?? {}).length) for (const r of await advice.assess(f.after)) put(r)
   if (!reminders.length) return
   const what = advice.what ?? bs.map(describe).join(' and ')

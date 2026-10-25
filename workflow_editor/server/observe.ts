@@ -16,7 +16,7 @@ import { execFile } from 'node:child_process'
 import { hostname } from 'node:os'
 import { promisify } from 'node:util'
 import { canonicalJson } from '../shared/canonical.ts'
-import { EXECUTOR_OPS, hostOf, questionState, replay, runKey, situation, type HoldCause, type RunRecord, type RunRef } from '../shared/run.ts'
+import { EXECUTOR_OPS, hostOf, questionState, replay, runKey, situation, standingEvents, type HoldCause, type RunRecord, type RunRef } from '../shared/run.ts'
 import { hostOwes, openContinuations, reviewStateText } from '../shared/humanReview.ts'
 import { DEFAULT_LANE, sessionPolicyOf } from '../shared/model.ts'
 import { laneOn } from './workers.ts'
@@ -201,6 +201,14 @@ function waitingOf(r: RunRecord, job: JobRow | null): ObservedRun['waiting'] {
   if (owed) return { reason: `changes requested in review ${owed.id} by ${owed.decision?.by}, not addressed, no job queued`, responsible: 'executor', since: owed.decision?.at ?? r.updated }
   if (r.execution.ready.length || r.execution.active.length) return { reason: `${r.execution.active.length ? `${r.execution.active.join(', ')} recorded as running` : `${r.execution.ready.join(', ')} ready`}, no attempt and no job`, responsible: 'executor', since: r.updated }
   if (r.execution.state === 'not-started') return { reason: 'not started, no job', responsible: 'executor', since: r.created }
+  // p18: a standing conductor at rest is the conversation's next event's to
+  // continue — not stalled, not anyone's work — unless words it was not
+  // woken for are waiting (then the executor owes it, as for any run).
+  if (r.execution.state === 'idle' && r.standing) {
+    const due = r.standing.state === 'open' ? standingEvents(r) : []
+    if (due.length) return { reason: `${due.join(', ')} arrived for the standing conductor of ${r.standing.conversation}, not woken, no job queued`, responsible: 'executor', since: r.updated }
+    return { reason: `at rest: the standing conductor of ${r.standing.conversation} (${r.standing.state}); the conversation's next event continues it`, responsible: `conversation:${r.standing.conversation}`, since: r.standing.since }
+  }
   return { reason: `execution ${r.execution.state}`, responsible: 'none', since: r.updated }
 }
 

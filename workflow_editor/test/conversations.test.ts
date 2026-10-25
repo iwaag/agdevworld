@@ -174,7 +174,7 @@ test('a one-to-one room gains a member and a conductor: same id, history and wor
   const tf = await s.ds.post('c-promo', { text: 'front, the checklist?', author: 'Pat', token: 'tok-pr-0005', to: ['front'] })
   assert.deepEqual(tf.invitations.map(i => [i.role, i.run]), [['discuss', 'front/discuss/run-001']])
   // Ending facilitation changes routing only.
-  assert.equal(s.ds.endFacilitation('c-promo', { by: 'Pat', note: 'enough' }).ended, true)
+  assert.equal((await s.ds.endFacilitation('c-promo', { by: 'Pat', note: 'enough' })).ended, true)
   assert.equal((await rec(s, C)).execution.state !== 'cancelled', true, 'nothing is stopped')
   const after = await s.ds.post('c-promo', { text: 'Thanks.', author: 'Pat', token: 'tok-pr-0006' })
   assert.deepEqual(after.invitations.map(i => [i.participant, i.role]), [['front', 'discuss']], 'the default addressee again')
@@ -214,7 +214,7 @@ test('a group without a default addressee asks whom a message is for; nothing is
   s.cs.close(); s.x.close()
 })
 
-test('a conductor that finished before its awaited result returns: continued once; held while no longer facilitated or while closed; resume runs it once; reopening replays nothing', async () => {
+test('a conductor at rest when its awaited result returns: the same run continues once (p18); held while no longer facilitated or while closed; resume continues it once; reopening replays nothing', async () => {
   const s = await setup()
   s.ds.create('c-late', { title: 'Late result', by: 'Pat', members: ['kid'], facilitate: true })
   const m1 = (await s.ds.post('c-late', { text: 'Go.', author: 'Pat', token: 'tok-cl-0001' })).message
@@ -224,8 +224,10 @@ test('a conductor that finished before its awaited result returns: continued onc
   await s.ds.contribute('c-late', { text: 'Started.', author: 'kid-agent', run: inv.run!, invitation: inv.id, re: [m1.id] })
   const aw = await s.ds.awaitResult('c-late', { run: inv.run!, note: 'kid\'s result', by: 'ponderer-agent', byRun: C })
   await finish(s, C)
+  assert.equal((await rec(s, C)).execution.state, 'idle', 'the conductor rests; it does not complete (p18)')
   // Facilitation ends before the result: the outcome is held, not a new conductor turn.
-  s.ds.endFacilitation('c-late', { by: 'Pat' })
+  await s.ds.endFacilitation('c-late', { by: 'Pat' })
+  assert.equal((await rec(s, C)).standing!.state, 'suspended')
   await finish(s, inv.run!)
   await s.ds.reconcile(); await s.ds.reconcile()
   assert.equal(s.ds.invitation(aw.invitation.id)!.state, 'unanswered')
@@ -234,13 +236,17 @@ test('a conductor that finished before its awaited result returns: continued onc
   const st = await s.ds.status('c-late')
   assert.deepEqual(st.continuations.map(h => h.awaitedBy), [C])
   assert.ok((await s.ds.obligations('c-late')).some(b => b.kind === 'continuation'))
-  // Resume: one new conductor turn, once.
+  // Resume: the same conductor continues, once, though suspended (the person asked).
   const r = await s.ds.resume('c-late', { by: 'Pat' })
   assert.deepEqual(r.resumed, [inv.id, aw.invitation.id], 'both outcomes C awaited were held together')
-  assert.equal(await runsOf(s, 'ponderer'), 2)
+  assert.equal(await runsOf(s, 'ponderer'), 1, 'no new run')
+  let c = await rec(s, C)
+  assert.equal(c.standing!.wakes.length, 1, 'woken once for the outcomes')
+  assert.equal(Object.keys(c.instructions ?? {}).length, 1, 'told in one instruction')
   assert.deepEqual((await s.ds.resume('c-late', { by: 'Pat' })).resumed, [])
   await s.ds.reconcile()
-  assert.equal(await runsOf(s, 'ponderer'), 2, 'told once')
+  c = await rec(s, C)
+  assert.deepEqual([c.standing!.wakes.length, Object.keys(c.instructions ?? {}).length], [1, 1], 'told once')
   // Closed: a result that comes due is held; reopening replays nothing; resume runs it once.
   s.ds.create('c-shut', { title: 'Closed room', by: 'Pat', members: ['kid'], facilitate: true })
   const m2 = (await s.ds.post('c-shut', { text: 'Go.', author: 'Pat', token: 'tok-cs-0001' })).message
@@ -248,16 +254,20 @@ test('a conductor that finished before its awaited result returns: continued onc
   s.x.db.prepare('UPDATE jobs SET state = \'done\' WHERE workspace = \'ponderer\'').run()
   const inv2 = (await s.ds.invite('c-shut', { participant: 'kid', question: 'Run it.', re: [m2.id], by: 'ponderer-agent', byRun: C2 })).invitation
   await finish(s, C2)
-  s.ds.close('c-shut', { by: 'Pat' })
+  await s.ds.close('c-shut', { by: 'Pat' })
+  assert.deepEqual([(await rec(s, C2)).execution.state, (await rec(s, C2)).standing!.state], ['completed', 'closed'], 'closed at rest: finalized')
   await s.ds.contribute('c-shut', { text: 'Done: the result.', author: 'kid-agent', run: inv2.run!, invitation: inv2.id, re: [m2.id], kind: 'result' })
   assert.equal(s.ds.invitation(inv2.id)!.state, 'answered', 'a late result stays readable while closed')
   assert.match(s.ds.invitation(inv2.id)!.held!, /closed/)
   const n = await runsOf(s, 'ponderer')
-  s.ds.reopen('c-shut', { by: 'Pat' })
+  await s.ds.reopen('c-shut', { by: 'Pat' })
+  assert.deepEqual([(await rec(s, C2)).execution.state, (await rec(s, C2)).standing!.state], ['idle', 'open'], 'reopened: the same run rests again')
   await s.ds.reconcile()
   assert.equal(await runsOf(s, 'ponderer'), n, 'reopening replays nothing')
+  assert.equal((await rec(s, C2)).standing!.wakes.length, 0)
   await s.ds.resume('c-shut', { by: 'Pat', request: inv2.id })
-  assert.equal(await runsOf(s, 'ponderer'), n + 1)
+  assert.equal(await runsOf(s, 'ponderer'), n, 'the same conductor continues')
+  assert.equal((await rec(s, C2)).standing!.wakes.length, 1)
   assert.equal(s.ds.invitation(inv2.id)!.held, null)
   s.cs.close(); s.x.close()
 })

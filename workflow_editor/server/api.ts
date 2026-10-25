@@ -320,7 +320,7 @@ export function createHandler(config: ServiceConfig) {
             const r = await ds.startFacilitation(wsId, { text: words('text'), author: by, token: str(input.token, 'token'), re: nums('re'), via: opt('via'), challenges: attachRequests(input.challenges) })
             return send(res, 200, { duplicate: r.duplicate, facilitation: r.facilitation, message: ds.message(r.posted.message, viewBaseOf(area)), requests: r.posted.invitations.map(i => ds.invitationView(i, viewBaseOf(area))) })
           }
-          if (action === 'end') return send(res, 200, ds.endFacilitation(wsId, { by, note: opt('note') }))
+          if (action === 'end') return send(res, 200, await ds.endFacilitation(wsId, { by, note: opt('note') }))
           throw new RequestError(400, 'action is start or end')
         }
         if (wsId && b === 'default' && method === 'POST') {
@@ -389,8 +389,21 @@ export function createHandler(config: ServiceConfig) {
           const r = ds.publishOverview(wsId, { purpose: words('purpose'), outcome: opt('outcome') ?? null, unresolved: u as string[], through, title: opt('displayTitle'), ifUntitled: input.ifUntitled === true, note: opt('note'), author: opt('author') ?? c.person, token: opt('token') })
           return send(res, 200, { ok: true, ...r })
         }
-        if (wsId && b === 'close' && method === 'POST') { const c = need(); return send(res, 200, { ok: true, ...ds.close(wsId, { by: opt('author') ?? c.person }) }) }
-        if (wsId && b === 'reopen' && method === 'POST') { const c = need(); return send(res, 200, { ok: true, conversation: ds.reopen(wsId, { by: opt('author') ?? c.person }) }) }
+        // p18: the conductor — its run, standing and status; an explicit
+        // replacement of a cancelled one (never done by itself).
+        if (wsId && b === 'conductor' && method === 'GET') {
+          exists(wsId)
+          const cur = await ds.conductorRecord(wsId)
+          const { runStatus } = await import('../shared/status.ts')
+          return send(res, 200, { conductor: cur?.run ?? null, standing: cur?.record?.standing ?? null, status: cur?.record ? runStatus(cur.record) : null })
+        }
+        if (wsId && b === 'conductor' && method === 'POST') {
+          const c = need()
+          if (opt('action') !== 'replace') throw new RequestError(400, 'action is replace (a new conductor for a cancelled one)')
+          return send(res, 200, { ok: true, ...await ds.replaceConductor(wsId, { by: opt('author') ?? c.person, reason: words('reason'), token: opt('token') }) })
+        }
+        if (wsId && b === 'close' && method === 'POST') { const c = need(); return send(res, 200, { ok: true, ...await ds.close(wsId, { by: opt('author') ?? c.person }) }) }
+        if (wsId && b === 'reopen' && method === 'POST') { const c = need(); return send(res, 200, { ok: true, conversation: await ds.reopen(wsId, { by: opt('author') ?? c.person }) }) }
         // Character dialogue (argue p5, docs/dialogue.md): the presentation
         // path, apart from every read above. A read may queue lines for the
         // dialogue worker; it never calls a model and changes nothing else.

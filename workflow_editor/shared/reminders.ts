@@ -14,7 +14,7 @@
 // their work inside the talk.
 import type { RunCatalog } from './catalog.ts'
 import type { Workflow, WorkflowNode } from './model.ts'
-import { isOpen, questionState, runFolder, runKey, type Presentation, type RunGraph, type RunRecord } from './run.ts'
+import { endsWork, isOpen, questionState, runFolder, runKey, type Presentation, type RunGraph, type RunRecord } from './run.ts'
 import { roundsUsing } from './humanReview.ts'
 
 // What a node is for, as far as its structured records say. Never its name.
@@ -178,7 +178,7 @@ export function evaluate(b: Boundary, f: Facts): Reminder[] {
   const ids = Object.keys(after.nodes)
   const out: Reminder[] = [...(f.extra ?? [])]
   const add = (r: Reminder) => { if (!out.some(x => x.code === r.code)) out.push(r) }
-  const completesRun = b.kind === 'complete' && record.execution.state !== 'completed' && after.execution.state === 'completed'
+  const completesRun = b.kind === 'complete' && endsWork(record, after)
   const completing = b.kind === 'complete' ? b.node : null
   const templates = f.catalog.state === 'supplied' ? f.catalog.snapshot.templates : []
   const has = (t: string) => templates.some(x => x.id === t)

@@ -31,13 +31,15 @@
 //   a run already working (`awaits = 'result'`): answered by that run's next
 //   result or synthesis here, or settled when the run ends;
 // - continuation: when every request a conductor run awaits is resolved, that
-//   run is given one instruction listing the outcomes; one that has ended is
-//   replaced by a new conductor turn while the room is facilitated and open.
-//   A continuation that may not run now (the room is closed, or no longer
-//   facilitated) is held and shown, and runs once on an explicit resume;
-// - the conductor (argue p4): the facilitator's run that owns the room's
-//   progression across many attempts, with its activities (announce, ask,
-//   ponder, talk) bound to messages, requests and decisions;
+//   run is given one instruction listing the outcomes. A continuation that
+//   may not run now (the room is closed, or no longer facilitated while the
+//   conductor rests) is held and shown, and runs once on an explicit resume;
+// - the conductor (argue p4, p18): the facilitator's one run that owns the
+//   room's progression for the room's whole life — a standing run (docs/runs.md
+//   *Standing runs*) that rests between turns and is continued by the room's
+//   events, its standing following the room (open, suspended, closed) — with
+//   its activities (announce, ask, ponder, talk) bound to messages, requests
+//   and decisions. A cancelled conductor is replaced only explicitly;
 // - questions (fix3): every open question of a run that speaks for the room
 //   is posted here by WFE (postQuestions), whoever asked it;
 // - annotations, metadata (category, display title, default addressee) and
@@ -51,16 +53,18 @@
 // withdraws requests not yet started and continues nobody; reopening replays
 // nothing.
 import { createHash } from 'node:crypto'
+import { join } from 'node:path'
 import type { ConversationSource } from '../shared/intake.ts'
 import { ACTIVITIES, type Activity } from '../shared/model.ts'
 import { isOpenDelegation } from '../shared/delegation.ts'
-import { situation, type OpInput, type RunRecord } from '../shared/run.ts'
+import { situation, type OpInput, type RunRecord, type StandingState } from '../shared/run.ts'
 import { CONVERSATION_ID, firstLine, loadConversationConfig, parseRunName, pendingQuestions, runName, runUrl, targetName, type ConversationConfig, type ConversationRow, type ConversationStore, type AttachRequest, type MessageAttachment, type MessageKind, type MessageRow, type RunEntry, type TargetView } from './conversations.ts'
 import { activeDefinition, adjustRun, readRun, runOp, usableRun } from './runs.ts'
 import { parseWorkflow, renderWorkflow } from './yamlDoc.ts'
 import { ConversationWorkflows } from './conversationWorkflows.ts'
 import { loadRegistry } from './registry.ts'
 import { transaction } from './sqlite.ts'
+import { withLock } from './lock.ts'
 import { RequestError } from './workspace.ts'
 
 const MAX_TEXT = 100_000
@@ -131,12 +135,14 @@ export interface ActivityRow {
   id: number; conv: string; run: string; node: string; attempt: string | null; kind: Activity; state: ActivityState; text: string; sources: string
   message: number | null; question: string | null; awaits: string | null; decision: string | null; obligations: string | null; outcome: string | null
   token: string; created: string; updated: string
+  topic: string | null // p18: a ponder's label for the stretch it opens or continues (navigation only)
 }
 export interface ActivityView {
   id: number; run: string; node: string; attempt: string | null; kind: Activity; state: ActivityState; text: string; sources: number[]
   message: number | null; question: string | null; awaits: string | null; invitations: number[]
   decision: { next: { activity: string; node: string }[]; revision: string | null } | null
   obligations: Obligation[] | null; outcome: string | null; created: string; updated: string
+  topic: string | null
 }
 export interface ActivityEventRow { id: number; conv: string; activity: number | null; kind: string; state: string; at: string; by: string; note: string; data: string }
 export const ANNOTATION_KINDS = ['intervention', 'recovery', 'evaluation', 'correction', 'note'] as const
@@ -428,6 +434,8 @@ export class ConversationService {
       this.db.prepare('UPDATE conversations SET requester = ? WHERE id = ?').run(JSON.stringify(requester), conv)
       this.activityEvent(conv, null, 'facilitation', 'started', o.author, `${o.author} asked ${cfg.facilitator.workspace} to lead, from #${horizon}`, { horizon, requester })
     })
+    // p18: a conductor that stood suspended leads again — the same run.
+    await this.syncStanding(conv).catch(() => null)
     const posted = await this.post(conv, { text: o.text, author: o.author, token: o.token, re: o.re, to: [cfg.facilitator.workspace], via: o.via, challenges: o.challenges })
     this.db.prepare('UPDATE facilitations SET brief = ? WHERE conv = ? AND token = ? AND brief IS NULL').run(posted.message.id, conv, token)
     return { facilitation: this.one<FacilitationRow>('SELECT * FROM facilitations WHERE conv = ? AND token = ?', conv, token)!, duplicate: !!seen, posted }
@@ -437,9 +445,11 @@ export class ConversationService {
   // default addressee (or asks whom it is for). Nothing is stopped, and what
   // the conductor asked of others stays its own; a continuation that would
   // need a new conductor turn is held (afterResolution).
-  endFacilitation(conv: string, o: { by: string; run?: string | null; note?: string }): { facilitation: FacilitationRow | null; ended: boolean } {
+  // p18: the conductor stays the same run, suspended: nothing unsolicited
+  // reaches it, its own asks and delegations still do.
+  async endFacilitation(conv: string, o: { by: string; run?: string | null; note?: string }): Promise<{ facilitation: FacilitationRow | null; ended: boolean; standing?: string | null }> {
     this.need(conv)
-    return this.tx(() => {
+    const r = this.tx(() => {
       const f = this.facilitation(conv)
       if (!f) return { facilitation: null, ended: false }
       this.db.prepare('UPDATE facilitations SET state = \'ended\', ended_at = ?, ended_by = ?, end_note = ? WHERE id = ?').run(now(), o.by, o.note?.trim() ?? '', f.id)
@@ -447,6 +457,7 @@ export class ConversationService {
       this.touch(conv)
       return { facilitation: this.one<FacilitationRow>('SELECT * FROM facilitations WHERE id = ?', f.id)!, ended: true }
     })
+    return r.ended ? { ...r, standing: await this.syncStanding(conv).catch(e => `not recorded yet (${(e as Error).message}); reconcile records it`) } : r
   }
 
   // ---- the person's words ----------------------------------------------------------
@@ -517,7 +528,7 @@ export class ConversationService {
       // as the answer to its question the message names, or to its only open
       // question asked here — and no second run is started.
       else if (r.role === 'conduct') {
-        const conductor = await this.openConductor(conv)
+        const conductor = await this.standingConductor(conv)
         if (conductor) r.deliver = { run: conductor, ...await this.conductorQuestion(conv, conductor, re, q) }
       }
     }
@@ -531,6 +542,7 @@ export class ConversationService {
       if (!again) {
         const at = now()
         this.db.prepare('UPDATE conversations SET updated = ?, state = \'open\' WHERE id = ?').run(at, conv)
+        if (reopened) this.activityEvent(conv, null, 'room', 'reopened', o.author, `${o.author}'s message reopened the conversation`, { by: o.author })
         if (!this.members(conv).some(m => m.participant === o.author)) this.joinRow(conv, this.resolve(o.author, { person: true }), o.author, 'first message')
         id = Number(this.db.prepare('INSERT INTO messages (conv, role, author, text, at, token, via, re, kind, participant, addressed) VALUES (?, \'person\', ?, ?, ?, ?, ?, ?, \'message\', ?, ?)').run(conv, o.author, o.text, at, o.token, o.via ?? null, JSON.stringify(re), o.author, JSON.stringify(recipients.map(r => r.run ?? r.participant))).lastInsertRowid)
         this.cs.attachRows(conv, id, pins)
@@ -546,6 +558,8 @@ export class ConversationService {
     })
     // A facilitation opened without its brief takes the first words to the conductor.
     if (!res.duplicate && res.invitations.some(i => i.role === 'conduct' || (i.role === 'deliver' && i.workflow === cfg.facilitator.workflow && i.workspace === cfg.facilitator.workspace))) this.db.prepare('UPDATE facilitations SET brief = ? WHERE conv = ? AND state = \'active\' AND brief IS NULL').run(res.message.id, conv)
+    // p18: reopened by these words, the conductor stands open again first.
+    if (res.reopened) await this.syncStanding(conv).catch(() => null)
     for (const i of res.invitations) if (i.state === 'pending') await this.dispatch(i.id)
     return { ...res, created, invitations: res.invitations.map(i => this.invitation(i.id)!) }
   }
@@ -553,11 +567,77 @@ export class ConversationService {
   // The conversations a run conducts, newest first (a conductor run that was
   // requested as work, not asked here, finds its conversation this way).
   conductedBy(run: string): string[] { return this.all<{ id: string }>('SELECT id FROM conversations WHERE conductor = ? ORDER BY updated DESC', run).map(r => r.id) }
-  // The conductor run while it is open (not completed or cancelled), else
-  // null: the next message for the conductor starts a new one.
-  async openConductor(conv: string): Promise<string | null> {
+  // ---- the standing conductor (workflow_editor p18) ---------------------------------
+
+  // The conductor's record as it reads now (record null: unreadable).
+  async conductorRecord(conv: string): Promise<{ run: string; record: RunRecord | null } | null> {
     const run = this.cs.conversation(conv)?.conductor
-    return run && await this.runIsOpen(run) ? run : null
+    if (!run) return null
+    if (!this.exec) return { run, record: null }
+    try { const { workspace, ref } = parseRunName(run); return { run, record: (await readRun(await this.exec.workspace(workspace), ref)).record as RunRecord | null } } catch { return { run, record: null } }
+  }
+  // The run that continues the room's progression: its conductor while it
+  // stands (working, waiting, at rest, or finalized while the room was
+  // closed) or, before the p18 transition, while it is open. A cancelled
+  // conductor continues nothing and is replaced only explicitly; a completed
+  // one that never stood is history (the transition decides what continues it).
+  async standingConductor(conv: string): Promise<string | null> {
+    const c = await this.conductorRecord(conv)
+    if (!c?.record || c.record.cancelled) return null
+    return c.record.standing || !['completed', 'cancelled'].includes(situation(c.record)) ? c.run : null
+  }
+  private conductorLock(conv: string) { return join(this.area, '.local', 'conversations', `conductor-${conv}`) }
+
+  // The conductor's standing follows its room (docs/runs.md *Standing
+  // runs*): closed while the room is closed, open while it is open and
+  // facilitated, suspended otherwise. A transition is recorded on the run
+  // under the receipt of the room event that caused it, so the operation
+  // that changed the room and reconcile record it once. A conductor that does
+  // not stand yet is established only while it is open (one created from
+  // its own attempt, or one working when p18 arrived); a completed one that
+  // never stood is left to the explicit transition (wfe conversation
+  // transition). A cancelled conductor records nothing.
+  async syncStanding(conv: string, why?: string): Promise<string | null> {
+    const c = this.cs.conversation(conv)
+    const cur = await this.conductorRecord(conv)
+    if (!c || !cur?.record || cur.record.cancelled || !this.exec) return null
+    const st = cur.record.standing
+    const want: StandingState = c.state === 'closed' ? 'closed' : this.facilitation(conv) ? 'open' : 'suspended'
+    let input: OpInput
+    if (!st) {
+      if (['completed', 'cancelled'].includes(situation(cur.record))) return null
+      input = { op: 'standing.establish', conversation: conv, state: want, reason: '' }
+    } else if (st.state === want) return null
+    else if (st.state === 'closed') input = { op: 'standing.reopen', reason: '', state: want as 'open' | 'suspended' }
+    else if (want === 'closed') input = { op: 'standing.close', reason: '' }
+    else input = want === 'open' ? { op: 'standing.facilitate', reason: '' } : { op: 'standing.suspend', reason: '' }
+    const event = this.one<{ id: number; note: string }>('SELECT id, note FROM activity_events WHERE conv = ? AND kind IN (\'room\', \'facilitation\', \'conductor\') ORDER BY id DESC LIMIT 1', conv)
+    const reason = why ?? event?.note ?? `the conversation is ${want}`
+    const { workspace, ref } = parseRunName(cur.run)
+    await runOp(await this.exec.workspace(workspace), ref, { ...input, reason, receipt: `standing:${conv}:${input.op}:e${event?.id ?? 0}` } as OpInput & { receipt: string }, { by: 'conversation', via: 'conversation' })
+    return `${cur.run}: ${input.op} (${st?.state ?? 'not standing'} → ${want})`
+  }
+
+  // Replaces a cancelled conductor (p18): an explicit act, recorded, and the
+  // new run names the one it replaces (standing.replaces). Nothing revives
+  // the cancelled run. The reason is the new conductor's brief.
+  async replaceConductor(conv: string, o: { by: string; reason: string; token?: string }): Promise<{ invitation: InvitationRow; replaces: string }> {
+    const c = this.need(conv)
+    const cfg = this.cfg()
+    if (c.state === 'closed') throw new RequestError(409, `${conv} is closed: reopen it first`, { code: 'closed' })
+    if (!this.facilitation(conv)) throw new RequestError(409, `${conv} is not facilitated: start facilitation instead`, { code: 'not-facilitated' })
+    if (!o.reason.trim()) throw new RequestError(400, 'say why the conductor is replaced (--reason)')
+    const cur = await this.conductorRecord(conv)
+    if (!cur?.record?.cancelled) throw new RequestError(409, cur ? `${cur.run} is not cancelled: it continues this conversation (a conductor is replaced only after its cancellation)` : `${conv} has no conductor to replace`, { code: 'conductor-live' })
+    const horizon = this.horizon(conv).message
+    const token = `replace:${cur.run}:${o.token ?? createHash('sha256').update(o.reason).digest('hex').slice(0, 16)}`
+    const inv = this.tx(() => {
+      const seen = this.one<InvitationRow>('SELECT * FROM invitations WHERE conv = ? AND token = ?', conv, token)
+      if (seen) return seen
+      this.activityEvent(conv, null, 'conductor', 'replacing', o.by, `${o.by} replaces the cancelled conductor ${cur.run}: ${o.reason.trim()}`, { replaces: cur.run })
+      return this.issue(conv, { participant: { participant: cfg.facilitator.workspace, kind: 'project', ...cfg.facilitator }, role: 'conduct', question: `The conversation's previous conductor ${cur.run} was cancelled; ${o.by} asked for a new conductor: ${o.reason.trim()}\nRead the conversation (wfe conversation state, show) and take up what is still owed.`, source: [horizon], by: o.by, byRun: null, awaitedBy: null, token })
+    })
+    return { invitation: inv.state === 'pending' ? await this.dispatch(inv.id) : inv, replaces: cur.run }
   }
   private setConductor(conv: string, run: string, by: string, why: string) {
     this.db.prepare('UPDATE conversations SET conductor = ? WHERE id = ?').run(run, conv)
@@ -653,25 +733,11 @@ export class ConversationService {
     try {
       if (!this.exec) throw new Error('execution is not configured here')
       if (i.delivery && i.run && await this.deliver(i)) return this.invitation(id)!
-      const named = JSON.parse(i.source) as number[]
-      const first = this.cs.message(named[0] ?? 0) ?? this.cs.message(this.horizon(i.conv).message)
-      if (!first) throw new Error('the request names no message')
-      const horizon = this.horizon(i.conv).message
-      const source: ConversationSource = { kind: 'conversation', conversation: i.conv, message: first.id, author: first.author, at: first.at, invitation: i.id }
-      // The challenges the messages it is about carried (challenge p1), as
-      // they were when sent.
-      const attachments = await this.cs.pinnedTexts(this.cs.attachmentsOf(named))
-      const r = await this.exec.request({ workspace: i.workspace, workflow: i.workflow, text: i.question, author: i.by, receipt: this.receipt(i), via: 'conversation', source, ...(attachments.length ? { attachments } : {}) })
-      const run = runName(i.workspace, r.ref)
-      // The facilitator's run started for a conductor request conducts the
-      // conversation unless another one still does (argue p4).
-      const conducts = i.role === 'conduct' && !await this.openConductor(i.conv)
-      this.tx(() => {
-        this.db.prepare('UPDATE invitations SET state = \'started\', run = ?, error = NULL, tries = tries + 1, horizon = CASE WHEN horizon = 0 THEN ? ELSE horizon END, updated = ? WHERE id = ?').run(run, horizon, now(), id)
-        this.event(i.conv, id, 'started', { run, note: `${run} requested; horizon #${horizon}` })
-        if (conducts && this.cs.conversation(i.conv)?.conductor !== run) this.setConductor(i.conv, run, 'conversation', `started by request ${id}`)
-        if (named[0] && !this.one('SELECT 1 FROM links WHERE message = ? AND run = ? AND relation = \'turn\'', named[0], run)) this.db.prepare('INSERT INTO links (conv, message, run, relation, note, by, at) VALUES (?, ?, ?, \'turn\', ?, \'conversation\', ?)').run(i.conv, named[0], run, `the run started for request ${id}`, now())
-      })
+      // p18: a request for the conductor goes to the room's one conductor;
+      // only a room without one gets a new run, and only one, under the
+      // conversation's lock (two messages before the first run exists).
+      if (i.role === 'conduct') return await withLock(this.conductorLock(i.conv), () => this.conductorDispatch(i), { timeoutMs: 120_000, what: `the conductor of ${i.conv}` })
+      await this.startRun(i)
     } catch (e) {
       this.tx(() => {
         this.db.prepare('UPDATE invitations SET state = \'failed\', error = ?, tries = tries + 1, updated = ? WHERE id = ?').run((e as Error).message, now(), id)
@@ -680,6 +746,52 @@ export class ConversationService {
       await this.afterResolution(id)
     }
     return this.invitation(id)!
+  }
+
+  // The conductor request's dispatch (under the conversation's conductor
+  // lock): delivered to the standing conductor; refused while the
+  // conductor is cancelled (never replaced silently: replaceConductor);
+  // otherwise one new run, created standing.
+  private async conductorDispatch(i: InvitationRow): Promise<InvitationRow> {
+    const cur = await this.conductorRecord(i.conv)
+    const replacing = i.token?.startsWith('replace:') ? cur?.run ?? null : null
+    const live = await this.standingConductor(i.conv)
+    if (live) {
+      const message = (JSON.parse(i.source) as number[])[0] ?? this.horizon(i.conv).message
+      this.tx(() => {
+        this.db.prepare('UPDATE invitations SET run = ?, delivery = ?, updated = ? WHERE id = ?').run(live, JSON.stringify({ question: null, message }), now(), i.id)
+        this.event(i.conv, i.id, 'pending', { note: `for the conversation's conductor ${live}, which continues it` })
+      })
+      if (!await this.deliver(this.invitation(i.id)!)) throw new Error(`${live} could not take it`)
+      return this.invitation(i.id)!
+    }
+    if (cur?.record?.cancelled && !replacing) throw new Error(`the conductor ${cur.run} was cancelled (${cur.record.cancelled.reason}); it is not replaced silently: replace it explicitly (wfe conversation conductor ${i.conv} --replace --reason …), then retry`)
+    await this.startRun(i, { conversation: i.conv, ...(replacing ? { replaces: replacing } : {}) })
+    return this.invitation(i.id)!
+  }
+
+  // Starts the request's run (one run of its recorded workflow with the
+  // words as its braindump), by receipt; a conductor's run stands (p18).
+  private async startRun(i: InvitationRow, standing?: { conversation: string; replaces?: string }): Promise<void> {
+    const id = i.id
+    const named = JSON.parse(i.source) as number[]
+    const first = this.cs.message(named[0] ?? 0) ?? this.cs.message(this.horizon(i.conv).message)
+    if (!first) throw new Error('the request names no message')
+    const horizon = this.horizon(i.conv).message
+    const source: ConversationSource = { kind: 'conversation', conversation: i.conv, message: first.id, author: first.author, at: first.at, invitation: i.id }
+    // The challenges the messages it is about carried (challenge p1), as
+    // they were when sent.
+    const attachments = await this.cs.pinnedTexts(this.cs.attachmentsOf(named))
+    const r = await this.exec!.request({ workspace: i.workspace, workflow: i.workflow, text: i.question, author: i.by, receipt: this.receipt(i), via: 'conversation', source, ...(attachments.length ? { attachments } : {}), ...(standing ? { standing } : {}) })
+    const run = runName(i.workspace, r.ref)
+    this.tx(() => {
+      this.db.prepare('UPDATE invitations SET state = \'started\', run = ?, error = NULL, tries = tries + 1, horizon = CASE WHEN horizon = 0 THEN ? ELSE horizon END, updated = ? WHERE id = ?').run(run, horizon, now(), id)
+      this.event(i.conv, id, 'started', { run, note: `${run} requested; horizon #${horizon}` })
+      // The facilitator's run started for a conductor request conducts the
+      // conversation (argue p4), for the room's life (p18).
+      if (standing && this.cs.conversation(i.conv)?.conductor !== run) this.setConductor(i.conv, run, 'conversation', `started by request ${id}${standing.replaces ? `; replaces the cancelled ${standing.replaces}` : ''}`)
+      if (named[0] && !this.one('SELECT 1 FROM links WHERE message = ? AND run = ? AND relation = \'turn\'', named[0], run)) this.db.prepare('INSERT INTO links (conv, message, run, relation, note, by, at) VALUES (?, ?, ?, \'turn\', ?, \'conversation\', ?)').run(i.conv, named[0], run, `the run started for request ${id}`, now())
+    })
   }
 
   // Delivers a request to the run it names: the person's words as the answer
@@ -692,9 +804,17 @@ export class ConversationService {
     const d = JSON.parse(i.delivery!) as { question: string | null; message: number; instruct?: boolean }
     const { workspace, ref } = parseRunName(i.run!)
     const ws = await this.exec!.workspace(workspace)
-    const rec = (await readRun(ws, ref)).record as RunRecord | null
+    let rec = (await readRun(ws, ref)).record as RunRecord | null
+    // p18: a conductor finalized while its room was closed stands again
+    // first (the room is open now: this delivery comes from it).
+    if (rec?.standing && !rec.cancelled && rec.standing.state === 'closed' && this.cs.conversation(i.conv)?.state === 'open' && this.cs.conversation(i.conv)?.conductor === i.run) {
+      await this.syncStanding(i.conv)
+      rec = (await readRun(ws, ref)).record as RunRecord | null
+    }
     if (!rec || ['completed', 'cancelled'].includes(situation(rec))) {
       if (d.instruct) throw new Error(`${i.run} has ${rec ? `ended (${situation(rec)})` : 'no record'}: an instruction is never redirected; ask the participant for new work instead`)
+      // p18: the conductor is never replaced behind the person's back.
+      if (rec?.standing || (rec?.cancelled && this.cs.conversation(i.conv)?.conductor === i.run)) throw new Error(`the conductor ${i.run} ${rec.cancelled ? `was cancelled (${rec.cancelled.reason})` : `stands ${rec.standing?.state}`}: it is not replaced silently; replace it explicitly (wfe conversation conductor ${i.conv} --replace --reason …), then retry`)
       this.tx(() => {
         this.db.prepare('UPDATE invitations SET run = NULL, delivery = NULL, updated = ? WHERE id = ?').run(now(), i.id)
         this.event(i.conv, i.id, 'pending', { note: `${i.run} has ended: a new run is requested instead` })
@@ -715,7 +835,8 @@ export class ConversationService {
       const r = await runOp(ws, ref, { op: 'instruction.receive', text: i.question, from: i.by, source, receipt }, { by: i.by, via: 'conversation' })
       const ins = r.record.history.find(h => h.receipt === receipt)?.change.instruction?.[1] ?? Object.keys(r.record.instructions ?? {}).at(-1)
       const job = ins ? await this.exec!.afterInstruction(ws, ref, ins) : null
-      how = `instruction ${ins}${job ? `; job ${job.id}` : ''}`
+      const woke = job?.receipt.startsWith('wake:') ? `; woke it (${job.reason.replace(/^resume: /, '')})` : ''
+      how = `instruction ${ins}${job ? `; job ${job.id}` : ''}${woke}`
     }
     this.tx(() => {
       this.db.prepare('UPDATE invitations SET state = \'started\', error = NULL, tries = tries + 1, horizon = CASE WHEN horizon = 0 THEN ? ELSE horizon END, updated = ? WHERE id = ?').run(this.horizon(i.conv).message, now(), i.id)
@@ -867,7 +988,15 @@ export class ConversationService {
       // to its question): a reply, result or synthesis answers them. A result
       // or synthesis also answers what is awaited of this run (an interim
       // reply does not).
-      const answered = ANSWERING.includes(kind) ? [...(inv && inv.state !== 'answered' ? [inv] : []), ...this.all<InvitationRow>('SELECT * FROM invitations WHERE conv = ? AND run = ? AND delivery IS NOT NULL AND state = \'started\' AND id IS NOT ?', conv, o.run, inv?.id ?? null),
+      // p18: the conductor stands for the whole room, and words keep arriving
+      // while it speaks: its reply answers the delivered requests whose
+      // messages it names (all of them when it names none of theirs).
+      const delivered = this.all<InvitationRow>('SELECT * FROM invitations WHERE conv = ? AND run = ? AND delivery IS NOT NULL AND state = \'started\' AND id IS NOT ?', conv, o.run, inv?.id ?? null)
+      const first = (x: InvitationRow) => (JSON.parse(x.source) as number[])[0]
+      const conducting = this.cs.conversation(conv)?.conductor === o.run
+      const named = conducting ? delivered.filter(d => re.includes(first(d))) : []
+      const own = inv && inv.state !== 'answered' && !(conducting && named.length && !re.includes(first(inv))) ? [inv] : []
+      const answered = ANSWERING.includes(kind) ? [...own, ...(named.length ? named : delivered),
         ...(kind === 'result' || kind === 'synthesis' ? this.all<InvitationRow>('SELECT * FROM invitations WHERE conv = ? AND run = ? AND awaits IS NOT NULL AND state = \'started\'', conv, o.run) : [])] : []
       for (const a of answered) {
         const late = a.state === 'unanswered' || a.state === 'withdrawn' || a.state === 'failed' ? 1 : 0
@@ -953,21 +1082,21 @@ export class ConversationService {
           ? `Discussion ${i.conv}: everything your ${act.kind} node ${act.node} asked (activity ${act.id}) is resolved${done ? `; ${done}` : ''}.`
           : `Discussion ${i.conv}: a later outcome of your ${act.state} ${act.kind} node ${act.node} (activity ${act.id}).`
       }
-      // A facilitator run that completed meanwhile cannot be continued: the
-      // outcomes go to a new facilitator turn (receipt-bound, once), so what
-      // was awaited is read by the facilitator whenever it resolves.
-      if (fr && situation(fr) === 'completed') {
-        if (!this.facilitation(i.conv) && !o.resume) return hold(`${i.awaited_by} has completed and nobody facilitates now (resume to start a conductor turn)`)
-        const cfg = this.cfg()
-        const turn = this.tx(() => this.issue(i.conv, { participant: { participant: cfg.facilitator.workspace, kind: 'project', ...cfg.facilitator }, role: 'conduct', question: lines(`Discussion ${i.conv}: what ${i.awaited_by} awaited is resolved, and that run has completed; this turn takes it up.`), source: m ? [m.id] : JSON.parse(untold[0].source) as number[], by: 'discussion', byRun: null, awaitedBy: null, token: receipt }))
-        this.tx(() => { for (const a of untold) this.db.prepare('UPDATE invitations SET reported = ?, held = NULL WHERE id = ?').run(label(a), a.id) })
-        const started = turn.state === 'pending' ? await this.dispatch(turn.id) : turn
-        return `${i.awaited_by} has completed: a new facilitator turn, invitation ${started.id} (${started.state}${started.run ? ` ${started.run}` : ''})`
+      // p18: the conductor is one standing run. Finalized while its room was
+      // closed it stands again first (the room is open now); at rest while
+      // nobody facilitates, the outcomes wait for the person's resume; a
+      // completed run that never stood (before the p18 transition) is not
+      // replaced behind anyone's back.
+      if (fr?.standing && situation(fr) === 'completed' && this.cs.conversation(i.conv)?.conductor === i.awaited_by) {
+        await this.syncStanding(i.conv)
+        fr = (await readRun(ws, ref)).record as RunRecord | null
       }
+      if (fr && situation(fr) === 'completed') return hold(fr.standing ? `${i.awaited_by} stands ${fr.standing.state} (resume to continue it)` : `${i.awaited_by} has completed and does not stand for this conversation (the p18 transition establishes its conductor; then resume)`)
+      if (fr?.standing && fr.execution.state === 'idle' && !this.facilitation(i.conv) && !o.resume) return hold(`${i.awaited_by} rests and nobody facilitates now (resume to continue it)`)
       const source: ConversationSource | undefined = m ? { kind: 'conversation', conversation: i.conv, message: m.id, author: m.author, at: m.at } : undefined
       const r = await runOp(ws, ref, { op: 'instruction.receive', text: lines(head), from: `discussion ${i.conv}`, ...(source ? { source } : {}), receipt }, { by: 'discussion', via: 'discussion' })
       const ins = r.record.history.find(h => h.receipt === receipt)?.change.instruction?.[1] ?? Object.keys(r.record.instructions ?? {}).at(-1)
-      const job = ins ? await this.exec.afterInstruction(ws, ref, ins) : null
+      const job = !ins ? null : fr?.standing ? await this.exec.afterStanding(ws, ref, { resume: !!o.resume }) : await this.exec.afterInstruction(ws, ref, ins)
       note = `told ${i.awaited_by} (instruction ${ins}${job ? `, job ${job.id}` : ', nothing to continue'})`
     } catch (e) {
       // A run that cannot take it (cancelled) is told nothing more; the
@@ -981,7 +1110,7 @@ export class ConversationService {
   // Runs held continuations once (all of the conversation's, or one
   // request's group): the person's explicit decision that what was awaited
   // should be taken up now. The conversation must be open.
-  async resume(conv: string, o: { by: string; request?: number }): Promise<{ resumed: number[]; notes: string[] }> {
+  async resume(conv: string, o: { by: string; request?: number }): Promise<{ resumed: number[]; notes: string[]; released?: string[] }> {
     const c = this.need(conv)
     if (c.state === 'closed') throw new RequestError(409, `conversation ${conv} is closed: reopen it, then resume`, { code: 'closed' })
     const held = this.all<InvitationRow>('SELECT * FROM invitations WHERE conv = ? AND held IS NOT NULL ORDER BY id', conv).filter(i => o.request === undefined || i.id === o.request)
@@ -996,7 +1125,20 @@ export class ConversationService {
       const n = await this.afterResolution(i.id, { resume: true })
       if (n) notes.push(n)
     }
-    return { resumed: held.map(i => i.id), notes }
+    // p18: what the conductor's standing held at a transition (words and
+    // children's facts that waited while the room was closed) continues now.
+    let released: string[] = []
+    const cur = o.request === undefined ? await this.conductorRecord(conv) : null
+    if (cur?.record?.standing?.held.length && !cur.record.cancelled && this.exec) {
+      const { workspace, ref } = parseRunName(cur.run)
+      const ws = await this.exec.workspace(workspace)
+      released = cur.record.standing.held
+      await runOp(ws, ref, { op: 'standing.release', reason: `resumed by ${o.by}`, receipt: `release:${conv}:${cur.record.seq}` } as OpInput & { receipt: string }, { by: o.by, via: 'conversation' })
+      const job = await this.exec.afterStanding(ws, ref, { resume: true }) ?? await this.exec.afterDelegation(ws, ref)
+      notes.push(`${cur.run}: released ${released.join(', ')}${job ? `; job ${job.id} (${job.reason})` : ''}`)
+    }
+    if (o.request === undefined && !held.length && !released.length) return { resumed: [], notes }
+    return { resumed: held.map(i => i.id), notes, ...(released.length ? { released } : {}) }
   }
 
   // ---- reconcile -------------------------------------------------------------------
@@ -1041,6 +1183,40 @@ export class ConversationService {
     }
     notes.push(...await this.postQuestions())
     notes.push(...await this.reconcileActivities())
+    notes.push(...await this.reconcileStanding())
+    return notes
+  }
+
+  // p18: each conductor's standing follows its room (a transition the
+  // room's operation could not record is recorded here), and a request
+  // delivered to a standing conductor whose turn ended without answering it
+  // is settled `unanswered` then — not when the run ends, which it does not.
+  async reconcileStanding(): Promise<string[]> {
+    const notes: string[] = []
+    if (!this.exec) return notes
+    for (const c of this.all<{ id: string }>('SELECT id FROM conversations WHERE conductor IS NOT NULL ORDER BY id')) {
+      try { const n = await this.syncStanding(c.id); if (n) notes.push(`conversation ${c.id}: ${n}`) } catch (e) { notes.push(`conversation ${c.id}: standing not recorded: ${(e as Error).message}`) }
+    }
+    // Delivered words, and the request that started the conductor itself.
+    const rows = this.all<InvitationRow>('SELECT i.* FROM invitations i JOIN conversations c ON c.id = i.conv AND c.conductor = i.run WHERE i.state = \'started\' AND (i.delivery IS NOT NULL OR i.role = \'conduct\') AND i.awaits IS NULL ORDER BY i.id')
+    const records = new Map<string, RunRecord | null>()
+    for (const i of rows) {
+      try {
+        if (!records.has(i.run!)) { const { workspace, ref } = parseRunName(i.run!); records.set(i.run!, (await readRun(await this.exec.workspace(workspace), ref)).record as RunRecord | null) }
+        const rec = records.get(i.run!)
+        if (!rec?.standing || rec.control.attempt) continue
+        const got = rec.history.find(h => h.receipt === this.receipt(i) || h.receipt === `request:${this.receipt(i)}`)
+        if (!got) continue
+        // A turn that took it: an attempt that began after it arrived and ended.
+        const turn = rec.history.find(h => h.op === 'attempt.begin' && h.seq > got.seq && rec.history.some(x => x.op === 'attempt.end' && x.seq > h.seq && (x as { attempt?: string }).attempt === (h as { attempt?: string }).attempt))
+        if (!turn) continue
+        this.tx(() => {
+          this.db.prepare('UPDATE invitations SET state = \'unanswered\', updated = ? WHERE id = ? AND state = \'started\'').run(now(), i.id)
+          this.event(i.conv, i.id, 'unanswered', { run: i.run, note: `${i.run}'s turn (attempt ${(turn as { attempt?: string }).attempt}) ended without a reply to it; the conductor continues the conversation` })
+        })
+        notes.push(`conversation ${i.conv} request ${i.id}: unanswered (${i.run}'s turn ended without a reply)`)
+      } catch { /* read again next time */ }
+    }
     return notes
   }
 
@@ -1055,7 +1231,7 @@ export class ConversationService {
       id: a.id, run: a.run, node: a.node, attempt: a.attempt, kind: a.kind, state: a.state, text: a.text, sources: JSON.parse(a.sources) as number[],
       message: a.message, question: a.question, awaits: a.awaits, invitations: this.all<{ id: number }>('SELECT id FROM invitations WHERE activity = ? ORDER BY id', a.id).map(r => r.id),
       decision: a.decision ? JSON.parse(a.decision) as ActivityView['decision'] : null, obligations: a.obligations ? JSON.parse(a.obligations) as Obligation[] : null,
-      outcome: a.outcome, created: a.created, updated: a.updated,
+      outcome: a.outcome, created: a.created, updated: a.updated, topic: a.topic ?? null,
     }
   }
   // Every change of an activity, the conductor or the requester is an event
@@ -1065,13 +1241,13 @@ export class ConversationService {
   }
   // Records an activity (inside a transaction); its token (run and node)
   // makes a retried command the same row.
-  private recordActivity(conv: string, o: { run: string; node: string; attempt: string | null; kind: Activity; state: ActivityState; text: string; sources: number[]; message?: number | null; question?: string | null; awaits?: string | null; decision?: unknown; obligations?: Obligation[] | null; outcome?: string | null; by: string; note: string }): { row: ActivityRow; duplicate: boolean } {
+  private recordActivity(conv: string, o: { run: string; node: string; attempt: string | null; kind: Activity; state: ActivityState; text: string; sources: number[]; message?: number | null; question?: string | null; awaits?: string | null; decision?: unknown; obligations?: Obligation[] | null; outcome?: string | null; topic?: string | null; by: string; note: string }): { row: ActivityRow; duplicate: boolean } {
     const token = `${o.run}:${o.node}`
     const seen = this.one<ActivityRow>('SELECT * FROM activities WHERE conv = ? AND token = ?', conv, token)
     if (seen) return { row: seen, duplicate: true }
     const at = now()
-    const id = Number(this.db.prepare('INSERT INTO activities (conv, run, node, attempt, kind, state, text, sources, message, question, awaits, decision, obligations, outcome, token, created, updated) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
-      .run(conv, o.run, o.node, o.attempt, o.kind, o.state, o.text, JSON.stringify(o.sources), o.message ?? null, o.question ?? null, o.awaits ?? null, o.decision === undefined ? null : JSON.stringify(o.decision), o.obligations ? JSON.stringify(o.obligations) : null, o.outcome ?? null, token, at, at).lastInsertRowid)
+    const id = Number(this.db.prepare('INSERT INTO activities (conv, run, node, attempt, kind, state, text, sources, message, question, awaits, decision, obligations, outcome, token, created, updated, topic) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
+      .run(conv, o.run, o.node, o.attempt, o.kind, o.state, o.text, JSON.stringify(o.sources), o.message ?? null, o.question ?? null, o.awaits ?? null, o.decision === undefined ? null : JSON.stringify(o.decision), o.obligations ? JSON.stringify(o.obligations) : null, o.outcome ?? null, token, at, at, o.topic?.trim() || null).lastInsertRowid)
     const row = this.activityRow(id)!
     this.activityEvent(conv, id, 'activity', row.state, o.by, o.note, this.activityView(row))
     this.touch(conv)
@@ -1131,7 +1307,7 @@ export class ConversationService {
       await this.startNode(o.run, o.node, t.node.state, { by: o.author, attempt: o.attempt, receipt: `discussion:${conv}:activity:${row.id}` })
       await this.finishNode(o.run, o.node, `announced #${said.message.id}${obligations ? `; conclusion with ${obligations.length} outstanding: ${obligations.map(b => `${b.ref} (${b.owes}; owner ${b.owner}; to ${b.receiver})`).join('; ') || 'none'}` : ''}`, { by: o.author, attempt: o.attempt, receipt: `discussion:${conv}:activity:${row.id}` })
     }
-    const closed = o.close ? this.close(conv, { by: o.author }) : null
+    const closed = o.close ? await this.close(conv, { by: o.author }) : null
     return { message: said.message, duplicate: said.duplicate, activity: this.activityView(this.activityRow(row.id)!), closed }
   }
 
@@ -1202,7 +1378,9 @@ export class ConversationService {
   // comes next and why — with the messages it rests on. Its node completes
   // with the decision; `next` (a chain of activities after this node) or a
   // whole definition records the run revision in the same operation.
-  async ponder(conv: string, o: { run: string; attempt: string | null; author: string; node: string; decision: string; sources: number[]; next?: { activity: string; node: string; name?: string; description?: string }[]; definition?: string }) {
+  // `topic` (p18): a short label for the stretch of the conversation this
+  // decision opens or continues — for readers' navigation, never a new run.
+  async ponder(conv: string, o: { run: string; attempt: string | null; author: string; node: string; decision: string; sources: number[]; next?: { activity: string; node: string; name?: string; description?: string }[]; definition?: string; topic?: string }) {
     const t = await this.activityNode(conv, o.run, o.node, 'ponder')
     if (!o.decision.trim()) throw new RequestError(400, 'say what you decided and why (--decision)')
     const sources = this.validRe(conv, o.sources)
@@ -1244,7 +1422,8 @@ export class ConversationService {
       await this.startNode(o.run, o.node, t.node.state, { by: o.author, attempt: o.attempt, receipt })
       await this.finishNode(o.run, o.node, o.decision.trim(), { by: o.author, attempt: o.attempt, receipt })
     }
-    const { row } = this.tx(() => this.recordActivity(conv, { run: o.run, node: o.node, attempt: o.attempt, kind: 'ponder', state: 'completed', text: o.decision.trim(), sources, decision: { next: next.map(x => ({ activity: x.activity, node: x.node })), revision }, outcome: revision ? `revision ${revision}` : 'no graph change', by: o.author, note: next.length ? `next: ${next.map(x => `${x.activity}:${x.node}`).join(' → ')}` : revision ? `revision ${revision}` : 'decided; no graph change' }))
+    if (o.topic !== undefined && (o.topic.includes('\n') || o.topic.trim().length > 80)) throw new RequestError(400, 'a topic is one line of at most 80 characters')
+    const { row } = this.tx(() => this.recordActivity(conv, { run: o.run, node: o.node, attempt: o.attempt, kind: 'ponder', state: 'completed', text: o.decision.trim(), sources, decision: { next: next.map(x => ({ activity: x.activity, node: x.node })), revision }, outcome: revision ? `revision ${revision}` : 'no graph change', topic: o.topic, by: o.author, note: next.length ? `next: ${next.map(x => `${x.activity}:${x.node}`).join(' → ')}` : revision ? `revision ${revision}` : 'decided; no graph change' }))
     // The conductor's revision is recorded as its progression, with this
     // activity (argue p4 ex3); a failure here leaves it to the reconcile's repair.
     if (revision) await new ConversationWorkflows(this).deriveRun(conv, o.run).catch(() => undefined)
@@ -1323,11 +1502,14 @@ export class ConversationService {
       return runState.get(run) ?? null
     }
     const ended = (r: RunRecord | null) => !!r && ['completed', 'cancelled'].includes(situation(r))
+    // p18: a standing conductor receives its outcomes itself, also at rest.
     const receiver = async (run: string | null) => {
       if (closed) return 'recorded only: the conversation is closed (reopen to continue)'
       if (!run) return 'nobody awaits it: recorded in the discussion'
+      const r = await rec(run)
+      if (r?.standing && !r.cancelled) return run
       if (run === o.except) return `a new ${this.cfg().facilitator.workspace} turn (${run} will have completed)`
-      return ended(await rec(run)) ? `a new ${this.cfg().facilitator.workspace} turn (${run} has ended)` : run
+      return ended(r) ? `the conversation's conductor (${run} has ended)` : run
     }
     const out: Obligation[] = []
     for (const i of this.invitations(conv).filter(x => OPEN_STATES.includes(x.state))) {
@@ -1347,10 +1529,12 @@ export class ConversationService {
     const runs = new Set<string>()
     for (const i of this.invitations(conv)) if (i.run) runs.add(i.run)
     for (const l of this.cs.links(conv)) runs.add(l.run)
+    if (c.conductor) runs.add(c.conductor)
     for (const run of runs) {
       if (run === o.except) continue
       const r = await rec(run)
-      if (!r || ended(r)) continue
+      // p18: a conductor at rest (or suspended) owes no work now.
+      if (!r || ended(r) || r.execution.state === 'idle') continue
       if (!out.some(x => x.owner === run)) out.push({ kind: 'run', ref: run, owes: `its work (${situation(r)})`, owner: run, receiver: closed ? 'recorded only: the conversation is closed (reopen to continue)' : 'its own contributions here', since: r.created, situation: situation(r) })
       for (const d of Object.values(r.delegations ?? {}).filter(isOpenDelegation)) {
         const child = d.child ? `${d.child.workspace}/${d.child.workflow}/${d.child.run}` : `${d.target.project ?? ''}/${d.target.workflow} (not created yet)`
@@ -1443,21 +1627,31 @@ export class ConversationService {
   // Ends automatic dispatch: requests not started are withdrawn, started
   // ones finish and are recorded, nothing downstream is cancelled, and no
   // conductor is continued while closed (its continuation is held).
-  close(conv: string, o: { by: string }): { conversation: ConversationRow; withdrawn: number[] } {
+  // p18: the conductor stands closed — finalized if it rests, still waiting
+  // on what it asked otherwise; no child is cancelled, no review approved.
+  async close(conv: string, o: { by: string }): Promise<{ conversation: ConversationRow; withdrawn: number[]; standing?: string | null }> {
     this.need(conv)
-    return this.tx(() => {
+    const r = this.tx(() => {
+      const was = this.cs.conversation(conv)!.state
       this.db.prepare('UPDATE conversations SET state = \'closed\', updated = ? WHERE id = ?').run(now(), conv)
+      if (was !== 'closed') this.activityEvent(conv, null, 'room', 'closed', o.by, `${o.by} closed the conversation`, { by: o.by })
       const pending = this.all<InvitationRow>('SELECT * FROM invitations WHERE conv = ? AND state IN (\'pending\', \'failed\')', conv)
       for (const i of pending) this.withdrawRow(i, `the conversation was closed by ${o.by}`)
       return { conversation: this.cs.conversation(conv)!, withdrawn: pending.map(i => i.id) }
     })
+    return { ...r, standing: await this.syncStanding(conv).catch(e => `not recorded yet (${(e as Error).message}); reconcile records it`) }
   }
   // The conversation continues; nothing withdrawn, completed or held is
-  // replayed (held continuations wait for resume).
-  reopen(conv: string, o: { by: string }): ConversationRow {
+  // replayed (held continuations wait for resume). p18: the same conductor
+  // stands again, what waited for it held.
+  async reopen(conv: string, o: { by: string }): Promise<ConversationRow> {
     this.need(conv)
-    void o
-    this.db.prepare('UPDATE conversations SET state = \'open\', updated = ? WHERE id = ?').run(now(), conv)
+    this.tx(() => {
+      if (this.cs.conversation(conv)!.state === 'open') return
+      this.db.prepare('UPDATE conversations SET state = \'open\', updated = ? WHERE id = ?').run(now(), conv)
+      this.activityEvent(conv, null, 'room', 'reopened', o.by, `${o.by} reopened the conversation`, { by: o.by })
+    })
+    await this.syncStanding(conv).catch(() => null)
     return this.cs.conversation(conv)!
   }
 

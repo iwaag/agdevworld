@@ -28,7 +28,7 @@ import {
   type ChildRef, type Delegation, type ManifestFile, type ResultManifest, type TransportRef,
 } from '../shared/delegation.ts'
 import { normalizeRepoPath } from '../shared/model.ts'
-import { graphOfState, hostOf, questionState, replay, runKey, type BecauseRef, type DocumentEvidence, type RunRecord, type RunRef } from '../shared/run.ts'
+import { graphOfState, hostOf, questionState, replay, runKey, standingHold, type BecauseRef, type DocumentEvidence, type RunRecord, type RunRef } from '../shared/run.ts'
 import { assessResult, assessmentReminders, type Assessment, type ChildEvidence } from '../shared/assessment.ts'
 import { latestResult, openRevision as openRevisionOf } from '../shared/delegation.ts'
 import { assertWorkspaceAllowed, loadBoundary } from './boundary.ts'
@@ -348,9 +348,12 @@ export class DelegateStore {
     const space = await runSpace(ws, ref)
     const r = (await readRun(space, ref)).record
     if (!r || hostOf(r.executor) !== exec.executor || r.cancelled || r.control.hold || r.control.stop || r.control.attempt) return null
+    // p18: a standing conductor's closed room continues nothing; a fact it
+    // held at a transition waits for the person's resume.
+    if (standingHold(r)) return null
     for (const d of Object.values(r.delegations ?? {})) {
       if (!isOpenDelegation(d)) continue
-      const e = pendingEvents(d)[0]
+      const e = pendingEvents(d).find(x => !r.standing?.held.includes(`${d.id}#${x.n}`))
       if (e) return exec.enqueue(ws.shared.reg.id, ref, 'resume', `delegation:${ws.shared.reg.id}/${runKey(ref)}/${d.id}/${e.n}`, `resume: delegation ${d.id} relayed ${e.type} #${e.n} from ${d.target.project}/${d.target.workflow}`)
     }
     return null

@@ -59,3 +59,10 @@ test('ages read in seconds first', () => {
   assert.equal(since('2026-10-13T08:02:00Z', now), '3 min ago')
   assert.equal(since('2026-10-13T06:05:00Z', now), '2 h ago')
 })
+
+test('a standing conductor at rest is idle, not waiting for a person (workflow_editor p18)', () => {
+  const rest = { ...base, exec: exec(), situation: 'awaiting-input', state: 'idle', active: [] } as ActivityInput
+  const l = describeActivity({ ...rest, status: { state: 'listening', label: 'Idle', reason: 'Ready for the conversation\'s next message', text: 'Idle · Ready for the conversation\'s next message', tone: 'muted' } } as ActivityInput)!
+  assert.deepEqual([l.tone, l.text], ['muted', 'Idle · Ready for the conversation\'s next message'])
+  assert.equal(describeActivity({ ...rest, situation: 'suspended', status: { state: 'suspended', label: 'Suspended', reason: 'x', text: 'Suspended · x', tone: 'muted' } } as ActivityInput)!.tone, 'muted')
+})

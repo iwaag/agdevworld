@@ -63,6 +63,8 @@ export function describeActivity(i: ActivityInput): ActivityLine | null {
   const queued = i.exec?.jobs.some(j => j.state === 'queued' || j.state === 'claimed')
   if (queued) return { tone: 'quiet', text: i.status?.state === 'queued' ? i.status.text : 'Queued', note: 'starts when the executor is free' }
   if (i.status && ['waiting', 'due', 'stalled'].includes(i.status.state)) return { tone: i.status.state === 'stalled' ? 'warn' : 'waiting', text: i.status.text }
+  // p18: a standing conductor at rest waits for no one in particular.
+  if (i.status && ['listening', 'suspended', 'closed'].includes(i.status.state)) return { tone: 'muted', text: i.status.text }
   if (i.situation.startsWith('awaiting-') || i.waitingFor) return { tone: 'waiting', text: i.waitingFor ? `Waiting for ${i.waitingFor}` : 'Waiting for a person' }
   if (i.failed.length) return { tone: 'warn', text: `${i.failed[0]} failed` }
   if (!i.exec) return { tone: 'muted', text: 'Checking the executor' }

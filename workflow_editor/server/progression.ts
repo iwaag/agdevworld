@@ -24,7 +24,7 @@ export interface ProgressRecipient {
   status: RunStatus | null // the recipient run as the room's view reads it
   purpose: string // what was asked
   request: number | null; delegation: string | null
-  corrections: number // results returned to the same child (fix6) and follow-ups (p17)
+  corrections: number // results returned to the same child: each revise (fix6), a review follow-up (p17) or the person's later words reopening an accepted result (p18) among them
   answeredBy: number | null
 }
 export interface ProgressNode {
@@ -80,7 +80,7 @@ export async function progression(ds: ConversationService, conv: string, o: { vi
     }
     for (const d of Object.values(record!.delegations ?? {}).filter(x => x.node === node)) {
       const child = d.child ? `${d.child.workspace}/${d.child.workflow}/${d.child.run}` : null
-      out.push({ kind: 'delegation', participant: d.target.project, workflow: d.target.workflow, run: child, url: child ? runOf(child)?.url ?? runUrl(o.viewBase, child) : null, state: delegationState(d), status: child ? runOf(child)?.status ?? null : null, purpose: short(descriptions[node] || names[node], 300) ?? '', request: null, delegation: d.id, corrections: (d.revisions ?? []).length + (d.reopened ?? []).length, answeredBy: null })
+      out.push({ kind: 'delegation', participant: d.target.project, workflow: d.target.workflow, run: child, url: child ? runOf(child)?.url ?? runUrl(o.viewBase, child) : null, state: delegationState(d), status: child ? runOf(child)?.status ?? null : null, purpose: short(descriptions[node] || names[node], 300) ?? '', request: null, delegation: d.id, corrections: (d.revisions ?? []).length, answeredBy: null })
     }
     return out
   }

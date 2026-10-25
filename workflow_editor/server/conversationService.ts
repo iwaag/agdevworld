@@ -1536,7 +1536,10 @@ export class ConversationService {
       const r = await rec(run)
       // p18: a conductor at rest (or suspended) owes no work now.
       if (!r || ended(r) || r.execution.state === 'idle') continue
-      if (!out.some(x => x.owner === run)) out.push({ kind: 'run', ref: run, owes: `its work (${situation(r)})`, owner: run, receiver: closed ? 'recorded only: the conversation is closed (reopen to continue)' : 'its own contributions here', since: r.created, situation: situation(r) })
+      // A standing conductor that only waits for its delegations owes no work
+      // of its own: the delegations listed below stand for it.
+      const onlyDelegations = !!r.standing && situation(r) === 'awaiting-delegation'
+      if (!onlyDelegations && !out.some(x => x.owner === run)) out.push({ kind: 'run', ref: run, owes: `its work (${situation(r)})`, owner: run, receiver: closed ? 'recorded only: the conversation is closed (reopen to continue)' : 'its own contributions here', since: r.created, situation: situation(r) })
       for (const d of Object.values(r.delegations ?? {}).filter(isOpenDelegation)) {
         const child = d.child ? `${d.child.workspace}/${d.child.workflow}/${d.child.run}` : `${d.target.project ?? ''}/${d.target.workflow} (not created yet)`
         out.push({ kind: 'delegation', ref: child, owes: `its result to ${run} (delegation ${d.id})`, owner: child, receiver: run, since: d.dispatched.at })

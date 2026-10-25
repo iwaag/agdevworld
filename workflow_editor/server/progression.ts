@@ -86,7 +86,11 @@ export async function progression(ds: ConversationService, conv: string, o: { vi
   }
   const messagesOf = (node: string): number[] => {
     const a = acts.filter(x => x.node === node)
-    return [...new Set([...o.messages.filter(m => m.run === current && m.node === node).map(m => m.id), ...a.map(x => x.message).filter((n): n is number => !!n), ...a.flatMap(x => JSON.parse(x.sources) as number[])])].sort((x, y) => x - y)
+    const own = [...o.messages.filter(m => m.run === current && m.node === node).map(m => m.id), ...a.map(x => x.message).filter((n): n is number => !!n), ...a.flatMap(x => JSON.parse(x.sources) as number[])]
+    // The conductor's reply spoken for no node belongs to the steps whose
+    // messages it answers (--re).
+    const replies = o.messages.filter(m => m.run === current && !m.node && (JSON.parse(m.re) as number[]).some(r => own.includes(r))).map(m => m.id)
+    return [...new Set([...own, ...replies])].sort((x, y) => x - y)
   }
   const stretches = stretchesOf(record).map(s => {
     const nodes: ProgressNode[] = s.nodes.map(id => {

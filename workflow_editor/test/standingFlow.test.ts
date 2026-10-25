@@ -172,6 +172,10 @@ test('several messages and replies keep one conductor run: attempts end, it rest
   assert.ok(Object.values(r.nodes).every(n => n.state === 'completed'))
   assert.equal(await runsOf(s, 'ponderer'), 2, 'one run per room')
   assert.deepEqual(s.ds.invitations('room-a').map(i => [i.role, i.state, i.run]), [['conduct', 'answered', C], ['deliver', 'answered', C], ['deliver', 'answered', C]])
+  // Each step lists the person's words and the conductor's reply to them (a reply spoken for no node, by --re).
+  const steps = (await s.ds.view('room-a')).progression.stretches.flatMap(x => x.nodes)
+  const reply = (re: number) => s.ds.messages('room-a').find(m => m.run === C && JSON.parse(m.re).includes(re))!.id
+  assert.deepEqual(steps.map(n => [n.id, n.messages]), [['ponder', [m1.id, reply(m1.id)]], ['ponder-w1', [m2.id, reply(m2.id)]], ['ponder-w2', [m3.id, reply(m3.id)]]])
   // The room reads as idle, not working.
   const st = await s.ds.status('room-a')
   assert.equal(st.working, 0, JSON.stringify(await s.ds.obligations('room-a')))

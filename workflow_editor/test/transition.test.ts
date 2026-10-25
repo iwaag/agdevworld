@@ -21,6 +21,7 @@ import { loadRegistry } from '../server/registry.ts'
 import { readRun, runOp } from '../server/runs.ts'
 import { runSpace } from '../server/runspace.ts'
 import { applyTransition, planTransition } from '../server/transition.ts'
+import { main } from '../cli/wfe.ts'
 import { Workspace } from '../server/workspace.ts'
 import type { RunRef } from '../shared/run.ts'
 
@@ -160,5 +161,20 @@ test('the transition plans and records one standing conductor per room, explicit
   assert.equal(p.invitations[0]!.state, 'failed')
   const v = await s.ds.view('old-open')
   assert.deepEqual(v.progression.earlier.map(e => e.run), [a[0], a[1]], 'the room lists its earlier runs as history')
+  s.cs.close(); s.x.close()
+})
+
+test('wfe conversation transition: --apply --author records through the command line (a boolean --apply must not take --author as its value)', async () => {
+  const s = await setup()
+  const a = await legacyRoom(s, 'old-cli', 2)
+  const log = console.log
+  console.log = () => {}
+  try {
+    assert.equal(await main(['conversation', 'transition', '--registry', s.registry, '--area', s.area]), 0)
+    assert.equal((await rec(s, a[1]!)).standing, undefined, 'without --apply: a dry run')
+    assert.equal(await main(['conversation', 'transition', '--apply', '--author', 'Omni Agent (p18 transition test)', '--registry', s.registry, '--area', s.area]), 0)
+  } finally { console.log = log }
+  const r = await rec(s, a[1]!)
+  assert.deepEqual([r.standing?.state, r.history.at(-1)!.by], ['open', 'Omni Agent (p18 transition test)'])
   s.cs.close(); s.x.close()
 })

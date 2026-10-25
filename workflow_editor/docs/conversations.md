@@ -444,6 +444,36 @@ A client shows the current stretch and what is open, folds completed
 stretches, and opens a recipient's run on demand. Topics only name
 stretches: they never make a run.
 
+## Transition (workflow_editor p18)
+
+Before p18 every response ended in a conductor run of its own. `wfe
+conversation transition [<id>…] [--apply --author <who>]`
+(`server/transition.ts`) gives each room that was ever led its one
+continuing run. Without `--apply` it only prints the plan. For each room
+it decides one of the following:
+
+| Decision | |
+| --- | --- |
+| `establish` | the latest readable, uncancelled conductor run (`conversations.conductor`, else the newest one a conductor request started) records `standing.establish`. A completed run comes to rest (`idle`), or stays finalized if the room is closed. A run still working keeps working. What it left unacknowledged is `held` |
+| `already-standing` | nothing to do |
+| `cancelled` | not revived: a replacement is `wfe conversation conductor <id> --replace` |
+| `unreadable` | a retired or missing project: the room keeps its history, and its next conductor request starts a new standing run |
+
+Each room gets one activity event (`conductor` / `transition`, with the
+plan in `data`). A run's establishment carries the receipt
+`transition:p18:<conv>` and `via: migration`, so applying twice records
+nothing more. Earlier conductor runs stay as they were, listed in
+`progression.earlier`. Another conductor run still open is named and left
+alone. Nothing is executed, woken, replayed or sent.
+
+Records that pre-p18 releases cannot read:
+
+- the store at version 13 (`activities.topic`);
+- in `run.json`: `run.create … standing`, `standing.*`, `run.adjust` with
+  a `wake` source, and the execution state `idle`.
+
+A rollback therefore restores code and data together.
+
 ## Annotations (argue p4)
 
 `wfe conversation annotate <id> --kind intervention|recovery|evaluation|

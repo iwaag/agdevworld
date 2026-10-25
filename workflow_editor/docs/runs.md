@@ -360,6 +360,50 @@ status even while a question is also pending: an answer alone never
 resumes a held run. `Watching` is not used: nothing in WFE watches on a
 run's behalf.
 
+### Standing runs (workflow_editor p18)
+
+A conversation's conductor is **one run for the conversation's life**, not
+one run per response. Its record carries `standing` (absent on every other
+run) and its graph grows turn by turn:
+
+```json
+"standing": { "role": "conductor", "conversation": "<id>", "state": "open",
+              "since": "…", "seq": 41, "by": "conversation", "reason": "…",
+              "replaces": "ponderer/conduct/run-012",
+              "wakes": [ { "n": 3, "node": "ponder-w3", "seq": 57, "at": "…", "by": "conversation", "events": ["i7"] } ],
+              "held": ["i2", "d1#4"] }
+```
+
+| Fact | Meaning |
+| --- | --- |
+| execution `idle` | every node is completed and the run stands `open` or `suspended`: it **rests** between turns. Not completed, not stopped: no attempt, no slot, no polling turn. `ended` stays null. Situation `awaiting-input` (open), `suspended` (facilitation ended), `due` (an event no attempt was briefed with); status *Idle · Ready for the conversation's next message* / *Suspended · Facilitation ended…* |
+| `state: open` | the room is open and facilitated: its events continue the run |
+| `state: suspended` | facilitation ended: nothing unsolicited comes to it, its own asks and delegations still do; at rest it wakes for nothing |
+| `state: closed` | the room is closed: nothing continues it (a child's fact waits, `due` is not reported). At rest its execution is finalized as `completed` (status *Closed · …*); with work still open (an ask, a review, a delegation) it keeps waiting and nothing is asserted done |
+| `held` | events a transition found waiting — unacknowledged instructions and delegation facts not taken up — when the run was established for an existing conversation or its room reopened. They continue nothing until `standing.release` (the person's resume); an attempt that runs for another reason may read them, and missing them is no interruption |
+| `wakes` | each continuation from rest |
+| instruction `seen` | the attempt that began after the instruction arrived; once it ended the instruction is consumed, acknowledged or not, and wakes nothing again |
+| `replaces` | a cancelled conductor this one explicitly replaces; cancellation is never undone |
+
+Operations (all by WFE's conversation service, as the room changes; none
+from an attempt):
+
+| Operation | From → to |
+| --- | --- |
+| `run.create` with `standing: {conversation, replaces?}` | a new conductor: `open` |
+| `standing.establish {conversation, state, reason, replaces?}` | a run that did not stand: the conductor a conversation created from its attempt, or the p18 transition of an existing room. A completed run becomes `idle` (open/suspended); everything unacknowledged is held |
+| `standing.facilitate` | `suspended` → `open` (facilitation starts again) |
+| `standing.suspend` | `open` → `suspended` (facilitation ended) |
+| `standing.close` | `open`/`suspended` → `closed` |
+| `standing.reopen {state}` | `closed` → `open`/`suspended`; what waits is held |
+| `standing.release {events?}` | clears held events (all, or those named) |
+| `run.adjust` with `source: {kind: wake, events}` | the **wake**: only while the run stands `open`, nothing is ready or running and no attempt is open, for events it waits to be continued for (instructions not acknowledged, seen or held). It adds exactly one node (a `ponder` WFE appends) and changes nothing else |
+
+Each is refused on a cancelled run, and from a state it does not apply to
+(`standing-state`); a wake that does not qualify is refused
+(`standing-busy`, `standing-event`, `standing-none`). An ordinary run's
+completion is unchanged: nothing here applies to a run without `standing`.
+
 ### Waiting
 
 A waiting node records `wait: {reason, holder, on}` where `on` is
@@ -473,6 +517,7 @@ Derived after every operation; the counts keep mixed facts visible.
 | `not-started` | every node is `pending` |
 | `in-progress` | some node is `running` or `waiting`, or some node is ready |
 | `stopped` | none of the above: nothing runs, waits or is ready, and some node is `failed` or `cancelled` |
+| `idle` | (p18) a standing run whose nodes are all completed, while its room is not closed (*Standing runs*) |
 
 A correction a delegating run returned the result with (fix6, below) keeps
 an otherwise `completed` execution `in-progress` until it is addressed; so

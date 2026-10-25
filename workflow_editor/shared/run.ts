@@ -32,7 +32,10 @@ export const RUN_ID = /^run-[a-z0-9][a-z0-9_.-]{0,59}$/
 export const QUESTION_ID = /^q[0-9]{1,6}$/
 export const NODE_STATES = ['pending', 'running', 'waiting', 'completed', 'failed', 'cancelled'] as const
 export type NodeState = typeof NODE_STATES[number]
-export const EXECUTION_STATES = ['not-started', 'in-progress', 'stopped', 'completed', 'cancelled'] as const
+// `idle` (workflow_editor p18): a standing run (a conversation's conductor)
+// whose recorded work is all done rests between turns: open for the
+// conversation's next event, never completed by its last node.
+export const EXECUTION_STATES = ['not-started', 'in-progress', 'stopped', 'completed', 'cancelled', 'idle'] as const
 export type ExecutionState = typeof EXECUTION_STATES[number]
 
 export class RunError extends Error {
@@ -205,6 +208,7 @@ export type AdjustSource =
   | { kind: 'person'; by?: string } // a person applies it themselves
   | { kind: 'request'; input: string; sha256: string } // the run's original braindump or entrusted request asks for this work (p7/ex1); by file and hash
   | { kind: 'record-done'; node: string } // fix5: the revision of run.record-done, adding work already done
+  | { kind: 'wake'; events: string[] } // p18: WFE continues a resting standing run for these events (a new ponder node)
 export interface AdjustDiff { added: string[]; removed: string[]; changed: string[]; edgesAdded: [string, string][]; edgesRemoved: [string, string][] }
 export interface Revision {
   revision: string // r2, r3, …
@@ -288,6 +292,10 @@ export interface Instruction {
   source?: SourceRef
   during: string[] // nodes recorded as running when it arrived
   ack: { by: string; at: string; attempt: string | null; response: string; note: string } | null
+  // p18, standing runs only: the attempt that began after it arrived and
+  // was therefore briefed with it. Once that attempt has ended the
+  // instruction is consumed, acknowledged or not: it wakes nothing again.
+  seen?: { attempt: string; seq: number }
 }
 export const INSTRUCTION_ID = /^i[0-9]{1,6}$/
 // A correction a delegating run returned this run's completed result with
@@ -460,6 +468,38 @@ export interface RunStorage {
   repositories: { path: string; base: string | null; branch: string | null; target: string | null }[]
 }
 
+// A standing run (workflow_editor p18, docs/runs.md *Standing runs*): a
+// conversation's conductor, one run for the conversation's life. Its graph
+// grows turn by turn; when its recorded work is all done it rests (`idle`)
+// instead of completing, holds no attempt and no slot, and the
+// conversation's next event continues it. `state` follows the room: `open`
+// (facilitated and open: its events continue it), `suspended`
+// (facilitation ended: nothing unsolicited comes to it, what it asked
+// still does), `closed` (the room is closed: nothing continues it; resting
+// then, its execution is finalized as `completed` until the room reopens).
+// The conversation records the same transitions on its side; this is the
+// run's own reading of them, kept with its history.
+export const STANDING_STATES = ['open', 'suspended', 'closed'] as const
+export type StandingState = typeof STANDING_STATES[number]
+// One continuation from rest: the ponder node WFE appended for the events
+// that arrived while nothing of the run was ready or running.
+export interface StandingWake { n: number; node: string; seq: number; at: string; by: string; events: string[] }
+export interface Standing {
+  role: 'conductor'
+  conversation: string
+  state: StandingState
+  since: string; seq: number; by: string; reason: string // the transition that set `state`
+  replaces?: string // <project>/<workflow>/<run>: the cancelled conductor this one explicitly replaces
+  wakes: StandingWake[]
+  // Events present at a transition (establishing an existing run, reopening
+  // a closed room): instruction ids (`i4`) and delegation facts (`d1#3`).
+  // They continue nothing until released (standing.release, the person's
+  // resume); a later attempt may read them, and the brief says they are held.
+  held: string[]
+}
+export const STANDING_EVENT = /^(i[0-9]{1,6}|d[0-9]{1,6}#[0-9]{1,6})$/
+const RUN_NAME = /^[a-z0-9][a-z0-9_.-]{0,63}\/[a-z0-9][a-z0-9_.-]{0,63}\/run-[a-z0-9][a-z0-9_.-]{0,59}$/
+
 export interface RunState {
   schema: string
   project: string
@@ -485,6 +525,7 @@ export interface RunState {
   delegations?: Record<string, Delegation> // present once the first dispatch is recorded (p10, docs/delegation.md)
   corrections?: Record<string, Correction> // present once a delegating run first returned this run's result (fix6)
   reviews?: Record<string, ReviewRound> // present once the first human review round is prepared (p17, docs/reviews.md)
+  standing?: Standing // present while the run is (or was) a conversation's standing conductor (p18)
   artifacts: Artifact[]
   decisions: Decision[]
   cancelled: { reason: string; at: string; by: string; because?: Because } | null
@@ -499,7 +540,7 @@ export interface RunState {
 // ---- operations (history entries) ---------------------------------------------
 
 export type OpInput =
-  | { op: 'run.create'; project: string; workflow: string; run: string; input: RunInput; executor: Executor; predecessor: RunRef | null; definition: DefinitionRef; context: RunState['context']; nodes: string[]; storage?: RunStorage }
+  | { op: 'run.create'; project: string; workflow: string; run: string; input: RunInput; executor: Executor; predecessor: RunRef | null; definition: DefinitionRef; context: RunState['context']; nodes: string[]; storage?: RunStorage; standing?: { conversation: string; replaces?: string } }
   | { op: 'node.start'; node: string; reason?: string }
   | { op: 'node.progress'; node: string; text: string }
   | { op: 'node.wait'; node: string; reason: string; holder: string; external: string; deadline?: string }
@@ -592,6 +633,15 @@ export type OpInput =
   | { op: 'review.decide'; review: string; outcome: string; feedback?: string; revisions?: string[]; synthetic?: boolean; because?: BecauseRef }
   | { op: 'review.cleanup'; review: string; results: Omit<CleanupResult, 'at'>[]; release?: boolean }
   | { op: 'review.take-up'; review: string; note: string; noChange?: boolean }
+  // p18 (docs/runs.md *Standing runs*): the conductor's lifecycle, recorded
+  // by WFE as the conversation's transitions happen. A wake is a run.adjust
+  // whose source is { kind: 'wake', events }.
+  | { op: 'standing.establish'; conversation: string; state: StandingState; reason: string; replaces?: string }
+  | { op: 'standing.facilitate'; reason: string }
+  | { op: 'standing.suspend'; reason: string }
+  | { op: 'standing.close'; reason: string }
+  | { op: 'standing.reopen'; reason: string; state: 'open' | 'suspended' }
+  | { op: 'standing.release'; reason: string; events?: string[] }
 
 // What a recorder gives: the answer (by question and index, default the
 // latest) or the instruction; the reducer resolves and records whose words.
@@ -606,6 +656,7 @@ export const OPS = ['run.create', 'node.start', 'node.progress', 'node.wait', 'n
   'delegation.dispatch', 'delegation.bind', 'delegation.event', 'delegation.take-up', 'delegation.answer', 'delegation.instruct', 'delegation.dispose',
   'delegation.revise', 'correction.receive', 'correction.take-up', 'presentation.retain',
   'review.prepare', 'review.start', 'review.serve', 'review.decide', 'review.cleanup', 'review.take-up',
+  'standing.establish', 'standing.facilitate', 'standing.suspend', 'standing.close', 'standing.reopen', 'standing.release',
   'input.select', 'input.observe', 'output.publish', 'output.observe'] as const
 // The executor's own reports. While an attempt is open they must carry its
 // id (`attempt`), so a stopped or superseded attempt cannot write into the
@@ -638,6 +689,7 @@ export interface Change {
   revision?: [string, string] // the revision in force before and after (p7)
   correction?: [string | null, string] // fix6: a correction received (null → id), or addressed (id → id)
   review?: [string, string | null, string] // p17: a review round: id, from, to (or the continuation addressed: state → state)
+  standing?: [StandingState | null, StandingState] // p18: the standing state before and after
 }
 export type HistoryEntry = OpInput & EntryMeta & { seq: number; at: string; by: string; via: string; change: Change }
 export interface RunRecord extends RunState { history: HistoryEntry[] }
@@ -696,7 +748,7 @@ export function readiness(nodes: Record<string, { state: NodeState }>, graph: Ru
 // An unaddressed correction (fix6) keeps a run whose nodes are all done
 // in progress: its agent owes the next move (adding the work), and the
 // result it returned is not announced again.
-export function summarize(s: Pick<RunState, 'nodes' | 'cancelled'> & Partial<Pick<RunState, 'corrections' | 'reviews'>>, graph: RunGraph): Execution {
+export function summarize(s: Pick<RunState, 'nodes' | 'cancelled'> & Partial<Pick<RunState, 'corrections' | 'reviews' | 'standing'>>, graph: RunGraph): Execution {
   const counts = Object.fromEntries(NODE_STATES.map(k => [k, 0])) as Record<NodeState, number>
   const ids = Object.keys(s.nodes).sort()
   for (const id of ids) counts[s.nodes[id].state]++
@@ -712,6 +764,8 @@ export function summarize(s: Pick<RunState, 'nodes' | 'cancelled'> & Partial<Pic
   else state = 'stopped'
   // p17: so do changes a person requested in a human review.
   if (state === 'completed' && (openCorrections(s).length || openContinuations(s).length)) state = 'in-progress'
+  // p18: a standing run rests instead of completing, until its room closes.
+  if (state === 'completed' && s.standing && s.standing.state !== 'closed') state = 'idle'
   return { state, counts, ready, blocked, active, waiting, failed }
 }
 
@@ -738,6 +792,34 @@ export function holderOf(s: RunState, node: string): string {
 export function questionState(q: Question): 'open' | 'answered' | 'taken-up' | 'withdrawn' {
   return q.withdrawn ? 'withdrawn' : q.takenUp ? 'taken-up' : q.answers.length ? 'answered' : 'open'
 }
+
+// ---- standing runs (p18) ----------------------------------------------------------
+
+// The events a resting standing run is continued for: instructions not
+// acknowledged, not yet briefed to an attempt and not held. Delegation
+// facts, answers, corrections and review decisions continue the node that
+// waits for them, as for any run; an instruction is the conversation's
+// word with nothing of the run ready to take it.
+export function standingEvents(s: Pick<RunState, 'standing' | 'instructions'>): string[] {
+  if (!s.standing) return []
+  return Object.values(s.instructions ?? {}).filter(i => !i.ack && !i.seen && !s.standing!.held.includes(i.id)).map(i => i.id)
+}
+// What a transition finds and holds: unconsumed instructions and relayed
+// delegation facts not taken up. Establishing an existing run (the p18
+// transition) holds every unacknowledged instruction: nothing it recorded
+// before it stood may start work by itself.
+function heldAt(s: RunState, establishing: boolean): string[] {
+  const ins = Object.values(s.instructions ?? {}).filter(i => !i.ack && (establishing || !i.seen)).map(i => i.id)
+  const facts = Object.values(s.delegations ?? {}).filter(isOpenDelegation).flatMap(d => pendingEvents(d).map(x => `${d.id}#${x.n}`))
+  return [...new Set([...(s.standing?.held ?? []), ...ins, ...facts])]
+}
+// Why a standing run's run-level events (a child's fact) are not continued
+// now, or null: the room is closed. Facilitation that ended stops nothing the
+// conductor asked for itself (docs/conversations.md *Facilitation*).
+export function standingHold(s: Pick<RunState, 'standing'>): string | null {
+  return s.standing?.state === 'closed' ? `the conversation ${s.standing.conversation} is closed; reopening and the person's resume continue it` : null
+}
+const heldFact = (s: Pick<RunState, 'standing'>, d: string, n: number) => !!s.standing?.held.includes(`${d}#${n}`)
 
 // ---- the reducer --------------------------------------------------------------
 
@@ -833,7 +915,12 @@ function adjustSource(v: unknown): AdjustSource {
     if (typeof o.sha256 !== 'string' || !/^[0-9a-f]{64}$/.test(o.sha256)) fail('shape', 'a request source names the input by hash (source.sha256)')
     return { kind: 'request', input: text(o.input, 'source.input'), sha256: o.sha256 as string }
   }
-  return fail('shape', 'source.kind is answer, instruction, agreement, person or request')
+  if (o.kind === 'wake') {
+    const events = Array.isArray(o.events) ? [...new Set(o.events)] : []
+    if (!events.length || !events.every(x => typeof x === 'string' && STANDING_EVENT.test(x))) fail('shape', 'a wake names the events it continues the run for (source.events)')
+    return { kind: 'wake', events: events as string[] }
+  }
+  return fail('shape', 'source.kind is answer, instruction, agreement, person, request or wake')
 }
 
 const isoOrNull = (v: unknown, what: string): string | null => {
@@ -1022,6 +1109,14 @@ export function apply(prev: RunState | null, e: HistoryEntry | (OpInput & EntryM
       definition: e.definition, context: e.context, ...(e.storage !== undefined ? { storage: validStorage(e.storage) } : {}),
       nodes, questions: {}, artifacts: [], decisions: [], cancelled: null, control: emptyControl(),
       execution: summarize({ nodes, cancelled: null }, graph), started: null, ended: null, updated: at, seq: e.seq,
+    }
+    // p18: created as a conversation's standing conductor.
+    if (e.standing !== undefined) {
+      const st = e.standing as unknown as Record<string, unknown>
+      if (!isObj(st) || typeof st.conversation !== 'string' || !/^[a-z0-9][a-z0-9-]{0,47}$/.test(st.conversation)) fail('shape', 'standing names its conversation')
+      if (st.replaces !== undefined && (typeof st.replaces !== 'string' || !RUN_NAME.test(st.replaces))) fail('shape', 'standing.replaces is <project>/<workflow>/<run>')
+      state.standing = { role: 'conductor', conversation: st.conversation as string, state: 'open', since: at, seq: e.seq, by, reason: 'created as the conversation\'s conductor', ...(st.replaces ? { replaces: st.replaces as string } : {}), wakes: [], held: [] }
+      return { state, change: { execution: [null, state.execution.state], standing: [null, 'open'] } }
     }
     return { state, change: { execution: [null, state.execution.state] } }
   }
@@ -1330,6 +1425,9 @@ export function apply(prev: RunState | null, e: HistoryEntry | (OpInput & EntryM
       ctl.attempts++
       // Work an approval made ready (p17 ex1) is this attempt's from now on.
       for (const r of Object.values(s.reviews ?? {})) if (r.release && !r.release.continued) r.release.continued = { attempt: e.attempt, seq: e.seq }
+      // p18: the conversation's words a standing run has received are this
+      // attempt's to read (held ones stay held).
+      if (s.standing) for (const i of Object.values(s.instructions ?? {})) if (!i.ack && !i.seen && !s.standing.held.includes(i.id)) i.seen = { attempt: e.attempt, seq: e.seq }
       // The attempt's session (agent_session p1): a resumed one must be the
       // run's current session; a new one supersedes it.
       const ss = ctl.attempt.settings?.session
@@ -1430,7 +1528,7 @@ export function apply(prev: RunState | null, e: HistoryEntry | (OpInput & EntryM
       // A child's fact that was waiting for this attempt and was not taken
       // up (p10): like work left ready. One that arrived during it queues
       // the next attempt instead.
-      const missedEvents = Object.values(s.delegations ?? {}).filter(isOpenDelegation).flatMap(d => pendingEvents(d).filter(x => x.during !== e.attempt).map(x => ({ delegation: d.id, n: x.n, type: x.type })))
+      const missedEvents = Object.values(s.delegations ?? {}).filter(isOpenDelegation).flatMap(d => pendingEvents(d).filter(x => x.during !== e.attempt && !heldFact(s, d.id, x.n)).map(x => ({ delegation: d.id, n: x.n, type: x.type })))
       const missed = missedEvents.map(x => `${x.delegation} ${x.type} #${x.n}`)
       if (outcome === 'exited' && !s.cancelled && missed.length) {
         outcome = 'interrupted'
@@ -1665,6 +1763,48 @@ export function apply(prev: RunState | null, e: HistoryEntry | (OpInput & EntryM
       which.last = { at, by, status: e.status, detail: optText(e.detail, 'detail') }
       break
     }
+    case 'standing.establish': {
+      live()
+      if (s.standing) fail('standing-exists', `the run already stands for ${s.standing.conversation} (${s.standing.state})`)
+      if (typeof e.conversation !== 'string' || !/^[a-z0-9][a-z0-9-]{0,47}$/.test(e.conversation)) fail('shape', 'standing.establish names its conversation')
+      if (!(STANDING_STATES as readonly string[]).includes(e.state)) fail('shape', `state is ${STANDING_STATES.join(', ')}`)
+      if (e.replaces !== undefined && (typeof e.replaces !== 'string' || !RUN_NAME.test(e.replaces))) fail('shape', 'replaces is <project>/<workflow>/<run>')
+      s.standing = { role: 'conductor', conversation: e.conversation, state: e.state, since: at, seq: e.seq, by, reason: text(e.reason, 'the reason'), ...(e.replaces ? { replaces: e.replaces } : {}), wakes: [], held: [] }
+      s.standing.held = heldAt(s, true)
+      change.standing = [null, e.state]
+      break
+    }
+    case 'standing.facilitate':
+    case 'standing.suspend':
+    case 'standing.close':
+    case 'standing.reopen': {
+      live()
+      const st = s.standing
+      if (!st) fail('standing-none', 'the run is not a standing conductor')
+      const from = st!.state
+      const allowed: Record<string, StandingState[]> = { 'standing.facilitate': ['suspended'], 'standing.suspend': ['open'], 'standing.close': ['open', 'suspended'], 'standing.reopen': ['closed'] }
+      if (!allowed[e.op].includes(from)) fail('standing-state', `the run stands ${from}; ${e.op} applies to ${allowed[e.op].join(' or ')}`)
+      const to: StandingState = e.op === 'standing.facilitate' ? 'open' : e.op === 'standing.suspend' ? 'suspended' : e.op === 'standing.close' ? 'closed'
+        : (e as { state?: string }).state === 'open' || (e as { state?: string }).state === 'suspended' ? (e as { state: StandingState }).state : fail('shape', 'a reopened conductor stands open or suspended')
+      // What waited while the room was closed continues nothing by itself
+      // (docs/conversations.md *Closing and reopening*).
+      if (e.op === 'standing.reopen') st!.held = heldAt(s, false)
+      Object.assign(st!, { state: to, since: at, seq: e.seq, by, reason: text(e.reason, 'the reason') })
+      change.standing = [from, to]
+      break
+    }
+    case 'standing.release': {
+      live()
+      const st = s.standing
+      if (!st) fail('standing-none', 'the run is not a standing conductor')
+      text(e.reason, 'the reason')
+      const which = e.events === undefined ? st!.held : [...new Set(e.events)]
+      if (!which.length) fail('standing-held', 'nothing is held')
+      for (const x of which) if (!st!.held.includes(x)) fail('standing-held', `${String(x)} is not held (${st!.held.join(', ') || 'nothing is'})`)
+      st!.held = st!.held.filter(x => !which.includes(x))
+      change.standing = [st!.state, st!.state]
+      break
+    }
     case 'run.adjust':
     case 'run.record-done': {
       // A change of the run's future work (p7, docs/adjustments.md), at a
@@ -1674,6 +1814,17 @@ export function apply(prev: RunState | null, e: HistoryEntry | (OpInput & EntryM
       live()
       const retro = e.op === 'run.record-done' ? e : null
       const source: AdjustSource = retro ? { kind: 'record-done', node: text(retro.node, 'the node') } : adjustSource((e as { source?: unknown }).source)
+      // p18: a wake continues a resting standing run, outside any attempt,
+      // only while nothing of it is ready or running, for events that are
+      // its to continue for.
+      if (source.kind === 'wake') {
+        const st = s.standing
+        if (!st) fail('standing-none', 'only a standing run is woken')
+        if (st!.state !== 'open') fail('standing-state', `the run stands ${st!.state} in ${st!.conversation}; only an open conductor is woken`)
+        if (s.execution.ready.length || s.execution.active.length) fail('standing-busy', `${[...s.execution.active, ...s.execution.ready].join(', ')} ${s.execution.active.length ? 'is running' : 'is ready'}; the run is continued there, not woken`)
+        const due = standingEvents(s)
+        for (const x of source.events) if (!due.includes(x)) fail('standing-event', `${x} is not an event this run waits to be continued for (${due.join(', ') || 'none'})`)
+      }
       if (ctl.attempt) {
         if (e.attempt !== ctl.attempt.id) fail(e.attempt ? 'attempt-stale' : 'attempt-open', `attempt ${ctl.attempt.id} is executing this run; only it adjusts the run meanwhile${source.kind === 'person' ? ' (a person\'s adjustment waits until no attempt is open)' : ''}`)
       } else if (e.attempt) fail('attempt-stale', `attempt ${e.attempt} is not open`)
@@ -1736,6 +1887,11 @@ export function apply(prev: RunState | null, e: HistoryEntry | (OpInput & EntryM
       s.nodes = Object.fromEntries(Object.keys(s.nodes).sort().map(k2 => [k2, s.nodes[k2]]))
       change.revision = [active, id]
       graph = { nodes, edges }
+      if (source.kind === 'wake') {
+        const added = diff.added.filter(n => !nodes[n]?.step)
+        if (added.length !== 1 || diff.removed.length || diff.changed.some(n => !nodes[n]?.step)) fail('adjust-graph', 'a wake adds one node and changes nothing else')
+        s.standing!.wakes.push({ n: s.standing!.wakes.length + 1, node: added[0], seq: e.seq, at, by, events: source.events })
+      }
       if (retro) {
         // The node as done: its outcome and evidence, who recorded it and
         // when, the work's own times only as reported. No start, no end.
@@ -2356,12 +2512,16 @@ export const runKey = (r: RunRef) => `${r.workflow}/${r.run}`
 // external result — and `due` when the record owes the executor the next
 // move (an answer or a child's fact not taken up, an instruction not read,
 // work left ready). Short words and reasons: shared/status.ts.
-export type Situation = 'executing' | 'stopping' | 'awaiting-person' | 'awaiting-review' | 'awaiting-delegation' | 'awaiting-external' | 'due' | 'stopped' | 'interrupted' | 'unknown' | 'completed' | 'cancelled' | 'not-started' | 'idle'
-export function situation(s: Pick<RunState, 'control' | 'execution' | 'cancelled'> & Partial<Pick<RunState, 'questions' | 'delegations' | 'instructions' | 'corrections' | 'reviews'>>): Situation {
+// p18: `awaiting-input` — a standing conductor resting, open for the
+// conversation's next event (no slot, no polling turn); `suspended` — one
+// resting while nothing unsolicited comes to it (facilitation ended).
+export type Situation = 'executing' | 'stopping' | 'awaiting-person' | 'awaiting-review' | 'awaiting-delegation' | 'awaiting-external' | 'due' | 'stopped' | 'interrupted' | 'unknown' | 'completed' | 'cancelled' | 'not-started' | 'idle' | 'awaiting-input' | 'suspended'
+export function situation(s: Pick<RunState, 'control' | 'execution' | 'cancelled'> & Partial<Pick<RunState, 'questions' | 'delegations' | 'instructions' | 'corrections' | 'reviews' | 'standing'>>): Situation {
   if (s.cancelled) return 'cancelled'
   if (s.control.attempt) return s.control.stop ? 'stopping' : 'executing'
   if (s.control.hold) return s.control.hold.kind
   if (s.execution.state === 'completed') return 'completed'
+  if (s.execution.state === 'idle') return dueReason(s) ? 'due' : s.standing?.state === 'open' ? 'awaiting-input' : 'suspended'
   if (s.execution.state === 'not-started') return 'not-started'
   if (dueReason(s)) return 'due'
   const on = s.execution.waiting.map(w => w.on)
@@ -2375,16 +2535,19 @@ export function situation(s: Pick<RunState, 'control' | 'execution' | 'cancelled
 
 // Why the executor owes the run its next move, from the record alone; null
 // when the next move is someone else's (or nobody's).
-export function dueReason(s: Pick<RunState, 'execution'> & Partial<Pick<RunState, 'questions' | 'delegations' | 'instructions' | 'corrections' | 'reviews'>>): string | null {
+export function dueReason(s: Pick<RunState, 'execution'> & Partial<Pick<RunState, 'questions' | 'delegations' | 'instructions' | 'corrections' | 'reviews' | 'standing'>>): string | null {
   for (const w of s.execution.waiting) {
     if ('question' in w.on) { const q = s.questions?.[w.on.question]; if (q && questionState(q) === 'answered') return `answer to ${q.id} arrived` }
   }
+  // p18: a fact a closed room holds is not the executor's move yet.
+  const closed = !!s.standing && !!standingHold(s)
   for (const d of Object.values(s.delegations ?? {})) {
-    const e = isOpenDelegation(d) ? pendingEvents(d)[0] : undefined
+    const e = isOpenDelegation(d) && !closed ? pendingEvents(d).find(x => !heldFact(s, d.id, x.n)) : undefined
     if (e) return `${e.type === 'completed' ? 'result' : e.type} from ${d.target.project} ${d.target.workflow} arrived`
   }
-  const ins = Object.values(s.instructions ?? {}).find(i => !i.ack)
-  if (ins && s.execution.state !== 'completed') return `instruction ${ins.id} arrived`
+  // A standing run owes only the words no attempt was briefed with (p18).
+  const ins = s.standing ? standingEvents({ standing: s.standing, instructions: s.instructions }).map(id => s.instructions![id])[0] : Object.values(s.instructions ?? {}).find(i => !i.ack)
+  if (ins && s.execution.state !== 'completed' && !(s.standing && s.standing.state !== 'open')) return `instruction ${ins.id} arrived`
   const cor = openCorrections(s)[0]
   if (cor) return `correction ${cor.id} from ${cor.from} arrived`
   const back = openContinuations(s)[0]

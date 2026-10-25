@@ -15,6 +15,7 @@ export type StatusState =
   | 'queued' | 'due' | 'stalled' // the next move is the executor's: queued, owed (host facts unknown), owed with nothing queued
   | 'paused' | 'interrupted' | 'unknown' // held
   | 'failed' | 'done' | 'cancelled' | 'not-started' | 'idle'
+  | 'listening' | 'suspended' | 'closed' // p18: a standing conductor at rest (open for input, facilitation ended, room closed)
 
 // One thing the run waits on. `kind` person: a question; delegation: a child
 // run's work; external: a named result. `text` is the short form, `detail`
@@ -146,10 +147,13 @@ export function waitsOf(s: Pick<RunState, 'nodes' | 'questions' | 'delegations' 
   return out
 }
 
+// What a standing run holds for an explicit resume (p18), as detail.
+const heldDetail = (s: Partial<Pick<RunState, 'standing'>>): string | null => s.standing?.held.length ? `Held until the person resumes: ${s.standing.held.join(', ')}` : null
+
 const status = (state: StatusState, label: string, reason: string, tone: RunStatus['tone'], waits: StatusWait[], extra: Partial<RunStatus> = {}): RunStatus =>
   ({ state, label, reason, text: `${label} · ${reason}`, tone, waits, detail: null, ...extra })
 
-export function runStatus(s: Pick<RunState, 'nodes' | 'questions' | 'delegations' | 'execution' | 'control' | 'cancelled' | 'decisions' | 'instructions' | 'input'> & Partial<Pick<RunState, 'reviews' | 'corrections'>>, facts: StatusFacts = {}): RunStatus {
+export function runStatus(s: Pick<RunState, 'nodes' | 'questions' | 'delegations' | 'execution' | 'control' | 'cancelled' | 'decisions' | 'instructions' | 'input'> & Partial<Pick<RunState, 'reviews' | 'corrections' | 'standing'>>, facts: StatusFacts = {}): RunStatus {
   const waits = waitsOf(s, facts)
   const names = facts.names ?? {}
   const ctl = s.control
@@ -165,6 +169,8 @@ export function runStatus(s: Pick<RunState, 'nodes' | 'questions' | 'delegations
     if (h.kind === 'stopped') return status('paused', 'Paused', short(h.reason) || `by ${h.by}`, 'held', waits, { hold, detail: `Stopped by ${h.by}: ${h.reason}` })
     return status(h.kind === 'unknown' ? 'unknown' : 'interrupted', h.kind === 'unknown' ? 'Unknown' : 'Interrupted', causeText(h.cause, h.reason, names), 'held', waits, { hold, detail: h.reason })
   }
+  // p18: a standing conductor whose room is closed is finalized until it reopens.
+  if (s.execution.state === 'completed' && s.standing?.state === 'closed') return status('closed', 'Closed', 'Conversation closed; reopening continues this run', 'done', [], { detail: heldDetail(s) })
   if (s.execution.state === 'completed') {
     const d = s.decisions.at(-1)?.decision
     return status('done', 'Done', d === 'accepted' ? 'Result accepted' : d === 'rejected' ? 'Result rejected' : 'Every step completed', 'done', [])
@@ -187,6 +193,10 @@ export function runStatus(s: Pick<RunState, 'nodes' | 'questions' | 'delegations
     const more = waits.length - 1
     return status('waiting', 'Waiting', `${first.text}${more ? ` (+${more} more)` : ''}`, 'waiting', waits, { detail: waits.map(w => w.detail).join('; ') })
   }
+  // p18: at rest between turns — not work, not stalled, no slot.
+  if (s.execution.state === 'idle') return s.standing?.state === 'open'
+    ? status('listening', 'Idle', 'Ready for the conversation\'s next message', 'muted', [], { detail: heldDetail(s) })
+    : status('suspended', 'Suspended', 'Facilitation ended; nothing unsolicited comes to it', 'muted', [], { detail: heldDetail(s) })
   if (s.execution.failed.length) return status('failed', 'Failed', `${list(s.execution.failed.map(id => names[id] ?? id))} failed`, 'warn', [], { detail: s.execution.failed.map(id => s.nodes[id]?.failure?.reason ?? '').filter(Boolean).join('; ') || null })
   return status('idle', 'Idle', 'Nothing to do now', 'muted', [])
 }

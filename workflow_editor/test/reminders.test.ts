@@ -452,3 +452,21 @@ test('record-done in a workflow with a final report: the report step follows the
   assert.equal(r.revision, 'r2')
   assert.equal((await rec(t)).nodes.page.state, 'completed')
 })
+
+test('completing a documentation step whose document does not exist is reminded; writing it clears the reminder (tidy p1)', async () => {
+  const s = await setup()
+  const FINAL = flow('', []).replace('documentation: {policy: manual}', 'documentation: {policy: custom, plan: false, reports: false, final: true}')
+  await writeFile(join(s.dir, 'devdocs', 'workflows', 'freework.yaml'), FINAL)
+  await gitOk(s.dir, ['commit', '-qam', 'final report'])
+  const run = await createRun(s.ws, { workflow: 'freework', executor: { host: 'autolab' }, by: 'Pat', via: 'cli', input: { kind: 'braindump', text: 'tidy it', author: 'Pat' }, area: s.area })
+  const t = { ...s, ref: run.ref, folder: join(s.dir, 'devdocs', 'runs', 'freework', run.ref.run) }
+  await op(t, { op: 'node.start', node: 'talk' })
+  await op(t, { op: 'node.complete', node: 'talk', outcome: 'tidied' }, { yes: true })
+  await op(t, { op: 'node.start', node: '_final-report' })
+  const r = await reminded(op(t, { op: 'node.complete', node: '_final-report', outcome: 'Report written' }, ADVISE))
+  assert.ok(r.codes.includes('document-missing'), r.codes.join())
+  assert.match(r.message, new RegExp(`_final-report completes with no devdocs/runs/freework/${run.ref.run}/report\\.md → write it first`))
+  await writeFile(join(t.folder, 'report.md'), '# Report\n')
+  await op(t, { op: 'node.complete', node: '_final-report', outcome: 'Report written' }, ADVISE)
+  assert.ok((await rec(t)).nodes['_final-report'].document)
+})

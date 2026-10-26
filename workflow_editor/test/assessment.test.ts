@@ -47,13 +47,13 @@ const node = (id: string, type: string, extra = '') => `  ${id}:\n    type: ${ty
 const flow = (nodes: string, edges: [string, string][]) => `${HEAD}${nodes}edges:\n${edges.map(([a, b]) => `  - {from: ${a}, to: ${b}}`).join('\n')}\n`
 
 let k = 0
-async function child() {
+async function child(workflow = flow('', []).replace('edges:\n\n', 'edges: []\n')) {
   const area = join(root, `area-${++k}`)
   const registry = join(area, 'registry.json')
   const dir = join(area, 'pj-kid')
   const r = await createProject({ dir, id: 'kid', name: 'Kid', intent: 'x', goals: [], devdocs: 'directory', sourcesDir: join(area, 'sources'), registryFile: registry })
   assert.ok(r.ok, r.message)
-  await writeFile(join(dir, 'devdocs', 'workflows', 'freework.yaml'), flow('', []).replace('edges:\n\n', 'edges: []\n'))
+  await writeFile(join(dir, 'devdocs', 'workflows', 'freework.yaml'), workflow)
   await mkdir(join(dir, 'out'), { recursive: true })
   await writeFile(join(dir, 'out', 'index.html'), '<p>result</p>')
   await writeFile(join(dir, 'review.md'), '# Review\n')
@@ -261,4 +261,24 @@ test('a pending human review of the child\'s presentation reads deferred; a deci
   assert.match(decided.checks.find(x => x.code === 'review-unrecorded')!.facts.join('\n'), /human review rv1: approved by Pat$/m)
   const synthetic = assessResult(withReviews(round('complete', { outcome: 'approved', by: 'check', at: '', via: 'cli', seq: 9, feedback: '', subjects: [], synthetic: true })), delegation(), event(), ev)
   assert.match(synthetic.checks.find(x => x.code === 'review-unrecorded')!.facts.join('\n'), /a synthetic check actor, not the person/)
+})
+
+test('a documentation step completed without its document is missing; with it, ok (tidy p1)', async () => {
+  const c = await child(flow('', []).replace('edges:\n\n', 'edges: []\n').replace('documentation: {policy: manual}', 'documentation: {policy: custom, plan: false, reports: false, final: true}'))
+  await c.op({ op: 'node.start', node: 'talk' })
+  await c.op({ op: 'node.complete', node: 'talk', outcome: 'tidied' })
+  await c.op({ op: 'node.start', node: '_final-report' })
+  await c.op({ op: 'node.complete', node: '_final-report', outcome: 'Report written' })
+  const a = await assess(c)
+  assert.equal(status(a, 'document-missing'), 'missing')
+  assert.match(a.checks.find(x => x.code === 'document-missing')!.summary, /_final-report with no devdocs\/runs\/freework\/run-001\/report\.md → wfe delegate revise/)
+  assert.ok(assessmentReminders([a]).some(r => r.code === 'delegated-document-missing'))
+  // A child that wrote it.
+  const d = await child(flow('', []).replace('edges:\n\n', 'edges: []\n').replace('documentation: {policy: manual}', 'documentation: {policy: custom, plan: false, reports: false, final: true}'))
+  await d.op({ op: 'node.start', node: 'talk' })
+  await d.op({ op: 'node.complete', node: 'talk', outcome: 'tidied' })
+  await d.op({ op: 'node.start', node: '_final-report' })
+  await writeFile(join(d.dir, 'devdocs', 'runs', 'freework', 'run-001', 'report.md'), '# Report\n')
+  await d.op({ op: 'node.complete', node: '_final-report', outcome: 'Report written' })
+  assert.equal(status(await assess(d), 'document-missing'), 'ok')
 })

@@ -23,7 +23,7 @@ import { isAwaitingPerson, reviewStateText, roundsUsing, type ReviewRound } from
 // The parent's human review rounds about a delegation's child (p17).
 const childRounds = (parent: RunRecord, d: Delegation): ReviewRound[] => Object.values(parent.reviews ?? {}).filter(v => v.subjects.some(x => x.delegation === d.id || (!!d.child && x.project === d.child.project && x.workflow === d.child.workflow && x.run === d.child.run)))
 
-export type CheckCode = 'presentation-missing' | 'review-unrecorded' | 'presentation-serving'
+export type CheckCode = 'presentation-missing' | 'review-unrecorded' | 'presentation-serving' | 'document-missing'
 // ok: the records show it; missing / serving: the records show the omission;
 // unknown: the evidence to tell is not in the records (never a proven violation);
 // deferred (p17): handed to the person's human review, which is pending.
@@ -208,6 +208,22 @@ export function assessResult(parent: RunRecord, d: Delegation, ev: DelegationEve
         'nothing here stops a page by itself; never stop the child\'s page from this run'],
     })
     else checks.push({ code: 'presentation-serving', status: 'ok', facts, expectations: expectationsOf(c.catalog, ['cleanup']), summary: '', repair: [] })
+  }
+
+  // ---- documentation steps completed without their document (tidy p1) ----
+  // protoprey freework/run-006 completed _final-report with no report.md and
+  // its requester was told the audit was there; ponderer judged it satisfied
+  // 14 s later. Only completed steps of the frozen record count.
+  if (fr && c.graph) {
+    const empty = Object.keys(fr.nodes).filter(id => c.graph!.nodes[id]?.step && fr.nodes[id].state === 'completed' && !fr.nodes[id].document)
+    if (empty.length) {
+      const docs = empty.map(id => `${runFolder(fr)}/${c.graph!.nodes[id].step!.output}`)
+      checks.push({
+        code: 'document-missing', status: 'missing', facts: [`${list(empty)} completed with no document (${few(docs)} not written)`], expectations: [],
+        summary: `${d.id} (${childRun}) completed ${list(empty)} with no ${few(docs, 2)} → wfe delegate revise ${run} ${d.id} --instruction "write ${docs[0]}"`,
+        repair: [inspect, revise(`write ${list(docs)} (the step completed without it)`)],
+      })
+    } else if (Object.keys(fr.nodes).some(id => c.graph!.nodes[id]?.step && fr.nodes[id].state === 'completed')) checks.push({ code: 'document-missing', status: 'ok', facts: ['every completed documentation step has its document'], expectations: [], summary: '', repair: [] })
   }
 
   // ---- what changed since, and integrations (historical facts) ----

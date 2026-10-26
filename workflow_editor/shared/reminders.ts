@@ -197,6 +197,21 @@ export function evaluate(b: Boundary, f: Facts): Reminder[] {
     if (how[a]) add({ code: 'discussion-activity', refs: [completing], text: `${completing} is the ${a} activity of a discussion. Completed this way, the discussion gets no record of it (no message, decision or outcomes).`, repair: [how[a]], summary: `${completing} is a ${a} activity completed outside the discussion → ${how[a].split(' (')[0]}` })
   }
 
+  // A documentation step completed while its document does not exist (tidy
+  // p1: protoprey freework/run-006's `sed … && cat > report.md` failed at the
+  // sed, _final-report completed "Report written", and the requester was told
+  // the audit was in report.md). The file layer records a document only when
+  // it is a file of the run folder, so its absence here is observed, not guessed.
+  if (completing && graph.nodes[completing]?.step && !after.nodes[completing]?.document) {
+    const path = `${runFolder(record)}/${graph.nodes[completing].step!.output}`
+    add({
+      code: 'document-missing', refs: [completing],
+      text: `${completing} is a documentation step and its document ${path} does not exist (or is empty), so completing it records no document.`,
+      repair: [`write ${path}, then complete ${completing} again`, `if the step is not wanted, remove it with wfe run adjust instead of completing it`],
+      summary: `${completing} completes with no ${path} → write it first`,
+    })
+  }
+
   // Open presentations and who stops them. One the person asked to keep
   // (presentation.retain, fix6) is not a forgotten cleanup.
   // Nor is one a human review round of this run serves (p17): its cleanup is WFE's.

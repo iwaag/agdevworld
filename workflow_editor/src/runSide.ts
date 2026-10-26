@@ -1103,7 +1103,7 @@ export class RunSide {
 
   private assessmentBlock(a: NonNullable<DelegationView['assessment']>): HTMLElement {
     const word: Record<string, string> = { ok: 'ok', missing: 'missing', serving: 'serving', unknown: 'unknown' }
-    const names: Record<string, string> = { 'presentation-missing': 'Presented', 'review-unrecorded': 'The person\'s review', 'presentation-serving': 'Pages still serving' }
+    const names: Record<string, string> = { 'presentation-missing': 'Presented', 'review-unrecorded': 'The person\'s review', 'presentation-serving': 'Pages still serving', 'document-missing': 'Documents written' }
     return h('div.small.dl-assessment', { dataset: { key: `as:${a.delegation}:${a.event}` } },
       h('div', h('span.muted', `Assessment of result #${a.event} (child seq ${a.childSeq}; facts as of seq ${a.position ?? '?'}):`)),
       h('ul', ...a.checks.map(c => h('li', { dataset: { check: c.code, status: c.status } }, chip(c.status === 'ok' ? 'completed' : c.status === 'unknown' ? 'waiting' : 'failed', word[c.status]), ' ', h('strong', names[c.code] ?? c.code), ': ', c.facts.join('; ') || '—',

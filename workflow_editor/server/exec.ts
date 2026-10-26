@@ -100,22 +100,32 @@ export interface AttemptExecution { agent: string; profile: string | null; backe
 // What the run's frozen documentation policy asks of this attempt (p5): the
 // policy, and for every documentation step that is running or ready, its
 // purpose, its document and the instructions frozen with the run.
+// The run folder is named as a path whatever the policy (tidy p1): "this
+// run's folder" in a request or a node's description was resolved against
+// the copy's root about half the time, so root report.md / answer.md /
+// review.md files read as the project's own and each run overwrote the last.
+export const runFolderLine = (r: RunRef) => `Run folder: ${runDir(r)}/ (relative to your working directory, the copy's root). The run's own documents go there: its plan and reports, an answer or review notes, whatever the request or a node asks to write "in the run folder". A file of the same name at the project root reads as the project's own and the next run overwrites it (tidy p1: protoprey freework/run-003 wrote its final report as the root report.md, replacing another run's; agops recover runs did the same eleven times).`
+
 export function documentationBrief(r: RunRecord): string[] {
   const eff = effectiveOf(r) // the revision in force (p7)
-  if (!eff) return ['Documentation policy: none (this run was created before p5); plans and reports are available as optional records.']
+  if (!eff) return ['Documentation policy: none (this run was created before p5); plans and reports are available as optional records.', runFolderLine(r)]
   const d = docStepsOf(eff)
-  if (!d.plan && !d.reports && !d.final) return [`Documentation policy: ${eff.policy}. No plan or report is a step of this run; documents can still be written when useful.`]
+  if (!d.plan && !d.reports && !d.final) return [`Documentation policy: ${eff.policy}. No plan or report is a step of this run; documents can still be written when useful.`, runFolderLine(r)]
   // The steps this run has (p8/ex2: any of the three), by name.
   const named = [d.plan && '_plan', d.reports && '_report.<node>', d.final && '_final-report'].filter(Boolean).join(', ')
   const absent = [!d.plan && 'no plan talk', !d.reports && 'no per-node reports', !d.final && 'no final report'].filter(Boolean)
-  const out = [`Documentation policy: ${eff.policy} (${describeSteps(d)}). ${named} ${named.includes(',') ? 'are steps' : 'is a step'} of this run, recorded like any node (start, complete); each is optional; available documents are recorded by hash.${absent.length ? ` This run has ${absent.join(' and ')}: documents can still be written when useful.` : ''}`]
-  const now = [...r.execution.active, ...r.execution.ready, ...r.execution.waiting.map(w => w.node)]
-  for (const id of [...new Set(now)]) {
+  const out = [`Documentation policy: ${eff.policy} (${describeSteps(d)}). ${named} ${named.includes(',') ? 'are steps' : 'is a step'} of this run, recorded like any node (start, complete); each is optional; available documents are recorded by hash.${absent.length ? ` This run has ${absent.join(' and ')}: documents can still be written when useful.` : ''}`, runFolderLine(r)]
+  const now = [...new Set([...r.execution.active, ...r.execution.ready, ...r.execution.waiting.map(w => w.node)])]
+  for (const id of now) {
     const step = eff.nodes[id]?.step
     if (!step) continue
     const state = r.nodes[id]?.state
     out.push('', `Step ${id} (${state === 'pending' ? 'ready' : state}): ${step.purpose}. Document: ${runDir(r)}/${step.output}.${step.for && r.nodes[step.for]?.state === 'completed' ? ` Node ${step.for} is completed; only its report remains.` : ''}`, step.instructions)
   }
+  // Steps not reached yet still have a place (tidy p1: run-003 was briefed
+  // while only its talk was ready, and never learned where report.md goes).
+  const later = Object.entries(eff.nodes).filter(([id, n]) => n.step && !now.includes(id) && r.nodes[id]?.state === 'pending')
+  if (later.length) out.push('', `Documents of steps not reached yet: ${later.map(([id, n]) => `${id} → ${runDir(r)}/${n.step!.output}`).join('; ')}.`)
   return out
 }
 // The person's additional instructions as the attempt starts (p6): the

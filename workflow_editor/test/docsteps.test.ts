@@ -276,6 +276,15 @@ test('the brief names the current step, its document and its instructions', asyn
   assert.match(text, /policy: default/)
   assert.match(text, /Step _plan \(ready\): Plan the work.*plan\.md/)
   assert.match(text, /Questions and plan agreement are optional/)
+  // tidy p1: the run folder and the documents of steps not reached yet are paths.
+  assert.match(text, /Run folder: devdocs\/runs\/docs\/run-001\/ \(relative to your working directory/)
+  assert.match(text, /Documents of steps not reached yet: .*_final-report → devdocs\/runs\/docs\/run-001\/report\.md/)
+})
+
+test('a manual run is told its run folder (tidy p1)', () => {
+  const M = graphOf(['a'], [], 'manual')
+  const r = create({ nodes: M.nodes, edges: M.edges }, M)
+  assert.match(documentationBrief(r).join('\n'), /Run folder: devdocs\/runs\/w\/run-001\/ .*A file of the same name at the project root/)
 })
 
 test('creation refuses an empty workflow; a delegate compiles under the default policy (p10)', async () => {

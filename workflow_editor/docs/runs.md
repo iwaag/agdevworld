@@ -298,6 +298,16 @@ and the run is `completed` only when `_final-report` is.
 | `_report.<node>` | `report-<node>.md` | its document is checked |
 | `_final-report` | `report.md` | its document is checked |
 
+- **Where documents go (tidy p1).** Every bootstrap brief names the run
+  folder as a path relative to the agent's working directory (the copy's
+  root), whatever the policy, and the document path of every documentation
+  step, including those not reached yet (`documentationBrief`). Before
+  this, a step's path was named only once it was ready, and a `manual` run
+  got none; "this run's folder" in a request or a node description was
+  resolved against the root about half the time (agops `recover`: 11 of 21
+  runs; protoprey `freework/run-003` replaced another run's root
+  `report.md`).
+
 - **Document evidence.** Before `complete` of a step (and `ask` from
   `_plan`), the file layer (`server/runs.ts` `checkDocument`) requires the
   document to be a regular, nonempty file of the run folder — not a

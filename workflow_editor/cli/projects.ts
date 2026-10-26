@@ -17,6 +17,13 @@ host; needs no project of its own and changes nothing in any workspace.
 <project> is a project id, or repo:<owner>/<name> (gitea:<id>) for a
 registered repository that no project needs to use.
 
+What it reads is tracked content. Ignored folders (deliveries a project
+installs, .local/), shares and what runs on a host are not in it, so a tree
+or a search that finds nothing is no evidence that a feature is absent: read
+the project's entry (README.md, its cooperation and adoption records) for
+what it has (tidy p1: ponderer reported protoprey's adopted wolf mouth scene
+as missing after searching its tree for GLB, Node3D and SepRig).
+
 list    every project (name, intent, devdocs mode, root repository and its
         current commit, submodules it uses, workspaces here) and every shared
         repository with the projects that use it

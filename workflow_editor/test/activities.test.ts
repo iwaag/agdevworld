@@ -430,14 +430,19 @@ test('wfe run complete on a conductor\'s ponder node warns and records nothing; 
   }
   const warned = await cli([])
   assert.equal(warned.code, 1)
-  assert.match(warned.err, /Not recorded — a reminder before completing after/)
+  assert.match(warned.err, /Not recorded — 2 reminders before completing after: conversation-unanswered, discussion-activity/)
   assert.match(warned.err, /discussion-activity: after is the ponder activity of a discussion.*\n.*wfe discussion ponder --node after/)
   assert.doesNotMatch(warned.err, /unrecorded-activity/, 'the run\'s own records are no sign of work')
   // p18: the standing conductor's last node leaves it at rest, not ended: it
   // speaks again at the room's next words, so discussion-open does not apply.
   assert.doesNotMatch(warned.err, /discussion-open/)
+  // tidy p1: but at rest it says nothing, so the person's unanswered words are named (ponderer/conduct/run-048).
+  assert.match(warned.err, new RegExp(`conversation-unanswered: This puts ponderer/conduct/run-001 to rest, and the person's latest words \\(fix3-b #${brief.id}\\) have no reply`))
   assert.match(warned.err, /--yes/)
   assert.equal((await rec(s, P)).nodes.after.state, 'running', 'nothing recorded')
+  const inv = s.ds.invitations('fix3-b').find(i => i.run === P)!
+  await s.ds.contribute('fix3-b', { text: 'Accepted; nothing owed.', author: 'ponderer-agent', run: P, invitation: inv.id, re: [brief.id], kind: 'result' } as never)
+  assert.doesNotMatch((await cli([])).err, /conversation-unanswered/, 'a result answers it')
   assert.equal((await cli(['--yes'])).code, 0)
   assert.equal((await rec(s, P)).execution.state, 'idle', 'accepted with --yes; the conductor rests')
   s.cs.close(); s.x.close()

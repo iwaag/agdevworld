@@ -778,6 +778,19 @@ export async function runCommand(c: RunCli): Promise<number> {
           && !ds.activityRows(id).some(a => a.run === run && a.kind === 'announce' && a.obligations !== null)))) ?? []
         if (open.length) extra.push({ code: 'discussion-open', refs: open, text: `This completes ${run}, which conducts ${open.join(', ')}: still open, and this run has announced no conclusion there. A completed run can no longer speak; the discussion would wait for the next message.`, repair: ['if it is finished, add a conclusion first: wfe discussion ponder --node <a ponder node> --next announce:<id>, then wfe discussion announce --node <id> --conclude [--close]', 'if it is not, say there what happens next'], summary: `${open.join(', ')} still open with no conclusion from this run → wfe discussion ponder … --next announce:<id>, then wfe discussion announce --conclude` })
       }
+      // tidy p1: a standing conductor that rests still owes the room an answer
+      // to the person's latest words. ponderer/conduct/run-048 posted only
+      // progress ("I will summarize when the results are back"), judged the
+      // three results, and its last completion put it to rest with nothing said.
+      if (record.standing && others.every(([, x]) => x.state === 'completed' || x.state === 'cancelled')) {
+        const run = `${ws.reg.id}/${runKey(r)}`
+        const owed = await quietly(() => discussions(async ds => ds.conductedBy(run).filter(id => ds.conversation(id)?.state === 'open').flatMap(id => {
+          const ms = ds.messages(id)
+          const last = ms.filter(m => m.role === 'person').at(-1)
+          return last && !ms.some(m => m.id > last.id && m.run === run && ['reply', 'result', 'synthesis', 'announce', 'question'].includes(m.kind)) ? [`${id} #${last.id}`] : []
+        }))) ?? []
+        if (owed.length) extra.push({ code: 'conversation-unanswered', refs: owed, text: `This puts ${run} to rest, and the person's latest words (${owed.join(', ')}) have no reply, result or announcement from it since (a progress note does not answer). At rest it says nothing until someone speaks again.`, repair: ['answer first: wfe conversation reply --re <msg> … --kind result (or announce from a node of its own), then complete', 'if the answer is still to come from work under way, say so and what it waits for'], summary: `${owed.join(', ')} unanswered as ${run} rests → wfe conversation reply --re … first` })
+      }
     }
     // fix6: the delegated results this run reports, when its completion completes the run.
     const assess = async (rec: RunRecord) => { const { delegatedReminders } = await import('../server/delegate.ts'); return delegatedReminders(c.exec().delegate, rec) }

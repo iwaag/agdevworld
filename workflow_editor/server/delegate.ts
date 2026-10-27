@@ -543,6 +543,8 @@ export async function assessDelegation(store: DelegateStore, parent: RunRecord, 
   let authored: ChildEvidence['authored']
   let catalog: ChildEvidence['catalog'] = { state: 'none' }
   let changed: ChildEvidence['changed'] = null
+  let removed: string[] = []
+  let reportRefs: ChildEvidence['reportRefs'] = null
   if (c) {
     const reading = await readRun(c.space, { workflow: c.record.workflow, run: c.record.run })
     frozen = recordAt(c.record, resultPosition(c.record, ev.child.seq))
@@ -555,9 +557,37 @@ export async function assessDelegation(store: DelegateStore, parent: RunRecord, 
     else {
       const by = pathsByNode(paths, frozen ?? c.record, (frozen ?? c.record).updated)
       changed = paths.map(p => ({ path: p.path, nodes: Object.entries(by).filter(([, ps]) => ps.includes(p.path)).map(([n]) => n) }))
+      removed = paths.filter(p => p.mtime === null).map(p => p.path)
     }
+    if (ev.manifest?.report) reportRefs = await namedPaths(c.space.root, c.record, ev.manifest.report.path).catch(() => null)
   }
-  return assessResult(parent, d, ev, { frozen, graph: frozen ? graphOfState(frozen) ?? null : null, authored, now: c?.record ?? null, catalog, changed, unavailable })
+  return assessResult(parent, d, ev, { frozen, graph: frozen ? graphOfState(frozen) ?? null : null, authored, now: c?.record ?? null, catalog, changed, removed, reportRefs, unavailable })
+}
+
+// The paths a report names in backticks, and those that are not in the
+// child's copy (tidy p2: "are the report and referenced artifacts present at
+// the stated locations?"). Only names with a folder in them count: a bare
+// filename, a URL, a share reference, a pattern or a placeholder is not a
+// path to look up. A name may be relative to the copy's root or to the run
+// folder. A missing one is something to look at, not a defect: it may have
+// moved on purpose or belong to another project.
+const NAMED = /`([^`\s]+)`/g
+export async function namedPaths(root: string, child: RunRecord, report: string): Promise<{ named: number; missing: string[] }> {
+  const text = await readFile(await inside(root, report), 'utf8')
+  const names = new Set<string>()
+  for (const m of text.matchAll(NAMED)) {
+    const p = m[1].replace(/[.,:;)]+$/, '').replace(/:\d+(-\d+)?$/, '')
+    if (!p.includes('/') || /^[a-z][a-z0-9+.-]*:/i.test(p) || /^(\/|~|\.\.)/.test(p) || /[*?<>{}$|=]/.test(p) || p.includes('…')) continue
+    names.add(p.replace(/\/$/, ''))
+    if (names.size >= 200) break
+  }
+  const missing: string[] = []
+  const folder = runDir({ workflow: child.workflow, run: child.run })
+  for (const p of names) {
+    const here = async (rel: string) => { try { return !!(await lstat(await inside(root, rel))) } catch { return false } }
+    if (!(await here(p)) && !(await here(join(folder, p)))) missing.push(p)
+  }
+  return { named: names.size, missing }
 }
 
 // The reminders of every delegated result a run reports (fix6): each

@@ -12,6 +12,7 @@ import { ConversationWorkflows, type WorkflowRef, type WorkflowRelation, type Wo
 import type { ExecStore } from '../server/exec.ts'
 import { adviseRun, readRun } from '../server/runs.ts'
 import { stretchesOf } from '../shared/stretches.ts'
+import { changedSince } from '../shared/resultEvidence.ts'
 import type { Boundary } from '../shared/reminders.ts'
 import type { RunRecord } from '../shared/run.ts'
 import { RequestError } from '../server/workspace.ts'
@@ -254,6 +255,17 @@ export async function conversationCommand(c: ConversationCli): Promise<number> {
     }
     const ids = (k: string) => c.opts(k).map(v => { const n = Number(v.replace(/^#/, '')); if (!Number.isInteger(n)) throw c.usage(`--${k} takes message ids`); return n })
     const isNum = (v: string | undefined) => v !== undefined && /^#?\d+$/.test(v)
+    // tidy p2: the run's delegations with a result fact (a result, its
+    // judgement, a correction) after its previous post in this conversation
+    // that spoke to the room; empty for a run with none.
+    const accountSince = async (conv: string, run: string, posted: number): Promise<string[]> => {
+      const { workspace, ref } = parseRunName(run)
+      const rec = (await readRun(await x.workspace(workspace), ref).catch(() => null))?.record
+      if (!rec || !Object.keys(rec.delegations ?? {}).length) return []
+      const prev = ds.messages(conv).filter(m => m.id < posted && m.run === run && ['reply', 'result', 'synthesis', 'announce'].includes(m.kind)).at(-1)
+      const moved = changedSince(rec, prev?.at ?? null)
+      return moved.length ? [`Commissioned results with news since ${prev ? `your previous post #${prev.id}` : 'this run began'} (an account of them names each, how you judged it and what stays unverified or open):`, ...moved.map(l => `  ${l}`)] : []
+    }
     const who = async () => { const o = await own(); return o?.agent ?? c.opt('author') ?? c.opt('by') }
     switch (sub) {
       case 'participants': {
@@ -403,7 +415,11 @@ export async function conversationCommand(c: ConversationCli): Promise<number> {
         const r = await ds.contribute(id, { text: said, author: o.agent, run: o.run, attempt: o.attempt, invitation: o.discussion === id ? o.invitation : null, re, kind: kind as MessageKind, key: c.opt('key'), node: complete ?? null, complete: !!complete })
         const wfs = new ConversationWorkflows(ds)
         const linked = c.opts('workflow').map(v => wfs.link(id, Number(v.replace(/^#/, '')), { message: r.message.id, by: o.agent, run: o.run }).ref.id)
-        c.out(`${r.duplicate ? 'Already posted (same key); nothing changed' : 'Posted'}: #${r.message.id} in ${id} as ${r.message.participant} for ${o.run}${r.invitation ? `; request ${r.invitation.id} ${r.invitation.state}${r.invitation.late ? ' (late)' : ''}` : ''}${r.completed ? `; node ${r.completed} completed` : ''}${linked.length ? `; workflow record${linked.length === 1 ? '' : 's'} ${linked.join(', ')} shown with it` : ''}.`, { ok: true, ...r, workflows: linked })
+        // tidy p2: the commissioned results that moved since this run's
+        // previous post, so a post that accounts for them can name each one
+        // (run-048's #453 reported d1 of the two corrections it promised).
+        const account = r.duplicate || r.message.kind === 'progress' ? [] : await accountSince(id, o.run, r.message.id)
+        c.out(`${r.duplicate ? 'Already posted (same key); nothing changed' : 'Posted'}: #${r.message.id} in ${id} as ${r.message.participant} for ${o.run}${r.invitation ? `; request ${r.invitation.id} ${r.invitation.state}${r.invitation.late ? ' (late)' : ''}` : ''}${r.completed ? `; node ${r.completed} completed` : ''}${linked.length ? `; workflow record${linked.length === 1 ? '' : 's'} ${linked.join(', ')} shown with it` : ''}.${account.length ? `\n${account.join('\n')}` : ''}`, { ok: true, ...r, workflows: linked, account })
         return 0
       }
       case 'workflow': return await workflowCommand(c, ds, args, { own, disc, ids, isNum, who })

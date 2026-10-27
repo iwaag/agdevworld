@@ -745,6 +745,12 @@ export async function runCommand(c: RunCli): Promise<number> {
     return report(target, res.record, `${res.duplicate ? 'Already recorded (same receipt); nothing changed.' : what(res.record)}${extra ? `\n${extra}` : ''}`)
   }
   const node = () => { if (!args[1]) throw c.usage('<node> is required'); return args[1] }
+  // tidy p2: the questions a result is assessed by, as it starts going back
+  // (server/resultEvidence.ts says where); advice only, never a refusal.
+  const reporting = (at: { started?: string; completed?: string }) => async (target: RunRef) => {
+    const { producerAdvice } = await import('../server/resultEvidence.ts')
+    return (await producerAdvice(ws, target, at).catch(() => null))?.join('\n') ?? null
+  }
   const rootOf = async (r: RunRef) => (await wrap(() => runSpace(ws, r))).root
   // This area's discussions, when they are configured (null otherwise).
   const discussions = async <T>(fn: (ds: import('../server/conversationService.ts').ConversationService) => Promise<T>): Promise<T | null> => {
@@ -760,37 +766,16 @@ export async function runCommand(c: RunCli): Promise<number> {
   // shared/reminders.ts): WFE evaluates them in the operation itself, under
   // the run's lock, and refuses with all of them at once; --yes continues
   // past them for this one command. What only this host can read is added
-  // here: a conductor run completing while its discussion is open with no
-  // conclusion (fix3: ponderer/conduct/run-020 completed its last ponder
-  // node with wfe run complete; its discussion stayed open, concluded by
-  // nobody).
+  // here: what a conductor's last completion leaves unsaid in its discussion
+  // (server/restChecks.ts: discussion-open, conversation-unanswered,
+  // results-unreported).
   const advice = async (r: RunRef, what: string, o: { completing?: string } = {}): Promise<Advice> => {
     if (c.flag('yes')) return { yes: true }
     const extra: Reminder[] = []
     if (o.completing) {
       const { record } = await wrap(() => usableRun(ws, r))
-      const others = Object.entries(record.nodes).filter(([id]) => id !== o.completing)
-      // p18: a standing conductor's last node leaves it at rest, not ended: it
-      // speaks again at the room's next words, so nothing is left unsaid.
-      if (!record.standing && others.every(([, x]) => x.state === 'completed' || x.state === 'cancelled')) {
-        const run = `${ws.reg.id}/${runKey(r)}`
-        const open = await quietly(() => discussions(async ds => ds.conductedBy(run).filter(id => ds.conversation(id)?.state === 'open'
-          && !ds.activityRows(id).some(a => a.run === run && a.kind === 'announce' && a.obligations !== null)))) ?? []
-        if (open.length) extra.push({ code: 'discussion-open', refs: open, text: `This completes ${run}, which conducts ${open.join(', ')}: still open, and this run has announced no conclusion there. A completed run can no longer speak; the discussion would wait for the next message.`, repair: ['if it is finished, add a conclusion first: wfe discussion ponder --node <a ponder node> --next announce:<id>, then wfe discussion announce --node <id> --conclude [--close]', 'if it is not, say there what happens next'], summary: `${open.join(', ')} still open with no conclusion from this run → wfe discussion ponder … --next announce:<id>, then wfe discussion announce --conclude` })
-      }
-      // tidy p1: a standing conductor that rests still owes the room an answer
-      // to the person's latest words. ponderer/conduct/run-048 posted only
-      // progress ("I will summarize when the results are back"), judged the
-      // three results, and its last completion put it to rest with nothing said.
-      if (record.standing && others.every(([, x]) => x.state === 'completed' || x.state === 'cancelled')) {
-        const run = `${ws.reg.id}/${runKey(r)}`
-        const owed = await quietly(() => discussions(async ds => ds.conductedBy(run).filter(id => ds.conversation(id)?.state === 'open').flatMap(id => {
-          const ms = ds.messages(id)
-          const last = ms.filter(m => m.role === 'person').at(-1)
-          return last && !ms.some(m => m.id > last.id && m.run === run && ['reply', 'result', 'synthesis', 'announce', 'question'].includes(m.kind)) ? [`${id} #${last.id}`] : []
-        }))) ?? []
-        if (owed.length) extra.push({ code: 'conversation-unanswered', refs: owed, text: `This puts ${run} to rest, and the person's latest words (${owed.join(', ')}) have no reply, result or announcement from it since (a progress note does not answer). At rest it says nothing until someone speaks again.`, repair: ['answer first: wfe conversation reply --re <msg> … --kind result (or announce from a node of its own), then complete', 'if the answer is still to come from work under way, say so and what it waits for'], summary: `${owed.join(', ')} unanswered as ${run} rests → wfe conversation reply --re … first` })
-      }
+      const { restReminders } = await import('../server/restChecks.ts')
+      extra.push(...await quietly(() => discussions(async ds => restReminders(ds, record, `${ws.reg.id}/${runKey(r)}`, o.completing!))) ?? [])
     }
     // fix6: the delegated results this run reports, when its completion completes the run.
     const assess = async (rec: RunRecord) => { const { delegatedReminders } = await import('../server/delegate.ts'); return delegatedReminders(c.exec().delegate, rec) }
@@ -855,7 +840,7 @@ export async function runCommand(c: RunCli): Promise<number> {
     case 'start': return op({ op: 'node.start', node: node(), reason: c.opt('reason') }, rec => {
       const from = rec.history.at(-1)!.change.nodes?.[args[1]]?.[0]
       return from === 'pending' ? `Recorded: ${args[1]} started.` : from === 'waiting' ? `Recorded: ${args[1]} resumed (it was waiting).` : `Recorded: ${args[1]} restarted after its failure.`
-    })
+    }, undefined, reporting({ started: node() }))
     case 'progress': return op({ op: 'node.progress', node: node(), text: need(c, 'note', 'the progress note') }, () => `Recorded a note on ${args[1]}.`)
     case 'wait': {
       // --deadline (observer p3): an ISO time, or a duration from now (90s, 20m, 2h).
@@ -872,7 +857,7 @@ export async function runCommand(c: RunCli): Promise<number> {
       return op({ op: 'node.complete', node: node(), outcome: need(c, 'outcome', 'what the node produced or concluded'), artifacts, ...(agreement ? { agreement } : {}) }, rec => {
         const d = rec.nodes[args[1]]?.document
         return `Recorded: ${args[1]} completed.${d ? ` Document ${d.path} checked (${d.bytes} bytes, sha256 ${d.sha256.slice(0, 12)}…).` : ''}${rec.nodes[args[1]]?.agreement ? ` Plan agreed in ${rec.nodes[args[1]].agreement!.question}.` : ''}`
-      }, r, undefined, await advice(r, `completing ${node()}`, { completing: node() }))
+      }, r, reporting({ completed: node() }), await advice(r, `completing ${node()}`, { completing: node() }))
     }
     case 'fail': return op({ op: 'node.fail', node: node(), reason: need(c, 'reason', 'what prevents continuation') }, () => `Recorded: ${args[1]} failed.`)
     case 'cancel':

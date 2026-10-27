@@ -137,6 +137,19 @@ export function createHandler(config: ServiceConfig) {
   const needExec = () => { if (!config.exec) throw new RequestError(503, 'execution is not configured on this service'); return config.exec }
   // fix6: the delegated results a run reports are assessed with its completion (reads children through this host's delegation store).
   const assessAdvice = () => config.exec ? { assess: async (rec: import('../shared/run.ts').RunRecord) => (await import('./delegate.ts')).delegatedReminders(config.exec!.delegate, rec) } : {}
+  // tidy p2: what a conductor's last completion leaves unsaid in its
+  // discussion, as the CLI adds it (server/restChecks.ts).
+  async function restAdvice(ws: Workspace, ref: RunRef, node: string): Promise<import('../shared/reminders.ts').Reminder[]> {
+    const cs = config.conversations
+    if (!cs) return []
+    const { ConversationService } = await import('./conversationService.ts')
+    const ds = new ConversationService(cs)
+    if ('disabled' in ds.config()) return []
+    const { readRun } = await import('./runs.ts')
+    const record = (await readRun(ws, ref)).record
+    if (!record) return []
+    return (await import('./restChecks.ts')).restReminders(ds, record, `${ws.reg.id}/${ref.workflow}/${ref.run}`, node)
+  }
   const str = (v: unknown, what: string) => { if (typeof v !== 'string' || !v.trim()) throw new RequestError(400, `${what} is required`); return v.trim() }
   const category = (v: unknown): RepoCategory => { if (!REPO_CATEGORIES.includes(v as RepoCategory)) throw new RequestError(400, `category must be one of ${REPO_CATEGORIES.join(', ')}`); return v as RepoCategory }
 
@@ -859,7 +872,7 @@ export function createHandler(config: ServiceConfig) {
           const expectSeq = typeof input.expectSeq === 'number' ? input.expectSeq : undefined
           // yes (fix5): continue past this operation's reminders, as --yes does.
           const { by: _b, expectSeq: _e, yes, ...op } = input
-          const advice = { yes: yes === true, ...assessAdvice() }
+          const advice = { yes: yes === true, ...assessAdvice(), ...(yes !== true && op.op === 'node.complete' && typeof op.node === 'string' ? { extra: await restAdvice(ws, ref, op.node) } : {}) }
           const x = config.exec
           const reason = typeof op.reason === 'string' ? op.reason : ''
           // The person's control operations go through execution management,

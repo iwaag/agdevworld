@@ -619,6 +619,7 @@ action, and cannot judge whether a result needs a presentation.
 | `unrecorded-activity` | a question, a report, the run-completing completion | the run's catalog has templates and no work node is visible, but something suggests work was done: changed paths in the run's copy outside its records, artifacts outside the run folder or published outputs, or a talk that has run for more than 10 minutes |
 | `discussion-activity`, `discussion-open` | completion | a discussion activity completed with a plain completion; a conductor run ending with its discussion open (fix3) |
 | `conversation-unanswered` | the completion that puts a standing conductor to rest | the person's latest words in a room it conducts have no reply, result, question or announcement from it since; a progress note does not count (tidy p1: ponderer/conduct/run-048 said it would summarize, judged three results and rested silent) |
+| `results-unreported` | the completion that puts a standing conductor to rest | a delegation's latest result, its judgement or a correction request is later than the run's last reply, result, synthesis, question or announcement in the room it conducts (tidy p2: ponderer/conduct/run-048's #452 promised to report two corrections; `conversation-unanswered` cannot see such a result once a reply exists). It clears when the run speaks in the room |
 | `delegated-presentation-missing`, `delegated-review-unrecorded`, `delegated-presentation-serving`, `delegated-document-missing` | a delegating run's outward report, the completion that completes it, `wfe delegate dispose --disposition satisfied` | the assessment of a delegated result found the child's omission or an unknown (fix6, [delegation.md](delegation.md) *Assessing a result*) |
 
 Roles come from structured records, never node names:
@@ -681,6 +682,11 @@ which shows the reminder and records only after the person explicitly
 continues. A retransmission with the same receipt records nothing and is
 not evaluated again.
 
+The checks of a conductor's rest (`discussion-open`,
+`conversation-unanswered`, `results-unreported`) read this area's
+discussions (`server/restChecks.ts`) and are added by the CLI and by HTTP
+`POST …/ops` alike (tidy p2; before it they were the CLI's only).
+
 A presentation the person asked to keep after the review (`wfe present
 keep`, `presentation.retain`, fix6: the note, whose words and who stops it
 later) is not a forgotten cleanup for `presentation-serving`.
@@ -689,6 +695,42 @@ Why: gimmickimg/freework/run-010 recorded its experiment as nodes and
 completed with no presentation. run-011 presented it only because a
 separate request asked. run-001…008 did their work inside the talk and
 left review pages serving (workflow_editor fix4 report).
+
+### Reporting a result (tidy p2)
+
+As a run's result starts going back, its agent is given the questions the
+result will be judged by. It is advice printed with an ordinary operation,
+once, never a refusal, and records nothing (`server/resultEvidence.ts`):
+
+- with `wfe run start` of the run's final-report step;
+- with the completion after which only reporting is left (documentation
+  steps, present, cleanup, review, the result confirmation), when no
+  final-report step is pending;
+- not for a standing conductor, and not when the completion completes the
+  run (nothing is left in which to act).
+
+It asks every run to say which files and records changed and at which
+commit, which checks actually ran and with what results, and what is
+unverified, deliberately unchanged or left open, and notes that the report
+and the paths it names are read where it says they are. Ordinary work is asked whether the
+project's entry, guide and setup or acquisition instructions still match
+the change, and to correct them in a node of the run (the catalog's `tidy`
+fits) rather than only in the report. A run with a `tidy` node is asked for
+that evidence instead of another pass. The questions that fit the run's
+changes follow (documentation, delivery, removals and moves, tests; chosen as
+in [delegation.md](delegation.md) *Assessing a result*), with what chose
+them. A delegated child's brief says that its result is assessed beside its
+files where its requester receives it.
+
+Documentation stays optional: nothing here makes a report mandatory. A
+documentation step that completes without its document still gets
+`document-missing`.
+
+Why: tidy p1. protoprey freework/run-006 completed `_final-report` "Report
+written" with no report. run-007 reported "7 tests pass" while its eighth
+test never ran. run-006 read `data/deliveries.json` without the status check
+and missed an adoption that pointed at agsfx's run copy. lowerpoly
+freework/run-004 put one host's addresses into its new README.
 
 ### Artifacts
 

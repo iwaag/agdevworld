@@ -76,7 +76,13 @@ records show as of that result beside what its frozen node catalog expects —
 whether what it produced was presented, whether the person's own answer
 about it is traceable (accepts: person), whether a page of it is still
 serving — and what is unknown. The same checks come back as reminders when
-you judge the result satisfied and when you report it.`,
+you judge the result satisfied and when you report it.
+It starts with the findings (or that there are none in what WFE checks),
+then the child's claim (outcome, report) beside its records (files changed
+and removed, outputs, report paths not in its copy), and ends with what WFE
+cannot judge, as questions that fit the child's work (tidy p2): read the
+files with wfe delegate file before judging. A corrected result says which
+correction it answers; an earlier judgement does not cover it.`,
   'take-up': `wfe delegate take-up <run> <d> <n>...
 
 Records that you read relayed facts n… of delegation <d> (wfe delegate show).
@@ -418,7 +424,7 @@ function nextAfterAssessment(rec: RunRecord, d: Delegation, a: Assessment): stri
   const open = a.checks.filter(c => c.status !== 'ok')
   return open.length
     ? `Next: inspect what the child left out, then return it to the same child (wfe delegate revise ${run} ${d.id} --instruction "…" --reason "…"), relay the person's actual answer, or judge it right as it is (dispose … --yes). Nothing here acts for the child.`
-    : `Next: judge it (wfe delegate dispose ${run} ${d.id} --disposition satisfied|rejected --note "…"), or return it for correction (wfe delegate revise).`
+    : `Next: compare the claim with the files (to judge, above), then judge it (wfe delegate dispose ${run} ${d.id} --disposition satisfied|rejected --note "what you checked"), or return it for correction (wfe delegate revise).`
 }
 
 // Where a parent's delegation files are (for messages and the browser).

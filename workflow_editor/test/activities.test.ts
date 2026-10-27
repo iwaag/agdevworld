@@ -440,6 +440,19 @@ test('wfe run complete on a conductor\'s ponder node warns and records nothing; 
   assert.match(warned.err, new RegExp(`conversation-unanswered: This puts ponderer/conduct/run-001 to rest, and the person's latest words \\(fix3-b #${brief.id}\\) have no reply`))
   assert.match(warned.err, /--yes/)
   assert.equal((await rec(s, P)).nodes.after.state, 'running', 'nothing recorded')
+  // tidy p2: the HTTP completion gets the same rest checks (server/restChecks.ts).
+  {
+    const { createHandler } = await import('../server/api.ts')
+    const { createServer } = await import('node:http')
+    const server = createServer(createHandler({ registryFile: join(s.area, 'registry.json'), allowedOrigins: [], exec: s.x, conversations: s.cs }))
+    await new Promise<void>(r => server.listen(0, '127.0.0.1', r))
+    const url = `http://127.0.0.1:${(server.address() as { port: number }).port}/api/workspaces/ponderer/runs/conduct/run-001/ops`
+    try {
+      const r = await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ op: 'node.complete', node: 'after', outcome: 'done', by: 'Pat' }) })
+      assert.equal(r.status, 409)
+      assert.match(((await r.json()) as { error: string }).error, /conversation-unanswered/)
+    } finally { server.close() }
+  }
   const inv = s.ds.invitations('fix3-b').find(i => i.run === P)!
   await s.ds.contribute('fix3-b', { text: 'Accepted; nothing owed.', author: 'ponderer-agent', run: P, invitation: inv.id, re: [brief.id], kind: 'result' } as never)
   assert.doesNotMatch((await cli([])).err, /conversation-unanswered/, 'a result answers it')

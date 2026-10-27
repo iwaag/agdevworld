@@ -322,6 +322,15 @@ default): members and history, facilitation, every message, the requests,
 questions waiting, held continuations and the archive. A reply is never
 attributed by recency: concurrent work is told apart by run and `re`.
 
+A post other than `progress` from a run with delegations is followed in the
+command's output (and `account` under `--json`) by the commissioned results
+with news since that run's previous reply, result, synthesis or
+announcement in the room: a result, its judgement or a correction request,
+each with where it stands (tidy p2: ponderer/conduct/run-048's #453 reported
+one of the two corrections it had promised in #452). It is information
+about the post just made. A run that rests with such news unreported gets
+`results-unreported` ([runs.md](runs.md) *Reminders*).
+
 What a message is to a run is the receiving agent's reading: `wfe
 conversation link <msg> --run … --as <relation> --note …`.
 

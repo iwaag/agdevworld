@@ -19,6 +19,7 @@ import type { Workflow } from './model.ts'
 import { isNotes, isViewable, roleOf, substantiveNodes, type Reminder } from './reminders.ts'
 import { isOpen, questionState, runFolder, runKey, type RunGraph, type RunRecord } from './run.ts'
 import { isAwaitingPerson, reviewStateText, roundsUsing, type ReviewRound } from './humanReview.ts'
+import { correctionLine, receiverQuestions, templatesOf, workContext } from './resultEvidence.ts'
 
 // The parent's human review rounds about a delegation's child (p17).
 const childRounds = (parent: RunRecord, d: Delegation): ReviewRound[] => Object.values(parent.reviews ?? {}).filter(v => v.subjects.some(x => x.delegation === d.id || (!!d.child && x.project === d.child.project && x.workflow === d.child.workflow && x.run === d.child.run)))
@@ -47,6 +48,8 @@ export interface ChildEvidence {
   now: RunRecord | null // the child as it is now
   catalog: RunCatalog // the snapshot the child was given
   changed: { path: string; nodes: string[] }[] | null // files the child's copy changed outside its records (observed now), with the nodes running when each was written; null: not readable
+  removed?: string[] // of those, the paths that are gone (tidy p2)
+  reportRefs?: { named: number; missing: string[] } | null // paths the result's report names, and those not in the child's copy (tidy p2)
   unavailable: string[] // what could not be read, said explicitly
 }
 
@@ -66,6 +69,12 @@ export interface Assessment {
   state: string // the delegation's disposition, or open
   latest: boolean // the delegation's latest result
   checks: AssessmentCheck[]
+  // tidy p2: the child's claim beside what its records hold, the correction
+  // this result answers, and what WFE cannot judge, as questions.
+  claim: string[]
+  evidence: string[]
+  correction: string | null
+  inspect: string[]
   current: string[] // what changed in the child since the result (now)
   integrations: string[] // the child's integrations: historical facts bound to their own revisions
   unavailable: string[]
@@ -234,12 +243,30 @@ export function assessResult(parent: RunRecord, d: Delegation, ev: DelegationEve
     for (const k of Object.values(c.now.corrections ?? {})) current.push(`correction ${k.id} (revision ${k.delegation.revision}) ${k.addressed ? `addressed (${k.addressed.how})` : 'not addressed yet'}`)
   }
   const integrations = (c.now ?? fr)?.integrations?.map(i => `integrated at ${i.at} from decision ${i.decision}: ${list(i.repositories.map(r => `${r.path} ${r.method}${r.result ? ` → ${r.result.slice(0, 10)}` : ''}`))}`) ?? []
+  // ---- the claim beside the evidence (tidy p2) ----
+  const m = ev.manifest
+  const claim: string[] = []
+  if (m?.outcome) claim.push(`outcome: "${m.outcome.replace(/\s+/g, ' ').slice(0, 300)}"`)
+  claim.push(m?.report ? `report: ${m.report.path} (${m.report.sha256.slice(0, 12)}, ${m.report.bytes} bytes${m.report.commit ? `, in ${m.report.commit.slice(0, 10)}` : ', not committed'})` : 'report: none recorded with the result')
+  const removed = c.removed ?? []
+  const changedPaths = (c.changed ?? []).map(p => p.path).filter(p => !removed.includes(p))
+  const outputs = Object.values((c.now ?? fr)?.outputs ?? {})
+  const evidence: string[] = []
+  if (c.changed === null) evidence.push('the child\'s copy could not be read: its changed files are unknown')
+  else evidence.push(changedPaths.length ? `changed outside its run folder (${changedPaths.length}): ${few(changedPaths, 6)}` : 'no file changed outside its run folder')
+  if (removed.length) evidence.push(`removed: ${few(removed, 4)}`)
+  if (m?.artifacts.length) evidence.push(`artifacts recorded: ${few(m.artifacts.map(a => a.path), 4)}`)
+  evidence.push(outputs.length ? `published outputs: ${list(outputs.map(o => `${o.id} "${o.title}" at ${o.ref} (${o.digest.slice(0, 19)}…, ${o.count} files)`))}` : 'published outputs: none')
+  if (c.reportRefs?.missing.length) evidence.push(`the report names ${c.reportRefs.missing.length} of ${c.reportRefs.named} paths that are not in the child's copy: ${few(c.reportRefs.missing, 4)} (moved on purpose, elsewhere, or missing: look)`)
+  const context = workContext({ templates: fr ? templatesOf(fr, c.authored) : [], changed: changedPaths, removed, outputs: outputs.map(o => o.id) })
+  const questions = receiverQuestions(context, `wfe delegate file ${run} ${d.id} <path>`, `wfe delegate revise ${run} ${d.id} --instruction "…" --reason "…"`)
+
   const latest = latestResult(d)
   return {
     delegation: d.id, uid: d.uid, event: ev.n, manifest: ev.manifest?.digest ?? null, child: child?.uid ?? null, childRun, childSeq: ev.child.seq,
     position: fr?.seq ?? null, definition: fr?.definition.active ?? null, catalog: c.catalog.state === 'supplied' ? c.catalog.sha256 : c.catalog.state,
     accepts: d.accepts, person: d.onBehalfOf, state: d.disposition?.kind ?? (d.closed ? 'closed' : 'open'), latest: latest?.n === ev.n,
-    checks, current, integrations, unavailable,
+    checks, claim, evidence, correction: correctionLine(d, ev), inspect: questions, current, integrations, unavailable,
   }
 }
 
@@ -264,9 +291,21 @@ export function assessmentReminders(as: Assessment[]): Reminder[] {
 // The assessment as text (wfe delegate show, take-up, the brief).
 export function assessmentLines(a: Assessment, indent = '  '): string[] {
   const mark: Record<CheckStatus, string> = { ok: 'ok', missing: 'MISSING', serving: 'SERVING', unknown: 'UNKNOWN', deferred: 'DEFERRED' }
+  // tidy p2: what needs acting on first, then the claim beside the evidence,
+  // then the checks that passed, then what only the reader can judge.
+  const open = a.checks.filter(c => c.status !== 'ok' && c.status !== 'deferred')
+  const rest = a.checks.filter(c => !open.includes(c))
+  const check = (c: AssessmentCheck) => [`${indent}  ${mark[c.status]} ${c.code}: ${c.facts.join('; ') || '—'}`, ...c.expectations.map(e => `${indent}      expects ${e}`), ...(c.status === 'ok' || c.status === 'deferred' ? [] : c.repair.map(r => `${indent}      · ${r}`))]
   return [
     `${indent}assessment of result event ${a.event}${a.manifest ? ` (manifest ${a.manifest.slice(7, 19)})` : ''}, child seq ${a.childSeq}${a.position ? ` (facts as of child seq ${a.position}, revision ${a.definition ?? 'r1'})` : ''}; catalog ${a.catalog ? a.catalog.slice(0, 12) : 'none'}; accepts: ${a.accepts}${a.person ? `, on behalf of ${a.person}` : ''}`,
-    ...a.checks.flatMap(c => [`${indent}  ${mark[c.status]} ${c.code}: ${c.facts.join('; ') || '—'}`, ...c.expectations.map(e => `${indent}      expects ${e}`), ...(c.status === 'ok' || c.status === 'deferred' ? [] : c.repair.map(r => `${indent}      · ${r}`))]),
+    open.length ? `${indent}  FINDINGS (${open.length}): ${open.map(c => `${mark[c.status]} ${c.code}`).join(', ')}, from the records; listed first below`
+      : `${indent}  findings: none in what WFE checks (presentation, the person's review, a serving page, documents); the content is not checked`,
+    ...(a.correction ? [`${indent}  ${a.correction}`] : []),
+    ...(a.claim ?? []).map(x => `${indent}  claim — ${x}`),
+    ...(a.evidence ?? []).map(x => `${indent}  records — ${x}`),
+    ...open.flatMap(check),
+    ...rest.flatMap(check),
+    ...(a.inspect ?? []).map((x, i) => `${indent}  ${i === 0 ? 'to judge: ' : '  · '}${x}`),
     ...a.integrations.map(i => `${indent}  ${i} (a historical fact; a corrected result is accepted and integrated anew)`),
     ...a.current.map(x => `${indent}  now: ${x}`),
     ...a.unavailable.map(x => `${indent}  unavailable: ${x}`),

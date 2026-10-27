@@ -15,7 +15,7 @@ import { gitOk } from '../server/git.ts'
 import { loadRegistry } from '../server/registry.ts'
 import { adjustRun, catalogOf, createRun, readRun, registerPresentation, runOp } from '../server/runs.ts'
 import { RequestError, Workspace } from '../server/workspace.ts'
-import { assessResult, assessmentReminders, type ChildEvidence } from '../shared/assessment.ts'
+import { assessResult, assessmentLines, assessmentReminders, type ChildEvidence } from '../shared/assessment.ts'
 import type { Delegation, DelegationEvent } from '../shared/delegation.ts'
 import { graphOfState, type OpInput, type RunRecord } from '../shared/run.ts'
 
@@ -281,4 +281,99 @@ test('a documentation step completed without its document is missing; with it, o
   await writeFile(join(d.dir, 'devdocs', 'runs', 'freework', 'run-001', 'report.md'), '# Report\n')
   await d.op({ op: 'node.complete', node: '_final-report', outcome: 'Report written' })
   assert.equal(status(await assess(d), 'document-missing'), 'ok')
+})
+
+// ---- tidy p2: the claim beside the evidence, and what WFE cannot judge ----
+
+test('the assessment puts findings first, the claim beside the records, and asks to inspect what fits the child\'s changes (tidy p2)', async () => {
+  const c = await child(flow('', []).replace('edges:\n\n', 'edges: []\n').replace('documentation: {policy: manual}', 'documentation: {policy: custom, plan: false, reports: false, final: true}'))
+  await c.op({ op: 'node.start', node: 'talk' })
+  await c.op({ op: 'node.complete', node: 'talk', outcome: 'tidied' })
+  await c.op({ op: 'node.start', node: '_final-report' })
+  await c.op({ op: 'node.complete', node: '_final-report', outcome: 'Report written' })
+  const ev = { ...event(), manifest: { ...event().manifest!, outcome: 'README rewritten; the audit record is in report.md' } }
+  const { record, bundle } = await c.read()
+  const authored = bundle.revisions?.at(-1)?.workflow ?? bundle.entries[record.definition.root]?.workflow
+  const a = assessResult(parent, delegation(), ev, { frozen: record, graph: graphOfState(record) ?? null, authored, now: record, catalog: catalogOf(record, bundle), changed: [{ path: 'README.md', nodes: ['talk'] }, { path: 'sheet-review.md', nodes: ['talk'] }], removed: ['sheet-review.md'], reportRefs: null, unavailable: [] })
+  const lines = assessmentLines(a)
+  const at = (re: RegExp) => lines.findIndex(l => re.test(l))
+  assert.match(lines[1], /FINDINGS \(1\): MISSING document-missing, from the records; listed first below/)
+  assert.ok(at(/MISSING document-missing/) < at(/ok presentation-missing/), 'the finding before the checks that passed')
+  assert.match(lines.join('\n'), /claim — outcome: "README rewritten; the audit record is in report\.md"/)
+  assert.match(lines.join('\n'), /claim — report: none recorded with the result/)
+  assert.match(lines.join('\n'), /records — changed outside its run folder \(1\): README\.md/)
+  assert.match(lines.join('\n'), /records — removed: sheet-review\.md/)
+  assert.match(lines.join('\n'), /records — published outputs: none/)
+  assert.match(lines.join('\n'), /to judge: WFE checked records, not content\. Compare the claim with the files before judging \(wfe delegate file use\/run-001 d1 <path>\)/)
+  assert.match(lines.join('\n'), /· Documentation: .*one machine's facts \(hosts, home paths, LAN addresses\) out of portable text/)
+  assert.match(lines.join('\n'), /· Removals and moves: /)
+  assert.doesNotMatch(lines.join('\n'), /Tests: |Delivery: /, 'only what fits the changes')
+  assert.match(lines.join('\n'), /a path chooses a question, it shows no defect/)
+
+  // A small unrelated change: no finding, the general questions only.
+  const plain = await child()
+  const pr = await plain.read()
+  const small = assessResult(parent, delegation(), event(), { frozen: pr.record, graph: graphOfState(pr.record) ?? null, authored: pr.bundle.entries[pr.record.definition.root]?.workflow, now: pr.record, catalog: catalogOf(pr.record, pr.bundle), changed: [{ path: 'src/main.py', nodes: [] }], unavailable: [] })
+  const sl = assessmentLines(small).join('\n')
+  assert.match(sl, /findings: none in what WFE checks .*; the content is not checked/)
+  assert.doesNotMatch(sl, /Documentation: |Tests: |Delivery: |Removals and moves: |chosen from/)
+  assert.match(sl, /What is missing goes back to the same child/)
+  assert.deepEqual(assessmentReminders([small]), [], 'the questions are advice: no reminder')
+})
+
+test('a corrected result says which correction it answers; the result that was returned does not (tidy p2)', async () => {
+  const c = await child()
+  const { record, bundle } = await c.read()
+  const rv = { n: 1, event: 1, manifest: null, childSeq: 9, instruction: 'Write the report in the run folder.', reason: 'report.md does not exist', from: 'Pat', by: 'par-agent', at: '2026-10-24T00:01:00.000Z', attempt: null, seq: 5 }
+  const d = delegation({ events: [event(1), { ...event(2), at: '2026-10-24T00:02:00.000Z' }], revisions: [rv] })
+  const ev = () => ({ frozen: record, graph: null, authored: undefined, now: record, catalog: catalogOf(record, bundle), changed: [], unavailable: [] }) as ChildEvidence
+  const second = assessResult(parent, d, d.events[1], ev())
+  assert.match(second.correction ?? '', /^This result follows correction request 1 \(it returned event 1\): "Write the report in the run folder\."\. Any check of event 1 does not cover it: check the correction itself\.$/)
+  assert.match(assessmentLines(second).join('\n'), /This result follows correction request 1/)
+  assert.equal(assessResult(parent, d, d.events[0], ev()).correction, null)
+})
+
+test('report paths: names with a folder are looked up in the child\'s copy and its run folder; URLs, shares, patterns and bare names are not (tidy p2)', async () => {
+  const c = await child()
+  const { record } = await c.read()
+  const { namedPaths } = await import('../server/delegate.ts')
+  await mkdir(join(c.dir, 'devdocs', 'runs', 'freework', 'run-001', 'notes'), { recursive: true })
+  await writeFile(join(c.dir, 'devdocs', 'runs', 'freework', 'run-001', 'notes', 'a.md'), 'a\n')
+  await writeFile(join(c.dir, 'devdocs', 'runs', 'freework', 'run-001', 'report.md'), [
+    'Moved `out/index.html` and wrote `notes/a.md`; see `docs/missing.md:12` and `tools/gone.py`.',
+    'Not paths: `report.md`, `https://x.invalid/a/b`, `shared://agshare/runs/x`, `src/*.ts`, `<run>/report.md`, `/abs/path`, `~/home/x`.',
+  ].join('\n'))
+  const r = await namedPaths(c.dir, record, 'devdocs/runs/freework/run-001/report.md')
+  assert.deepEqual(r, { named: 4, missing: ['docs/missing.md', 'tools/gone.py'] })
+})
+
+test('the producer is advised once, as only reporting is left, and not when the run completes or work remains (tidy p2)', async () => {
+  const { producerAdvice } = await import('../server/resultEvidence.ts')
+  const c = await child()
+  await c.op({ op: 'node.start', node: 'talk' })
+  await c.adjust(flow(node('build', 'do', tpl('work')) + node('more', 'do') + node('present', 'do', tpl('present')), [['talk', 'build'], ['build', 'more'], ['more', 'present']]))
+  await c.op({ op: 'node.complete', node: 'talk', outcome: 'ok' })
+  await c.op({ op: 'node.start', node: 'build' })
+  await c.op({ op: 'node.complete', node: 'build', outcome: 'built' })
+  assert.equal(await producerAdvice(c.ws, c.ref, { completed: 'build' }), null, 'work remains')
+  await c.op({ op: 'node.start', node: 'more' })
+  await c.op({ op: 'node.complete', node: 'more', outcome: 'done' })
+  const advice = (await producerAdvice(c.ws, c.ref, { completed: 'more' }))!.join('\n')
+  assert.match(advice, /^Before the result goes back \(advice; nothing is refused\): par-agent compares what you report with your files and records\./)
+  assert.match(advice, /Do the project's entry \(README\), guide and setup or acquisition instructions still match this change\?/)
+  assert.doesNotMatch(advice, /chosen from/, 'nothing chose a specific question')
+  await c.op({ op: 'node.start', node: 'present' })
+  assert.equal(await producerAdvice(c.ws, c.ref, { completed: 'present' }), null, 'a reporting node itself is not the boundary')
+  assert.equal(await producerAdvice(c.ws, c.ref, { started: 'present' }), null)
+
+  // With a final-report step: advised when it starts, not at the completion before it.
+  const f = await child(flow('', []).replace('edges:\n\n', 'edges: []\n').replace('documentation: {policy: manual}', 'documentation: {policy: custom, plan: false, reports: false, final: true}'))
+  await f.op({ op: 'node.start', node: 'talk' })
+  await f.op({ op: 'node.complete', node: 'talk', outcome: 'ok' })
+  assert.equal(await producerAdvice(f.ws, f.ref, { completed: 'talk' }), null)
+  await f.op({ op: 'node.start', node: '_final-report' })
+  assert.match((await producerAdvice(f.ws, f.ref, { started: '_final-report' }))!.join('\n'), /The report \(devdocs\/runs\/freework\/run-001\/report\.md\) and every path it names are read where you say they are\./)
+  await writeFile(join(f.dir, 'devdocs', 'runs', 'freework', 'run-001', 'report.md'), '# Report\n')
+  await f.op({ op: 'node.complete', node: '_final-report', outcome: 'Report written' })
+  assert.equal(await producerAdvice(f.ws, f.ref, { completed: '_final-report' }), null, 'a completed run is past it')
 })

@@ -351,6 +351,40 @@ act as the child or to record a review nobody gave. A stale result
 (`result-superseded`), a result returned for correction (`result-returned`)
 and attempt ownership stay errors that `--yes` does not pass.
 
+**The claim beside the evidence (tidy p2).** The checks above are facts of
+the records; whether the entry is right, the tests ran or a delivery is
+portable is not observable, and the assessment says so instead of judging
+it. Its lines, in order:
+
+- a findings headline: `FINDINGS (n)` with the checks that are not `ok`,
+  which are listed before the ones that passed; or `findings: none in what
+  WFE checks …; the content is not checked`;
+- for a result that answers a correction (a later event than a returned
+  one), which request it answers and that an earlier judgement or check
+  does not cover it;
+- `claim —`: the child's outcome and its report (path, hash, commit) as the
+  manifest has them;
+- `records —`: the files its copy changed outside its run folder, those
+  removed, the manifest's artifacts, its published outputs, and the paths
+  the report names in backticks (with a folder) that are not in its copy or
+  run folder — a thing to look at, not a defect;
+- the checks;
+- `to judge:` read the files (`wfe delegate file`) before judging, the
+  questions that fit the child's work, and the way back to the same child.
+
+The questions (`shared/resultEvidence.ts`) are chosen from the child's
+template provenance (a `tidy` node), the paths it changed (an entry or a
+guide, tests, delivery or adoption manifests, `.gitignore`), what it removed
+and its outputs: documentation, delivery, removals and moves, tests. A path
+chooses a question, never a finding; nothing chosen leaves the general
+questions alone. They add no reminder and no state: dispose, reports and
+`--yes` behave as above. The HTTP view's `assessment` carries the same
+fields (`claim`, `evidence`, `correction`, `inspect`).
+
+Why: in tidy p1's trial ponderer judged three results 12–23 s after taking
+them up, from the outcome line. It accepted a report that was never written
+and a README with one host's addresses, whose assessment was all `ok`.
+
 **At dispatch.** `wfe delegate request` prints, as information, who accepts
 the child's result, that the parent relays its questions and presentations
 to the person, and the target's node catalog expectations as they are now (a

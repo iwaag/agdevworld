@@ -55,7 +55,8 @@ test('the agent reopens its own satisfied judgement with its evidence: recorded 
   assert.deepEqual([d.disposition, d.reopened?.length, d.reopened?.[0]?.origin, d.reopened?.[0]?.because, d.reopened?.[0]?.disposition.kind], [null, 1, 'agent', undefined, 'satisfied'], 'reopened by its own finding; the acceptance kept')
   assert.match(d.reopened![0].evidence!, /ran 3, not 4/)
   const r = d.revisions![0]
-  assert.deepEqual([r.from, r.by, r.origin, r.because], ['par-agent', 'par-agent', 'agent', undefined])
+  assert.deepEqual([r.from, r.by, originOf(r, d).origin, r.because, r.evidence], ['par-agent', 'par-agent', 'agent', undefined, 'read test_icon.py: the test is still outside the class; python3 -m unittest ran 3, not 4'])
+  assert.equal('origin' in r, false, 'derived, not stored: records before p3 replay to the same state')
   assert.match(originText(r), /^par-agent's own finding \(checked: read test_icon\.py/)
   assert.ok(openRevision(d))
   await s.zulip.cycle()
@@ -87,7 +88,7 @@ test('a recorded attribution is corrected by an appended entry: the original fro
   await runOp(await runSpace(s.par, ref), ref, { op: 'instruction.receive', text: 'Go ahead and send it back.', from: 'Pat' } as never, { by: 'Pat', via: 'conversation' })
   await s.x.delegate.revise(s.par, ref, 'd1', { instruction: 'Fix the test.', reason: 'Claimed fix not present.', manifest, because: { kind: 'instruction', instruction: 'i1' } }, { by: 'par-agent', via: 'cli' })
   let r = (await rec(s.par, ref)).delegations!.d1.revisions![0]
-  assert.deepEqual([r.from, r.origin, originOf(r).origin], ['Pat', 'person', 'person'], 'as recorded: relayed words')
+  assert.deepEqual([r.from, 'origin' in r, originOf(r).origin], ['Pat', false, 'person'], 'as recorded: relayed words; nothing new stored')
   const before = (await rec(s.kid, kidRef)).seq
   await assert.rejects(runOp(await runSpace(s.par, ref), ref, { op: 'delegation.attribute', delegation: 'd1', revision: 1, origin: 'agent', from: 'par-agent', reason: '' } as never, { by: 'Omni', via: 'cli' }), /reason/)
   await runOp(await runSpace(s.par, ref), ref, { op: 'delegation.attribute', delegation: 'd1', revision: 1, origin: 'agent', from: 'par-agent', reason: 'i1 was a go-ahead; the defect was par-agent\'s own finding (its note at seq 12)' } as never, { by: 'Omni', via: 'cli' })

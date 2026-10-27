@@ -177,7 +177,7 @@ export function assessResult(parent: RunRecord, d: Delegation, ev: DelegationEve
       else facts.push(`${words}: the child's ${a.question} did not ask about its result, so this is not a review of it`)
     }
     for (const r of d.revisions ?? []) {
-      facts.push(`correction ${r.n} (of event ${r.event}) is ${originText(r)}: a correction is not a review of the result`)
+      facts.push(`correction ${r.n} (of event ${r.event}) is ${originText(r, d)}: a correction is not a review of the result`)
     }
     // A human review round of this run about the child (p17): decided, it is
     // the person's review (a synthetic actor is said so); pending, the review

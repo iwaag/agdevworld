@@ -2125,7 +2125,7 @@ export function apply(prev: RunState | null, e: HistoryEntry | (OpInput & EntryM
           if (d.closed) fail('delegation-closed', `delegation ${d.id} is closed: ${d.closed.reason}`)
           if (ownReopen && !evidence) fail('evidence', `reopening your own judgement of ${d.id} names what you checked that shows the defect (--evidence)`)
           if (ownReopen && d.disposition.event !== null && d.disposition.event !== latestResult(d)?.n) fail('result-superseded', `${d.id} was judged on event ${d.disposition.event}, and event ${latestResult(d)?.n} came since; judge the latest result`)
-          d.reopened = [...(d.reopened ?? []), { disposition: d.disposition, review: null, ...(said ? { because: said, origin: 'person' as const } : { origin: 'agent' as const, evidence }), at, by, seq: e.seq }]
+          d.reopened = [...(d.reopened ?? []), { disposition: d.disposition, review: null, ...(said ? { because: said } : { origin: 'agent' as const, evidence }), at, by, seq: e.seq }]
           d.disposition = null
           const dn = s.nodes[d.node]
           if (dn?.state === 'completed') { dn.ended = null; move(d.node, 'running') }
@@ -2148,9 +2148,11 @@ export function apply(prev: RunState | null, e: HistoryEntry | (OpInput & EntryM
       if (stop) fail('child-stopped', `the child ${stop.type === 'cancelled' ? 'was cancelled' : 'failed'} after this result (event ${stop.n}); a correction does not undo that`)
       const why = because(e.because)
       if (why && why.from === s.executor.name) fail('because', `the words named are ${s.executor.name}'s own; because names a person's answer or instruction`)
-      const follow = e.followUp !== undefined && e.followUp !== null ? String(e.followUp) : undefined
+      // Only what a p3 operation supplies is stored (evidence, a reopening's
+      // origin): a record written before p3 replays to the same state, and
+      // originOf derives the origin of every correction alike.
       const r: DelegationRevision = { n: (d.revisions?.length ?? 0) + 1, event: ev!.n, manifest: ev!.manifest?.digest ?? null, childSeq: ev!.child.seq, instruction: text(e.instruction, 'what the child is asked to add (the instruction)'), reason: text(e.reason, 'why the result is returned (the reason)'), from: why?.from ?? by, by, at, attempt: e.attempt ?? null, seq: e.seq, ...(why ? { because: why } : {}),
-        origin: follow ? 'review' : why ? 'person' : 'agent', ...(evidence ? { evidence } : {}), ...(follow ? { followUp: follow } : {}) }
+        ...(evidence ? { evidence } : {}) }
       d.revisions = [...(d.revisions ?? []), r]
       waitOnDelegation(d)
       break

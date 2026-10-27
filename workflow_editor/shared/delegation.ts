@@ -138,15 +138,18 @@ export const latestResult = (d: Pick<Delegation, 'events'>) => [...d.events].rev
 // Whose finding a correction is, as last attributed (tidy p3). A record
 // before p3 carries none: a follow-up is a review's, relayed words are the
 // person's, anything else the recording agent's.
-export function originOf(r: DelegationRevision): { origin: CorrectionOrigin; from: string; corrected: Attribution | null } {
+// A review's follow-up is known by the reopening recorded with the same
+// entry (`d`); without it, a correction relaying no words is the agent's.
+export function originOf(r: DelegationRevision, d?: Pick<Delegation, 'reopened'>): { origin: CorrectionOrigin; from: string; corrected: Attribution | null; review: string | null } {
   const a = r.attributed?.at(-1)
-  if (a) return { origin: a.origin, from: a.from, corrected: a }
-  return { origin: r.origin ?? (r.followUp ? 'review' : r.because ? 'person' : 'agent'), from: r.from, corrected: null }
+  const review = r.followUp ?? d?.reopened?.find(x => x.seq === r.seq && x.review)?.review ?? null
+  if (a) return { origin: a.origin, from: a.from, corrected: a, review }
+  return { origin: r.origin ?? (review ? 'review' : r.because ? 'person' : 'agent'), from: r.from, corrected: null, review }
 }
-export function originText(r: DelegationRevision): string {
-  const o = originOf(r)
+export function originText(r: DelegationRevision, d?: Pick<Delegation, 'reopened'>): string {
+  const o = originOf(r, d)
   const what = o.origin === 'agent' ? `${o.from}'s own finding${r.evidence ? ` (checked: ${r.evidence.replace(/\s+/g, ' ').slice(0, 160)})` : ''}`
-    : o.origin === 'review' ? `${o.from}'s requested changes in human review ${r.followUp ?? ''}`.trim()
+    : o.origin === 'review' ? `${o.from}'s requested changes in human review ${o.review ?? ''}`.trim()
       : `${o.from}'s words, relayed by ${r.by}`
   return o.corrected ? `${what}; attributed so by ${o.corrected.by} at ${o.corrected.at} (${o.corrected.reason.replace(/\s+/g, ' ').slice(0, 160)}), recorded at first as from ${r.from}` : what
 }

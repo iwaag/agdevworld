@@ -67,7 +67,10 @@ const ASK: Record<WorkKind, { producer: string; receiver: string }> = {
   },
   tests: {
     producer: 'Tests: did the new and changed tests actually run (listed by the runner, not only present in the source), and do the counts you report include them?',
-    receiver: 'Tests: did the named checks run, including the new tests? Do the counts support the report?',
+    // tidy p2 trial C: ponderer judged run-006's correction "consistent with
+    // reported 4 tests … Tests not re-run" from the report's own output; the
+    // test it claimed to have moved was still outside the class.
+    receiver: 'Tests: the output in the report is the child\'s claim. Run the named command on its files where you can (or read the tests: is each one collected?), and say in your note whether the counts are your own or unverified.',
   },
 }
 

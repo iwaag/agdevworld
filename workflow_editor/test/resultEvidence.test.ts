@@ -42,6 +42,8 @@ test('producer: ordinary work is asked whether the entry still matches; a tidy r
 
 test('receiver: the general questions always; a kind\'s question only when chosen', () => {
   const q = receiverQuestions(workContext({ templates: [], changed: [], removed: [], outputs: [] }), 'READ', 'REVISE')
+  const t = receiverQuestions(workContext({ templates: [], changed: ['tests/test_x.py'], removed: [], outputs: [] }), 'READ', 'REVISE').join('\n')
+  assert.match(t, /Tests: the output in the report is the child's claim\. Run the named command on its files where you can .*say in your note whether the counts are your own or unverified\./, 'trial C: a count is not checked by reading the report')
   assert.deepEqual(q, ['WFE checked records, not content. Compare the claim with the files before judging (READ).', 'What is missing goes back to the same child (REVISE), and its next result is checked again; otherwise your judgement\'s note says what you checked.'])
 })
 

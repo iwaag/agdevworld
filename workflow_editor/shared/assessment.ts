@@ -14,7 +14,7 @@
 // clear discussion-activity reminders; the hypothesis is that the evidence
 // and a concrete correction at its receiving point improve delivery.
 import type { RunCatalog } from './catalog.ts'
-import { latestResult, type Delegation, type DelegationEvent } from './delegation.ts'
+import { latestResult, originText, type Delegation, type DelegationEvent, type ResultManifest } from './delegation.ts'
 import type { Workflow } from './model.ts'
 import { isNotes, isViewable, roleOf, substantiveNodes, type Reminder } from './reminders.ts'
 import { isOpen, questionState, runFolder, runKey, type RunGraph, type RunRecord } from './run.ts'
@@ -164,8 +164,21 @@ export function assessResult(parent: RunRecord, d: Delegation, ev: DelegationEve
       const confirms = Object.values(fr.questions).filter(q => c.graph?.nodes[q.node ?? '']?.confirms === 'result')
       if (confirms.length) facts.push(`confirmation asked: ${list(confirms.map(q => `${q.id} to ${q.to} (${questionState(q)}${q.answers.length ? `, answered by ${list(q.answers.map(a => a.from))}` : ''})`))}`)
     }
-    for (const a of d.answers) if (a.because && personal(a.from)) found.push(`answer ${a.n} to the child's ${a.question} relays ${a.from}'s words (${a.because.kind === 'answer' ? `answer to ${a.because.question}` : `instruction ${a.because.instruction}`})`)
-    for (const r of d.revisions ?? []) if (r.because && personal(r.from)) found.push(`correction ${r.n} relays ${r.from}'s words`)
+    // tidy p3: relayed words are the person's review of this result only
+    // when they answer the child's own question about it (a result
+    // confirmation, or one asked with its presentation). An instruction, a
+    // go-ahead or a correction — the person's or the agent's — is not: p2's
+    // conduct/run-051 d1 read ok from a correction that relayed a go-ahead.
+    for (const a of d.answers) {
+      if (!a.because || !personal(a.from)) continue
+      const q = d.events.find(x => x.n === a.event)
+      const words = `answer ${a.n} to the child's ${a.question} relays ${a.from}'s words (${a.because.kind === 'answer' ? `answer to ${a.because.question}` : `instruction ${a.because.instruction}`})`
+      if (q?.confirms || q?.presentation) found.push(words)
+      else facts.push(`${words}: the child's ${a.question} did not ask about its result, so this is not a review of it`)
+    }
+    for (const r of d.revisions ?? []) {
+      facts.push(`correction ${r.n} (of event ${r.event}) is ${originText(r)}: a correction is not a review of the result`)
+    }
     // A human review round of this run about the child (p17): decided, it is
     // the person's review (a synthetic actor is said so); pending, the review
     // is deferred to them, not missing.
@@ -240,26 +253,11 @@ export function assessResult(parent: RunRecord, d: Delegation, ev: DelegationEve
   if (c.now && c.frozen && c.now.seq > c.frozen.seq) {
     const ops = [...new Set(c.now.history.filter(h => h.seq > c.frozen!.seq).map(h => h.op))]
     current.push(`the child recorded since this result: ${few(ops, 6)} (seq ${c.frozen.seq} → ${c.now.seq}; execution ${c.now.execution.state})`)
-    for (const k of Object.values(c.now.corrections ?? {})) current.push(`correction ${k.id} (revision ${k.delegation.revision}) ${k.addressed ? `addressed (${k.addressed.how})` : 'not addressed yet'}`)
+    for (const k of Object.values(c.now.corrections ?? {})) current.push(`correction ${k.id} (${k.delegation ? `revision ${k.delegation.revision}` : `returned by ${k.request?.run}`}) ${k.addressed ? `addressed (${k.addressed.how})` : 'not addressed yet'}`)
   }
   const integrations = (c.now ?? fr)?.integrations?.map(i => `integrated at ${i.at} from decision ${i.decision}: ${list(i.repositories.map(r => `${r.path} ${r.method}${r.result ? ` → ${r.result.slice(0, 10)}` : ''}`))}`) ?? []
   // ---- the claim beside the evidence (tidy p2) ----
-  const m = ev.manifest
-  const claim: string[] = []
-  if (m?.outcome) claim.push(`outcome: "${m.outcome.replace(/\s+/g, ' ').slice(0, 300)}"`)
-  claim.push(m?.report ? `report: ${m.report.path} (${m.report.sha256.slice(0, 12)}, ${m.report.bytes} bytes${m.report.commit ? `, in ${m.report.commit.slice(0, 10)}` : ', not committed'})` : 'report: none recorded with the result')
-  const removed = c.removed ?? []
-  const changedPaths = (c.changed ?? []).map(p => p.path).filter(p => !removed.includes(p))
-  const outputs = Object.values((c.now ?? fr)?.outputs ?? {})
-  const evidence: string[] = []
-  if (c.changed === null) evidence.push('the child\'s copy could not be read: its changed files are unknown')
-  else evidence.push(changedPaths.length ? `changed outside its run folder (${changedPaths.length}): ${few(changedPaths, 6)}` : 'no file changed outside its run folder')
-  if (removed.length) evidence.push(`removed: ${few(removed, 4)}`)
-  if (m?.artifacts.length) evidence.push(`artifacts recorded: ${few(m.artifacts.map(a => a.path), 4)}`)
-  evidence.push(outputs.length ? `published outputs: ${list(outputs.map(o => `${o.id} "${o.title}" at ${o.ref} (${o.digest.slice(0, 19)}…, ${o.count} files)`))}` : 'published outputs: none')
-  if (c.reportRefs?.missing.length) evidence.push(`the report names ${c.reportRefs.missing.length} of ${c.reportRefs.named} paths that are not in the child's copy: ${few(c.reportRefs.missing, 4)} (moved on purpose, elsewhere, or missing: look)`)
-  const context = workContext({ templates: fr ? templatesOf(fr, c.authored) : [], changed: changedPaths, removed, outputs: outputs.map(o => o.id) })
-  const questions = receiverQuestions(context, `wfe delegate file ${run} ${d.id} <path>`, `wfe delegate revise ${run} ${d.id} --instruction "…" --reason "…"`)
+  const { claim, evidence, inspect: questions } = claimBeside(ev.manifest ?? null, { frozen: fr, authored: c.authored, now: c.now, changed: c.changed, removed: c.removed, reportRefs: c.reportRefs, who: 'the child' }, `wfe delegate file ${run} ${d.id} <path>`, `wfe delegate revise ${run} ${d.id} --instruction "…" --reason "…"`)
 
   const latest = latestResult(d)
   return {
@@ -268,6 +266,29 @@ export function assessResult(parent: RunRecord, d: Delegation, ev: DelegationEve
     accepts: d.accepts, person: d.onBehalfOf, state: d.disposition?.kind ?? (d.closed ? 'closed' : 'open'), latest: latest?.n === ev.n,
     checks, claim, evidence, correction: correctionLine(d, ev), inspect: questions, current, integrations, unavailable,
   }
+}
+
+// The claim beside the records and what only the reader can judge (tidy p2),
+// for any received result: a delegated child's (assessResult) and a run the
+// receiver requested and awaited (tidy p3, server/requestedResult.ts). One
+// rendering, whatever command commissioned the work.
+export function claimBeside(m: ResultManifest | null, c: { frozen: RunRecord | null; authored: Pick<Workflow, 'nodes'> | undefined; now: RunRecord | null; changed: ChildEvidence['changed']; removed?: string[]; reportRefs?: ChildEvidence['reportRefs']; who: string }, read: string, revise: string): { claim: string[]; evidence: string[]; inspect: string[] } {
+  const fr = c.frozen
+  const claim: string[] = []
+  if (m?.outcome) claim.push(`outcome: "${m.outcome.replace(/\s+/g, ' ').slice(0, 300)}"`)
+  claim.push(m?.report ? `report: ${m.report.path} (${m.report.sha256.slice(0, 12)}, ${m.report.bytes} bytes${m.report.commit ? `, in ${m.report.commit.slice(0, 10)}` : ', not committed'})` : 'report: none recorded with the result')
+  const removed = c.removed ?? []
+  const changedPaths = (c.changed ?? []).map(p => p.path).filter(p => !removed.includes(p))
+  const outputs = Object.values((c.now ?? fr)?.outputs ?? {})
+  const evidence: string[] = []
+  if (c.changed === null) evidence.push(`${c.who}'s copy could not be read: its changed files are unknown`)
+  else evidence.push(changedPaths.length ? `changed outside its run folder (${changedPaths.length}): ${few(changedPaths, 6)}` : 'no file changed outside its run folder')
+  if (removed.length) evidence.push(`removed: ${few(removed, 4)}`)
+  if (m?.artifacts.length) evidence.push(`artifacts recorded: ${few(m.artifacts.map(a => a.path), 4)}`)
+  evidence.push(outputs.length ? `published outputs: ${list(outputs.map(o => `${o.id} "${o.title}" at ${o.ref} (${o.digest.slice(0, 19)}…, ${o.count} files)`))}` : 'published outputs: none')
+  if (c.reportRefs?.missing.length) evidence.push(`the report names ${c.reportRefs.missing.length} of ${c.reportRefs.named} paths that are not in ${c.who}'s copy: ${few(c.reportRefs.missing, 4)} (moved on purpose, elsewhere, or missing: look)`)
+  const context = workContext({ templates: fr ? templatesOf(fr, c.authored) : [], changed: changedPaths, removed, outputs: outputs.map(o => o.id) })
+  return { claim, evidence, inspect: receiverQuestions(context, read, revise, c.who) }
 }
 
 // The reminders an assessment gives at the parent's boundaries: one per

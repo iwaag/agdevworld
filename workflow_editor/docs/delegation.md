@@ -94,7 +94,7 @@ is recorded):
 | `transport` | `{realm, message, stream, topic}` of the request post once bound |
 | `events` | facts relayed from the child, numbered `1, 2, …` (below), each with `wakes`, and `takenUp` once the parent's agent read it |
 | `answers`, `instructions` | what the parent's agent sent, in order, with `from` (whose words), `because` (the parent record they rest on) and the question they answer |
-| `revisions` | (fix6, present once used) results returned to the same child for correction: `{n, event, manifest, childSeq, instruction, reason, from, by, at, attempt, seq, because?}` |
+| `revisions` | (fix6, present once used) results returned to the same child for correction: `{n, event, manifest, childSeq, instruction, reason, from, by, at, attempt, seq, because?, origin?, evidence?, followUp?, attributed?}`. tidy p3: `origin` is whose finding it is (`agent`: the recording agent's own, with `evidence`; `person`: words relayed with `because`; `review`: a human review's requested changes); records before p3 derive it the same way. `attributed[]` holds later, explicit attribution corrections (`delegation.attribute`), beside the original `from` |
 | `disposition` | `{kind: satisfied \| rejected \| abandoned, note, event, manifest, at, by}` or null |
 | `closed` | `{reason, at, by}` when the parent run was cancelled with the delegation open, or the disposition closed it |
 
@@ -272,7 +272,8 @@ not taken up is `interrupted`, like an exit with work left ready.
 | `delegation.answer` | the parent's agent | `answer <run> <d> <q> --answer <text> [--because answer:<q>]` | posted in the child's request topic and recorded there as the answer; the node waits |
 | `delegation.instruct` | the parent's agent | `instruct <run> <d> --instruction <text>` | recorded as the child's additional instruction |
 | `delegation.dispose` | the parent's agent | `dispose <run> <d> --disposition satisfied\|rejected\|abandoned --note <text> [--event <n>] [--manifest <digest>] [--yes]` | closes the delegation; `satisfied` lets the node complete; `satisfied` is assessed first (fix6) |
-| `delegation.revise` | the parent's agent | `revise <run> <d> --instruction <text> --reason <text> [--event <n>] [--manifest <digest>] [--because …]` | (fix6) returns the latest result to the same child; posted in its request topic; the node waits |
+| `delegation.revise` | the parent's agent | `revise <run> <d> --instruction <text> --reason <text> [--event <n>] [--manifest <digest>] [--evidence <text>] [--because … \| --follow-up <rv> \| --reopen]` | (fix6) returns the latest result to the same child; posted in its request topic; the node waits |
+| `delegation.attribute` | whoever corrects the record, by name | `attribute <run> <d> <n> --origin agent\|person\|review --from <whose> --reason <evidence> --by <you>` | (tidy p3) appends an attribution to correction request `n`; the original stays; nothing is sent |
 
 Reading: `wfe delegate list|show <run> [<d>]`, `wfe delegate file <run> <d>
 <path> [--out <file>]` (a file of the child's copy, compared with the hash a
@@ -313,7 +314,7 @@ never compiled into a rule.
 | Check | Evidence | Status |
 | --- | --- | --- |
 | Presentation missing | the child's completed work as of the result — `work` template nodes, and untemplated nodes it added with files beyond notes ([runs.md](runs.md) *Reminders*) — and viewable candidates by extension (manifest artifacts, node artifacts, files its copy changed, in every repository it owns: a signal, not proof); its presentations and when each was registered or linked | `missing` when work completed after the latest presentation (an earlier page does not cover later work), or viewable files with no presentation at all; else `ok` |
-| The person's review not recorded | only with `accepts: person` and a deliverable (work, viewable files or a presentation); the child's answers and decisions as of the result, and this delegation's answers and correction requests that relay words with `because` | `ok` when an answer from the person (`onBehalfOf`) about it is traceable; else `unknown` — a confirmation node, a decision or an agent's own answer alone does not show they reviewed it, and unknown is not a proven violation |
+| The person's review not recorded | only with `accepts: person` and a deliverable (work, viewable files or a presentation); the child's answers and decisions as of the result; this delegation's answers that relay the person's words (`because`) to the child's own question about its result (a result confirmation, or one asked with its presentation); human review rounds about the child. tidy p3: a correction request — the person's relayed words, a go-ahead or the agent's own finding — and relayed words answering a question that was not about the result are listed as facts and are not review evidence (p2's conduct/run-051 d1 read `ok` from a correction that relayed a go-ahead) | `ok` when an answer from the person (`onBehalfOf`) about it is traceable; else `unknown` — a confirmation node, a decision or an agent's own answer alone does not show they reviewed it, and unknown is not a proven violation |
 | (p17) Human review | the parent's review rounds about this child | a round pending: `review-unrecorded` is `deferred` (handed to the person, not missing); decided: their review (a synthetic actor said so); a page a round serves or will serve again is the review's, not a forgotten cleanup |
 | Presentation still serving | the child's presentations now: review questions and their state, a planned cleanup, a recorded request to keep it (`presentation.retain`) | `serving` only for an answered (or never asked) review with no cleanup planned and no request to keep it; an unfinished review or a kept page is a fact, not an omission. Nothing stops a page because this ran |
 | (tidy p1) Documents written | the child's documentation steps completed as of the result and whether each recorded its document | `missing` when one completed with no document (protoprey freework/run-006 told its requester the audit was in a report.md it never wrote, and ponderer judged it satisfied 14 s later); `ok` when every completed one has it; no check without one |
@@ -435,9 +436,37 @@ after a disposition, `revise` is refused (`delegation-closed`), with two
 exceptions for a result judged `satisfied`: a human review's requested
 changes (`--follow-up <rv>`, p17), and the person's later words naming that
 result (`--because answer:…|instruction:…`, p18: a standing conductor hears
-them after it accepted the result). Either reopens the same delegation for
+them after it accepted the result), and the parent agent's own finding
+(`--reopen --evidence`, tidy p3). Each reopens the same delegation for
 the same child, keeps the earlier disposition in `reopened` (with the
-review or the words), and waits again on the delegate node. Replay keeps
+review, the words, or `origin: agent` and the evidence), and waits again
+on the delegate node.
+
+**The agent's own finding (tidy p3).** In p2's fixture trial
+(ponderer conduct/run-051 d1) the conductor judged a partial correction
+satisfied, then read the test itself and found it unchanged. The only way
+to reopen was the person's words, so it cited an Omni go-ahead (#464); the
+correction was recorded "from Omni Agent (for Developer)" and the review
+check read `ok`. Now:
+
+- A correction without `--because` or `--follow-up` is the recording
+  agent's finding (`origin: agent`, `from` = the agent), with what it
+  checked in `--evidence`. Returning what the commissioned work left out
+  needs nobody's go-ahead.
+- `--reopen --evidence` reopens a `satisfied` judgement of the latest
+  result by the agent's own finding. Evidence is required; `--because` with
+  it is refused (one origin per correction); a delegation that is not
+  judged, or judged `rejected`/`abandoned`, is refused as before; a newer
+  result than the one judged must be judged instead. A person's hold on
+  the parent stays: the request is recorded and nothing is launched until
+  the person resumes it.
+- Readers (`wfe delegate show`, the assessment's facts, the child's
+  correction) show the actual actor and origin. A correction is never a
+  review of the result.
+- `wfe delegate attribute` appends an explicit attribution to a recorded
+  correction (who corrected the record, when and on what evidence); the
+  original `from`/`because` stay as recorded, and the child keeps what it
+  received. Applied once, to conduct/run-051 d1 correction 1 (tidy p3). Replay keeps
 both the returned and the corrected result (events, `revisions`, the child's
 `corrections`).
 

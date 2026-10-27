@@ -219,6 +219,32 @@ delegating run.
 as it is and the delegating run is told why. Ending an attempt with a
 correction that arrived before it still unaddressed holds the run as
 interrupted, like work left ready. Writes run.json.`,
+  result: `wfe run result <workspace>/<workflow>/<run> [--requester <project>/<workflow>/<run>] [--file <path>]
+
+The latest completed result of a run, as its receiver sees it (tidy p3): the
+result's identity (its completing entry and manifest), the claim (outcome,
+report) beside its records (files changed and removed, artifacts, outputs),
+the corrections it received, and what WFE cannot judge, as questions. It is
+the same assessment a delegated result gets, for a run you requested with
+wfe request and awaited (conversation ask --run). --requester: the run
+reading it (inside an attempt, your run); the requesting relation is the
+one the run recorded (its input names the run that requested it), never a
+topic, a name or recency. Only the requester is given the return route;
+an observer is told who requested it. --file <path>: one file of the
+run's working copy (a path of its project), with its sha256. Reads only.`,
+  return: `wfe run return <workspace>/<workflow>/<run> --requester <project>/<workflow>/<run> --instruction <text> --reason <text> [--evidence <what you checked>] [--result-seq <n>]
+
+Returns the latest result of a run you requested (wfe request) to it for
+correction (tidy p3), as wfe delegate revise does for a delegated child:
+the run reopens (correction cN), its agent adds the missing work as new
+nodes and performs it, and its next completion is a new result. Await it
+again (conversation ask --node <n> --run <run>) and check the correction
+itself. Only the requesting run recorded in its input may return it;
+inside an attempt the attempt must be that run's. --result-seq: the
+completing entry you assessed (wfe run result shows it); a newer result
+is refused, not corrected blind. Returning what the request asked for
+needs nobody's go-ahead; it is recorded as your finding (--evidence:
+what you read or ran). Materially new work is the person's to decide.`,
   integrate: `wfe run integrate <run> [--dry-run|--status] [--by <actor>]
 
 Integrates the actual saved run copy into its recorded target branches.
@@ -452,7 +478,9 @@ export function runIndex(): string {
   io <run>                 the run's detailed IO channel; one IO entry in full (--attempt, --line)
   ask / answer / take-up / withdraw    questions
   instructions / instruct / ack       additional instructions: list, give, acknowledge
-  correction <run> [<c>]   a delegating run returned this run's result: list, take up, --no-change
+  correction <run> [<c>]   a delegating or requesting run returned this run's result: list, take up, --no-change
+  result <ws>/<wf>/<run>   a run's latest result: the claim beside its records, what to judge, and who may return it
+  return <ws>/<wf>/<run>   as the run that requested it, return its result for correction
   access <run> [<path>]... what the run's definition declares for a path
   attach <run> <path>      record an artifact
   input / inputs <run>     select an input set from a shared:// reference; list and verify them
@@ -534,7 +562,7 @@ function entryLine(e: HistoryEntry): string {
 
 // A correction as the run's agent reads it (fix6).
 export function correctionLines(k: Correction): string[] {
-  return [`  ${k.id} ${k.addressed ? `addressed (${k.addressed.how}, seq ${k.addressed.seq})` : k.takenUp ? 'taken up, not addressed yet' : 'received, not addressed'} — from ${k.from}${k.by !== k.from ? ` (relayed by ${k.by})` : ''} at ${k.at}, returning the result completed at seq ${k.result.seq} (delegation ${k.delegation.uid}, request ${k.delegation.revision})`,
+  return [`  ${k.id} ${k.addressed ? `addressed (${k.addressed.how}, seq ${k.addressed.seq})` : k.takenUp ? 'taken up, not addressed yet' : 'received, not addressed'} — from ${k.from}${k.by !== k.from ? ` (relayed by ${k.by})` : ''} at ${k.at}, returning the result completed at seq ${k.result.seq} (${k.delegation ? `delegation ${k.delegation.uid}, request ${k.delegation.revision}` : `returned by its requesting run ${k.request?.run}`})${k.evidence ? `\n     checked: ${k.evidence}` : ''}`,
     `     why: ${first(k.reason, 400)}`, `     add: ${first(k.text, 600)}`, ...(k.takenUp?.note ? [`     note: ${first(k.takenUp.note, 300)}`] : [])]
 }
 
@@ -650,17 +678,41 @@ export async function runCommand(c: RunCli): Promise<number> {
   }
   if (!RUN_HELP[sub]) throw c.usage(`no run subcommand "${sub}" (see: wfe run help)`)
   if (c.flag('help')) { console.log(`${RUN_HELP[sub]}\n\n${COMMON}`); return 0 }
-  const ws = await c.workspace()
-  const by = c.opt('by')
-  const expectSeq = c.opt('expect-seq') !== undefined ? Number(c.opt('expect-seq')) : undefined
-  if (expectSeq !== undefined && !Number.isInteger(expectSeq)) throw c.usage('--expect-seq must be an integer')
-  const link = async (ref: string) => { const u = await c.serviceUrl(); return u ? `${u}/#/ws/${encodeURIComponent(ws.reg.id)}/run/${ref.split('/').map(encodeURIComponent).join('/')}` : null }
   const wrap = async <T>(f: () => Promise<T>): Promise<T> => {
     try { return await f() } catch (e) {
       if (e instanceof RequestError) throw c.refused(e.message, e.detail)
       throw e
     }
   }
+  // tidy p3: a requested run's result, read and returned across projects.
+  if (sub === 'result' || sub === 'return') {
+    const { parseRunName } = await import('../server/conversations.ts')
+    const { assessRequested, requestedLines, returnRequested } = await import('../server/requestedResult.ts')
+    if (!args[0]) throw c.usage('<workspace>/<workflow>/<run> is required')
+    const target = await wrap(async () => parseRunName(args[0]))
+    const store = c.exec().delegate
+    if (sub === 'result') {
+      if (c.opt('file')) {
+        const { requestedFile } = await import('../server/requestedResult.ts')
+        const f = await wrap(() => requestedFile(store, target, c.opt('file')!))
+        c.out(`${f.path} (${f.bytes.length} bytes, sha256 ${f.sha256})\n${f.bytes.toString('utf8')}`, { path: f.path, sha256: f.sha256, bytes: f.bytes.length, text: f.bytes.toString('utf8') })
+        return 0
+      }
+      const a = await wrap(() => assessRequested(store, target, c.opt('requester') ?? null))
+      c.out(requestedLines(a, '').join('\n'), a)
+      return 0
+    }
+    const seq = c.opt('result-seq') !== undefined ? Number(c.opt('result-seq')) : undefined
+    if (seq !== undefined && !Number.isInteger(seq)) throw c.usage('--result-seq is the completing entry\'s seq (wfe run result shows it)')
+    const r = await wrap(() => returnRequested(store, target, { requester: need(c, 'requester', 'your run, <project>/<workflow>/<run>'), instruction: need(c, 'instruction', 'what to add or change'), reason: need(c, 'reason', 'why it is returned'), evidence: c.opt('evidence'), resultSeq: seq, attempt: c.opt('attempt') ?? process.env.WFE_ATTEMPT ?? undefined, by: c.opt('by'), receipt: c.opt('receipt'), via: 'cli' }))
+    c.out(r.duplicate ? 'Already recorded (same receipt); nothing changed.' : `Returned ${args[0]}'s result for correction (${r.correction})${r.job ? `; job ${r.job} continues it` : ''}. Its next completion is a new result: await it (conversation ask --node <n> --run ${args[0]}) and check the correction itself.`, { ok: true, correction: r.correction, job: r.job, duplicate: r.duplicate })
+    return 0
+  }
+  const ws = await c.workspace()
+  const by = c.opt('by')
+  const expectSeq = c.opt('expect-seq') !== undefined ? Number(c.opt('expect-seq')) : undefined
+  if (expectSeq !== undefined && !Number.isInteger(expectSeq)) throw c.usage('--expect-seq must be an integer')
+  const link = async (ref: string) => { const u = await c.serviceUrl(); return u ? `${u}/#/ws/${encodeURIComponent(ws.reg.id)}/run/${ref.split('/').map(encodeURIComponent).join('/')}` : null }
   const ref = async (i = 0): Promise<RunRef> => {
     if (!args[i]) throw c.usage('<run> is required')
     return wrap(() => resolveRef(ws, args[i]))

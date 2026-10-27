@@ -4,7 +4,7 @@
 // server/delegate.ts and the run operations; no command needs the service.
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
-import { delegationState, latestResult, pendingEvents, type Delegation, type DelegationEvent } from '../shared/delegation.ts'
+import { delegationState, latestResult, originText, pendingEvents, type Delegation, type DelegationEvent } from '../shared/delegation.ts'
 import { assessmentLines, type Assessment } from '../shared/assessment.ts'
 import { holderOf, runKey, type BecauseRef, type RunRecord, type RunRef } from '../shared/run.ts'
 import { readRun, resolveRef, runDir, runOp } from '../server/runs.ts'
@@ -129,7 +129,7 @@ answer) and judge again, or give the same command with --yes when you judge
 it right as it is (for this command only; a later report is assessed again).
 This is your receipt of the result, not the child's acceptance (that is its
 own decision, from its confirmation) and not your run's result decision.`,
-  revise: `wfe delegate revise <run> <d> --instruction <text> --reason <text> [--event <n>] [--manifest <digest>] [--because answer:<q>[:<n>]|instruction:<i>] [--follow-up <rv>]
+  revise: `wfe delegate revise <run> <d> --instruction <text> --reason <text> [--event <n>] [--manifest <digest>] [--evidence <what you checked>] [--because answer:<q>[:<n>]|instruction:<i> | --follow-up <rv> | --reopen]
 
 Returns the child's current completed result to the same child for
 correction (workflow_editor fix6), instead of closing the delegation:
@@ -145,6 +145,18 @@ correction (workflow_editor fix6), instead of closing the delegation:
 The result must be the latest, taken up, and not already returned; the
 child must be completed (not cancelled, failed or executing). A closed
 delegation is not reopened: dispose rejected and --replaces is replacement.
+Returning what the commissioned work left out is part of assessing it:
+it needs nobody's go-ahead. Without --because or --follow-up the
+correction is your own finding, recorded as yours; name what you
+checked (--evidence: the file you read, the command you ran and its
+output). Materially new work, or a change of what was asked, is the
+person's to decide: ask them instead.
+--reopen --evidence: a result you judged satisfied and now find
+deficient (tidy p3). Your own finding reopens your own judgement of the
+latest result: the satisfied disposition is kept in the record
+(reopened, origin agent). Do not cite the person's words for it; a
+go-ahead or an instruction is not their finding, and nothing here
+records that anyone reviewed the result.
 --because when the correction carries your person's words. Those words
 also reopen a result you had judged satisfied (p18: the person asks later
 for a change to what you accepted): the same child corrects it, and the
@@ -165,6 +177,13 @@ dropped and a running attempt of it is stopped; its records, copy and
 branch stay. This is the explicit act: holding or cancelling your own run
 never cancels the child. The cancellation comes back as a relayed fact;
 then judge the delegation (dispose --disposition abandoned).`,
+  attribute: `wfe delegate attribute <run> <d> <correction n> --origin agent|person|review --from <whose finding> --reason <evidence> --by <you>
+
+Corrects, explicitly and later, whose finding a recorded correction
+request was (tidy p3). The request keeps what it recorded (its from and
+because); the attribution is appended beside it with who recorded it,
+when and why, and readers show both. It sends nothing to the child, and
+a correction is never a review of the result, whoever it is attributed to.`,
   file: `wfe delegate file <run> <d> <path> [--out <file>]
 
 Prints a file of the child's working copy (a path of the child's project,
@@ -188,6 +207,7 @@ export const DELEGATE_INDEX = `wfe delegate <subcommand> … (p10: entrusting a 
   dispose <run> <d> --disposition …       judge the result (satisfied / rejected / abandoned)
   revise <run> <d> --instruction <text>   return the result to the same child for correction
   cancel <run> <d> --reason <text>        cancel the child run (an explicit act of its own)
+  attribute <run> <d> <n> --origin …      correct later whose finding correction request <n> was
   file <run> <d> <path>                   read a file the child presents
   sync                                    relay children's facts now
 
@@ -217,7 +237,8 @@ export function describeDelegation(d: Delegation, rec: RunRecord, assessment?: A
     ...(d.events.length ? ['  facts relayed:', ...d.events.flatMap(eventLines)] : ['  facts relayed: none yet']),
     ...d.answers.map(a => `  answer ${a.n} to ${a.question} from ${a.from}${a.from !== a.by ? ` (relayed by ${a.by})` : ''} at ${a.at}: ${a.text.replace(/\s+/g, ' ').slice(0, 200)}`),
     ...d.instructions.map(a => `  instruction ${a.n} from ${a.from} at ${a.at}: ${a.text.replace(/\s+/g, ' ').slice(0, 200)}`),
-    ...(d.revisions ?? []).map(r => `  correction request ${r.n} (returns result event ${r.event}${r.manifest ? `, manifest ${r.manifest.slice(7, 19)}` : ''}) from ${r.from} at ${r.at}: ${r.instruction.replace(/\s+/g, ' ').slice(0, 200)} — because: ${r.reason.replace(/\s+/g, ' ').slice(0, 160)}`),
+    ...(d.revisions ?? []).map(r => `  correction request ${r.n} (returns result event ${r.event}${r.manifest ? `, manifest ${r.manifest.slice(7, 19)}` : ''}) at ${r.at}, ${originText(r)}: ${r.instruction.replace(/\s+/g, ' ').slice(0, 200)} — because: ${r.reason.replace(/\s+/g, ' ').slice(0, 160)}`),
+    ...(d.reopened ?? []).map(x => `  reopened at ${x.at} by ${x.by}: the ${x.disposition.kind} judgement of event ${x.disposition.event ?? '—'} (${x.disposition.by}) set aside — ${x.review ? `human review ${x.review} asked for changes` : x.because ? `${x.because.from}'s words` : `${x.by}'s own finding${x.evidence ? ` (checked: ${x.evidence.replace(/\s+/g, ' ').slice(0, 160)})` : ''}`}`),
     d.disposition ? `  judged ${d.disposition.kind} by ${d.disposition.by} at ${d.disposition.at}${d.disposition.manifest ? ` (manifest ${d.disposition.manifest.slice(7, 19)})` : ''}: ${d.disposition.note}` : d.closed ? `  closed: ${d.closed.reason}` : '',
     ...(rec.nodes[d.node] ? [`  node ${d.node}: ${rec.nodes[d.node].state}${rec.nodes[d.node].wait ? `; next move: ${holderOf(rec, d.node)}` : ''}`] : []),
     ...(assessment ? assessmentLines(assessment) : []),
@@ -362,9 +383,20 @@ export async function delegateCommand(c: RunCli): Promise<number> {
       const rec = await record(r)
       const d = delegation(rec, args[1])
       const ev = c.opt('event') !== undefined ? Number(c.opt('event')) : undefined
-      const res = await wrap(() => store.revise(ws, r, d.id, { instruction: need('instruction', 'what the child is to add or change'), reason: need('reason', 'why the result is returned'), event: ev, manifest: c.opt('manifest'), because: because(), ...(c.opt('follow-up') ? { followUp: c.opt('follow-up') } : {}) }, { by: recorder(rec), via: 'cli', ...meta() }))
+      const res = await wrap(() => store.revise(ws, r, d.id, { instruction: need('instruction', 'what the child is to add or change'), reason: need('reason', 'why the result is returned'), event: ev, manifest: c.opt('manifest'), because: because(), ...(c.opt('follow-up') ? { followUp: c.opt('follow-up') } : {}), ...(c.flag('reopen') ? { reopen: true } : {}), ...(c.opt('evidence') ? { evidence: c.opt('evidence') } : {}) }, { by: recorder(rec), via: 'cli', ...meta() }))
       const rv = res.record.delegations![d.id].revisions?.at(-1)
       return after(res.record, res.record.delegations![d.id], res.duplicate ? 'Already recorded (same receipt); nothing changed.' : `Returned result event ${rv?.event} of ${d.id} to the child ${d.child?.workflow}/${d.child?.run} for correction (request ${rv?.n}). It is posted in the child's request topic; the child reopens, adds the work and completes again — its new result resumes this run. End your attempt when only the child's work remains.`)
+    }
+    case 'attribute': {
+      const r = await ref()
+      const rec = await record(r)
+      const d = delegation(rec, args[1])
+      const n = Number(args[2])
+      if (!Number.isInteger(n) || n < 1) throw c.usage('<correction n> is required (wfe delegate show lists the correction requests)')
+      const res = await wrap(async () => runOp(await runSpace(ws, r), r, { op: 'delegation.attribute', delegation: d.id, revision: n, origin: need('origin', 'agent, person or review'), from: need('from', 'whose finding it was'), reason: need('reason', 'the evidence for the attribution'), ...meta() } as never, { by: recorder(rec), via: 'cli' }))
+      const rv = res.record.delegations![d.id].revisions?.find(x => x.n === n)
+      c.out(`Correction request ${n} of ${d.id}: ${rv ? originText(rv) : '?'}.`, { ok: true, revision: rv })
+      return 0
     }
     case 'cancel': {
       const r = await ref()

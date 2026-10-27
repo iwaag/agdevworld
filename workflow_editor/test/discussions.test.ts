@@ -347,6 +347,9 @@ test('argue p3, p18: what a facilitator awaited while it rests continues the sam
   const told = Object.values(f.instructions ?? {})
   assert.equal(told.length, 1)
   assert.match(told[0].text, /awaited result of sage\/discuss\/run-001 .*unanswered: .*ended without a message here since the await/)
+  // tidy p3: the result itself comes with it — the claim beside its records, and who may return it.
+  assert.match(told[0].text, /\n    result of sage\/discuss\/run-001: completed at seq \d+/)
+  assert.match(told[0].text, /\n      claim — report: /)
   assert.deepEqual(f.standing!.wakes.map(w => w.events), [[told[0].id]], 'woken once, for that instruction')
   assert.ok(notes.some(n => /told argue\/facilitate\/run-001/.test(n)), notes.join('\n'))
   await ds2.reconcile(); await s.ds.reconcile()

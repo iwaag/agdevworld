@@ -261,10 +261,13 @@ export async function conversationCommand(c: ConversationCli): Promise<number> {
     const accountSince = async (conv: string, run: string, posted: number): Promise<string[]> => {
       const { workspace, ref } = parseRunName(run)
       const rec = (await readRun(await x.workspace(workspace), ref).catch(() => null))?.record
-      if (!rec || !Object.keys(rec.delegations ?? {}).length) return []
+      if (!rec) return []
       const prev = ds.messages(conv).filter(m => m.id < posted && m.run === run && ['reply', 'result', 'synthesis', 'announce'].includes(m.kind)).at(-1)
-      const moved = changedSince(rec, prev?.at ?? null)
-      return moved.length ? [`Commissioned results with news since ${prev ? `your previous post #${prev.id}` : 'this run began'} (an account of them names each, how you judged it and what stays unverified or open):`, ...moved.map(l => `  ${l}`)] : []
+      // tidy p3: and the runs it requested and awaited here (wfe request + ask --run).
+      const { awaitedStanding } = await import('../server/requestedResult.ts')
+      const awaited = (await awaitedStanding(ds, [conv], run).catch(() => [])).filter(a => !prev || a.at > prev.at).map(a => a.text)
+      const moved = [...changedSince(rec, prev?.at ?? null), ...awaited]
+      return moved.length ? [`Commissioned results with news since ${prev ? `your previous post #${prev.id}` : 'this run began'} (an account of them names each, how you judged it, any correction it needed and what stays unverified or open):`, ...moved.map(l => `  ${l}`)] : []
     }
     const who = async () => { const o = await own(); return o?.agent ?? c.opt('author') ?? c.opt('by') }
     switch (sub) {

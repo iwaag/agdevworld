@@ -547,7 +547,7 @@ export class ExecStore {
     if (!r || hostOf(r.executor) !== this.executor || r.cancelled || r.control.hold || r.control.attempt) return null
     const k = r.corrections?.[correction]
     if (!k || k.addressed) return null
-    return this.enqueue(ws.reg.id, ref, 'resume', `correction:${ws.reg.id}/${runKey(ref)}/${correction}`, `resume: correction ${correction} from ${k.from} (the delegating run returned the result)`, this.nodeOf(r))
+    return this.enqueue(ws.reg.id, ref, 'resume', `correction:${ws.reg.id}/${runKey(ref)}/${correction}`, `resume: correction ${correction} from ${k.from} (${k.request ? `its requesting run ${k.request.run}` : "the delegating run"} returned the result)`, this.nodeOf(r))
   }
 
   // After a person requested changes in a human review (p17, docs/reviews.md):

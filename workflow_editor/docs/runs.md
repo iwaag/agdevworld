@@ -491,6 +491,30 @@ execution is completed with no other open correction, and
 (`result-superseded`, checked against the history under the same lock)
 when the run completed again after the result it returns.
 
+**From the requesting run (tidy p3).** A run created by `wfe request` whose
+input names the run that requested it (`input.entrustedBy = {kind: run,
+project, workflow, run}`) can have its result returned by that run:
+`wfe run return <ws>/<wf>/<run> --requester <project>/<workflow>/<run>
+--instruction … --reason … [--evidence …] [--result-seq <n>]` (HTTP
+`POST …/runs/<wf>/<run>/return`). The correction carries `request: {run}`
+instead of a delegation, and `evidence`. The reducer refuses
+(`request-relation`) a requester that is not the recorded one (a delegated
+child is its parent's to revise; a run with no recorded requester is
+nobody's); inside an attempt, the attempt must be the requester's own
+(`not-requester`); `--result-seq` names the result assessed
+(`result-superseded` otherwise). A retransmission with the same receipt
+records once. The run is continued as below. Its next completion is a new
+result, which the requester awaits again.
+
+`wfe run result <ws>/<wf>/<run> [--requester …] [--file <path>]` (HTTP
+`GET …/runs/<wf>/<run>/result?requester=…`) shows the latest result as its
+receiver sees it, from the same rendering as a delegated result
+([delegation.md](delegation.md) *The claim beside the evidence*): its
+identity (completing entry, frozen position, manifest), the claim beside
+its records, the corrections it received, `to judge:` questions, and the
+route — the return command for the recorded requester only; an observer is
+told who requested it and that observing grants nothing.
+
 While a correction is not addressed the execution is `in-progress` with no
 ready node, the situation is `due` ("correction c1 from … arrived") and the
 run gets a continuation job (receipt `correction:<ws>/<wf>/<run>/<c>`; queued
@@ -619,7 +643,7 @@ action, and cannot judge whether a result needs a presentation.
 | `unrecorded-activity` | a question, a report, the run-completing completion | the run's catalog has templates and no work node is visible, but something suggests work was done: changed paths in the run's copy outside its records, artifacts outside the run folder or published outputs, or a talk that has run for more than 10 minutes |
 | `discussion-activity`, `discussion-open` | completion | a discussion activity completed with a plain completion; a conductor run ending with its discussion open (fix3) |
 | `conversation-unanswered` | the completion that puts a standing conductor to rest | the person's latest words in a room it conducts have no reply, result, question or announcement from it since; a progress note does not count (tidy p1: ponderer/conduct/run-048 said it would summarize, judged three results and rested silent) |
-| `results-unreported` | the completion that puts a standing conductor to rest | a delegation's latest result, its judgement or a correction request is later than the run's last reply, result, synthesis, question or announcement in the room it conducts (tidy p2: ponderer/conduct/run-048's #452 promised to report two corrections; `conversation-unanswered` cannot see such a result once a reply exists). It clears when the run speaks in the room |
+| `results-unreported` | the completion that puts a standing conductor to rest | a delegation's latest result, its judgement or a correction request is later than the run's last reply, result, synthesis, question or announcement in the room it conducts (tidy p2: ponderer/conduct/run-048's #452 promised to report two corrections; `conversation-unanswered` cannot see such a result once a reply exists). It clears when the run speaks in the room. tidy p3: runs it requested and awaited there (`conversation ask --run`) count too (their latest result or correction), and a delegation's phrase says how many correction requests it needed and whether a satisfied judgement was set aside. It compares record times; whether a post accounts well is not judged |
 | `delegated-presentation-missing`, `delegated-review-unrecorded`, `delegated-presentation-serving`, `delegated-document-missing` | a delegating run's outward report, the completion that completes it, `wfe delegate dispose --disposition satisfied` | the assessment of a delegated result found the child's omission or an unknown (fix6, [delegation.md](delegation.md) *Assessing a result*) |
 
 Roles come from structured records, never node names:

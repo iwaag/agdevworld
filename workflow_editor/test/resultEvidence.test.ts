@@ -44,7 +44,7 @@ test('receiver: the general questions always; a kind\'s question only when chose
   const q = receiverQuestions(workContext({ templates: [], changed: [], removed: [], outputs: [] }), 'READ', 'REVISE')
   const t = receiverQuestions(workContext({ templates: [], changed: ['tests/test_x.py'], removed: [], outputs: [] }), 'READ', 'REVISE').join('\n')
   assert.match(t, /Tests: the output in the report is the child's claim\. Run the named command on its files where you can .*say in your note whether the counts are your own or unverified\./, 'trial C: a count is not checked by reading the report')
-  assert.deepEqual(q, ['WFE checked records, not content. Compare the claim with the files before judging (READ).', 'What is missing goes back to the same child (REVISE), and its next result is checked again; otherwise your judgement\'s note says what you checked.'])
+  assert.deepEqual(q, ['WFE checked records, not content. Compare the claim with the files before judging (READ).', 'What is missing goes back to the same child (REVISE) as part of assessing it — no go-ahead is needed for what the request asked — and its next result is checked again; otherwise your judgement\'s note says what you checked.'])
 })
 
 // ---- the multi-child account ----
@@ -68,12 +68,12 @@ const run048 = () => ({
 test('the account since a previous post lists every delegation that moved, with where it stands', () => {
   const ds = run048()
   assert.deepEqual(changedSince({ delegations: ds }, '2026-10-26T20:35:28.978Z'), [
-    'd1 → protoprey freework/run-006: judged satisfied (event 4)',
-    'd3 → lowerpoly freework/run-006: judged satisfied (event 4)',
+    'd1 → protoprey freework/run-006: judged satisfied (event 4) after 1 correction request',
+    'd3 → lowerpoly freework/run-006: judged satisfied (event 4) after 1 correction request',
   ], 'since #452: both corrections, not d2')
   assert.equal(changedSince({ delegations: ds }, null).length, 3)
   assert.equal(delegationStanding(dl('d4', 'agsfx', { events: [ev(1, 't1')], revisions: [corr(1, 't2')] })), 'd4 → agsfx freework/run-006: returned for correction (request 1), not back yet')
-  assert.equal(delegationStanding(dl('d4', 'agsfx', { events: [ev(1, 't1'), ev(3, 't3')], revisions: [corr(1, 't2')] })), 'd4 → agsfx freework/run-006: result event 3 (a corrected result), not judged yet')
+  assert.equal(delegationStanding(dl('d4', 'agsfx', { events: [ev(1, 't1'), ev(3, 't3')], revisions: [corr(1, 't2')] })), 'd4 → agsfx freework/run-006: result event 3 (a corrected result after 1 correction request), not judged yet')
   assert.equal(delegationStanding(dl('d5', 'agsfx')), 'd5 → agsfx freework/run-006: no result yet')
 })
 
@@ -84,32 +84,32 @@ function room(messages: { id: number; role: 'person' | 'agent'; run: string | nu
 const RUN = 'ponderer/conduct/run-048'
 const conductor = (delegations: Record<string, Delegation>) => ({ standing: { state: 'open' }, nodes: { 'ponder-w3': { state: 'running' }, earlier: { state: 'completed' } }, delegations }) as unknown as RunRecord
 
-test('results-unreported: a result judged after the run last spoke is named at rest; an earlier reply does not hide it; speaking clears it', () => {
+test('results-unreported: a result judged after the run last spoke is named at rest; an earlier reply does not hide it; speaking clears it', async () => {
   const ds = run048()
   // #452 replied to #451 (20:35:28); then both corrections came back and were judged; the run rests silently.
   const before453 = room([{ id: 451, role: 'person', run: null, kind: 'message', at: '2026-10-26T20:34:25.450Z' }, { id: 452, role: 'agent', run: RUN, kind: 'reply', at: '2026-10-26T20:35:28.978Z' }])
-  const rs = restReminders(before453, conductor(ds), RUN, 'ponder-w3')
+  const rs = await restReminders(before453, conductor(ds), RUN, 'ponder-w3')
   assert.deepEqual(rs.map(r => r.code), ['results-unreported'], 'conversation-unanswered cannot see it: #451 has a reply')
   assert.deepEqual(rs[0].refs, ['d1', 'd3'])
-  assert.match(rs[0].text, /2 commissioned results have a fact the room has not heard from it since its last post \(tidy-p2 #452\): d1 → protoprey freework\/run-006: judged satisfied \(event 4\); d3 → lowerpoly freework\/run-006: judged satisfied \(event 4\)\./)
+  assert.match(rs[0].text, /2 commissioned results have a fact the room has not heard from it since its last post \(tidy-p2 #452\): d1 → protoprey freework\/run-006: judged satisfied \(event 4\) after 1 correction request; d3 → lowerpoly freework\/run-006: judged satisfied \(event 4\) after 1 correction request\./)
   assert.match(rs[0].summary, /^d1, d3 not reported to the room since #452 → wfe conversation reply … first$/)
   // A post after them clears it (no loop); a progress note does not.
   const progress = room([{ id: 452, role: 'agent', run: RUN, kind: 'reply', at: '2026-10-26T20:35:28.978Z' }, { id: 453, role: 'agent', run: RUN, kind: 'progress', at: '2026-10-26T20:38:13.179Z' }])
-  assert.deepEqual(restReminders(progress, conductor(ds), RUN, 'ponder-w3').map(r => r.code), ['results-unreported'])
+  assert.deepEqual((await restReminders(progress, conductor(ds), RUN, 'ponder-w3')).map(r => r.code), ['results-unreported'])
   const spoke = room([{ id: 452, role: 'agent', run: RUN, kind: 'reply', at: '2026-10-26T20:35:28.978Z' }, { id: 453, role: 'agent', run: RUN, kind: 'reply', at: '2026-10-26T20:38:13.179Z' }])
-  assert.deepEqual(restReminders(spoke, conductor(ds), RUN, 'ponder-w3'), [])
+  assert.deepEqual(await restReminders(spoke, conductor(ds), RUN, 'ponder-w3'), [])
   // Not at rest yet: nothing. A conductor with no delegations: nothing of this kind.
   const busy = { ...conductor(ds), nodes: { 'ponder-w3': { state: 'running' }, ask: { state: 'waiting' } } } as unknown as RunRecord
-  assert.deepEqual(restReminders(before453, busy, RUN, 'ponder-w3'), [])
-  assert.deepEqual(restReminders(before453, conductor({}), RUN, 'ponder-w3'), [])
+  assert.deepEqual(await restReminders(before453, busy, RUN, 'ponder-w3'), [])
+  assert.deepEqual(await restReminders(before453, conductor({}), RUN, 'ponder-w3'), [])
   // Another run's post is not this run's account.
   const other = room([{ id: 452, role: 'agent', run: RUN, kind: 'reply', at: '2026-10-26T20:35:28.978Z' }, { id: 453, role: 'agent', run: 'lowerpoly/freework/run-004', kind: 'result', at: '2026-10-26T20:38:13.179Z' }])
-  assert.deepEqual(restReminders(other, conductor(ds), RUN, 'ponder-w3').map(r => r.code), ['results-unreported'])
+  assert.deepEqual((await restReminders(other, conductor(ds), RUN, 'ponder-w3')).map(r => r.code), ['results-unreported'])
 })
 
-test('rest checks keep fix3\'s and tidy p1\'s: an unconcluded discussion of a run that ends; the person\'s unanswered words at rest', () => {
+test('rest checks keep fix3\'s and tidy p1\'s: an unconcluded discussion of a run that ends; the person\'s unanswered words at rest', async () => {
   const ended = { nodes: { last: { state: 'running' } }, delegations: {} } as unknown as RunRecord
-  assert.deepEqual(restReminders(room([]), ended, RUN, 'last').map(r => r.code), ['discussion-open'])
+  assert.deepEqual((await restReminders(room([]), ended, RUN, 'last')).map(r => r.code), ['discussion-open'])
   const asked = room([{ id: 447, role: 'person', run: null, kind: 'message', at: '2026-10-26T20:06:00.000Z' }, { id: 448, role: 'agent', run: RUN, kind: 'progress', at: '2026-10-26T20:09:01.373Z' }])
-  assert.deepEqual(restReminders(asked, conductor(run048()), RUN, 'ponder-w3').map(r => r.code), ['conversation-unanswered', 'results-unreported'], 'run-048 at its first rest: both')
+  assert.deepEqual((await restReminders(asked, conductor(run048()), RUN, 'ponder-w3')).map(r => r.code), ['conversation-unanswered', 'results-unreported'], 'run-048 at its first rest: both')
 })

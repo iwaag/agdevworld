@@ -177,8 +177,20 @@ test('the person\'s review: a confirm node and an agent\'s answer are unknown; t
   assert.match(rs[0].text, /Unknown is not a proven omission/)
   assert.ok(!rs[0].repair.some(x => /impersonat|answer for/.test(x)))
   // The parent relayed the person's words to the child (because → Pat).
-  const relayed = await assess(c, { d: { answers: [{ n: 1, question: 'q1', event: 1, text: 'OK', from: 'Pat', by: 'par-agent', at: '', attempt: null, seq: 5, because: { kind: 'answer', question: 'q3', answer: 0, from: 'Pat' } }] } })
+  // (tidy p3: it answers the child's result-confirmation question, event 2.)
+  const confirmQ: DelegationEvent = { ...event(2), type: 'question', question: 'q1', to: 'par-agent', confirms: true, presentation: { id: 'p1', revision: 'sha256:' + 'b'.repeat(64) }, manifest: undefined }
+  const relayed = await assess(c, { d: { events: [event(), confirmQ], answers: [{ n: 1, question: 'q1', event: 2, text: 'OK', from: 'Pat', by: 'par-agent', at: '', attempt: null, seq: 5, because: { kind: 'answer', question: 'q3', answer: 0, from: 'Pat' } }] } })
   assert.equal(status(relayed, 'review-unrecorded'), 'ok')
+  // tidy p3: a correction — relaying the person's go-ahead, or the agent's own
+  // finding — is not their review of the result; nor is relayed words
+  // answering a child question that was not about its result.
+  const rv = { n: 1, event: 1, manifest: null, childSeq: 9, instruction: 'Fix the test.', reason: 'not collected', by: 'par-agent', at: '', attempt: null, seq: 6 }
+  const corrected = await assess(c, { d: { revisions: [{ ...rv, from: 'Pat', because: { kind: 'instruction', instruction: 'i1', from: 'Pat' } }, { ...rv, n: 2, from: 'par-agent', origin: 'agent', evidence: 'ran the tests' }] } })
+  assert.equal(status(corrected, 'review-unrecorded'), 'unknown')
+  assert.match(corrected.checks.find(x => x.code === 'review-unrecorded')!.facts.join('\n'), /correction 1 \(of event 1\) is Pat's words, relayed by par-agent: a correction is not a review of the result[\s\S]*correction 2 \(of event 1\) is par-agent's own finding \(checked: ran the tests\)/)
+  const unrelated = await assess(c, { d: { answers: [{ n: 1, question: 'q9', event: 99, text: 'go ahead', from: 'Pat', by: 'par-agent', at: '', attempt: null, seq: 5, because: { kind: 'instruction', instruction: 'i1', from: 'Pat' } }] } })
+  assert.equal(status(unrelated, 'review-unrecorded'), 'unknown')
+  assert.match(unrelated.checks.find(x => x.code === 'review-unrecorded')!.facts.join('\n'), /did not ask about its result, so this is not a review of it/)
   // accepts: parent: the parent's agent may accept; nothing to check.
   assert.equal(status(await assess(c, { d: { accepts: 'parent' } }), 'review-unrecorded'), undefined)
   // The person answered the child's question themselves.

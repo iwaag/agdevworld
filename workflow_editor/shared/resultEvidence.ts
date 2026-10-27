@@ -99,13 +99,15 @@ export function producerLines(o: { context: WorkContext; requester: string | nul
 
 // What the receiving run is asked beside a result's records: what WFE cannot
 // judge, as questions, with how to read the files.
-export function receiverQuestions(c: WorkContext, read: string, revise: string): string[] {
-  const b = basisLine(c, 'the child\'s changes')
+// `who`: the producer as the receiver knows it (a delegated child, or a run
+// it requested — tidy p3).
+export function receiverQuestions(c: WorkContext, read: string, revise: string, who = 'the child'): string[] {
+  const b = basisLine(c, `${who}'s changes`)
   return [
     `WFE checked records, not content. Compare the claim with the files before judging (${read}).`,
-    ...c.kinds.map(k => ASK[k].receiver),
+    ...c.kinds.map(k => who === 'the child' ? ASK[k].receiver : ASK[k].receiver.replace(/the child's/g, `${who}'s`)),
     ...(b ? [b] : []),
-    `What is missing goes back to the same child (${revise}), and its next result is checked again; otherwise your judgement's note says what you checked.`,
+    `What is missing goes back to ${who === 'the child' ? 'the same child' : who} (${revise}) as part of assessing it — no go-ahead is needed for what the request asked — and its next result is checked again; otherwise your judgement's note says what you checked.`,
   ]
 }
 
@@ -124,10 +126,15 @@ export function delegationStanding(d: Delegation): string {
   const ev = latestResult(d)
   const child = d.child ? `${d.target.project} ${d.child.workflow}/${d.child.run}` : `${d.target.project}/${d.target.workflow}`
   const rv = (d.revisions ?? []).at(-1)
-  const state = d.disposition ? `judged ${d.disposition.kind}${d.disposition.event !== null ? ` (event ${d.disposition.event})` : ''}`
+  // tidy p3: a result that needed corrections, or whose acceptance was set
+  // aside, says so: p2's last summary presented a twice-returned result as
+  // done and dropped the failed correction.
+  const n = (d.revisions ?? []).length
+  const history = `${n ? ` after ${n} correction request${n === 1 ? '' : 's'}` : ''}${d.reopened?.length ? ` (an earlier satisfied judgement set aside ${d.reopened.length === 1 ? 'once' : `${d.reopened.length} times`})` : ''}`
+  const state = d.disposition ? `judged ${d.disposition.kind}${d.disposition.event !== null ? ` (event ${d.disposition.event})` : ''}${history}`
     : d.closed ? `closed: ${d.closed.reason}`
       : rv && (!ev || ev.n <= rv.event) ? `returned for correction (request ${rv.n}), not back yet`
-        : ev ? `result event ${ev.n}${(d.revisions ?? []).some(r => r.event < ev.n) ? ' (a corrected result)' : ''}, not judged yet`
+        : ev ? `result event ${ev.n}${(d.revisions ?? []).some(r => r.event < ev.n) ? ` (a corrected result${history})` : ''}, not judged yet`
           : 'no result yet'
   return `${d.id} → ${child}: ${state}`
 }

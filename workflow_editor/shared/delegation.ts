@@ -74,7 +74,15 @@ export interface Disposition { kind: DispositionKind; note: string; event: numbe
 // (fix6, `wfe delegate revise`): the result it returns (event and manifest
 // digest), why, and what the child is asked to add. The child adds and
 // performs the missing work itself; its next completion is a new result.
-export interface DelegationRevision { n: number; event: number; manifest: string | null; childSeq: number; instruction: string; reason: string; from: string; by: string; at: string; attempt: string | null; seq: number; because?: Because }
+// tidy p3: `origin` is whose finding the correction is — the recording
+// agent's own (`agent`, with what it checked in `evidence`), the person's
+// words it relays (`person`, `because`), or a human review's requested
+// changes (`review`). Records before p3 have none: read with originOf.
+// `attributed`: later, explicit corrections of who the finding was (the
+// original `from` stays as recorded).
+export type CorrectionOrigin = 'agent' | 'person' | 'review'
+export interface Attribution { origin: CorrectionOrigin; from: string; reason: string; by: string; at: string; seq: number }
+export interface DelegationRevision { n: number; event: number; manifest: string | null; childSeq: number; instruction: string; reason: string; from: string; by: string; at: string; attempt: string | null; seq: number; because?: Because; origin?: CorrectionOrigin; evidence?: string; followUp?: string; attributed?: Attribution[] }
 
 export interface Delegation {
   id: string
@@ -98,7 +106,8 @@ export interface Delegation {
   // p17: dispositions set aside by a follow-up after a person's requested
   // changes (the agent had judged the result satisfied; the person's review
   // asked for more). Kept in order; the delegation is open again.
-  reopened?: { disposition: Disposition; review: string | null; because?: Because; at: string; by: string; seq: number }[] // p17 a review's follow-up; p18 the person's words
+  // tidy p3: or the agent's own finding (`origin: agent`, with its evidence).
+  reopened?: { disposition: Disposition; review: string | null; because?: Because; origin?: CorrectionOrigin; evidence?: string; at: string; by: string; seq: number }[] // p17 a review's follow-up; p18 the person's words
   disposition: Disposition | null
   closed: { at: string; by: string; reason: string } | null
 }
@@ -126,6 +135,22 @@ export function questionEvent(d: Pick<Delegation, 'events'>, question: string): 
 export const latestResult = (d: Pick<Delegation, 'events'>) => [...d.events].reverse().find(e => e.type === 'completed')
 // The correction request that returned the latest result and still stands
 // (fix6): no newer result came back, and the child did not refuse it.
+// Whose finding a correction is, as last attributed (tidy p3). A record
+// before p3 carries none: a follow-up is a review's, relayed words are the
+// person's, anything else the recording agent's.
+export function originOf(r: DelegationRevision): { origin: CorrectionOrigin; from: string; corrected: Attribution | null } {
+  const a = r.attributed?.at(-1)
+  if (a) return { origin: a.origin, from: a.from, corrected: a }
+  return { origin: r.origin ?? (r.followUp ? 'review' : r.because ? 'person' : 'agent'), from: r.from, corrected: null }
+}
+export function originText(r: DelegationRevision): string {
+  const o = originOf(r)
+  const what = o.origin === 'agent' ? `${o.from}'s own finding${r.evidence ? ` (checked: ${r.evidence.replace(/\s+/g, ' ').slice(0, 160)})` : ''}`
+    : o.origin === 'review' ? `${o.from}'s requested changes in human review ${r.followUp ?? ''}`.trim()
+      : `${o.from}'s words, relayed by ${r.by}`
+  return o.corrected ? `${what}; attributed so by ${o.corrected.by} at ${o.corrected.at} (${o.corrected.reason.replace(/\s+/g, ' ').slice(0, 160)}), recorded at first as from ${r.from}` : what
+}
+
 export function openRevision(d: Pick<Delegation, 'events' | 'revisions'>): DelegationRevision | undefined {
   const r = d.revisions?.at(-1)
   const latest = latestResult(d)

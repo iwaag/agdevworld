@@ -728,8 +728,22 @@ export function createHandler(config: ServiceConfig) {
           const because = input.because && typeof input.because === 'object' ? input.because as never : undefined
           const r = parts[8] === 'dispose'
             ? await store.dispose(ws, ref, parts[7], { disposition: str(input.disposition, 'disposition'), note: str(input.note, 'note'), event, manifest, yes: input.yes === true }, { by, via: 'browser', ...meta })
-            : await store.revise(ws, ref, parts[7], { instruction: str(input.instruction, 'instruction'), reason: str(input.reason, 'reason'), event, manifest, because, ...(typeof input.followUp === 'string' ? { followUp: input.followUp } : {}) }, { by, via: 'browser', ...meta })
+            : await store.revise(ws, ref, parts[7], { instruction: str(input.instruction, 'instruction'), reason: str(input.reason, 'reason'), event, manifest, because, ...(typeof input.followUp === 'string' ? { followUp: input.followUp } : {}), ...(input.reopen === true ? { reopen: true } : {}), ...(typeof input.evidence === 'string' ? { evidence: input.evidence } : {}) }, { by, via: 'browser', ...meta })
           return send(res, 200, { ok: true, duplicate: r.duplicate ?? false, seq: r.record.seq, delegation: r.record.delegations?.[parts[7]] })
+        }
+        // tidy p3: this run's latest result as its requester receives it
+        // (wfe run result); `requester` names the reading run. And its
+        // return by that requester (wfe run return).
+        if (sub === 'result' && method === 'GET') {
+          const { assessRequested } = await import('./requestedResult.ts')
+          const q = new URL(req.url ?? '', 'http://x').searchParams.get('requester')
+          return send(res, 200, { result: await assessRequested(needExec().delegate, { workspace: ws.reg.id, ref }, q) })
+        }
+        if (sub === 'return' && method === 'POST') {
+          const input = await body(req) as Record<string, unknown>
+          const { returnRequested } = await import('./requestedResult.ts')
+          const r = await returnRequested(needExec().delegate, { workspace: ws.reg.id, ref }, { requester: str(input.requester, 'requester'), instruction: str(input.instruction, 'instruction'), reason: str(input.reason, 'reason'), ...(typeof input.evidence === 'string' ? { evidence: input.evidence } : {}), ...(typeof input.resultSeq === 'number' ? { resultSeq: input.resultSeq } : {}), ...(typeof input.attempt === 'string' ? { attempt: input.attempt } : {}), ...(typeof input.by === 'string' ? { by: input.by } : {}), ...(typeof input.receipt === 'string' ? { receipt: input.receipt } : {}), via: 'browser' })
+          return send(res, 200, { ok: true, correction: r.correction, duplicate: r.duplicate, job: r.job })
         }
         // fix6: one delegation's result assessment (reads only).
         if (sub === 'delegations' && parts[7] && parts[8] === 'assessment' && method === 'GET') {

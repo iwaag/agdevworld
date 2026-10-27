@@ -1060,7 +1060,19 @@ export class ConversationService {
       : a.state === 'failed' ? `failed: ${a.error}` : `withdrawn: ${a.error ?? ''}`
     const what = (a: InvitationRow) => a.awaits ? `the awaited result of ${a.run} (invitation ${a.id}, ${a.participant})` : `invitation ${a.id} to ${a.participant}`
     const read = `Read what was said: wfe discussion show ${i.conv} --since ${Math.min(...untold.map(a => a.horizon || 0))}`
-    const lines = (head: string) => [head, ...untold.map(a => `- ${what(a)}: ${outcome(a)}`), read].join('\n')
+    // tidy p3: an awaited run's result is told with its evidence — the claim
+    // beside its records, what to judge, and whether this run may return it —
+    // as a delegated result is (p2: "unanswered: ended without a message"
+    // was all a requested run's result got).
+    const results = new Map<number, string[]>()
+    for (const a of untold.filter(x => x.awaits && x.run)) {
+      try {
+        const { assessRequested, requestedLines } = await import('./requestedResult.ts')
+        const ev = await assessRequested(this.exec.delegate, parseRunName(a.run!), i.awaited_by)
+        if (ev.resultSeq) results.set(a.id, requestedLines(ev, '    '))
+      } catch (e) { results.set(a.id, [`    its result could not be read: ${(e as Error).message}`]) }
+    }
+    const lines = (head: string) => [head, ...untold.flatMap(a => [`- ${what(a)}: ${outcome(a)}`, ...(results.get(a.id) ?? [])]), read].join('\n')
     const ids = untold.map(a => `${a.id}-${label(a)}`).join('.')
     let receipt = `discussion:${i.conv}:continue:${i.awaited_by}:${act ? `a${act.id}:` : ''}${ids}`
     if (receipt.length > 200) receipt = `discussion:${i.conv}:continue:${createHash('sha256').update(receipt).digest('hex').slice(0, 32)}`

@@ -307,7 +307,12 @@ export const INSTRUCTION_ID = /^i[0-9]{1,6}$/
 // recorded that nothing needs to change (`no-change`).
 export interface Correction {
   id: string
-  delegation: { uid: string; revision: number }
+  // Who returned it: a delegating run's correction request (fix6), or the
+  // run that requested this one (`request`, tidy p3: input.entrustedBy names
+  // it, <project>/<workflow>/<run>), returning its result directly.
+  delegation?: { uid: string; revision: number }
+  request?: { run: string }
+  evidence?: string // tidy p3: what the requester checked
   result: { seq: number } // the completing entry of the result it returns
   text: string // what the child is asked to add
   reason: string // why the result was returned
@@ -618,8 +623,9 @@ export type OpInput =
   // same child for correction (event and manifest name the result it saw);
   // the child's side: the intake records the delivered request on the
   // child, its agent takes it up (`noChange`: nothing needs to change).
-  | { op: 'delegation.revise'; delegation: string; instruction: string; reason: string; event?: number; manifest?: string; because?: BecauseRef; followUp?: string }
-  | { op: 'correction.receive'; correction?: string; delegation: { uid: string; revision: number }; result: { seq: number }; text: string; reason: string; from: string; source?: SourceRef }
+  | { op: 'delegation.revise'; delegation: string; instruction: string; reason: string; event?: number; manifest?: string; because?: BecauseRef; followUp?: string; reopen?: boolean; evidence?: string }
+  | { op: 'delegation.attribute'; delegation: string; revision: number; origin: string; from: string; reason: string }
+  | { op: 'correction.receive'; correction?: string; delegation?: { uid: string; revision: number }; request?: { run: string }; result: { seq: number }; text: string; reason: string; from: string; evidence?: string; source?: SourceRef }
   | { op: 'correction.take-up'; correction: string; note: string; noChange?: boolean }
   // fix6: the person asked for a presentation to stay available after its
   // review; who stops it, and on whose words. A record, not a stop or a keep-alive.
@@ -654,7 +660,7 @@ export const OPS = ['run.create', 'node.start', 'node.progress', 'node.wait', 'n
   'question.ask', 'question.answer', 'question.take-up', 'question.withdraw', 'instruction.receive', 'instruction.ack', 'artifact.attach', 'run.cancel', 'run.decide',
   'attempt.begin', 'attempt.end', 'run.stop', 'run.resume', 'presentation.register', 'presentation.observe', 'run.adjust', 'run.record-done', 'run.integrate', 'run.relocate', 'run.assign', 'run.recover', 'attempt.session', 'attempt.context', 'session.retire',
   'delegation.dispatch', 'delegation.bind', 'delegation.event', 'delegation.take-up', 'delegation.answer', 'delegation.instruct', 'delegation.dispose',
-  'delegation.revise', 'correction.receive', 'correction.take-up', 'presentation.retain',
+  'delegation.revise', 'delegation.attribute', 'correction.receive', 'correction.take-up', 'presentation.retain',
   'review.prepare', 'review.start', 'review.serve', 'review.decide', 'review.cleanup', 'review.take-up',
   'standing.establish', 'standing.facilitate', 'standing.suspend', 'standing.close', 'standing.reopen', 'standing.release',
   'input.select', 'input.observe', 'output.publish', 'output.observe'] as const
@@ -2106,17 +2112,26 @@ export function apply(prev: RunState | null, e: HistoryEntry | (OpInput & EntryM
       // already accepted. The person's words (an answer or an instruction,
       // named by `because`) reopen a delegation judged satisfied for the same
       // child, as a review's requested changes do; the disposition is kept.
+      // tidy p3: the agent's own finding reopens its own earlier judgement
+      // (`reopen`), with what it checked (`evidence`). The person's words are
+      // not borrowed for it (p2: ponderer's finding was recorded as the
+      // person's go-ahead), and nothing here says anyone reviewed the result.
+      const evidence = e.evidence === undefined || e.evidence === null ? undefined : text(e.evidence, 'what you checked (the evidence)')
+      const ownReopen = !!e.reopen && (e.followUp === undefined || e.followUp === null)
+      if (ownReopen && e.because) fail('because', 'a reopening is either your own finding (--reopen --evidence) or the person\'s words (--because), not both')
       if (d.disposition?.kind === 'satisfied' && (e.followUp === undefined || e.followUp === null)) {
         const said = because(e.because)
-        if (said && said.from !== s.executor.name) {
+        if ((said && said.from !== s.executor.name) || ownReopen) {
           if (d.closed) fail('delegation-closed', `delegation ${d.id} is closed: ${d.closed.reason}`)
-          d.reopened = [...(d.reopened ?? []), { disposition: d.disposition, review: null, because: said, at, by, seq: e.seq }]
+          if (ownReopen && !evidence) fail('evidence', `reopening your own judgement of ${d.id} names what you checked that shows the defect (--evidence)`)
+          if (ownReopen && d.disposition.event !== null && d.disposition.event !== latestResult(d)?.n) fail('result-superseded', `${d.id} was judged on event ${d.disposition.event}, and event ${latestResult(d)?.n} came since; judge the latest result`)
+          d.reopened = [...(d.reopened ?? []), { disposition: d.disposition, review: null, ...(said ? { because: said, origin: 'person' as const } : { origin: 'agent' as const, evidence }), at, by, seq: e.seq }]
           d.disposition = null
           const dn = s.nodes[d.node]
           if (dn?.state === 'completed') { dn.ended = null; move(d.node, 'running') }
         }
-      }
-      if (d.disposition) fail('delegation-closed', `delegation ${d.id} was judged ${d.disposition.kind} by ${d.disposition.by}; a closed delegation is not reopened (dispatch a replacement with --replaces ${d.id}; after a person's review asked for changes: --follow-up <rv>; a result judged satisfied that the person now wants changed: --because with their words)`)
+      } else if (ownReopen && !d.disposition) fail('state', `${d.id} is not judged; nothing to reopen (return it without --reopen)`)
+      if (d.disposition) fail('delegation-closed', `delegation ${d.id} was judged ${d.disposition.kind} by ${d.disposition.by}; a closed delegation is not reopened (dispatch a replacement with --replaces ${d.id}; after a person's review asked for changes: --follow-up <rv>; a result judged satisfied that the person now wants changed: --because with their words; a result you judged satisfied and now find deficient: --reopen --evidence with what you checked)`)
       if (d.closed) fail('delegation-closed', `delegation ${d.id} is closed: ${d.closed.reason}`)
       if (!d.child) fail('delegation-unbound', `delegation ${d.id} has no child yet; there is no result to return`)
       const latest = latestResult(d)
@@ -2133,9 +2148,24 @@ export function apply(prev: RunState | null, e: HistoryEntry | (OpInput & EntryM
       if (stop) fail('child-stopped', `the child ${stop.type === 'cancelled' ? 'was cancelled' : 'failed'} after this result (event ${stop.n}); a correction does not undo that`)
       const why = because(e.because)
       if (why && why.from === s.executor.name) fail('because', `the words named are ${s.executor.name}'s own; because names a person's answer or instruction`)
-      const r: DelegationRevision = { n: (d.revisions?.length ?? 0) + 1, event: ev!.n, manifest: ev!.manifest?.digest ?? null, childSeq: ev!.child.seq, instruction: text(e.instruction, 'what the child is asked to add (the instruction)'), reason: text(e.reason, 'why the result is returned (the reason)'), from: why?.from ?? by, by, at, attempt: e.attempt ?? null, seq: e.seq, ...(why ? { because: why } : {}) }
+      const follow = e.followUp !== undefined && e.followUp !== null ? String(e.followUp) : undefined
+      const r: DelegationRevision = { n: (d.revisions?.length ?? 0) + 1, event: ev!.n, manifest: ev!.manifest?.digest ?? null, childSeq: ev!.child.seq, instruction: text(e.instruction, 'what the child is asked to add (the instruction)'), reason: text(e.reason, 'why the result is returned (the reason)'), from: why?.from ?? by, by, at, attempt: e.attempt ?? null, seq: e.seq, ...(why ? { because: why } : {}),
+        origin: follow ? 'review' : why ? 'person' : 'agent', ...(evidence ? { evidence } : {}), ...(follow ? { followUp: follow } : {}) }
       d.revisions = [...(d.revisions ?? []), r]
       waitOnDelegation(d)
+      break
+    }
+    case 'delegation.attribute': {
+      // tidy p3: an explicit, later correction of whose finding a recorded
+      // correction request was (p2: conduct/run-051 d1 correction 1 was
+      // ponderer's own finding, recorded as relaying the Omni go-ahead #464).
+      // The original entry stays as it was recorded; readers show both.
+      const d = delegation(e.delegation)
+      const r = (d.revisions ?? []).find(x => x.n === e.revision)
+      if (!r) fail('revision-unknown', `${d.id} has no correction request ${String(e.revision)}`)
+      if (!['agent', 'person', 'review'].includes(String(e.origin))) fail('shape', 'origin is agent, person or review')
+      const a = { origin: e.origin as 'agent' | 'person' | 'review', from: text(e.from, 'whose finding it was (from)'), reason: text(e.reason, 'the evidence for the attribution (reason)'), by, at, seq: e.seq }
+      d.revisions = (d.revisions ?? []).map(x => x.n === r!.n ? { ...x, attributed: [...(x.attributed ?? []), a] } : x)
       break
     }
     case 'correction.receive': {
@@ -2144,9 +2174,19 @@ export function apply(prev: RunState | null, e: HistoryEntry | (OpInput & EntryM
       // and only for the result it returns: the latest completion.
       live()
       const ent = s.input.entrustedBy
-      const dl = e.delegation as unknown as Record<string, unknown>
-      if (!isObj(dl) || typeof dl.uid !== 'string' || typeof dl.revision !== 'number' || !Number.isInteger(dl.revision) || dl.revision < 1) fail('shape', 'delegation is {uid, revision}')
-      if (ent?.kind !== 'delegation' || ent.delegation !== dl.uid) fail('delegate-relation', `this run was not created from delegation ${String(dl.uid)}; its correction does not belong here`)
+      const dl = e.delegation as unknown as Record<string, unknown> | undefined
+      const rq = e.request as unknown as Record<string, unknown> | undefined
+      if (rq !== undefined && rq !== null) {
+        // tidy p3: the requesting run returns this run's result itself. Its
+        // authority is the recorded relation, never a topic or recency.
+        if (dl !== undefined && dl !== null) fail('shape', 'a correction comes from a delegation or from the requesting run, not both')
+        if (!isObj(rq) || typeof rq.run !== 'string') fail('shape', 'request is {run}')
+        const owner = ent?.kind === 'run' ? `${ent.project ?? s.project}/${ent.workflow}/${ent.run}` : null
+        if (owner !== rq.run) fail('request-relation', `${String(rq.run)} did not request this run (${ent?.kind === 'run' ? `requested by ${owner}` : ent?.kind === 'delegation' ? 'it is a delegated child: its parent returns it with wfe delegate revise' : 'no requesting run is recorded'}); only its requester returns its result`)
+      } else {
+        if (!isObj(dl) || typeof dl!.uid !== 'string' || typeof dl!.revision !== 'number' || !Number.isInteger(dl!.revision) || (dl!.revision as number) < 1) fail('shape', 'delegation is {uid, revision}')
+        if (ent?.kind !== 'delegation' || ent.delegation !== dl!.uid) fail('delegate-relation', `this run was not created from delegation ${String(dl!.uid)}; its correction does not belong here`)
+      }
       const base = summarize({ nodes: s.nodes, cancelled: s.cancelled }, graph)
       if (base.state !== 'completed' || openCorrections(s).length) fail('correction-state', `this run is ${openCorrections(s).length ? `already open for correction ${openCorrections(s)[0].id}` : base.state}; a correction returns a completed result`)
       // Which completion it returns is checked against the history by the
@@ -2157,7 +2197,7 @@ export function apply(prev: RunState | null, e: HistoryEntry | (OpInput & EntryM
       const id = e.correction || `c${Object.keys(all).length + 1}`
       if (!CORRECTION_ID.test(id)) fail('shape', `correction id "${id}" must match ${CORRECTION_ID.source}`)
       if (id in all) fail('correction-exists', `correction ${id} already exists`)
-      const c: Correction = { id, delegation: { uid: dl.uid as string, revision: dl.revision as number }, result: { seq: res.seq as number }, text: text(e.text, 'the instruction'), reason: text(e.reason, 'the reason'), from: text(e.from, 'whose words they are (from)'), by, at, via: e.via, during: ctl.attempt?.id ?? null, takenUp: null, addressed: null }
+      const c: Correction = { id, ...(rq ? { request: { run: rq.run as string } } : { delegation: { uid: dl!.uid as string, revision: dl!.revision as number } }), result: { seq: res.seq as number }, text: text(e.text, 'the instruction'), reason: text(e.reason, 'the reason'), from: text(e.from, 'whose words they are (from)'), ...(e.evidence ? { evidence: text(e.evidence, 'the evidence') } : {}), by, at, via: e.via, during: ctl.attempt?.id ?? null, takenUp: null, addressed: null }
       if (e.source !== undefined) c.source = sourceOf(e.source)
       s.corrections = { ...all, [id]: c }
       change.correction = [null, id]

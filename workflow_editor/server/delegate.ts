@@ -438,19 +438,19 @@ export class DelegateStore {
   // identity and the delegation's state under the parent's lock; the
   // notifier delivers it into the child's request topic, and the child's
   // intake records it there and continues the child.
-  async revise(ws: Workspace, ref: RunRef, id: string, o: { instruction: string; reason: string; event?: number; manifest?: string; because?: BecauseRef; followUp?: string }, ctx: OpContext & { attempt?: string; receipt?: string }) {
+  async revise(ws: Workspace, ref: RunRef, id: string, o: { instruction: string; reason: string; event?: number; manifest?: string; because?: BecauseRef; followUp?: string; reopen?: boolean; evidence?: string }, ctx: OpContext & { attempt?: string; receipt?: string }) {
     const { d } = await this.parentDelegation(ws, ref, id)
     if (d.child) {
       const c = await this.child(d).catch(() => null)
       if (c?.record.cancelled) throw new RequestError(409, `the child ${d.child.workflow}/${d.child.run} is cancelled (${c.record.cancelled.reason}); a correction does not undo that`, { code: 'child-stopped' })
       if (c && c.record.control.attempt) throw new RequestError(409, `the child ${d.child.workflow}/${d.child.run} has attempt ${c.record.control.attempt.id} open; its result is not settled — wait for it to end`, { code: 'child-active' })
-      if (c && c.record.execution.state !== 'completed' && !(c.record.corrections && Object.values(c.record.corrections).some(k => k.delegation.uid === d.uid && !k.addressed))) throw new RequestError(409, `the child ${d.child.workflow}/${d.child.run} is ${c.record.execution.state} now, not completed; a correction returns a completed result`, { code: 'child-active' })
+      if (c && c.record.execution.state !== 'completed' && !(c.record.corrections && Object.values(c.record.corrections).some(k => k.delegation?.uid === d.uid && !k.addressed))) throw new RequestError(409, `the child ${d.child.workflow}/${d.child.run} is ${c.record.execution.state} now, not completed; a correction returns a completed result`, { code: 'child-active' })
     }
-    const r = await runOp(await runSpace(ws, ref), ref, { op: 'delegation.revise', delegation: id, instruction: o.instruction, reason: o.reason, ...(o.event !== undefined ? { event: o.event } : {}), ...(o.manifest ? { manifest: o.manifest } : {}), ...(o.because ? { because: o.because } : {}), ...(o.followUp ? { followUp: o.followUp } : {}), ...(ctx.attempt ? { attempt: ctx.attempt } : {}), ...(ctx.receipt ? { receipt: ctx.receipt } : {}) } as never, ctx)
+    const r = await runOp(await runSpace(ws, ref), ref, { op: 'delegation.revise', delegation: id, instruction: o.instruction, reason: o.reason, ...(o.event !== undefined ? { event: o.event } : {}), ...(o.manifest ? { manifest: o.manifest } : {}), ...(o.because ? { because: o.because } : {}), ...(o.followUp ? { followUp: o.followUp } : {}), ...(o.reopen ? { reopen: true } : {}), ...(o.evidence ? { evidence: o.evidence } : {}), ...(ctx.attempt ? { attempt: ctx.attempt } : {}), ...(ctx.receipt ? { receipt: ctx.receipt } : {}) } as never, ctx)
     // A follow-up reopened a judged delegation (p17): its child's next
     // result is relayed again.
     const nd = r.record.delegations?.[id]
-    if ((o.followUp || o.because) && nd) this.index(ws.reg.id, r.record, nd)
+    if ((o.followUp || o.because || o.reopen) && nd) this.index(ws.reg.id, r.record, nd)
     return r
   }
 

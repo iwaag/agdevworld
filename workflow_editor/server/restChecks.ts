@@ -11,7 +11,7 @@ import type { ConversationService } from './conversationService.ts'
 // The kinds of post that speak to the room for the run (a progress note does not).
 const SPOKEN = ['reply', 'result', 'synthesis', 'announce', 'question']
 
-export function restReminders(ds: ConversationService, record: RunRecord, run: string, completing: string): Reminder[] {
+export async function restReminders(ds: ConversationService, record: RunRecord, run: string, completing: string): Promise<Reminder[]> {
   const others = Object.entries(record.nodes).filter(([id]) => id !== completing)
   if (!others.every(([, x]) => x.state === 'completed' || x.state === 'cancelled')) return []
   const out: Reminder[] = []
@@ -40,12 +40,17 @@ export function restReminders(ds: ConversationService, record: RunRecord, run: s
   const posts = open.flatMap(id => ds.messages(id).filter(m => m.run === run && SPOKEN.includes(m.kind)).map(m => ({ id, at: m.at, n: m.id })))
   const lastPost = posts.sort((a, b) => a.at.localeCompare(b.at)).at(-1) ?? null
   if (open.length) {
-    const unreported = Object.values(record.delegations ?? {}).filter(d => { const t = lastResultFact(d); return !!t && (!lastPost || t > lastPost.at) })
+    const delegated = Object.values(record.delegations ?? {}).filter(d => { const t = lastResultFact(d); return !!t && (!lastPost || t > lastPost.at) }).map(d => ({ ref: d.id, text: delegationStanding(d) }))
+    // tidy p3: runs it requested and awaited (wfe request + ask --run) are
+    // commissioned results too; p2's fixture rooms used only that route.
+    const { awaitedStanding } = await import('./requestedResult.ts')
+    const requested = (await awaitedStanding(ds, open, run).catch(() => [])).filter(x => !lastPost || x.at > lastPost.at).map(x => ({ ref: x.run, text: x.text }))
+    const unreported = [...delegated, ...requested]
     if (unreported.length) out.push({
-      code: 'results-unreported', refs: unreported.map(d => d.id),
-      text: `This puts ${run} to rest, and ${unreported.length === 1 ? 'a commissioned result has' : `${unreported.length} commissioned results have`} a fact the room has not heard from it${lastPost ? ` since its last post (${lastPost.id} #${lastPost.n})` : ''}: ${unreported.map(delegationStanding).join('; ')}.`,
-      repair: [`account for each in the room first: wfe conversation reply --re <the person's message> … --kind result, naming each commissioned result, how you judged it and what stays unverified or open`, 'if a result is still to be checked or corrected, say so and what it waits for'],
-      summary: `${unreported.map(d => d.id).join(', ')} not reported to the room since ${lastPost ? `#${lastPost.n}` : 'the run began'} → wfe conversation reply … first`,
+      code: 'results-unreported', refs: unreported.map(d => d.ref),
+      text: `This puts ${run} to rest, and ${unreported.length === 1 ? 'a commissioned result has' : `${unreported.length} commissioned results have`} a fact the room has not heard from it${lastPost ? ` since its last post (${lastPost.id} #${lastPost.n})` : ''}: ${unreported.map(d => d.text).join('; ')}. This compares times of records, not what a post says.`,
+      repair: [`account for each in the room first: wfe conversation reply --re <the person's message> … --kind result, naming each commissioned result, how you judged it, any correction it needed and what stays unverified or open`, 'if a result is still to be checked or corrected, say so and what it waits for'],
+      summary: `${unreported.map(d => d.ref).join(', ')} not reported to the room since ${lastPost ? `#${lastPost.n}` : 'the run began'} → wfe conversation reply … first`,
     })
   }
   return out

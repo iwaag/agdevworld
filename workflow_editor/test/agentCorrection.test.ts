@@ -12,6 +12,7 @@ import { runOp } from '../server/runs.ts'
 import { runSpace } from '../server/runspace.ts'
 import { RequestError } from '../server/workspace.ts'
 import { openRevision, originOf, originText } from '../shared/delegation.ts'
+import { delegationBrief } from '../server/exec.ts'
 import { as, claim, delegationSuite, dispatched, rec, type S } from './delegateFixture.ts'
 
 delegationSuite('wfe-agent-correction-')
@@ -59,6 +60,8 @@ test('the agent reopens its own satisfied judgement with its evidence: recorded 
   assert.equal('origin' in r, false, 'derived, not stored: records before p3 replay to the same state')
   assert.match(originText(r), /^par-agent's own finding \(checked: read test_icon\.py/)
   assert.ok(openRevision(d))
+  // The brief carries the history for the run's account (trial 6's #481 omitted a returned result).
+  assert.match(delegationBrief(await rec(s.par, ref)).join('\n'), /its history, for your account: result event 1 returned for correction \(request 1: The claimed fix is not in the file\.\); a satisfied judgement was set aside/)
   await s.zulip.cycle()
   const child = await rec(s.kid, kidRef)
   assert.deepEqual([Object.keys(child.corrections ?? {}), child.corrections?.c1.from], [['c1'], 'par-agent'], 'the same child receives it, from the agent')

@@ -248,6 +248,9 @@ export function delegationBrief(r: RunRecord, assessed: Record<string, string[]>
       if (e.manifest) out.push(`      result manifest ${e.manifest.digest.slice(7, 19)}: ${e.manifest.execution}; report ${e.manifest.report?.path ?? '(none)'}; ${e.manifest.artifacts.length} artifact(s)`)
       if (e.type === 'completed' && assessed[d.id]) out.push(...assessed[d.id].map(l => `    ${l}`))
     }
+    // tidy p3: trial 6's account (#481) presented a result returned once as
+    // simply done; the correction history reached it only in the reply's output.
+    if ((d.revisions ?? []).length || d.reopened?.length) out.push(`  - its history, for your account: ${(d.revisions ?? []).map(r => `result event ${r.event} returned for correction (request ${r.n}: ${r.reason.replace(/\s+/g, ' ').slice(0, 100)})`).join('; ')}${d.reopened?.length ? `; ${d.reopened.length === 1 ? 'a satisfied judgement was' : `${d.reopened.length} satisfied judgements were`} set aside` : ''}`)
     const rv = (d.revisions ?? []).at(-1)
     if (rv && delegationState(d) === 'correcting') out.push(`  - result event ${rv.event} was returned for correction (request ${rv.n}, ${rv.at}); the child continues and its next completion comes back as a new result.`)
   }

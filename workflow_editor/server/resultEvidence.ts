@@ -7,6 +7,7 @@ import { producerLines, templatesOf, workContext } from '../shared/resultEvidenc
 import { graphOfState, runFolder, type RunRecord, type RunRef } from '../shared/run.ts'
 import { changedPaths } from './reminders.ts'
 import { activeDefinition, readRun } from './runs.ts'
+import { runSpace } from './runspace.ts'
 import type { Workspace } from './workspace.ts'
 
 // Where a run's result starts going back:
@@ -35,7 +36,10 @@ export async function producerAdvice(ws: Workspace, ref: RunRef, at: { started?:
     const left = Object.keys(r.nodes).filter(id => !['completed', 'cancelled'].includes(r.nodes[id].state))
     if (!left.length || !left.every(reporting)) return null
   } else return null
-  return producerLines({ context: await contextOf(ws, r, authored), requester: r.input.kind === 'request' ? r.input.requester ?? null : null, report: finalStep ? `${runFolder(r)}/${graph.nodes[finalStep].step!.output}` : null })
+  // The run's own copy, where its changes are (evidence-fixture/run-003: read
+  // against the project workspace, nothing was chosen).
+  const space = await runSpace(ws, ref).catch(() => ws)
+  return producerLines({ context: await contextOf(space, r, authored), requester: r.input.kind === 'request' ? r.input.requester ?? null : null, report: finalStep ? `${runFolder(r)}/${graph.nodes[finalStep].step!.output}` : null })
 }
 
 async function contextOf(ws: Workspace, r: RunRecord, authored: Parameters<typeof templatesOf>[1]) {

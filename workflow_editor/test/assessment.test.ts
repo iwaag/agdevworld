@@ -341,7 +341,7 @@ test('report paths: names with a folder are looked up in the child\'s copy and i
   await writeFile(join(c.dir, 'devdocs', 'runs', 'freework', 'run-001', 'notes', 'a.md'), 'a\n')
   await writeFile(join(c.dir, 'devdocs', 'runs', 'freework', 'run-001', 'report.md'), [
     'Moved `out/index.html` and wrote `notes/a.md`; see `docs/missing.md:12` and `tools/gone.py`.',
-    'Not paths: `report.md`, `https://x.invalid/a/b`, `shared://agshare/runs/x`, `src/*.ts`, `<run>/report.md`, `/abs/path`, `~/home/x`.',
+    'Not paths: `report.md`, `__pycache__/`, `runs/run-001..003/report.md`, `https://x.invalid/a/b`, `shared://agshare/runs/x`, `src/*.ts`, `<run>/report.md`, `/abs/path`, `~/home/x`.',
   ].join('\n'))
   const r = await namedPaths(c.dir, record, 'devdocs/runs/freework/run-001/report.md')
   assert.deepEqual(r, { named: 4, missing: ['docs/missing.md', 'tools/gone.py'] })

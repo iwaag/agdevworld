@@ -576,9 +576,9 @@ export async function namedPaths(root: string, child: RunRecord, report: string)
   const text = await readFile(await inside(root, report), 'utf8')
   const names = new Set<string>()
   for (const m of text.matchAll(NAMED)) {
-    const p = m[1].replace(/[.,:;)]+$/, '').replace(/:\d+(-\d+)?$/, '')
-    if (!p.includes('/') || /^[a-z][a-z0-9+.-]*:/i.test(p) || /^(\/|~|\.\.)/.test(p) || /[*?<>{}$|=]/.test(p) || p.includes('…')) continue
-    names.add(p.replace(/\/$/, ''))
+    const p = m[1].replace(/[.,:;)]+$/, '').replace(/:\d+(-\d+)?$/, '').replace(/\/$/, '')
+    if (!p.includes('/') || p.includes('..') || /^[a-z][a-z0-9+.-]*:/i.test(p) || /^(\/|~|\.\.)/.test(p) || /[*?<>{}$|=]/.test(p) || p.includes('…')) continue
+    names.add(p)
     if (names.size >= 200) break
   }
   const missing: string[] = []

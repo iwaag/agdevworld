@@ -332,7 +332,7 @@ test('all registered projects route without an intake project allowlist; renamed
   await i.process()
   const rec = await record(ws, { workflow: 'conversation', run: 'run-001' })
   assert.equal(rec.input.author, 'Pat')
-  assert.deepEqual(Object.keys(rec.nodes).sort(), ['_final-report', 'talk'])
+  assert.deepEqual(Object.keys(rec.nodes).sort(), ['_final-report', 'talk', 'workflow__talk'])
   i.close()
 })
 

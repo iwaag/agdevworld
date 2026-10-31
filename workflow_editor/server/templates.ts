@@ -16,7 +16,7 @@ export const WORKFLOW_TEMPLATES: WorkflowTemplate[] = [
   { id: 'empty', name: 'Empty workflow', description: 'No steps yet: you add them in the editor.', documentation: { policy: 'default' } },
   // The basic freework (server/basics.ts) under the id and name given here,
   // with this project's resolved bindings and execution.
-  { id: 'freework', name: 'Free work', description: 'One talk with the person; the run adds the work agreed in the conversation as it goes. A final report at the end.', documentation: { policy: 'custom', plan: false, reports: false, final: true } },
+  { id: 'freework', name: 'Free work', description: 'Talk, then workflow consultation: add and present the actual work nodes for agreement before execution. A final report at the end.', documentation: { policy: 'custom', plan: false, reports: false, final: true } },
 ]
 
 export const templateIds = () => WORKFLOW_TEMPLATES.map(t => t.id)

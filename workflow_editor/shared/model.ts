@@ -8,8 +8,10 @@ export const PROJECT_SCHEMA = 'ag.project.v2'
 // completed work, prepared by the run's agent and then managed by WFE —
 // starting the presentations, the person's decision, cleanup. No agent
 // process waits on it.
-export const NODE_TYPES = ['study', 'do', 'delegate', 'talk', 'review'] as const
+export const NODE_TYPES = ['study', 'do', 'delegate', 'talk', 'workflow__talk', 'review'] as const
 export type NodeType = typeof NODE_TYPES[number]
+// workflow_improve p1: workflow__talk specializes consultation to the run's graph.
+export const isTalkType = (type: string): boolean => type === 'talk' || type === 'workflow__talk'
 // What a node is in a discussion (argue p4, docs/discussions.md *Activities*):
 // metadata on an ordinary node type, bound to the discussion's records by
 // `wfe discussion announce|ask|ponder|talk --node`. `talk` is a talk node;

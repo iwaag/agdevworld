@@ -1,5 +1,5 @@
 // Basic workflows (p8/ex2): ordinary workflow definitions every project has
-// from the start. Today one, `freework`: the braindump and one talk; its run
+// from the start. Today one, `freework`: talk, then workflow__talk; its run
 // grows its work in that conversation (docs/adjustments.md, *Growing a
 // run's work*). Nothing in the editor or the executor knows it by name.
 //
@@ -30,6 +30,7 @@ import { createExclusive } from './files.ts'
 import { git } from './git.ts'
 import { newWorkflowText } from './yamlDoc.ts'
 import type { Workspace } from './workspace.ts'
+import { WORKFLOW_TALK, workflowTalkNode } from '../shared/workflowTalk.ts'
 
 export const FREEWORK = 'freework'
 
@@ -46,7 +47,8 @@ export function freeworkWorkflow(settings: Pick<BasicSettings, 'repositories' | 
   const w = emptyWorkflow(id, name)
   w.intent = [
     'Serve the person\'s request starting from their braindump and one conversation.',
-    'Work out what to do, add that work to the run as nodes of its own, do it there,',
+    'Present the actual run graph in workflow__talk, ask the requester for agreement,',
+    'and do the work on its own nodes, added before execution,',
     'and talk with the person whenever that helps, until the request is served.',
   ].join('\n')
   w.documentation = { policy: 'custom', plan: false, reports: false, final: true }
@@ -57,6 +59,8 @@ export function freeworkWorkflow(settings: Pick<BasicSettings, 'repositories' | 
     description: 'Understand the request and hold the consultation it needs. The work itself is added as nodes of its own and done there, not in this talk.',
     repositories: [],
   }
+  w.nodes[WORKFLOW_TALK] = workflowTalkNode()
+  w.edges = [{ from: 'talk', to: WORKFLOW_TALK }]
   return w
 }
 

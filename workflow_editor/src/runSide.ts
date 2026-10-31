@@ -20,6 +20,7 @@ import { effectiveOf, holderOf, isOpen, questionState, runKey, situation, type B
 import { hostOwes, isAwaitingPerson, owedContinuation, reviewStateText } from '../shared/humanReview.ts'
 import { reportStep } from '../shared/compile.ts'
 import { sessionPolicyOf } from '../shared/model.ts'
+import { WORKFLOW_TALK, WORKFLOW_TALK_INSTRUCTIONS } from '../shared/workflowTalk.ts'
 import type { AdjustView, DelegationsView, DelegationView, PresentationView, RunExecView, RunNotifyView } from './api.ts'
 import { ACTIVITY_LABEL, STATE_GLYPH, TYPE_LABEL } from './canvas.ts'
 import { stepFacts, stepLabel } from './inspector.ts'
@@ -740,6 +741,7 @@ export class RunSide {
     box.append(h('div.insp-head', icon(step ? 'doc' : def?.type ?? 'unknown', 'icon'), h('h3', step ? label2(id) : def?.name || id), h('code.d-only', id), h('button.icon-btn', { title: 'Close', 'aria-label': 'Close the selected node', dataset: { action: 'close-node' } }, '×')))
     box.append(h('div.chips', chip(state, `${STATE_GLYPH[state] ?? ''} ${label}`), h('span.chip.d-only', step ? 'Documentation step' : TYPE_LABEL[def?.type ?? ''] ?? def?.type ?? '?'), def?.activity ? h('span.chip', `Discussion: ${ACTIVITY_LABEL[def.activity] ?? def.activity}`) : null, h('span.chip.muted.d-only', icon('lock', 'icon tiny'), 'Read-only')))
     if (def?.description) box.append(h('p.small', def.description))
+    if (def?.type === WORKFLOW_TALK && def.description !== WORKFLOW_TALK_INSTRUCTIONS) box.append(h('p.small', WORKFLOW_TALK_INSTRUCTIONS))
     // A delegate node (p10): its delegation and child, in both modes.
     const dl = this.data.delegView?.delegations.filter(x => x.node === id).at(-1)
     if (def?.type === 'delegate') box.append(dl ? this.delegationCard(dl, true) : h('p.small.muted', `Delegates to ${def.project ? `${def.project}/` : ''}${def.workflow ?? '?'}; nothing dispatched yet.`))

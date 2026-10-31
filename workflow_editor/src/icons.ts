@@ -50,6 +50,6 @@ export const ICONS: Record<string, string> = {
 export function icon(name: string, cls = 'icon'): HTMLSpanElement {
   const span = document.createElement('span')
   span.className = cls
-  span.innerHTML = ICONS[name] ?? ICONS.unknown
+  span.innerHTML = ICONS[name === 'workflow__talk' ? 'talk' : name] ?? ICONS.unknown
   return span
 }

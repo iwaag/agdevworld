@@ -30,6 +30,7 @@ import { configChanges, currentSession, unverifiedReason, unverifiedSession, des
 import { wake } from './standing.ts'
 import { git } from './git.ts'
 import { docStepsOf } from '../shared/compile.ts'
+import { WORKFLOW_TALK, WORKFLOW_TALK_INSTRUCTIONS } from '../shared/workflowTalk.ts'
 import { assertWorkspaceAllowed, loadBoundary } from './boundary.ts'
 import type { Gitea } from './gitea.ts'
 import { baseline, publish, publishRun, type Baseline, type RepoStep } from './publish.ts'
@@ -105,6 +106,13 @@ export interface AttemptExecution { agent: string; profile: string | null; backe
 // the copy's root about half the time, so root report.md / answer.md /
 // review.md files read as the project's own and each run overwrote the last.
 export const runFolderLine = (r: RunRef) => `Run folder: ${runDir(r)}/ (relative to your working directory, the copy's root). The run's own documents go there: its plan and reports, an answer or review notes, whatever the request or a node asks to write "in the run folder". A file of the same name at the project root reads as the project's own and the next run overwrites it (tidy p1: protoprey freework/run-003 wrote its final report as the root report.md, replacing another run's; agops recover runs did the same eleven times).`
+
+// Deliver the built-in contract even while the node follows the initial talk.
+// It must not depend on an optional guide read or an editable local catalog.
+export function workflowTalkBrief(r: RunRecord): string[] {
+  const nodes = Object.entries(effectiveOf(r)?.nodes ?? {}).filter(([id, n]) => n.type === WORKFLOW_TALK && ['pending', 'running', 'waiting'].includes(r.nodes[id]?.state))
+  return nodes.length ? ['', `Workflow consultation (${nodes.map(([id]) => `${id}: ${r.nodes[id].state}`).join('; ')}):`, WORKFLOW_TALK_INSTRUCTIONS] : []
+}
 
 export function documentationBrief(r: RunRecord): string[] {
   const eff = effectiveOf(r) // the revision in force (p7)
@@ -921,6 +929,7 @@ export class ExecStore {
       for (const w of r.execution.waiting) lines.push(`Node ${w.node} waits; next move: ${holderOf(r, w.node)}.`)
     }
     lines.push(`Ready: ${r.execution.ready.join(', ') || '(none)'}; running: ${r.execution.active.join(', ') || '(none)'}.`)
+    lines.push(...workflowTalkBrief(r))
     lines.push(...pendingAnswerLines(r))
     lines.push(...instructionBrief(r))
     lines.push(...presentationBrief(r))
@@ -960,6 +969,7 @@ export class ExecStore {
     const delta = changeLines(r, since, [previous, attempts.at(-1)].filter((a): a is string => !!a))
     lines.push('', delta.count ? `Recorded since your previous attempt began (after seq ${since}), not by it (${delta.count}):` : `Nothing was recorded since your previous attempt began (seq ${since}) except by it.`, ...delta.lines)
     lines.push('', ...stateLines(r))
+    lines.push(...workflowTalkBrief(r))
     lines.push(...pendingAnswerLines(r), ...instructionBrief(r), ...delegationBrief(r, await this.assessedLines(r)))
     lines.push(...await shareBrief(ws, ref, r, { by: this.executor }, view))
     lines.push(...newStepLines(r, briefedSteps(r, sinceBootstrap(r, attempts.slice(0, -1)))))

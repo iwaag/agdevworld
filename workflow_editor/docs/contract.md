@@ -104,7 +104,7 @@ repositories:            # binding key -> project-relative path and access
   root: {path: ., access: readonly}
 nodes:                   # node id -> node
   survey:
-    type: study          # study | do | delegate | talk | review
+    type: study          # study | do | delegate | talk | workflow__talk | review
     name: Survey         # short card label, optional
     description: What this step does.
     repositories: [tools]
@@ -217,7 +217,7 @@ are still refused at creation.
 
 Every project has the basic workflow **`freework`** from the start: an
 ordinary definition in `devdocs/workflows/freework.yaml` whose author nodes
-are one talk —
+start with talk followed by the built-in workflow consultation —
 
 ```yaml
 id: freework
@@ -228,6 +228,11 @@ nodes:
     type: talk
     name: Talk
     description: Understand the request and hold the consultation it needs. The work itself is added as nodes of its own and done there, not in this talk.
+  workflow__talk:
+    type: workflow__talk
+    name: Discuss the workflow
+edges:
+  - {from: talk, to: workflow__talk}
 ```
 
 — with the braindump as its input. Its run grows its work in that
@@ -427,9 +432,12 @@ reports what is declared for a path (`shared/access.ts`).
 | --- | --- |
 | `study` | Research: reading the web or files a person points to, and recording what was learned |
 | `do` | General work: coding, running and testing, file operations |
-| `talk` | Consulting a person, or an agent they entrusted, to agree on something or get permission |
+| `talk` | Consulting a person, or an agent they entrusted, about intent and direction |
+| `workflow__talk` | A built-in specialization of talk: add actual work nodes before execution, present the run graph to the Developer or requesting agent, and ask for agreement on the work, results and checks. Agreement records direction rather than granting execution permission |
 | `review` | A person's review of completed work (p17): the agent prepares it with the presentations to look at, then WFE manages the start, the person's decision and cleanup; no agent performs it ([reviews.md](reviews.md)) |
 | `delegate` | Entrusting work to another managed workflow (`workflow: <id>`, `project: <id>` across projects, `accepts`): the contract is [delegation.md](delegation.md) (p10). Definition and display only until its execution is released: runs of a workflow with a delegate node are refused |
+
+`workflow__talk` is available in the standard Add node palette and needs no local catalog entry. Its built-in instructions are supplied in initial and continuation briefs while it is pending, running or waiting, even when it is not ready yet. Use ordinary run start, progress, ask, answer and complete operations. Questions wait without occupying an execution slot; existing authorization does not acquire another approval gate. It is consultation, not implementation or result acceptance. The node presents the actual adjusted graph, not only a prose plan. Work then runs on its own nodes. A simple answer can keep a small graph. Existing runs retain their frozen definitions.
 
 Submodules under `study/` conventionally accumulate the results of study
 steps (repository names prefixed `study-`). Submodules under `wedo/`

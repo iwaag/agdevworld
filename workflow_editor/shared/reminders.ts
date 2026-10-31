@@ -13,7 +13,7 @@
 // it only because a separate request asked (fix4's report). run-001…008 did
 // their work inside the talk.
 import type { RunCatalog } from './catalog.ts'
-import type { Workflow, WorkflowNode } from './model.ts'
+import { isTalkType, type Workflow, type WorkflowNode } from './model.ts'
 import { endsWork, isOpen, questionState, runFolder, runKey, type Presentation, type RunGraph, type RunRecord } from './run.ts'
 import { roundsUsing } from './humanReview.ts'
 
@@ -46,7 +46,7 @@ export function roleOf(id: string, record: Pick<RunRecord, 'definition' | 'prese
   if (a.template?.id === CLEANUP || a.appearance?.icon === CLEANUP) return 'cleanup'
   if (g.confirms === 'result') return 'confirm'
   // A talk stays a talk when it registered a presentation (run-001…008).
-  if (g.type === 'talk') return 'talk'
+  if (isTalkType(g.type)) return 'talk'
   if (a.template?.id === WORK) return 'work'
   if (pres.some(p => p.node === id)) return 'present'
   if (substantive?.has(id)) return 'work'

@@ -331,7 +331,7 @@ reported, never a reason to refuse (wfe validate); approvals are records
 
 wfe workflow basics [--dry-run] [--commit [--push]] [--workspace <id> | --all]
 
-Adds the basic workflows (today: freework — one talk; the run adds the work
+Adds the basic workflows (today: freework — talk then workflow__talk; the run adds the work
 agreed in the conversation) to a project that lacks them. Its bindings and
 execution are resolved from the project's valid workflows (the most
 permissive access one of them already grants each path; the agent, profile

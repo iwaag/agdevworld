@@ -265,7 +265,7 @@ button.ghost-dark:hover:not(:disabled) { border-color: #8a93a0; }
 .canvas-hint[hidden] { display: none; }
 .add-node.type-study { background: var(--study-bg); border-color: var(--study); }
 .add-node.type-do { background: var(--do-bg); border-color: var(--do); }
-.add-node.type-talk { background: var(--talk-bg); border-color: var(--talk); }
+.add-node.type-talk, .add-node.type-workflow__talk { background: var(--talk-bg); border-color: var(--talk); }
 .add-node.type-review { background: #eaf6ec; border-color: #7fbf8e; }
 .add-node.type-delegate { background: var(--delegate-bg); border-color: var(--delegate); color: #fff; }
 .canvas {
@@ -301,7 +301,7 @@ button.ghost-dark:hover:not(:disabled) { border-color: #8a93a0; }
 /* Type: a light fill and a quiet border; the icon and the label say the type without color. */
 .node.type-study { background: var(--study-bg); border-color: #b3c2e6; }
 .node.type-do { background: var(--do-bg); border-color: #e8c98a; }
-.node.type-talk, .step-card.type-talk { background: var(--talk-bg); border-color: #a9dccd; }
+.node.type-talk, .node.type-workflow__talk, .step-card.type-talk { background: var(--talk-bg); border-color: #a9dccd; }
 .node.type-delegate { background: #f1ecf9; border-color: #b9a7d8; }
 .node.type-review { background: #eaf6ec; border-color: #9fd0aa; }
 .node.type-unknown { background: var(--unknown-bg); border-color: var(--unknown); border-style: dashed; }

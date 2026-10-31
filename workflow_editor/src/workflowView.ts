@@ -11,6 +11,7 @@ import { compile, hasDocSteps } from '../shared/compile.ts'
 import { policySummary } from './docPolicy.ts'
 import { NODE_TYPES, cloneWorkflow, docSteps, type ApprovalKind, type Issue, type NodeType, type Workflow } from '../shared/model.ts'
 import { instantiate, type NodeTemplate } from '../shared/catalog.ts'
+import { WORKFLOW_TALK, workflowTalkNode } from '../shared/workflowTalk.ts'
 import { hasErrors, validateWorkflow, type ValidationContext } from '../shared/validate.ts'
 import { api } from './api.ts'
 import { live, serial } from './live.ts'
@@ -33,6 +34,7 @@ const TYPE_HINT: Record<string, string> = {
   study: 'Read, research, compare',
   do: 'Change or produce something',
   talk: 'Ask or agree with a person',
+  workflow__talk: 'Build and present the run graph for agreement',
   delegate: 'Entrust work to another workflow and use its result',
   review: 'The person reviews finished work later (WFE serves it, records the decision, cleans up)',
 }
@@ -324,7 +326,7 @@ export function renderWorkflowView(root: HTMLElement, wsId: string, file: string
     const id = `${type}-${n}`
     if (Object.keys(draft.nodes).some(k => !draft!.layout.nodes[k])) completeLayout(draft)
     const at = freeSlot(draft, canvas.visibleCentre(), selection?.kind === 'node' ? selection.id : undefined)
-    draft.nodes[id] = { type, name: '', description: '', repositories: [] }
+    draft.nodes[id] = type === WORKFLOW_TALK ? workflowTalkNode() : { type, name: '', description: '', repositories: [] }
     draft.layout.nodes[id] = at
     selectNew(id)
   }

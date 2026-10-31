@@ -9,6 +9,7 @@ import type { EffectiveGraph } from '../shared/compile.ts'
 import type { NodeTemplate } from '../shared/catalog.ts'
 import { ACCESS_LEVELS, APPEARANCE_COLORS, APPEARANCE_ICONS, ID_PATTERN, NODE_TYPES, normalizeRepoPath, SESSION_POLICIES, type Issue, type Workflow } from '../shared/model.ts'
 import { bindingCategory, iconOf, TYPE_LABEL, type Selection } from './canvas.ts'
+import { WORKFLOW_TALK, WORKFLOW_TALK_INSTRUCTIONS } from '../shared/workflowTalk.ts'
 import { h } from './dom.ts'
 import { icon } from './icons.ts'
 import { setDisplay } from './displayMode.ts'
@@ -142,6 +143,7 @@ function nodePanel(ctx: InspectorContext, id: string, actions: InspectorActions)
       onchange: (e: Event) => { n.type = (e.target as HTMLSelectElement).value; actions.changed(true) },
     }, typeOptions.map(t => h('option', { value: t, selected: t === n.type }, TYPE_LABEL[t] ?? `${t || '(none)'} — unknown`)))),
   ]
+  if (n.type === WORKFLOW_TALK && n.description !== WORKFLOW_TALK_INSTRUCTIONS) out.push(h('p.small', WORKFLOW_TALK_INSTRUCTIONS))
   if (n.type === 'delegate' || n.workflow || n.project || n.accepts) out.push(...delegateFields(ctx, n, ro, actions))
   out.push(moreDetails('type, appearance, repositories, connections'))
   out.push(appearanceField(n, ro, actions))

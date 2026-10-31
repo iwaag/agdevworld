@@ -11,7 +11,10 @@ import { FREEWORK, placeBasics, placeBasicsEverywhere, resolveSettings } from '.
 import { createProject } from '../server/create.ts'
 import { gitOk } from '../server/git.ts'
 import { loadRegistry } from '../server/registry.ts'
-import { createRun } from '../server/runs.ts'
+import { createRun, runOp } from '../server/runs.ts'
+import { workflowTalkBrief } from '../server/exec.ts'
+import { WORKFLOW_TALK, WORKFLOW_TALK_INSTRUCTIONS } from '../shared/workflowTalk.ts'
+import { roleOf } from '../shared/reminders.ts'
 import { Workspace } from '../server/workspace.ts'
 import { parseWorkflow } from '../server/yamlDoc.ts'
 
@@ -35,13 +38,16 @@ async function project(devdocs: 'directory' | 'submodule' = 'directory') {
 const file = (dir: string) => join(dir, 'devdocs', 'workflows', `${FREEWORK}.yaml`)
 const model = async (path: string) => { const p = parseWorkflow(await readFile(path, 'utf8')); assert.ok(p.ok); return p.model }
 
-test('a new project has freework: one talk, final report only, its root editable, committed with the project', async () => {
+test('a new project has freework: talk then built-in workflow consultation, final report only, its root editable, committed with the project', async () => {
   const p = await project()
   assert.ok(p.made.steps.some(s => s.name === 'basic workflows' && s.status === 'done'))
   const w = await model(file(p.dir))
   assert.equal(w.id, FREEWORK)
-  assert.deepEqual(Object.keys(w.nodes), ['talk'])
+  assert.deepEqual(Object.keys(w.nodes), ['talk', WORKFLOW_TALK])
   assert.equal(w.nodes.talk.type, 'talk')
+  assert.equal(w.nodes[WORKFLOW_TALK].type, WORKFLOW_TALK)
+  assert.equal(w.nodes[WORKFLOW_TALK].template, undefined, 'built in, without a local catalog template')
+  assert.deepEqual(w.edges, [{ from: 'talk', to: WORKFLOW_TALK }])
   assert.match(w.nodes.talk.description, /added as nodes of its own and done there, not in this talk/)
   assert.deepEqual(w.documentation, { policy: 'custom', plan: false, reports: false, final: true })
   assert.deepEqual(w.repositories, { project: { path: '.', access: 'editable' } })
@@ -49,12 +55,27 @@ test('a new project has freework: one talk, final report only, its root editable
   assert.equal(w.intake.zulip, 'requests', 'Zulip requests enabled by default')
   assert.deepEqual(validateWorkflow(w, { repositories: await p.ws.repositories() }).filter(i => i.severity === 'error'), [])
   const g = compile(w)
-  assert.ok(g.ok && Object.keys(g.graph.nodes).sort().join() === '_final-report,talk')
+  assert.ok(g.ok && Object.keys(g.graph.nodes).sort().join() === '_final-report,talk,workflow__talk')
   assert.equal((await gitOk(p.dir, ['status', '--porcelain'])).trim(), '', 'it is part of the initial commit')
   assert.match(await gitOk(p.dir, ['log', '--name-only', '--format=%s']), /devdocs\/workflows\/freework\.yaml/)
   // A run of it is created like any other.
   const run = await createRun(p.ws, { workflow: FREEWORK, input: { kind: 'braindump', text: 'Hello.', author: 'Person' }, executor: { name: 'Agent', backend: null }, by: 'Agent', via: 'cli' })
-  assert.deepEqual(Object.keys(run.record.nodes).sort(), ['_final-report', 'talk'])
+  assert.deepEqual(Object.keys(run.record.nodes).sort(), ['_final-report', 'talk', WORKFLOW_TALK])
+  assert.ok(workflowTalkBrief(run.record).join('\n').includes(WORKFLOW_TALK_INSTRUCTIONS), 'the consultation contract is delivered before its node becomes ready')
+  assert.ok(g.ok)
+  assert.equal(roleOf(WORKFLOW_TALK, run.record, g.graph, w), 'talk', 'consultation does not masquerade as substantive work')
+  const op = (operation: Parameters<typeof runOp>[2]) => runOp(p.ws, run.ref, operation, { by: 'Agent', via: 'cli' })
+  await op({ op: 'node.start', node: 'talk' })
+  await op({ op: 'node.complete', node: 'talk', outcome: 'Understood.' })
+  await op({ op: 'node.start', node: WORKFLOW_TALK })
+  await op({ op: 'question.ask', question: 'q1', node: WORKFLOW_TALK, text: 'Here is the graph; does it match your intent?', to: 'Person' })
+  await op({ op: 'node.start', node: '_final-report' })
+  // Dependencies and agreement remain records, not new execution gates.
+  await runOp(p.ws, run.ref, { op: 'question.answer', question: 'q1', text: 'Yes.' }, { by: 'Person', via: 'browser' })
+  await op({ op: 'node.start', node: WORKFLOW_TALK })
+  const finished = await op({ op: 'node.complete', node: WORKFLOW_TALK, outcome: 'Graph presented and agreed.' })
+  assert.equal(finished.record.nodes[WORKFLOW_TALK].state, 'completed')
+  assert.deepEqual(workflowTalkBrief(finished.record), [], 'completed consultations are not repeated')
 })
 
 test('a new project with devdocs as a submodule has it in the devdocs repository', async () => {
@@ -180,7 +201,7 @@ test('the Free work template makes the same definition under another id', async 
   const w = await model(join(p.dir, 'devdocs', 'workflows', 'ask-first.yaml'))
   assert.equal(w.id, 'ask-first')
   assert.equal(w.name, 'Ask first')
-  assert.deepEqual(Object.keys(w.nodes), ['talk'])
+  assert.deepEqual(Object.keys(w.nodes), ['talk', WORKFLOW_TALK])
   assert.deepEqual(w.documentation, { policy: 'custom', plan: false, reports: false, final: true })
   assert.deepEqual(w.execution.agent, 'proj-agent')
 })

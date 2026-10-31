@@ -15,7 +15,7 @@ export const CATALOG_FILE = 'node-catalog.json'
 // target and acceptance scope; it is a description, not an executor.
 // p17: a review template is a person's review of completed work, prepared by
 // the agent and managed by WFE (docs/reviews.md).
-export const TEMPLATE_TYPES = ['study', 'do', 'talk', 'delegate', 'review'] as const
+export const TEMPLATE_TYPES = ['study', 'do', 'talk', 'workflow__talk', 'delegate', 'review'] as const
 export type TemplateType = typeof TEMPLATE_TYPES[number]
 
 // What a template says. Everything here is its content: a change of any of

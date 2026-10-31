@@ -345,8 +345,8 @@ by re-renders, so a background reload or a switch keeps the text, the open
 state and the keyboard.
 
 **freework (p8/ex2).** Every project has the basic workflow *Free work*: a
-talk with the person, then the run adds the work agreed in the
-conversation as it goes, and ends with a final report (docs/contract.md,
+talk with the person followed by the built-in `workflow__talk`, which adds
+and presents actual work nodes for agreement before substantive execution, and ends with a final report (docs/contract.md,
 *Basic workflows*; docs/adjustments.md, *Growing a run's work*). New projects
 get it at creation; existing ones with `wfe workflow basics --all --dry-run`,
 then without `--dry-run` (`--commit --push` to publish the file). It is

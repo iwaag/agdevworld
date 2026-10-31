@@ -31,7 +31,7 @@ decides whether and where an activity becomes a node.
 
   list                       the templates (id, revision, type, name, expectation)
   show <id>                  one template in full
-  create <id> --name <text> --type study|do|talk|delegate --description <text> --expectation <text>
+  create <id> --name <text> --type study|do|talk|workflow__talk|delegate|review --description <text> --expectation <text>
              [--icon <token>] [--color <token>] [--target-project <id>] [--target-workflow <id>] [--accepts person|parent] [--by <name>]
   update <id> --expect-revision <n> [--name …] [--type …] [--description …]
              [--expectation …] [--icon …] [--color …] [--by <name>]

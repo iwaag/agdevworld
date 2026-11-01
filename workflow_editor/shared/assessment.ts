@@ -61,6 +61,7 @@ export interface Assessment {
   child: string | null // the child's uid
   childRun: string | null // <workflow>/<run>
   childSeq: number // the child's completing entry
+  ran: string | null // improve_wfrun p1: which workflow the child ran, from which revision, against the one dispatched
   position: number | null // the child's history position the frozen facts come from
   definition: string | null // the child's revision in force then
   catalog: string | null // the child's catalog snapshot (sha256), or why none
@@ -261,11 +262,28 @@ export function assessResult(parent: RunRecord, d: Delegation, ev: DelegationEve
 
   const latest = latestResult(d)
   return {
-    delegation: d.id, uid: d.uid, event: ev.n, manifest: ev.manifest?.digest ?? null, child: child?.uid ?? null, childRun, childSeq: ev.child.seq,
+    delegation: d.id, uid: d.uid, event: ev.n, manifest: ev.manifest?.digest ?? null, child: child?.uid ?? null, childRun, childSeq: ev.child.seq, ran: ranLine(d, c.now ?? fr),
     position: fr?.seq ?? null, definition: fr?.definition.active ?? null, catalog: c.catalog.state === 'supplied' ? c.catalog.sha256 : c.catalog.state,
     accepts: d.accepts, person: d.onBehalfOf, state: d.disposition?.kind ?? (d.closed ? 'closed' : 'open'), latest: latest?.n === ev.n,
     checks, claim, evidence, correction: correctionLine(d, ev), inspect: questions, current, integrations, unavailable,
   }
+}
+
+// Which workflow the child ran and where its definition came from
+// (improve_wfrun p1: ponderer conduct/run-068 read a scene made inside
+// gimmickimg's freework as if the new workflow had run). The child's own
+// record, beside the target and revision the parent dispatched to.
+export function ranLine(d: Delegation, rec: RunRecord | null): string | null {
+  if (!rec) return null
+  const what = `${rec.project}/${rec.workflow} (${rec.run})${rec.project !== d.target.project || rec.workflow !== d.target.workflow ? `, not the dispatched ${d.target.project}/${d.target.workflow}` : ''}`
+  const s = rec.definition.source
+  if (!s) return `${what}; where its definition came from is not recorded (a child created before published sources)`
+  if (s.kind === 'published') {
+    const want = d.target.source?.commit
+    return `${what} with the published definition and code of ${s.repository}@${s.commit.slice(0, 10)}${want ? (want === s.commit ? ', the revision dispatched' : `, not the dispatched ${want.slice(0, 10)}`) : ''}`
+  }
+  if (s.kind === 'trial') return `${what} as a trial of ${s.file} (sha256 ${s.sha256.slice(0, 12)}) from workspace ${s.workspace}, on ${s.baseline.repository}@${s.baseline.commit.slice(0, 10)}`
+  return `${what} with workspace ${s.workspace}'s files (${s.reason})`
 }
 
 // The claim beside the records and what only the reader can judge (tidy p2),
@@ -321,6 +339,7 @@ export function assessmentLines(a: Assessment, indent = '  '): string[] {
     `${indent}assessment of result event ${a.event}${a.manifest ? ` (manifest ${a.manifest.slice(7, 19)})` : ''}, child seq ${a.childSeq}${a.position ? ` (facts as of child seq ${a.position}, revision ${a.definition ?? 'r1'})` : ''}; catalog ${a.catalog ? a.catalog.slice(0, 12) : 'none'}; accepts: ${a.accepts}${a.person ? `, on behalf of ${a.person}` : ''}`,
     open.length ? `${indent}  FINDINGS (${open.length}): ${open.map(c => `${mark[c.status]} ${c.code}`).join(', ')}, from the records; listed first below`
       : `${indent}  findings: none in what WFE checks (presentation, the person's review, a serving page, documents); the content is not checked`,
+    ...(a.ran ? [`${indent}  ran — ${a.ran}`] : []),
     ...(a.correction ? [`${indent}  ${a.correction}`] : []),
     ...(a.claim ?? []).map(x => `${indent}  claim — ${x}`),
     ...(a.evidence ?? []).map(x => `${indent}  records — ${x}`),

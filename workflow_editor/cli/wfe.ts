@@ -1784,7 +1784,7 @@ async function cmdWorkspace(p: Parsed): Promise<number> {
   if (!g) throw new Refused(`the published source is read from Gitea, which is not configured here (${giteaFile(p)})`)
   const ctx = { registryFile: registryFile(p), area: areaDir(p), gitea: g }
   const m = await import('../server/workspaceSync.ts')
-  const line = (r: import('../server/workspaceSync.ts').RepoRelation) => `  ${r.path.padEnd(24)} ${r.initialized ? `${(r.branch ?? 'detached').padEnd(10)} ${r.head?.slice(0, 10) ?? '-'} → ${r.published?.slice(0, 10) ?? '-'}  ${r.relation}${r.behind ? ` −${r.behind}` : ''}${r.ahead ? ` +${r.ahead}` : ''}${r.dirty ? `  ${r.dirty} uncommitted` : ''}` : 'not checked out'}${r.problem && r.initialized ? `  (${r.problem})` : ''}`
+  const line = (r: import('../server/workspaceSync.ts').RepoRelation) => `  ${r.path.padEnd(24)} ${r.initialized ? `${(r.branch ?? 'detached').padEnd(10)} ${r.head?.slice(0, 10) ?? '-'} → ${r.published?.slice(0, 10) ?? '-'}  ${r.relation}${r.behind ? `, ${r.behind} published commit${r.behind === 1 ? '' : 's'} missing` : ''}${r.ahead ? `, ${r.ahead} local commit${r.ahead === 1 ? '' : 's'}` : ''}${r.dirty ? `; ${r.dirty} uncommitted` : ''}` : 'not checked out'}${r.problem && r.initialized ? `  (${r.problem})` : ''}`
   try {
     if (sub === 'status') {
       const r = await m.workspaceRelation(ctx, ws, { fresh: p.flags.has('refresh') })

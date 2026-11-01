@@ -58,7 +58,29 @@ child is actually given is frozen when it is created; its result is
 assessed against that snapshot when it comes back (wfe delegate show).
 One delegation per delegate node at a time. To replace a failed or rejected
 child, judge it first (dispose), then --replaces <d>. A retransmission of
-the same request is recorded once.`,
+the same request is recorded once.
+The target is the workflow as published on its project's default branch
+(fetched now), whatever that project's workspace here holds; the dispatch
+records that revision and the child is created from it (wfe delegate targets
+shows what is offered and ready).
+Creating a workflow and running it are separate results (improve_wfrun p1:
+gimmickimg's freework was asked to define partial-animation and to make a
+scene; it made the scene itself, and partial-animation never ran). When both
+are wanted, delegate the creation, check the new workflow with wfe delegate
+targets once that child's work is integrated, then delegate to it from a
+delegate node naming it (wfe run adjust). wfe delegate show says which
+workflow and revision a child actually ran.`,
+  targets: `wfe delegate targets [<project>[/<workflow>]]
+
+What a delegate node can reach now: every project with a workspace here, each
+workflow as published on its default branch (repository@commit, fetch state),
+and whether a delegation to it would be delivered: it validates (the first
+errors are shown), it accepts requests (intake), its Zulip channel is
+provisioned (pending: the notifier creates it on its next pass), and the
+project has a workspace here for the child's copy. "ready" means all four.
+A workflow that is only in a workspace, not on the default branch, is not
+offered. Reads only; the published side may be read from a cache up to 30 s
+old, said as "recent".`,
   list: `wfe delegate list <run>
 
 The run's delegations: node, target, state (dispatching, working,
@@ -209,6 +231,7 @@ export const DELEGATE_INDEX = `wfe delegate <subcommand> … (p10: entrusting a 
   cancel <run> <d> --reason <text>        cancel the child run (an explicit act of its own)
   attribute <run> <d> <n> --origin …      correct later whose finding correction request <n> was
   file <run> <d> <path>                   read a file the child presents
+  targets [<project>[/<workflow>]]        published workflows a delegation can reach, and whether each is ready
   sync                                    relay children's facts now
 
 Contract: workflow_editor/docs/delegation.md. Details: wfe delegate help <subcommand>.`
@@ -230,7 +253,7 @@ function eventLines(e: DelegationEvent): string[] {
 
 export function describeDelegation(d: Delegation, rec: RunRecord, assessment?: Assessment | null): string[] {
   return [
-    `Delegation ${d.id} (${d.uid}) from node ${d.node} to ${d.target.project}/${d.target.workflow} (workspace ${d.target.workspace}): ${delegationState(d)}`,
+    `Delegation ${d.id} (${d.uid}) from node ${d.node} to ${d.target.project}/${d.target.workflow}${d.target.source ? ` at ${d.target.source.repository}@${d.target.source.commit.slice(0, 10)}` : ''} (workspace ${d.target.workspace}): ${delegationState(d)}`,
     `  request: ${d.request.path} (${d.request.sha256.slice(0, 12)})${d.original ? `; original: ${d.original.path}` : ''}; requester ${d.requester}${d.onBehalfOf ? ` for ${d.onBehalfOf}` : ''}; result acceptance: ${d.accepts === 'parent' ? 'this run\'s agent may accept' : 'the person\'s (relay their answer)'}`,
     `  dispatched ${d.dispatched.at} by ${d.dispatched.by}${d.predecessor ? `, replacing ${d.predecessor}` : ''}`,
     d.child ? `  child: ${d.child.project} ${d.child.workflow}/${d.child.run} (${d.child.uid}) in workspace ${d.child.workspace}${d.transport ? `; request post ${d.transport.message} in #${d.transport.stream} › ${d.transport.topic}` : ''}` : '  child: none yet (the request is being delivered; wfe notify status shows the delivery)',
@@ -243,6 +266,45 @@ export function describeDelegation(d: Delegation, rec: RunRecord, assessment?: A
     ...(rec.nodes[d.node] ? [`  node ${d.node}: ${rec.nodes[d.node].state}${rec.nodes[d.node].wait ? `; next move: ${holderOf(rec, d.node)}` : ''}`] : []),
     ...(assessment ? assessmentLines(assessment) : []),
   ].filter(Boolean)
+}
+
+// Published workflows a delegation can reach and whether a request to each
+// would be delivered (improve_wfrun p1): it validates, accepts requests, its
+// channel is provisioned and its project has a workspace here.
+async function targets(c: RunCli, store: import('../server/delegate.ts').DelegateStore, which?: string): Promise<number> {
+  const access = store.ctx.exec?.ctx.gitea ? store.ctx.exec.accessContext() : undefined
+  if (!access) throw c.refused('published workflows are read from Gitea, which is not configured here')
+  const [project, workflow] = (which ?? '').split('/')
+  const { loadRegistry } = await import('../server/registry.ts')
+  const { publishedWorkspace } = await import('../server/published.ts')
+  const { NotifyStore } = await import('../server/notify.ts')
+  const reg = await loadRegistry(store.ctx.registryFile)
+  const notify = new NotifyStore({ area: store.ctx.area, registryFile: store.ctx.registryFile })
+  const projects = [...new Set(reg.workspaces.map(w => w.project).filter((p): p is string => !!p))].filter(p => !project || p === project).sort()
+  if (project && !projects.length) throw c.refused(`project ${project} has no workspace on this host, so a delegation cannot create its child here`)
+  const rows: Record<string, unknown>[] = []
+  const lines: string[] = []
+  try {
+    for (const p of projects) {
+      let pub
+      try { pub = await publishedWorkspace(access, reg.workspaces.find(w => w.project === p)!, { discovery: true }) } catch (e) { lines.push(`${p}: published workflows cannot be read: ${(e as Error).message}`); rows.push({ project: p, problem: (e as Error).message }); continue }
+      const src = pub.source
+      lines.push(`${p}  ${src.repository}@${src.commit.slice(0, 10)} (${src.branch}, ${src.fetch.state} ${src.fetch.at})`)
+      const { list } = await pub.workflowSummaries()
+      const shown = list.filter(w => !workflow || w.id === workflow || w.file === `${workflow}.yaml`)
+      if (workflow && !shown.length) lines.push(`  ${workflow}: not on the default branch at this revision`)
+      for (const w of shown) {
+        const errors = w.id ? (await pub.workflowResponse(w.file)).issues.filter(i => i.severity === 'error') : []
+        const channel = w.id ? notify.target(`channel:${p}/${w.id}`) : undefined
+        const ch = !channel ? 'not created' : channel.state === 'provisioned' ? 'provisioned' : channel.state
+        const ready = !!w.id && !w.problem && !errors.length && !!w.intake && ch === 'provisioned'
+        lines.push(`  ${(w.id ?? w.file).padEnd(24)} ${ready ? 'ready' : 'NOT READY'}  valid: ${w.problem ? `unreadable (${w.problem.message})` : errors.length ? `${errors.length} error${errors.length === 1 ? '' : 's'} — ${errors.slice(0, 2).map(i => i.message).join('; ')}` : 'yes'}; requests: ${w.intake ? 'yes' : 'opted out'}; channel: ${ch}`)
+        rows.push({ project: p, workflow: w.id ?? null, file: w.file, source: src, ready, problem: w.problem?.message ?? null, errors: errors.map(i => ({ code: i.code, message: i.message })), intake: !!w.intake, channel: ch })
+      }
+    }
+  } finally { notify.close() }
+  c.out(lines.join('\n') || 'No project with a workspace here.', { targets: rows })
+  return 0
 }
 
 export async function delegateCommand(c: RunCli): Promise<number> {
@@ -266,6 +328,7 @@ export async function delegateCommand(c: RunCli): Promise<number> {
     c.out(notes.join('\n') || 'Nothing new to relay.', { ok: true, notes })
     return 0
   }
+  if (sub === 'targets') return targets(c, store, args[0]) // needs no workspace of the caller's
   const ws = await c.workspace()
   const ref = async (): Promise<RunRef> => {
     if (!args[0]) throw c.usage('<run> is required')

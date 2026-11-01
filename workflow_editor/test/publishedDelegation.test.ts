@@ -96,3 +96,14 @@ test('live discovery: a workflow integrated while the service runs gets its chan
   assert.ok(!(await s.kid.workflowSummaries()).list.some(w => w.id === 'animate'), 'the workspace was not pulled')
   s.i.close(); s.n.close(); s.x.close()
 })
+
+test('the result evidence says which workflow and revision the child ran, against the dispatched one', async () => {
+  const { ranLine } = await import('../shared/assessment.ts')
+  const d = { target: { project: 'kid', workflow: 'make', workspace: 'kid', source: { kind: 'published', repository: 'dev/pj-kid', branch: 'main', commit: 'a'.repeat(40), definitions: null } } } as never
+  const child = (source: unknown, workflow = 'make') => ({ project: 'kid', workflow, run: 'run-001', definition: { source } }) as never
+  const pub = (commit: string) => ({ kind: 'published', project: 'kid', selector: 'commit', repository: 'dev/pj-kid', branch: 'main', commit, definitions: null, fetch: { state: 'fresh', at: '' } })
+  assert.equal(ranLine(d, child(pub('a'.repeat(40)))), 'kid/make (run-001) with the published definition and code of dev/pj-kid@aaaaaaaaaa, the revision dispatched')
+  assert.match(ranLine(d, child(pub('b'.repeat(40))))!, /not the dispatched aaaaaaaaaa/)
+  assert.match(ranLine(d, child(pub('a'.repeat(40)), 'freework'))!, /^kid\/freework \(run-001\), not the dispatched kid\/make/)
+  assert.match(ranLine(d, child(undefined))!, /not recorded/)
+})

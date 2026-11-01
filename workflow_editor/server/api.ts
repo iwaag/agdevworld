@@ -154,6 +154,13 @@ export function createHandler(config: ServiceConfig) {
     if (!record) return []
     return (await import('./restChecks.ts')).restReminders(ds, record, `${ws.reg.id}/${ref.workflow}/${ref.run}`, node)
   }
+  // A trial of editing content (improve_wfrun p1): {file, sha256} of the workspace file shown.
+  const trialOf = (v: unknown): { trial?: { file: string; sha256?: string } } => {
+    if (v === undefined || v === null || v === false) return {}
+    const t = v as { file?: unknown; sha256?: unknown }
+    if (typeof t !== 'object' || typeof t.file !== 'string' || !t.file) throw new RequestError(400, 'trial is {file, sha256}: the workspace workflow file and the hash of the bytes shown')
+    return { trial: { file: t.file, ...(typeof t.sha256 === 'string' && /^[0-9a-f]{64}$/.test(t.sha256) ? { sha256: t.sha256 } : {}) } }
+  }
   const str = (v: unknown, what: string) => { if (typeof v !== 'string' || !v.trim()) throw new RequestError(400, `${what} is required`); return v.trim() }
   const category = (v: unknown): RepoCategory => { if (!REPO_CATEGORIES.includes(v as RepoCategory)) throw new RequestError(400, `category must be one of ${REPO_CATEGORIES.join(', ')}`); return v as RepoCategory }
 
@@ -720,7 +727,7 @@ export function createHandler(config: ServiceConfig) {
           const { attachRequests, ConversationStore } = await import('./conversations.ts')
           const wanted = attachRequests(input.challenges)
           const attachments = wanted.length ? await (async () => { const cs = config.conversations ?? new ConversationStore({ area, exec: needExec() }); return cs.pinnedTexts(await cs.pinAll(wanted)) })() : []
-          const r = await needExec().request({ workspace: ws.reg.id, workflow: str(input.workflow, 'workflow'), text: str(input.text, 'the request text'), author: str(input.author, 'author'), receipt: str(input.receipt, 'receipt'), by: typeof input.by === 'string' ? input.by : undefined, via: 'browser', predecessor, ...(typeof input.node === 'string' && input.node ? { node: input.node } : {}), ...(attachments.length ? { attachments } : {}) })
+          const r = await needExec().request({ workspace: ws.reg.id, workflow: str(input.workflow, 'workflow'), text: str(input.text, 'the request text'), author: str(input.author, 'author'), receipt: str(input.receipt, 'receipt'), by: typeof input.by === 'string' ? input.by : undefined, via: 'browser', predecessor, ...(typeof input.node === 'string' && input.node ? { node: input.node } : {}), ...(attachments.length ? { attachments } : {}), ...(trialOf(input.trial)) })
           return send(res, r.duplicate ? 200 : 201, { ok: true, ...r })
         }
         const ref: RunRef = { workflow: parts[4] ?? '', run: parts[5] ?? '' }
@@ -960,6 +967,25 @@ export function createHandler(config: ServiceConfig) {
         assertNotRetired(retiredByUrl(await loadBoundary(config.registryFile, area), input.url), `Adding ${input.url} as a submodule`)
         const result = await ws.addSubmodule(input.path, input.url)
         return send(res, result.ok ? 200 : 422, result)
+      }
+      // The published workflows (improve_wfrun p1): what ordinary execution
+      // runs, with the workspace's relation to that revision beside them.
+      if (b === 'published' && method === 'GET') {
+        const ctx: import('./access.ts').AccessContext = { registryFile: config.registryFile, area, gitea: config.gitea, giteaProblem: config.giteaProblem, refresh: url.searchParams.get('refresh') === '1' }
+        const { publishedWorkspace } = await import('./published.ts')
+        const pub = await publishedWorkspace(ctx, ws.reg, { discovery: true })
+        if (file) return send(res, 200, { ...(await pub.workflowResponse(file)), source: pub.source })
+        const { list, dir } = await pub.workflowSummaries()
+        const relation = await (await import('./workspaceSync.ts')).workspaceRelation(ctx, ws).catch(e => ({ problem: (e as Error).message }))
+        return send(res, 200, { source: pub.source, workflows: list, ...(dir.exists ? {} : { problem: dir.reason }), relation })
+      }
+      // Bringing the workspace forward to the published revision, only by
+      // fast-forward; refused (nothing changed) otherwise.
+      if (b === 'sync' && !file && method === 'POST') {
+        const input = await body(req) as Record<string, unknown>
+        const ctx: import('./access.ts').AccessContext = { registryFile: config.registryFile, area, gitea: config.gitea, giteaProblem: config.giteaProblem }
+        const r = await (await import('./workspaceSync.ts')).syncWorkspace(ctx, ws, { dryRun: input.dryRun === true })
+        return send(res, r.ok ? 200 : 409, r)
       }
       if (b === 'workflows' && !file) {
         if (method === 'GET') return send(res, 200, (await ws.workflowSummaries()).list)

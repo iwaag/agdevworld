@@ -44,7 +44,7 @@ class Refused extends Error { detail?: unknown; constructor(m: string, detail?: 
 // ---- arguments ---------------------------------------------------------------
 
 interface Parsed { positional: string[]; opts: Map<string, string[]>; flags: Set<string> }
-const FLAGS = new Set(['json', 'help', 'resume', 'h', 'new', 'history', 'no-gitea', 'reuse', 'lost', 'uncertain', 'found', 'complete', 'not-posted', 'ok', 'about-plan', 'all', 'dry-run', 'commit', 'push', 'status', 'rebuild', 'allow-live-executor', 'terminal', 'missing', 'retire', 'upstream', 'published', 'regex', 'ignore-case', 'refresh', 'quick', 'verify-all', 'rendered', 'delivered', 'undelivered', 'partial', 'person', 'integration', 'conclude', 'close', 'no-title', 'if-untitled', 'queue', 'yes', 'no-default', 'none', 'no-change', 'synthetic', 'apply', 'replace', 'current', 'reopen', 'check-bytes']) // p7: present stop --all, run adjust --dry-run
+const FLAGS = new Set(['json', 'help', 'resume', 'h', 'new', 'history', 'no-gitea', 'reuse', 'lost', 'uncertain', 'found', 'complete', 'not-posted', 'ok', 'about-plan', 'all', 'dry-run', 'commit', 'push', 'status', 'rebuild', 'allow-live-executor', 'terminal', 'missing', 'retire', 'upstream', 'published', 'regex', 'ignore-case', 'refresh', 'quick', 'verify-all', 'rendered', 'delivered', 'undelivered', 'partial', 'person', 'integration', 'conclude', 'close', 'no-title', 'if-untitled', 'queue', 'yes', 'no-default', 'none', 'no-change', 'synthetic', 'apply', 'replace', 'current', 'reopen', 'check-bytes', 'editing']) // p7: present stop --all, run adjust --dry-run
 function parse(argv: string[]): Parsed {
   const p: Parsed = { positional: [], opts: new Map(), flags: new Set() }
   for (let i = 0; i < argv.length; i++) {
@@ -354,7 +354,7 @@ policy a run plans, reports each node and reports the whole (docs/contract.md,
 "Documentation policy"); manual leaves documents to explicit instructions.
 Refuses an id already used by another workflow file. Writing the file by hand
 is equally valid; see docs/contract.md.`,
-  request: `wfe request <workflow> --braindump <file|-> --author <person> [--predecessor <run>] [--node <worker>] [--receipt <id>] [--workspace <id>]
+  request: `wfe request <workflow> --braindump <file|-> --author <person> [--predecessor <run>] [--node <worker>] [--receipt <id>] [--editing] [--workspace <id>]
 wfe request <workflow> --request <file|-> [--requester <agent>] [--entrusted-by <ref>] [--on-behalf-of <person>] [--original <file>] [--predecessor <run>] [--node <worker>] [--receipt <id>] [--workspace <id>]
 Both take [--challenge <id>[@<commit>]]…: a challenge the work is about (wfe challenge help), given to
 the run as it is at that revision (its file in the run folder, input.attachments in run.json).
@@ -377,7 +377,33 @@ follows (reusing its plan, repairing or reversing it): the record keeps the
 link and the agent is told where that run's records and saved branch are.
 --node chooses the execution node (worker) that performs the run, over the
 workflow's execution.node, the project's and the area's default
-(<area>/workers.json; docs/workers.md). The run keeps it for every attempt.`,
+(<area>/workers.json; docs/workers.md). The run keeps it for every attempt.
+
+Which definition runs (improve_wfrun p1): the workflow as published on the
+project's default branch on Gitea, fetched now, and the run's code at the same
+commit — never this workspace's files, whether it is behind, edited or on
+another branch. run.json definition.source names the commit.
+--editing runs a trial of this workspace's file of <workflow> instead: its
+exact bytes (definition.source kind trial, with their sha256) on the published
+code; the workspace's uncommitted project code is not part of it.`,
+  workspace: `wfe workspace status [--workspace <id>] [--refresh]
+wfe workspace sync [--workspace <id>] [--dry-run]
+
+How this workspace relates to the project's published source (its default
+branch on Gitea), and bringing it forward (improve_wfrun p1). Runs never need
+it: ordinary execution reads the published source whatever the workspace is.
+
+status   the root and every submodule the published revision pins: head,
+         branch, published commit, relation (same, behind, ahead, diverged,
+         unknown) with counts, uncommitted changes counted apart, and what
+         can be done next. --refresh fetches the published side now.
+sync     fast-forwards the root (on the published branch, clean, only
+         behind) and each submodule whose pin moved (clean, at its old pin;
+         a branch is fast-forwarded, a detached checkout moved to the pin).
+         Anything else is refused with the reason and nothing is changed;
+         nothing is stashed, reset, merged or rebased. Each repository's step
+         is reported; after a partial update, fix the named repository and
+         run sync again. --dry-run says what would move.`,
   share: `wfe share <subcommand> …   (shared areas on this host; docs/shares.md)
 
 A share is where people put materials for agents and pick results up. They
@@ -677,7 +703,9 @@ Projects and workspaces
   dashboard               every project and shared repository, with where each fact was read
   projects <subcommand>     read any managed project: list, show, tree, read, search, runs, run
                             (committed by default, at a revision, with provenance; docs/access.md)
-  request <workflow> …      a person's request to the executor (autolab): a run, queued
+  request <workflow> …      a person's request to the executor (autolab): a run of the published
+                            workflow, queued (--editing: a trial of this workspace's file)
+  workspace status|sync     this workspace against the published source; fast-forward it when safe
   intake <subcommand>       requests from Zulip: status, messages, receive, process … (autolab fetches)
   exec <subcommand>         the executor's interface: claim, started, finished, stops, reconcile …
   runs index [--rebuild]    runs' own working copies on this host (p9)
@@ -1511,10 +1539,13 @@ async function cmdRequest(p: Parsed): Promise<number> {
       const cs = new ConversationStore({ area: areaDir(p), exec: x })
       try { attachments = await cs.pinnedTexts(await cs.pinAll(attachRequests(wanted))) } finally { cs.close() }
     }
-    try { r = await x.request({ workspace: ws.reg.id, workflow, text, author: author ?? input?.requester ?? '', receipt, by: opt(p, 'by') ?? own?.agent, via: 'cli', predecessor, node: opt(p, 'node'), ...(input ? { input } : {}), ...(attachments.length ? { attachments } : {}) }) } catch (e) { if (journal !== null) ev?.wfs.abort(journal); ev?.close(); throw e }
+    const trial = p.flags.has('editing') ? { file: workflow } : undefined
+    try { r = await x.request({ workspace: ws.reg.id, workflow, text, author: author ?? input?.requester ?? '', receipt, by: opt(p, 'by') ?? own?.agent, via: 'cli', predecessor, node: opt(p, 'node'), ...(input ? { input } : {}), ...(attachments.length ? { attachments } : {}), ...(trial ? { trial } : {}) }) } catch (e) { if (journal !== null) ev?.wfs.abort(journal); ev?.close(); throw e }
     if (ev && journal !== null) { const rec = await quietly(() => ev.wfs.finishRequest(journal, `${ws.reg.id}/${r.ref.workflow}/${r.ref.run}`)); if (rec) process.stderr.write(`Recorded in discussion ${ev.turn.conv}: workflow record ${rec.id} (executed).\n`) }
     ev?.close()
-    out(`${r.duplicate ? 'Already requested (same receipt)' : 'Requested'}: run ${r.ref.workflow}/${r.ref.run} in ${ws.reg.id}; job ${r.job.id} is ${r.job.state}${r.job.worker ? ` for execution node ${r.job.worker}` : ''}.`, r)
+    const src = (await (await import('../server/runs.ts')).readRun(await (await import('../server/runspace.ts')).runSpace(ws, r.ref), r.ref)).record?.definition.source
+    const from = src?.kind === 'published' ? ` Definition and code: ${src.repository}@${src.commit.slice(0, 10)} (${src.branch}).` : src?.kind === 'trial' ? ` Trial: ${src.file} (sha256 ${src.sha256.slice(0, 12)}) on ${src.baseline.repository}@${src.baseline.commit.slice(0, 10)}.` : src?.kind === 'workspace' ? ` Definition: workspace ${src.workspace} (${src.reason}).` : ''
+    out(`${r.duplicate ? 'Already requested (same receipt)' : 'Requested'}: run ${r.ref.workflow}/${r.ref.run} in ${ws.reg.id}; job ${r.job.id} is ${r.job.state}${r.job.worker ? ` for execution node ${r.job.worker}` : ''}.${from}`, r)
     return 0
   } catch (e) {
     if (e instanceof RequestError) throw new Refused(e.message, e.detail)
@@ -1702,7 +1733,7 @@ const COMMANDS: Record<string, (p: Parsed) => Promise<number>> = {
   runs: cmdRuns, observe: cmdObserve, projects: cmdProjects, run: cmdRun, delegate: cmdDelegate, review: cmdReview, present: cmdPresent, share: cmdShare, project: cmdProject, repo: cmdRepo, gitea: cmdGitea, dashboard: cmdDashboard, exec: cmdExec, request: cmdRequest, notify: cmdNotify, intake: cmdIntake,
   create: cmdCreate, register: cmdRegister, list: cmdList, status: cmdStatus, validate: cmdValidate,
   approve: cmdApprove, arrange: cmdArrange, 'add-repo': cmdAddRepo, workflow: cmdWorkflow, serve: cmdServe, setup: cmdSetup,
-  version: cmdVersion, nodes: cmdNodes, boast: cmdBoast, context: cmdContext, challenge: cmdChallenge, conversation: cmdConversation, discussion: cmdConversation, dialogue: cmdDialogue,
+  version: cmdVersion, nodes: cmdNodes, workspace: cmdWorkspace, boast: cmdBoast, context: cmdContext, challenge: cmdChallenge, conversation: cmdConversation, discussion: cmdConversation, dialogue: cmdDialogue,
 }
 
 // Challenges (challenge p1, docs/challenges.md).
@@ -1742,6 +1773,31 @@ async function cmdContext(p: Parsed): Promise<number> {
     workspace: () => workspace(p), exec: () => openExec(p),
     resolveRun: async (ws, text) => (await import('../server/runs.ts')).resolveRef(ws, text),
   })
+}
+
+// The workspace beside the published source (improve_wfrun p1).
+async function cmdWorkspace(p: Parsed): Promise<number> {
+  const [sub] = p.positional
+  if (sub !== 'status' && sub !== 'sync') throw new UsageError('workspace needs status or sync')
+  const ws = await workspace(p)
+  const g = await giteaOf(p)
+  if (!g) throw new Refused(`the published source is read from Gitea, which is not configured here (${giteaFile(p)})`)
+  const ctx = { registryFile: registryFile(p), area: areaDir(p), gitea: g }
+  const m = await import('../server/workspaceSync.ts')
+  const line = (r: import('../server/workspaceSync.ts').RepoRelation) => `  ${r.path.padEnd(24)} ${r.initialized ? `${(r.branch ?? 'detached').padEnd(10)} ${r.head?.slice(0, 10) ?? '-'} → ${r.published?.slice(0, 10) ?? '-'}  ${r.relation}${r.behind ? ` −${r.behind}` : ''}${r.ahead ? ` +${r.ahead}` : ''}${r.dirty ? `  ${r.dirty} uncommitted` : ''}` : 'not checked out'}${r.problem && r.initialized ? `  (${r.problem})` : ''}`
+  try {
+    if (sub === 'status') {
+      const r = await m.workspaceRelation(ctx, ws, { fresh: p.flags.has('refresh') })
+      out([`${ws.reg.id}: published ${r.source.repository}@${r.source.commit.slice(0, 10)} (${r.source.branch}, fetch ${r.source.fetch.state} ${r.source.fetch.at})`, line(r.root), ...r.submodules.map(line), r.summary, r.next === 'sync' ? 'Next: wfe workspace sync' : r.next === 'resolve-by-hand' ? 'Next: reconcile it by hand (published runs are unaffected).' : ''].filter(Boolean).join('\n'), r)
+      return 0
+    }
+    const r = await m.syncWorkspace(ctx, ws, { dryRun: p.flags.has('dry-run') })
+    out([r.message, ...r.steps.map(x => `  ${x.path.padEnd(24)} ${x.state.padEnd(9)} ${x.before?.slice(0, 10) ?? '-'} → ${x.after?.slice(0, 10) ?? '-'}  ${x.detail}`), r.recovery ?? ''].filter(Boolean).join('\n'), r)
+    return r.ok ? 0 : 1
+  } catch (e) {
+    if (e instanceof RequestError) throw new Refused(e.message, e.detail)
+    throw e
+  }
 }
 
 // Project access (project_migration p4): reads of any managed project.

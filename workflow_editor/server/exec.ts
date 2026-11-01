@@ -476,7 +476,7 @@ export class ExecStore {
   // `attachments` (challenge p1): challenges the words carried, each with its
   // file's text at the attached commit, written into the new run's folder.
   // `standing` (p18): the run is created as a conversation's standing conductor.
-  async request(o: { workspace: string; workflow: string; text: string; author: string; receipt: string; by?: string; via: string; predecessor?: RunRef; node?: string; source?: import('../shared/intake.ts').SourceRef; input?: Extract<import('./runs.ts').CreateRunOptions['input'], { kind: 'request' }>; attachments?: import('./runs.ts').PinnedAttachment[]; standing?: { conversation: string; replaces?: string } }): Promise<{ job: JobRow; ref: RunRef; duplicate: boolean }> {
+  async request(o: { workspace: string; workflow: string; text: string; author: string; receipt: string; by?: string; via: string; predecessor?: RunRef; node?: string; source?: import('../shared/intake.ts').SourceRef; input?: Extract<import('./runs.ts').CreateRunOptions['input'], { kind: 'request' }>; attachments?: import('./runs.ts').PinnedAttachment[]; standing?: { conversation: string; replaces?: string }; trial?: { file: string; sha256?: string } }): Promise<{ job: JobRow; ref: RunRef; duplicate: boolean }> {
     if (!/^[A-Za-z0-9:._/#-]{8,200}$/.test(o.receipt)) throw new RequestError(400, 'a request needs a receipt id (8–200 of A-Z a-z 0-9 : . _ / # -)')
     const seen = this.one<JobRow>('SELECT * FROM jobs WHERE receipt = ?', `request:${o.receipt}`)
     if (seen) return { job: seen, ref: { workflow: seen.workflow, run: seen.run }, duplicate: true }
@@ -484,7 +484,7 @@ export class ExecStore {
     // The run gets its own working copy (p9); the same receipt finds it again.
     const env = this.ctx.gitea ? await this.ctx.gitea.gitEnv() : {}
     const attachments = o.attachments?.length ? { attachments: o.attachments } : {}
-    const created = await createRunInCopy(ws, { workflow: o.workflow, input: o.input ? { ...o.input, ...attachments } : { kind: 'braindump', text: o.text, author: o.author, recordedBy: o.by, ...(o.source ? { source: o.source } : {}), ...attachments }, executor: { host: this.executor, ...(o.node ? { node: o.node } : {}) }, by: o.by ?? o.author, via: o.via, area: this.ctx.area, receipt: `request:${o.receipt}`, ...(o.predecessor ? { predecessor: o.predecessor } : {}), ...(o.standing ? { standing: o.standing } : {}), ...(this.ctx.gitea ? { access: this.accessContext() } : {}) }, env)
+    const created = await createRunInCopy(ws, { workflow: o.workflow, input: o.input ? { ...o.input, ...attachments } : { kind: 'braindump', text: o.text, author: o.author, recordedBy: o.by, ...(o.source ? { source: o.source } : {}), ...attachments }, executor: { host: this.executor, ...(o.node ? { node: o.node } : {}) }, by: o.by ?? o.author, via: o.via, area: this.ctx.area, receipt: `request:${o.receipt}`, ...(o.predecessor ? { predecessor: o.predecessor } : {}), ...(o.standing ? { standing: o.standing } : {}), ...(this.ctx.gitea ? { access: this.accessContext() } : {}), ...(o.trial ? { trial: o.trial } : {}) }, env)
     const job = this.enqueue(ws.reg.id, created.ref, 'start', `request:${o.receipt}`, o.input ? `start: ${o.input.requester}'s request` : 'start: the person\'s request', this.nodeOf(created.record))
     return { job, ref: created.ref, duplicate: false }
   }

@@ -105,3 +105,14 @@ export const fact = (k: string, v: string, cls = '') => h(`div.fact${cls ? `.${c
 export const line = (k: string, items: (Node | string | null)[], cls = '') => h(`div.now-line${cls ? `.${cls}` : ''}`, h('span.k', k), h('span.v', ...items.filter((x): x is Node | string => x !== null).flatMap((x, i) => (i ? [', ', x] : [x]))))
 export const nodeLink = (id: string, text = id) => h('a.node-link', { href: '#', dataset: { action: 'node', node: id } }, text)
 export const fileLink = (path: string, label = path) => h('a.file-link', { href: '#', title: 'Show this file here (read-only)', dataset: { action: 'file', path } }, label)
+
+// Where a run's definition and code came from (improve_wfrun p1,
+// run.json definition.source), in words.
+export function sourceText(rec: RunRecord): string {
+  const s = rec.definition.source
+  const at = (repo: string, commit: string, branch?: string) => `${repo}@${commit.slice(0, 10)}${branch ? ` (${branch})` : ''}`
+  if (!s) return 'not recorded (a run created before published sources)'
+  if (s.kind === 'published') return `published — definition and code from ${at(s.repository, s.commit, s.branch)}${s.selector === 'commit' ? ', the revision named at creation' : ''}${s.definitions && s.definitions.repository !== s.repository ? `; definitions at ${at(s.definitions.repository, s.definitions.commit)}` : ''}`
+  if (s.kind === 'trial') return `trial — the bytes of ${s.file} in workspace ${s.workspace} (sha256 ${s.sha256.slice(0, 12)}${s.dirty ? ', with uncommitted changes' : ''}) on the published code ${at(s.baseline.repository, s.baseline.commit, s.baseline.branch)}; uncommitted project code not included`
+  return `workspace ${s.workspace} — its files${s.head ? ` at ${s.head.slice(0, 10)}` : ''}${s.dirty ? ' with uncommitted definition changes' : ''} (${s.reason})`
+}

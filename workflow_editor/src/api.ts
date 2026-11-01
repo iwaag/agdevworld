@@ -1,7 +1,7 @@
 // Thin client for the local service. Errors carry the service's message.
 import type {
   AddSubmoduleResponse, AgdevResult, CreateProjectResult, DashboardResponse, ProjectResponse, RegisterResponse, RunOpResponse, RunResponse, RunSummary, SaveResponse,
-  WorkflowResponse, WorkspacesResponse,
+  WorkflowResponse, WorkspacesResponse, PublishedResponse, PublishedSourceView, SyncResultView,
 } from '../shared/api.ts'
 import type { ApprovalState } from '../shared/canonical.ts'
 import type { RoundView } from '../shared/humanReview.ts'
@@ -135,7 +135,11 @@ export const api = {
   adjustRun: (id: string, workflow: string, run: string, body: { text: string; reason: string; by: string; dryRun: boolean; expectRevision?: string; expectSeq?: number }) => call<AdjustView>('POST', `${ws(id)}/runs/${encodeURIComponent(workflow)}/${encodeURIComponent(run)}/adjust`, body, [422]),
   integrate: (id: string, workflow: string, run: string, by: string, dryRun: boolean) => call<{ ok: true; state: string; steps: IntegrationStepView[]; error?: string }>('POST', `${ws(id)}/runs/${encodeURIComponent(workflow)}/${encodeURIComponent(run)}/integration`, { by, dryRun }),
   retryCheckpoint: (id: string, workflow: string, run: string, checkpoint: number) => call<unknown>('POST', `${ws(id)}/runs/${encodeURIComponent(workflow)}/${encodeURIComponent(run)}/checkpoints/${checkpoint}/publish`),
-  requestRun: (id: string, input: { workflow: string; text: string; author: string; receipt: string }) =>
+  // improve_wfrun p1: the published workflows with the workspace's relation, one published definition, and the optional fast-forward.
+  published: (id: string, refresh = false) => call<PublishedResponse>('GET', `${ws(id)}/published${refresh ? '?refresh=1' : ''}`),
+  publishedWorkflow: (id: string, file: string) => call<WorkflowResponse & { source: PublishedSourceView }>('GET', `${ws(id)}/published/${encodeURIComponent(file)}`),
+  syncWorkspace: (id: string, dryRun = false) => call<SyncResultView>('POST', `${ws(id)}/sync`, { dryRun }, [409]),
+  requestRun: (id: string, input: { workflow: string; text: string; author: string; receipt: string; trial?: { file: string } }) =>
     call<{ ok: true; duplicate: boolean; ref: { workflow: string; run: string }; job: { id: number; state: string } }>('POST', `${ws(id)}/runs`, input),
   catalog: () => call<CatalogView>('GET', 'api/nodes'),
   createTemplate: (body: TemplateBody & { id: string }) => call<{ template: NodeTemplate }>('POST', 'api/nodes', body),

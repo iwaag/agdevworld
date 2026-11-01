@@ -509,6 +509,11 @@ export interface CreateRunOptions {
   // and the record says so.
   access?: AccessContext
   rev?: string
+  // A trial of editing content (improve_wfrun p1): the workspace file's exact
+  // bytes (checked against `sha256` when given: what the person saw) as the
+  // definition, on the published code. Uncommitted project code is never
+  // part of it.
+  trial?: { file: string; sha256?: string }
   // Set by createRunInCopy: the bundle already read and where it came from.
   bundle?: SourceBundle
   definitionSource?: DefinitionSource
@@ -689,6 +694,7 @@ export async function createRunInCopy(ws: Workspace, o: CreateRunOptions & { rec
   if (!project) throw new RequestError(409, 'project.yaml cannot be read, so the run cannot name its project; fix project.yaml first (wfe status)')
   inputOf(o.input)
   if (o.access?.gitea) return createPublished(ws, project, o, env)
+  if (o.trial) throw new RequestError(409, 'a trial runs the editing definition on the published code, and this host has no published source (no Gitea)', { code: 'trial-unavailable' })
   const info = await ws.devdocs()
   if (info.problem) throw new RequestError(409, `${info.problem.message}; nothing was created. ${info.problem.fix ?? ''}`.trim())
   const src = await sourceBundle(ws, o.workflow)
@@ -717,7 +723,9 @@ async function createPublished(ws: Workspace, project: string, o: CreateRunOptio
   const pub = await publishedWorkspace(o.access!, ws.reg, frozen ? { rev: frozen } : o.rev ? { rev: o.rev } : { fresh: true })
   const info = await pub.devdocs()
   if (info.problem) throw new RequestError(409, `${project}@${pub.source.commit.slice(0, 10)}: ${info.problem.message}; nothing was created.`)
-  const src = await sourceBundle(pub, o.workflow)
+  const src = await sourceBundle(o.trial ? ws : pub, o.trial?.file ?? o.workflow)
+  const trialText = o.trial ? Object.values(src.files)[0].text : null
+  if (o.trial?.sha256 && sha256(trialText!) !== o.trial.sha256) throw new RequestError(409, `${src.files[src.root].source} changed since it was shown (sha256 ${sha256(trialText!).slice(0, 12)}, not ${o.trial.sha256.slice(0, 12)}); look at it again and retry`, { code: 'definition-conflict' })
   const workflow = src.files[src.root].workflow
   const compiled = compile(workflow)
   if (!compiled.ok) throw new RequestError(422, `${src.root} cannot be executed: ${compiled.message}. Nothing was written.`, { code: compiled.code })
@@ -735,10 +743,12 @@ async function createPublished(ws: Workspace, project: string, o: CreateRunOptio
     if (path && path !== '.' && r && !r.initialized) throw new RequestError(409, `${src.root} binds ${path}, which the published revision ${pub.source.commit.slice(0, 10)} pins but cannot be read here: ${r.problem ?? 'not available'}`, { code: 'source-repository' })
   }
   const s = pub.source
-  return createRunUnlocked(ws, {
-    ...o, workflow: src.root, name: copy.ref.run, into, storage: storageOf(copy.manifest!), bundle: src, definitionWs: pub,
-    definitionSource: { kind: 'published', project: s.project, selector: s.selector, repository: s.repository, branch: s.branch, commit: s.commit, definitions: s.definitions, fetch: { state: s.fetch.state, at: s.fetch.at } },
-  })
+  let definitionSource: DefinitionSource = { kind: 'published', project: s.project, selector: s.selector, repository: s.repository, branch: s.branch, commit: s.commit, definitions: s.definitions, fetch: { state: s.fetch.state, at: s.fetch.at } }
+  if (o.trial) {
+    const w = await workspaceSource(ws, 'trial')
+    definitionSource = { kind: 'trial', workspace: ws.reg.id, file: src.files[src.root].source, sha256: sha256(trialText!), head: w.kind === 'workspace' ? w.head ?? null : null, dirty: w.kind === 'workspace' && !!w.dirty, baseline: { project: s.project, repository: s.repository, branch: s.branch, commit: s.commit } }
+  }
+  return createRunUnlocked(ws, { ...o, workflow: src.root, name: copy.ref.run, into, storage: storageOf(copy.manifest!), bundle: src, definitionWs: pub, definitionSource })
 }
 
 // A workspace's files as a definition source, said as such.

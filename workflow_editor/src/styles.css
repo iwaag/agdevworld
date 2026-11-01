@@ -1177,3 +1177,18 @@ html[data-display="detail"] .dash-glance { max-width: none; padding: 0; }
 .review-page .notice.error { background: var(--error-bg); color: var(--error); }
 .review-main > p.small a { color: var(--top-text); }
 .review-head p { margin: 4px 0 0; }
+
+/* improve_wfrun p1: published workflows beside the workspace's. */
+.wf-source { display: inline-flex; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; margin-left: auto; }
+.wf-source .seg { border: 0; border-radius: 0; background: transparent; padding: 5px 10px; font-size: 13px; }
+.wf-source .seg.on { background: var(--paper); font-weight: 600; box-shadow: inset 0 -2px 0 currentColor; }
+.ws-relation-box { display: flex; flex-direction: column; gap: 6px; margin: 6px 0; }
+.ws-relation-box .banner { margin: 0; }
+.ws-relation-detail summary { cursor: pointer; font-size: 13px; }
+.ws-relation-table { border-collapse: collapse; width: 100%; margin: 6px 0; display: block; overflow-x: auto; }
+.ws-relation-table th, .ws-relation-table td { text-align: left; padding: 3px 8px 3px 0; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.pub-definition { margin: 0 0 8px 36px; min-width: 0; }
+.pub-definition pre { max-height: 360px; overflow: auto; background: var(--paper); border: 1px solid var(--line); border-radius: 6px; padding: 8px; margin: 4px 0 0; }
+.req-source { margin: 4px 0; color: var(--muted); }
+.req-source.trial { color: var(--warn); }
+.trial-chip { display: inline-block; margin: 4px 0; }

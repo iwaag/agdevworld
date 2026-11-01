@@ -26,7 +26,7 @@ import { h, when } from './dom.ts'
 import { icon } from './icons.ts'
 import { live } from './live.ts'
 import { patchContent } from './patch.ts'
-import { activeWorkflow, ago, chip, fact, line, nodeFacts, nodeLabel, nodeLink, runHash, runTitle, STATE_LABEL } from './runCommon.ts'
+import { activeWorkflow, ago, chip, fact, line, nodeFacts, nodeLabel, nodeLink, runHash, runTitle, sourceText, STATE_LABEL } from './runCommon.ts'
 import { outcome, RefreshCoordinator, type Outcome, type RefreshKind } from './runRefresh.ts'
 import { RunContextCard } from './runContext.ts'
 import { RunSide, integrationStatus, type OpResult } from './runSide.ts'
@@ -368,6 +368,7 @@ export function renderRunView(root: HTMLElement, wsId: string, workflow: string,
     patchContent(titleMain,
       h('h1.run-name', { title: t.title }, t.title),
       progress(rec), activity.el, conversationLinks(),
+      rec.definition.source?.kind === 'trial' ? h('p.chip.warn.trial-chip', { title: sourceText(rec) }, 'Trial of editing content') : null,
       h('p.run-lead.d-only', statusLine(rec)),
       h('p.wf-file.d-only', `${t.sub} · ${rec.definition.revisions?.length ? `adjusted, ${rec.definition.active ?? 'r1'} in force` : 'fixed snapshot'}`))
     const last = rec.decisions.at(-1)
@@ -454,7 +455,7 @@ export function renderRunView(root: HTMLElement, wsId: string, workflow: string,
     const r = shown!
     const ex = rec.execution
     const src = r.sources.find(s => s.workflow === rec.definition.root)
-    const srcText = !src ? null : src.status === 'same' ? 'current definition: same as this snapshot' : src.status === 'changed' ? 'current definition: changed since this snapshot' : src.status === 'deleted' ? 'current definition: deleted' : `snapshot: ${src.detail}`
+    const srcText = !src ? null : src.status === 'same' ? 'this workspace\'s file: same as this snapshot' : src.status === 'changed' ? 'this workspace\'s file: changed since this snapshot' : src.status === 'deleted' ? 'this workspace\'s file: deleted' : `snapshot: ${src.detail}`
     const input = rec.input
     const last = rec.decisions.at(-1)
     patchContent(details,
@@ -466,6 +467,7 @@ export function renderRunView(root: HTMLElement, wsId: string, workflow: string,
         fact('Created', when(rec.created)), fact('Started', rec.started ? when(rec.started) : '—'), fact('Ended', rec.ended ? when(rec.ended) : '—'),
         fact('Last recorded update', `${when(rec.updated)} (${ago(rec.updated)})`, 'last-update'),
         ...countFacts(rec),
+        fact('Source', sourceText(rec), 'definition-source'),
         h(`div.fact.run-title.src-state.${src?.status ?? 'none'}`, h('span.k', 'Definition'), h('span.v', `${rec.definition.root} · ${rec.definition.active ?? 'r1'} in force${srcText ? ` · ${srcText}${src?.renamed ? ` (now ${src.file})` : ''}` : ''}`)),
         rec.control.attempt ? fact('Open attempt', `${rec.control.attempt.id} since ${when(rec.control.attempt.began)}`) : rec.control.last ? fact('Last attempt', `${rec.control.last.id}: ${rec.control.last.outcome}, ${when(rec.control.last.ended)}`) : null),
       h('div.run-now',

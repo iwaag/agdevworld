@@ -1,5 +1,5 @@
 // Project editor: metadata, sub-repositories, workspaces and workflows.
-import type { DashboardResponse, ProjectResponse, RepositoryStatus, RunSummary, WorkflowResponse, WorkspaceSummary } from '../shared/api.ts'
+import type { DashboardResponse, ProjectResponse, PublishedResponse, RepositoryStatus, RunSummary, WorkflowResponse, WorkspaceSummary } from '../shared/api.ts'
 import { PROJECT_SCHEMA, type Project } from '../shared/model.ts'
 import { validateProject } from '../shared/validate.ts'
 import { api, ApiError } from './api.ts'
@@ -68,6 +68,15 @@ export function renderProjectView(root: HTMLElement, wsId: string, opts: { conte
   let connected = true
   let runs: RunSummary[] | null = null
   let runsError = ''
+  // improve_wfrun p1: what a request runs (the project's published source)
+  // beside what this workspace holds for editing. The view chosen is a
+  // per-viewer convenience; switching it keeps every draft and selection.
+  let pub: PublishedResponse | null = null
+  let pubError = ''
+  let wfView: 'published' | 'workspace' = (() => { try { return localStorage.getItem('workflow-editor.wf-view') === 'workspace' ? 'workspace' : 'published' } catch { return 'published' } })()
+  let syncNote: HTMLElement | null = null
+  let syncing = false
+  const pubShown = new Map<string, HTMLElement>() // published definitions opened for reading, by file
 
   const dirty = () => !!draft && !!saved && JSON.stringify(draft) !== JSON.stringify(saved)
 
@@ -123,7 +132,9 @@ export function renderProjectView(root: HTMLElement, wsId: string, opts: { conte
   // keeps it and flags a change on disk.
   const load = serial<LoadOpts>(async opts => {
     try {
+      const published = api.published(wsId, opts.refresh).then(r => { pub = r; pubError = '' }, e => { pubError = (e as Error).message })
       const [p, w] = await Promise.all([api.project(wsId, opts.refresh), opts.workspaces ? api.workspaces() : Promise.resolve(null)])
+      await published
       if (disposed) return
       const changedOnDisk = !!data && data.rev !== p.rev
       data = p
@@ -361,22 +372,101 @@ export function renderProjectView(root: HTMLElement, wsId: string, opts: { conte
     return card
   }
 
+  // Where the published workflows were read, and how fresh that is.
+  function sourceLine(): string {
+    if (!pub) return pubError ? `the published workflows cannot be read: ${pubError}` : 'reading…'
+    const src = pub.source
+    return `${src.repository}@${short(src.commit)} on ${src.branch} · ${src.fetch.state === 'stale' ? `Gitea not reachable (${src.fetch.error ?? 'unknown'}); cached ${ago(src.fetch.at)}` : `read ${ago(src.fetch.at)}`}`
+  }
+
+  // The workspace beside the published revision: the situation and the next
+  // action (Simple), every repository's commits, counts and changes (Detail).
+  function renderRelation(): HTMLElement | null {
+    if (!pub) return null
+    if ('problem' in pub.relation) return h('div.banner.warn.d-only', `How this workspace relates to the published revision is unknown: ${pub.relation.problem}`)
+    const r = pub.relation
+    const update = r.next === 'sync' ? h('button', { type: 'button', disabled: syncing, onclick: () => void sync() }, syncing ? 'Updating…' : 'Update workspace') : null
+    const banner = r.next === 'none' ? null : h('div.banner.warn.ws-relation', h('span', r.summary), update)
+    const rel = (x: typeof r.root) => x.relation === 'behind' && x.behind ? `behind by ${x.behind}` : x.relation === 'ahead' && x.ahead ? `ahead by ${x.ahead}` : x.relation === 'diverged' ? `diverged${x.ahead !== null || x.behind !== null ? ` (${x.ahead ?? '?'} local, ${x.behind ?? '?'} published)` : ''}` : x.relation
+    const rows = [r.root, ...r.submodules].map(x => h('tr',
+      h('td', x.path === '.' ? 'project root' : x.path), h('td', x.initialized ? (x.branch ?? 'detached') : '—'),
+      h('td', x.head ? short(x.head) : '—'), h('td', x.published ? short(x.published) : '—'), h('td', x.initialized ? rel(x) : '—'),
+      h('td', !x.initialized ? 'not checked out' : x.dirty ? `${x.dirty} uncommitted` : 'clean')))
+    return h('div.ws-relation-box', banner, syncNote,
+      h('details.d-only.ws-relation-detail', h('summary', r.next === 'none' ? 'Workspace: at the published revision' : 'Workspace and the published revision'),
+        h('table.small.ws-relation-table', h('thead', h('tr', ...['Repository', 'Branch', 'Workspace', 'Published', 'Relation', 'Changes'].map(t => h('th', t)))), h('tbody', ...rows)),
+        h('p.muted.small', `Published ${sourceLine()}; observed ${ago(r.observed)}. Updating only fast-forwards and is optional: requests run the published workflows whatever this workspace holds.`)))
+  }
+
+  async function sync() {
+    syncing = true
+    render()
+    try {
+      const r = await api.syncWorkspace(wsId)
+      syncNote = h(`div.banner.${r.ok ? 'ok' : 'error'}`, h('span', r.message), ...r.steps.filter(x => x.state !== 'unchanged').map(x => h('span.small', `${x.path === '.' ? 'root' : x.path}: ${x.state} — ${x.detail}`)), r.recovery ? h('span.small', r.recovery) : null)
+    } catch (e) { syncNote = h('div.banner.error', `Not updated: ${(e as Error).message}`) }
+    syncing = false
+    await load({ refresh: true })
+  }
+
+  async function togglePublished(file: string) {
+    if (pubShown.has(file)) { pubShown.delete(file); render(); return }
+    try {
+      const r = await api.publishedWorkflow(wsId, file)
+      pubShown.set(file, h('div.pub-definition', h('p.muted.small', `${r.source.definitions?.repository ?? r.source.repository}@${short(r.source.definitions?.commit ?? r.source.commit)}:devdocs/workflows/${file} — read-only`), h('pre.small', r.text ?? '')))
+    } catch (e) { pubShown.set(file, h('div.banner.error', (e as Error).message)) }
+    render()
+  }
+
+  function workflowState(w: { problem?: { message: string }; errors: number }, ok: HTMLElement): HTMLElement {
+    return w.problem ? h('span.tile-state.error', icon('alert', 'icon'), 'Cannot be read') : w.errors ? h('span.tile-state.error', icon('alert', 'icon'), `${w.errors} error${w.errors > 1 ? 's' : ''}`) : ok
+  }
+
   function renderWorkflows(): HTMLElement {
-    const card = h('section.card.workflows', h('div.card-head', h('h2', 'Workflows'), creator.button), h('p.muted.small.d-only', 'devdocs/workflows/ in this workspace'))
+    const seg = (v: 'published' | 'workspace', label: string) => h(`button.seg${wfView === v ? '.on' : ''}`, {
+      type: 'button', 'aria-pressed': String(wfView === v),
+      onclick: () => { wfView = v; try { localStorage.setItem('workflow-editor.wf-view', v) } catch { /* not remembered */ } render() },
+    }, label)
+    const card = h('section.card.workflows',
+      h('div.card-head', h('h2', 'Workflows'), h('div.wf-source', { role: 'group', 'aria-label': 'Which workflows' }, seg('published', 'Published'), seg('workspace', 'Workspace (editing)')), wfView === 'workspace' ? creator.button : null),
+      h('p.muted.small', wfView === 'published' ? `What a request runs: ${sourceLine()}` : 'devdocs/workflows/ in this workspace: what you edit. Requests run it once it is on the default branch; a trial runs it as it is.'))
+    const rel = renderRelation()
+    if (rel) card.append(rel)
     if (!data) return card
+    const editHash = (file: string) => `#/ws/${encodeURIComponent(wsId)}/wf/${encodeURIComponent(file)}`
+    if (wfView === 'published') {
+      if (!pub) { card.append(h(`p.${pubError ? 'error' : 'muted'}`, pubError || 'Loading…')); return card }
+      if (pub.problem) card.append(h('div.banner.warn', pub.problem))
+      if (!pub.workflows.length && !pub.problem) card.append(h('p.muted.empty-workflows', 'No published workflow yet.'))
+      const local = new Map(data.workflows.filter(w => w.id).map(w => [w.id!, w.file]))
+      for (const w of pub.workflows) {
+        const mine = w.id ? local.get(w.id) : undefined
+        card.append(h('div.wf-row', { dataset: { file: w.file, source: 'published' } },
+          h('span.s-only.wf-icon', icon('flag', 'icon')),
+          h('div.wf-main', h('strong', w.name || w.id || w.file), h('span.muted.small.d-only', `${w.file}${w.id ? ` · id ${w.id}` : ''}`),
+            h('div', workflowState(w, h('span.tile-state.calm', icon('check', 'icon'), w.intake ? 'Published · accepts requests' : 'Published'))),
+            !mine ? h('span.small.muted', 'Not in this workspace') : null,
+            w.warnings ? h('span.chip.warn.d-only', `${w.warnings} warning${w.warnings > 1 ? 's' : ''}`) : null),
+          h('button', { type: 'button', onclick: () => void togglePublished(w.file) }, pubShown.has(w.file) ? 'Hide' : 'View'),
+          mine ? h('a.button', { href: editHash(mine) }, 'Edit', h('span.d-only', ' in workspace')) : null))
+        const shown = pubShown.get(w.file)
+        if (shown) card.append(shown)
+      }
+      return card
+    }
     if (!data.workflowsDir.exists) card.append(h('div.banner.warn', data.workflowsDir.reason ?? 'no workflow directory'))
     if (!data.workflows.length) card.append(h('p.muted.empty-workflows', 'No workflow yet. ', data.workflowsDir.exists ? h('button.link-btn', { type: 'button', onclick: () => creator.open() }, 'Create the first one') : null))
+    const published = new Set(pub?.workflows.map(w => w.id).filter(Boolean))
     for (const w of data.workflows) {
       const approved = w.approvals && w.approvals.intent === 'approved' && w.approvals.definition === 'approved'
-      const simpleState = w.problem ? h('span.tile-state.error', icon('alert', 'icon'), 'Cannot be read')
-        : w.errors ? h('span.tile-state.error', icon('alert', 'icon'), `${w.errors} error${w.errors > 1 ? 's' : ''}`)
-          : approved ? h('span.tile-state.calm', icon('check', 'icon'), 'Approved')
-            : w.approvals && (w.approvals.intent === 'stale' || w.approvals.definition === 'stale') ? h('span.tile-state.warn', icon('alert', 'icon'), 'Changed since approval')
-              : h('span.tile-state.muted', icon('doc', 'icon'), 'Draft')
-      card.append(h('div.wf-row', { dataset: { file: w.file } },
+      const simpleState = workflowState(w, approved ? h('span.tile-state.calm', icon('check', 'icon'), 'Approved')
+        : w.approvals && (w.approvals.intent === 'stale' || w.approvals.definition === 'stale') ? h('span.tile-state.warn', icon('alert', 'icon'), 'Changed since approval')
+          : h('span.tile-state.muted', icon('doc', 'icon'), 'Draft'))
+      card.append(h('div.wf-row', { dataset: { file: w.file, source: 'workspace' } },
         h('span.s-only.wf-icon', icon('flag', 'icon')),
         h('div.wf-main', h('strong', w.name || w.id || w.file), h('span.muted.small.d-only', `${w.file}${w.id ? ` · id ${w.id}` : ''}`),
           h('div.s-only', simpleState),
+          pub && w.id && !published.has(w.id) ? h('span.small.muted', 'Not published: requests cannot run it yet') : null,
           h('div.chips.d-only',
             w.problem ? h('span.chip.error', `${w.problem.kind}: ${w.problem.message}`) : null,
             w.approvals ? approvalChip('intent', w.approvals.intent) : null,
@@ -384,7 +474,7 @@ export function renderProjectView(root: HTMLElement, wsId: string, opts: { conte
             approved ? h('span.chip.ok', 'Author approved') : null,
             w.errors && !w.problem ? h('span.chip.error', `${w.errors} error${w.errors > 1 ? 's' : ''}`) : null,
             w.warnings ? h('span.chip.warn', `${w.warnings} warning${w.warnings > 1 ? 's' : ''}`) : null)),
-        h('a.button', { href: `#/ws/${encodeURIComponent(wsId)}/wf/${encodeURIComponent(w.file)}` }, 'Open', h('span.d-only', ' Editor'))))
+        h('a.button', { href: editHash(w.file) }, 'Open', h('span.d-only', ' Editor'))))
     }
     creator.update({ existing: data.workflows.map(w => w.id).filter((x): x is string => !!x), enabled: data.workflowsDir.exists, reason: data.workflowsDir.reason })
     card.append(creator.form)
@@ -408,15 +498,24 @@ export function renderProjectView(root: HTMLElement, wsId: string, opts: { conte
   // A person's request to the executor (autolab). The receipt is kept until
   // the service confirms, so a retry after a lost response is not a second run.
   const reqText = h('textarea', { rows: 4, 'aria-label': 'Request text', placeholder: 'Your words: what you want done. They are kept as the run\'s braindump.md.' })
-  const reqWorkflow = h('select', { 'aria-label': 'Request workflow' })
+  const reqWorkflow = h('select', { 'aria-label': 'Request workflow', onchange: () => renderRuns() })
+  // Ordinary execution runs the published workflow; a trial runs this
+  // workspace's file as it is, on the published code (improve_wfrun p1).
+  const reqMode = h('select', { 'aria-label': 'What runs', onchange: () => renderRuns() },
+    h('option', { value: 'published' }, 'Published workflow'), h('option', { value: 'trial' }, 'Trial of this workspace\'s file')) as HTMLSelectElement
   const reqAuthor = h('input', { 'aria-label': 'Request author', placeholder: 'your name' })
   let reqReceipt = ''
   let reqResult: HTMLElement | null = null
   function renderRequest(): HTMLElement {
-    const workflows = data?.workflows.filter(w => w.id && !w.problem) ?? []
+    const trial = reqMode.value === 'trial'
+    const workflows = (trial ? data?.workflows : pub?.workflows)?.filter(w => w.id && !w.problem) ?? []
     // The person's choice stays; before one, the first workflow a run can be made of.
-    const current = reqWorkflow.value || workflows.find(w => !w.errors)?.id
-    reqWorkflow.replaceChildren(...workflows.map(w => h('option', { value: w.id!, selected: w.id === current }, `${w.name || w.id}${w.errors ? ' — has validation errors' : w.delegates.length ? ` — delegates to ${w.delegates.join(', ')}` : ''}`)))
+    const current = workflows.some(w => w.id === reqWorkflow.value) ? reqWorkflow.value : workflows.find(w => !w.errors)?.id
+    reqWorkflow.replaceChildren(...workflows.map(w => h('option', { value: w.id!, selected: w.id === current, dataset: { file: w.file } }, `${w.name || w.id}${w.errors ? ' — has validation errors' : w.delegates.length ? ` — delegates to ${w.delegates.join(', ')}` : ''}`)))
+    const src = pub?.source
+    const what = trial
+      ? `Runs the bytes of this workspace's devdocs/workflows/${(reqWorkflow.selectedOptions[0] as HTMLOptionElement | undefined)?.dataset.file ?? '…'} as they are now, on the published code${src ? ` ${src.repository}@${short(src.commit)}` : ''}. Uncommitted project code is not included. The run is recorded as a trial.`
+      : src ? `Runs the workflow as published: definition and code from ${src.repository}@${short(src.commit)} (${src.branch}).` : pubError ? `The published workflows cannot be read: ${pubError}` : ''
     // A per-viewer convenience: storage that is unavailable leaves it empty.
     if (!reqAuthor.value) { try { reqAuthor.value = localStorage.getItem('workflow-editor.actor') ?? '' } catch { /* not remembered */ } }
     const go = h('button.primary', {
@@ -426,7 +525,8 @@ export function renderProjectView(root: HTMLElement, wsId: string, opts: { conte
         reqReceipt ||= `browser-${Array.from(crypto.getRandomValues(new Uint8Array(16)), b => b.toString(16).padStart(2, '0')).join('')}`
         go.disabled = true
         try {
-          const r = await api.requestRun(wsId, { workflow: reqWorkflow.value, text: reqText.value, author: reqAuthor.value.trim(), receipt: reqReceipt })
+          const file = (reqWorkflow.selectedOptions[0] as HTMLOptionElement | undefined)?.dataset.file
+          const r = await api.requestRun(wsId, { workflow: reqWorkflow.value, text: reqText.value, author: reqAuthor.value.trim(), receipt: reqReceipt, ...(trial && file ? { trial: { file } } : {}) })
           try { localStorage.setItem('workflow-editor.actor', reqAuthor.value.trim()) } catch { /* not remembered */ }
           reqResult = h('div.banner.ok', `${r.duplicate ? 'Already requested' : 'Requested'}: `, h('a', { href: runHash(wsId, `${r.ref.workflow}/${r.ref.run}`) }, `${r.ref.workflow}/${r.ref.run}`), ` — the executor is queued (job ${r.job.id}, ${r.job.state}).`)
           reqText.value = ''; reqReceipt = ''
@@ -435,8 +535,9 @@ export function renderProjectView(root: HTMLElement, wsId: string, opts: { conte
       },
     }, 'Request run')
     return h('div.request-run', h('h3', 'Request a run'),
-      h('p.muted.small.d-only', 'autolab performs it in this workspace: study, do and talk nodes; questions come back here. Another run cannot start in this workspace until the current one completes or is cancelled.'),
-      h('div.row', h('label.field', h('span', 'Workflow'), reqWorkflow), h('label.field', h('span', 'Your name'), reqAuthor)),
+      h('p.muted.small.d-only', 'autolab performs it in the run\'s own copy of the project: study, do and talk nodes; questions come back here. Other runs of the project go on beside it.'),
+      h('div.row', h('label.field', h('span', 'Runs'), reqMode), h('label.field', h('span', 'Workflow'), reqWorkflow), h('label.field', h('span', 'Your name'), reqAuthor)),
+      what ? h(`p.small.req-source${trial ? '.trial' : ''}`, what) : null,
       reqText, h('div.save-row', go), reqResult)
   }
 

@@ -278,3 +278,16 @@ export interface DashboardResponse {
 
 export interface AgdevStep { name: string; status: 'done' | 'kept' | 'failed'; detail: string }
 export interface AgdevResult { ok: boolean; message: string; steps?: AgdevStep[]; [k: string]: unknown }
+
+// The published source a workspace's project offers (improve_wfrun p1,
+// server/published.ts), and the workspace beside it (server/workspaceSync.ts).
+export interface PublishedSourceView {
+  schema: string; kind: 'published'; project: string; selector: 'default-branch' | 'commit'
+  repository: string; branch: string; commit: string
+  definitions: { path: string; repository: string; commit: string } | null
+  fetch: { state: 'fresh' | 'recent' | 'stale'; at: string; error?: string }
+}
+export interface RepoRelationView { path: string; head: string | null; branch: string | null; published: string | null; relation: 'same' | 'behind' | 'ahead' | 'diverged' | 'unknown'; behind: number | null; ahead: number | null; dirty: number; initialized: boolean; problem?: string }
+export interface WorkspaceRelationView { workspace: string; project: string; source: PublishedSourceView; observed: string; root: RepoRelationView; submodules: RepoRelationView[]; summary: string; next: 'none' | 'sync' | 'resolve-by-hand' }
+export interface PublishedResponse { source: PublishedSourceView; workflows: WorkflowSummary[]; problem?: string; relation: WorkspaceRelationView | { problem: string } }
+export interface SyncResultView { ok: boolean; workspace: string; source: PublishedSourceView; steps: { path: string; before: string | null; after: string | null; state: string; detail: string }[]; relation: WorkspaceRelationView; message: string; recovery?: string }

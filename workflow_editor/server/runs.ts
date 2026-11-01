@@ -13,7 +13,7 @@ import { DEFAULT_LANE, docSteps, ID_PATTERN, normalizeRepoPath, type Workflow } 
 import { validateWorkflow } from '../shared/validate.ts'
 import {
   activeRevision, checkRecord, documentPath, fileAttachmentOf, graphOfState, hostOf, operate, presentationFolder, runDisplayTitle, type AdjustSource, type AdjustDiff, graphDiff, RUN_ID, RunError, runFolder, RUNS_ROOT, runKey, validRunRef, type Presentation,
-  type BundleEntry, type DefinitionRef, type DocumentEvidence, type EntrustRef, type Executor, type OpInput, type RepoContext, type RunGraph,
+  type BundleEntry, type DefinitionRef, type DefinitionSource, type DocumentEvidence, type EntrustRef, type Executor, type OpInput, type RepoContext, type RunGraph,
   type EntryMeta, type RetroEvidence, type RunInput, type RunRecord, type RunRef, type RunState, type RunStorage,
 } from '../shared/run.ts'
 import { runStatus } from '../shared/status.ts'
@@ -25,7 +25,8 @@ import { parseSnapshot, type CatalogContext, type CatalogSnapshot, type RunCatal
 import { withLock } from './lock.ts'
 import { blobSizeAt, listAt, resolveRev, RevError, showAt, type DevdocsInfo, type DevdocsRev } from './devdocs.ts'
 import { RequestError, WORKFLOWS_DIR, type Workspace } from './workspace.ts'
-import { allocating, listCopies, prepareCopy, runSpace, storageOf, usedRuns } from './runspace.ts'
+import { allocating, copyByReceipt, listCopies, prepareCopy, runSpace, storageOf, usedRuns } from './runspace.ts'
+import type { AccessContext } from './access.ts'
 import { parseWorkflow, renderWorkflow } from './yamlDoc.ts'
 import { git } from './git.ts'
 import { CatalogError, instantiate } from '../shared/catalog.ts'
@@ -501,6 +502,17 @@ export interface CreateRunOptions {
   storage?: RunStorage
   // p18: created as a conversation's standing conductor (docs/runs.md *Standing runs*).
   standing?: { conversation: string; replaces?: string }
+  // improve_wfrun p1: with Gitea access, a run in its own copy follows the
+  // project's published source — its default branch now, or the root commit
+  // `rev` names (a delegation's dispatched revision) — for both its
+  // definition and its code. Without access the workspace's files are used
+  // and the record says so.
+  access?: AccessContext
+  rev?: string
+  // Set by createRunInCopy: the bundle already read and where it came from.
+  bundle?: SourceBundle
+  definitionSource?: DefinitionSource
+  definitionWs?: Workspace
   by: string
   via: string
   now?: Date
@@ -538,7 +550,8 @@ function validEntrust(e: EntrustRef): EntrustRef {
 }
 
 // Validates the source workflow and returns its saved bytes.
-async function sourceBundle(ws: Workspace, workflow: string): Promise<{ root: string; files: Record<string, { source: string; text: string; workflow: Workflow }>; warnings: string[] }> {
+type SourceBundle = { root: string; files: Record<string, { source: string; text: string; workflow: Workflow }>; warnings: string[] }
+async function sourceBundle(ws: Workspace, workflow: string): Promise<SourceBundle> {
   const { list } = await ws.workflowSummaries()
   const find = (name: string) => list.find(s => s.id === name) ?? list.find(s => s.file === name || s.file === `${name}.yaml` || s.file === `${name}.yml`)
   const s = find(workflow)
@@ -675,6 +688,7 @@ export async function createRunInCopy(ws: Workspace, o: CreateRunOptions & { rec
   const project = await projectId(ws)
   if (!project) throw new RequestError(409, 'project.yaml cannot be read, so the run cannot name its project; fix project.yaml first (wfe status)')
   inputOf(o.input)
+  if (o.access?.gitea) return createPublished(ws, project, o, env)
   const info = await ws.devdocs()
   if (info.problem) throw new RequestError(409, `${info.problem.message}; nothing was created. ${info.problem.fix ?? ''}`.trim())
   const src = await sourceBundle(ws, o.workflow)
@@ -688,7 +702,51 @@ export async function createRunInCopy(ws: Workspace, o: CreateRunOptions & { rec
   const { copy, workspace: into } = await prepareCopy(ws, { project, workflow: src.root, name: o.name, receipt: o.receipt }, env)
   const have = await readRun(into, copy.ref)
   if (have.record) return { ref: copy.ref, dir: runDir(copy.ref), record: have.record, files: [], existing: true }
-  return createRunUnlocked(ws, { ...o, workflow: src.root, name: copy.ref.run, into, storage: storageOf(copy.manifest!) })
+  return createRunUnlocked(ws, { ...o, workflow: src.root, name: copy.ref.run, into, storage: storageOf(copy.manifest!), bundle: src, definitionSource: await workspaceSource(ws, 'no published source is configured here (no Gitea)') })
+}
+
+// A run of the published workflow (improve_wfrun p1): the source is resolved
+// once, to a root commit, and both the definition and the copy are read at
+// it. The same receipt keeps the revision its copy was reserved with, so a
+// retried request never mixes a later definition with earlier code.
+async function createPublished(ws: Workspace, project: string, o: CreateRunOptions & { receipt: string; access?: AccessContext }, env: Record<string, string>): Promise<CreatedRun & { existing?: boolean }> {
+  const { publishedWorkspace } = await import('./published.ts')
+  const prior = await copyByReceipt(ws, o.receipt)
+  const frozen = prior?.manifest?.source?.commit
+  if (prior?.manifest && !frozen) throw new RequestError(409, `the request ${o.receipt} already reserved ${runKey(prior.ref)} from the workspace; it is finished from there or not at all`, { code: 'source-changed' })
+  const pub = await publishedWorkspace(o.access!, ws.reg, frozen ? { rev: frozen } : o.rev ? { rev: o.rev } : { fresh: true })
+  const info = await pub.devdocs()
+  if (info.problem) throw new RequestError(409, `${project}@${pub.source.commit.slice(0, 10)}: ${info.problem.message}; nothing was created.`)
+  const src = await sourceBundle(pub, o.workflow)
+  const workflow = src.files[src.root].workflow
+  const compiled = compile(workflow)
+  if (!compiled.ok) throw new RequestError(422, `${src.root} cannot be executed: ${compiled.message}. Nothing was written.`, { code: compiled.code })
+  if ('host' in o.executor && o.area) {
+    const { chooseNode, loadWorkers } = await import('./workers.ts')
+    chooseNode(loadWorkers(o.area), { request: o.executor.node, workflow, project: (await pub.readProject()).project })
+  }
+  const { copy, workspace: into } = await prepareCopy(ws, { project, workflow: src.root, name: o.name, receipt: o.receipt, published: { ctx: o.access!, source: pub.source } }, env)
+  const have = await readRun(into, copy.ref)
+  if (have.record) return { ref: copy.ref, dir: runDir(copy.ref), record: have.record, files: [], existing: true }
+  // Every repository the definition binds is in the copy.
+  for (const b of Object.values(workflow.repositories)) {
+    const path = normalizeRepoPath(b.path)
+    const r = copy.manifest!.repositories.find(x => x.path === path)
+    if (path && path !== '.' && r && !r.initialized) throw new RequestError(409, `${src.root} binds ${path}, which the published revision ${pub.source.commit.slice(0, 10)} pins but cannot be read here: ${r.problem ?? 'not available'}`, { code: 'source-repository' })
+  }
+  const s = pub.source
+  return createRunUnlocked(ws, {
+    ...o, workflow: src.root, name: copy.ref.run, into, storage: storageOf(copy.manifest!), bundle: src, definitionWs: pub,
+    definitionSource: { kind: 'published', project: s.project, selector: s.selector, repository: s.repository, branch: s.branch, commit: s.commit, definitions: s.definitions, fetch: { state: s.fetch.state, at: s.fetch.at } },
+  })
+}
+
+// A workspace's files as a definition source, said as such.
+async function workspaceSource(ws: Workspace, reason: string): Promise<DefinitionSource> {
+  const head = await git(ws.root, ['rev-parse', '-q', '--verify', 'HEAD'])
+  const branch = await git(ws.root, ['symbolic-ref', '-q', '--short', 'HEAD'])
+  const dirty = await git(ws.root, ['status', '--porcelain=v1', '--', WORKFLOWS_DIR])
+  return { kind: 'workspace', workspace: ws.reg.id, reason, head: head.code === 0 ? head.stdout.trim() : null, branch: branch.code === 0 ? branch.stdout.trim() : null, dirty: dirty.stdout.trim() !== '' }
 }
 
 async function createRunUnlocked(ws: Workspace, o: CreateRunOptions): Promise<CreatedRun> {
@@ -703,12 +761,14 @@ async function createRunUnlocked(ws: Workspace, o: CreateRunOptions): Promise<Cr
   }
   const project = await projectId(ws)
   if (!project) throw new RequestError(409, 'project.yaml cannot be read, so the run cannot name its project; fix project.yaml first (wfe status)')
-  const info = await ws.devdocs()
+  const defWs = o.definitionWs ?? ws
+  const info = await defWs.devdocs()
   if (info.problem) throw new RequestError(409, `${info.problem.message}; nothing was created. ${info.problem.fix ?? ''}`.trim())
-  const src = await sourceBundle(ws, o.workflow)
+  const src = o.bundle ?? await sourceBundle(ws, o.workflow)
   const ref = validRef({ workflow: src.root, run: o.name ?? await nextRunId(ws, src.root) })
   if (o.predecessor) validRunRef(o.predecessor, 'predecessor')
   const definition = await definitionRef(src.root, src.files, src.warnings)
+  definition.source = o.definitionSource ?? await workspaceSource(ws, 'created in the workspace (wfe run create)')
   const context: { repositories: RepoContext[]; catalog?: CatalogContext } = await repoContext(dest, src.files)
   if (o.area) {
     const { snapshotForRun } = await import('./catalog.ts')
@@ -730,7 +790,7 @@ async function createRunUnlocked(ws: Workspace, o: CreateRunOptions): Promise<Cr
   let lane: string | undefined
   if (host && o.area) {
     const { chooseLane, chooseNode, loadWorkers } = await import('./workers.ts')
-    const project = (await ws.readProject().catch(() => ({ project: undefined }))).project
+    const project = (await defWs.readProject().catch(() => ({ project: undefined }))).project
     chosen = chooseNode(loadWorkers(o.area), { request: node, workflow: src.files[src.root].workflow, project }).node
     const l = chooseLane({ workflow: src.files[src.root].workflow, project })
     if (l !== DEFAULT_LANE) lane = l

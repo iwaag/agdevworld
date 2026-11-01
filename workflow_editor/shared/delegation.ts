@@ -10,7 +10,10 @@ export const DISPOSITIONS = ['satisfied', 'rejected', 'abandoned'] as const
 export type DispositionKind = typeof DISPOSITIONS[number]
 
 // Where a dispatch goes: identities, and the workspace resolved for it.
-export interface DelegationTarget { project: string; workflow: string; workspace: string }
+// `source` (improve_wfrun p1): the target's published revision the parent
+// dispatched to; the intake creates the child from that root commit.
+export interface DelegationTarget { project: string; workflow: string; workspace: string; source?: DelegationTargetSource }
+export interface DelegationTargetSource { kind: 'published'; repository: string; branch: string; commit: string; definitions: { path: string; repository: string; commit: string } | null }
 // The child once the intake created it from the request post.
 export interface ChildRef { uid: string; workspace: string; project: string; workflow: string; run: string; created: string }
 // The request post (a reference, not an identity).

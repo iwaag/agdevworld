@@ -33,6 +33,8 @@ import { atomicWrite, readTextOrNull } from './files.ts'
 import { git, gitOk, LOCAL_TRANSPORT } from './git.ts'
 import { withLock } from './lock.ts'
 import { RequestError, Workspace } from './workspace.ts'
+import type { AccessContext } from './access.ts'
+import type { PublishedSource } from './published.ts'
 
 export const COPY_SCHEMA = 'ag.wfe-run-copy.v1'
 export const COPIES_DIR = '.local/wfe/runs' // under the project workspace
@@ -53,6 +55,7 @@ export interface CopyRepo {
   branch: string | null // the run's branch (null until the copy is made, and for an uninitialized submodule)
   target: string | null // where integration goes: the branch the project workspace had checked out
   url: string | null // its remote (host-local; never written into run.json)
+  problem?: string // why a pinned submodule of a published revision is not in the copy
 }
 export interface CopyManifest {
   schema: string
@@ -65,7 +68,8 @@ export interface CopyManifest {
   created: string
   ready: string | null
   receipt: string | null // the request that reserved it: the same request finds it again
-  baseFrom?: 'workspace' | 'upstream' // the workspace's HEAD, or its branch's upstream when the workspace was only behind it
+  baseFrom?: 'workspace' | 'upstream' | 'published' // the workspace's HEAD, its branch's upstream when the workspace was only behind it, or (improve_wfrun p1) the project's published source
+  source?: { project: string; repository: string; branch: string; commit: string; selector: PublishedSource['selector'] } // the published revision the copy and the definition were made from
   repositories: CopyRepo[]
   local: string[] // files of the project workspace's .local/ copied into the copy's .local/
   reconstructed?: string // when the manifest was rebuilt from the copy itself
@@ -148,8 +152,17 @@ export function copyWorkspace(ws: Workspace, c: RunCopy): Workspace {
 // Run numbers already taken for a workflow: recorded in the project tree,
 // held by a copy, or named by a run branch Git knows (local, or as last
 // fetched from the remote).
-export async function usedRuns(ws: Workspace, project: string, workflow: string): Promise<Set<string>> {
+export async function usedRuns(ws: Workspace, project: string, workflow: string, published?: { ctx: AccessContext; source: PublishedSource }): Promise<Set<string>> {
   const used = new Set<string>()
+  // A published source also counts the runs its revision records and the
+  // run branches on Gitea as last fetched: the workspace may be behind both.
+  if (published) {
+    const { locate, parseLsTree } = await import('./access.ts')
+    const at = await locate(published.ctx, project, RUNS_ROOT, { rev: published.source.commit }).catch(() => null)
+    if (at) for (const e of parseLsTree((await git(at.dir, ['ls-tree', '-z', at.commit, '--', `${at.inner}/${workflow}/`])).stdout)) { const name = e.path.split('/').pop()!; if (e.type === 'tree' && RUN_ID.test(name)) used.add(name) }
+    const root = await locate(published.ctx, project, '.', { rev: published.source.commit }).catch(() => null)
+    if (root) for (const line of (await git(root.dir, ['for-each-ref', '--format=%(refname)', `refs/heads/wfe/${project}/${workflow}/`])).stdout.split('\n')) { const m = /\/(run-[a-z0-9][a-z0-9_.-]*)$/.exec(line.trim()); if (m) used.add(m[1]) }
+  }
   for (const d of await readdir(join(ws.root, RUNS_ROOT, workflow), { withFileTypes: true }).catch(() => [])) if (d.isDirectory() && RUN_ID.test(d.name)) used.add(d.name)
   for (const d of await readdir(join(copiesRoot(ws), workflow), { withFileTypes: true }).catch(() => [])) if (d.isDirectory() && RUN_ID.test(d.name)) used.add(d.name)
   const refs = await git(ws.root, ['for-each-ref', '--format=%(refname)', `refs/heads/wfe/${project}/${workflow}/`, `refs/remotes/origin/wfe/${project}/${workflow}/`])
@@ -167,7 +180,15 @@ export async function allocating<T>(ws: Workspace, f: () => Promise<T>): Promise
 // adopt (p9 migration): the named run is already recorded in the project
 // tree and moves into a copy under the same id; only a copy or a run branch
 // of that name refuses it.
-export interface ReserveOptions { project: string; workflow: string; name?: string; receipt?: string; adopt?: boolean }
+// published (improve_wfrun p1): the copy is made from that resolved source,
+// read from the access caches, not from the workspace.
+export interface ReserveOptions { project: string; workflow: string; name?: string; receipt?: string; adopt?: boolean; published?: { ctx: AccessContext; source: PublishedSource } }
+
+// The copy a request reserved, by its receipt (finished or not).
+export async function copyByReceipt(ws: Workspace, receipt: string): Promise<RunCopy | null> {
+  for (const c of await listCopies(ws.shared)) if (c.manifest?.receipt === receipt) return c
+  return null
+}
 
 // Reserves a run identity and its copy folder. With a receipt, a second call
 // for the same request returns the run it reserved (finished or not).
@@ -175,8 +196,8 @@ export async function reserve(ws: Workspace, o: ReserveOptions, env: Record<stri
   ws = ws.shared
   // What other runs integrated reaches the remote, not the person's
   // workspace: its branch's upstream is fetched first (best effort; offline,
-  // the workspace's own HEAD is used).
-  const branch = (await git(ws.root, ['symbolic-ref', '-q', '--short', 'HEAD'])).stdout.trim()
+  // the workspace's own HEAD is used). A published source needs neither.
+  const branch = o.published ? '' : (await git(ws.root, ['symbolic-ref', '-q', '--short', 'HEAD'])).stdout.trim()
   if (branch) await git(ws.root, ['fetch', '-q', 'origin', `+refs/heads/${branch}:refs/remotes/origin/${branch}`], { env, timeoutMs: 60_000 })
   if (!ID_PATTERN.test(o.project)) throw new RequestError(409, `project id "${o.project}" is invalid`)
   if (!ID_PATTERN.test(o.workflow)) throw new RequestError(400, `workflow id "${o.workflow}" is invalid`)
@@ -186,7 +207,7 @@ export async function reserve(ws: Workspace, o: ReserveOptions, env: Record<stri
     if (o.receipt) {
       for (const c of await listCopies(ws)) if (c.manifest?.receipt === o.receipt) return { ref: c.ref, manifest: c.manifest, existing: true }
     }
-    const used = await usedRuns(ws, o.project, o.workflow)
+    const used = await usedRuns(ws, o.project, o.workflow, o.published)
     let run = o.name
     if (o.adopt) {
       if (!run) throw new RequestError(400, 'adopting a run needs its name')
@@ -198,8 +219,9 @@ export async function reserve(ws: Workspace, o: ReserveOptions, env: Record<stri
       run = `run-${String((nums.length ? Math.max(...nums) : 0) + 1).padStart(3, '0')}`
     }
     const ref = { workflow: o.workflow, run }
-    const { repositories, from } = await planRepositories(ws)
-    const manifest: CopyManifest = { schema: COPY_SCHEMA, project: o.project, workspace: ws.reg.id, workflow: o.workflow, run, branch: runBranch(o.project, ref), state: 'creating', created: now(), ready: null, receipt: o.receipt ?? null, baseFrom: from, repositories, local: [] }
+    const { repositories, from } = o.published ? { repositories: await planPublished(o.published.ctx, o.published.source), from: 'published' as const } : await planRepositories(ws)
+    const src = o.published?.source
+    const manifest: CopyManifest = { schema: COPY_SCHEMA, project: o.project, workspace: ws.reg.id, workflow: o.workflow, run, branch: runBranch(o.project, ref), state: 'creating', created: now(), ready: null, receipt: o.receipt ?? null, baseFrom: from, ...(src ? { source: { project: src.project, repository: src.repository, branch: src.branch, commit: src.commit, selector: src.selector } } : {}), repositories, local: [] }
     const dir = copyDir(ws, ref)
     await mkdir(join(root, o.workflow), { recursive: true })
     await mkdir(dir) // exclusive: the reservation
@@ -228,6 +250,38 @@ async function planRepositories(ws: Workspace): Promise<{ repositories: CopyRepo
   const out: CopyRepo[] = [{ path: '.', kind: 'root', initialized: true, base, branch: null, target: branch, url }]
   await submodulesOf(ws.root, '', base, out)
   return { repositories: out, from }
+}
+
+// What a copy of a published source is made from (improve_wfrun p1): the
+// root at the resolved commit, every submodule at the gitlink its parent
+// records there — whether or not the workspace has it checked out — read
+// from the access caches, nested ones too; each integrates into its
+// repository's default branch. A submodule that cannot be read (outside this
+// Gitea, its pin on no branch) is left uninitialized with the reason.
+async function planPublished(ctx: AccessContext, src: PublishedSource): Promise<CopyRepo[]> {
+  const { host, locate } = await import('./access.ts')
+  const { gitmodules } = await import('./agdev.ts')
+  const urlOf = (fullName: string) => { const [o, n] = fullName.split('/'); return host(ctx).cloneUrl(o, n) }
+  const root = await locate(ctx, src.project, '.', { rev: src.commit })
+  const out: CopyRepo[] = [{ path: '.', kind: 'root', initialized: true, base: src.commit, branch: null, target: src.branch, url: urlOf(root.repository.fullName) }]
+  const walk = async (dir: string, prefix: string, commit: string, depth: number) => {
+    const mods = await git(dir, ['show', `${commit}:.gitmodules`])
+    for (const m of mods.code === 0 && depth < 8 ? gitmodules(mods.stdout) : []) {
+      const rel = m.path.replace(/\/+$/, '')
+      const path = prefix ? `${prefix}/${rel}` : rel
+      const link = /^160000 commit ([0-9a-f]+)\t/.exec((await git(dir, ['ls-tree', commit, '--', rel])).stdout)?.[1] ?? null
+      if (!link) { out.push({ path, kind: 'submodule', initialized: false, base: null, branch: null, target: null, url: null, problem: 'no gitlink at this revision' }); continue }
+      try {
+        const l = await locate(ctx, src.project, path, { rev: src.commit })
+        out.push({ path, kind: 'submodule', initialized: true, base: link, branch: null, target: l.repository.defaultBranch, url: urlOf(l.repository.fullName) })
+        await walk(l.dir, path, link, depth + 1)
+      } catch (e) {
+        out.push({ path, kind: 'submodule', initialized: false, base: link, branch: null, target: null, url: null, problem: (e as Error).message })
+      }
+    }
+  }
+  await walk(root.dir, '', src.commit, 0)
+  return out
 }
 
 // The submodules of one repository of the workspace (`prefix`: its
@@ -282,7 +336,7 @@ async function targetOf(dir: string): Promise<string> {
 // Makes (or finishes making) the copy a reservation describes. Every step
 // checks what is already there, so a call after an interruption continues
 // rather than starting over; a finished copy is returned unchanged.
-export async function materialize(ws: Workspace, ref: RunRef, env: Record<string, string> = {}): Promise<RunCopy> {
+export async function materialize(ws: Workspace, ref: RunRef, env: Record<string, string> = {}, access?: AccessContext): Promise<RunCopy> {
   ws = ws.shared
   const dir = copyDir(ws, ref)
   return withLock(join(dir, MANIFEST), async () => {
@@ -292,9 +346,13 @@ export async function materialize(ws: Workspace, ref: RunRef, env: Record<string
     if (m.state === 'ready') return c
     const tree = c.tree
     const root = m.repositories.find(r => r.path === '.')!
+    // A published copy is cloned from the access caches at its recorded
+    // commits; any other from the project workspace.
+    if (m.baseFrom === 'published' && !access) throw new RequestError(409, `run ${runKey(ref)}: its copy is made from the published source, which needs Gitea access here`)
+    const cacheOf = async (path: string) => (await (await import('./access.ts')).locate(access!, m.project, path, { rev: root.base! })).dir
     if (!(await isDir(join(tree, '.git')))) {
       await rm(tree, { recursive: true, force: true }) // a clone that did not finish
-      await gitOk(dir, ['clone', '-q', '--no-checkout', '--', ws.root, TREE], { timeoutMs: 600_000 })
+      await gitOk(dir, ['clone', '-q', '--no-checkout', '--', m.baseFrom === 'published' ? await cacheOf('.') : ws.root, TREE], { timeoutMs: 600_000 })
     }
     // Remotes: the project's own, not the workspace it was cloned from.
     if ((await remoteUrl(tree)) !== root.url) {
@@ -310,7 +368,7 @@ export async function materialize(ws: Workspace, ref: RunRef, env: Record<string
     for (const sub of [...subs].sort((a, b) => depth(a.path) - depth(b.path))) {
       const parent = ownerOf(sub.path, subs.map(s => s.path))
       const rel = parent === '.' ? sub.path : sub.path.slice(parent.length + 1)
-      await submodule(join(ws.root, parent), join(tree, parent), rel, sub.url, env)
+      await submodule(m.baseFrom === 'published' ? await cacheOf(sub.path) : join(ws.root, parent, rel), join(tree, parent), rel, sub.url, env)
       await ownBranch(join(tree, sub.path), m.branch, sub.base!)
       sub.branch = m.branch
     }
@@ -340,15 +398,16 @@ async function exclude(dir: string, pattern: string) {
   await writeFile(abs, `${text}${text && !text.endsWith('\n') ? '\n' : ''}${pattern}\n`)
 }
 
-// One submodule of the copy, cloned from the project workspace's checkout
-// (local, with its unpublished commits) and then pointed at its own remote;
-// when the workspace lacks the recorded commit, from that remote.
-async function submodule(sharedRoot: string, tree: string, path: string, url: string | null, env: Record<string, string>) {
+// One submodule of the copy, cloned from a local source — the project
+// workspace's checkout (with its unpublished commits), or the access cache of
+// a published source — and then pointed at its own remote; when the source
+// lacks the recorded commit, from that remote.
+async function submodule(source: string, tree: string, path: string, url: string | null, env: Record<string, string>) {
   const dir = join(tree, path)
   const name = await submoduleName(tree, path)
   if (!(await isRepoTop(dir))) {
     await gitOk(tree, ['submodule', 'init', '--', path])
-    await gitOk(tree, ['config', `submodule.${name}.url`, join(sharedRoot, path)])
+    await gitOk(tree, ['config', `submodule.${name}.url`, source])
     let r = await git(tree, ['submodule', 'update', '--', path], { config: LOCAL_TRANSPORT, timeoutMs: 600_000 })
     if (r.code !== 0 && url) {
       await gitOk(tree, ['config', `submodule.${name}.url`, url])
@@ -394,7 +453,7 @@ async function localFiles(sharedRoot: string, tree: string): Promise<string[]> {
 // interrupted creation of the same run.
 export async function prepareCopy(ws: Workspace, o: ReserveOptions, env: Record<string, string> = {}): Promise<{ copy: RunCopy; workspace: Workspace; existing: boolean }> {
   const r = await reserve(ws, o, env)
-  const copy = await materialize(ws, r.ref, env)
+  const copy = await materialize(ws, r.ref, env, o.published?.ctx)
   return { copy, workspace: copyWorkspace(ws, copy), existing: r.existing }
 }
 

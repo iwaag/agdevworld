@@ -361,12 +361,14 @@ export class ConversationStore {
     const base: TargetView = { target: targetName(t), ...t, project: null, projectName: null, workflowName: null, intent: null, agent: null, state: 'unavailable', problem: null }
     try {
       if (!this.exec) throw new Error('execution is not configured here')
-      const ws = await this.exec.workspace(t.workspace)
+      const own = await this.exec.workspace(t.workspace)
+      // What a request would start: the published workflow (improve_wfrun p1).
+      const ws = this.exec.ctx.gitea ? await (await import('./published.ts')).publishedWorkspace(this.exec.accessContext(), own.reg, { discovery: true }) : own
       const [project, files] = await Promise.all([ws.readProject().catch(() => ({ project: undefined })), ws.workflowFiles()])
       Object.assign(base, { project: ws.reg.project ?? null, projectName: project.project?.name || null })
       let wf: Workflow | undefined
       for (const f of files) { const r = await ws.readWorkflowFile(f); if (r.workflow?.id === t.workflow) { wf = r.workflow; break } }
-      if (!wf) throw new Error(`workspace ${t.workspace} has no workflow "${t.workflow}"`)
+      if (!wf) throw new Error(`${ws === own ? `workspace ${t.workspace}` : `the published ${t.workspace}`} has no workflow "${t.workflow}"`)
       return { ...base, workflowName: wf.name || null, intent: wf.intent || null, agent: wf.execution.agent || null, state: 'available' }
     } catch (e) { return { ...base, problem: (e as Error).message } }
   }

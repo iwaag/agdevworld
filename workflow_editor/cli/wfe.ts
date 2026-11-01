@@ -117,7 +117,7 @@ async function workspace(p: Parsed): Promise<Workspace> {
   if (!o.available) throw new Refused(`workspace "${w.id}" is registered but not available: ${o.reason}`)
   const ws = new Workspace(w)
   // Delegate targets in the other registered projects (p10).
-  ws.peers = async () => (await import('../server/peers.ts')).registryPeers(registryFile(p), areaDir(p), w!.project)
+  ws.peers = async () => { const g = await giteaOf(p); return (await import('../server/peers.ts')).registryPeers(registryFile(p), areaDir(p), w!.project, g ? { registryFile: registryFile(p), area: areaDir(p), gitea: g } : undefined) }
   return ws
 }
 

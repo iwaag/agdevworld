@@ -151,7 +151,12 @@ export class IntakeStore {
       if (!reg1) { problems.push(`intake: project ${project}: ${opt.workspace ? `workspace ${opt.workspace} is not registered for it` : candidates.length ? `it has ${candidates.length} workspaces here; name one in zulip.json intake.projects.${project}.workspace` : 'no workspace of it is registered here'}`); continue }
       try { await assertWorkspaceAllowed(boundary, reg1, 'Intake') } catch (e) { problems.push(`intake: project ${project}: ${(e as Error).message}`); continue }
       if (!(await observe(reg1)).available) { problems.push(`intake: project ${project}: workspace ${reg1.id} is not available`); continue }
-      const ws = new Workspace(reg1)
+      // The project's published workflows (improve_wfrun p1), not the
+      // workspace's checkout; a source that cannot be read is a problem.
+      let ws: Workspace = new Workspace(reg1)
+      if (this.exec?.ctx.gitea) {
+        try { ws = await (await import('./published.ts')).publishedWorkspace(this.exec.accessContext(), reg1, { discovery: true }) } catch (e) { problems.push(`intake: project ${project}: its published workflows cannot be read: ${(e as Error).message}`); continue }
+      }
       for (const s of (await ws.workflowSummaries()).list) {
         // An unreadable file (an intake of the wrong type, fix2) is neither on
         // nor off: it is reported, not skipped in silence.
@@ -368,6 +373,12 @@ export class IntakeStore {
     return 'intake' in cfg ? cfg.intake.agents?.find(a => a.id === senderId)?.name : undefined
   }
 
+  // Gitea access for run creation (improve_wfrun p1): runs follow the
+  // published source when this host has it.
+  private access(): { access?: import('./access.ts').AccessContext } {
+    return this.exec?.ctx.gitea ? { access: this.exec.accessContext() } : {}
+  }
+
   private personOf(senderId: number): string {
     const cfg = loadIntakeConfig(this.area)
     return ('intake' in cfg ? cfg.intake.requesters.find(r => r.id === senderId)?.name : undefined) ?? `zulip user ${senderId}`
@@ -395,7 +406,7 @@ export class IntakeStore {
           // The run gets its own working copy (p9), found again by the post's receipt.
           const env = this.exec?.ctx.gitea ? await this.exec.ctx.gitea.gitEnv() : {}
           ref = (await createRunInCopy(ws, {
-            workflow: b.workflow, receipt, executor: { host: this.exec?.executor ?? 'autolab' }, by: agent ?? person, via: 'zulip', area: this.area,
+            workflow: b.workflow, receipt, executor: { host: this.exec?.executor ?? 'autolab' }, by: agent ?? person, via: 'zulip', area: this.area, ...this.access(),
             // An agent's request (observer p3) is its own words, not a person's braindump.
             input: agent
               ? { kind: 'request', text: row.content, requester: agent, entrustedBy: { kind: 'note', text: `Zulip post ${row.id} in ${row.topic}` }, source: this.source(row) }
@@ -458,8 +469,11 @@ export class IntakeStore {
       try {
         const env = this.exec?.ctx.gitea ? await this.exec.ctx.gitea.gitEnv() : {}
         const { creationOf } = await import('./observe.ts')
+        // The child follows the revision the parent dispatched to, not
+        // whatever the target's default branch is when the post arrives.
         childRef = (await createRunInCopy(ws, {
-          workflow: b.workflow, receipt, executor: { host: this.exec?.executor ?? 'autolab' }, by: record.executor.name, via: 'zulip', area: this.area,
+          workflow: b.workflow, receipt, executor: { host: this.exec?.executor ?? 'autolab' }, by: record.executor.name, via: 'zulip', area: this.area, ...this.access(),
+          ...(delegation.target.source?.commit ? { rev: delegation.target.source.commit } : {}),
           input: {
             kind: 'request', text: dr.request, requester: record.executor.name, ...(delegation.onBehalfOf ? { onBehalfOf: delegation.onBehalfOf } : {}),
             entrustedBy: { kind: 'delegation', delegation: delegation.uid, parent: { project: record.project, workflow: record.workflow, run: record.run, creation: creationOf(record), node: delegation.node }, accepts: delegation.accepts },

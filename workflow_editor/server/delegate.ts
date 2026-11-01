@@ -89,6 +89,8 @@ export class DelegateStore {
   // ---- resolution ------------------------------------------------------------------------
 
   private async registered(): Promise<Registration[]> { return (await loadRegistry(this.ctx.registryFile)).workspaces }
+  // Gitea access, when this host has it: targets are then published workflows.
+  private access(): import('./access.ts').AccessContext | undefined { return this.ctx.exec?.ctx.gitea ? this.ctx.exec.accessContext() : undefined }
 
   async workspace(id: string): Promise<Workspace> {
     const reg = (await this.registered()).find(w => w.id === id)
@@ -166,19 +168,26 @@ export class DelegateStore {
     const project = gn.project ?? rec.project
     const target = await this.targetWorkspace(project)
     const notes: string[] = []
-    // The target as it is now: it exists, validates and accepts requests.
-    const summary = (await target.workflowSummaries()).list.find(s => s.id === gn.workflow)
+    // The target as it is published now (improve_wfrun p1: its default
+    // branch, fetched): it exists, validates and accepts requests. The
+    // revision is recorded, and the child is created from it.
+    const access = this.access()
+    const published = access ? await (await import('./published.ts')).publishedWorkspace(access, target.reg, { fresh: true }) : null
+    const tws: Workspace = published ?? target
+    const at = published ? ` at ${published.source.repository}@${published.source.commit.slice(0, 10)}` : ` (workspace ${target.reg.id})`
+    const summaries = (await tws.workflowSummaries()).list
+    const summary = summaries.find(s => s.id === gn.workflow)
     if (!summary) {
-      const unreadable = (await target.workflowSummaries()).list.find(s => !s.id && s.problem && /^(.*)\.ya?ml$/.exec(s.file)?.[1] === gn.workflow)
-      throw new RequestError(409, unreadable ? `${project}/${unreadable.file} cannot be read: ${unreadable.problem!.message}` : `project ${project} (workspace ${target.reg.id}) has no workflow "${gn.workflow}"`, { code: 'delegate-target' })
+      const unreadable = summaries.find(s => !s.id && s.problem && /^(.*)\.ya?ml$/.exec(s.file)?.[1] === gn.workflow)
+      throw new RequestError(409, unreadable ? `${project}/${unreadable.file}${at} cannot be read: ${unreadable.problem!.message}` : `project ${project}${at} has no workflow "${gn.workflow}"${published ? ' (a workflow is offered once it is on the default branch)' : ''}`, { code: 'delegate-target' })
     }
-    const tw = await target.workflowResponse(summary.file)
+    const tw = await tws.workflowResponse(summary.file)
     if (!tw.workflow || tw.issues.some(i => i.severity === 'error')) throw new RequestError(409, `${project}/${gn.workflow} has validation errors; a child needs a valid definition (wfe validate ${gn.workflow} --workspace ${target.reg.id})`, { code: 'delegate-target' })
     if (tw.workflow.intake.zulip !== 'requests') throw new RequestError(409, `${project}/${gn.workflow} opts out of requests (intake: {zulip: ""}); a delegation is delivered through its intake`, { code: 'delegate-target' })
     // Cycles: the target's definitions reaching back, and the active ancestors.
     const self = `${rec.project}/${rec.workflow}`
     const tkey = `${project}/${gn.workflow}`
-    const graph = await this.definitionGraph()
+    const graph = access ? (await (await import('./published.ts')).publishedGraph(access)).graph : await this.definitionGraph()
     const seen = new Set<string>(), path: string[] = []
     const reaches = (k: string): boolean => {
       if (k === self) { path.push(k); return true }
@@ -202,7 +211,8 @@ export class DelegateStore {
     const ev = (name: string, text: string): DocumentEvidence => ({ path: `${folder}/${name}`, sha256: sha256(text), bytes: Buffer.byteLength(text) })
     const onBehalfOf = rec.input.author ?? rec.input.onBehalfOf ?? null
     const r = await runOp(space, ref, {
-      op: 'delegation.dispatch', delegation: id, uid: `${uidOf(rec)}/${id}`, node, target: { project, workflow: gn.workflow, workspace: target.reg.id },
+      op: 'delegation.dispatch', delegation: id, uid: `${uidOf(rec)}/${id}`, node,
+      target: { project, workflow: gn.workflow, workspace: target.reg.id, ...(published ? { source: { kind: 'published', repository: published.source.repository, branch: published.source.branch, commit: published.source.commit, definitions: published.source.definitions } } : {}) },
       request: ev('request.md', o.request), ...(original !== null ? { original: ev('original-input.md', original) } : {}),
       ...(onBehalfOf ? { onBehalfOf } : {}), ...(o.predecessor ? { predecessor: o.predecessor } : {}), targetDigest: await semanticDigest('definition', tw.workflow),
       receipt, ...(o.attempt ? { attempt: o.attempt } : {}),

@@ -5,13 +5,14 @@
 // acknowledged), so every crash point can be exercised.
 import { after, before } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { InboundMessage } from '../shared/intake.ts'
 import { createProject } from '../server/create.ts'
 import { ExecStore } from '../server/exec.ts'
 import { gitOk } from '../server/git.ts'
+import type { GiteaRepo } from '../server/gitea.ts'
 import { IntakeStore } from '../server/intake.ts'
 import { NotifyStore } from '../server/notify.ts'
 import { loadRegistry } from '../server/registry.ts'
@@ -96,12 +97,33 @@ async function project(area: string, registry: string, id: string, wf: { file: s
   await gitOk(dir, ['remote', 'add', 'origin', remote]); await gitOk(dir, ['push', '-q', '-u', 'origin', 'main'])
 }
 
+// A Gitea stand-in over the fixture's bare remotes (<area>/<id>.git),
+// registered as dev/pj-<id> (improve_wfrun p1: published sources).
+function stubGitea(area: string) {
+  const ids: Record<string, number> = { 'pj-par': 1, 'pj-kid': 2 }
+  const info = (owner: string, name: string): GiteaRepo => ({ id: ids[name], owner, name, fullName: `${owner}/${name}`, cloneUrl: join(area, `${name.slice(3)}.git`), htmlUrl: '', description: '', empty: false, defaultBranch: 'main', archived: false })
+  return {
+    url: 'http://gitea.test', cloneUrl: (o: string, n: string) => info(o, n).cloneUrl, gitEnv: async () => ({}),
+    repoById: async (id: number) => { const n = Object.keys(ids).find(k => ids[k] === id); return n ? info('dev', n) : null },
+    repo: async (o: string, n: string) => (ids[n] ? info(o, n) : null),
+  }
+}
+
 // `parent` / `kid`: the workflows of par (id use) and kid (id make).
-export async function setup(o: { parent?: string; kid?: string } = {}) {
+// `published`: the executor has Gitea access, so runs and delegations follow
+// the projects' published sources.
+export async function setup(o: { parent?: string; kid?: string; published?: boolean } = {}) {
   const area = join(root, `area-${++k}`)
   const registry = join(area, 'registry.json')
   await project(area, registry, 'par', { file: 'use.yaml', text: o.parent ?? PARENT_WF })
   await project(area, registry, 'kid', { file: 'make.yaml', text: o.kid ?? KID_WF })
+  if (o.published) {
+    const raw = JSON.parse(await readFile(registry, 'utf8'))
+    raw.repositories = [{ gitea: { id: 1, owner: 'dev', name: 'pj-par' }, category: 'root', description: '' }, { gitea: { id: 2, owner: 'dev', name: 'pj-kid' }, category: 'root', description: '' }]
+    raw.projects = [{ id: 'par', root: 'gitea:1' }, { id: 'kid', root: 'gitea:2' }]
+    await writeFile(registry, JSON.stringify(raw, null, 2))
+    giteas.set(area, stubGitea(area))
+  }
   await writeFile(join(area, 'zulip.json'), JSON.stringify({
     enabled: true, zulipUrl: `https://${REALM}`, viewBase: null, since: '2026-01-01T00:00:00.000Z', person: 'Pat',
     intake: { enabled: true, since: '2026-01-01T00:00:00.000Z', projects: {}, requesters: [{ id: PERSON, name: 'Pat' }] },
@@ -115,8 +137,9 @@ export async function setup(o: { parent?: string; kid?: string } = {}) {
   return { area, registry, x, n, i, par, kid, zulip }
 }
 
+const giteas = new Map<string, ReturnType<typeof stubGitea>>()
 async function stores(area: string, registry: string) {
-  const x = new ExecStore({ registryFile: registry, area })
+  const x = new ExecStore({ registryFile: registry, area, ...(giteas.has(area) ? { gitea: giteas.get(area) as never } : {}) })
   const n = new NotifyStore({ area, registryFile: registry, exec: x })
   await n.due()
   // The request topic of a question posted there (what the notifier's sent deliveries record).

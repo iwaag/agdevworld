@@ -8,7 +8,10 @@ import { loadRegistry, observe } from './registry.ts'
 import { Workspace } from './workspace.ts'
 import type { PeerProject } from '../shared/api.ts'
 
-export async function registryPeers(registryFile: string, area: string, self?: string): Promise<PeerProject[]> {
+// With Gitea access the peers are the projects' published workflows
+// (improve_wfrun p1): what a delegation would actually reach.
+export async function registryPeers(registryFile: string, area: string, self?: string, access?: import('./access.ts').AccessContext): Promise<PeerProject[]> {
+  if (access?.gitea) return (await import('./published.ts')).publishedPeers(access, self)
   const reg = await loadRegistry(registryFile)
   const boundary = await loadBoundary(registryFile, area)
   const out: PeerProject[] = []

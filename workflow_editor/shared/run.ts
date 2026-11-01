@@ -200,7 +200,18 @@ export interface BundleEntry {
 // `revisions` and `active` (p7, docs/adjustments.md): adjustments of the
 // run's future work, each a complete authored definition (by file and hash)
 // and its complete compiled graph; `effective` stays the original (r1).
-export interface DefinitionRef { root: string; workflows: Record<string, BundleEntry>; warnings: string[]; effective?: EffectiveGraph; active?: string; revisions?: Revision[] }
+// Where a run's frozen definition was read (improve_wfrun p1, docs/runs.md
+// *Definition snapshot*): portable, repository names and commits only.
+// `published`: the project's published source, the same root commit the
+// run's copy starts from. `workspace`: a workspace's files, said as such (an
+// IDE agent's run in the workspace, or an area without Gitea). `trial`: the
+// exact editing bytes a person or agent chose to try, on a named code
+// baseline; uncommitted project code is never implied.
+export type DefinitionSource =
+  | { kind: 'published'; project: string; selector: 'default-branch' | 'commit'; repository: string; branch: string; commit: string; definitions: { path: string; repository: string; commit: string } | null; fetch: { state: string; at: string } }
+  | { kind: 'workspace'; workspace: string; reason: string; head?: string | null; branch?: string | null; dirty?: boolean }
+  | { kind: 'trial'; workspace: string; file: string; sha256: string; head: string | null; dirty: boolean; baseline: { project: string; repository: string; branch: string; commit: string } }
+export interface DefinitionRef { root: string; workflows: Record<string, BundleEntry>; warnings: string[]; effective?: EffectiveGraph; active?: string; revisions?: Revision[]; source?: DefinitionSource }
 export const REVISION_ID = /^r[0-9]{1,4}$/
 export type AdjustSource =
   | { kind: 'answer'; question: string; answer?: number } // the person asked for it in an answer that was taken up
@@ -657,6 +668,14 @@ export type BecauseRef = { kind: 'answer'; question: string; answer?: number } |
 // Control operations (p9): an executing agent records them as itself; when
 // it carries its attempt id, that attempt must be the open one.
 export const CONTROL_OPS: readonly string[] = ['run.stop', 'run.resume', 'run.cancel']
+
+// A dispatched target's published revision (improve_wfrun p1), kept as given
+// when it has the shape; a record without one (before p1) has none.
+function targetSourceOf(v: unknown): { source?: import('./delegation.ts').DelegationTargetSource } {
+  if (!isObj(v) || v.kind !== 'published' || ![v.repository, v.branch].every(x => typeof x === 'string' && x) || typeof v.commit !== 'string' || !/^[0-9a-f]{40,64}$/.test(v.commit)) return {}
+  const d = isObj(v.definitions) && typeof v.definitions.path === 'string' && typeof v.definitions.repository === 'string' && typeof v.definitions.commit === 'string' ? { path: v.definitions.path, repository: v.definitions.repository, commit: v.definitions.commit } : null
+  return { source: { kind: 'published', repository: v.repository as string, branch: v.branch as string, commit: v.commit, definitions: d } }
+}
 
 export const OPS = ['run.create', 'node.start', 'node.progress', 'node.wait', 'node.complete', 'node.fail', 'node.cancel',
   'question.ask', 'question.answer', 'question.take-up', 'question.withdraw', 'instruction.receive', 'instruction.ack', 'artifact.attach', 'run.cancel', 'run.decide',
@@ -1990,7 +2009,7 @@ export function apply(prev: RunState | null, e: HistoryEntry | (OpInput & EntryM
       const request = evidence(e.request, `dispatching ${id}`, `${folder}/request.md`)
       const original = e.original !== undefined && e.original !== null ? evidence(e.original, `dispatching ${id}`, `${folder}/original-input.md`) : undefined
       const d: Delegation = {
-        id, uid: e.uid, node: e.node, target: { project: t.project as string, workflow: t.workflow as string, workspace: t.workspace as string },
+        id, uid: e.uid, node: e.node, target: { project: t.project as string, workflow: t.workflow as string, workspace: t.workspace as string, ...(targetSourceOf(t.source)) },
         ...(typeof e.targetDigest === 'string' && /^sha256:[0-9a-f]{64}$/.test(e.targetDigest) ? { targetDigest: e.targetDigest } : {}),
         request, ...(original ? { original } : {}),
         requester: s.executor.name, onBehalfOf: optText(e.onBehalfOf, 'onBehalfOf').trim() || null, accepts: gn!.accepts === 'parent' ? 'parent' : 'person',

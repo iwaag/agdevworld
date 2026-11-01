@@ -484,7 +484,7 @@ export class ExecStore {
     // The run gets its own working copy (p9); the same receipt finds it again.
     const env = this.ctx.gitea ? await this.ctx.gitea.gitEnv() : {}
     const attachments = o.attachments?.length ? { attachments: o.attachments } : {}
-    const created = await createRunInCopy(ws, { workflow: o.workflow, input: o.input ? { ...o.input, ...attachments } : { kind: 'braindump', text: o.text, author: o.author, recordedBy: o.by, ...(o.source ? { source: o.source } : {}), ...attachments }, executor: { host: this.executor, ...(o.node ? { node: o.node } : {}) }, by: o.by ?? o.author, via: o.via, area: this.ctx.area, receipt: `request:${o.receipt}`, ...(o.predecessor ? { predecessor: o.predecessor } : {}), ...(o.standing ? { standing: o.standing } : {}) }, env)
+    const created = await createRunInCopy(ws, { workflow: o.workflow, input: o.input ? { ...o.input, ...attachments } : { kind: 'braindump', text: o.text, author: o.author, recordedBy: o.by, ...(o.source ? { source: o.source } : {}), ...attachments }, executor: { host: this.executor, ...(o.node ? { node: o.node } : {}) }, by: o.by ?? o.author, via: o.via, area: this.ctx.area, receipt: `request:${o.receipt}`, ...(o.predecessor ? { predecessor: o.predecessor } : {}), ...(o.standing ? { standing: o.standing } : {}), ...(this.ctx.gitea ? { access: this.accessContext() } : {}) }, env)
     const job = this.enqueue(ws.reg.id, created.ref, 'start', `request:${o.receipt}`, o.input ? `start: ${o.input.requester}'s request` : 'start: the person\'s request', this.nodeOf(created.record))
     return { job, ref: created.ref, duplicate: false }
   }
@@ -1410,6 +1410,9 @@ export class ExecStore {
       }
       this.run('UPDATE integrations SET state = ?, steps = ?, error = ?, updated = ? WHERE id = ?', r.state, JSON.stringify(r.steps), r.error ?? null, now(), row.id)
       if (r.state === 'integrated') await this.checkpoint(ws.shared, ref, 'integrated', null, null).catch(() => null) // the record of it, on the run branch
+      // What reached Gitea is read on the next discovery, not after a cache
+      // window (improve_wfrun p1): a workflow the run added becomes routable.
+      if ((r.state === 'integrated' || r.state === 'partial') && this.ctx.gitea) await (await import('./access.ts')).invalidate(this.accessContext(), ok.record.project).catch(() => [])
       return { state: r.state, steps: r.steps, error: r.error, row: this.one<IntegrationRow>('SELECT * FROM integrations WHERE id = ?', row.id)! }
     }, { what: `integration of run ${runKey(ref)}`, timeoutMs: 600_000 })
   }

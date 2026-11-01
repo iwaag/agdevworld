@@ -165,7 +165,7 @@ export function createHandler(config: ServiceConfig) {
     if (!obs.available) throw new RequestError(409, `workspace "${id}" is registered but not available: ${obs.reason}`)
     const ws = new Workspace(reg)
     // Delegate targets in the other registered projects (p10).
-    ws.peers = async () => (await import('./peers.ts')).registryPeers(config.registryFile, area, reg.project)
+    ws.peers = async () => (await import('./peers.ts')).registryPeers(config.registryFile, area, reg.project, { registryFile: config.registryFile, area, gitea: config.gitea, giteaProblem: config.giteaProblem })
     return ws
   }
 

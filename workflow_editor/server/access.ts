@@ -119,7 +119,7 @@ interface Cached { dir: string; fetch: FetchInfo; repo: GiteaRepo }
 
 const cacheRoot = (ctx: AccessContext) => join(ctx.area, '.local', 'access-cache')
 
-function host(ctx: AccessContext): RepoHost {
+export function host(ctx: AccessContext): RepoHost {
   if (!ctx.gitea) throw new AccessError('inaccessible', `committed content is read from Gitea, which is not available here: ${ctx.giteaProblem ?? 'no Gitea setting'}`)
   return ctx.gitea
 }
@@ -159,7 +159,38 @@ async function cached(ctx: AccessContext, at: { id?: number; owner: string; name
   }, { what: `access cache ${at.owner}/${at.name}`, timeoutMs: 240_000 })
 }
 
-async function commitOf(dir: string, ref: string): Promise<string | null> {
+// Marks the caches of a project's repositories (its root and every
+// submodule its default branch names) as due, so the next read fetches
+// whatever its age (improve_wfrun p1: an integration that just reached Gitea
+// is not hidden for a cache window). The stamp is shared by every process.
+export async function invalidate(ctx: AccessContext, project: string): Promise<string[]> {
+  const reg = await loadRegistry(ctx.registryFile)
+  const p = reg.projects.find(x => x.id === project)
+  const entry = p && reg.repositories.find(r => r.key === p.root)
+  if (!entry) return []
+  const ids = new Set<number>([entry.gitea.id])
+  const rootDir = join(cacheRoot(ctx), `gitea-${entry.gitea.id}.git`)
+  const branch = await readFile(join(rootDir, 'wfe-access.json'), 'utf8').then(t => (JSON.parse(t) as { repo?: GiteaRepo }).repo?.defaultBranch, () => undefined)
+  const mods = branch ? await git(rootDir, ['show', `refs/heads/${branch}:.gitmodules`]) : { code: 1, stdout: '' }
+  const giteaUrl = ctx.gitea?.url
+  for (const m of mods.code === 0 && giteaUrl ? gitmodules(mods.stdout) : []) {
+    const at = repoOfUrl(m.url, { giteaUrl: giteaUrl!, owner: entry.gitea.owner, name: entry.gitea.name })
+    const hit = at && reg.repositories.find(r => r.gitea.owner === at.owner && r.gitea.name === at.name)
+    if (hit) ids.add(hit.gitea.id)
+  }
+  const out: string[] = []
+  for (const id of ids) {
+    const dir = join(cacheRoot(ctx), `gitea-${id}.git`)
+    const stampFile = join(dir, 'wfe-access.json')
+    const stamp = await readFile(stampFile, 'utf8').then(t => JSON.parse(t) as { fetchedAt: string }, () => null)
+    if (!stamp) continue
+    await withLock(dir, () => writeFile(stampFile, `${JSON.stringify({ ...stamp, fetchedAt: new Date(0).toISOString() })}\n`), { what: `access cache gitea:${id}` })
+    out.push(`gitea:${id}`)
+  }
+  return out
+}
+
+export async function commitOf(dir: string, ref: string): Promise<string | null> {
   const r = await git(dir, ['rev-parse', '--verify', '-q', `${isHex(ref) ? ref : `refs/heads/${ref}`}^{commit}`])
   return r.code === 0 ? r.stdout.trim() : null
 }
@@ -328,7 +359,7 @@ export async function ignored(repoRoot: string, rel: string): Promise<boolean> {
 export interface TreeEntry { path: string; type: 'file' | 'dir' | 'submodule' | 'symlink'; size?: number; object?: string }
 export interface TreeResult { provenance: Provenance; entries: TreeEntry[]; truncated: boolean; total: number }
 
-function parseLsTree(out: string): { mode: string; type: string; object: string; size: string; path: string }[] {
+export function parseLsTree(out: string): { mode: string; type: string; object: string; size: string; path: string }[] {
   return out.split('\0').filter(Boolean).map(line => {
     const tab = line.indexOf('\t')
     const [mode, type, object, size] = line.slice(0, tab).split(/\s+/)

@@ -339,7 +339,13 @@ export class NotifyStore {
       const project = (await ws.readProject().catch(() => ({ project: undefined }))).project
       if (!project?.id) continue
       this.ensureTarget('folder', project.id, null, project.name)
-      for (const s of (await ws.workflowSummaries()).list) if (s.id) this.ensureTarget('channel', project.id, s.id, s.name || s.id)
+      // A channel per published workflow (improve_wfrun p1): one integrated
+      // while the service runs is provisioned on the next scan.
+      let defs: Workspace | null = ws
+      if (this.exec?.ctx.gitea) {
+        try { defs = await (await import('./published.ts')).publishedWorkspace(this.exec.accessContext(), w, { discovery: true }) } catch (e) { notes.push(`notify: ${project.id}: its published workflows cannot be read (channels are not added until they can): ${(e as Error).message}`); defs = null }
+      }
+      if (defs) for (const s of (await defs.workflowSummaries()).list) if (s.id) this.ensureTarget('channel', project.id, s.id, s.name || s.id)
       for (const s of await listRuns(ws)) {
         if (s.problem) continue
         const ref = { workflow: s.workflow, run: s.run }

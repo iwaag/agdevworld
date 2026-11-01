@@ -589,7 +589,7 @@ export function describeRun(r: RunResponse, opts: { history?: boolean; url?: str
   lines.push(`Definition (fixed): ${rec.definition.root} in ${r.dir}/definition/`)
   for (const [id, d] of defs) {
     const s = r.sources.find(x => x.workflow === id)
-    const now = !s ? '' : s.status === 'same' ? `current ${s.file}: same${s.renamed ? ' (renamed)' : ''}` : s.status === 'changed' ? `current ${s.file}: changed since the snapshot${s.renamed ? ' (renamed)' : ''}` : s.status === 'deleted' ? 'current source: deleted' : `bundle: ${s.detail}`
+    const now = !s ? '' : s.status === 'same' ? `current ${s.file}: same${s.renamed ? ' (renamed)' : ''}` : s.status === 'changed' ? `current ${s.file}: changed since the snapshot${s.renamed ? ' (renamed)' : ''}` : s.status === 'deleted' ? 'not in this workspace (the run\'s source is in definition.source)' : `bundle: ${s.detail}`
     lines.push(`  ${id.padEnd(20)} approvals at creation: intent ${d.approvals.intent}, definition ${d.approvals.definition}${now ? `; ${now}` : ''}`)
   }
   if (rec.definition.revisions?.length) lines.push(`Adjusted: revision ${rec.definition.active} in force (${rec.definition.revisions.map(v => `${v.revision} from ${v.parent} by ${v.by}: ${first(v.reason, 80)}`).join('; ')}); the original stays in definition/ (wfe run revisions)`)

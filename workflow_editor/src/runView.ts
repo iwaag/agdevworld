@@ -455,7 +455,7 @@ export function renderRunView(root: HTMLElement, wsId: string, workflow: string,
     const r = shown!
     const ex = rec.execution
     const src = r.sources.find(s => s.workflow === rec.definition.root)
-    const srcText = !src ? null : src.status === 'same' ? 'this workspace\'s file: same as this snapshot' : src.status === 'changed' ? 'this workspace\'s file: changed since this snapshot' : src.status === 'deleted' ? 'this workspace\'s file: deleted' : `snapshot: ${src.detail}`
+    const srcText = !src ? null : src.status === 'same' ? 'this workspace\'s file: same as this snapshot' : src.status === 'changed' ? 'this workspace\'s file: changed since this snapshot' : src.status === 'deleted' ? 'not in this workspace' : `snapshot: ${src.detail}`
     const input = rec.input
     const last = rec.decisions.at(-1)
     patchContent(details,

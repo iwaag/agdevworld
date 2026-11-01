@@ -23,6 +23,15 @@ work is kept (its own working copy and branches, p9) is in
 [docs/storage.md](docs/storage.md), and how an accepted result reaches the
 project's shared branches in [docs/integration.md](docs/integration.md).
 
+**Published and editing (improve_wfrun p1).** Which workflows a project offers,
+and what an ordinary run follows, is its committed default branch on Gitea,
+resolved to one commit for the definition and the run's code
+([docs/access.md](docs/access.md) *Published workflows*, [docs/runs.md](docs/runs.md)
+*Definition snapshot*). The registered workspace is where workflows are edited;
+the editor shows both, a trial runs editing bytes on the published code, and the
+workspace can be fast-forwarded when that is safe
+([docs/storage.md](docs/storage.md) *The workspace and the published source*).
+
 **Writers take turns.** UI edits and external edits are assumed not to overlap.
 
 ## Layout
@@ -30,7 +39,7 @@ project's shared branches in [docs/integration.md](docs/integration.md).
 | Path | Purpose |
 | --- | --- |
 | `shared/` | Models, validation, canonicalization and digests; `compile.ts`, the effective execution graph of a documentation policy (p5); `run.ts`, the run reducer (service, CLI and browser); p13: `context.ts`, the scoped-context model (bundles, rendering, differences) |
-| `server/` | Local service: YAML round-trip, Git inspection, file persistence, watching, project creation and registration; `runs.ts`, run folders and operations; p9: `runspace.ts` (each run's own working copy, the resolver, allocation, the index), `integrate.ts` (accepted results into shared branches), `reversal.ts` (what undoing a run involves), `migrate.ts` (pre-p9 runs into copies); observer p3: `observe.ts` (the read-only observation for monitors); project_migration p4: `access.ts` (reading any managed project, docs/access.md); p13: `context.ts` (the scoped-context resolver), `contextStore.ts` (local context blocks — p14 — with revisions, evidence and details; snapshots), `contextView.ts` (the matrix and a run's used-versus-next view), docs/context.md; p12: `boast.ts` (a project's `boast/index.html`, served by commit or from a working tree, docs/boast.md) and `staticServe.ts` (media types, byte ranges) |
+| `server/` | Local service: YAML round-trip, Git inspection, file persistence, watching, project creation and registration; `runs.ts`, run folders and operations; p9: `runspace.ts` (each run's own working copy, the resolver, allocation, the index), `integrate.ts` (accepted results into shared branches), `reversal.ts` (what undoing a run involves), `migrate.ts` (pre-p9 runs into copies); observer p3: `observe.ts` (the read-only observation for monitors); project_migration p4: `access.ts` (reading any managed project, docs/access.md); improve_wfrun p1: `published.ts` (a project's published source and its read-only view), `workspaceSync.ts` (the workspace's relation to it, fast-forward sync); p13: `context.ts` (the scoped-context resolver), `contextStore.ts` (local context blocks — p14 — with revisions, evidence and details; snapshots), `contextView.ts` (the matrix and a run's used-versus-next view), docs/context.md; p12: `boast.ts` (a project's `boast/index.html`, served by commit or from a working tree, docs/boast.md) and `staticServe.ts` (media types, byte ranges) |
 | `cli/wfe.ts`, `cli/run.ts` | `wfe`, the command-line surface over the same modules (`wfe help`, `wfe run help`) |
 | `src/` | Browser UI (TypeScript, Vite, DOM cards and SVG edges) |
 | `examples/` | Synthetic project and workflow files; `invalid/` for validation tests |
@@ -249,6 +258,8 @@ node cli/wfe.ts help          # from the checkout (or: npm run wfe -- help)
 | `present register|start|status|stop|reconcile` | presentations of a run's result (docs/presentations.md) |
 | `share list|resolve|ls|verify`, `run input|inputs|publish|outputs` | shared areas: large inputs and outputs outside Git, by `shared://` reference and manifest (docs/shares.md) |
 | `runs index [--rebuild]` | runs' own working copies on this host (docs/storage.md) |
+| `workspace status|sync` | this workspace against the published source; fast-forward it when safe (docs/storage.md, improve_wfrun p1) |
+| `delegate targets` | published workflows a delegation can reach and whether each is ready (docs/delegation.md) |
 | `observe` | a read-only snapshot of every run for monitors (docs/observation.md) |
 | `projects list|show|tree|read|search|runs|run` | read any managed project, committed by default, at a revision, with provenance (docs/access.md, project_migration p4) |
 | `serve` | build the UI and start the service for this registry |

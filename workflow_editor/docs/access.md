@@ -190,6 +190,28 @@ These are `GET` routes over managed project content only. No route takes a
 host path or a repository location. So they are offered through
 agdevworld's `/wfe/` like the other reads, from the home LAN.
 
+## Published workflows (improve_wfrun p1)
+
+What a project offers is its committed default branch: `server/published.ts`
+resolves a project's **published source** — the root repository, its default
+branch and commit, the repository and commit `devdocs/workflows` is read at (the
+root's pin in submodule mode), and the fetch state — and reads project.yaml,
+workflow files and repositories at that one commit through a read-only
+`Workspace`. Every reader of "which workflows exist and what runs" uses it:
+
+| Reader | Freshness |
+| --- | --- |
+| the editor's Published list (`GET api/workspaces/<ws>/published[/<file>]`), validation peers, conversation targets | discovery: a cache up to 30 s old, labelled `recent` |
+| intake routes, notifier channel targets, `wfe delegate targets` | discovery |
+| run creation (requests, Zulip posts), delegation dispatch (target and cycles) | fetched now; refused (`fetch-failed`) when Gitea cannot be read, unless a root commit is named |
+
+An integration that is `integrated` or `partial` marks the project's caches due
+(`invalidate`: the root and the submodules its default branch names), so the next
+discovery fetches and a new workflow is routable, and its channel created, on
+the next pass, without a restart. A source that cannot be read is an error, never
+an empty list and never the workspace's files. The workspace's own state is a
+separate read ([storage.md](storage.md), *The workspace and the published source*).
+
 ## Execution guides of another project
 
 `execution.guides` may name `<project>:<path>` (contract.md, *Execution*).

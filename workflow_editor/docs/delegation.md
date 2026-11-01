@@ -83,7 +83,7 @@ is recorded):
 | Field | Content |
 | --- | --- |
 | `id`, `uid`, `node` | the delegation's identity and the delegate node it serves |
-| `target` | `{project, workflow, workspace}` — the workspace resolved at dispatch |
+| `target` | `{project, workflow, workspace, source?}` — the workspace resolved at dispatch; `source` (improve_wfrun p1): `{kind: published, repository, branch, commit, definitions}`, the target's published revision dispatched to |
 | `request` | `{path, sha256, bytes}` of `delegations/<d>/request.md` in the run folder: the parent agent's constructed request, exactly as delivered |
 | `original` | `{path, sha256, bytes}` of `delegations/<d>/original-input.md`: the human input the request was derived from (the parent's `braindump.md`, or the parent's own original), kept separately |
 | `requester`, `onBehalfOf` | the parent's agent, and the person the parent run serves |
@@ -124,12 +124,19 @@ At `wfe delegate request`, before anything is written:
    one `zulip.json` `intake.projects.<project>.workspace` names; several
    without a selection, none, or one outside the operating boundary refuse
    the dispatch (`delegate-target`), naming the candidates. Never a guess.
-2. **Target workflow.** It exists in that workspace now, validates without
-   errors, and accepts requests (the default; `intake: {zulip: ""}` opts
-   out, [intake.md](intake.md)), and its workflow channel is provisioned. The child's own definition is frozen later by its
-   ordinary run creation; the dispatch records the digest it saw.
+2. **Target workflow.** It is on the target project's **published default
+   branch**, fetched now (improve_wfrun p1; not that project's workspace),
+   validates without errors, accepts requests (the default; `intake: {zulip: ""}`
+   opts out, [intake.md](intake.md)), and its workflow channel is provisioned.
+   The dispatch records that revision (`target.source`) and the digest it saw;
+   the intake creates the child **at that root commit**, so a request post
+   delivered after the target's default branch moved on still starts the
+   definition dispatched to. A delegation dispatched before p1 has no
+   `target.source`; its child follows the default branch. `wfe delegate targets`
+   shows what is offered and ready; the result assessment says which workflow
+   and revision the child ran (`ran —`).
 3. **Cycles.** Refused (`delegate-cycle`) when the target, as currently
-   defined, reaches the parent's workflow through delegate nodes across the
+   published, reaches the parent's workflow through delegate nodes across the
    registry, or when the target is the workflow of the parent or of any
    ancestor of the parent (the chain of `entrustedBy: delegation` records,
    read from the ancestors' own records, so a definition changed since an

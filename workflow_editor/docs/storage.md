@@ -49,7 +49,7 @@ usual rule (the copy is inside the registered workspace's folder).
 | --- | --- |
 | Run identity | project id + workflow id + run id (as in runs.md) |
 | Run branch | `wfe/<project>/<workflow>/<run>` in every repository the run owns |
-| Integration target | the branch the project workspace had checked out when the copy was made (a detached submodule: its remote's default branch) |
+| Integration target | each repository's default branch on Gitea for a published copy (improve_wfrun p1); for a copy made from the workspace, the branch the workspace had checked out (a detached submodule: its remote's default branch) |
 
 The project id in the branch keeps runs of different projects apart in a
 repository they share (a study, a wedo).
@@ -64,6 +64,33 @@ finds its run again, finished or not.
 
 ## What a copy is made from
 
+**Published (improve_wfrun p1)** — every run a host with Gitea creates for an
+execution host (a person's or conversation's request, a Zulip post, a
+delegation's child):
+
+- The root starts at the **resolved root commit of the project's published
+  source** ([runs.md](runs.md), *Definition snapshot*), the same commit the
+  definition is read at. `copy.json` has `baseFrom: "published"` and `source`
+  (`project`, `repository`, `branch`, `commit`, `selector`).
+- It is cloned from the access cache (`<area>/.local/access-cache/`,
+  [access.md](access.md)), and **every** submodule the revision pins is
+  initialized at its gitlink, nested ones too, whether or not the workspace has
+  it checked out. A submodule that cannot be read (outside this Gitea, its pin
+  on no branch) stays uninitialized with its `problem`; a definition binding it
+  is refused.
+- **Integration targets** are each repository's default branch on Gitea, never
+  the workspace's checked-out branch. Per-binding policies (`integrate:
+  if-unchanged`) are unchanged.
+- The same request (receipt) keeps the revision its copy was reserved with: a
+  creation interrupted after the reservation and retried after the default
+  branch moved on still uses the reserved commit for definition and code.
+- Run numbers also count the run folders of that revision and the run branches
+  in the root's access cache.
+- Nothing in the workspace is read for content, fetched into or changed.
+
+**From the workspace** — only where no published source exists (a host without
+Gitea), and for reconstruction:
+
 - **The committed project, never the person's uncommitted edits.**
   - The root starts at the project workspace's `HEAD`.
   - Results integrated from other runs' copies reach the remote, not the
@@ -77,9 +104,9 @@ finds its run again, finished or not.
     workspace. A gitlink the workspace lacks is fetched from the submodule's
     remote.
   - Nothing in the person's workspace is changed.
-- The **definition** the run follows is still read from the project
-  workspace, as the person sees and edits it, and frozen into the run folder
-  (runs.md, *Definition snapshot*). The rest of the tree is committed state.
+- The **definition** the run follows is read from the project workspace and
+  frozen into the run folder; `definition.source` says `workspace` (runs.md,
+  *Definition snapshot*).
 - **Remotes.** Every repository of the copy has the project's own `origin`
   (the root's remote, each submodule's remote), not the workspace it was
   cloned from. A copy pushes nowhere but its run branches (see runs.md,
@@ -133,6 +160,31 @@ It never leaves the host, but it still holds no credentials. What the run
 records about its storage is portable: `run.json` `storage` (from
 `run.create`) has the branch and, per repository, `path`, `base`, `branch`
 and `target`, with no paths on this host and no URLs.
+
+## The workspace and the published source (improve_wfrun p1)
+
+The registered workspace is the editing area. Its age, its local commits and
+its uncommitted changes do not decide which workflows exist or what a run
+follows. How it relates to the published revision is read, never assumed
+(`server/workspaceSync.ts`; `wfe workspace status`, the editor's Workflows card):
+
+- per repository (the root and every submodule the published revision pins):
+  `same`, `behind`, `ahead`, `diverged` or `unknown`, with counts, decided from
+  commits a side is known to have (the access cache holds every Gitea branch);
+  uncommitted changes are counted apart; `atCommitted` alone is never the
+  relation;
+- the situation in a sentence and the next action (`none`, `sync`,
+  `resolve-by-hand`).
+
+**Synchronization is optional** (`wfe workspace sync [--dry-run]`, the editor's
+Update workspace). It only fast-forwards: the root on the published branch,
+clean and only behind; each submodule whose pin moved, clean and at its old pin
+(a branch is fast-forwarded, a detached checkout moved to the pin). Anything
+else is refused with the concrete reasons and nothing changes. State is read
+again before each change; nothing is stashed, reset, merged or rebased. Each
+repository's step is reported (`moved`, `refused`, `failed`, `unchanged`); after
+a partial update the named repository is fixed by hand and sync runs again,
+continuing from what already moved.
 
 ## One live record
 
@@ -221,6 +273,15 @@ own, explicitly and only once (code: `server/migrate.ts`).
 - the refusal while the executor reports.
 
 ## Fixtures
+
+`test/publishedSource.test.ts` (improve_wfrun p1): a stale, dirty, ahead and
+diverged workspace with published runs (the workspace unchanged); one revision
+for definition and code; a retried receipt after the default branch moved; an
+explicit revision; every pinned submodule including one absent from the
+workspace and its nested module; devdocs as a submodule read at the pin;
+discovery after `invalidate`; Gitea unreachable; existing runs unchanged.
+`test/workspaceSync.test.ts`: relations, sync refusals, a partial update and its
+continuation, and trials.
 
 `test/runspace.test.ts`: separate roots, manifests and branches; uncommitted
 edits left out; local notes copied and ignored; allocation under

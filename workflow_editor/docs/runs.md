@@ -126,6 +126,28 @@ editor's rules (errors refuse the run; warnings are kept as facts), and copied
 byte for byte to `definition/<id>.yaml`. The copy keeps layout, approvals and
 comments.
 
+**Which `devdocs/workflows/` (improve_wfrun p1).** A run in its own copy on a
+host with Gitea follows the project's **published source**: its default branch
+on Gitea, resolved once to a root commit with a fetch that succeeded now (or a
+root commit named at creation: a delegation's dispatched revision). The
+definition is read at that commit (devdocs at the root's pin when it is a
+submodule) and the copy starts from the same commit ([storage.md](storage.md)),
+so definition and code never come from two revisions. The registered
+workspace is not read for it, whatever it holds. A default branch that cannot
+be fetched refuses the run (`fetch-failed`); a workflow that is not on it
+refuses with `no workflow "…"`. A trial of editing content is the explicit
+exception: the workspace file's exact bytes on the published code.
+`run.json` `definition.source` says which:
+
+| `kind` | Fields | Meaning |
+| --- | --- | --- |
+| `published` | `project`, `selector` (`default-branch`/`commit`), `repository`, `branch`, `commit`, `definitions` (`path`, `repository`, `commit`), `fetch` | definition and code from that root commit |
+| `trial` | `workspace`, `file`, `sha256`, `head`, `dirty`, `baseline` (`project`, `repository`, `branch`, `commit`) | the bytes of a workspace file (hash checked against what the person saw) on the published code at `baseline`; uncommitted project code is not part of it |
+| `workspace` | `workspace`, `reason`, `head`, `branch`, `dirty` | a workspace's files: an IDE agent's `wfe run create` in the workspace, or a host without Gitea |
+
+A record without `definition.source` was created before p1. Its meaning is
+unchanged; nothing is rewritten.
+
 **Delegate nodes execute (p10).** A delegate node's work is entrusted to a
 run of another managed workflow — its `project`/`workflow` target — through
 `wfe delegate`: the parent records the dispatch, the child is an ordinary
@@ -142,9 +164,9 @@ bundle file that is missing or differs from its recorded `sha256` makes the
 record **inconsistent**.
 
 The bundle never changes. Later edits, renames or deletion of the source
-workflow do not change the run's graph. The run view shows the snapshot and
-compares it with the current source (same definition, changed, renamed,
-deleted). A run on a changed definition is a new run (`--predecessor
+workflow do not change the run's graph. The run view shows the snapshot, its
+source, and compares it with this workspace's file (same definition, changed,
+renamed, deleted). A run on a changed definition is a new run (`--predecessor
 <run-ref>` records the link).
 
 **The effective graph is frozen (p5).** At creation the root workflow is

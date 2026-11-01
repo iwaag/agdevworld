@@ -1,0 +1,207 @@
+{
+  "$comment": "workflow_editor p19: example shapes of message files (docs/message-files.md). Bytes are real: decode files[*].base64 and compare sha256.",
+  "attachmentFiles": {
+    "available": true,
+    "problem": null,
+    "files": 20,
+    "fileBytes": 33554432,
+    "totalBytes": 67108864,
+    "requestBytes": 90527062,
+    "nameLength": 255
+  },
+  "unavailable": {
+    "available": false,
+    "problem": "no destination for message files is configured here (attachments.json)",
+    "files": 20,
+    "fileBytes": 33554432,
+    "totalBytes": 67108864,
+    "requestBytes": 90527062,
+    "nameLength": 255
+  },
+  "post": {
+    "request": {
+      "text": "",
+      "token": "hangout-1730466000000-k3j2",
+      "with": "front",
+      "files": [
+        {
+          "name": "clipboard.png",
+          "base64": "iVBORw0KGgoAAAANSUhEUgAAAAQAAAAECAIAAAAmkwkpAAAAG0lEQVR4nGN4phEFRCJgxIDKOREFRCJghMIBAPWDFPGbo8YSAAAAAElFTkSuQmCC",
+          "mime": "image/png"
+        },
+        {
+          "name": "notes.txt",
+          "base64": "bm90ZXMgZm9yIHRoZSBhZ2VudAo=",
+          "mime": "text/plain"
+        }
+      ]
+    },
+    "response": {
+      "sent": true,
+      "duplicate": false,
+      "reopened": false,
+      "created": true,
+      "message": {
+        "id": 42,
+        "role": "person",
+        "author": "iwaag",
+        "text": "",
+        "at": "2026-11-01T13:00:00.000Z",
+        "via": null,
+        "re": [],
+        "kind": "message",
+        "participant": "iwaag",
+        "run": null,
+        "runUrl": null,
+        "invitation": null,
+        "addressed": [
+          "front"
+        ],
+        "node": null,
+        "requests": [
+          57
+        ],
+        "attachments": [
+          {
+            "kind": "file",
+            "id": "f-8c1e7a2b4d6f0a9e3c5b7d1f",
+            "bundle": "b-20261101t130000z-3f9a2c1d",
+            "conversation": "p19-fixture",
+            "message": 42,
+            "ordinal": 1,
+            "name": "clipboard.png",
+            "mime": "image/png",
+            "bytes": 84,
+            "sha256": "62172b83c6c0b9dbb417482480241426a82ec3dc6d3f36652d403c0900664e8d",
+            "ref": "shared://agshare/conversations/p19-fixture/attachments/b-20261101t130000z-3f9a2c1d/f-8c1e7a2b4d6f0a9e3c5b7d1f",
+            "preview": "image",
+            "api": "api/conversations/p19-fixture/messages/42/attachments/f-8c1e7a2b4d6f0a9e3c5b7d1f",
+            "url": "http://wfe.example/wfe/api/conversations/p19-fixture/messages/42/attachments/f-8c1e7a2b4d6f0a9e3c5b7d1f"
+          },
+          {
+            "kind": "file",
+            "id": "f-2a4c6e8b0d1f3a5c7e9b1d3f",
+            "bundle": "b-20261101t130000z-3f9a2c1d",
+            "conversation": "p19-fixture",
+            "message": 42,
+            "ordinal": 2,
+            "name": "notes.txt",
+            "mime": "text/plain",
+            "bytes": 20,
+            "sha256": "00158f46c841bfff0edfad8e6d823079f7695660724cfefbddae74067a9a0754",
+            "ref": "shared://agshare/conversations/p19-fixture/attachments/b-20261101t130000z-3f9a2c1d/f-2a4c6e8b0d1f3a5c7e9b1d3f",
+            "preview": "text",
+            "api": "api/conversations/p19-fixture/messages/42/attachments/f-2a4c6e8b0d1f3a5c7e9b1d3f",
+            "url": "http://wfe.example/wfe/api/conversations/p19-fixture/messages/42/attachments/f-2a4c6e8b0d1f3a5c7e9b1d3f"
+          }
+        ]
+      },
+      "requests": [
+        {
+          "id": 57,
+          "participant": "front",
+          "role": "converse",
+          "target": "front/converse",
+          "state": "started",
+          "run": "front/converse/run-090"
+        }
+      ]
+    },
+    "retry": {
+      "$comment": "same token, same payload after a lost response",
+      "duplicate": true,
+      "messageId": 42
+    }
+  },
+  "titleFromFile": {
+    "$comment": "a new room from a file-only message without title: its original title is the first file name",
+    "title": "clipboard.png"
+  },
+  "errors": {
+    "invalid": {
+      "status": 400,
+      "body": {
+        "error": "file 1 (clipboard.png): base64 is malformed",
+        "detail": {
+          "code": "invalid-attachment",
+          "file": 1
+        }
+      }
+    },
+    "limit": {
+      "status": 413,
+      "body": {
+        "error": "file 2 (video.mp4) is 40000000 bytes; one file is at most 33554432",
+        "detail": {
+          "code": "attachment-limit",
+          "limit": "fileBytes",
+          "actual": 40000000,
+          "file": 2
+        }
+      }
+    },
+    "conflict": {
+      "status": 409,
+      "body": {
+        "error": "token hangout-1730466000000-k3j2 was already used for another submission in p19-fixture; send changed content with a new token",
+        "detail": {
+          "code": "token-conflict",
+          "operation": 7
+        }
+      }
+    },
+    "storage": {
+      "status": 503,
+      "body": {
+        "error": "message files cannot be stored now: share \"agshare\" is not mounted on this host: .wfe-share.json is missing at its root",
+        "detail": {
+          "code": "storage-unavailable",
+          "state": "unmounted"
+        }
+      }
+    },
+    "notFound": {
+      "status": 404,
+      "body": {
+        "error": "message #42 of p19-fixture has no attachment f-000000000000000000000000",
+        "detail": {
+          "code": "attachment-not-found"
+        }
+      }
+    },
+    "missing": {
+      "status": 410,
+      "body": {
+        "error": "the bytes of f-8c1e7a2b4d6f0a9e3c5b7d1f are not on the share",
+        "detail": {
+          "code": "attachment-missing"
+        }
+      }
+    },
+    "integrity": {
+      "status": 409,
+      "body": {
+        "error": "the bytes of f-8c1e7a2b4d6f0a9e3c5b7d1f on the share are not the recorded ones (sha256 differs)",
+        "detail": {
+          "code": "attachment-integrity"
+        }
+      }
+    }
+  },
+  "files": [
+    {
+      "name": "clipboard.png",
+      "mime": "image/png",
+      "base64": "iVBORw0KGgoAAAANSUhEUgAAAAQAAAAECAIAAAAmkwkpAAAAG0lEQVR4nGN4phEFRCJgxIDKOREFRCJghMIBAPWDFPGbo8YSAAAAAElFTkSuQmCC",
+      "sha256": "62172b83c6c0b9dbb417482480241426a82ec3dc6d3f36652d403c0900664e8d",
+      "bytes": 84
+    },
+    {
+      "name": "notes.txt",
+      "mime": "text/plain",
+      "base64": "bm90ZXMgZm9yIHRoZSBhZ2VudAo=",
+      "sha256": "00158f46c841bfff0edfad8e6d823079f7695660724cfefbddae74067a9a0754",
+      "bytes": 20
+    }
+  ]
+}

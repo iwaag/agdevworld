@@ -13,7 +13,7 @@ attachments; configuration), `server/conversationService.ts` (everything
 that routes, delivers and reads), `server/conversationArchive.ts`,
 `server/conversationWorkflows.ts`; CLI: `wfe conversation` (`wfe
 discussion` is the same command); HTTP: `api/conversations`; store:
-`<area>/.local/conversations/conversations.sqlite` (version 13).
+`<area>/.local/conversations/conversations.sqlite` (version 14). Message files: [message-files.md](message-files.md).
 
 WFE owns identity, membership, messages, delivery, execution, recovery and
 the archive. A client (aghangout, the Slack integration, the CLI) owns
@@ -60,7 +60,7 @@ with the reason); existing records stay readable through the CLI.
 | member | the person(s) and projects: an append-only history of `join` and `leave` (who, when, why), folded into the members. Rows written before p2 may say `facilitator` for ponderer; it reads as a project |
 | message | the person's words verbatim (author, time, submit token, `via`, `re`, whom it reached) or an agent's speech (participant, agent, run, attempt, request, node, kind `reply`/`question`/`progress`/`result`/`synthesis`/`announce`, key). The same token (the person) or key (a run) is one message |
 | link | what a message is to a run: `turn` (written by WFE: the run a request started), `new`, `follow-up`, `correction`, `steer`, `answer`, `question`, `informational`, `cites`, `handoff`. A later reading supersedes an earlier one; messages are never rewritten |
-| attachment | a challenge a person's message carried, pinned to a revision (challenge p1, [challenges.md](challenges.md)) |
+| attachment | what a person's message carried: a challenge pinned to a revision (challenge p1, [challenges.md](challenges.md)), or a file — an occurrence of original bytes on a share, tied to exactly this message (workflow_editor p19, [message-files.md](message-files.md)) |
 | response request | table `invitations` — below |
 | facilitation | who started a conductor's leading, when, with which brief and from which horizon; when and why it ended |
 | activity, annotation, metadata, overview, workflow reference | below |
@@ -274,9 +274,10 @@ lets the person start a child's review from the room without a manual link.
 | Route | |
 | --- | --- |
 | `GET api/conversations[?category=&state=&with=&mode=&limit=&offset=]` | `{person, disabled, participants, counts, total, offset, conversations}`; participants are each project (with `converse` and `discuss`) and the facilitator as their projects say now; each row with `mode`, `members`, `participants`, `defaultTo`, `facilitation`, `category`, `displayTitle`, `newest`, `last`, `overview` or `brief`, `status`, `activity`, `archive` |
-| `POST api/conversations {id, title, members?, defaultTo?, facilitate?, category?, text?, token?, to?, re?, author?}` | creates (201; the same id by the same author is 200), and posts the first message when `text` is given |
+| `POST api/conversations {id, title, members?, defaultTo?, facilitate?, category?, text?, token?, to?, re?, author?, files?}` | creates (201; the same id by the same author is 200), and posts the first message when `text` or `files` is given |
 | `GET api/conversations/<id>[?since=<msg>]` | `conversation` (`mode`, `defaultTo`, `facilitation`, `conductor`, `requester`, `category`, `displayTitle`, `origin`), `facilitations`, `overview`, `overviews`, `brief`, `status` (with `continuations` held), `meta`, `activities`, `annotations`, `obligations`, `members`, `membership`, `messages` (with `participant`, `run`, `runUrl`, `invitation`, `addressed`, `node`, `requests`, `attachments`), `requests` (role, workflow, state, run, receipt, held, …), `links`, `runs` (shared status, run view, file route, presentations), `asking`, `horizon`, `archive`; (p17) `reviews`: the human review rounds of the runs serving the room (`id`, `state`, `text`, `summary`, `subjects`, `decision`, `page`, `api`, `runKey`; [reviews.md](reviews.md)); (p18) `progression` (*Progression*) |
-| `POST api/conversations/<id>/messages {text, token, with?, title?, to?, runs?, re?, author?, via?, challenges?}` | the person's words; `{sent, duplicate, reopened, created, message, requests}`; 409 `choose-recipient` when it reaches nobody |
+| `POST api/conversations/<id>/messages {text, token, with?, title?, to?, runs?, re?, author?, via?, challenges?, files?}` | the person's words; `{sent, duplicate, reopened, created, message, requests}`; 409 `choose-recipient` when it reaches nobody. (p19) `files: [{name, base64, mime?}]`, and `text` may be empty with files: [message-files.md](message-files.md) |
+| `GET`/`HEAD …/messages/<n>/attachments[/<attachment>][?download=1]`, `GET …/attachments/verify[?message=]` | (p19) a message's files and their original bytes, by the whole identity; explicit integrity verification ([message-files.md](message-files.md)) |
 | `POST …/facilitation {action: start, text, token, re?, challenges?} \| {action: end, note?}` | start (with the brief) or end facilitation |
 | `POST …/default {participant \| null, note?}` | the default addressee |
 | `POST …/members {participant, action: join\|leave, note?}` | membership; starts nothing |

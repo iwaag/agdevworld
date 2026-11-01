@@ -204,7 +204,7 @@ fetching a file starts nothing.
 Bytes never enter a run's Git history. An agent fetches what it needs:
 
 ```text
-wfe conversation attachments <id> --message <n> [--verify]
+wfe conversation attachments <id> [--message <n>] [--check-bytes]
 wfe conversation fetch <id> --message <n> --attachment <f-…> [--out <path>]
 ```
 

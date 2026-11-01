@@ -12,7 +12,7 @@ import { authoredNode, COMPILER_VERSION, compile, isGenerated, type EffectiveGra
 import { DEFAULT_LANE, docSteps, ID_PATTERN, normalizeRepoPath, type Workflow } from '../shared/model.ts'
 import { validateWorkflow } from '../shared/validate.ts'
 import {
-  activeRevision, checkRecord, documentPath, graphOfState, hostOf, operate, presentationFolder, runDisplayTitle, type AdjustSource, type AdjustDiff, graphDiff, RUN_ID, RunError, runFolder, RUNS_ROOT, runKey, validRunRef, type Presentation,
+  activeRevision, checkRecord, documentPath, fileAttachmentOf, graphOfState, hostOf, operate, presentationFolder, runDisplayTitle, type AdjustSource, type AdjustDiff, graphDiff, RUN_ID, RunError, runFolder, RUNS_ROOT, runKey, validRunRef, type Presentation,
   type BundleEntry, type DefinitionRef, type DocumentEvidence, type EntrustRef, type Executor, type OpInput, type RepoContext, type RunGraph,
   type EntryMeta, type RetroEvidence, type RunInput, type RunRecord, type RunRef, type RunState, type RunStorage,
 } from '../shared/run.ts'
@@ -509,7 +509,9 @@ export interface CreateRunOptions {
 export interface CreatedRun { ref: RunRef; dir: string; record: RunRecord; files: string[] }
 // A challenge attached to the input, with the text of its file at the
 // attached commit (challenge p1): written into the run folder as given.
-export type PinnedAttachment = import('../shared/intake.ts').AttachmentRef & { text: string }
+// A challenge with its revision's text, or a message file by occurrence
+// (p19: its bytes stay on the share).
+export type PinnedAttachment = (import('../shared/intake.ts').ChallengeAttachmentRef & { text: string }) | import('../shared/intake.ts').FileAttachmentRef
 
 // The next run-NNN: past every run recorded, held by a copy or named by a
 // run branch (p9). Called under the workspace's allocation lock.
@@ -597,7 +599,8 @@ async function writeRun(ws: Workspace, ref: RunRef, files: Record<string, string
 }
 
 function inputOf(o: CreateRunOptions['input']): { input: RunInput; files: Record<string, string> } {
-  if (!o.text.trim()) throw new RequestError(400, `the ${o.kind} text is empty`)
+  // p19: a message of files alone is the person's words as they were.
+  if (!o.text.trim() && !o.attachments?.some(a => a.kind === 'file')) throw new RequestError(400, `the ${o.kind} text is empty`)
   if (o.kind === 'braindump') {
     if (!o.author?.trim()) throw new RequestError(400, 'a braindump needs its author: the person whose words it holds (--author)')
     const input: RunInput = { kind: 'braindump', file: 'braindump.md', author: o.author.trim() }
@@ -629,6 +632,14 @@ function withAttachments(input: RunInput, files: Record<string, string>, attachm
   const seen = new Set<string>()
   input.attachments = []
   for (const a of attachments) {
+    if (a.kind === 'file') {
+      // Each occurrence once, by its identity; never by name or bytes.
+      const f = fileAttachmentOf(a as unknown as Record<string, unknown>, `attachment ${a.id}`)
+      if (seen.has(f.id)) continue
+      seen.add(f.id)
+      input.attachments.push(f)
+      continue
+    }
     if (a.kind !== 'challenge' || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(a.id) || !/^[0-9a-f]{40,64}$/.test(a.commit)) throw new RequestError(400, `attachment ${a.id}@${a.commit} is not a pinned challenge`)
     if (sha256(a.text) !== a.sha256) throw new RequestError(409, `attachment ${a.id}@${a.commit.slice(0, 12)}: its text is not the revision named (hash differs)`)
     const file = `attachments/${a.id}@${a.commit.slice(0, 12)}.md`

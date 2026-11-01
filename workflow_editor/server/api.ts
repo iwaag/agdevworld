@@ -55,14 +55,18 @@ function send(res: ServerResponse, status: number, body: unknown) {
   res.end(text)
 }
 
-async function body(req: IncomingMessage): Promise<unknown> {
+// `max`: a route that carries files (p19: a person's message) reads more.
+async function body(req: IncomingMessage, max = MAX_BODY): Promise<unknown> {
   const type = req.headers['content-type'] ?? ''
   if (!type.startsWith('application/json')) throw new RequestError(415, 'writes require content-type: application/json')
+  const tooLarge = (n: number) => new RequestError(413, `request body too large (${n} bytes; at most ${max})`, max > MAX_BODY ? { code: 'attachment-limit', limit: 'requestBytes', actual: n } : undefined)
+  const declared = Number(req.headers['content-length'] ?? 0)
+  if (declared > max) throw tooLarge(declared)
   const chunks: Buffer[] = []
   let size = 0
   for await (const chunk of req) {
     size += (chunk as Buffer).length
-    if (size > MAX_BODY) throw new RequestError(413, 'request body too large')
+    if (size > max) throw tooLarge(size)
     chunks.push(chunk as Buffer)
   }
   try { return JSON.parse(Buffer.concat(chunks).toString('utf8')) } catch { throw new RequestError(400, 'invalid JSON body') }
@@ -268,17 +272,23 @@ export function createHandler(config: ServiceConfig) {
         const { ConversationService } = await import('./conversationService.ts')
         const { ConversationArchive } = await import('./conversationArchive.ts')
         const { viewBaseOf, attachRequests } = await import('./conversations.ts')
+        const mf = await import('./messageFiles.ts')
         const ds = new ConversationService(cs)
         const cfg = ds.config()
         const person = 'disabled' in cfg ? null : cfg.person
         const need = () => { if ('disabled' in cfg) throw new RequestError(503, cfg.disabled); return cfg }
-        const input = method === 'POST' ? await body(req) as Record<string, unknown> : {}
+        // A person's message may carry files (p19): its routes read more.
+        const carries = method === 'POST' && ((!wsId) || (b === 'messages' && !file))
+        const input = method === 'POST' ? await body(req, carries ? mf.REQUEST_BYTES : MAX_BODY) as Record<string, unknown> : {}
+        const files = () => mf.decodeFiles(input.files)
+        // The words: required, unless files come with them.
+        const said = (fs: unknown[]) => { const v = input.text ?? ''; if (typeof v !== 'string') throw new RequestError(400, 'text is a string'); if (!v.trim() && !fs.length) throw new RequestError(400, 'text is required'); return v }
         const opt = (k: string) => input[k] === undefined ? undefined : str(input[k], k)
         const words = (k: string) => { const v = input[k]; if (typeof v !== 'string' || !v.trim()) throw new RequestError(400, `${k} is required`); return v }
         const list = (k: string): string[] => { const v = input[k] ?? []; if (!Array.isArray(v) || !v.every(x => typeof x === 'string')) throw new RequestError(400, `${k} is a list of names`); return v as string[] }
         const nums = (k: string): number[] => { const v = input[k] ?? []; if (!Array.isArray(v) || !v.every(n => Number.isInteger(n))) throw new RequestError(400, `${k} is a list of message ids`); return v as number[] }
         const archive = new ConversationArchive(ds)
-        const view = async (id: string, since = 0) => ({ person, ...await ds.view(id, { viewBase: viewBaseOf(area), since }), archive: await archive.status(id) })
+        const view = async (id: string, since = 0) => ({ person, ...await ds.view(id, { viewBase: viewBaseOf(area), since }), archive: await archive.status(id), attachmentFiles: await mf.filesAvailability(area) })
         const exists = (id: string) => ds.conversation(id) ?? (() => { throw new RequestError(404, `no conversation ${id}`) })()
         // The list as readers use it: ?category=conversation|check
         // &state=open|closed|all&with=<participant>&mode=direct|group|facilitated
@@ -288,7 +298,7 @@ export function createHandler(config: ServiceConfig) {
           const q = (k: string) => url.searchParams.get(k) ?? undefined
           const n = (k: string) => { const v = q(k); if (v === undefined) return undefined; const x = Number(v); if (!Number.isInteger(x) || x < 0) throw new RequestError(400, `${k} is a whole number`); return x }
           const l = 'disabled' in cfg ? null : await ds.listing({ category: q('category'), state: q('state'), with: q('with'), mode: q('mode'), limit: n('limit'), offset: n('offset') })
-          return send(res, 200, { person, disabled: 'disabled' in cfg ? cfg.disabled : null, participants: await ds.participants(), counts: l?.counts ?? null, total: l?.total ?? 0, offset: l?.offset ?? 0, conversations: await Promise.all((l?.conversations ?? []).map(async d => {
+          return send(res, 200, { person, disabled: 'disabled' in cfg ? cfg.disabled : null, participants: await ds.participants(), attachmentFiles: await mf.filesAvailability(area), counts: l?.counts ?? null, total: l?.total ?? 0, offset: l?.offset ?? 0, conversations: await Promise.all((l?.conversations ?? []).map(async d => {
             const st = await archive.status(d.id)
             return {
               id: d.id, title: d.title, displayTitle: d.displayTitle, category: d.category, created: d.created, updated: d.updated, state: d.state, count: d.count, newest: d.last?.id ?? 0, members: d.members, participants: d.participants, open: d.open,
@@ -306,7 +316,8 @@ export function createHandler(config: ServiceConfig) {
           if (dt !== undefined && dt !== null && typeof dt !== 'string') throw new RequestError(400, 'defaultTo is a participant, or null')
           const r = ds.create(id, { title: str(input.title, 'title'), by: author, members: list('members'), category: opt('category'), facilitate: input.facilitate === true, ...(dt !== undefined ? { defaultTo: dt as string | null } : {}) })
           let posted = null
-          if (input.text !== undefined) posted = await ds.post(id, { text: words('text'), author, token: str(input.token, 'token'), to: list('to'), re: nums('re'), via: opt('via'), challenges: attachRequests(input.challenges) })
+          const fs = files()
+          if (input.text !== undefined || fs.length) posted = await ds.post(id, { text: said(fs), author, token: str(input.token, 'token'), to: list('to'), re: nums('re'), via: opt('via'), challenges: attachRequests(input.challenges), files: fs })
           return send(res, r.duplicate ? 200 : 201, { created: !r.duplicate, posted: posted && { message: posted.message.id, duplicate: posted.duplicate, requests: posted.invitations.map(i => ds.invitationView(i)) }, ...await view(id) })
         }
         if (wsId && !b && method === 'GET') {
@@ -317,10 +328,34 @@ export function createHandler(config: ServiceConfig) {
         // the project `with` names (a one-to-one room). A client other than
         // the page (Slack) says how the words came (`via`) and, for an
         // automated trial actor, who wrote them (`author`).
-        if (wsId && b === 'messages' && method === 'POST') {
+        if (wsId && b === 'messages' && !file && method === 'POST') {
           const c = need()
-          const r = await ds.post(wsId, { text: words('text'), author: opt('author') ?? c.person, token: str(input.token, 'token'), to: list('to'), runs: list('runs'), re: nums('re'), via: opt('via'), with: opt('with'), title: opt('title'), challenges: attachRequests(input.challenges) })
-          return send(res, 200, { sent: true, duplicate: r.duplicate, reopened: r.reopened, created: r.created, message: ds.message(r.message, viewBaseOf(area)), requests: r.invitations.map(i => ds.invitationView(i, viewBaseOf(area))) })
+          const fs = files()
+          const r = await ds.post(wsId, { text: said(fs), author: opt('author') ?? c.person, token: str(input.token, 'token'), to: list('to'), runs: list('runs'), re: nums('re'), via: opt('via'), with: opt('with'), title: opt('title'), challenges: attachRequests(input.challenges), files: fs })
+          const attached = (await cs.attachmentViews(wsId, viewBaseOf(area))).get(r.message.id) ?? []
+          return send(res, 200, { sent: true, duplicate: r.duplicate, reopened: r.reopened, created: r.created, message: { ...ds.message(r.message, viewBaseOf(area)), attachments: attached }, requests: r.invitations.map(i => ds.invitationView(i, viewBaseOf(area))) })
+        }
+        // A message's files (p19, docs/message-files.md): their records, and
+        // the original bytes by the whole identity. Reading starts nothing.
+        if (wsId && b === 'messages' && file && action === 'attachments' && (method === 'GET' || method === 'HEAD')) {
+          exists(wsId)
+          const n = Number(file)
+          if (!Number.isInteger(n) || n <= 0) throw new RequestError(404, 'not found')
+          const m = cs.message(n)
+          if (!m || m.conv !== wsId) throw new RequestError(404, `conversation ${wsId} has no message #${n}`, { code: 'attachment-not-found' })
+          const att = parts[6]
+          if (!att) return send(res, 200, { conversation: wsId, message: n, attachments: (await cs.attachmentViews(wsId, viewBaseOf(area))).get(n) ?? [] })
+          const row = cs.fileRow(wsId, n, att)
+          if (!row || parts.length > 7) throw new RequestError(404, `message #${n} of ${wsId} has no attachment ${att}`, { code: 'attachment-not-found' })
+          return await mf.serveFile(req, res, row, url.searchParams.get('download') === '1')
+        }
+        if (wsId && b === 'attachments' && file === 'verify' && method === 'GET') {
+          exists(wsId)
+          const only = url.searchParams.get('message')
+          const rows = cs.fileRows({ conv: wsId }).filter(r => !only || r.message === Number(only))
+          const out = []
+          for (const r of rows) { const v = await mf.checkFile(mf.refOf(r)); out.push({ message: r.message, ordinal: r.ordinal, attachment: r.attachment, name: r.name, bytes: r.bytes, sha256: r.sha256, state: v.state, detail: v.detail }) }
+          return send(res, 200, { conversation: wsId, verified: out.filter(x => x.state === 'verified').length, files: out })
         }
         // Facilitation: start (with a brief: the person's words to the
         // conductor) or end. Joining a member or changing presentation never

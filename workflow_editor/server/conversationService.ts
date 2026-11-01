@@ -67,6 +67,9 @@ import { loadRegistry } from './registry.ts'
 import { transaction } from './sqlite.ts'
 import { withLock } from './lock.ts'
 import { RequestError } from './workspace.ts'
+import { fileRef, loadFilesConfig, newAttachmentId, newBundleId, publishBundle, StorageUnavailable, submissionDigest, type AllocatedFile, type IncomingFile } from './messageFiles.ts'
+import { shareRoot } from './shares.ts'
+import type { ChallengeAttachmentRef } from '../shared/intake.ts'
 
 const MAX_TEXT = 100_000
 const TOKEN = /^[A-Za-z0-9:._/#-]{8,200}$/
@@ -214,6 +217,14 @@ function categoryOf(v: string): Category {
 export const modeOf = (members: Member[], facilitation: FacilitationRow | null): Mode => facilitation ? 'facilitated' : members.filter(m => m.kind !== 'person').length > 1 ? 'group' : 'direct'
 const label = (i: Pick<InvitationRow, 'state' | 'late'>) => `${i.state}${i.late ? '-late' : ''}`
 const resolved = (s: InvitationState) => !OPEN_STATES.includes(s)
+
+// A person's message as the service takes it (`post`).
+export interface PostInput { text: string; author: string; token: string; re?: number[]; to?: string[]; runs?: string[]; via?: string; challenges?: AttachRequest[]; with?: string; title?: string; files?: IncomingFile[] }
+export interface PostResult { message: MessageRow; duplicate: boolean; reopened: boolean; created: boolean; invitations: InvitationRow[] }
+type Recipient = { key: string; participant: string; role: 'conduct' | 'project' | 'run'; run?: string; deliver?: { run: string; question: string | null; message: number; instruct?: boolean } }
+interface Route { c: ConversationRow; seen: MessageRow | null; re: number[]; recipients: Recipient[]; chosen: { workspace: string; workflow: string; role: RequestRole }[]; state: string }
+// An upload operation (p19): what a submit token with files names.
+export interface UploadRow { id: number; conv: string; token: string; author: string; digest: string; bundle: string; share: string; prefix: string; files: string; pins: string; state: 'reserved' | 'published' | 'accepted' | 'failed'; manifest: string | null; message: number | null; error: string | null; tries: number; created: string; updated: string }
 
 export class ConversationService {
   readonly cs: ConversationStore
@@ -474,19 +485,55 @@ export class ConversationService {
   // with the project `with` names (a one-to-one room).
   // `challenges` (challenge p1): challenges the message carries, pinned to the
   // revision named (or the current one), given to whoever it reaches.
-  async post(conv: string, o: { text: string; author: string; token: string; re?: number[]; to?: string[]; runs?: string[]; via?: string; challenges?: AttachRequest[]; with?: string; title?: string }): Promise<{ message: MessageRow; duplicate: boolean; reopened: boolean; created: boolean; invitations: InvitationRow[] }> {
+  // `files` (workflow_editor p19, docs/message-files.md): the files the
+  // message carries; with them the text may be empty. The token is then an
+  // upload operation bound to the submission's digest: the bundle is
+  // published on the share first, and the message, its file rows, its
+  // requests and the operation's acceptance are one transaction.
+  async post(conv: string, o: PostInput): Promise<PostResult> {
+    const files = o.files ?? []
     if (!CONVERSATION_ID.test(conv)) throw new RequestError(400, `conversation id must match ${CONVERSATION_ID.source}`)
-    if (!o.text.trim()) throw new RequestError(400, 'the message is empty')
+    if (!o.text.trim() && !files.length) throw new RequestError(400, 'the message is empty')
     if (o.text.length > MAX_TEXT) throw new RequestError(413, `a message is at most ${MAX_TEXT} characters`)
     if (!TOKEN.test(o.token)) throw new RequestError(400, 'a message needs a submit token (8–200 of A-Z a-z 0-9 : . _ / # -)')
     if (o.via !== undefined && !VIA.test(o.via)) throw new RequestError(400, `via must match ${VIA.source}`)
+    if (files.length) return this.postFiles(conv, o, files)
+    // A token a file submission used belongs to that submission.
+    const op = this.upload(conv, o.token)
+    if (op) throw this.tokenConflict(conv, o.token, op)
+    const created = this.room(conv, o, null)
+    const route = await this.route(conv, o)
+    const pins = route.seen ? [] : await this.cs.pinAll(o.challenges ?? [])
+    const res = this.tx(() => this.accept(conv, o, route, pins))
+    return this.afterAccept(conv, res, created)
+  }
+
+  // A new id is created by its first message, with the project `with`
+  // names (a one-to-one room). Its original title is the given one, else the
+  // words' first line, else (p19) the first file's original name.
+  private room(conv: string, o: PostInput, firstFile: string | null): boolean {
+    if (this.cs.conversation(conv)) return false
     const cfg = this.cfg()
-    let created = false
-    if (!this.cs.conversation(conv)) {
-      if (!o.with) throw new RequestError(404, `conversation ${conv} does not exist yet: its first message names whom it is with (with: <project>)`, { code: 'no-destination' })
-      if (!cfg.projects.some(p => p.workspace === o.with)) throw new RequestError(400, `${o.with} is not a project that can take part here (${cfg.projects.map(p => p.workspace).join(', ') || 'none configured'})`, { code: 'unknown-target' })
-      created = !this.create(conv, { title: o.title?.trim() || firstLine(o.text), by: o.author, members: [o.with] }).duplicate
-    }
+    if (!o.with) throw new RequestError(404, `conversation ${conv} does not exist yet: its first message names whom it is with (with: <project>)`, { code: 'no-destination' })
+    if (!cfg.projects.some(p => p.workspace === o.with)) throw new RequestError(400, `${o.with} is not a project that can take part here (${cfg.projects.map(p => p.workspace).join(', ') || 'none configured'})`, { code: 'unknown-target' })
+    return !this.create(conv, { title: o.title?.trim() || firstLine(o.text) || firstLine(firstFile ?? ''), by: o.author, members: [o.with] }).duplicate
+  }
+
+  // What routing reads that can change between computing a route and
+  // writing the message: the room's state, default addressee, facilitation,
+  // conductor and membership.
+  private routingState(conv: string): string {
+    const c = this.cs.conversation(conv)
+    const f = this.facilitation(conv)
+    const m = this.one<{ n: number | null }>('SELECT max(id) AS n FROM membership WHERE conv = ?', conv)?.n ?? 0
+    return JSON.stringify([c?.state ?? null, c?.default_to ?? null, c?.conductor ?? null, f?.id ?? null, m])
+  }
+
+  // Whom the words reach (routing as above): the recipients, each request's
+  // workflow selected now, and the routing state this was computed from.
+  private async route(conv: string, o: PostInput): Promise<Route> {
+    const cfg = this.cfg()
+    const state = this.routingState(conv)
     const c = this.need(conv)
     if (o.with && !this.members(conv).some(m => m.participant === o.with)) throw new RequestError(409, `conversation ${conv} is not with ${o.with}: invite it, or start a new conversation`, { code: 'other-destination' })
     const seen = this.one<MessageRow>('SELECT * FROM messages WHERE conv = ? AND token = ?', conv, o.token)
@@ -499,8 +546,6 @@ export class ConversationService {
     if (left.length) throw new RequestError(409, `${left.map(t => t.participant).join(', ')} left this conversation; ask ${left.length > 1 ? 'them' : 'it'} to join again first`, { code: 'left' })
     const known = new Set([...this.invitations(conv).map(i => i.run).filter((r): r is string => !!r), ...this.cs.links(conv).map(l => l.run), ...this.all<{ run: string }>('SELECT DISTINCT run FROM activities WHERE conv = ?', conv).map(r => r.run), ...(c.conductor ? [c.conductor] : [])])
     for (const r of runs) { parseRunName(r); if (!known.has(r)) throw new RequestError(400, `${r} is not work of this conversation: name a run its requests started, linked or conducted`, { code: 'unknown-run' }) }
-    // Whom the words reach.
-    type Recipient = { key: string; participant: string; role: 'conduct' | 'project' | 'run'; run?: string; deliver?: { run: string; question: string | null; message: number; instruct?: boolean } }
     const recipients: Recipient[] = []
     const add = (r: Recipient) => { if (!recipients.some(x => x.key === r.key)) recipients.push(r) }
     const conductorOrProject = (participant: string) => facilitated && participant === cfg.facilitator.workspace ? add({ key: participant, participant, role: 'conduct' }) : add({ key: participant, participant, role: 'project' })
@@ -535,34 +580,138 @@ export class ConversationService {
     }
     // The workflow of each request, selected now and recorded with it.
     const chosen = seen ? [] : recipients.map(r => r.role === 'run' ? (({ workspace, ref }) => ({ workspace, workflow: ref.workflow, role: 'deliver' as RequestRole }))(parseRunName(r.run!)) : r.role === 'conduct' ? this.selectWorkflow(conv, r.participant, 'conduct') : this.selectWorkflow(conv, r.participant))
-    const pins = seen ? [] : await this.cs.pinAll(o.challenges ?? [])
-    const res = this.tx(() => {
-      const again = this.one<MessageRow>('SELECT * FROM messages WHERE conv = ? AND token = ?', conv, o.token)
-      const reopened = !again && c.state === 'closed'
-      let id = again?.id
-      if (!again) {
-        const at = now()
-        this.db.prepare('UPDATE conversations SET updated = ?, state = \'open\' WHERE id = ?').run(at, conv)
-        if (reopened) this.activityEvent(conv, null, 'room', 'reopened', o.author, `${o.author}'s message reopened the conversation`, { by: o.author })
-        if (!this.members(conv).some(m => m.participant === o.author)) this.joinRow(conv, this.resolve(o.author, { person: true }), o.author, 'first message')
-        id = Number(this.db.prepare('INSERT INTO messages (conv, role, author, text, at, token, via, re, kind, participant, addressed) VALUES (?, \'person\', ?, ?, ?, ?, ?, ?, \'message\', ?, ?)').run(conv, o.author, o.text, at, o.token, o.via ?? null, JSON.stringify(re), o.author, JSON.stringify(recipients.map(r => r.run ?? r.participant))).lastInsertRowid)
-        this.cs.attachRows(conv, id, pins)
+    return { c, seen: seen ?? null, re, recipients, chosen, state }
+  }
+
+  // The message and its requests (inside the transaction). With an upload
+  // operation (p19): its files' rows by position and the operation accepted.
+  private accept(conv: string, o: PostInput, route: Route, pins: ChallengeAttachmentRef[], up?: { op: UploadRow; files: AllocatedFile[] }) {
+    const { c, re, recipients, chosen } = route
+    const again = this.one<MessageRow>('SELECT * FROM messages WHERE conv = ? AND token = ?', conv, o.token)
+    const reopened = !again && c.state === 'closed'
+    let id = again?.id
+    if (!again) {
+      const at = now()
+      this.db.prepare('UPDATE conversations SET updated = ?, state = \'open\' WHERE id = ?').run(at, conv)
+      if (reopened) this.activityEvent(conv, null, 'room', 'reopened', o.author, `${o.author}'s message reopened the conversation`, { by: o.author })
+      if (!this.members(conv).some(m => m.participant === o.author)) this.joinRow(conv, this.resolve(o.author, { person: true }), o.author, 'first message')
+      id = Number(this.db.prepare('INSERT INTO messages (conv, role, author, text, at, token, via, re, kind, participant, addressed) VALUES (?, \'person\', ?, ?, ?, ?, ?, ?, \'message\', ?, ?)').run(conv, o.author, o.text, at, o.token, o.via ?? null, JSON.stringify(re), o.author, JSON.stringify(recipients.map(r => r.run ?? r.participant))).lastInsertRowid)
+      this.cs.attachRows(conv, id, pins)
+      if (up) {
+        const ins = this.db.prepare('INSERT INTO message_files (conv, message, ordinal, attachment, bundle, upload, name, mime, bytes, sha256, preview, served, ref, at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
+        for (const f of up.files) ins.run(conv, id, f.ordinal, f.id, up.op.bundle, up.op.id, f.name, f.mime, f.bytes, f.sha256, f.preview, f.served, fileRef(up.op.share, up.op.prefix, conv, up.op.bundle, f.id), at)
+        this.db.prepare('UPDATE uploads SET state = \'accepted\', message = ?, error = NULL, updated = ? WHERE id = ?').run(id, at, up.op.id)
+        this.uploadEvent(up.op.id, 'accepted', `message #${id}, ${up.files.length} file(s), bundle ${up.op.bundle}`)
       }
-      const m = this.cs.message(id!)!
-      const invs = again ? this.all<InvitationRow>('SELECT * FROM invitations WHERE conv = ? AND token LIKE ? ORDER BY id', conv, `message:${m.id}:%`)
-        : recipients.map((r, n) => {
-          const w = chosen[n] as { workspace: string; workflow: string; role: RequestRole }
-          const role: RequestRole = r.deliver && r.role !== 'run' ? 'deliver' : w.role
-          return this.issue(conv, { participant: { participant: r.participant, kind: 'project', workspace: w.workspace, workflow: w.workflow }, role, question: m.text, source: [m.id, ...re.filter(n => n !== m.id)], by: o.author, byRun: null, awaitedBy: null, token: `message:${m.id}:${r.key}`, deliver: r.deliver ? { ...r.deliver, message: r.deliver.message || m.id } : undefined })
-        })
-      return { message: m, duplicate: !!again, reopened, invitations: invs }
-    })
+    }
+    const m = this.cs.message(id!)!
+    const invs = again ? this.all<InvitationRow>('SELECT * FROM invitations WHERE conv = ? AND token LIKE ? ORDER BY id', conv, `message:${m.id}:%`)
+      : recipients.map((r, n) => {
+        const w = chosen[n] as { workspace: string; workflow: string; role: RequestRole }
+        const role: RequestRole = r.deliver && r.role !== 'run' ? 'deliver' : w.role
+        return this.issue(conv, { participant: { participant: r.participant, kind: 'project', workspace: w.workspace, workflow: w.workflow }, role, question: m.text, source: [m.id, ...re.filter(n => n !== m.id)], by: o.author, byRun: null, awaitedBy: null, token: `message:${m.id}:${r.key}`, deliver: r.deliver ? { ...r.deliver, message: r.deliver.message || m.id } : undefined })
+      })
+    return { message: m, duplicate: !!again, reopened, invitations: invs }
+  }
+
+  private async afterAccept(conv: string, res: { message: MessageRow; duplicate: boolean; reopened: boolean; invitations: InvitationRow[] }, created: boolean): Promise<PostResult> {
+    const cfg = this.cfg()
     // A facilitation opened without its brief takes the first words to the conductor.
     if (!res.duplicate && res.invitations.some(i => i.role === 'conduct' || (i.role === 'deliver' && i.workflow === cfg.facilitator.workflow && i.workspace === cfg.facilitator.workspace))) this.db.prepare('UPDATE facilitations SET brief = ? WHERE conv = ? AND state = \'active\' AND brief IS NULL').run(res.message.id, conv)
     // p18: reopened by these words, the conductor stands open again first.
     if (res.reopened) await this.syncStanding(conv).catch(() => null)
+    if (!res.duplicate) await this.testHooks.afterAccept?.()
     for (const i of res.invitations) if (i.state === 'pending') await this.dispatch(i.id)
     return { ...res, created, invitations: res.invitations.map(i => this.invitation(i.id)!) }
+  }
+
+  // ---- message files (workflow_editor p19, docs/message-files.md) ------------------------
+
+  // Failure injection for the recovery checks: each hook runs at its
+  // boundary, and a throw there is a crash at that point.
+  testHooks: { afterStaging?: () => Promise<void>; afterPublish?: () => Promise<void>; beforeAccept?: () => Promise<void>; afterAccept?: () => Promise<void> } = {}
+  upload(conv: string, token: string): UploadRow | undefined { return this.one<UploadRow>('SELECT * FROM uploads WHERE conv = ? AND token = ?', conv, token) }
+  uploads(conv: string): UploadRow[] { return this.all<UploadRow>('SELECT * FROM uploads WHERE conv = ? ORDER BY id', conv) }
+  uploadEvents(upload: number): { id: number; state: string; at: string; note: string }[] { return this.all('SELECT id, state, at, note FROM upload_events WHERE upload = ? ORDER BY id', upload) }
+  private uploadEvent(upload: number, state: string, note: string) { this.db.prepare('INSERT INTO upload_events (upload, state, at, note) VALUES (?, ?, ?, ?)').run(upload, state, now(), note) }
+  private tokenConflict(conv: string, token: string, op?: UploadRow) {
+    return new RequestError(409, `token ${token} was already used for another submission in ${conv}; send changed content with a new token`, { code: 'token-conflict', ...(op ? { operation: op.id, state: op.state } : {}) })
+  }
+  // The accepted message of an operation, as the first response gave it.
+  private acceptedResult(conv: string, op: UploadRow) {
+    const m = this.cs.message(op.message!)!
+    return { message: m, duplicate: true, reopened: false, invitations: this.all<InvitationRow>('SELECT * FROM invitations WHERE conv = ? AND token LIKE ? ORDER BY id', conv, `message:${m.id}:%`) }
+  }
+
+  private async postFiles(conv: string, o: PostInput, files: IncomingFile[]): Promise<PostResult> {
+    const digest = submissionDigest({ author: o.author, text: o.text, files: files.map(f => ({ name: f.name, mime: f.mime, bytes: f.bytes.length, sha256: f.sha256 })), challenges: o.challenges ?? [], to: o.to ?? [], runs: o.runs ?? [], re: o.re ?? [], with: o.with ?? null, title: o.title ?? null, via: o.via ?? null })
+    const same = (op: UploadRow) => op.digest === digest && op.author === o.author
+    let op = this.upload(conv, o.token)
+    if (op && !same(op)) throw this.tokenConflict(conv, o.token, op)
+    // Accepted already (a retry after a lost response): the same result,
+    // without routing, publishing or a second request.
+    if (op?.state === 'accepted') return this.afterAccept(conv, this.acceptedResult(conv, op), false)
+    if (!op && this.one('SELECT 1 FROM messages WHERE conv = ? AND token = ?', conv, o.token)) throw this.tokenConflict(conv, o.token)
+    const fc = loadFilesConfig(this.area)
+    if ('disabled' in fc) throw new StorageUnavailable(fc.disabled, 'unconfigured')
+    const root = await shareRoot(fc.share)
+    if (root.state !== 'ok') throw new StorageUnavailable(root.detail, root.state)
+    const created = this.room(conv, o, files[0].name)
+    // A message nobody can receive publishes nothing.
+    await this.route(conv, o)
+    if (!op) {
+      const pins = await this.cs.pinAll(o.challenges ?? [])
+      const alloc: AllocatedFile[] = files.map(f => ({ id: newAttachmentId(), ordinal: f.ordinal, name: f.name, mime: f.mime, bytes: f.bytes.length, sha256: f.sha256, preview: f.preview, served: f.served }))
+      op = this.tx(() => {
+        const again = this.upload(conv, o.token)
+        if (again) return again
+        const at = now()
+        const id = Number(this.db.prepare('INSERT INTO uploads (conv, token, author, digest, bundle, share, prefix, files, pins, state, created, updated) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, \'reserved\', ?, ?)')
+          .run(conv, o.token, o.author, digest, newBundleId(), fc.share, fc.prefix, JSON.stringify(alloc), JSON.stringify(pins), at, at).lastInsertRowid)
+        this.uploadEvent(id, 'reserved', `${alloc.length} file(s) by ${o.author}; ${digest}`)
+        return this.one<UploadRow>('SELECT * FROM uploads WHERE id = ?', id)!
+      })
+      if (!same(op)) throw this.tokenConflict(conv, o.token, op)
+    }
+    const alloc = JSON.parse(op.files) as AllocatedFile[]
+    const pins = JSON.parse(op.pins) as ChallengeAttachmentRef[]
+    if (op.state !== 'accepted') {
+      try {
+        const r = await publishBundle({ share: op.share, prefix: op.prefix, conversation: conv, bundle: op.bundle, files: alloc, bytes: f => files[f.ordinal - 1].bytes }, { afterStaging: this.testHooks.afterStaging })
+        const id = op.id
+        this.tx(() => {
+          const cur = this.one<UploadRow>('SELECT * FROM uploads WHERE id = ?', id)!
+          if (cur.state === 'accepted') return
+          this.db.prepare('UPDATE uploads SET state = \'published\', manifest = ?, error = NULL, tries = tries + 1, updated = ? WHERE id = ?').run(r.digest, now(), id)
+          if (cur.state !== 'published') this.uploadEvent(id, 'published', `${r.adopted ? 'adopted the complete bundle found on the share' : 'bundle written and renamed into place'}: ${r.digest}`)
+        })
+      } catch (e) {
+        const id = op.id
+        this.tx(() => {
+          this.db.prepare('UPDATE uploads SET state = CASE WHEN state = \'accepted\' THEN state ELSE \'failed\' END, error = ?, tries = tries + 1, updated = ? WHERE id = ?').run((e as Error).message, now(), id)
+          this.uploadEvent(id, 'failed', `${(e as Error).message} (a retry with the same token and files starts again from reserved)`)
+        })
+        throw e
+      }
+      await this.testHooks.afterPublish?.()
+    }
+    // Routed again now and written in one transaction with the files and the
+    // operation's acceptance; a route that moved meanwhile is computed again.
+    for (let n = 0; ; n++) {
+      const route = await this.route(conv, o)
+      await this.testHooks.beforeAccept?.()
+      const cur = op
+      const res = this.tx(() => {
+        const latest = this.one<UploadRow>('SELECT * FROM uploads WHERE id = ?', cur.id)!
+        if (latest.state === 'accepted') return 'accepted' as const
+        if (latest.state !== 'published') throw new RequestError(409, `the files of ${o.token} are not published (${latest.state}${latest.error ? `: ${latest.error}` : ''}); send the same files with the same token again`, { code: 'upload-incomplete' })
+        if (this.routingState(conv) !== route.state) return 'moved' as const
+        return this.accept(conv, o, route, pins, { op: latest, files: alloc })
+      })
+      if (res === 'accepted') return this.afterAccept(conv, this.acceptedResult(conv, this.upload(conv, o.token)!), created)
+      if (res === 'moved') { if (n >= 2) throw new RequestError(409, `the conversation ${conv} kept changing while the message was accepted; nothing was sent — send it again`, { code: 'routing-changed' }); continue }
+      return this.afterAccept(conv, res, created)
+    }
   }
 
   // The conversations a run conducts, newest first (a conductor run that was
@@ -1890,7 +2039,7 @@ export class ConversationService {
     // runs) keeps its run name; it gets no run-view link that opens nothing.
     const known = this.exec ? new Set((await loadRegistry(this.exec.ctx.registryFile)).workspaces.map(w => w.id)) : null
     const linkable = (run: string | null) => !run || !known || known.has(parseRunName(run).workspace)
-    const attached = await this.cs.attachmentViews(conv)
+    const attached = await this.cs.attachmentViews(conv, o.viewBase)
     return {
       conversation: { id: c.id, title: c.title, created: c.created, updated: c.updated, state: c.state, by: c.by, origin: c.kind, category: c.category === 'check' ? 'check' : 'conversation', displayTitle: c.display_title ?? null, defaultTo: c.default_to ?? null, mode: this.mode(conv), conductor: c.conductor ?? null, requester: this.requester(conv), facilitation: this.facilitation(conv) },
       facilitations: this.facilitations(conv),

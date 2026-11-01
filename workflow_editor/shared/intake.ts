@@ -41,12 +41,22 @@ export interface ZulipSource { kind: 'zulip'; realm: string; message: number; st
 // `invitation`: in a discussion (p16, docs/discussions.md), the invitation
 // the run was started for.
 // `attachments` (challenge p1, docs/challenges.md): what the message carried,
-// each pinned to the revision it was sent with.
+// each challenge pinned to the revision it was sent with, each file (p19) by
+// its occurrence.
 export interface ConversationSource { kind: 'conversation'; conversation: string; message: number; author: string; at: string; invitation?: number; attachments?: AttachmentRef[] }
 // A challenge attached to a message or a request, at one revision of the
 // challenge repository: the commit, the title it had and the file's sha256.
-export interface AttachmentRef { kind: 'challenge'; id: string; commit: string; title: string; sha256: string }
-export const attachmentLabel = (a: AttachmentRef) => `challenge ${a.id} "${a.title}" at ${a.commit.slice(0, 12)}`
+export interface ChallengeAttachmentRef { kind: 'challenge'; id: string; commit: string; title: string; sha256: string }
+// A file a person's message carried (workflow_editor p19,
+// docs/message-files.md): one occurrence of original bytes on a share, by the
+// identity WFE allocated (attachment id, bundle) and the message it was
+// accepted with — conversation, message, position — with the original name,
+// the client's media type hint, the size and the sha256.
+export interface FileAttachmentRef { kind: 'file'; id: string; bundle: string; conversation: string; message: number; ordinal: number; name: string; mime: string; bytes: number; sha256: string; ref: string }
+export type AttachmentRef = ChallengeAttachmentRef | FileAttachmentRef
+export const attachmentLabel = (a: AttachmentRef) => a.kind === 'file' ? `file "${a.name}" (${a.id}, ${a.bytes} bytes) of ${a.conversation} #${a.message}` : `challenge ${a.id} "${a.title}" at ${a.commit.slice(0, 12)}`
+// The same attachment twice: a challenge by id, a file by its occurrence.
+export const sameAttachment = (a: AttachmentRef, b: AttachmentRef) => a.kind === b.kind && a.id === b.id
 export type SourceRef = ZulipSource | ConversationSource
 // How a source is named to a reader. The Zulip form is the one recorded
 // decisions were written with (their evidence is derived from it on replay).

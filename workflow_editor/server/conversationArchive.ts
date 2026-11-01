@@ -44,6 +44,8 @@ import type { ConversationService, Horizon } from './conversationService.ts'
 import { ConversationWorkflows } from './conversationWorkflows.ts'
 import { git, gitOk } from './git.ts'
 import { withLock } from './lock.ts'
+import { manifestOf, writePackage, type AllocatedFile, type Manifest as FilesManifest } from './messageFiles.ts'
+import { RequestError } from './workspace.ts'
 
 // The manifest format: `ag.conversation.v1` since challenge p2, a superset of
 // the discussions' `ag.argue.discussion.v1` (which readers still accept).
@@ -219,14 +221,9 @@ export class ConversationArchive {
     try { return JSON.parse(readFileSync(join(this.dir, this.pathOf(conv), 'manifest.json'), 'utf8')) as Manifest } catch { return null }
   }
 
-  // Appends the records beyond the published horizon and rewrites the
-  // manifest. Null when nothing changed (no new record, same state).
-  private write(conv: string): { horizon: Horizon; records: number } | null {
-    const d = this.ds.conversation(conv)
-    if (!d) return null
-    const before = this.published(conv)
-    const from = before?.horizon ?? ZERO
-    const live = this.ds.horizon(conv)
+  // Every record of the conversation beyond `from`, in the transcript's
+  // order (also what an export package carries from the start).
+  records(conv: string, from: Horizon) {
     const lines: { at: string; order: number; rec: Record<string, unknown> }[] = []
     for (const r of this.ds.membership(conv)) if (r.id > from.membership) lines.push({ at: r.at, order: 0, rec: { type: 'membership', id: r.id, participant: r.participant, kind: r.kind, workspace: r.workspace, workflow: r.workflow, action: r.action, by: r.by, at: r.at, note: r.note } })
     const invs = new Map(this.ds.invitations(conv).map(i => [i.id, i]))
@@ -258,8 +255,38 @@ export class ConversationArchive {
       for (const v of [r.after, r.before]) if (v && !snapshots.includes(v.sha256)) snapshots.push(v.sha256)
     }
     for (const e of wfs.events(conv, from.workflowEvent ?? 0)) lines.push({ at: e.at, order: 9, rec: { type: 'workflow-link', id: e.id, at: e.at, ref: e.ref, message: e.message, by: e.by, run: e.run, note: e.note } })
-    if (!lines.length && before?.state === d.state) return null
     lines.sort((a, b) => a.at.localeCompare(b.at) || a.order - b.order)
+    return { lines, snapshots, invs, wfs }
+  }
+
+  // The manifests of the conversation's accepted message-file bundles (p19),
+  // as they were published on the share.
+  bundles(conv: string): FilesManifest[] {
+    const out: FilesManifest[] = []
+    for (const u of this.ds.uploads(conv).filter(u => u.state === 'accepted')) out.push(manifestOf({ conversation: conv, bundle: u.bundle, share: u.share, prefix: u.prefix, files: JSON.parse(u.files) as AllocatedFile[] }))
+    return out
+  }
+
+  // A self-contained recovery package of one conversation (p19,
+  // docs/message-files.md): its whole transcript, the bundle manifests and
+  // every original file, hashed while packaged. Starts nothing.
+  async exportPackage(conv: string, out: string, by: string) {
+    if (!this.ds.conversation(conv)) throw new RequestError(404, `no conversation ${conv}`)
+    const { lines } = this.records(conv, ZERO)
+    const challenges = this.ds.messages(conv).flatMap(m => this.ds.cs.attachmentsOf([m.id]).filter(a => a.kind === 'challenge').map(a => ({ id: a.id, commit: (a as { commit: string }).commit, message: m.id })))
+    return writePackage(out, { conversation: conv, by, horizon: this.ds.horizon(conv).message, transcript: lines.map(l => `${JSON.stringify(l.rec)}\n`).join(''), bundles: this.bundles(conv), files: this.ds.cs.fileRows({ conv }), challenges })
+  }
+
+  // Appends the records beyond the published horizon and rewrites the
+  // manifest. Null when nothing changed (no new record, same state).
+  private write(conv: string): { horizon: Horizon; records: number } | null {
+    const d = this.ds.conversation(conv)
+    if (!d) return null
+    const before = this.published(conv)
+    const from = before?.horizon ?? ZERO
+    const live = this.ds.horizon(conv)
+    const { lines, snapshots, invs, wfs } = this.records(conv, from)
+    if (!lines.length && before?.state === d.state) return null
     const dir = join(this.dir, this.pathOf(conv))
     mkdirSync(dir, { recursive: true })
     if (lines.length) appendFileSync(join(dir, 'transcript.jsonl'), lines.map(l => `${JSON.stringify(l.rec)}\n`).join(''))
@@ -267,6 +294,13 @@ export class ConversationArchive {
       const snap = wfs.snapshot(sha)
       const file = join(dir, 'workflows', `${sha}.yaml`)
       if (snap && !existsSync(file)) { mkdirSync(join(dir, 'workflows'), { recursive: true }); writeFileSync(file, snap.text) }
+    }
+    // Message files (p19): each accepted bundle's manifest beside the
+    // transcript, byte for byte the share's. The bytes stay on the share.
+    const bundles = this.bundles(conv)
+    for (const m of bundles) {
+      const file = join(dir, 'attachments', m.bundle, 'manifest.json')
+      if (!existsSync(file)) { mkdirSync(join(dir, 'attachments', m.bundle), { recursive: true }); writeFileSync(file, `${JSON.stringify(m, null, 2)}\n`) }
     }
     const horizon = { message: Math.max(from.message, live.message), link: Math.max(from.link, live.link), membership: Math.max(from.membership, live.membership), event: Math.max(from.event, live.event), activity: Math.max(from.activity ?? 0, live.activity ?? 0), annotation: Math.max(from.annotation ?? 0, live.annotation ?? 0), meta: Math.max(from.meta ?? 0, live.meta ?? 0), overview: Math.max(from.overview ?? 0, live.overview ?? 0), workflow: Math.max(from.workflow ?? 0, live.workflow ?? 0), workflowEvent: Math.max(from.workflowEvent ?? 0, live.workflowEvent ?? 0) }
     const runs = new Map<string, { run: string; workspace: string; workflow: string; author: string | null; participant: string }>()
@@ -288,6 +322,8 @@ export class ConversationArchive {
       runs: [...runs.values()],
       exports: [...(before?.exports ?? []), { at: now(), from, through: horizon, records: lines.length, state: d.state }],
       workflows: wfs.rows(conv).map(w => { const r = wfs.view(w); const snap = (v: typeof r.after) => v && existsSync(join(dir, 'workflows', `${v.sha256}.yaml`)) ? `workflows/${v.sha256}.yaml` : null; return { id: r.id, relation: r.relation, role: r.role, project: r.project, workflow: r.workflow, target: r.target, after: r.after, before: r.before, messages: r.messages, run: r.run, attempt: r.attempt, invitation: r.invitation, evidence: r.evidence, state: r.state, snapshot: { after: snap(r.after), before: snap(r.before) } } }),
+      // p19: where each message's files are, and the manifest kept here.
+      ...(bundles.length ? { files: bundles.map(m => ({ bundle: m.bundle, share: m.share, path: m.path, digest: m.digest, manifest: `attachments/${m.bundle}/manifest.json`, messages: [...new Set(this.ds.cs.fileRows({ conv }).filter(r => r.bundle === m.bundle).map(r => r.message))], files: m.files.length })) } : {}),
       transcript: 'transcript.jsonl', summary: 'summary.md',
     }
     writeFileSync(join(dir, 'manifest.json'), `${JSON.stringify(manifest, null, 2)}\n`)
@@ -310,7 +346,7 @@ export interface Manifest {
   facilitations?: unknown[]; defaultTo?: string | null; migration?: unknown
   conductor?: string | null; requester?: unknown; activities?: unknown[]
   category?: string; displayTitle?: string | null; overview?: unknown
-  members: unknown[]; horizon: Horizon; invitations: unknown[]; runs: unknown[]; workflows?: unknown[]
+  members: unknown[]; horizon: Horizon; invitations: unknown[]; runs: unknown[]; workflows?: unknown[]; files?: unknown[]
   exports: { at: string; from: Horizon; through: Horizon; records: number; state: string }[]
   transcript: string; summary: string
 }

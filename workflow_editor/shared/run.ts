@@ -7,7 +7,7 @@ import { contextChanges, changeWords, type AttemptContext, type ContextDelivery 
 import { docStepsOf, type EffectiveGraph, type StepSpec } from './compile.ts'
 import type { DocSteps } from './model.ts'
 import type { AttemptCatalog, CatalogContext } from './catalog.ts'
-import { INSTRUCTION_RESPONSES, sourceLabel, type AttachmentRef, type SourceRef } from './intake.ts'
+import { INSTRUCTION_RESPONSES, sourceLabel, type AttachmentRef, type ChallengeAttachmentRef, type FileAttachmentRef, type SourceRef } from './intake.ts'
 import {
   CANDIDATE, INPUT_ID, OUTPUT_ID, SET_OBSERVATIONS, STAGINGS, outputNumber, parseRef,
   type ExternalOutput, type InputSet, type SetObservation, type ShareRef, type Staging,
@@ -75,10 +75,12 @@ export interface RunInput {
   references?: ShareRef[]
   // Challenges attached to the words (challenge p1, docs/challenges.md),
   // each as it was at the attached commit: the file in the run folder
-  // (attachments/<id>@<commit12>.md) is that revision's text.
+  // (attachments/<id>@<commit12>.md) is that revision's text. Files a
+  // message carried (p19, docs/message-files.md) are named by occurrence;
+  // their bytes stay on the share (wfe conversation fetch).
   attachments?: InputAttachment[]
 }
-export interface InputAttachment extends AttachmentRef { file: string }
+export type InputAttachment = (ChallengeAttachmentRef & { file: string }) | FileAttachmentRef
 // `name` is the agent identity the run is performed as (p6: the workflow's
 // execution.agent); `host` the execution host that launches it, when that is
 // not the agent itself (autolab executing for ppt-agent).
@@ -836,6 +838,9 @@ const heldFact = (s: Pick<RunState, 'standing'>, d: string, n: number) => !!s.st
 // ---- the reducer --------------------------------------------------------------
 
 const text = (v: unknown, what: string): string => (typeof v === 'string' && v.trim() ? v : fail('missing', `${what} is required`))
+// Words that may be empty when the message they come from carried files (p19):
+// a pasted image alone is what the person said.
+const withFiles = (v: unknown, source: unknown, what: string): string => (typeof v === 'string' && !v.trim() && isObj(source) && Array.isArray((source as { attachments?: unknown }).attachments) && ((source as { attachments: { kind?: unknown }[] }).attachments).some(a => isObj(a) && a.kind === 'file') ? v : text(v, what))
 const optText = (v: unknown, what: string): string => (v === undefined || v === null ? '' : typeof v === 'string' ? v : fail('shape', `${what} must be text`))
 const isObj = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null && !Array.isArray(v)
 
@@ -882,12 +887,21 @@ function evidence(v: unknown, what: string, expected: string): DocumentEvidence 
   return { path: expected, sha256: d.sha256 as string, bytes: d.bytes as number }
 }
 
-// Challenge references (challenge p1): pinned to a commit, never a moving name.
+// Challenge references (challenge p1): pinned to a commit, never a moving
+// name. File references (p19): an occurrence of one message, by the identity
+// WFE allocated, with its size and hash.
+export function fileAttachmentOf(o: Record<string, unknown>, what: string): FileAttachmentRef {
+  const t = (k: string, re: RegExp) => (typeof o[k] === 'string' && re.test(o[k] as string) ? o[k] as string : fail('shape', `${what}.${k} is not valid`))
+  const n = (k: string, min: number) => (typeof o[k] === 'number' && Number.isInteger(o[k]) && (o[k] as number) >= min ? o[k] as number : fail('shape', `${what}.${k} must be a whole number ≥ ${min}`))
+  if (typeof o.name !== 'string' || !o.name) fail('shape', `${what}.name is required`)
+  return { kind: 'file', id: t('id', /^f-[0-9a-f]{24}$/), bundle: t('bundle', /^b-[0-9]{8}t[0-9]{6}z-[0-9a-f]{8}$/), conversation: t('conversation', /^[a-z0-9][a-z0-9-]{0,47}$/), message: n('message', 1), ordinal: n('ordinal', 1), name: o.name as string, mime: typeof o.mime === 'string' ? o.mime : 'application/octet-stream', bytes: n('bytes', 0), sha256: t('sha256', /^[0-9a-f]{64}$/), ref: t('ref', /^shared:\/\/\S+$/) }
+}
 export function attachmentsOf(v: unknown): AttachmentRef[] {
   if (!Array.isArray(v)) return fail('shape', 'source.attachments must be a list')
   return v.map((a, i) => {
     const o = isObj(a) ? a as Record<string, unknown> : fail('shape', `source.attachments[${i}] must be an object`)
-    if (o.kind !== 'challenge' || typeof o.id !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(o.id)) fail('shape', `source.attachments[${i}] must be a challenge (ch-0001)`)
+    if (o.kind === 'file') return fileAttachmentOf(o, `source.attachments[${i}]`)
+    if (o.kind !== 'challenge' || typeof o.id !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(o.id)) fail('shape', `source.attachments[${i}] must be a challenge (ch-0001) or a file`)
     if (typeof o.commit !== 'string' || !/^[0-9a-f]{40,64}$/.test(o.commit)) fail('shape', `source.attachments[${i}].commit must be a full commit id`)
     if (typeof o.sha256 !== 'string' || !/^[0-9a-f]{64}$/.test(o.sha256)) fail('shape', `source.attachments[${i}].sha256 must be 64 hex digits`)
     return { kind: 'challenge' as const, id: o.id as string, commit: o.commit as string, title: typeof o.title === 'string' ? o.title : '', sha256: o.sha256 as string }
@@ -1332,7 +1346,7 @@ export function apply(prev: RunState | null, e: HistoryEntry | (OpInput & EntryM
       const q = question(e.question)
       if (q.withdrawn) fail('question-closed', `question ${q.id} was withdrawn`)
       if (q.takenUp) fail('question-closed', `the answer to ${q.id} was already taken up; ask a new question`)
-      const answer: Answer = { text: text(e.text, 'the answer'), from: optText(e.from, 'from').trim() || by, by, at, via: e.via }
+      const answer: Answer = { text: withFiles(e.text, e.source, 'the answer'), from: optText(e.from, 'from').trim() || by, by, at, via: e.via }
       if (e.source !== undefined) answer.source = sourceOf(e.source)
       if (e.delegation !== undefined && e.delegation !== null) {
         const dl = e.delegation as unknown as Record<string, unknown>
@@ -1375,7 +1389,7 @@ export function apply(prev: RunState | null, e: HistoryEntry | (OpInput & EntryM
       const id = e.instruction || `i${Object.keys(all).length + 1}`
       if (!INSTRUCTION_ID.test(id)) fail('shape', `instruction id "${id}" must match ${INSTRUCTION_ID.source}`)
       if (id in all) fail('instruction-exists', `instruction ${id} already exists`)
-      const ins: Instruction = { id, text: text(e.text, 'the instruction'), from: text(e.from, 'whose instruction it is (from)'), by, at, via: e.via, during: Object.keys(s.nodes).filter(n => s.nodes[n].state === 'running').sort(), ack: null }
+      const ins: Instruction = { id, text: withFiles(e.text, e.source, 'the instruction'), from: text(e.from, 'whose instruction it is (from)'), by, at, via: e.via, during: Object.keys(s.nodes).filter(n => s.nodes[n].state === 'running').sort(), ack: null }
       if (e.source !== undefined) ins.source = sourceOf(e.source)
       s.instructions = { ...all, [id]: ins }
       change.instruction = [null, id]

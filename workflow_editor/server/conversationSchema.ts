@@ -4,7 +4,8 @@
 // conversation), the conductor's activities, metadata, overviews, workflow
 // references, attachments, facilitations and the archive's bookkeeping.
 // Versions 4–11 were written for discussions (workflow_editor p16 … challenge
-// p1); version 12 (challenge p2) makes every conversation one kind of room.
+// p1); version 12 (challenge p2) makes every conversation one kind of room;
+// version 14 (workflow_editor p19) adds message files.
 import type { Migration } from './sqlite.ts'
 
 export const CONVERSATION_MIGRATIONS: Migration[] = [{
@@ -210,4 +211,26 @@ export const CONVERSATION_MIGRATIONS: Migration[] = [{
   // the conversation it opens (`topic`): navigation, never a run identity.
   version: 13,
   up: db => { if (!(db.prepare('PRAGMA table_info(activities)').all() as { name: string }[]).some(c => c.name === 'topic')) db.exec('ALTER TABLE activities ADD COLUMN topic TEXT') },
+}, {
+  // workflow_editor p19 (docs/message-files.md): files a person's message
+  // carried. `uploads` is the operation a submit token names — the author, the
+  // submission's digest, the identities allocated (bundle, files), the
+  // challenge pins taken once, its state (reserved → published → accepted;
+  // failed, retried from reserved) and the accepted message. `message_files`
+  // is the association written with the message: one row per occurrence, by
+  // its position. `file_backups`: each bundle's copy outside the live share.
+  // Nothing existing is rewritten: earlier messages carried no files.
+  version: 14,
+  up: db => db.exec(`
+    CREATE TABLE IF NOT EXISTS uploads (id INTEGER PRIMARY KEY AUTOINCREMENT, conv TEXT NOT NULL, token TEXT NOT NULL, author TEXT NOT NULL, digest TEXT NOT NULL,
+      bundle TEXT NOT NULL UNIQUE, share TEXT NOT NULL, prefix TEXT NOT NULL, files TEXT NOT NULL, pins TEXT NOT NULL DEFAULT '[]', state TEXT NOT NULL,
+      manifest TEXT, message INTEGER, error TEXT, tries INTEGER NOT NULL DEFAULT 0, created TEXT NOT NULL, updated TEXT NOT NULL, UNIQUE (conv, token));
+    CREATE TABLE IF NOT EXISTS upload_events (id INTEGER PRIMARY KEY AUTOINCREMENT, upload INTEGER NOT NULL, state TEXT NOT NULL, at TEXT NOT NULL, note TEXT NOT NULL DEFAULT '');
+    CREATE INDEX IF NOT EXISTS upload_events_upload ON upload_events (upload, id);
+    CREATE TABLE IF NOT EXISTS message_files (id INTEGER PRIMARY KEY AUTOINCREMENT, conv TEXT NOT NULL, message INTEGER NOT NULL, ordinal INTEGER NOT NULL, attachment TEXT NOT NULL UNIQUE,
+      bundle TEXT NOT NULL, upload INTEGER NOT NULL, name TEXT NOT NULL, mime TEXT NOT NULL, bytes INTEGER NOT NULL, sha256 TEXT NOT NULL, preview TEXT, served TEXT NOT NULL,
+      ref TEXT NOT NULL, at TEXT NOT NULL, UNIQUE (message, ordinal));
+    CREATE INDEX IF NOT EXISTS message_files_conv ON message_files (conv, message);
+    CREATE TABLE IF NOT EXISTS file_backups (bundle TEXT PRIMARY KEY, conv TEXT NOT NULL, state TEXT NOT NULL, destination TEXT, detail TEXT, error TEXT, tries INTEGER NOT NULL DEFAULT 0, at TEXT);
+  `),
 }]

@@ -13,7 +13,8 @@
 import { existsSync, mkdirSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import type { DatabaseSync } from 'node:sqlite'
-import type { AttachmentRef, ConversationSource } from '../shared/intake.ts'
+import type { AttachmentRef, ChallengeAttachmentRef, ConversationSource } from '../shared/intake.ts'
+import { fileView, refOf, type FileRow, type FileView } from './messageFiles.ts'
 import type { ChallengeStore } from './challenges.ts'
 import type { PinnedAttachment } from './runs.ts'
 import type { Workflow } from '../shared/model.ts'
@@ -133,7 +134,9 @@ export interface Message {
 }
 // A challenge a message carried (challenge p1): the revision it was sent
 // with, and — a separate, current read — the latest one when it moved since.
-export interface MessageAttachment extends AttachmentRef { latest: { commit: string; title: string; state: string | null } | null }
+// A file it carried (p19, docs/message-files.md): the occurrence, how a
+// browser may show it and where its bytes are read.
+export type MessageAttachment = (ChallengeAttachmentRef & { latest: { commit: string; title: string; state: string | null } | null }) | FileView
 // What a client names to attach: a challenge, optionally at a commit (else
 // its current revision when the message is accepted).
 export interface AttachRequest { id: string; at?: string }
@@ -276,13 +279,13 @@ export class ConversationStore {
   // Each named challenge at the revision named, or its current one. Refused
   // (with the reason) when one is not published or cannot be read: a message
   // never carries a reference that does not resolve.
-  async pinAll(refs: AttachRequest[]): Promise<AttachmentRef[]> {
+  async pinAll(refs: AttachRequest[]): Promise<ChallengeAttachmentRef[]> {
     if (!Array.isArray(refs)) throw new RequestError(400, 'challenges is a list of {id, at?}')
     if (!refs.length) return []
     if (refs.length > 20) throw new RequestError(400, 'a message carries at most 20 challenges')
     const store = await this.challenges()
     if (!store) throw new RequestError(503, 'no challenge repository is configured here (challenges.json): nothing can be attached', { code: 'no-challenges' })
-    const out: AttachmentRef[] = []
+    const out: ChallengeAttachmentRef[] = []
     for (const r of refs) {
       if (typeof r?.id !== 'string') throw new RequestError(400, 'challenges is a list of {id, at?}')
       if (out.some(x => x.id === r.id)) continue
@@ -292,40 +295,60 @@ export class ConversationStore {
     return out
   }
   // Inside the message's own transaction.
-  attachRows(conv: string, message: number, pins: AttachmentRef[]) {
+  attachRows(conv: string, message: number, pins: ChallengeAttachmentRef[]) {
     const ins = this.db.prepare('INSERT INTO attachments (conv, message, kind, ref, commit_id, title, sha256, at) VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (message, kind, ref) DO NOTHING')
     for (const p of pins) ins.run(conv, message, p.kind, p.id, p.commit, p.title, p.sha256, now())
   }
-  // What the named messages carried, in order, each challenge once.
+  // What the named messages carried, in order: each challenge once, and
+  // every file occurrence (p19) with the message it came with — two files
+  // with one name, or the same bytes in two messages, stay two.
   attachmentsOf(messages: number[]): AttachmentRef[] {
     const out: AttachmentRef[] = []
-    for (const m of messages) for (const a of this.all<AttachmentRow>('SELECT * FROM attachments WHERE message = ? ORDER BY id', m)) {
-      if (!out.some(x => x.id === a.ref)) out.push({ kind: 'challenge', id: a.ref, commit: a.commit_id, title: a.title, sha256: a.sha256 })
+    for (const m of messages) {
+      for (const a of this.all<AttachmentRow>('SELECT * FROM attachments WHERE message = ? ORDER BY id', m)) {
+        if (!out.some(x => x.kind === 'challenge' && x.id === a.ref)) out.push({ kind: 'challenge', id: a.ref, commit: a.commit_id, title: a.title, sha256: a.sha256 })
+      }
+      for (const f of this.fileRows({ message: m })) if (!out.some(x => x.kind === 'file' && x.id === f.attachment)) out.push(refOf(f))
     }
     return out
   }
-  // The text of each attached revision, for the run that receives it.
+  // The text of each attached revision, for the run that receives it; files
+  // go as references (their bytes stay on the share).
   async pinnedTexts(refs: AttachmentRef[]): Promise<PinnedAttachment[]> {
     if (!refs.length) return []
-    const store = await this.challenges()
-    if (!store) throw new Error('the message carries challenges, but no challenge repository is configured here (challenges.json)')
     const out: PinnedAttachment[] = []
-    for (const a of refs) out.push({ ...a, text: await store.text(a.id, a.commit) })
+    for (const a of refs) {
+      if (a.kind === 'file') { out.push(a); continue }
+      const store = await this.challenges()
+      if (!store) throw new Error('the message carries challenges, but no challenge repository is configured here (challenges.json)')
+      out.push({ ...a, text: await store.text(a.id, a.commit) })
+    }
     return out
+  }
+  // ---- files (workflow_editor p19, docs/message-files.md) ----------------------------------
+  fileRows(o: { conv?: string; message?: number }): FileRow[] {
+    if (o.message !== undefined) return this.all<FileRow>('SELECT * FROM message_files WHERE message = ? ORDER BY ordinal', o.message)
+    return this.all<FileRow>('SELECT * FROM message_files WHERE conv = ? ORDER BY message, ordinal', o.conv ?? '')
+  }
+  // One file by its whole identity: conversation, message and attachment.
+  fileRow(conv: string, message: number, attachment: string): FileRow | undefined {
+    return this.one<FileRow>('SELECT * FROM message_files WHERE conv = ? AND message = ? AND attachment = ?', conv, message, attachment)
   }
   // A conversation's attachments by message, with the latest revision of
   // each challenge beside the attached one (the index; refreshed at most
   // every few seconds).
-  async attachmentViews(conv: string): Promise<Map<number, MessageAttachment[]>> {
+  async attachmentViews(conv: string, viewBase?: string | null): Promise<Map<number, MessageAttachment[]>> {
     const rows = this.all<AttachmentRow>('SELECT * FROM attachments WHERE conv = ? ORDER BY id', conv)
     const out = new Map<number, MessageAttachment[]>()
-    if (!rows.length) return out
-    const store = await this.challenges()
-    await store?.sync().catch(() => undefined)
-    for (const a of rows) {
-      const cur = store?.current(a.ref) ?? null
-      out.set(a.message, [...out.get(a.message) ?? [], { kind: 'challenge', id: a.ref, commit: a.commit_id, title: a.title, sha256: a.sha256, latest: cur ? { commit: cur.commit, title: cur.title, state: cur.state } : null }])
+    if (rows.length) {
+      const store = await this.challenges()
+      await store?.sync().catch(() => undefined)
+      for (const a of rows) {
+        const cur = store?.current(a.ref) ?? null
+        out.set(a.message, [...out.get(a.message) ?? [], { kind: 'challenge', id: a.ref, commit: a.commit_id, title: a.title, sha256: a.sha256, latest: cur ? { commit: cur.commit, title: cur.title, state: cur.state } : null }])
+      }
     }
+    for (const f of this.fileRows({ conv })) out.set(f.message, [...out.get(f.message) ?? [], fileView(f, viewBase)])
     return out
   }
 

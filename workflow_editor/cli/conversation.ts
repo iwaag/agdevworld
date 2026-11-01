@@ -16,6 +16,7 @@ import { changedSince } from '../shared/resultEvidence.ts'
 import type { Boundary } from '../shared/reminders.ts'
 import type { RunRecord } from '../shared/run.ts'
 import { RequestError } from '../server/workspace.ts'
+import { FILES_HELP, filesAdmin, filesRead } from './messageFiles.ts'
 
 // Why --if-untitled left the display title alone (challenge p4).
 const skippedWords = (k: TitleSkip | null) => !k ? '' : `Display title left as it is: ${k.by ? `${k.by} titled it${k.at ? ` at ${k.at}` : ''} (${k.value === null ? 'the original title' : `"${k.value}"`})` : `it already reads "${k.value}"`}.`
@@ -132,10 +133,12 @@ create <id> --title <t> [--author <person>] [--member <project>]… [--default <
                               requester is whoever requested that run
 post <id> (--text <t> | --file <f>) --author <person> [--with <project>] [--to <participant>]…
      [--run <run>]… [--re <msg>]… [--token <t>] [--via <way>] [--challenge <id>[@<commit>]]…
+     [--attach <path>]…
                               the person's message, verbatim, routed as above (refused from an
                               executing attempt). --with: whom a new id is with (creates a
                               one-to-one conversation). --challenge attaches a challenge pinned to
-                              its current revision (or the commit named)
+                              its current revision (or the commit named). --attach sends a file
+                              with it (p19; the text may then be empty; see files below)
 start <id> (--text <t> | --file <f>) --author <person> [--token <t>] [--re <msg>]… [--challenge …]
                               ask the conductor to lead: an explicit start with a brief (the
                               person's words to the conductor) from the current history. The
@@ -205,7 +208,9 @@ workflow list [<id>]
 workflow show [<id>] <record> [--current]
 workflow repair [<id>] [--all]
 
-Carrying the person's words into a run: wfe run instruct|answer … --source-message <id>:<msg>.`
+Carrying the person's words into a run: wfe run instruct|answer … --source-message <id>:<msg>.
+
+${FILES_HELP}`
 
 export interface ConversationCli {
   positional: string[]
@@ -222,6 +227,11 @@ export interface ConversationCli {
 export async function conversationCommand(c: ConversationCli): Promise<number> {
   const [sub, ...args] = c.positional
   if (!sub || sub === 'help') { c.out(CONVERSATION_HELP, { help: CONVERSATION_HELP }); return 0 }
+  // p19: a message's files are read on any host, through the coordinator
+  // when this one has no conversation store (an execution node).
+  const service = c.opt('service') ?? process.env.WFE_SERVICE ?? undefined
+  const filesCli = { sub, args, opt: c.opt, flag: c.flag, out: c.out, usage: c.usage, refused: c.refused }
+  if ((sub === 'attachments' || sub === 'fetch') && service) return filesRead(filesCli, { service })
   const x = await c.exec()
   const cs = new ConversationStore({ area: c.area(), exec: x })
   const ds = new ConversationService(cs)
@@ -248,10 +258,20 @@ export async function conversationCommand(c: ConversationCli): Promise<number> {
       if (o?.discussion) return o.discussion
       throw c.usage('name the conversation: this process is not an attempt of a run asked in one')
     }
-    const text = () => {
+    const text = (o: { optional?: boolean } = {}) => {
       const t = c.opt('text'), f = c.opt('file')
+      if (o.optional && t === undefined && f === undefined) return ''
       if (!!t === !!f) throw c.usage('give exactly one of --text <text> or --file <file|->')
       return t ?? readFileSync(f === '-' ? 0 : resolve(f!), 'utf8')
+    }
+    // p19: files a person's message carries (--attach <path>…), checked
+    // like any client's.
+    const attached = async () => {
+      const paths = c.opts('attach')
+      if (!paths.length) return []
+      const { decodeFiles } = await import('../server/messageFiles.ts')
+      const { basename } = await import('node:path')
+      return decodeFiles(paths.map(p => ({ name: basename(p), base64: readFileSync(resolve(p)).toString('base64') })))
     }
     const ids = (k: string) => c.opts(k).map(v => { const n = Number(v.replace(/^#/, '')); if (!Number.isInteger(n)) throw c.usage(`--${k} takes message ids`); return n })
     const isNum = (v: string | undefined) => v !== undefined && /^#?\d+$/.test(v)
@@ -271,6 +291,8 @@ export async function conversationCommand(c: ConversationCli): Promise<number> {
     }
     const who = async () => { const o = await own(); return o?.agent ?? c.opt('author') ?? c.opt('by') }
     switch (sub) {
+      case 'attachments': case 'fetch': return await filesRead(filesCli, { store: () => cs })
+      case 'uploads': case 'export': case 'restore': case 'backup': return await filesAdmin(filesCli, cs, ds)
       case 'participants': {
         const rows = await ds.participants()
         const cfg = ds.config()
@@ -307,6 +329,7 @@ export async function conversationCommand(c: ConversationCli): Promise<number> {
             : `${m.participant ?? m.author} (${m.author}${m.run ? ` for ${m.run}` : ''}${m.invitation ? `, request ${m.invitation}` : ''})`
           lines.push('', `#${m.id} ${m.at} ${head}${m.kind !== 'message' ? ` [${m.kind}${m.question ? ` ${m.question}` : ''}${m.node ? ` node ${m.node}` : ''}]` : ''}${m.re.length ? ` re ${m.re.map(n => `#${n}`).join(', ')}` : ''}${after}`)
           lines.push(...m.text.split('\n').map(l => `    ${l}`))
+          for (const a of m.attachments ?? []) lines.push(a.kind === 'file' ? `    [file ${a.ordinal}] ${a.name} (${a.mime}, ${a.bytes} bytes) ${a.id} — wfe conversation fetch ${id} --message ${m.id} --attachment ${a.id}` : `    [challenge] ${a.id} "${a.title}" at ${a.commit.slice(0, 12)}`)
           for (const l of v.links.filter(l => l.message === m.id && !v.links.some(y => y.supersedes === l.id))) lines.push(`    → ${l.relation} ${l.run} by ${l.by}: ${l.note}`)
         }
         lines.push('', 'Requests:', ...v.requests.map(i => `  ${i.id} → ${i.participant} (${i.role ?? '?'} ${i.target}) by ${i.by}${i.byRun ? ` ${i.byRun}` : ''}${i.awaits ? ', awaited result' : i.awaitedBy ? ', awaited' : ''}${i.instruct ? ', instruction' : ''}: ${i.state}${i.late ? ' (late)' : ''}${i.run ? ` ${i.run}` : ''}${i.answeredBy ? ` answered by #${i.answeredBy}` : ''}${i.error ? ` — ${i.error}` : ''}${i.held ? ` [continuation held: ${i.held}]` : ''}; about ${i.source.map(n => `#${n}`).join(', ')}; "${i.question.split('\n')[0].slice(0, 100)}"`))
@@ -353,8 +376,10 @@ export async function conversationCommand(c: ConversationCli): Promise<number> {
         // attempt speaks as its own run.
         const o = await own()
         if (o) throw c.refused(`post is the person's route; ${o.run} speaks as itself: wfe conversation reply, or announce from the conductor (quote the request and name whose it is)`, { code: 'not-person' })
-        const r = await ds.post(id, { text: text(), author, token: c.opt('token') ?? `cli-${Date.now()}-${process.pid}`, re: ids('re'), to: c.opts('to'), runs: c.opts('run'), via: c.opt('via'), with: c.opt('with'), title: c.opt('title'), challenges: attachRequests(c.opts('challenge')) })
-        c.out(`${r.duplicate ? 'Already posted (same token)' : 'Posted'}: #${r.message.id} in ${id}${r.created ? ' (created)' : ''}${r.reopened ? ' (reopened)' : ''}; ${r.invitations.map(i => `request ${i.id} → ${i.participant} (${i.role}): ${i.state}${i.run ? ` ${i.run}` : ''}${i.error ? ` — ${i.error}` : ''}`).join('; ')}.`, { ok: true, ...r })
+        const files = await attached()
+        const r = await ds.post(id, { text: text({ optional: files.length > 0 }), author, token: c.opt('token') ?? `cli-${Date.now()}-${process.pid}`, re: ids('re'), to: c.opts('to'), runs: c.opts('run'), via: c.opt('via'), with: c.opt('with'), title: c.opt('title'), challenges: attachRequests(c.opts('challenge')), files })
+        const rows = cs.fileRows({ message: r.message.id })
+        c.out(`${r.duplicate ? 'Already posted (same token)' : 'Posted'}: #${r.message.id} in ${id}${r.created ? ' (created)' : ''}${r.reopened ? ' (reopened)' : ''}${rows.length ? ` with ${rows.length} file(s): ${rows.map(f => `${f.ordinal}. ${f.name} ${f.attachment}`).join(', ')}` : ''}; ${r.invitations.map(i => `request ${i.id} → ${i.participant} (${i.role}): ${i.state}${i.run ? ` ${i.run}` : ''}${i.error ? ` — ${i.error}` : ''}`).join('; ')}.`, { ok: true, ...r, files: rows })
         return 0
       }
       case 'start': {

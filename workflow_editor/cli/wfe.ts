@@ -44,7 +44,7 @@ class Refused extends Error { detail?: unknown; constructor(m: string, detail?: 
 // ---- arguments ---------------------------------------------------------------
 
 interface Parsed { positional: string[]; opts: Map<string, string[]>; flags: Set<string> }
-const FLAGS = new Set(['json', 'help', 'resume', 'h', 'new', 'history', 'no-gitea', 'reuse', 'lost', 'uncertain', 'found', 'complete', 'not-posted', 'ok', 'about-plan', 'all', 'dry-run', 'commit', 'push', 'status', 'rebuild', 'allow-live-executor', 'terminal', 'missing', 'retire', 'upstream', 'published', 'regex', 'ignore-case', 'refresh', 'quick', 'verify-all', 'rendered', 'delivered', 'undelivered', 'partial', 'person', 'integration', 'conclude', 'close', 'no-title', 'if-untitled', 'queue', 'yes', 'no-default', 'none', 'no-change', 'synthetic', 'apply', 'replace', 'current', 'reopen']) // p7: present stop --all, run adjust --dry-run
+const FLAGS = new Set(['json', 'help', 'resume', 'h', 'new', 'history', 'no-gitea', 'reuse', 'lost', 'uncertain', 'found', 'complete', 'not-posted', 'ok', 'about-plan', 'all', 'dry-run', 'commit', 'push', 'status', 'rebuild', 'allow-live-executor', 'terminal', 'missing', 'retire', 'upstream', 'published', 'regex', 'ignore-case', 'refresh', 'quick', 'verify-all', 'rendered', 'delivered', 'undelivered', 'partial', 'person', 'integration', 'conclude', 'close', 'no-title', 'if-untitled', 'queue', 'yes', 'no-default', 'none', 'no-change', 'synthetic', 'apply', 'replace', 'current', 'reopen', 'check-bytes']) // p7: present stop --all, run adjust --dry-run
 function parse(argv: string[]): Parsed {
   const p: Parsed = { positional: [], opts: new Map(), flags: new Set() }
   for (let i = 0; i < argv.length; i++) {
@@ -1240,6 +1240,13 @@ async function cmdExec(p: Parsed): Promise<number> {
             const { ConversationArchive } = await import('../server/conversationArchive.ts')
             const a = await new ConversationArchive(ds).publish().catch(e => ({ published: [], unchanged: [], failed: [{ conv: '*', error: (e as Error).message }] }))
             notes.push(...a.published.map(x => `conversation ${x.conv}: archived ${x.records} records (${x.commit.slice(0, 12)})`), ...a.failed.map(f => `conversation ${f.conv}: archive failed — ${f.error}`))
+            // Message files (p19): accepted bundles copied outside the live share.
+            const { loadFilesConfig } = await import('../server/messageFiles.ts')
+            const fc = loadFilesConfig(areaDir(p))
+            if (!('disabled' in fc) && fc.backup) {
+              const { FileBackups } = await import('../server/fileBackups.ts')
+              notes.push(...await new FileBackups(ds, fc).run().catch(e => [`message files: backup failed — ${(e as Error).message}`]))
+            }
           }
         } finally { cs.close() }
         // Challenges (challenge p1): writes not yet seen in the repository are

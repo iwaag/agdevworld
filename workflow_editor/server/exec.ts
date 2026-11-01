@@ -142,15 +142,24 @@ export function documentationBrief(r: RunRecord): string[] {
 // Challenges the input carried (challenge p1, docs/challenges.md): each as
 // it was when attached, its summary in the run folder, and how to read its
 // files and trials then and its current revision — a separate, explicit read.
+// Files a message carried (p19, docs/message-files.md): each occurrence with
+// its source message and how to get its verified bytes on this host.
+const fileLine = (a: import('../shared/intake.ts').FileAttachmentRef) => `"${a.name}" (${a.mime}, ${a.bytes} bytes, sha256 ${a.sha256.slice(0, 12)}…) from ${a.conversation} #${a.message}, file ${a.ordinal}: wfe conversation fetch ${a.conversation} --message ${a.message} --attachment ${a.id}`
 export function attachmentBrief(r: RunRecord, dir: string): string[] {
   const all = r.input.attachments ?? []
   if (!all.length) return []
-  return [`Attached to the ${r.input.kind === 'request' ? 'request' : 'person\'s words'} (${all.length}): durable challenges, each as it was when attached (wfe challenge help):`,
-    ...all.map(a => `- ${a.id} "${a.title}" at ${a.commit.slice(0, 12)}: ${dir}/${a.file}; its files and trials then: wfe challenge show ${a.id} --at ${a.commit.slice(0, 12)}; its latest revision: wfe challenge show ${a.id}`)]
+  const challenges = all.filter(a => a.kind === 'challenge'), files = all.filter(a => a.kind === 'file')
+  const words = r.input.kind === 'request' ? 'request' : 'person\'s words'
+  return [
+    ...(challenges.length ? [`Attached to the ${words} (${challenges.length}): durable challenges, each as it was when attached (wfe challenge help):`,
+      ...challenges.map(a => `- ${a.id} "${a.title}" at ${a.commit.slice(0, 12)}: ${dir}/${a.file}; its files and trials then: wfe challenge show ${a.id} --at ${a.commit.slice(0, 12)}; its latest revision: wfe challenge show ${a.id}`)] : []),
+    ...(files.length ? [`Files the ${words} carried (${files.length}; the original bytes are on the share, checked against their hash when fetched; fetch writes into .local/attachments/ unless --out says otherwise):`,
+      ...files.map(a => `- ${fileLine(a)}`)] : []),
+  ]
 }
-// Challenges carried by an answer's or an instruction's source.
+// What an answer's or an instruction's source carried.
 export const attachedLines = (s: import('../shared/intake.ts').SourceRef | undefined, indent = '    ') =>
-  s?.kind === 'conversation' && s.attachments?.length ? s.attachments.map(a => `${indent}attached: ${a.id} "${a.title}" at ${a.commit.slice(0, 12)} — wfe challenge show ${a.id} --at ${a.commit.slice(0, 12)}`) : []
+  s?.kind === 'conversation' && s.attachments?.length ? s.attachments.map(a => a.kind === 'file' ? `${indent}file: ${fileLine(a)}` : `${indent}attached: ${a.id} "${a.title}" at ${a.commit.slice(0, 12)} — wfe challenge show ${a.id} --at ${a.commit.slice(0, 12)}`) : []
 
 export function instructionBrief(r: RunRecord): string[] {
   const all = Object.values(r.instructions ?? {})

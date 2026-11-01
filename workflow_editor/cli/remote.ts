@@ -8,7 +8,8 @@
 //   before an attempt, publishing the copy after it, shipping the attempt's
 //   log, and judging its own processes after a restart.
 // - `wfe share …` reads this host's shared areas (<worker area>/shares.json).
-// - `wfe challenge …` talks to the coordinator's challenge routes directly.
+// - `wfe challenge …` and `wfe conversation attachments|fetch` talk to the
+//   coordinator's routes directly (files are read and written on this node).
 // - every other command is forwarded: the run folder and the files the
 //   command names are uploaded into the coordinator's record copy, the
 //   coordinator's wfe runs it there, and the run folder comes back.
@@ -490,6 +491,10 @@ export async function remoteMain(argv: string[], local: (argv: string[]) => Prom
     // here: the files a write names are read on this node and `--out`
     // writes on this node, never in the coordinator's copy.
     if (cmd === 'challenge') { process.env.WFE_SERVICE ??= c.coordinator; return await local(argv) }
+    // A message's files (p19) likewise: read from this node's share when it
+    // mounts it, else downloaded; written on this node.
+    const sub = argv.filter(a => !a.startsWith('-'))[1]
+    if ((cmd === 'conversation' || cmd === 'discussion') && (sub === 'attachments' || sub === 'fetch')) { process.env.WFE_SERVICE ??= c.coordinator; return await local(argv) }
     if (cmd === 'exec') {
       const p = parse(argv.slice(argv.indexOf('exec') + 1))
       console.log(JSON.stringify(await execCommand(c, p), null, 2))

@@ -99,17 +99,17 @@ test('a conversation message carries a challenge; its turn gets that revision, n
   assert.equal(s.cs.attachmentsOf([p.message.id]).length, 1)
   const r = await rec(s, run)
   assert.deepEqual(r.input.attachments, [{ kind: 'challenge', id: 'ch-0001', commit: first, title: 'Edge remnants', sha256: c.record!.sha256, file: `attachments/ch-0001@${first.slice(0, 12)}.md` }])
-  assert.match(await file(s, run, r.input.attachments![0]!.file), /Version one\./)
+  assert.match(await file(s, run, (r.input.attachments![0] as { file: string }).file), /Version one\./)
   assert.match(attachmentBrief(r, 'devdocs/runs/converse/run-001').join('\n'), /ch-0001 "Edge remnants" at [0-9a-f]{12}: devdocs\/runs\/converse\/run-001\/attachments\/ch-0001@[0-9a-f]{12}\.md; its files and trials then: wfe challenge show ch-0001 --at/)
   // the challenge is edited later: the earlier turn's input is unchanged; the view says what moved
   const e = await s.ch.edit('ch-0001', { by: 'Pat', via: 'page', request: 'att-edit-1', base: first, body: 'Version two.' })
   second = e.record!.commit
-  assert.match(await file(s, run, r.input.attachments![0]!.file), /Version one\./)
+  assert.match(await file(s, run, (r.input.attachments![0] as { file: string }).file), /Version one\./)
   const v = await s.ds.view('att-c1')
-  assert.deepEqual(v.messages[0]!.attachments!.map(a => [a.commit, a.latest?.commit]), [[first, second]])
+  assert.deepEqual(v.messages[0]!.attachments!.map(a => a.kind === 'challenge' ? [a.commit, a.latest?.commit] : []), [[first, second]])
   // a message may name a revision explicitly
   const p2 = await s.ds.post('att-c1', { text: 'And the earlier text.', author: 'Pat', token: 'tok-att-0002', challenges: [{ id: 'ch-0001', at: first.slice(0, 10) }] })
-  assert.equal((await rec(s, p2.invitations[0]!.run!)).input.attachments![0]!.commit, first)
+  assert.equal(((await rec(s, p2.invitations[0]!.run!)).input.attachments![0] as { commit: string }).commit, first)
 })
 
 test('unknown, unpublished or malformed references are refused and the message is not stored', async () => {
@@ -127,8 +127,8 @@ test('a discussion message carries a challenge to whom it invites, and to the ru
   const inv = p.invitations[0]!
   assert.equal(inv.state, 'started', inv.error ?? '')
   const r = await rec(s, inv.run!)
-  assert.equal(r.input.attachments![0]!.commit, second)
-  assert.match(await file(s, inv.run!, r.input.attachments![0]!.file), /Version two\./)
+  assert.equal((r.input.attachments![0] as { commit: string }).commit, second)
+  assert.match(await file(s, inv.run!, (r.input.attachments![0] as { file: string }).file), /Version two\./)
   // forge asks the person; the reply goes to that run with the references in its source
   const run = inv.run!
   const ws = s.ws('forge'), ref = refOf(run)

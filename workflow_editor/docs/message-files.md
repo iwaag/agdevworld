@@ -149,6 +149,8 @@ Every error is `{error, detail: {code, …}}`; routing errors are unchanged
 | 400 `invalid-attachment` | a file is not `{name, base64, mime?}`, its name or hint is not acceptable, or its base64 is malformed (`detail.file`: its position) |
 | 413 `attachment-limit` | too many files, a file or the total too large, or the body too large (`detail.limit`, `detail.actual`) |
 | 409 `token-conflict` | the token was used for another submission (`detail.operation`) |
+| 409 `upload-incomplete` | the operation's bundle is not published (its last attempt failed); send the same files with the same token again |
+| 409 `routing-changed` | the room kept changing while the message was being accepted; nothing was sent — send it again (same token) |
 | 503 `storage-unavailable` | no destination configured, or its share is not reachable here (`detail.state`); text-only messages still work |
 | 404 `attachment-not-found` | (reads) no such attachment of that message of that conversation |
 | 410 `attachment-missing` | (reads) the record exists, its bytes are not on the share |

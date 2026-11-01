@@ -128,6 +128,16 @@ export function host(ctx: AccessContext): RepoHost {
 // the id), and its fetched cache.
 async function cached(ctx: AccessContext, at: { id?: number; owner: string; name: string }): Promise<Cached> {
   const g = host(ctx)
+  // Inside the fetch window a registered repository is read from its cache
+  // without asking Gitea anything (improve_wfrun p1: discovery reads every
+  // project's workflows and their peers; an API call per read made the
+  // intake pass exceed its time). A rename shows on the next fetch.
+  const ttl0 = ctx.fetchTtlMs ?? 10_000
+  if (at.id !== undefined && !ctx.refresh && ttl0 > 0) {
+    const dir0 = join(cacheRoot(ctx), `gitea-${at.id}.git`)
+    const stamp0 = await readFile(join(dir0, 'wfe-access.json'), 'utf8').then(t => JSON.parse(t) as { fetchedAt: string; repo: GiteaRepo }, () => null)
+    if (stamp0?.repo?.id === at.id && Date.now() - Date.parse(stamp0.fetchedAt) < ttl0) return { dir: dir0, repo: stamp0.repo, fetch: { state: 'recent', at: stamp0.fetchedAt } }
+  }
   let repo: GiteaRepo | null
   let apiError: string | undefined
   try { repo = at.id !== undefined ? await g.repoById(at.id) : await g.repo(at.owner, at.name) } catch (e) { repo = null; apiError = (e as Error).message }

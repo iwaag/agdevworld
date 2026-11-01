@@ -110,12 +110,24 @@ export class PublishedWorkspace extends Workspace {
     throw new RequestError(409, `the published workflows of ${this.r.source.project} (${this.r.source.repository}@${this.r.source.commit.slice(0, 10)}) are read-only; edit them in the workspace and publish`, { code: 'published-read-only' })
   }
 
+  // A commit never changes: each reading is made once per view.
+  private memo = new Map<string, Promise<unknown>>()
+  private once<T>(key: string, f: () => Promise<T>): Promise<T> {
+    if (!this.memo.has(key)) this.memo.set(key, f())
+    return this.memo.get(key) as Promise<T>
+  }
+
   override async submodulePaths(): Promise<{ name: string; path: string; url?: string }[]> {
-    const text = await this.show('.gitmodules')
-    return text ? gitmodules(text).map(m => ({ name: m.path, path: m.path, url: m.url })) : []
+    return this.once('modules', async () => {
+      const text = await this.show('.gitmodules')
+      return text ? gitmodules(text).map(m => ({ name: m.path, path: m.path, url: m.url })) : []
+    })
   }
 
   override async readProject(): Promise<{ text: string | null; project?: Project; problem?: FileProblem }> {
+    return this.once('project', () => this.readProjectNow())
+  }
+  private async readProjectNow(): Promise<{ text: string | null; project?: Project; problem?: FileProblem }> {
     const text = await this.show('project.yaml')
     if (text === null) return { text, problem: { kind: 'missing', message: `project.yaml does not exist at ${this.r.source.commit.slice(0, 10)}` } }
     const p = parseProject(text)
@@ -125,10 +137,15 @@ export class PublishedWorkspace extends Workspace {
   // The repositories as the revision records them: the root at the commit,
   // each submodule at its gitlink, devdocs as a directory, declared areas.
   override async repositories(): Promise<RepositoryStatus[]> {
+    return structuredClone(await this.once('repositories', () => this.repositoriesNow()))
+  }
+  private async repositoriesNow(): Promise<RepositoryStatus[]> {
     const { commit, branch } = this.r.source
     const out: RepositoryStatus[] = [{ path: '.', name: 'project root', kind: 'root', category: 'root', initialized: true, head: commit, branch, dirty: 0 }]
-    const tree = parseLsTree((await git(this.r.rootDir, ['ls-tree', '-r', '-t', '-z', commit])).stdout)
     const subs = await this.submodulePaths()
+    // Only the paths that matter: submodules, devdocs and declared areas.
+    const wanted = [...subs.map(sm => normalizeRepoPath(sm.path) ?? sm.path), 'devdocs', ...((await this.readProject()).project?.areas ?? []).map(a => normalizeRepoPath(a.path) ?? a.path)].filter(p => p && p !== '.')
+    const tree = wanted.length ? parseLsTree((await git(this.r.rootDir, ['ls-tree', '-z', commit, '--', ...wanted])).stdout) : []
     for (const sm of subs) {
       const path = normalizeRepoPath(sm.path) ?? sm.path
       const link = tree.find(e => e.path === path && e.type === 'commit')?.object
@@ -240,23 +257,45 @@ export async function publishedWorkflows(ctx: AccessContext, project: string, o:
 // project is offered when it has an allowed, available workspace here — the
 // child's run copy lives there — and its source can be read. A project whose
 // source cannot be read is left out of the list; dispatch says why.
+// Several validations in one pass ask for the same peers: one reading of
+// every project is kept for a few seconds per registry, each caller gets it
+// without its own project (improve_wfrun p1: a reading per validation made
+// the intake pass exceed its time).
+const peerMemo = new Map<string, { at: number; peers: Promise<PeerProject[]> }>()
+const PEER_MEMO_MS = 5_000
 export async function publishedPeers(ctx: AccessContext, self?: string): Promise<PeerProject[]> {
+  const key = `${ctx.registryFile}\0${ctx.fetchTtlMs ?? ''}`
+  let hit = peerMemo.get(key)
+  if (!hit || Date.now() - hit.at >= PEER_MEMO_MS || ctx.refresh) {
+    const peers = readPeers(ctx)
+    hit = { at: Date.now(), peers }
+    peerMemo.set(key, hit)
+    peers.catch(() => peerMemo.delete(key))
+  }
+  return (await hit.peers).filter(p => p.project !== self)
+}
+// A peer's workflows need only their identity, delegate targets and intake:
+// parsed, not validated.
+async function readPeers(ctx: AccessContext): Promise<PeerProject[]> {
   const reg = await loadRegistry(ctx.registryFile)
   const boundary = await loadBoundary(ctx.registryFile, ctx.area)
-  const out: PeerProject[] = []
-  const seen = new Set<string>()
   const c: AccessContext = { ...ctx, fetchTtlMs: ctx.fetchTtlMs ?? DISCOVERY_TTL_MS }
-  for (const w of reg.workspaces) {
-    if (!w.project || w.project === self || seen.has(w.project)) continue
-    try { await assertWorkspaceAllowed(boundary, w, 'Delegation') } catch { continue }
-    if (!(await observe(w)).available) continue
+  const seen = new Set<string>()
+  const out = await Promise.all(reg.workspaces.map(async (w): Promise<PeerProject | null> => {
+    if (!w.project || seen.has(w.project)) return null
     seen.add(w.project)
+    try { await assertWorkspaceAllowed(boundary, w, 'Delegation') } catch { return null }
+    if (!(await observe(w)).available) return null
     const ws = await resolve(c, w.project, {}).then(r => new PublishedWorkspace(w, r), () => null)
-    if (!ws) continue
-    const list = (await ws.workflowSummaries().catch(() => ({ list: [] }))).list
-    out.push({ project: w.project, workspace: w.id, label: w.label, workflows: list.filter(s => s.id).map(s => ({ id: s.id!, name: s.name, file: s.file, delegates: s.delegates, intake: !!s.intake })) })
-  }
-  return out.sort((a, b) => (a.project < b.project ? -1 : 1))
+    if (!ws) return null
+    const workflows: PeerProject['workflows'] = []
+    for (const f of await ws.workflowFiles().catch(() => [])) {
+      const r = await ws.readWorkflowFile(f)
+      if (r.workflow) workflows.push({ id: r.workflow.id, name: r.workflow.name, file: f, delegates: delegateTargets(r.workflow, w.project), intake: r.workflow.intake.zulip === 'requests' })
+    }
+    return { project: w.project, workspace: w.id, label: w.label, workflows }
+  }))
+  return out.filter((p): p is PeerProject => !!p).sort((a, b) => (a.project < b.project ? -1 : 1))
 }
 
 // Every published workflow's delegate targets, as <project>/<workflow>

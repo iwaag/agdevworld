@@ -26,7 +26,7 @@ request topic in the workflows named for it, and nothing else: its post
 becomes a run whose input is a `request` in the agent's name (`request.md`,
 `requester`, `entrustedBy: {kind: note}`, the post as `source`), and its later
 posts and its posts in other workflows are ignored. Observer requests
-recovery runs (`agops/recover`) this way.
+recovery runs (`warden/recover`) this way.
 
 **Delegation posts (p10, [delegation.md](delegation.md)).** A delegating
 run's request, answers and instructions are posted by the notifier's bot

@@ -25,9 +25,9 @@ import { canonicalJson } from '../shared/canonical.ts'
 import { latestResult } from '../shared/delegation.ts'
 import { hostOwes, reviewStateText, startedInstances, subjectLabel, type CleanupResult, type ReviewRound, type ReviewSubject, type RoundView, type SubjectServing, type SubjectView } from '../shared/humanReview.ts'
 export type { RoundView, SubjectView }
-import { isOpen, runKey, type BecauseRef, type RunRecord, type RunRef } from '../shared/run.ts'
+import { isOpen, runKey, runUid, type BecauseRef, type RunRecord, type RunRef } from '../shared/run.ts'
 import { loadBoundary, assertWorkspaceAllowed } from './boundary.ts'
-import { loadRegistry } from './registry.ts'
+import { holdsProject, loadRegistry, recordedWorkspace } from './registry.ts'
 import { checkSubject, readRun, resolveRef, runOp, type OpContext } from './runs.ts'
 import { runSpace } from './runspace.ts'
 import { Presenter, type PresentContext } from './present.ts'
@@ -35,7 +35,7 @@ import { RequestError, Workspace } from './workspace.ts'
 
 export const REVIEWER = 'wfe-review' // who records the host's facts
 const creationOf = (r: RunRecord) => createHash('sha256').update(canonicalJson(r.history[0] ?? null)).digest('hex').slice(0, 16)
-const uidOf = (r: RunRecord) => `${r.project}/${r.workflow}/${r.run}#${creationOf(r)}`
+const uidOf = (r: RunRecord) => runUid(r, creationOf(r))
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms))
 const RETRY_MS = 60_000 // a failed cleanup is retried by reconcile after this
 
@@ -52,7 +52,7 @@ export class ReviewHost {
   close() { this._pr?.close() }
 
   async workspace(id: string): Promise<Workspace> {
-    const reg = (await loadRegistry(this.ctx.registryFile)).workspaces.find(w => w.id === id)
+    const reg = recordedWorkspace((await loadRegistry(this.ctx.registryFile)).workspaces, id)
     if (!reg) throw new RequestError(404, `workspace "${id}" is not registered`, { code: 'review-subjects' })
     await assertWorkspaceAllowed(await loadBoundary(this.ctx.registryFile, this.ctx.area), reg, 'Review')
     return new Workspace(reg)
@@ -298,7 +298,7 @@ export class ReviewHost {
   private async roundOpen(uid: string): Promise<boolean> {
     const m = /^([a-z0-9][a-z0-9_.-]*)\/([a-z0-9][a-z0-9_.-]*)\/(run-[a-z0-9][a-z0-9_.-]*)#[0-9a-f]+\/(rv[0-9]+)$/.exec(uid)
     if (!m) return false
-    const reg = (await loadRegistry(this.ctx.registryFile)).workspaces.filter(w => w.project === m[1])
+    const reg = (await loadRegistry(this.ctx.registryFile)).workspaces.filter(w => holdsProject(w, m[1]))
     for (const w of reg) {
       const rec = (await readRun(await runSpace(new Workspace(w), { workflow: m[2], run: m[3] }), { workflow: m[2], run: m[3] }).catch(() => null))?.record
       const r = rec?.reviews?.[m[4]]

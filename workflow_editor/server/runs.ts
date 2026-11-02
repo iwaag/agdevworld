@@ -130,7 +130,7 @@ export interface Reading { text: string | null; record?: RunRecord; problem?: Fi
 // Parses and checks one run. Cached on the stat of run.json and the bundle.
 const cache = new Map<string, { key: string; reading: Reading }>()
 
-export async function readFrom(src: Source, expect: RunRef & { project?: string }, cacheKey?: string): Promise<Reading> {
+export async function readFrom(src: Source, expect: RunRef & { project?: string; formerly?: string[] }, cacheKey?: string): Promise<Reading> {
   if (cacheKey) {
     const hit = cache.get(cacheKey.split('\0')[0])
     if (hit && hit.key === cacheKey) return { ...hit.reading, record: hit.reading.record && structuredClone(hit.reading.record) }
@@ -157,7 +157,9 @@ export async function readFrom(src: Source, expect: RunRef & { project?: string 
     // by hash like the bundle, never re-read from the live catalog.
     const catProblem = await loadCatalogSnapshot(src, checked.record, bundle)
     if (catProblem) return { text, problem: { kind: 'shape', message: catProblem, code: 'bundle' }, bundle }
-    if (expect.project !== undefined && checked.record.project !== expect.project) {
+    // A copy made before a rename still holds the old project.yaml, and a committed
+    // snapshot may still name the old project (rename/warden): the same project.
+    if (expect.project !== undefined && checked.record.project !== expect.project && checked.record.createdAs !== expect.project && !expect.formerly?.includes(checked.record.project)) {
       return { text, problem: { kind: 'shape', message: `${RUN_FILE} belongs to project "${checked.record.project}", not "${expect.project}"`, code: 'location' }, bundle }
     }
     if (checked.record.workflow !== expect.workflow || checked.record.run !== expect.run) {
@@ -263,7 +265,7 @@ export async function readRun(ws: Workspace, ref: RunRef): Promise<Reading & { d
   const dir = await inside(ws.copyOf?.recordRoot ?? ws.root, rel)
   const project = await projectId(ws)
   const key = `${dir}\0${project}\0${await sigOf(join(dir, RUN_FILE))}\0${await bundleSigs(dir)}\0${await sigOf(join(dir, CATALOG_SNAPSHOT))}`
-  return { ...(await readFrom(fsSource(dir), { ...ref, project }, key)), dir }
+  return { ...(await readFrom(fsSource(dir), { ...ref, project, formerly: ws.shared.reg.formerly }, key)), dir }
 }
 
 // The project a run must belong to: project.yaml's id (undefined when unreadable).
@@ -404,7 +406,7 @@ export async function runResponse(ws: Workspace, ref: RunRef, opts: { rev?: stri
     const { info, rev } = await historyRev(ws, opts.rev)
     revInfo = rev
     const src = gitSource(info, rev, devdocsRel(rel))
-    reading = { ...(await readFrom(src, { ...ref, project: await projectId(ws) })), files: await src.list() }
+    reading = { ...(await readFrom(src, { ...ref, project: await projectId(ws), formerly: ws.shared.reg.formerly })), files: await src.list() }
   } else {
     const r = await readRun(ws, ref)
     reading = { ...r, files: await fsSource(r.dir).list() }

@@ -28,7 +28,7 @@ import {
   type ChildRef, type Delegation, type ManifestFile, type ResultManifest, type TransportRef,
 } from '../shared/delegation.ts'
 import { normalizeRepoPath } from '../shared/model.ts'
-import { graphOfState, hostOf, questionState, replay, runKey, standingHold, type BecauseRef, type DocumentEvidence, type RunRecord, type RunRef } from '../shared/run.ts'
+import { graphOfState, hostOf, questionState, replay, runKey, runUid, standingHold, type BecauseRef, type DocumentEvidence, type RunRecord, type RunRef } from '../shared/run.ts'
 import { assessResult, assessmentReminders, type Assessment, type ChildEvidence } from '../shared/assessment.ts'
 import { latestResult, openRevision as openRevisionOf } from '../shared/delegation.ts'
 import { assertWorkspaceAllowed, loadBoundary } from './boundary.ts'
@@ -36,7 +36,7 @@ import type { ExecStore, JobRow } from './exec.ts'
 import { atomicWrite, inside, withinRoot } from './files.ts'
 import { git } from './git.ts'
 import { creationOf } from './observe.ts'
-import { loadRegistry, observe, type Registration } from './registry.ts'
+import { holdsProject, loadRegistry, observe, recordedWorkspace, type Registration } from './registry.ts'
 import { RUN_FILE, catalogOf, listRuns, readRun, runDir, runOp, runOpLocked, type OpContext } from './runs.ts'
 import { withLock } from './lock.ts'
 import { reminderText } from '../shared/reminders.ts'
@@ -47,7 +47,7 @@ import { RequestError, Workspace } from './workspace.ts'
 
 const sha256 = (b: string | Buffer) => createHash('sha256').update(b).digest('hex')
 const now = () => new Date().toISOString()
-export const uidOf = (r: RunRecord) => `${r.project}/${r.workflow}/${r.run}#${creationOf(r)}`
+export const uidOf = (r: RunRecord) => runUid(r, creationOf(r))
 const MAX_FILE = 4 * 1024 * 1024
 
 export interface DelegateContext { registryFile: string; area: string; exec?: ExecStore }
@@ -93,7 +93,7 @@ export class DelegateStore {
   private access(): import('./access.ts').AccessContext | undefined { return this.ctx.exec?.ctx.gitea ? this.ctx.exec.accessContext() : undefined }
 
   async workspace(id: string): Promise<Workspace> {
-    const reg = (await this.registered()).find(w => w.id === id)
+    const reg = recordedWorkspace(await this.registered(), id)
     if (!reg) throw new RequestError(404, `workspace "${id}" is not registered`)
     await assertWorkspaceAllowed(await loadBoundary(this.ctx.registryFile, this.ctx.area), reg, 'Delegation')
     return new Workspace(reg)
@@ -138,7 +138,7 @@ export class DelegateStore {
       if (e?.kind !== 'delegation') break
       const parent: { project: string; workflow: string; run: string; creation: string; node: string } = e.parent
       out.push({ key: `${parent.project}/${parent.workflow}`, uid: `${parent.project}/${parent.workflow}/${parent.run}#${parent.creation}` })
-      const regs: Registration[] = (await this.registered()).filter(w => w.project === parent.project)
+      const regs: Registration[] = (await this.registered()).filter(w => holdsProject(w, parent.project))
       cur = undefined
       for (const r of regs) {
         const found: RunRecord | undefined = (await readRun(new Workspace(r), { workflow: parent.workflow, run: parent.run }).catch(() => null))?.record
@@ -646,7 +646,7 @@ export async function delegationsView(store: DelegateStore, ws: Workspace, ref: 
     const status = runStatus(rec, { children: Object.fromEntries(delegations.filter(d => d.childNow).map(d => [d.id, { situation: d.childNow!.situation, hold: d.childNow!.hold, execution: d.childNow!.execution, run: d.child?.run ?? null }])) })
     const ent = rec.input.entrustedBy
     // A child names its parent; the parent's workspace here, for a link.
-    const parentWs = ent?.kind === 'delegation' ? (await loadRegistry(store.ctx.registryFile)).workspaces.find(w => w.project === ent.parent.project)?.id ?? null : null
+    const parentWs = ent?.kind === 'delegation' ? (await loadRegistry(store.ctx.registryFile)).workspaces.find(w => holdsProject(w, ent.parent.project))?.id ?? null : null
     return { ref: runKey(ref), delegations, status, parent: ent?.kind === 'delegation' ? { ...ent, workspace: parentWs } : null }
   } finally { n.close() }
 }

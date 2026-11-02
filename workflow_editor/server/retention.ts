@@ -536,7 +536,9 @@ async function fetchRetained(ws: Workspace, ref: RunRef, r: InventoryRepo, cwd: 
   const specs = r.refs.map(x => `+${space}/${x.ref.slice('refs/'.length)}:${x.ref}`)
   if (specs.length) await gitOk(cwd, ['fetch', '-q', '--no-tags', '--no-write-fetch-head', '--update-head-ok', bare, ...specs], { config: LOCAL_TRANSPORT, timeoutMs: GIT_LONG })
   if (r.head && !r.refs.some(x => x.oid === r.head)) await gitOk(cwd, ['fetch', '-q', '--no-tags', '--no-write-fetch-head', bare, `+${space}/HEAD:refs/wfe/retain-head`], { config: LOCAL_TRANSPORT, timeoutMs: GIT_LONG })
-  if (r.url) { await git(cwd, ['remote', 'remove', 'origin']); await gitOk(cwd, ['remote', 'add', 'origin', r.url]) }
+  // The manifest's url: the contents list is hashed and keeps the url from before a rename.
+  const url = (await readCopy(ws.shared, ref))?.manifest?.repositories.find(x => x.path === r.path)?.url ?? r.url
+  if (url) { await git(cwd, ['remote', 'remove', 'origin']); await gitOk(cwd, ['remote', 'add', 'origin', url]) }
 }
 
 // Rebuilds the tree in staging with Git's standard layout (relative paths, so

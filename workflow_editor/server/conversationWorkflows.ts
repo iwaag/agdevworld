@@ -247,7 +247,7 @@ export class ConversationWorkflows {
   }
   // A delegation names its parent by project; the run name is by workspace.
   private async workspaceRun(project: string, workflow: string, run: string): Promise<string> {
-    const reg = this.ds.exec ? (await loadRegistry(this.ds.exec.ctx.registryFile)).workspaces.find(w => (w.project ?? w.id) === project) : undefined
+    const reg = this.ds.exec ? (await loadRegistry(this.ds.exec.ctx.registryFile)).workspaces.find(w => (w.project ?? w.id) === project || w.formerly?.includes(project)) : undefined
     return runName(reg?.id ?? project, { workflow, run })
   }
   // Progression: a run of the facilitator's own workflow (its conductor

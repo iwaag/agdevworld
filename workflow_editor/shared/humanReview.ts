@@ -135,9 +135,9 @@ export function startedInstances(r: Pick<ReviewRound, 'serving' | 'cleanup'>): S
 }
 // The rounds that still name a presentation of a given run (for retention
 // and for assessments): open, approved with cleanup owed, or handed to the agent.
-export function roundsUsing(s: { reviews?: Record<string, ReviewRound> }, owner: { project: string; workflow: string; run: string }, presentation?: string): ReviewRound[] {
+export function roundsUsing(s: { reviews?: Record<string, ReviewRound> }, owner: { project: string; createdAs?: string; workflow: string; run: string }, presentation?: string): ReviewRound[] {
   return Object.values(s.reviews ?? {}).filter(r => r.state !== 'complete' && r.state !== 'cancelled' && !(r.state === 'changes-requested' && r.cleanup?.state === 'done')
-    && r.subjects.some(x => x.project === owner.project && x.workflow === owner.workflow && x.run === owner.run && (!presentation || x.presentation === presentation)))
+    && r.subjects.some(x => (x.project === owner.project || x.project === owner.createdAs) && x.workflow === owner.workflow && x.run === owner.run && (!presentation || x.presentation === presentation)))
 }
 
 const STATE_WORDS: Record<ReviewState, string> = {

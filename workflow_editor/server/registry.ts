@@ -23,7 +23,9 @@ import { withLock } from './lock.ts'
 import { parseProject } from './yamlDoc.ts'
 import { Workspace } from './workspace.ts'
 
-export interface Registration { id: string; label: string; host: string; path: string; project?: string }
+// formerly (rename/warden): the names this workspace and its project had. It resolves what
+// existing records stored; routing, publication and new requests never consult it.
+export interface Registration { id: string; label: string; host: string; path: string; project?: string; formerly?: string[] }
 export type RepoCategory = 'root' | 'devdocs' | 'study' | 'wedo' | 'other'
 export const REPO_CATEGORIES: RepoCategory[] = ['root', 'devdocs', 'study', 'wedo', 'other']
 // A Gitea repository, identified by its Gitea id; owner/name are as registered.
@@ -31,6 +33,9 @@ export interface RepoEntry { key: string; gitea: { id: number; owner: string; na
 export interface ProjectEntry { id: string; root: string; registered: string } // root: a RepoEntry key
 export interface Registry { approver: string; workspaces: Registration[]; projects: ProjectEntry[]; repositories: RepoEntry[]; exists: boolean }
 export const repoKey = (giteaId: number) => `gitea:${giteaId}`
+// The workspace an existing record means: by its current id, else by a name it had.
+export const recordedWorkspace = (workspaces: Registration[], id: string) => workspaces.find(w => w.id === id) ?? workspaces.find(w => w.formerly?.includes(id))
+export const holdsProject = (w: Registration, project: string) => w.project === project || !!w.formerly?.includes(project)
 
 export interface Observation {
   available: boolean
@@ -66,7 +71,7 @@ export async function loadRegistry(file: string): Promise<Registry> {
   if (!raw) return { approver: '', workspaces: [], projects: [], repositories: [], exists: false }
   const workspaces = ((raw.workspaces ?? []) as unknown[]).map((w, i) => {
     if (!isObj(w) || typeof w.id !== 'string' || typeof w.path !== 'string') throw new RegistryError(`registry ${file}: workspaces[${i}] needs text "id" and "path". Fix the file; nothing was changed.`)
-    return { id: w.id, label: typeof w.label === 'string' && w.label ? w.label : w.id, host: typeof w.host === 'string' && w.host ? w.host : 'this machine', path: w.path, ...(typeof w.project === 'string' ? { project: w.project } : {}) }
+    return { id: w.id, label: typeof w.label === 'string' && w.label ? w.label : w.id, host: typeof w.host === 'string' && w.host ? w.host : 'this machine', path: w.path, ...(typeof w.project === 'string' ? { project: w.project } : {}), ...(Array.isArray(w.formerly) ? { formerly: w.formerly.filter((x): x is string => typeof x === 'string') } : {}) }
   })
   for (const k of ['projects', 'repositories']) if (raw[k] !== undefined && !Array.isArray(raw[k])) throw new RegistryError(`registry ${file}: "${k}" must be a list. Fix the file; nothing was changed.`)
   const repositories = ((raw.repositories ?? []) as unknown[]).map((r, i): RepoEntry => {

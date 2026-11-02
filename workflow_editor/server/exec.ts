@@ -38,7 +38,7 @@ import { assertWorkspaceAllowed, loadBoundary } from './boundary.ts'
 import type { Gitea } from './gitea.ts'
 import { baseline, publish, publishRun, type Baseline, type RepoStep } from './publish.ts'
 import { guardsFor, integrate, type Guard, type IntegrationState, type IntegrationStep } from './integrate.ts'
-import { loadRegistry, observe, type Registration } from './registry.ts'
+import { loadRegistry, observe, recordedWorkspace, type Registration } from './registry.ts'
 import { catalogOf, createRunInCopy, listRuns, readRun, RUN_FILE, runDir, runOp } from './runs.ts'
 import { readCopy, runSpace, treeSpace } from './runspace.ts'
 import { atomicWrite } from './files.ts'
@@ -461,7 +461,7 @@ export class ExecStore {
   }
 
   async workspace(id: string): Promise<Workspace> {
-    const reg = (await loadRegistry(this.ctx.registryFile)).workspaces.find(w => w.id === id)
+    const reg = recordedWorkspace((await loadRegistry(this.ctx.registryFile)).workspaces, id)
     if (!reg) throw new RequestError(404, `workspace "${id}" is not registered`)
     await assertWorkspaceAllowed(await loadBoundary(this.ctx.registryFile, this.ctx.area), reg, 'Execution')
     const o = await observe(reg)

@@ -24,7 +24,7 @@ function parent(node: Partial<Workflow['nodes'][string]>): Workflow {
 }
 
 const registry = (forge: { id: string; delegates?: string[]; intake?: boolean }[]): ValidationContext => ({
-  project: 'agops',
+  project: 'warden',
   workflows: [{ id: 'use-asset', file: 'use-asset.yaml', delegates: ['forge/provide'] }, { id: 'local', file: 'local.yaml', delegates: [], intake: true }],
   file: 'use-asset.yaml',
   projects: { forge: forge.map(f => ({ id: f.id, file: `${f.id}.yaml`, delegates: f.delegates ?? [], intake: f.intake ?? true })) },
@@ -38,9 +38,9 @@ test('a delegate names a portable target: project and workflow, read and written
   const back = parseWorkflow(text)
   assert.ok(back.ok)
   assert.deepEqual({ project: back.model.nodes.asset.project, workflow: back.model.nodes.asset.workflow, accepts: back.model.nodes.asset.accepts }, { project: 'forge', workflow: 'provide', accepts: 'parent' })
-  assert.deepEqual(delegateTargets(back.model, 'agops'), ['forge/provide'])
+  assert.deepEqual(delegateTargets(back.model, 'warden'), ['forge/provide'])
   // The same project, named explicitly, is the same target as none.
-  assert.deepEqual(delegateTargets(parent({ project: 'agops', workflow: 'local' }), 'agops'), ['local'])
+  assert.deepEqual(delegateTargets(parent({ project: 'warden', workflow: 'local' }), 'warden'), ['local'])
   const compiled = compile(back.model)
   assert.ok(compiled.ok)
   assert.deepEqual(compiled.graph.nodes.asset, { type: 'delegate', workflow: 'provide', project: 'forge', accepts: 'parent' })
@@ -54,20 +54,20 @@ test('cross-project targets are validated against the registry', () => {
   assert.deepEqual(codes(validateWorkflow(parent({ project: 'forge', workflow: 'provide', accepts: 'anyone' }), registry([{ id: 'provide' }]))), ['delegate-accepts'])
   assert.ok(codes(validateWorkflow(parent({ project: 'forge', workflow: 'provide' }), registry([{ id: 'provide', intake: false }])), 'warning').includes('delegate-no-intake'))
   // Without a registry, another project's workflow cannot be checked and is not called unknown.
-  assert.deepEqual(codes(validateWorkflow(parent({ project: 'forge', workflow: 'provide' }), { project: 'agops', workflows: [], file: 'use-asset.yaml' })), [])
+  assert.deepEqual(codes(validateWorkflow(parent({ project: 'forge', workflow: 'provide' }), { project: 'warden', workflows: [], file: 'use-asset.yaml' })), [])
   // Its own workflow in its own project is itself; the same id in another project is not.
   assert.deepEqual(codes(validateWorkflow(parent({ workflow: 'use-asset' }), registry([]))), ['delegate-self'])
-  assert.deepEqual(codes(validateWorkflow(parent({ project: 'agops', workflow: 'use-asset' }), registry([]))), ['delegate-self'])
+  assert.deepEqual(codes(validateWorkflow(parent({ project: 'warden', workflow: 'use-asset' }), registry([]))), ['delegate-self'])
   assert.deepEqual(codes(validateWorkflow(parent({ project: 'forge', workflow: 'use-asset' }), registry([{ id: 'use-asset' }]))), [])
 })
 
 test('delegation that comes back across projects is recursive', () => {
-  const back = registry([{ id: 'provide', delegates: ['agops/use-asset'] }])
+  const back = registry([{ id: 'provide', delegates: ['warden/use-asset'] }])
   const issues = validateWorkflow(parent({ project: 'forge', workflow: 'provide' }), back)
   assert.ok(codes(issues).includes('delegate-recursive'), JSON.stringify(issues))
   assert.match(issues.find(i => i.code === 'delegate-recursive')!.message, /use-asset → forge\/provide → use-asset/)
   // Through a third workflow of the target project.
-  const via = registry([{ id: 'provide', delegates: ['helper'] }, { id: 'helper', delegates: ['agops/use-asset'] }])
+  const via = registry([{ id: 'provide', delegates: ['helper'] }, { id: 'helper', delegates: ['warden/use-asset'] }])
   assert.ok(codes(validateWorkflow(parent({ project: 'forge', workflow: 'provide' }), via)).includes('delegate-recursive'))
   // Not recursive: the target delegates elsewhere.
   const other = registry([{ id: 'provide', delegates: ['helper'] }, { id: 'helper' }])

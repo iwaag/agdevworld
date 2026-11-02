@@ -42,7 +42,7 @@ import {
   DELAYED_AFTER_MS, type DocLink, type NoticeKind, type RenderContext,
 } from '../shared/notify.ts'
 import type { IntakeStore, RequestRow } from './intake.ts'
-import { effectiveOf, notableEvents, openPresentations, questionState, runKey, type NotableEvent, type RunRecord, type RunRef } from '../shared/run.ts'
+import { effectiveOf, notableEvents, openPresentations, questionState, runKey, runUid, type NotableEvent, type RunRecord, type RunRef } from '../shared/run.ts'
 import { assertWorkspaceAllowed, loadBoundary } from './boundary.ts'
 import type { AttemptRow, CheckpointRow, ExecStore } from './exec.ts'
 import { git } from './git.ts'
@@ -279,6 +279,7 @@ export class NotifyStore {
 
   // A target is recorded when its project or workflow becomes known; its
   // name and description are what provisioning will ask for.
+  private renamed = new Map<string, string>() // a project's former names, from the registry (rename/warden)
   private ensureTarget(kind: 'folder' | 'channel', project: string, workflow: string | null, label: string) {
     const key = kind === 'folder' ? project : `${project}/${workflow}`
     const name = kind === 'folder' ? folderName(project) : channelName(project, workflow!)
@@ -332,6 +333,7 @@ export class NotifyStore {
     const notes: string[] = []
     const reg = await loadRegistry(this.registryFile)
     const boundary = await loadBoundary(this.registryFile, this.area)
+    this.renamed = new Map(reg.workspaces.flatMap(w => (w.project ? w.formerly ?? [] : []).map(f => [f, w.project!] as const)))
     for (const w of reg.workspaces) {
       try { await assertWorkspaceAllowed(boundary, w, 'Notification') } catch { continue }
       if (!(await observe(w)).available) continue
@@ -377,7 +379,7 @@ export class NotifyStore {
   private ensureIo(workspace: string, rec: RunRecord) {
     const creation = creationOf(rec)
     const key = ioKey(rec, creation)
-    const uid = `${rec.project}/${rec.workflow}/${rec.run}#${creation}`
+    const uid = runUid(rec, creation)
     const name = fitName(`wf-${rec.project}.${rec.workflow}.${rec.run}.io`)
     this.run('INSERT OR IGNORE INTO targets (key, kind, project, workflow, name, description, state, created, updated) VALUES (?, \'channel\', ?, ?, ?, ?, \'pending\', ?, ?)', `channel:${key}`, rec.project, `${rec.workflow}/${rec.run}@${creation}`, name, ioDescription(rec, creation, uid), now(), now())
     this.run(`INSERT OR IGNORE INTO runs (key, project, workflow, run, workspace, created, channel, topic, kind, request, updated) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'io', ?, ?)`, `${key}/io`, rec.project, rec.workflow, rec.run, workspace, rec.created, name, IO_TOPIC, uid, now())
@@ -491,11 +493,13 @@ export class NotifyStore {
   // A delegation's conversation row (p10), created with its request topic.
   private delegationThread(workspace: string, rec: RunRecord, d: NonNullable<RunRecord['delegations']>[string]): string {
     const label = delegationLabel(rec, d.id)
-    const key = `${d.target.project}/${d.target.workflow}/${label}`
-    this.ensureTarget('channel', d.target.project, d.target.workflow, d.target.workflow)
-    const channel = this.target(`channel:${d.target.project}/${d.target.workflow}`)?.name ?? channelName(d.target.project, d.target.workflow)
+    // A delegation names its target as dispatched; its conversation follows a rename (rename/warden).
+    const project = this.renamed.get(d.target.project) ?? d.target.project
+    const key = `${project}/${d.target.workflow}/${label}`
+    this.ensureTarget('channel', project, d.target.workflow, d.target.workflow)
+    const channel = this.target(`channel:${project}/${d.target.workflow}`)?.name ?? channelName(project, d.target.workflow)
     this.run(`INSERT OR IGNORE INTO runs (key, project, workflow, run, workspace, created, channel, topic, kind, request, bound, updated)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'delegation', ?, ?, ?)`, key, d.target.project, d.target.workflow, label, workspace, d.dispatched.at, channel, delegationTopic(rec, d.id), d.uid, d.child?.run ?? null, now())
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'delegation', ?, ?, ?)`, key, project, d.target.workflow, label, workspace, d.dispatched.at, channel, delegationTopic(rec, d.id), d.uid, d.child?.run ?? null, now())
     return key
   }
 

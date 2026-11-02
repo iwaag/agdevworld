@@ -533,6 +533,7 @@ const RUN_NAME = /^[a-z0-9][a-z0-9_.-]{0,63}\/[a-z0-9][a-z0-9_.-]{0,63}\/run-[a-
 export interface RunState {
   schema: string
   project: string
+  createdAs?: string // rename/warden: the project this run was created in, when it has since been renamed; its uid keeps it
   workflow: string
   run: string
   created: string
@@ -591,6 +592,9 @@ export type OpInput =
   // own copy. Nothing else changes: nodes, questions, holds and decisions
   // stay as they were; what it published before stays published.
   | { op: 'run.relocate'; storage: RunStorage; note: string }
+  // rename/warden: the project was renamed. The run's current project changes;
+  // its creation identity (uid, branch, frozen definition) does not.
+  | { op: 'run.rename-project'; from: string; to: string; note: string }
   // project_migration p7: the run is performed by another execution node
   // from its next attempt on. Never automatic: recorded with who and why,
   // only while no attempt is open.
@@ -691,7 +695,7 @@ function targetSourceOf(v: unknown): { source?: import('./delegation.ts').Delega
 
 export const OPS = ['run.create', 'node.start', 'node.progress', 'node.wait', 'node.complete', 'node.fail', 'node.cancel',
   'question.ask', 'question.answer', 'question.take-up', 'question.withdraw', 'instruction.receive', 'instruction.ack', 'artifact.attach', 'run.cancel', 'run.decide',
-  'attempt.begin', 'attempt.end', 'run.stop', 'run.resume', 'presentation.register', 'presentation.observe', 'run.adjust', 'run.record-done', 'run.integrate', 'run.relocate', 'run.assign', 'run.recover', 'attempt.session', 'attempt.context', 'session.retire',
+  'attempt.begin', 'attempt.end', 'run.stop', 'run.resume', 'presentation.register', 'presentation.observe', 'run.adjust', 'run.record-done', 'run.integrate', 'run.relocate', 'run.rename-project', 'run.assign', 'run.recover', 'attempt.session', 'attempt.context', 'session.retire',
   'delegation.dispatch', 'delegation.bind', 'delegation.event', 'delegation.take-up', 'delegation.answer', 'delegation.instruct', 'delegation.dispose',
   'delegation.revise', 'delegation.attribute', 'correction.receive', 'correction.take-up', 'presentation.retain',
   'review.prepare', 'review.start', 'review.serve', 'review.decide', 'review.cleanup', 'review.take-up',
@@ -1137,6 +1141,9 @@ const TERMINAL: ExecutionState[] = ['completed', 'stopped', 'cancelled']
 
 // Applies one entry. Returns the next state and what changed; throws RunError
 // for an operation the current state does not allow.
+// A run's identity across projects: <the project it was created in>/<workflow>/<run>#<creation>.
+export const runUid = (r: { project: string; createdAs?: string; workflow: string; run: string }, creation: string) => `${r.createdAs ?? r.project}/${r.workflow}/${r.run}#${creation}`
+
 export const emptyControl = (): Control => ({ attempt: null, attempts: 0, last: null, hold: null, stop: null })
 
 export function apply(prev: RunState | null, e: HistoryEntry | (OpInput & EntryMeta & { seq: number; at: string; by: string; via: string }), graph: RunGraph): { state: RunState; change: Change } {
@@ -1737,6 +1744,15 @@ export function apply(prev: RunState | null, e: HistoryEntry | (OpInput & EntryM
       s.storage = validStorage(e.storage)
       break
     }
+    case 'run.rename-project': {
+      if (ctl.attempt) fail('attempt-open', `attempt ${ctl.attempt.id} is still open; a run's project is renamed only while nothing executes it`)
+      if (e.from !== s.project) fail('state', `the run's project is ${s.project}, not ${String(e.from)}`)
+      if (typeof e.to !== 'string' || !ID_PATTERN.test(e.to) || e.to === e.from) fail('shape', `project id "${String(e.to)}" is invalid`)
+      text(e.note, 'a note on the rename')
+      s.createdAs ??= s.project
+      s.project = e.to
+      break
+    }
     case 'run.assign': {
       if (ctl.attempt) fail('attempt-open', `attempt ${ctl.attempt.id} is still open; a run changes its execution node only between attempts`)
       const node = text(e.node, 'the execution node')
@@ -2007,7 +2023,7 @@ export function apply(prev: RunState | null, e: HistoryEntry | (OpInput & EntryM
       const all = s.delegations ?? {}
       const id = `d${Object.keys(all).length + 1}`
       if (e.delegation !== id) fail('shape', `the next delegation is ${id}, not ${String(e.delegation)}`)
-      if (typeof e.uid !== 'string' || !e.uid.endsWith(`/${id}`) || !e.uid.startsWith(`${s.project}/${s.workflow}/${s.run}#`)) fail('shape', `the delegation uid is <this run's uid>/${id}`)
+      if (typeof e.uid !== 'string' || !e.uid.endsWith(`/${id}`) || !e.uid.startsWith(`${s.createdAs ?? s.project}/${s.workflow}/${s.run}#`)) fail('shape', `the delegation uid is <this run's uid>/${id}`)
       const t = e.target as unknown as Record<string, unknown>
       if (!isObj(t) || ![t.project, t.workflow].every(v => typeof v === 'string' && ID_PATTERN.test(v)) || typeof t.workspace !== 'string' || !t.workspace) fail('shape', 'target is {project, workflow, workspace}')
       if (t.project !== (gn!.project ?? s.project) || t.workflow !== gn!.workflow) fail('delegate-target', `${e.node} delegates to ${gn!.project ?? s.project}/${gn!.workflow}, not ${String(t.project)}/${String(t.workflow)}`)
@@ -2287,7 +2303,7 @@ export function apply(prev: RunState | null, e: HistoryEntry | (OpInput & EntryM
       const all = s.reviews ?? {}
       const id = `rv${Object.keys(all).length + 1}`
       if (e.review !== id) fail('shape', `the next review round is ${id}, not ${String(e.review)}`)
-      if (typeof e.uid !== 'string' || !e.uid.endsWith(`/${id}`) || !e.uid.startsWith(`${s.project}/${s.workflow}/${s.run}#`)) fail('shape', `the review uid is <this run's uid>/${id}`)
+      if (typeof e.uid !== 'string' || !e.uid.endsWith(`/${id}`) || !e.uid.startsWith(`${s.createdAs ?? s.project}/${s.workflow}/${s.run}#`)) fail('shape', `the review uid is <this run's uid>/${id}`)
       const open = Object.values(all).find(r => r.node === e.node && r.state !== 'changes-requested' && r.state !== 'cancelled')
       if (open) fail('review-open', `${e.node} already has review round ${open.id} (${open.state}); a new round is a new review node`)
       if (n.state === 'pending') {

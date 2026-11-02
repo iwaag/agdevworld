@@ -465,3 +465,26 @@ and a restart; devdocs and study submodules on the run branch at their
 gitlinks (a workspace-only commit included); a nested submodule on the run
 branch (`test/nested.test.ts`: checkpoint and integration order, pins);
 a damaged, missing or reconstructed manifest; a missing copy.
+
+## Renaming a project
+
+`wfe rename-project <from> <to> --repository <name>` renames a managed project on this host
+(`server/renameProject.ts`). The Gitea repository and the Zulip folder and channels are renamed
+first, by their ids, so history and numeric bindings stay. Writers are stopped first. `--preview`
+changes nothing; a journal in `<area>/.local/migrations/` makes a repeat continue.
+
+- **A run keeps its creation identity**: uid, branch, creation hash, frozen definition and source.
+  Its current project moves through `run.rename-project`, which records `createdAs`.
+- **Stores follow the current project.** Notification keys move with their event ids, so a scan
+  queues nothing again. Receipts, sent content, message text and hashed snapshots stay.
+- **The registry's `formerly`** resolves what existing records stored: a child's workspace in a
+  parent's record, a parent's project in a child's, a committed snapshot, a run in an older backup
+  generation. Routing, publication and new requests do not consult it, so the old name offers
+  nothing new. A new run allocates a number above the existing copies.
+- **Backups.** Existing generations are unchanged and describe the old names; the next generation
+  describes the new ones. An isolated restore uses the generation's own registry. A live
+  `wfe backup reinstate` from an older generation resolves its workspace through `formerly` and
+  brings back a record from before the rename; `rename-project` run again converges it (delete
+  the journal's `records` step first).
+- A retired run's retention repository keeps its key, which its contents record. A new retirement
+  uses a key from the new URL, so one workspace can hold both.

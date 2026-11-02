@@ -45,7 +45,7 @@ class Refused extends Error { detail?: unknown; constructor(m: string, detail?: 
 // ---- arguments ---------------------------------------------------------------
 
 interface Parsed { positional: string[]; opts: Map<string, string[]>; flags: Set<string> }
-const FLAGS = new Set(['json', 'help', 'resume', 'h', 'new', 'history', 'no-gitea', 'reuse', 'lost', 'uncertain', 'found', 'complete', 'not-posted', 'ok', 'about-plan', 'all', 'dry-run', 'commit', 'push', 'status', 'rebuild', 'allow-live-executor', 'terminal', 'missing', 'retire', 'upstream', 'published', 'regex', 'ignore-case', 'refresh', 'quick', 'verify-all', 'rendered', 'delivered', 'undelivered', 'partial', 'person', 'integration', 'conclude', 'close', 'no-title', 'if-untitled', 'queue', 'yes', 'no-default', 'none', 'no-change', 'synthetic', 'apply', 'replace', 'current', 'reopen', 'check-bytes', 'editing', 'no-failure-cases']) // p7: present stop --all, run adjust --dry-run
+const FLAGS = new Set(['preview', 'json', 'help', 'resume', 'h', 'new', 'history', 'no-gitea', 'reuse', 'lost', 'uncertain', 'found', 'complete', 'not-posted', 'ok', 'about-plan', 'all', 'dry-run', 'commit', 'push', 'status', 'rebuild', 'allow-live-executor', 'terminal', 'missing', 'retire', 'upstream', 'published', 'regex', 'ignore-case', 'refresh', 'quick', 'verify-all', 'rendered', 'delivered', 'undelivered', 'partial', 'person', 'integration', 'conclude', 'close', 'no-title', 'if-untitled', 'queue', 'yes', 'no-default', 'none', 'no-change', 'synthetic', 'apply', 'replace', 'current', 'reopen', 'check-bytes', 'editing', 'no-failure-cases']) // p7: present stop --all, run adjust --dry-run
 function parse(argv: string[]): Parsed {
   const p: Parsed = { positional: [], opts: new Map(), flags: new Set() }
   for (let i = 0; i < argv.length; i++) {
@@ -276,6 +276,15 @@ reconstructed from the copy itself — the run branch it has checked out and
 the storage its run.json records. Nothing is cloned, checked out, restarted or
 deleted; a copy whose repository is gone stays reported (its saved work is on
 its branch). Exit 0 when every copy is usable; 1 when one is damaged.`,
+  'rename-project': `wfe rename-project <from> <to> --repository <name> [--preview] --by <name> [--allow-live-executor] [--sessions <dir>]
+
+Renames a managed project on this host (rename/warden): workspace folder, registry,
+run copies, run records, stores, settings, context folder, presentation configs and
+session folders. --preview changes nothing. Rename the Gitea repository and the Zulip
+folder and channels first, by their ids; stop the executor, the service, Observer and
+its watchdog. Refused on any open attempt. Running it again continues from its journal
+(<area>/.local/migrations/rename-<from>-<to>.json) and changes nothing that is done.
+docs/storage.md *Renaming a project*.`,
   list: `wfe list
 
 Lists the registered workspaces and what is observed now: available or not
@@ -775,6 +784,7 @@ Projects and workspaces
   exec <subcommand>         the executor's interface: claim, started, finished, stops, reconcile …
   runs index [--rebuild]    runs' own working copies on this host (p9)
   observe                   a read-only snapshot of every run for monitors (observer p3)
+  rename-project <a> <b>    rename a managed project on this host, with a preview and a journal (rename/warden)
   notify <subcommand>       Zulip coordination: status, deliveries, claim, resolve … (autolab delivers)
   present <subcommand>      presentations of a run's result: register, start, status, stop, reconcile
   share <subcommand>        shared areas on this host: list, resolve, ls, find, verify (docs/shares.md)
@@ -1824,6 +1834,31 @@ async function cmdRelocate(p: Parsed): Promise<number> {
 // The p9 migration (docs/storage.md *Migration*): an inventory first
 // (--dry-run changes nothing), then the move of non-terminal runs into
 // working copies of their own; resumable from its journal.
+async function cmdRenameProject(p: Parsed): Promise<number> {
+  const [from, to] = p.positional
+  const repository = opt(p, 'repository'), by = opt(p, 'by')
+  if (!from || !to || !repository) throw new UsageError('usage: wfe rename-project <from> <to> --repository <name> [--preview] --by <name>')
+  const { renamePreview, renameProject } = await import('../server/renameProject.ts')
+  const x = await openExec(p)
+  try {
+    const o = { from, to, repository, by: by ?? 'preview', allowLive: p.flags.has('allow-live-executor'), sessions: opt(p, 'sessions') }
+    if (p.flags.has('preview')) {
+      const v = await renamePreview(x, o)
+      out([`Rename ${from} → ${to} (nothing was changed). Executor: ${v.executor}.`,
+        `  workspace ${v.workspace.from} → ${v.workspace.to}${v.workspace.moved ? ' (moved already)' : ''}`,
+        `  runs ${v.runs.total}: to rename ${v.runs.toRename}, renamed ${v.runs.renamed}, retired ${v.runs.retired}`,
+        `  session folders ${v.sessions}; context folder ${v.contexts ? 'present' : 'absent'}`,
+        ...v.stores.filter(s => s.rows).map(s => `  ${s.store}.${s.change}: ${s.rows}`),
+        ...v.problems.map(t => `  problem: ${t}`)].join('\n'), v)
+      return v.problems.length ? 1 : 0
+    }
+    if (!by) throw new UsageError('--by <name> is required')
+    const r = await renameProject(x, o)
+    out([`Renamed ${from} → ${to}. Journal: ${r.journal}`, ...Object.entries(r.steps).map(([k, v]) => `  ${k}: ${JSON.stringify(v.detail ?? null).slice(0, 400)}`), ...r.problems.map(t => `  problem: ${t}`)].join('\n'), r)
+    return r.problems.length ? 1 : 0
+  } finally { x.close(); execStore = undefined }
+}
+
 async function cmdMigrate(p: Parsed): Promise<number> {
   const { inventory, migrate } = await import('../server/migrate.ts')
   const x = await openExec(p)
@@ -1958,7 +1993,7 @@ async function cmdBackup(p: Parsed): Promise<number> {
 
 const COMMANDS: Record<string, (p: Parsed) => Promise<number>> = {
   backup: cmdBackup, branches: cmdBranches,
-  runs: cmdRuns, observe: cmdObserve, projects: cmdProjects, run: cmdRun, delegate: cmdDelegate, review: cmdReview, present: cmdPresent, share: cmdShare, project: cmdProject, repo: cmdRepo, gitea: cmdGitea, dashboard: cmdDashboard, exec: cmdExec, request: cmdRequest, notify: cmdNotify, intake: cmdIntake,
+  runs: cmdRuns, 'rename-project': cmdRenameProject, observe: cmdObserve, projects: cmdProjects, run: cmdRun, delegate: cmdDelegate, review: cmdReview, present: cmdPresent, share: cmdShare, project: cmdProject, repo: cmdRepo, gitea: cmdGitea, dashboard: cmdDashboard, exec: cmdExec, request: cmdRequest, notify: cmdNotify, intake: cmdIntake,
   create: cmdCreate, register: cmdRegister, list: cmdList, status: cmdStatus, validate: cmdValidate,
   approve: cmdApprove, arrange: cmdArrange, 'add-repo': cmdAddRepo, workflow: cmdWorkflow, serve: cmdServe, setup: cmdSetup,
   version: cmdVersion, nodes: cmdNodes, workspace: cmdWorkspace, boast: cmdBoast, context: cmdContext, challenge: cmdChallenge, conversation: cmdConversation, discussion: cmdConversation, dialogue: cmdDialogue,

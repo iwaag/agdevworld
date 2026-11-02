@@ -25,7 +25,7 @@ import { atomicWrite, readTextOrNull } from './files.ts'
 import { git } from './git.ts'
 import { withLock } from './lock.ts'
 import { workspaces } from './migrate.ts'
-import { loadRegistry } from './registry.ts'
+import { loadRegistry, recordedWorkspace } from './registry.ts'
 import { ARCHIVE, CLEANUP_RECORD, FILES, lifecycleLock, readContents, restoreRun, retainedFile, retentionRepo, RETENTION_DIR, sha256File, verifyRetained, type RetainedRef } from './retention.ts'
 import { recordFolderOf } from './runrecord.ts'
 import { readRun, readRunFile, RUN_FILE } from './runs.ts'
@@ -579,7 +579,7 @@ export async function rehearse(o: { into: string; by: string; failureCases?: boo
   const add = (check: string, ok: boolean, detail: string, run?: string) => { checks.push({ check, ok, detail, ...(run ? { run } : {}) }) }
   const x = new ExecStore({ registryFile, area })
   let compared = 0, restoredBytes = 0, restoredRuns = 0
-  const wsOf = async (id: string) => new Workspace((await loadRegistry(registryFile)).workspaces.find(w => w.id === id)!)
+  const wsOf = async (id: string) => new Workspace(recordedWorkspace((await loadRegistry(registryFile)).workspaces, id)!)
   const parse = (ref: string): RunRef => { const [workflow, run] = ref.split('/'); return { workflow, run } }
   const selected = m.runs.filter(r => r.covered && (!o.only?.length || o.only.includes(`${r.workspace}:${r.ref}`)))
   const jobsBefore = x.countsForRehearsal().jobs
@@ -749,7 +749,7 @@ export async function reinstate(x: ExecStore, cfg: BackupConfig, o: { generation
   const items: ReinstateItem[] = [], losses: string[] = []
   const stamp = now().replace(/[:.]/g, '-')
   for (const ws of (await workspaces(x)).filter(w => !o.workspace || w.reg.id === o.workspace)) {
-    const here = m.runs.filter(r => r.workspace === ws.reg.id)
+    const here = m.runs.filter(r => r.workspace === ws.reg.id || ws.reg.formerly?.includes(r.workspace))
     for (const key of new Set(here.flatMap(r => r.repositories.map(p => p.key)))) {
       const bare = retentionRepo(ws, key), label = `retention ${ws.reg.id}/${key}`
       const runs = here.filter(r => r.repositories.some(p => p.key === key))

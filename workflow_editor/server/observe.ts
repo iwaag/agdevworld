@@ -16,13 +16,13 @@ import { execFile } from 'node:child_process'
 import { hostname } from 'node:os'
 import { promisify } from 'node:util'
 import { canonicalJson } from '../shared/canonical.ts'
-import { EXECUTOR_OPS, hostOf, questionState, replay, runKey, situation, standingEvents, type HoldCause, type RunRecord, type RunRef } from '../shared/run.ts'
+import { EXECUTOR_OPS, hostOf, questionState, replay, runKey, runUid, situation, standingEvents, type HoldCause, type RunRecord, type RunRef } from '../shared/run.ts'
 import { hostOwes, openContinuations, reviewStateText } from '../shared/humanReview.ts'
 import { DEFAULT_LANE, sessionPolicyOf } from '../shared/model.ts'
 import { laneOn } from './workers.ts'
 import { activityOf, logFacts } from './activity.ts'
 import type { AttemptRow, ExecStore, JobRow } from './exec.ts'
-import { loadRegistry, observe as observeRegistration } from './registry.ts'
+import { loadRegistry, observe as observeRegistration, recordedWorkspace } from './registry.ts'
 import { readRun, runRefs } from './runs.ts'
 import { readCopy } from './runspace.ts'
 import { codeVersion } from './version.ts'
@@ -370,7 +370,7 @@ export class Observer {
     const out: ObservedRun = {
       identity: {
         project: r.project, workspace: ws.reg.id, workflow: r.workflow, run: r.run, creation: creationOf(r),
-        uid: `${r.project}/${r.workflow}/${r.run}#${creationOf(r)}`, created: r.created,
+        uid: runUid(r, creationOf(r)), created: r.created,
         receipt: r.history[0]?.receipt ?? null, branch: r.storage?.branch ?? null,
       },
       source: { ...source, readAt: now().toISOString(), reads, consistent },
@@ -428,11 +428,11 @@ export class Observer {
         let unrelayed: DelegationFacts['unrelayed'] = []
         let problem: string | null = null
         if (d.child) {
-          const reg = regs.find(w => w.id === d.child!.workspace)
+          const reg = recordedWorkspace(regs, d.child!.workspace)
           const cref = { workflow: d.child.workflow, run: d.child.run }
           const c = reg ? (await readRun(new Workspace(reg), cref).catch(() => null))?.record : undefined
           if (!c) problem = `the child ${d.child.project} ${cref.workflow}/${cref.run} cannot be read here`
-          else if (`${c.project}/${c.workflow}/${c.run}#${creationOf(c)}` !== d.child.uid) problem = `the child's record is another run now (bound ${d.child.uid})`
+          else if (runUid(c, creationOf(c)) !== d.child.uid) problem = `the child's record is another run now (bound ${d.child.uid})`
           else {
             child = { uid: d.child.uid, workspace: d.child.workspace, ref: `${cref.workflow}/${cref.run}`, situation: situation(c), execution: c.execution.state, waitingFor: c.execution.waiting.map(w => w.holder), hold: c.control.hold?.kind ?? null, failed: c.execution.failed }
             const recorded = new Set(r.history.map(h => h.receipt).filter(Boolean))
@@ -441,7 +441,7 @@ export class Observer {
         }
         let delivery: DelegationFacts['delivery'] = null
         if (db && !d.child) {
-          const id = `${r.project}/${r.workflow}/${r.run}#${d.dispatched.seq}:delegation-request@${d.id}`
+          const id = `${r.createdAs ?? r.project}/${r.workflow}/${r.run}#${d.dispatched.seq}:delegation-request@${d.id}`
           const row = db.prepare('SELECT o.state AS ostate, o.created AS created, d.state AS dstate, d.last_error AS error, d.message_id AS message, d.uncertain AS uncertain FROM outbox o LEFT JOIN delivery_events e ON e.event = o.id LEFT JOIN deliveries d ON d.id = e.delivery WHERE o.id = ?').get(id) as { ostate: string; created: string; dstate: string | null; error: string | null; message: number | null; uncertain: number | null } | undefined
           delivery = row ? { state: row.dstate ? `${row.dstate}${row.uncertain ? ' (may have been posted)' : ''}` : row.ostate === 'sent' ? 'sent' : 'queued', error: row.error, message: row.message, since: row.created } : { state: 'not-queued', error: null, message: null, since: d.dispatched.at }
         }

@@ -18,7 +18,7 @@ import { withLock } from './lock.ts'
 import { CLEANUP_RECORD, lifecycleLock, readContents, recordReasons, retentionRepo } from './retention.ts'
 import { coverageOf, Dest, loadBackupConfig, readManifest, type BackupManifest } from './runBackup.ts'
 import { readRun } from './runs.ts'
-import { copyDir, listCopies, ownerOf, readCopy, runBranch, type CopyManifest, type RunCopy } from './runspace.ts'
+import { copyDir, listCopies, ownerOf, readCopy, type CopyManifest, type RunCopy } from './runspace.ts'
 import type { ExecStore } from './exec.ts'
 import type { Workspace } from './workspace.ts'
 
@@ -129,7 +129,7 @@ export async function assess(c: Ctx, ws: Workspace, ref: RunRef, o: { leaving?: 
   const contents = m.state === 'retired' ? await readContents(copy as RunCopy & { manifest: CopyManifest }).catch(e => { reasons.push((e as Error).message); return null }) : null
   const cov = coverageOf(c.backup, ws.reg.id, key, m.generation ?? 0)
   if (m.state === 'retired' && !cov.covered) reasons.push(cov.run || !c.backupProblem ? cov.why! : c.backupProblem!)
-  const name = `refs/heads/${runBranch(m.project, ref)}`
+  const name = `refs/heads/${m.branch}`
   const prior = await readCleanupRecord(ws, ref)
   const repos = repositoriesOf(m, contents)
   const rows: RefRow[] = []
@@ -176,11 +176,13 @@ export async function inventory(c: Ctx, ws: Workspace): Promise<Inventory> {
   const out: Inventory = { workspace: ws.reg.id, project: ws.reg.project ?? ws.reg.id, runs: [], unknown: [], outside: 0, totals: { refs: 0, byRepository: {} }, unread: [] }
   const urls = new Set<string>()
   const owned = new Set<string>()
+  const owners = new Set([out.project]) // a renamed project's older runs keep their branches (rename/warden)
   for (const copy of copies) {
     const m = copy.manifest
     if (!m) continue
     out.project = m.project
-    const name = `refs/heads/${runBranch(m.project, copy.ref)}`
+    const name = `refs/heads/${m.branch}`
+    owners.add(m.branch.split('/')[1])
     const refs: Inventory['runs'][number]['refs'] = []
     const contents = m.state === 'retired' ? await readContents(copy as RunCopy & { manifest: CopyManifest }).catch(() => null) : null
     for (const r of repositoriesOf(m, contents)) {
@@ -201,7 +203,7 @@ export async function inventory(c: Ctx, ws: Workspace): Promise<Inventory> {
     if (typeof listed === 'string') continue
     for (const [ref, oid] of listed) {
       const b = BRANCH.exec(ref)
-      if (!b || b[1] !== out.project) continue
+      if (!b || !owners.has(b[1])) continue
       out.totals.refs++
       out.totals.byRepository[url] = (out.totals.byRepository[url] ?? 0) + 1
       if (!owned.has(`${url} ${ref}`)) out.unknown.push({ repository: url, ref, oid })

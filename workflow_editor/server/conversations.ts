@@ -18,7 +18,7 @@ import { fileView, refOf, type FileRow, type FileView } from './messageFiles.ts'
 import type { ChallengeStore } from './challenges.ts'
 import type { PinnedAttachment } from './runs.ts'
 import type { Workflow } from '../shared/model.ts'
-import { runDisplayTitle, runKey, situation, type RunRecord, type RunRef } from '../shared/run.ts'
+import { runDisplayTitle, runKey, runUid, situation, type RunRecord, type RunRef } from '../shared/run.ts'
 import { reviewStateText, subjectRun } from '../shared/humanReview.ts'
 import type { ExecStore } from './exec.ts'
 import { presenterOf, type Presenter } from './present.ts'
@@ -395,7 +395,7 @@ export class ConversationStore {
         const reading = await readRun(ws, ref)
         const rec = reading.record as RunRecord | null
         if (!rec) throw new Error('the run cannot be read')
-        if (uid && `${rec.project}/${rec.workflow}/${rec.run}#${creationOf(rec)}` !== uid) throw new Error('the delegated run identity changed; its review cannot be substituted')
+        if (uid && runUid(rec, creationOf(rec)) !== uid) throw new Error('the delegated run identity changed; its review cannot be substituted')
         // A child can prepare its own human review before it completes, so
         // it has no result to relay yet. Follow recorded bindings directly,
         // including satisfied delegations, rather than waiting for a result.

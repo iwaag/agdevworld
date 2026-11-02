@@ -729,10 +729,10 @@ async function publishedRuns(ctx: AccessContext, project: string, workflow: stri
   return { l, refs: refs.slice(0, LIMITS.runs) }
 }
 
-async function readPublished(l: Located, project: string, ref: RunRef) {
+async function readPublished(l: Located, project: string, ref: RunRef, formerly?: string[]) {
   const inner = `${l.inner}/${ref.workflow}/${ref.run}`
   const src = committedSource(l, inner)
-  return { src, reading: await readFrom(src, { ...ref, project }) }
+  return { src, reading: await readFrom(src, { ...ref, project, formerly }) }
 }
 
 async function liveWorkspace(ctx: AccessContext, project: string, id?: string): Promise<Workspace | string> {
@@ -750,8 +750,9 @@ export async function runs(ctx: AccessContext, project: string, opts: ReadOption
   try {
     const { l, refs } = await publishedRuns(ctx, project, opts.workflow, opts)
     prov = provenance(ctx, l, RUNS_ROOT)
+    const formerly = (await loadRegistry(ctx.registryFile)).workspaces.find(w => w.project === project)?.formerly
     for (const ref of refs) {
-      const { reading } = await readPublished(l, project, ref)
+      const { reading } = await readPublished(l, project, ref, formerly)
       const s = summaryOf(ref, reading)
       byRef.set(runKey(ref), { ref: runKey(ref), published: { ...s, commit: l.commit, integrated: !!reading.record?.integrations?.length } })
     }
@@ -812,7 +813,7 @@ export async function run(ctx: AccessContext, project: string, text: string, opt
     if (t.code !== 0) view.publishedUnavailable = `${runKey(ref)} is not in ${l.repository.fullName}@${l.commit.slice(0, 10)}`
     else {
       const runs = await locate(ctx, project, RUNS_ROOT, { rev: opts.rev })
-      const { reading } = await readPublished(runs, project, ref)
+      const { reading } = await readPublished(runs, project, ref, (await loadRegistry(ctx.registryFile)).workspaces.find(w => w.project === project)?.formerly)
       const files = parseLsTree((await git(l.dir, ['ls-tree', '-r', '-z', l.commit, '--', `${l.inner}/`])).stdout).map(e => e.path.slice(l.inner.length + 1))
       view.published = { provenance: provenance(ctx, l, `${RUNS_ROOT}/${runKey(ref)}`), ...(reading.record ? { record: reading.record } : {}), ...(reading.problem ? { problem: reading.problem } : {}), files }
     }

@@ -24,7 +24,7 @@ import { createProject } from '../server/create.ts'
 import { ExecStore } from '../server/exec.ts'
 import { git, gitOk } from '../server/git.ts'
 import { loadRegistry } from '../server/registry.ts'
-import { readRun } from '../server/runs.ts'
+import { readRun, runOp } from '../server/runs.ts'
 import { runSpace } from '../server/runspace.ts'
 import { Workspace } from '../server/workspace.ts'
 
@@ -272,4 +272,77 @@ test('workers: a forwarded command gets the same reminder as on the coordinator,
   const ok = await s.wfe([...args, '--yes', '--json'], { cwd: tree, attempt: claim.attempt.id })
   assert.equal(ok.code, 0, ok.stderr + ok.stdout)
   assert.equal((await readRun(await runSpace(s.ws, a.ref), a.ref)).record!.presentations?.p1?.node, 'build')
+})
+
+test('workers: a worker-only file is archived before anything goes; lost contact holds the retirement visibly; stale messages change nothing; a new dispatch brings the file back (improve_wfrun p2)', async () => {
+  const s = await setup()
+  const { retireRun, restoreRun, storageView } = await import('../server/retention.ts')
+  const { readCopy } = await import('../server/runspace.ts')
+  const a = await request(s.x, s.id, 'onpc', 'workers-retire-1')
+  const claim = JSON.parse((await s.wfe(['exec', 'claim', ...OFFER, '--json'])).stdout)
+  const tree = claim.cwd as string
+  const ref = `onpc/${a.ref.run}`
+  await s.wfe(['exec', 'started', claim.attempt.id, '--pid', String(process.pid), '--json'])
+  assert.equal((await s.wfe(['run', 'start', ref, 'build', '--json'], { cwd: tree, attempt: claim.attempt.id })).code, 0)
+  await writeFile(join(tree, 'game.txt'), 'v2\n')
+  assert.equal((await s.wfe(['run', 'complete', ref, 'build', '--outcome', 'built', '--json'], { cwd: tree, attempt: claim.attempt.id })).code, 0)
+  const fin = await s.wfe(['exec', 'finished', claim.attempt.id, '--exit-code', '0', '--json'])
+  assert.equal(fin.code, 0, fin.stderr)
+  await s.x.integrateDue()
+  // Only this worker has these.
+  await mkdir(join(tree, 'out'), { recursive: true })
+  await writeFile(join(tree, 'out', 'render.bin'), 'only on the pc\n')
+  await gitOk(tree, ['branch', 'side'])
+  await writeFile(join(tree, 'side.txt'), 'a local commit no remote has\n')
+  await gitOk(tree, ['checkout', '-q', 'side']); await gitOk(tree, ['add', 'side.txt']); await gitOk(tree, ['commit', '-q', '-m', 'side']); await gitOk(tree, ['checkout', '-q', `wfe/${s.id}/onpc/${a.ref.run}`])
+
+  // The worker has not answered: the retirement holds, the coordinator's tree stays, and it says so.
+  const r1 = await retireRun(s.x, s.ws, a.ref, { by: 'check' })
+  assert.equal(r1.outcome, 'waiting', JSON.stringify(r1))
+  assert.match(r1.reasons.join(), /worker pc has not reported/)
+  const c = (await readCopy(s.ws, a.ref))!
+  assert.equal(c.manifest!.state, 'retiring')
+  assert.ok(existsSync(join(c.tree, '.git')))
+  assert.equal((await storageView(s.x, s.ws, a.ref)).hosts.pc.state, 'requested')
+  const beat = await (await fetch(new URL('api/workers/pc/heartbeat', s.url), { method: 'POST', headers: { authorization: 'Bearer secret-of-pc', 'content-type': 'application/json' }, body: JSON.stringify({ pid: process.pid }) })).json() as { storageTasks: number }
+  assert.equal(beat.storageTasks, 1, 'the heartbeat says work is due')
+  // A second call continues the same retirement: the worker's task keeps its generation.
+  const gen = c.manifest!.generation
+  assert.equal((await retireRun(s.x, s.ws, a.ref, { by: 'check' })).outcome, 'waiting')
+  assert.equal((await readCopy(s.ws, a.ref))!.manifest!.generation, gen)
+
+  const tick = await s.wfe(['exec', 'storage-tick', '--json'])
+  assert.equal(tick.code, 0, tick.stderr + tick.stdout)
+  const v = (await storageView(s.x, s.ws, a.ref)).hosts.pc
+  assert.equal(v.state, 'archived', JSON.stringify(v))
+  assert.ok(v.archive!.bytes > 0)
+  const r2 = await retireRun(s.x, s.ws, a.ref, { by: 'check' })
+  assert.equal(r2.outcome, 'retired', JSON.stringify(r2))
+  assert.equal((await storageView(s.x, s.ws, a.ref)).hosts.pc.state, 'remove-pending', 'partial until the worker removes its copy')
+  assert.ok(existsSync(join(tree, 'out', 'render.bin')), 'the worker has not been reached yet')
+
+  // Delayed messages from before the retirement.
+  const headers = { authorization: 'Bearer secret-of-pc' }
+  const put = await fetch(new URL(`api/workers/pc/files?workspace=${s.id}&workflow=onpc&run=${a.ref.run}`, s.url), { method: 'PUT', headers, body: new Uint8Array(0) })
+  assert.equal(put.status, 409, 'a delayed upload is refused; it cannot resurrect the tree')
+  assert.equal(existsSync(c.tree), false)
+  const stale = await (await fetch(new URL('api/workers/pc/storage-report', s.url), { method: 'POST', headers: { ...headers, 'content-type': 'application/json' }, body: JSON.stringify({ workspace: s.id, workflow: 'onpc', run: a.ref.run, generation: gen! - 1, state: 'removed' }) })).json() as { accepted: boolean }
+  assert.equal(stale.accepted, false)
+  assert.equal((await storageView(s.x, s.ws, a.ref)).hosts.pc.state, 'remove-pending')
+
+  assert.equal((await s.wfe(['exec', 'storage-tick', '--json'])).code, 0)
+  assert.equal(existsSync(tree), false, 'the worker removed its copy')
+  assert.equal((await storageView(s.x, s.ws, a.ref)).hosts.pc.state, 'removed')
+
+  // Restored, and dispatched again: the worker's bytes come back into its new copy.
+  assert.equal((await restoreRun(s.x, s.ws, a.ref, { by: 'check' })).outcome, 'restored')
+  assert.equal((await fetch(new URL(`api/workers/pc/storage-archive?workspace=${s.id}&workflow=onpc&run=${a.ref.run}`, s.url), { headers })).status, 200)
+  const db = s.x as unknown as { tx: <T>(f: () => T) => T; run: (sql: string, ...a: unknown[]) => unknown }
+  await runOp(s.ws, a.ref, { op: 'correction.receive', result: { seq: (await readRun(s.ws, a.ref)).record!.seq }, reason: 'fix it', instruction: 'Fix it.', by: 'check' } as never, { by: 'check', via: 'cli' }).catch(() => null)
+  db.tx(() => db.run('INSERT INTO jobs (workspace, workflow, run, kind, reason, receipt, state, created, worker) VALUES (?, ?, ?, \'resume\', \'correction\', \'r-again\', \'queued\', ?, \'pc\')', s.id, 'onpc', a.ref.run, new Date().toISOString()))
+  const again = JSON.parse((await s.wfe(['exec', 'claim', ...OFFER, '--json'])).stdout)
+  if (again.cwd) {
+    assert.equal(await readFile(join(tree, 'out', 'render.bin'), 'utf8'), 'only on the pc\n')
+    assert.ok(existsSync(join(tree, '.local/wfe-worker-bundles/root.bundle')), 'its unpublished commit travels as a bundle')
+  } else assert.fail(`the correction was not dispatched: ${JSON.stringify(again)}`)
 })

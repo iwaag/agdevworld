@@ -24,7 +24,8 @@ import { git } from './git.ts'
 import { withLock } from './lock.ts'
 import type { RepoStep } from './publish.ts'
 import { RUN_FILE, runDir } from './runs.ts'
-import { runSpace } from './runspace.ts'
+import { withoutLink } from './runrecord.ts'
+import { treeSpace } from './runspace.ts'
 import { RequestError, type Workspace } from './workspace.ts'
 
 export const WORKERS_FILE = 'workers.json'
@@ -112,9 +113,9 @@ export const workerTree = (root: string, workspace: string, ref: RunRef) => posi
 // only forward (its current commit must be an ancestor of the worker's);
 // anything else is refused, never forced.
 export async function alignRecordCopy(ws: Workspace, ref: RunRef, steps: RepoStep[], env: Record<string, string>): Promise<void> {
-  const space = await runSpace(ws.shared, ref)
+  const space = await treeSpace(ws.shared, ref)
   if (!space.copyOf) throw new Error(`run ${ref.workflow}/${ref.run} has no record copy here`)
-  const record = join(space.root, runDir(ref), RUN_FILE)
+  const record = join(space.copyOf!.recordRoot ?? space.root, runDir(ref), RUN_FILE)
   const moves = steps.filter(s => s.head).sort((a, b) => depth(a.repo) - depth(b.repo))
   await withLock(record, async () => {
     const keep = await readFile(record, 'utf8')
@@ -128,7 +129,9 @@ export async function alignRecordCopy(ws: Workspace, ref: RunRef, steps: RepoSte
         const cur = (await git(dir, ['rev-parse', 'HEAD'])).stdout.trim()
         if (cur === st.head) continue
         if ((await git(dir, ['merge-base', '--is-ancestor', cur, st.head!])).code !== 0) throw new Error(`${st.repo}: the record copy is at ${cur.slice(0, 12)}, which the worker's ${st.head!.slice(0, 12)} does not contain`)
-        const r = await git(dir, ['reset', '-q', '--hard', st.head!])
+        const c = space.copyOf!
+        const move = () => git(dir, ['reset', '-q', '--hard', st.head!])
+        const r = c.recordRoot && c.owner === st.repo ? await withoutLink(space.root, ref, st.repo, move) : await move()
         if (r.code !== 0) throw new Error(`${st.repo}: git reset failed: ${r.stderr.trim()}`)
       }
     } finally {

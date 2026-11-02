@@ -18,14 +18,15 @@ import {
 } from '../shared/run.ts'
 import { runStatus } from '../shared/status.ts'
 import type { SourceRef } from '../shared/intake.ts'
-import { atomicWrite, inside, readTextOrNull } from './files.ts'
+import { atomicWrite, inside, readTextOrNull, withinRoot } from './files.ts'
 import { MANIFEST_KIND } from '../shared/review.ts'
 import { refsIn } from '../shared/shares.ts'
 import { parseSnapshot, type CatalogContext, type CatalogSnapshot, type RunCatalog } from '../shared/catalog.ts'
 import { withLock } from './lock.ts'
 import { blobSizeAt, listAt, resolveRev, RevError, showAt, type DevdocsInfo, type DevdocsRev } from './devdocs.ts'
 import { RequestError, WORKFLOWS_DIR, type Workspace } from './workspace.ts'
-import { allocating, copyByReceipt, listCopies, prepareCopy, runSpace, storageOf, usedRuns } from './runspace.ts'
+import { allocating, copyByReceipt, listCopies, prepareCopy, readCopy, runSpace, storageOf, treeSpace, usedRuns } from './runspace.ts'
+import { linkRecord } from './runrecord.ts'
 import type { AccessContext } from './access.ts'
 import { parseWorkflow, renderWorkflow } from './yamlDoc.ts'
 import { git } from './git.ts'
@@ -259,7 +260,7 @@ export async function runCatalog(ws: Workspace, ref: RunRef): Promise<RunCatalog
 export async function readRun(ws: Workspace, ref: RunRef): Promise<Reading & { dir: string }> {
   ws = await runSpace(ws, ref)
   const rel = runDir(ref)
-  const dir = await inside(ws.root, rel)
+  const dir = await inside(ws.copyOf?.recordRoot ?? ws.root, rel)
   const project = await projectId(ws)
   const key = `${dir}\0${project}\0${await sigOf(join(dir, RUN_FILE))}\0${await bundleSigs(dir)}\0${await sigOf(join(dir, CATALOG_SNAPSHOT))}`
   return { ...(await readFrom(fsSource(dir), { ...ref, project }, key)), dir }
@@ -470,6 +471,11 @@ export async function readRunFile(ws: Workspace, ref: RunRef, path: string, opts
   }
   const abs = await inside(ws.root, target)
   const s = await stat(abs).catch(() => null)
+  if (!s?.isFile() && ws.copyOf?.treeless) {
+    // A retired run's artifact: from its retained commit or archive, unchanged.
+    const kept = await (await import('./retention.ts')).retainedFile(ws, ref, target)
+    if (kept) { if (kept.length > MAX_READ) throw new RequestError(413, `${target} is larger than ${MAX_READ} bytes`); return { path: target, text: kept.toString('utf8') } }
+  }
   if (!s?.isFile()) throw new RequestError(404, `${target} does not exist`)
   if (s.size > MAX_READ) throw new RequestError(413, `${target} is larger than ${MAX_READ} bytes; open it in the editor`)
   return { path: target, text: await readFile(abs, 'utf8') }
@@ -595,9 +601,10 @@ async function repoContext(ws: Workspace, files: Record<string, { workflow: Work
 // is refused and left as it is. run.json is written last.
 async function writeRun(ws: Workspace, ref: RunRef, files: Record<string, string>, record: RunRecord): Promise<CreatedRun> {
   const rel = runDir(ref)
-  const runs = await inside(ws.root, `${RUNS_DIR}/${ref.workflow}`)
+  const root = ws.copyOf?.recordRoot ?? ws.root // the durable record of a run in a copy (improve_wfrun p2)
+  const runs = await inside(root, `${RUNS_DIR}/${ref.workflow}`)
   await mkdir(runs, { recursive: true })
-  const dir = await inside(ws.root, rel)
+  const dir = await inside(root, rel)
   try {
     await mkdir(dir)
   } catch (e) {
@@ -832,7 +839,7 @@ export async function findRunByReceipt(ws: Workspace, workflow: string, receipt:
   for (const ref of await runRefs(ws, workflow)) {
     const space = await runSpace(ws, ref).catch(() => null)
     if (!space) continue
-    const text = await readTextOrNull(join(await inside(space.root, runDir(ref)), RUN_FILE))
+    const text = await readTextOrNull(join(await inside(space.copyOf?.recordRoot ?? space.root, runDir(ref)), RUN_FILE))
     if (!text?.includes(receipt)) continue
     try {
       const first = (JSON.parse(text) as { history?: { op?: string; receipt?: string }[] }).history?.[0]
@@ -847,6 +854,11 @@ export async function findRunByReceipt(ws: Workspace, workflow: string, receipt:
 // advice (fix5): an agent's or a person's operation, evaluated for
 // reminders before it is written (server/reminders.ts); absent for WFE's own.
 export interface OpContext { by?: string; via: string; expectSeq?: number; now?: Date; advice?: Advice }
+
+async function assertReady(space: Workspace, ref: RunRef) {
+  const state = (await readCopy(space.shared, ref))?.manifest?.state
+  if (state && state !== 'ready') throw new RequestError(409, `run ${runKey(ref)}: its working copy is ${state}`, { code: 'run-retired' })
+}
 
 async function writeRecord(dir: string, record: RunRecord) {
   await atomicWrite(join(dir, RUN_FILE), `${JSON.stringify(record, null, 2)}\n`)
@@ -865,9 +877,17 @@ function nextQuestionId(record: RunRecord): string {
 export async function runOp(ws: Workspace, ref: RunRef, input: OpInput & EntryMeta, ctx: OpContext): Promise<{ record: RunRecord; ref: RunRef; duplicate?: boolean }> {
   if (input.op === 'run.create') throw new RequestError(400, 'runs are created with create, not as an operation')
   ws = await runSpace(ws, ref)
-  const file = join(await inside(ws.root, runDir(ref)), RUN_FILE)
+  const file = join(await inside(ws.copyOf?.recordRoot ?? ws.root, runDir(ref)), RUN_FILE)
   try {
-    return await withLock(file, () => runOpLocked(ws, ref, input, ctx), { what: `run ${runKey(ref)}` })
+    return await withLock(file, async () => {
+      // A write takes the run's lock on the durable folder, wherever it was
+      // spelled; the tree's link is repaired here if something replaced it,
+      // and an attempt begins only in a ready copy (a retirement in progress
+      // holds this same lock when it decides).
+      if (ws.copyOf?.recordRoot && !ws.copyOf.treeless) await linkRecord(ws.root, ref, ws.copyOf.owner!)
+      if (input.op === 'attempt.begin' && ws.copyOf) await treeSpace(ws.copyOf.shared, ref).then(s => assertReady(s, ref))
+      return runOpLocked(ws, ref, input, ctx)
+    }, { what: `run ${runKey(ref)}` })
   } catch (e) {
     if ((e as Error).name === 'LockTimeout' || (e as Error).constructor?.name === 'LockTimeout') throw new RequestError(409, (e as Error).message)
     throw e
@@ -952,6 +972,7 @@ async function prepareOp(ws: Workspace, ref: RunRef, record: RunRecord, graph: R
     if (last && op.result && last.seq !== op.result.seq) throw new RequestError(409, `this run completed again at seq ${last.seq}, after the result (seq ${op.result.seq}) the correction returns; it is not applied to the newer result`, { code: 'result-superseded' })
   }
   if (op.op === 'run.decide') {
+    if (op.decision === 'accepted' && ws.copyOf?.treeless) throw new RequestError(409, `run ${runKey(ref)} has no working copy now, and an acceptance binds to its files: restore it first (wfe run restore ${runKey(ref)})`, { code: 'run-retired' })
     delete op.subject
     const q = op.question ? record.questions[op.question] : undefined
     if (q?.subject) op.subject = (await Promise.all(q.subject.map(d => checkSubject(ws, d.path).catch(() => null)))).filter((d): d is DocumentEvidence => !!d)
@@ -1457,7 +1478,7 @@ export async function checkSubject(ws: Workspace, path: string): Promise<Documen
   const l = await lstat(abs).catch(() => null)
   if (!l) throw new RequestError(422, `${rel} does not exist; write the deliverable before presenting it`, { code: 'subject-missing' })
   if (l.isSymbolicLink() || !l.isFile()) throw new RequestError(422, `${rel} is not a regular file`, { code: 'subject-missing' })
-  if (!(await realpath(abs)).startsWith((await realpath(ws.root)) + sep)) throw new RequestError(422, `${rel} resolves outside the project`, { code: 'subject-missing' })
+  if (!withinRoot(await realpath(ws.root), await realpath(abs))) throw new RequestError(422, `${rel} resolves outside the project`, { code: 'subject-missing' })
   if (l.size === 0) throw new RequestError(422, `${rel} is empty`, { code: 'document-empty' })
   if (l.size > MAX_SUBJECT) throw new RequestError(422, `${rel} is larger than ${MAX_SUBJECT} bytes`, { code: 'subject-missing' })
   const bytes = await readFile(abs)

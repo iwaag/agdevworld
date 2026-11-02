@@ -28,6 +28,8 @@ import { createHash } from 'node:crypto'
 import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { git } from './git.ts'
+import { folderIn, stageRecord } from './runrecord.ts'
+import { runFolder } from '../shared/run.ts'
 import type { Workspace } from './workspace.ts'
 
 export type Baseline = Record<string, Record<string, string>> // repo path → file path → content hash ('-' deleted)
@@ -201,11 +203,15 @@ export async function publishRun(ws: Workspace, message: string, previous: RepoS
           if (blocked.has(childOf(step.repo, d.path))) { step.excluded.push(d.path); continue }
           step.include.push(d.path)
         }
-        if (!step.include.length) continue
-        const add = await git(dir, ['add', '-A', '--', ...step.include])
+        // The durable run folder reaches its repository as a snapshot
+        // (improve_wfrun p2): staged from the record, committed with the rest.
+        const record = ws.copyOf?.recordRoot && ws.copyOf.owner === step.repo ? ws.copyOf : null
+        if (record) await stageRecord(dir, folderIn(step.repo, record.ref), join(record.recordRoot!, runFolder(record.ref)))
+        if (!step.include.length && !record) continue
+        const add = step.include.length ? await git(dir, ['add', '-A', '--', ...step.include]) : { code: 0, stderr: '' }
         if (add.code !== 0) throw new Error(`${step.repo}: git add failed: ${add.stderr.trim()}`)
         if ((await git(dir, ['diff', '--cached', '--quiet'])).code === 1) {
-          const c = await git(dir, ['commit', '-q', '-m', message, '--', ...step.include], { env })
+          const c = await git(dir, ['commit', '-q', '-m', message, ...(record ? [] : ['--', ...step.include])], { env })
           if (c.code !== 0) throw new Error(`${step.repo}: git commit failed: ${c.stderr.trim() || c.stdout.trim()}`)
           step.commit = (await git(dir, ['rev-parse', 'HEAD'])).stdout.trim()
         }

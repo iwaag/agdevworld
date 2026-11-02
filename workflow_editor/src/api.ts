@@ -10,6 +10,13 @@ import type { ApprovalKind, Documentation, Project, Workflow } from '../shared/m
 import type { Catalog, NodeTemplate, TemplateContent } from '../shared/catalog.ts'
 import type { ContextBundle, ContextChange, AttemptContext, BlockKind, BlockRevision, BlockState, EvidenceRef, ScopeTarget } from '../shared/context.ts'
 
+// The run's working copy as a storage fact (improve_wfrun p2, server/retention.ts storageView).
+export interface RunStorageView {
+  ref: string; managed: boolean; state: string; retained: string; action: 'retire' | 'restore' | null; eligible: boolean; reasons: string[]; problem: string | null; generation: number
+  hosts: Record<string, { state: string; at: string; detail?: string; archive?: { bytes: number } | null; files?: number; treeBytes?: number | null }>
+  lifecycle: { requestedBy: string; requestedAt: string; phase: string; failure: { at: string; step: string; message: string } | null; archive?: { bytes: number; files: number; verified: string; discarded: number; published: number } | null; sizes?: { treeBytes: number | null; integrationBytes: number | null }; repositories?: { path: string; head: string | null; branch: string | null }[]; history: { at: string; op: string; by: string; result: string }[] } | null
+}
+
 // One run's execution on this host (server/exec.ts runView).
 export interface RunExecView {
   attempts: { id: string; state: string; began: string; ended: string | null; exit_code: number | null; signal: string | null; outcome: string | null; backend: string | null; pid: number | null; alive: boolean | null; stop_requested: string | null; log: string | null; worker?: string | null; host?: string
@@ -120,6 +127,8 @@ export const api = {
   // One run operation (docs/runs.md); `by` is the declared actor, `expectSeq` the sequence the view showed.
   runOp: (id: string, workflow: string, run: string, op: Record<string, unknown> & { op: string; by: string; expectSeq?: number; yes?: boolean }) =>
     call<RunOpResponse>('POST', `${ws(id)}/runs/${encodeURIComponent(workflow)}/${encodeURIComponent(run)}/ops`, op),
+  runStorage: (id: string, workflow: string, run: string, signal?: AbortSignal) => call<RunStorageView>('GET', `${ws(id)}/runs/${encodeURIComponent(workflow)}/${encodeURIComponent(run)}/storage`, undefined, [], signal),
+  storageAction: (id: string, workflow: string, run: string, action: 'retire' | 'restore', by: string) => call<{ ok: boolean; started: string }>('POST', `${ws(id)}/runs/${encodeURIComponent(workflow)}/${encodeURIComponent(run)}/storage/${action}`, { by }),
   runExec: (id: string, workflow: string, run: string, signal?: AbortSignal) => call<RunExecView>('GET', `${ws(id)}/runs/${encodeURIComponent(workflow)}/${encodeURIComponent(run)}/exec`, undefined, [], signal),
   runNotify: (id: string, workflow: string, run: string, signal?: AbortSignal) => call<RunNotifyView>('GET', `${ws(id)}/runs/${encodeURIComponent(workflow)}/${encodeURIComponent(run)}/notify`, undefined, [], signal),
   runDelegations: (id: string, workflow: string, run: string, signal?: AbortSignal) => call<DelegationsView>('GET', `${ws(id)}/runs/${encodeURIComponent(workflow)}/${encodeURIComponent(run)}/delegations`, undefined, [], signal),

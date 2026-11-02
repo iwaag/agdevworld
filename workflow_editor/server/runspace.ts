@@ -30,6 +30,7 @@ import { join } from 'node:path'
 import { ID_PATTERN } from '../shared/model.ts'
 import { RUN_ID, RUNS_ROOT, runFolder, runKey, type RunRef, type RunStorage } from '../shared/run.ts'
 import { atomicWrite, readTextOrNull } from './files.ts'
+import { guardRecordRoot, linkRecord, recordRootOf } from './runrecord.ts'
 import { git, gitOk, LOCAL_TRANSPORT } from './git.ts'
 import { withLock } from './lock.ts'
 import { RequestError, Workspace } from './workspace.ts'
@@ -64,7 +65,7 @@ export interface CopyManifest {
   workflow: string
   run: string
   branch: string
-  state: 'creating' | 'ready'
+  state: 'creating' | CopyStorage // the working copy's storage state, independent of the run's status (improve_wfrun p2)
   created: string
   ready: string | null
   receipt: string | null // the request that reserved it: the same request finds it again
@@ -73,7 +74,11 @@ export interface CopyManifest {
   repositories: CopyRepo[]
   local: string[] // files of the project workspace's .local/ copied into the copy's .local/
   reconstructed?: string // when the manifest was rebuilt from the copy itself
+  record?: 'durable' // improve_wfrun p2: the run's folder is in record/ beside the tree; absent, still in the tree (wfe runs relocate)
+  generation?: number // raised by every retirement and restoration; a worker's stale report names an older one
+  lifecycle?: import('./retention.ts').Lifecycle
 }
+export type CopyStorage = 'ready' | 'retiring' | 'retired' | 'restoring'
 
 export interface RunCopy { ref: RunRef; dir: string; tree: string; manifest: CopyManifest | null; problem: string | null }
 
@@ -94,7 +99,7 @@ function parseManifest(text: string, ref: RunRef): CopyManifest | string {
   try { m = JSON.parse(text) } catch (e) { return `${MANIFEST} is not JSON (${(e as Error).message})` }
   if (!m || typeof m !== 'object' || m.schema !== COPY_SCHEMA) return `${MANIFEST} is not ${COPY_SCHEMA}`
   if (m.workflow !== ref.workflow || m.run !== ref.run) return `${MANIFEST} names ${m.workflow}/${m.run}, not ${runKey(ref)}`
-  if (typeof m.project !== 'string' || typeof m.branch !== 'string' || !Array.isArray(m.repositories) || (m.state !== 'creating' && m.state !== 'ready')) return `${MANIFEST} is incomplete`
+  if (typeof m.project !== 'string' || typeof m.branch !== 'string' || !Array.isArray(m.repositories) || !['creating', 'ready', 'retiring', 'retired', 'restoring'].includes(m.state)) return `${MANIFEST} is incomplete`
   return m
 }
 
@@ -110,7 +115,7 @@ export async function readCopy(ws: Workspace, ref: RunRef): Promise<RunCopy | nu
   if (typeof m === 'string') { out.problem = `the run's working copy is damaged: ${m}`; return out }
   out.manifest = m
   if (m.state === 'creating') out.problem = 'the run\'s working copy is still being created (or its creation was interrupted; the same request finishes it)'
-  else if (!(await isDir(join(tree, '.git')))) out.problem = `the run's working copy is missing (${COPIES_DIR}/${runKey(ref)}/${TREE} has no repository); its saved branch ${m.branch} is in the project's repositories`
+  else if (m.state === 'ready' && !(await isDir(join(tree, '.git')))) out.problem = `the run's working copy is missing (${COPIES_DIR}/${runKey(ref)}/${TREE} has no repository); its saved branch ${m.branch} is in the project's repositories`
   return out
 }
 
@@ -126,11 +131,13 @@ export async function listCopies(ws: Workspace, workflow?: string): Promise<RunC
   return out
 }
 
-// The workspace a run's files are read and written in: its copy when it
-// has one, else the project workspace (runs recorded before p9's migration
-// that stay where they are, and runs created there by an IDE agent). A copy
-// that cannot be used is refused with its problem, never replaced by the
-// project tree's snapshot of the same run.
+// The workspace a run's files are read and written in, never materializing
+// anything: its copy when the copy is ready; the durable record when it has no
+// usable tree (retired, on its way there or back, or missing, which stays
+// reported as a problem of the tree); else the project workspace (runs recorded
+// before p9's migration that stay where they are, and runs created there by an
+// IDE agent). A copy that cannot be used and has no durable record is refused
+// with its problem, never replaced by the project tree's snapshot of the same run.
 export async function runSpace(ws: Workspace, ref: RunRef): Promise<Workspace> {
   if (ws.copyOf) {
     if (ws.copyOf.ref.workflow === ref.workflow && ws.copyOf.ref.run === ref.run) return ws
@@ -138,13 +145,51 @@ export async function runSpace(ws: Workspace, ref: RunRef): Promise<Workspace> {
   }
   const c = await readCopy(ws, ref)
   if (!c) return ws
+  if (c.manifest?.record === 'durable' && (c.manifest.state !== 'ready' || c.problem)) return recordWorkspace(ws, c)
   if (c.problem || !c.manifest) throw new RequestError(409, `run ${runKey(ref)}: ${c.problem}`, { code: 'run-copy' })
   return copyWorkspace(ws, c)
 }
 
+// The run's working tree, for what needs the project's code: publishing,
+// integrating, executing. A run without a ready tree is refused with its state
+// and what to do; only an explicit restoration brings one back.
+export async function treeSpace(ws: Workspace, ref: RunRef): Promise<Workspace> {
+  const space = await runSpace(ws, ref)
+  if (!space.copyOf?.treeless) return space
+  const c = await readCopy(ws.shared, ref)
+  const state = c?.manifest?.state
+  if (state === 'retired' || state === 'retiring' || state === 'restoring') throw new RequestError(409, `run ${runKey(ref)}: its working copy is ${state}; its record stays readable${state === 'retired' ? ` and wfe run restore ${runKey(ref)} brings the copy back` : ''}`, { code: 'run-retired' })
+  throw new RequestError(409, `run ${runKey(ref)}: ${c?.problem ?? 'it has no working copy'}`, { code: 'run-copy' })
+}
+
+// The repository of the copy that owns the run's folder.
+export const recordOwner = (m: CopyManifest) => ownerOf(runFolder(m), m.repositories.filter(r => r.initialized).map(r => r.path))
+
 export function copyWorkspace(ws: Workspace, c: RunCopy): Workspace {
   const shared = ws.shared
-  return new Workspace({ ...shared.reg, path: c.tree }, { shared, ref: c.ref })
+  const durable = c.manifest?.record === 'durable'
+  return new Workspace({ ...shared.reg, path: c.tree }, { shared, ref: c.ref, ...(durable ? { recordRoot: recordRootOf(c.dir), owner: recordOwner(c.manifest!) } : {}) })
+}
+
+// A run without a usable tree, read from its record root: the same relative
+// paths, no repository.
+export function recordWorkspace(ws: Workspace, c: RunCopy): Workspace {
+  const shared = ws.shared
+  const root = recordRootOf(c.dir)
+  return new Workspace({ ...shared.reg, path: root }, { shared, ref: c.ref, recordRoot: root, owner: recordOwner(c.manifest!), treeless: true })
+}
+
+// Changes the manifest under its lock; returns what was written.
+export async function updateManifest(ws: Workspace, ref: RunRef, f: (m: CopyManifest) => void): Promise<CopyManifest> {
+  const dir = copyDir(ws.shared, ref)
+  return withLock(join(dir, MANIFEST), async () => {
+    const text = await readTextOrNull(join(dir, MANIFEST))
+    const m = text === null ? `no ${MANIFEST}` : parseManifest(text, ref)
+    if (typeof m === 'string') throw new RequestError(409, `run ${runKey(ref)}: ${m}`)
+    f(m)
+    await atomicWrite(join(dir, MANIFEST), `${JSON.stringify(m, null, 2)}\n`)
+    return m
+  }, { what: `the manifest of run ${runKey(ref)}` })
 }
 
 // ---- allocation ---------------------------------------------------------------------
@@ -343,7 +388,7 @@ export async function materialize(ws: Workspace, ref: RunRef, env: Record<string
     const c = await readCopy(ws, ref)
     if (!c?.manifest) throw new RequestError(409, `run ${runKey(ref)}: ${c?.problem ?? 'no reservation'}`)
     const m = c.manifest
-    if (m.state === 'ready') return c
+    if (m.state !== 'creating') return c
     const tree = c.tree
     const root = m.repositories.find(r => r.path === '.')!
     // A published copy is cloned from the access caches at its recorded
@@ -373,6 +418,10 @@ export async function materialize(ws: Workspace, ref: RunRef, env: Record<string
       sub.branch = m.branch
     }
     m.local = await localFiles(ws.root, tree)
+    // The run's folder lives beside the tree from the start (improve_wfrun p2).
+    await guardRecordRoot(recordRootOf(dir))
+    await linkRecord(tree, ref, recordOwner(m))
+    m.record = 'durable'
     m.state = 'ready'
     m.ready = now()
     await atomicWrite(join(dir, MANIFEST), `${JSON.stringify(m, null, 2)}\n`)
@@ -454,12 +503,12 @@ async function localFiles(sharedRoot: string, tree: string): Promise<string[]> {
 export async function prepareCopy(ws: Workspace, o: ReserveOptions, env: Record<string, string> = {}): Promise<{ copy: RunCopy; workspace: Workspace; existing: boolean }> {
   const r = await reserve(ws, o, env)
   const copy = await materialize(ws, r.ref, env, o.published?.ctx)
-  return { copy, workspace: copyWorkspace(ws, copy), existing: r.existing }
+  return { copy, workspace: await runSpace(ws, r.ref), existing: r.existing }
 }
 
 // ---- reconstruction -------------------------------------------------------------------
 
-export interface IndexEntry { ref: string; state: 'ready' | 'creating' | 'damaged' | 'rebuilt'; branch?: string; problem?: string }
+export interface IndexEntry { ref: string; state: 'ready' | 'creating' | 'damaged' | 'rebuilt' | 'retiring' | 'retired' | 'restoring'; branch?: string; problem?: string }
 
 // The index as it is, or rebuilt: a copy whose manifest is missing or
 // damaged gets one reconstructed from the copy itself — the run branch it
@@ -471,7 +520,7 @@ export async function inspectIndex(ws: Workspace, o: { rebuild?: boolean } = {})
   const out: IndexEntry[] = []
   for (const c of await listCopies(ws)) {
     const ref = runKey(c.ref)
-    if (c.manifest && !c.problem) { out.push({ ref, state: 'ready', branch: c.manifest.branch }); continue }
+    if (c.manifest && !c.problem) { out.push({ ref, state: c.manifest.state === 'ready' ? 'ready' : c.manifest.state as IndexEntry['state'], branch: c.manifest.branch }); continue }
     if (c.manifest?.state === 'creating') { out.push({ ref, state: 'creating', branch: c.manifest.branch, problem: c.problem! }); continue }
     if (!o.rebuild || c.manifest) { out.push({ ref, state: 'damaged', problem: c.problem! }); continue }
     const rebuilt = await reconstruct(ws, c).catch(e => (e as Error).message)

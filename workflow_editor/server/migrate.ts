@@ -29,6 +29,7 @@ import { atomicWrite, readTextOrNull } from './files.ts'
 import { git } from './git.ts'
 import { loadRegistry, observe } from './registry.ts'
 import { listRuns, readRun, runOp } from './runs.ts'
+import { recordFolderOf } from './runrecord.ts'
 import { materialize, readCopy, reserve, storageOf } from './runspace.ts'
 import { Workspace } from './workspace.ts'
 import type { ExecStore } from './exec.ts'
@@ -51,7 +52,7 @@ async function readSharedRecord(ws: Workspace, ref: RunRef) {
   try { return text ? JSON.parse(text) as import('../shared/run.ts').RunRecord : null } catch { return null }
 }
 
-async function workspaces(x: ExecStore): Promise<Workspace[]> {
+export async function workspaces(x: ExecStore): Promise<Workspace[]> {
   const out: Workspace[] = []
   for (const w of (await loadRegistry(x.ctx.registryFile)).workspaces) if ((await observe(w)).available) out.push(new Workspace(w))
   return out
@@ -111,7 +112,7 @@ interface Journal { started: string; backup: string; runs: Record<string, { step
 // Host-local recovery copies, taken once per migration (a resumed one keeps
 // the first set): the stores (consistent copies), the area's settings, and
 // each workspace's refs and status.
-async function backup(x: ExecStore, dir: string, inv: Inventory) {
+export async function backup(x: ExecStore, dir: string, inv: Inventory) {
   await mkdir(dir, { recursive: true })
   for (const store of ['exec', 'notify', 'intake', 'present']) {
     const file = join(x.ctx.area, '.local', store, `${store}.sqlite`)
@@ -177,7 +178,7 @@ export async function migrate(x: ExecStore, o: { workspace?: string; allowLive?:
       await step('reserved', async () => { await reserve(ws, { project, workflow, name: run, receipt: `migrate:${key}`, adopt: true }, o.env ?? {}) })
       await step('made', async () => { await materialize(ws, ref, o.env ?? {}) })
       const copy = (await readCopy(ws, ref))!
-      await step('placed', async () => { await placeFolder(join(ws.root, runFolder(ref)), join(copy.tree, runFolder(ref))) })
+      await step('placed', async () => { await placeFolder(join(ws.root, runFolder(ref)), recordFolderOf(copy.dir, ref)) })
       await step('recorded', async () => {
         const have = (await readRun(ws, ref)).record // through the copy now
         if (!have) throw new Error('the record cannot be read in its copy')

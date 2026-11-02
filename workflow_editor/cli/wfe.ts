@@ -4,6 +4,7 @@
 // service, so no command needs it running. `wfe help` is the index.
 import { spawn } from 'node:child_process'
 import { realpathSync } from 'node:fs'
+import { readFile } from 'node:fs/promises'
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import type { Diagnostic, RepositoryStatus, WorkflowSummary } from '../shared/api.ts'
@@ -239,6 +240,9 @@ executor (heartbeat age, the slot, queued jobs).
 Exit 0 with the document; 1 when the registry cannot be read.`,
   runs: `wfe runs index [--rebuild] [--workspace <id>]
 wfe runs migrate [--dry-run] [--workspace <id>] --by <name> [--allow-live-executor]
+wfe runs relocate [--dry-run] [--workspace <id>] --by <name> [--allow-live-executor]
+wfe runs storage [--workspace <id>]
+wfe runs retire --selection <file.json> --by <name> [--dry-run]
 
 migrate (p9): moves runs recorded in a project workspace before p9 into
 working copies of their own, without changing what they mean. --dry-run
@@ -253,6 +257,15 @@ stay where they are; uncommitted files outside run folders are reported, not
 moved. Refused while the executor reports (stop it first). Running it again
 continues an interrupted migration (journal <area>/.local/migrations/p9.json)
 and changes nothing that is done.
+
+relocate (improve_wfrun p2): moves existing runs' folders from their trees into
+durable storage beside them, and links the documented path there. --dry-run
+changes nothing. Stop the executor and the service first; recovery copies come
+first, and running it again continues (journal <area>/.local/migrations/p2-records.json).
+
+storage: which runs of this workspace could have their working copy retired, and
+why the others keep theirs. retire: retires an inspected selection, checking each
+run again (wfe run retire is one run). docs/storage.md *Retirement*.
 
 index:
 
@@ -1682,6 +1695,8 @@ async function cmdObserve(p: Parsed): Promise<number> {
 async function cmdRuns(p: Parsed): Promise<number> {
   const [sub] = p.positional
   if (sub === 'migrate') return cmdMigrate(p)
+  if (sub === 'relocate') return cmdRelocate(p)
+  if (sub === 'storage' || sub === 'retire') return cmdRunsStorage(p, sub)
   // project_migration p7: record the execution node of every unfinished run.
   if (sub === 'assign-nodes') {
     const by = opt(p, 'by'); if (!by) throw new UsageError('--by <name> is required')
@@ -1692,13 +1707,58 @@ async function cmdRuns(p: Parsed): Promise<number> {
       return 0
     } finally { x.close(); execStore = undefined }
   }
-  if (sub !== 'index') throw new UsageError('usage: wfe runs index [--rebuild] [--workspace <id>] | wfe runs migrate [--dry-run] [--workspace <id>] --by <name> | wfe runs assign-nodes [--dry-run] --by <name>')
+  if (sub !== 'index') throw new UsageError('usage: wfe runs index [--rebuild] [--workspace <id>] | wfe runs migrate [--dry-run] [--workspace <id>] --by <name> | wfe runs relocate [--dry-run] [--workspace <id>] --by <name> | wfe runs assign-nodes [--dry-run] --by <name>')
   const { inspectIndex } = await import('../server/runspace.ts')
   const ws = await workspace(p)
   const entries = await inspectIndex(ws, { rebuild: p.flags.has('rebuild') })
   const lines = entries.length ? entries.map(e => `  ${e.ref.padEnd(28)} ${e.state.padEnd(9)} ${e.branch ?? ''}${e.problem ? `\n    ${e.problem}` : ''}`) : ['  (no run has a working copy in this workspace)']
   out([`Run copies of workspace ${ws.reg.id}:`, ...lines].join('\n'), { workspace: ws.reg.id, entries })
   return entries.some(e => e.state === 'damaged') ? 1 : 0
+}
+
+// Which runs could be retired, and retiring an inspected selection
+// (improve_wfrun p2, docs/storage.md). Every run is checked again when its turn comes.
+async function cmdRunsStorage(p: Parsed, sub: string): Promise<number> {
+  const { inspectWorkspace, retireRun } = await import('../server/retention.ts')
+  const x = await openExec(p)
+  try {
+    if (sub === 'storage') {
+      const ws = await workspace(p)
+      const all = await inspectWorkspace(x, ws)
+      const lines = [`Run copies of workspace ${ws.reg.id}: ${all.filter(e => e.eligible).length} of ${all.length} could be retired now (running processes are checked when a run is retired).`, ...all.map(e => `  ${e.ref.padEnd(32)} ${e.state.padEnd(9)} ${e.eligible ? 'candidate' : e.reasons[0] ?? ''}`)]
+      out(lines.join('\n'), { workspace: ws.reg.id, runs: all })
+      return 0
+    }
+    const file = opt(p, 'selection'); const by = opt(p, 'by')
+    if (!file || !by) throw new UsageError('wfe runs retire --selection <file.json> --by <name> [--dry-run]: the file lists {"workspace", "ref"} entries')
+    const selection = JSON.parse(await readFile(file, 'utf8')) as { workspace: string; ref: string; discard?: { path: string; reason: string }[] }[]
+    const results = []
+    for (const s of selection) {
+      const [workflow, run] = s.ref.split('/')
+      results.push({ workspace: s.workspace, ...await retireRun(x, await x.workspace(s.workspace), { workflow, run }, { by, dryRun: p.flags.has('dry-run'), discard: s.discard }) })
+    }
+    out(results.map(r => `  ${`${r.workspace}/${r.ref}`.padEnd(40)} ${r.outcome.padEnd(8)} ${r.reasons[0] ?? ''}`).join('\n'), { results })
+    return results.some(r => r.outcome === 'failed') ? 1 : 0
+  } finally { x.close(); execStore = undefined }
+}
+
+// Moving runs' folders into durable storage (improve_wfrun p2, docs/storage.md).
+async function cmdRelocate(p: Parsed): Promise<number> {
+  const { relocate, relocationPlan } = await import('../server/relocate.ts')
+  const x = await openExec(p)
+  try {
+    const only = opt(p, 'workspace')
+    if (p.flags.has('dry-run')) {
+      const plan = await relocationPlan(x, only)
+      const n = (a: string) => plan.runs.filter(r => r.action === a).length
+      out([`Relocation plan (nothing was changed). Executor: ${plan.executor}.`, `  relocate ${n('relocate')}, relocated already ${n('relocated')}, blocked ${n('blocked')}`, ...plan.runs.filter(r => r.action === 'blocked').map(r => `  blocked ${r.workspace}/${r.ref}: ${r.why}`)].join('\n'), plan)
+      return 0
+    }
+    const by = opt(p, 'by'); if (!by) throw new UsageError('--by <name> is required')
+    const r = await relocate(x, { workspace: only, allowLive: p.flags.has('allow-live-executor'), by })
+    out([`Moved ${r.moved.length}, already durable ${r.already}. Recovery copies: ${r.backup}`, ...r.blocked.map(b => `  blocked ${b}`), ...r.problems.map(b => `  problem ${b}`)].join('\n'), r)
+    return r.problems.length ? 1 : 0
+  } finally { x.close(); execStore = undefined }
 }
 
 // The p9 migration (docs/storage.md *Migration*): an inventory first

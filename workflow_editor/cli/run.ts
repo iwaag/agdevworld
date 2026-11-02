@@ -114,6 +114,28 @@ recorded and not yet taken up, every instruction not acknowledged and every
 delegation fact not taken up. --since <seq>: also one line per entry
 recorded after that seq. Not the whole record: wfe run show for that.
 Reads only.`,
+  storage: `wfe run storage <run>
+
+The run's working copy as a storage fact: ready, retiring, retired or restoring,
+whether its work is retained, why it keeps its copy, each worker's progress and
+the last failure. Independent of the run's status. docs/storage.md *Retirement*.`,
+  retire: `wfe run retire <run> --by <name> [--dry-run] [--discard <path>=<reason>]…
+
+Saves what the run's working copy holds and releases it. The record stays readable
+and writable; the run's number, receipts and links stay. --dry-run reports the
+inventory and changes nothing. Commits go to the project's retention repository,
+everything not committed to the run's archive, each verified before the tree goes.
+Data that cannot be classified keeps the copy; --discard names what is expendable,
+and why (recorded, reported at restoration). A worker that holds a copy must report
+first: until then the run stays retiring, and running this again continues. Refused
+with the reasons while anything still needs the tree. Exit 3 when refused.`,
+  restore: `wfe run restore <run> --by <name> [--dry-run]
+
+Brings back a retired run's working copy from its saved revisions and files, never
+from main, verified, with the latest record. Starts nothing: no job, no integration,
+no notification. On a retirement not finished, abandons it (the tree was never
+released). A job that needs the tree starts this by itself. --dry-run checks that
+the archive and the commits are available.`,
   check: `wfe run check [<run>]
 
 Checks one run, or every run: run.json parses, its history replays to exactly
@@ -881,6 +903,28 @@ export async function runCommand(c: RunCli): Promise<number> {
       const rec = resp.record
       c.out(describeState(rec, since), { ref: runKey(r), seq: rec.seq, execution: rec.execution, hold: rec.control.hold, pendingAnswers: pendingAnswers(rec).map(({ q, index }) => ({ question: q.id, answer: index, ...q.answers[index] })), pendingInstructions: Object.values(rec.instructions ?? {}).filter(i => !i.ack), since: since ?? null, entries: since === undefined ? [] : rec.history.filter(e => e.seq > since) })
       return 0
+    }
+    // The working copy's lifecycle (improve_wfrun p2, docs/storage.md).
+    case 'storage': case 'retire': case 'restore': {
+      const m = await import('../server/retention.ts')
+      const target = await ref()
+      if (sub === 'storage') {
+        const v = await m.storageView(c.exec(), ws, target)
+        c.out([`${v.ref}: ${v.state}. ${v.retained}`, ...v.reasons.map(r => `  keeps its copy: ${r}`), ...Object.entries(v.hosts).map(([h, p]) => `  worker ${h}: ${p.state}${p.detail ? ` (${p.detail})` : ''}`), ...(v.lifecycle?.failure ? [`  failure at ${v.lifecycle.failure.step}: ${v.lifecycle.failure.message}`] : [])].join('\n'), v)
+        return 0
+      }
+      const by = c.opt('by')
+      if (!by) throw c.usage(`wfe run ${sub} <workflow>/<run> --by <name> [--dry-run]${sub === 'retire' ? ' [--discard <path>=<reason>]…' : ''}`)
+      if (sub === 'restore') {
+        const r = await m.restoreRun(c.exec(), ws, target, { by, dryRun: c.flag('dry-run') })
+        c.out([`${r.ref}: ${r.outcome} (now ${r.state})`, ...r.reasons.map(x => `  ${x}`), ...(r.discarded ?? []).map(d => `  discarded at retirement, not restored: ${d.path}${d.reason ? ` (${d.reason})` : ''}`)].join('\n'), r)
+        return r.outcome === 'failed' ? 1 : 0
+      }
+      const discard = c.opts('discard').map(d => { const i = d.indexOf('='); if (i < 1 || !d.slice(i + 1).trim()) throw c.usage('--discard <path>=<reason>: both are required'); return { path: d.slice(0, i).replace(/\/+$/, ''), reason: d.slice(i + 1).trim() } })
+      const r = await m.retireRun(c.exec(), ws, target, { by, dryRun: c.flag('dry-run'), discard })
+      const inv = r.inventory
+      c.out([`${r.ref}: ${r.outcome} (now ${r.state})`, ...(inv ? [`  to keep: ${inv.archive} files, ${inv.bytes} bytes outside commits; to discard: ${inv.discard}; repositories: ${inv.repositories.map(x => `${x.path} ${x.head?.slice(0, 10) ?? '?'}`).join(', ')}`] : []), ...r.reasons.map(x => `  ${x}`)].join('\n'), r)
+      return r.outcome === 'failed' ? 1 : r.outcome === 'refused' ? 3 : 0
     }
     case 'check': {
       const refs = args[0] ? [await ref()] : (await listRuns(ws)).map(s => ({ workflow: s.workflow, run: s.run }))

@@ -67,7 +67,10 @@ export class Workspace {
   // A run's own working copy (p9, server/runspace.ts): the same logical
   // workspace (reg.id), rooted at the copy; `shared` is the project
   // workspace it was made from.
-  readonly copyOf?: { shared: Workspace; ref: { workflow: string; run: string } }
+  // improve_wfrun p2: recordRoot, where the run's folder is durably kept (owner:
+  // the repository of the tree that snapshots it); treeless, this workspace is
+  // rooted at that record because the run has no usable tree.
+  readonly copyOf?: { shared: Workspace; ref: { workflow: string; run: string }; recordRoot?: string; owner?: string; treeless?: boolean }
   constructor(reg: Registration, copyOf?: Workspace['copyOf']) { this.reg = reg; this.copyOf = copyOf }
   // The other registered projects' workflows (p10: delegate targets), when
   // the caller knows the registry (the service, the CLI).
@@ -236,6 +239,7 @@ export class Workspace {
   // ---- project.yaml ---------------------------------------------------
 
   async readProject(): Promise<{ text: string | null; project?: Project; problem?: FileProblem }> {
+    if (this.copyOf?.treeless) return this.copyOf.shared.readProject()
     const text = await readTextOrNull(await inside(this.root, 'project.yaml'))
     if (text === null) return { text, problem: { kind: 'missing', message: 'project.yaml does not exist' } }
     const parsed = parseProject(text)

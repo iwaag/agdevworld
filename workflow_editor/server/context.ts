@@ -30,7 +30,7 @@ import { runKey, type RunRecord } from '../shared/run.ts'
 import { runFolder } from '../shared/run.ts'
 import type { AccessContext } from './access.ts'
 import { ContextStore } from './contextStore.ts'
-import { inside } from './files.ts'
+import { inside, withinRoot } from './files.ts'
 import type { Workspace } from './workspace.ts'
 
 const sha256 = (b: string | Buffer) => createHash('sha256').update(b).digest('hex')
@@ -164,7 +164,7 @@ async function guideSource(ctx: AccessContext, ws: Workspace, key: string, g: { 
   try {
     const abs = await inside(ws.root, path)
     const l = await lstat(abs)
-    if (!l.isFile() || l.isSymbolicLink() || !(await realpath(abs)).startsWith(await realpath(ws.root))) return { ...base, origin: { file: path }, delivery: 'error', note: `${path} is not a regular file of the project` }
+    if (!l.isFile() || l.isSymbolicLink() || !withinRoot(await realpath(ws.root), await realpath(abs))) return { ...base, origin: { file: path }, delivery: 'error', note: `${path} is not a regular file of the project` }
     const bytes = await readFile(abs)
     return { ...base, origin: { file: path }, delivery: 'body', text: bytes.toString('utf8'), sha256: sha256(bytes), ...(unread ? { note: unread } : {}) }
   } catch (e) {

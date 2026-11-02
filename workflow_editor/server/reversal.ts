@@ -39,6 +39,12 @@ export async function reversalFacts(ws: Workspace, ref: RunRef): Promise<Reversa
   const space = await runSpace(ws, ref)
   const record = (await readRun(space, ref)).record
   if (!record) throw new RequestError(409, `run ${runKey(ref)} cannot be read`)
+  // A retired run's Git facts are in its retention repository, not at hand: say
+  // what is known and how to read the rest.
+  if (space.copyOf?.treeless) return {
+    ref: runKey(ref), state: 'kept', copy: null, saved: null, integrations: [], external: [], summary: `Run ${runKey(ref)}'s working copy is not in place, so its commits cannot be read here; its record stays readable.`,
+    steps: [`Restore the copy first (wfe run restore ${runKey(ref)}), then ask again.`],
+  }
   const copy = space.copyOf ? await readCopy(ws, ref) : null
   const external = [
     'Effects outside Git — a service deployed, data written elsewhere, messages sent, files outside the repositories — are not undone by reverting commits; inspect and reverse them on their own.',

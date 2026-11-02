@@ -19,7 +19,7 @@
 import { backendFact } from '../shared/backend.ts'
 import type { RunOpResponse, RunResponse } from '../shared/api.ts'
 import { describeSteps, effectiveOf, holderOf, situation, type RunRecord } from '../shared/run.ts'
-import { api, ApiError, type AdjustView, type DelegationsView, type PresentationView, type RunExecView, type RunNotifyView } from './api.ts'
+import { api, ApiError, type AdjustView, type DelegationsView, type PresentationView, type RunExecView, type RunNotifyView, type RunStorageView } from './api.ts'
 import { Canvas, STATE_GLYPH } from './canvas.ts'
 import { docStepsOf, FINAL_STEP, hasDocSteps, splitCounts } from '../shared/compile.ts'
 import { h, when } from './dom.ts'
@@ -60,6 +60,7 @@ export function renderRunView(root: HTMLElement, wsId: string, workflow: string,
   let viewing: { path: string; text?: string; error?: string } | null = null
   let fileRequest = 0 // the identity of the latest file read; older responses are dropped
   let execView: RunExecView | null = null
+  let storageView: RunStorageView | null = null
   let notifyView: RunNotifyView | null = null
   let delegView: DelegationsView | null = null // p10
   let execError = ''
@@ -120,28 +121,30 @@ export function renderRunView(root: HTMLElement, wsId: string, workflow: string,
   // host's facts; presentation facts follow the run just read, or the last
   // usable one when the new reading is malformed. A host batch re-reads only
   // the facts that change without a run.json change.
-  interface Batch { run?: Outcome<RunResponse>; exec?: Outcome<RunExecView>; notify?: Outcome<RunNotifyView>; presentations?: Outcome<PresentationView[]>; delegations?: Outcome<DelegationsView> }
+  interface Batch { run?: Outcome<RunResponse>; exec?: Outcome<RunExecView>; storage?: Outcome<RunStorageView>; notify?: Outcome<RunNotifyView>; presentations?: Outcome<PresentationView[]>; delegations?: Outcome<DelegationsView> }
   async function readBatch(kind: RefreshKind, signal: AbortSignal): Promise<Batch> {
-    const [runOut, exec, notify] = await Promise.all([
+    const [runOut, exec, notify, storage] = await Promise.all([
       kind === 'full' ? outcome(api.run(wsId, workflow, run, rev, signal)) : undefined,
       rev ? undefined : outcome(api.runExec(wsId, workflow, run, signal)),
       rev ? undefined : outcome(api.runNotify(wsId, workflow, run, signal)),
+      rev ? undefined : outcome(api.runStorage(wsId, workflow, run, signal)),
     ])
     const rec = runOut?.ok && runOut.value.record ? runOut.value.record : shown?.record
     const presentations = rev ? undefined : rec?.presentations ? await outcome(api.runPresentations(wsId, workflow, run, signal).then(x => x.presentations)) : { ok: true as const, value: [] }
     // Delegations (p10): a child's situation changes without this record changing, so host batches read them too.
     const delegations = rev || !(rec?.delegations || rec?.input.entrustedBy?.kind === 'delegation') ? undefined : await outcome(api.runDelegations(wsId, workflow, run, signal))
-    return { run: runOut, exec, notify, presentations, delegations }
+    return { run: runOut, exec, notify, storage, presentations, delegations }
   }
   // A host batch whose facts differ only in the executor's heartbeat time
   // displays nothing new and touches nothing; otherwise only the parts that
   // show host facts are brought up to date. A full batch updates the view.
-  const hostFacts = () => JSON.stringify([execView && { ...execView, executor: { ...execView.executor, at: undefined }, workers: execView.workers?.map(w => ({ ...w, at: undefined, ageSeconds: undefined })) }, execError, notifyView, presentViews, delegView])
+  const hostFacts = () => JSON.stringify([storageView, execView && { ...execView, executor: { ...execView.executor, at: undefined }, workers: execView.workers?.map(w => ({ ...w, at: undefined, ageSeconds: undefined })) }, execError, notifyView, presentViews, delegView])
   function applyBatch(b: Batch, kind: RefreshKind) {
     const before = resp
     if (b.run?.ok) { resp = b.run.value; loadError = ''; if (b.run.value.record) shown = b.run.value } else if (b.run) loadError = b.run.error
     // A failed host read keeps the last facts beside its error; nothing else is cleared.
     if (b.exec?.ok) { execView = b.exec.value; execError = '' } else if (b.exec) execError = b.exec.error
+    if (b.storage?.ok) storageView = b.storage.value
     if (b.notify?.ok) notifyView = b.notify.value
     if (b.presentations?.ok) presentViews = b.presentations.value
     if (b.delegations?.ok) delegView = b.delegations.value
@@ -162,7 +165,7 @@ export function renderRunView(root: HTMLElement, wsId: string, workflow: string,
     return f ? `${f.size}:${f.modified}` : `unlisted:${Math.random()}`
   }
   const refresh = new RefreshCoordinator<Batch>(readBatch, applyBatch)
-  const data = () => ({ wsId, rev, shown, resp, execView, execError, notifyView, presentViews, selection, viewing, connected, delegView })
+  const data = () => ({ wsId, rev, shown, resp, execView, storageView, execError, notifyView, presentViews, selection, viewing, connected, delegView })
 
   async function loadProjectName() {
     const p = await api.project(wsId).catch(() => null)
@@ -247,6 +250,16 @@ export function renderRunView(root: HTMLElement, wsId: string, workflow: string,
   }
 
   // Integration of the accepted result (p9): a check (dry run) or now.
+  async function storageAction(what: 'retire' | 'restore') {
+    const name = actorName('who asks for this')
+    if (!name) return
+    try {
+      await api.storageAction(wsId, workflow, run, what, name)
+      opNotice = { kind: 'ok', text: what === 'retire' ? 'Retiring the copy; the run\'s record stays readable.' : 'Restoring the copy. It starts nothing by itself.' }
+    } catch (e) { opNotice = { kind: 'error', text: `${what === 'retire' ? 'Retiring' : 'Restoring'} failed: ${(e as Error).message}` } }
+    await refresh.request('full')
+  }
+
   async function integrateRun(dryRun: boolean) {
     const name = actorName('who integrates the result')
     if (!name) return
@@ -320,6 +333,7 @@ export function renderRunView(root: HTMLElement, wsId: string, workflow: string,
       case 'integrate-run': void integrateRun(false); break
       case 'dismiss': opNotice = null; renderBanners(); break
       case 'details': toggleDetails(true); details.scrollIntoView({ block: 'nearest' }); break
+      case 'storage-retire': case 'storage-restore': void storageAction(d.action === 'storage-retire' ? 'retire' : 'restore'); break
       case 'stop-run': {
         const reason = prompt('Hold this run? Execution stops; its plan and work are kept and it can be resumed later. Other requests in this project can run meanwhile. Reason:')
         if (reason?.trim()) void record({ op: 'run.stop', reason }, 'Stop recorded.')

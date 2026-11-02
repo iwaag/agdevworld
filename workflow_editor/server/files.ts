@@ -5,6 +5,13 @@ import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'nod
 
 export class BoundaryError extends Error {}
 
+// Whether a real path belongs to a real root. A run copy's own folder is a link
+// to its durable record beside the tree (improve_wfrun p2); nothing else leaves.
+export function withinRoot(realRoot: string, real: string): boolean {
+  if (real === realRoot || real.startsWith(realRoot + sep)) return true
+  return basename(realRoot) === 'tree' && real.startsWith(join(dirname(realRoot), 'record') + sep)
+}
+
 // Resolves a project-relative path inside `root` and refuses anything that
 // leaves it, lexically or through a symlink of an existing parent.
 export async function inside(root: string, rel: string): Promise<string> {
@@ -17,7 +24,7 @@ export async function inside(root: string, rel: string): Promise<string> {
   for (;;) {
     try {
       const real = await realpath(probe)
-      if (real !== realRoot && !real.startsWith(realRoot + sep)) throw new BoundaryError(`path "${rel}" resolves outside the workspace`)
+      if (!withinRoot(realRoot, real)) throw new BoundaryError(`path "${rel}" resolves outside the workspace`)
       break
     } catch (e) {
       if (e instanceof BoundaryError) throw e

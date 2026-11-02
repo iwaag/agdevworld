@@ -24,9 +24,10 @@ writers taking turns per file).
 ## Where things live
 
 **A run the execution host performs lives in its own working copy (p9,
-[storage.md](storage.md)).** The tree below is inside that copy
-(`<project workspace>/.local/wfe/runs/<workflow>/<run>/tree/`), on the run's
-branch `wfe/<project>/<workflow>/<run>`. The project workspace holds runs
+[storage.md](storage.md)).** The tree below is read and written at that copy's
+documented path (`<project workspace>/.local/wfe/runs/<workflow>/<run>/tree/`), on the run's
+branch `wfe/<project>/<workflow>/<run>`; the folder itself is durable, beside the tree, and outlives it
+(improve_wfrun p2). The project workspace holds runs
 recorded before p9 that were not migrated, and runs an IDE agent creates
 there with `wfe run create`. Every operation resolves the place first
 (`runSpace`). A run's folder that reaches the project's shared branch (an

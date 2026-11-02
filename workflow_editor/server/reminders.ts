@@ -33,7 +33,7 @@ const SIGNAL_PATHS = 5
 // .local/, with when it was last written (null: gone).
 export interface ChangedPath { path: string; mtime: number | null }
 export async function changedPaths(ws: Workspace, record: RunRecord): Promise<ChangedPath[] | null> {
-  if (!ws.copyOf || !record.storage) return null
+  if (!ws.copyOf || ws.copyOf.treeless || !record.storage) return null
   const own = `${runFolder(record)}/`
   const out = new Map<string, ChangedPath>()
   const subs = record.storage.repositories.filter(r => r.path !== '.').map(r => r.path)

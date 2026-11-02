@@ -18,11 +18,14 @@
 //   "label": "…", "tokenFile": "worker.token", "facts": { "os": "…", … } }
 import { spawn } from 'node:child_process'
 import { createHash, randomUUID } from 'node:crypto'
-import { createReadStream, existsSync, readFileSync } from 'node:fs'
-import { copyFile, mkdir, readdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises'
-import { hostname } from 'node:os'
+import { createReadStream, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { copyFile, lstat, mkdir, mkdtemp, readdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises'
+import { hostname, tmpdir } from 'node:os'
 import { dirname, isAbsolute, join, normalize, relative, resolve, sep } from 'node:path'
+import { Readable } from 'node:stream'
 import { atomicWrite } from '../server/files.ts'
+import { tarCreate, tarExtract } from '../server/tarball.ts'
+import type { StorageTask } from '../server/exec.ts'
 import { git } from '../server/git.ts'
 import { Gitea, loadGiteaSetting } from '../server/gitea.ts'
 import { publishRun, type RepoStep } from '../server/publish.ts'
@@ -63,15 +66,17 @@ async function saveState(c: WorkerConfig, s: State) { await mkdir(dirname(stateF
 
 // ---- HTTP ------------------------------------------------------------------------------
 
-async function call(c: WorkerConfig, method: string, action: string, o: { body?: unknown; raw?: Buffer; query?: Record<string, string | string[]> } = {}): Promise<{ status: number; json?: unknown; bytes?: Buffer }> {
+async function call(c: WorkerConfig, method: string, action: string, o: { body?: unknown; raw?: Buffer; rawFile?: string; query?: Record<string, string | string[]> } = {}): Promise<{ status: number; json?: unknown; bytes?: Buffer }> {
   const url = new URL(`api/workers/${encodeURIComponent(c.worker)}/${action}`, c.coordinator)
   for (const [k, v] of Object.entries(o.query ?? {})) for (const x of [v].flat()) url.searchParams.append(k, x)
   const headers: Record<string, string> = { authorization: `Bearer ${c.token}` }
   let body: BodyInit | undefined
-  if (o.raw) { headers['content-type'] = 'application/octet-stream'; body = new Uint8Array(o.raw) }
+  let duplex: { duplex?: 'half' } = {}
+  if (o.rawFile) { headers['content-type'] = 'application/octet-stream'; body = Readable.toWeb(createReadStream(o.rawFile)) as unknown as BodyInit; duplex = { duplex: 'half' } }
+  else if (o.raw) { headers['content-type'] = 'application/octet-stream'; body = new Uint8Array(o.raw) }
   else if (o.body !== undefined) { headers['content-type'] = 'application/json'; body = JSON.stringify(o.body) }
   let res: Response
-  try { res = await fetch(url, { method, headers, body, signal: AbortSignal.timeout(35 * 60_000) }) } catch (e) { throw new Failure(`the coordinator (${c.coordinator}) cannot be reached: ${(e as Error).message}`) }
+  try { res = await fetch(url, { method, headers, body, ...duplex, signal: AbortSignal.timeout(35 * 60_000) }) } catch (e) { throw new Failure(`the coordinator (${c.coordinator}) cannot be reached: ${(e as Error).message}`) }
   const type = res.headers.get('content-type') ?? ''
   if (type.startsWith('application/json')) {
     const j = await res.json() as { error?: string }
@@ -299,7 +304,9 @@ async function execCommand(c: WorkerConfig, p: Parsed): Promise<unknown> {
       const ws = (answer.workspace as { id: string; project: string })
       const h: Held = { workspace: ws.id, workflow: ref.workflow, run: ref.run, project: ws.project, tree: workerTree(copiesRoot(c), ws.id, ref), log: join(logsDir(c), `${attempt.id}.jsonl`), shipped: 0, pid: null, began: new Date().toISOString(), copy: (answer.copy ?? []) as Dispatched[] }
       try {
+        const made = !existsSync(join(h.tree, '.git'))
         await materialize(c, h.tree, h.copy)
+        if (made) await restoreWorkerFiles(c, h)
         await download(c, h, [runFolder(ref)])
         await stageInputs(c, h)
         await overlay(c, ws.project, h.tree)
@@ -328,10 +335,12 @@ async function execCommand(c: WorkerConfig, p: Parsed): Promise<unknown> {
     case 'session': return (await call(c, 'POST', 'session', { body: { attempt: arg, ...(opt(p, 'attached') ? { attached: opt(p, 'attached') } : { missing: opt(p, 'detail') ?? '' }) } })).json
     case 'context': return (await call(c, 'POST', 'context', { body: { attempt: arg, delivered: p.flags.has('delivered'), detail: opt(p, 'detail') } })).json
     case 'stops': return (await call(c, 'GET', 'stops')).json
+    case 'storage-tick': return storageTick(c, s)
     case 'heartbeat': {
-      await call(c, 'POST', 'heartbeat', { body: { pid: Number(opt(p, 'pid')) || process.pid, detail: opt(p, 'detail') ?? '', offer: s.offer, facts: { label: c.label, root: copiesRoot(c), host: c.facts } } })
+      const beat = await call(c, 'POST', 'heartbeat', { body: { pid: Number(opt(p, 'pid')) || process.pid, detail: opt(p, 'detail') ?? '', offer: s.offer, facts: { label: c.label, root: copiesRoot(c), host: c.facts } } })
       for (const [id, h] of Object.entries(s.attempts)) await shipLog(c, id, h).catch(() => null)
       await saveState(c, s)
+      if ((beat.json as { storageTasks?: number }).storageTasks) startStorageTick(c)
       return { ok: true }
     }
     case 'reconcile': return { ok: true, notes: await reconcile(c, s, p.opts.get('holding') ?? []) }
@@ -342,6 +351,107 @@ async function execCommand(c: WorkerConfig, p: Parsed): Promise<unknown> {
     case 'status': case 'workers': return (await fetch(new URL('api/workers', c.coordinator)).then(r => r.json()))
   }
   throw new Failure('wfe exec claim|started|session|context|finished|stops|heartbeat|reconcile|adopt|status (on a worker)')
+}
+
+// ---- this worker's copies in a run's lifecycle (improve_wfrun p2, docs/storage.md) ------------
+
+// Work the heartbeat must not wait for: one process at a time (its lock), started
+// when the coordinator says tasks are due.
+function startStorageTick(c: WorkerConfig) {
+  const lock = join(c.area, '.local', 'worker', 'storage-tick.pid')
+  try { const pid = Number(readFileSync(lock, 'utf8')); if (pid && pidAlive(pid)) return } catch { /* none running */ }
+  const p = spawn(process.execPath, [process.argv[1], 'exec', 'storage-tick'], { detached: true, stdio: 'ignore', env: process.env })
+  p.on('error', () => null)
+  if (p.pid) { mkdirSync(dirname(lock), { recursive: true }); writeFileSync(lock, String(p.pid)) }
+  p.unref()
+}
+
+// One pass over the tasks. A copy with an open attempt here is refused; a copy
+// that is gone is `absent`. Committed work the coordinator cannot have (local
+// commits, branches or tags no remote has) travels as bundle files in the archive.
+async function storageTick(c: WorkerConfig, s: State): Promise<unknown> {
+  const { tasks } = (await call(c, 'GET', 'storage-tasks')).json as { tasks: StorageTask[] }
+  const done: string[] = []
+  for (const t of tasks) {
+    const body = { workspace: t.workspace, workflow: t.workflow, run: t.run, generation: t.generation }
+    const tree = workerTree(copiesRoot(c), t.workspace, t)
+    try {
+      if (Object.values(s.attempts).some(h => h.workspace === t.workspace && h.workflow === t.workflow && h.run === t.run)) {
+        await call(c, 'POST', 'storage-report', { body: { ...body, state: 'refused', detail: 'an attempt of this run is open here' } })
+      } else if (t.action === 'remove') {
+        await rm(dirname(tree), { recursive: true, force: true })
+        await call(c, 'POST', 'storage-report', { body: { ...body, state: 'removed' } })
+      } else if (!existsSync(join(tree, '.git'))) {
+        await call(c, 'POST', 'storage-report', { body: { ...body, state: 'absent', detail: 'this worker holds no copy of the run' } })
+      } else {
+        const a = await archiveWorkerCopy(tree, t)
+        if (a.file) await call(c, 'PUT', 'storage-archive', { rawFile: a.file, query: { ...runKeyOf(t), generation: String(t.generation) } })
+        await call(c, 'POST', 'storage-report', { body: { ...body, state: 'archived', files: a.files, treeBytes: a.treeBytes, archive: a.file ? { sha256: a.sha256!, bytes: a.bytes } : null } })
+        if (a.file) await rm(dirname(a.file), { recursive: true, force: true })
+      }
+      done.push(`${t.action} ${t.workflow}/${t.run}`)
+    } catch (e) { done.push(`${t.action} ${t.workflow}/${t.run} failed: ${(e as Error).message}`) }
+  }
+  return { ok: true, done }
+}
+
+// The worker-only bytes of a copy: everything Git would not bring back, and the
+// commits no remote has as bundles. Its run folder is the coordinator's.
+async function archiveWorkerCopy(tree: string, t: StorageTask) {
+  const entries: string[] = []
+  const repos = (await git(tree, ['submodule', 'status', '--recursive'])).stdout.split('\n').map(l => /^[ +U][0-9a-f]+ (\S+)/.exec(l)?.[1]).filter((x): x is string => !!x)
+  const own = runFolder(t)
+  const tmp = await mkdtemp(join(tmpdir(), 'wfe-storage-'))
+  const walk = async (rel: string) => {
+    const st = await lstat(join(tree, rel)).catch(() => null)
+    if (!st) return
+    if (st.isDirectory() && !st.isSymbolicLink()) {
+      const names = (await readdir(join(tree, rel))).filter(n => !repos.includes(`${rel}/${n}`))
+      if (!names.length) entries.push(rel)
+      for (const n of names) await walk(`${rel}/${n}`)
+    } else if (st.isFile() || st.isSymbolicLink()) entries.push(rel)
+    else throw new Failure(`${rel}: neither a file, a folder nor a symbolic link`)
+  }
+  for (const repo of ['.', ...repos]) {
+    const dir = repo === '.' ? tree : join(tree, repo)
+    const prefix = repo === '.' ? '' : `${repo}/`
+    const st = await git(dir, ['status', '--porcelain=v1', '-z', '--ignored=matching', '--untracked-files=normal', '--ignore-submodules=dirty'], { timeoutMs: 600_000 })
+    if (st.code !== 0) throw new Failure(`${repo}: ${st.stderr.trim()}`)
+    const parts = st.stdout.split('\0')
+    for (let i = 0; i < parts.length; i++) {
+      const e = parts[i]
+      if (e.length < 4) continue
+      if (e[0] === 'R' || e[0] === 'C') i++
+      const full = `${prefix}${e.slice(3)}`.replace(/\/+$/, '')
+      if (full === own || full.startsWith(`${own}/`) || repos.includes(full) || e.slice(0, 2).includes('D')) continue
+      await walk(full)
+    }
+    const count = await git(dir, ['rev-list', '--count', '--branches', '--tags', '--not', '--remotes'])
+    if (count.stdout.trim() !== '0' && count.code === 0) {
+      const name = `.local/wfe-worker-bundles/${repo === '.' ? 'root' : repo.replace(/[^A-Za-z0-9_.-]+/g, '_')}.bundle`
+      await mkdir(dirname(join(tree, name)), { recursive: true })
+      const b = await git(dir, ['bundle', 'create', '-q', join(tree, name), '--branches', '--tags', '--not', '--remotes'], { timeoutMs: 3_600_000 })
+      if (b.code !== 0) throw new Failure(`${repo}: its unpublished commits cannot be bundled: ${b.stderr.trim()}`)
+      if (!entries.includes(name)) entries.push(name)
+    }
+  }
+  const treeBytes = await new Promise<number | null>(res => { const d = spawn('du', ['-sk', tree], { stdio: ['ignore', 'pipe', 'ignore'] }); let o = ''; d.stdout.on('data', x => { o += x }); d.on('close', code => res(code === 0 ? Number(o.split(/\s/)[0]) * 1024 : null)); d.on('error', () => res(null)) })
+  if (!entries.length) { await rm(tmp, { recursive: true, force: true }); return { file: null, files: 0, treeBytes, sha256: null, bytes: 0 } }
+  const file = join(tmp, 'files.tgz')
+  await tarCreate(file, tree, [...new Set(entries)])
+  const check = join(tmp, 'check')
+  await tarExtract(file, check)
+  for (const e of new Set(entries)) if (!(await lstat(join(check, e)).catch(() => null))) throw new Failure(`the archive lacks ${e}`)
+  await rm(check, { recursive: true, force: true })
+  return { file, files: new Set(entries).size, treeBytes, sha256: await sha256File(file), bytes: (await stat(file)).size }
+}
+
+// A copy this worker made anew for a restored run gets back what only it had.
+async function restoreWorkerFiles(c: WorkerConfig, h: Pick<Held, 'workspace' | 'workflow' | 'run' | 'tree'>) {
+  const r = await call(c, 'GET', 'storage-archive', { query: { ...runKeyOf(h) } })
+  if (r.status === 204 || !r.bytes?.length) return
+  const tmp = await mkdtemp(join(tmpdir(), 'wfe-storage-'))
+  try { await writeFile(join(tmp, 'files.tgz'), r.bytes); await tarExtract(join(tmp, 'files.tgz'), h.tree) } finally { await rm(tmp, { recursive: true, force: true }) }
 }
 
 // What this worker holds of an attempt it has no bookkeeping for (its state

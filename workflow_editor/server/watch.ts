@@ -28,6 +28,7 @@ import { inside, readTextOrNull, textHash } from './files.ts'
 import { git } from './git.ts'
 import { ID_PATTERN } from '../shared/model.ts'
 import { RUN_ID, runFolder } from '../shared/run.ts'
+import { recordFolderOf } from './runrecord.ts'
 import { listCopies } from './runspace.ts'
 import { WORKFLOW_FILE, WORKFLOWS_DIR, type Workspace } from './workspace.ts'
 
@@ -115,7 +116,7 @@ export class Watcher {
       if (count++ >= MAX_RUNS) return
       const key = `${c.ref.workflow}/${c.ref.run}`
       seen.add(key)
-      await this.runFolder(prev, next, key, join(c.tree, runFolder(c.ref)), [`copy.json ${await sigOf(join(c.dir, 'copy.json'))}`])
+      await this.runFolder(prev, next, key, c.manifest?.record === 'durable' ? recordFolderOf(c.dir, c.ref) : join(c.tree, runFolder(c.ref)), [`copy.json ${await sigOf(join(c.dir, 'copy.json'))}`])
     }
     const runsDir = await inside(ws.root, 'devdocs/runs')
     const tops = (await readdir(runsDir, { withFileTypes: true }).catch(() => [])).filter(d => d.isDirectory() && ID_PATTERN.test(d.name)).map(d => d.name).sort()

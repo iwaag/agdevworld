@@ -16,11 +16,13 @@ import { createReadStream, existsSync } from 'node:fs'
 import { mkdir, open, readFile, readdir, stat } from 'node:fs/promises'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { dirname, join, normalize, sep } from 'node:path'
+import { pipeline } from 'node:stream/promises'
+import { receiveWorkerArchive, workerArchiveFile, workerStorageReport, type WorkerReport } from './retention.ts'
 import { fileURLToPath } from 'node:url'
 import type { ExecStore, HostOffer, WorkerFacts } from './exec.ts'
 import type { RepoStep } from './publish.ts'
 import { readRun, RUN_FILE, runDir } from './runs.ts'
-import { runSpace } from './runspace.ts'
+import { treeSpace } from './runspace.ts'
 import { loadRegistry, observe } from './registry.ts'
 import { RequestError, Workspace } from './workspace.ts'
 import type { RunRef } from '../shared/run.ts'
@@ -55,19 +57,25 @@ async function authorize(cfg: WorkerRouteConfig, req: IncomingMessage, worker: s
   if (!want || a.length !== b.length || !timingSafeEqual(a, b)) throw new RequestError(401, `not authorized as worker "${worker}"`)
 }
 
+async function lifecycleWorkspace(cfg: WorkerRouteConfig, workspace: string): Promise<Workspace> {
+  const reg = (await loadRegistry(cfg.registryFile)).workspaces.find(w => w.id === workspace)
+  if (!reg) throw new RequestError(404, `workspace "${workspace}" is not registered`)
+  return new Workspace(reg)
+}
+
 // The record copy of a run assigned to this worker; refused for any other run.
-async function runOfWorker(cfg: WorkerRouteConfig, worker: string, workspace: string, ref: RunRef): Promise<{ ws: Workspace; tree: string }> {
+async function runOfWorker(cfg: WorkerRouteConfig, worker: string, workspace: string, ref: RunRef): Promise<{ ws: Workspace; tree: string; record: string | null }> {
   const reg = (await loadRegistry(cfg.registryFile)).workspaces.find(w => w.id === workspace)
   if (!reg) throw new RequestError(404, `workspace "${workspace}" is not registered`)
   if (!(await observe(reg)).available) throw new RequestError(409, `workspace "${workspace}" is not available`)
   const ws = new Workspace(reg)
-  const space = await runSpace(ws, ref)
+  const space = await treeSpace(ws, ref) // a retired run takes no files: a delayed upload cannot resurrect it
   if (!space.copyOf) throw new RequestError(409, `run ${ref.workflow}/${ref.run} has no record copy`)
   const rec = (await readRun(space, ref)).record
   if (!rec) throw new RequestError(409, `run ${ref.workflow}/${ref.run} cannot be read`)
   const node = cfg.exec.nodeOf(rec)
   if (node !== worker) throw new RequestError(403, `run ${ref.workflow}/${ref.run} is performed by ${node}, not by ${worker}`, { code: 'run-foreign' })
-  return { ws, tree: space.root }
+  return { ws, tree: space.root, record: space.copyOf.recordRoot ?? null }
 }
 const refOf = (q: URLSearchParams | Record<string, unknown>) => {
   const get = (k: string) => (q instanceof URLSearchParams ? q.get(k) : q[k]) as string | null | undefined
@@ -133,7 +141,33 @@ export async function workerRoute(cfg: WorkerRouteConfig, req: IncomingMessage, 
     case 'POST heartbeat': {
       const b = await json(req)
       x.heartbeat(worker, Number(b.pid) || 0, typeof b.detail === 'string' ? b.detail : '', { offer: b.offer as HostOffer | undefined, facts: b.facts as WorkerFacts | undefined })
+      return send(res, 200, { ok: true, storageTasks: (await x.storageTasks(worker)).length })
+    }
+    // A worker's own copies in a run's lifecycle (improve_wfrun p2, docs/storage.md).
+    case 'GET storage-tasks': return send(res, 200, { tasks: await x.storageTasks(worker) })
+    case 'PUT storage-archive': {
+      const { workspace, ref } = refOf(q)
+      await receiveWorkerArchive(await lifecycleWorkspace(cfg, workspace), ref, worker, Number(q.get('generation')), req as never)
       return send(res, 200, { ok: true })
+    }
+    case 'GET storage-archive': {
+      const { workspace, ref } = refOf(q)
+      const file = workerArchiveFile(await lifecycleWorkspace(cfg, workspace), ref, worker)
+      const st = await stat(file).catch(() => null)
+      if (!st) { res.writeHead(204); res.end(); return }
+      res.writeHead(200, { 'content-type': 'application/gzip', 'content-length': st.size, 'cache-control': 'no-store' })
+      await pipeline(createReadStream(file), res)
+      return
+    }
+    case 'POST storage-report': {
+      const b = await json(req)
+      const { workspace, ref } = refOf(b)
+      const r = await workerStorageReport(await lifecycleWorkspace(cfg, workspace), ref, worker, b as unknown as WorkerReport)
+      // A stale report is answered and its task forgotten: the current one has its own.
+      const tasks = await x.storageTasks(worker)
+      const t = tasks.find(k => k.workspace === workspace && k.workflow === ref.workflow && k.run === ref.run)
+      if (t && t.generation <= Number(b.generation)) await x.storageTaskDone(worker, t)
+      return send(res, 200, r)
     }
     case 'POST claim': {
       const b = await json(req)
@@ -192,17 +226,23 @@ export async function workerRoute(cfg: WorkerRouteConfig, req: IncomingMessage, 
       const record = `${runDir(ref)}/${RUN_FILE}`
       const names = list.stdout.toString('utf8').split('\n').filter(Boolean)
       for (const n of names) { confined(tree, n.replace(/\/$/, '') || '.'); if (normalize(n) === normalize(record)) throw new RequestError(400, `${record} is the coordinator's record; it is never uploaded`) }
-      const x2 = await tar(['-xf', '-'], tree, data)
+      // -P: the run folder is a link to the durable record (improve_wfrun p2),
+      // which a macOS tar otherwise refuses to extract through; every name was
+      // confined above.
+      const x2 = await tar(['-xPf', '-'], tree, data)
       if (x2.code !== 0) throw new RequestError(500, `tar failed: ${x2.stderr.trim()}`)
       return send(res, 200, { ok: true, files: names.filter(n => !n.endsWith('/')).length })
     }
     // Files of the record copy for the worker (a tar stream of the paths).
     case 'GET files': {
       const { workspace, ref } = refOf(q)
-      const { tree } = await runOfWorker(cfg, worker, workspace, ref)
+      const { tree, record } = await runOfWorker(cfg, worker, workspace, ref)
       const paths = q.getAll('path').filter(p => { confined(tree, p); return existsSync(join(tree, p)) })
       if (!paths.length) { res.writeHead(204); res.end(); return }
-      const t = await tar(['-cf', '-', '--exclude', '.git', ...paths], tree)
+      // The run's folder is read from the durable record, not through its link.
+      const own = record ? paths.filter(p => normalize(p) === runDir(ref) || normalize(p).startsWith(`${runDir(ref)}/`)) : []
+      const rest = paths.filter(p => !own.includes(p))
+      const t = await tar(['-cf', '-', '--exclude', '.git', ...(own.length ? ['-C', record!, ...own] : []), ...(rest.length ? ['-C', tree, ...rest] : [])], tree)
       if (t.code !== 0) throw new RequestError(500, `tar failed: ${t.stderr.trim()}`)
       res.writeHead(200, { 'content-type': 'application/x-tar', 'cache-control': 'no-store' })
       res.end(t.stdout)

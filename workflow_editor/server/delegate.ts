@@ -33,7 +33,7 @@ import { assessResult, assessmentReminders, type Assessment, type ChildEvidence 
 import { latestResult, openRevision as openRevisionOf } from '../shared/delegation.ts'
 import { assertWorkspaceAllowed, loadBoundary } from './boundary.ts'
 import type { ExecStore, JobRow } from './exec.ts'
-import { atomicWrite, inside } from './files.ts'
+import { atomicWrite, inside, withinRoot } from './files.ts'
 import { git } from './git.ts'
 import { creationOf } from './observe.ts'
 import { loadRegistry, observe, type Registration } from './registry.ts'
@@ -493,9 +493,15 @@ export class DelegateStore {
     if (!rel || rel === '.') throw new RequestError(400, `"${path}" is not a path inside the child's project`)
     const abs = await inside(c.space.root, rel)
     const st = await lstat(abs).catch(() => null)
-    if (!st || !st.isFile() || st.isSymbolicLink() || !(await realpath(abs)).startsWith(await realpath(c.space.root))) throw new RequestError(404, `${rel} is not a regular file of the child's working copy (${d.child!.workflow}/${d.child!.run})`)
+    // A retired child's file: from its retained commit or archive, unchanged.
+    const kept = !st && c.space.copyOf?.treeless ? await (await import('./retention.ts')).retainedFile(c.space, c.space.copyOf.ref, rel) : null
+    if (kept) return this.withKnown(d, rel, kept)
+    if (!st || !st.isFile() || st.isSymbolicLink() || !withinRoot(await realpath(c.space.root), await realpath(abs))) throw new RequestError(404, `${rel} is not a regular file of the child's working copy (${d.child!.workflow}/${d.child!.run})`)
     if (st.size > MAX_FILE) throw new RequestError(413, `${rel} is larger than ${MAX_FILE} bytes; use --out <file> to copy it`)
-    const bytes = await readFile(abs)
+    return this.withKnown(d, rel, await readFile(abs))
+  }
+
+  private withKnown(d: Delegation, rel: string, bytes: Buffer) {
     const known = d.events.flatMap(e => [...(e.document ? [e.document] : []), ...(e.subject ?? []), ...(e.manifest ? [...(e.manifest.report ? [e.manifest.report] : []), ...e.manifest.artifacts] : [])]).filter(x => x.path === rel).at(-1)
     return { path: rel, bytes, sha256: sha256(bytes), expected: known?.sha256 ?? null }
   }

@@ -1,7 +1,9 @@
 // HTTP routes of the local service. JSON in, JSON out; the UI is one client.
+import { spawn } from 'node:child_process'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { mkdir, readFile, stat } from 'node:fs/promises'
 import { basename, dirname, extname, isAbsolute, join, normalize, sep } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import type { RepositoryStatus, WorkspaceSummary, WorkspacesResponse } from '../shared/api.ts'
 import { APPROVAL_KINDS, type ApprovalKind, type Documentation, type Project, type Workflow } from '../shared/model.ts'
 import { addNewRepository, createProject } from './create.ts'
@@ -12,7 +14,7 @@ import { REPO_CATEGORIES, type RepoCategory } from './registry.ts'
 import { BoundaryError, inside } from './files.ts'
 import { loadRegistry, observe, registerWorkspace, RegistryError, type Registry } from './registry.ts'
 import { listRuns, readRunFile, runOp, runResponse, resolveRef } from './runs.ts'
-import { OPS, hostOf, type OpInput, type RunRef } from '../shared/run.ts'
+import { OPS, hostOf, runKey, type OpInput, type RunRef } from '../shared/run.ts'
 import type { Watcher } from './watch.ts'
 import { codeVersion } from './version.ts'
 import { assertNotRetired, assertWorkspaceAllowed, loadBoundary, retiredByUrl } from './boundary.ts'
@@ -732,9 +734,25 @@ export function createHandler(config: ServiceConfig) {
         }
         const ref: RunRef = { workflow: parts[4] ?? '', run: parts[5] ?? '' }
         const sub = parts[6]
-        if (!ref.workflow || !ref.run || (parts.length > 7 && sub !== 'checkpoints' && sub !== 'presentations' && sub !== 'delegations' && sub !== 'reviews')) throw new RequestError(404, 'not found')
+        if (!ref.workflow || !ref.run || (parts.length > 7 && sub !== 'checkpoints' && sub !== 'presentations' && sub !== 'delegations' && sub !== 'reviews' && sub !== 'storage')) throw new RequestError(404, 'not found')
         if (!sub && method === 'GET') return send(res, 200, await runResponse(ws, ref, { rev: url.searchParams.get('rev') || undefined }))
         if (sub === 'exec' && method === 'GET') return send(res, 200, await needExec().runView(ws.reg.id, ref))
+        // The working copy's lifecycle (improve_wfrun p2, docs/storage.md): the
+        // view; a dry run answers here; the operation itself can take minutes,
+        // so it is started apart and the view follows it.
+        if (sub === 'storage' && !parts[7] && method === 'GET') return send(res, 200, await (await import('./retention.ts')).storageView(needExec(), ws, ref))
+        if (sub === 'storage' && (parts[7] === 'retire' || parts[7] === 'restore') && method === 'POST') {
+          const input = await body(req) as Record<string, unknown>
+          const by = typeof input.by === 'string' ? input.by.trim() : ''
+          if (!by) throw new RequestError(400, 'by is required: the name of who asks')
+          const m = await import('./retention.ts')
+          if (input.dryRun === true) return send(res, 200, parts[7] === 'retire' ? await m.retireRun(needExec(), ws, ref, { by, dryRun: true }) : await m.restoreRun(needExec(), ws, ref, { by, dryRun: true }))
+          const cli = fileURLToPath(new URL('../cli/wfe.ts', import.meta.url))
+          const p = spawn(process.execPath, [cli, 'run', parts[7], runKey(ref), '--by', by, '--workspace', ws.reg.id], { detached: true, stdio: 'ignore', env: { ...process.env, WFE_REGISTRY: config.registryFile, WFE_AREA: area } })
+          p.on('error', () => null)
+          p.unref()
+          return send(res, 202, { ok: true, started: parts[7] })
+        }
         // What each attempt was prepared with and the next attempt now (p13, docs/context.md).
         if (sub === 'context' && method === 'GET') return send(res, 200, await (await import('./contextView.ts')).runContextView(needExec(), ws, ref))
         // A full check of an input set's or output's bytes, on a person's

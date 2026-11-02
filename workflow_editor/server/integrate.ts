@@ -39,6 +39,7 @@ import { git, gitOk } from './git.ts'
 import { withLock } from './lock.ts'
 import { publicationOrder } from './publish.ts'
 import { copyDir, ownerOf } from './runspace.ts'
+import { folderIn, stageRecord } from './runrecord.ts'
 import type { Workspace } from './workspace.ts'
 
 export interface RevisionEntry { path: string; tree: string }
@@ -88,12 +89,14 @@ const names = (out: string) => out.split('\n').map(s => s.trim()).filter(Boolean
 // The tree a repository's working copy holds now, uncommitted and untracked
 // files included (ignored ones not), computed in a temporary index so that
 // nothing of the repository's own index or work changes.
-export async function workingTree(dir: string): Promise<string> {
+// `record`: the durable run folder this repository snapshots (improve_wfrun p2).
+export async function workingTree(dir: string, record?: { folder: string; abs: string }): Promise<string> {
   const tmp = await mkdtemp(join(tmpdir(), 'wfe-tree-'))
   try {
     const env = { GIT_INDEX_FILE: join(tmp, 'index') }
     await gitOk(dir, ['read-tree', 'HEAD'], { env })
     await gitOk(dir, ['add', '-A'], { env })
+    if (record) await stageRecord(dir, record.folder, record.abs, env)
     return (await gitOk(dir, ['write-tree'], { env })).trim()
   } finally { await rm(tmp, { recursive: true, force: true }) }
 }
@@ -105,7 +108,8 @@ export async function acceptedRevision(space: Workspace, storage: RunStorage): P
   const out: RevisionEntry[] = []
   for (const r of storage.repositories.filter(x => x.branch)) {
     const dir = r.path === '.' ? space.root : join(space.root, r.path)
-    const tree = await workingTree(dir)
+    const c = space.copyOf
+    const tree = await workingTree(dir, c?.recordRoot && c.owner === r.path ? { folder: folderIn(r.path, c.ref), abs: join(c.recordRoot, runFolder(c.ref)) } : undefined)
     await gitOk(dir, ['update-ref', `refs/wfe/accepted/${tree}`, tree])
     out.push({ path: r.path, tree })
   }

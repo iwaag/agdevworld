@@ -17,10 +17,13 @@
 // recorded end becomes `unknown`, a non-zero exit `interrupted`; both hold the
 // run until a person resumes it. A request or answer sent twice (same
 // receipt) is queued once.
+import { spawn } from 'node:child_process'
 import { randomBytes, randomUUID } from 'node:crypto'
 import { existsSync, mkdirSync, readFileSync } from 'node:fs'
+import { mkdir, readdir, readFile, rm } from 'node:fs/promises'
 import { hostname } from 'node:os'
-import { join, posix } from 'node:path'
+import { dirname, join, posix } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import type { DatabaseSync } from 'node:sqlite'
 import { DEFAULT_LANE, sessionPolicyOf, type Workflow } from '../shared/model.ts'
 import { attemptContext, renderContext, type AttemptContext } from '../shared/context.ts'
@@ -37,7 +40,8 @@ import { baseline, publish, publishRun, type Baseline, type RepoStep } from './p
 import { guardsFor, integrate, type Guard, type IntegrationState, type IntegrationStep } from './integrate.ts'
 import { loadRegistry, observe, type Registration } from './registry.ts'
 import { catalogOf, createRunInCopy, listRuns, readRun, RUN_FILE, runDir, runOp } from './runs.ts'
-import { readCopy, runSpace } from './runspace.ts'
+import { readCopy, runSpace, treeSpace } from './runspace.ts'
+import { atomicWrite } from './files.ts'
 import { withLock } from './lock.ts'
 import { catalogBrief } from '../shared/catalog.ts'
 import { activityOf } from './activity.ts'
@@ -105,7 +109,7 @@ export interface AttemptExecution { agent: string; profile: string | null; backe
 // run's folder" in a request or a node's description was resolved against
 // the copy's root about half the time, so root report.md / answer.md /
 // review.md files read as the project's own and each run overwrote the last.
-export const runFolderLine = (r: RunRef) => `Run folder: ${runDir(r)}/ (relative to your working directory, the copy's root). The run's own documents go there: its plan and reports, an answer or review notes, whatever the request or a node asks to write "in the run folder". A file of the same name at the project root reads as the project's own and the next run overwrites it (tidy p1: protoprey freework/run-003 wrote its final report as the root report.md, replacing another run's; agops recover runs did the same eleven times).`
+export const runFolderLine = (r: RunRef) => `Run folder: ${runDir(r)}/ (relative to your working directory, the copy's root). The run's own documents go there: its plan and reports, an answer or review notes, whatever the request or a node asks to write "in the run folder". A file of the same name at the project root reads as the project's own and the next run overwrites it (tidy p1: protoprey freework/run-003 wrote its final report as the root report.md, replacing another run's; agops recover runs did the same eleven times). Saving a file there is enough: WFE publishes the folder itself, so leave it out of your own git commands (git refuses them there, improve_wfrun p2).`
 
 // Deliver the built-in contract even while the node follows the initial talk.
 // It must not depend on an optional guide read or an editable local catalog.
@@ -365,6 +369,9 @@ export function activeWorkflow(rec: RunRecord, bundle: import('./runs.ts').Bundl
   const rev = rec.definition.active ? bundle.revisions?.find(x => x.revision === rec.definition.active)?.workflow : undefined
   return rev ?? bundle.entries[rec.definition.root]?.workflow
 }
+
+// A worker's part in a run's working-copy lifecycle (improve_wfrun p2).
+export interface StorageTask { workspace: string; workflow: string; run: string; action: 'archive' | 'remove'; generation: number; repositories?: { path: string; head: string | null }[] }
 
 export class ExecStore {
   readonly db: DatabaseSync
@@ -683,6 +690,15 @@ export class ExecStore {
       if (rec.cancelled) { drop('the run is cancelled'); continue }
       if (rec.control.hold) { drop(`the run is held (${rec.control.hold.kind}); a person resumes it`); continue }
       if (rec.control.attempt) { drop(`attempt ${rec.control.attempt.id} is still open in run.json`); continue }
+      // improve_wfrun p2: a continuation of a retired run restores it first;
+      // one that arrives during a retirement wins at the retirement's last check.
+      if (space.copyOf.treeless) {
+        const state = (await readCopy(ws.shared, ref))?.manifest?.state
+        if (state === 'retired') this.requestRestore(ws, ref)
+        if (state === 'retired' || state === 'retiring' || state === 'restoring') wait(`the run's working copy is ${state}; this waits for its restoration`)
+        else drop(`the run's working copy is missing; nothing can be executed there`)
+        continue
+      }
       // p18: a standing conductor at rest (or finalized with its room closed) has nothing to do; the conversation wakes it.
       if (rec.standing && (rec.execution.state === 'idle' || rec.execution.state === 'completed')) { drop(`the run rests (${rec.execution.state}): nothing is ready; the conversation's next event wakes it`); continue }
       const execution = await this.execution(space, rec, activeWorkflow(rec, reading.bundle), backend, offer)
@@ -721,7 +737,9 @@ export class ExecStore {
         await runOp(space, ref, { op: 'attempt.begin', attempt: id, reason: job.kind, ...(execution.backend ? { backend: execution.backend } : {}), settings }, { by: this.executor, via: 'exec' })
       } catch (e) {
         this.run('UPDATE attempts SET state = \'ended\', ended = ?, outcome = \'refused\' WHERE id = ?', now(), id)
-        this.run('UPDATE jobs SET state = \'dropped\', note = ? WHERE id = ?', `attempt refused: ${(e as Error).message}`, job.id)
+        // A retirement took the run between the look above and the record's lock: the job waits for it.
+        if (((e as RequestError).detail as { code?: string } | undefined)?.code === 'run-retired') this.run('UPDATE jobs SET state = \'queued\', claimed = NULL, attempt = NULL, note = ? WHERE id = ?', (e as Error).message, job.id)
+        else this.run('UPDATE jobs SET state = \'dropped\', note = ? WHERE id = ?', `attempt refused: ${(e as Error).message}`, job.id)
         continue
       }
       this.run('UPDATE attempts SET baseline = ?, log = ? WHERE id = ?', JSON.stringify(base), join(this.logsDir, `${id}.jsonl`), id)
@@ -1010,7 +1028,7 @@ export class ExecStore {
   // in the copy; the agent looks and, when they change the plan or the
   // reviewed result, asks again.
   async sinceBase(ws: Workspace, r: RunRecord, view: WorkerView | null = null): Promise<string[]> {
-    if (!ws.copyOf || !r.storage) return []
+    if (!ws.copyOf || ws.copyOf.treeless || !r.storage) return []
     const out: string[] = []
     const env = this.ctx.gitea ? await this.ctx.gitea.gitEnv() : {}
     for (const repo of r.storage.repositories) {
@@ -1225,7 +1243,14 @@ export class ExecStore {
       const id = Number(this.run('INSERT INTO checkpoints (workspace, workflow, run, kind, attempt, state, created, updated, steps, baseline, mode) VALUES (?, ?, ?, ?, ?, \'pending\', ?, ?, \'[]\', NULL, \'worker\')', ws.reg.id, ref.workflow, ref.run, kind, attempt, now(), now()).lastInsertRowid)
       return this.one<CheckpointRow>('SELECT * FROM checkpoints WHERE id = ?', id)!
     }
-    const mode = (await runSpace(ws, ref)).copyOf ? 'run-copy' : null
+    // A later record of a run without a tree (a rejection, a late review) has
+    // nothing to commit now: the durable record holds it, and the next
+    // publication after a restoration snapshots it.
+    if ((await runSpace(ws, ref)).copyOf?.treeless) {
+      const id = Number(this.run('INSERT INTO checkpoints (workspace, workflow, run, kind, attempt, state, created, updated, steps, baseline, mode) VALUES (?, ?, ?, ?, ?, \'nothing\', ?, ?, \'[]\', NULL, \'run-copy\')', ws.reg.id, ref.workflow, ref.run, kind, attempt, now(), now()).lastInsertRowid)
+      return this.one<CheckpointRow>('SELECT * FROM checkpoints WHERE id = ?', id)!
+    }
+    const mode = (await treeSpace(ws, ref)).copyOf ? 'run-copy' : null
     const id = Number(this.run('INSERT INTO checkpoints (workspace, workflow, run, kind, attempt, state, created, updated, steps, baseline, mode) VALUES (?, ?, ?, ?, ?, \'pending\', ?, ?, \'[]\', ?, ?)', ws.reg.id, ref.workflow, ref.run, kind, attempt, now(), now(), base, mode).lastInsertRowid)
     return this.publishCheckpoint(id)
   }
@@ -1248,7 +1273,7 @@ export class ExecStore {
     if (owed) throw new RequestError(409, `run ${runKey(ref)} waits for worker ${this.attemptRow(owed.attempt ?? '')?.worker ?? '?'} to publish checkpoint ${owed.id} (${owed.state}${owed.error ? `: ${owed.error}` : ''}); the coordinator publishes after it`, { code: 'checkpoint-worker' })
     // The checkpoint's own mode decides (p9): one made before the run moved
     // to its copy still publishes the project workspace's branches.
-    const space = cp.mode === 'run-copy' ? await runSpace(ws, ref) : ws.shared
+    const space = cp.mode === 'run-copy' ? await treeSpace(ws, ref) : ws.shared
     const live = space.copyOf
       ? this.one<AttemptRow>('SELECT * FROM attempts WHERE workspace = ? AND workflow = ? AND run = ? AND state != \'ended\'', cp.workspace, cp.workflow, cp.run)
       : this.one<AttemptRow>('SELECT * FROM attempts WHERE workspace = ? AND state != \'ended\'', cp.workspace)
@@ -1338,6 +1363,7 @@ export class ExecStore {
   // a completed execution and no open attempt.
   private async integrable(ws: Workspace, ref: RunRef): Promise<{ space: Workspace; record: RunRecord; decision: number } | { refused: string; wait?: boolean; superseded?: boolean }> {
     const space = await runSpace(ws, ref)
+    if (space.copyOf?.treeless) return { refused: `run ${runKey(ref)} has no working copy now; integration waits for its restoration (wfe run restore ${runKey(ref)})`, wait: true }
     const record = (await readRun(space, ref)).record
     if (!record) return { refused: `run ${runKey(ref)} cannot be read` }
     if (record.cancelled || record.control.hold?.kind === 'stopped' || record.control.stop) return { refused: `run ${runKey(ref)} was explicitly stopped or cancelled; resume it before integration` }
@@ -1346,6 +1372,55 @@ export class ExecStore {
     const owed = this.workerCheckpointOwed(ws.reg.id, ref)
     if (owed) return { refused: `run ${runKey(ref)} waits for its worker to publish checkpoint ${owed.id} (${owed.state}); integration builds on it`, wait: true }
     return { space, record, decision: record.seq }
+  }
+
+  // ---- working-copy lifecycle (improve_wfrun p2, docs/storage.md) -------------------------
+
+  // What in this store still needs the run's tree.
+  storageBlockers(workspace: string, ref: RunRef): string[] {
+    const where = [workspace, ref.workflow, ref.run]
+    const out: string[] = []
+    for (const a of this.all<AttemptRow>('SELECT * FROM attempts WHERE workspace = ? AND workflow = ? AND run = ? AND state != \'ended\'', ...where)) out.push(`attempt ${a.id} is ${a.state}`)
+    for (const j of this.all<JobRow>('SELECT * FROM jobs WHERE workspace = ? AND workflow = ? AND run = ? AND state IN (\'queued\', \'claimed\')', ...where)) out.push(`job ${j.id} (${j.kind}) is ${j.state}: a continuation is queued`)
+    for (const c of this.all<CheckpointRow>('SELECT * FROM checkpoints WHERE workspace = ? AND workflow = ? AND run = ? AND state NOT IN (\'published\', \'nothing\')', ...where)) out.push(`checkpoint ${c.id} (${c.kind}) is ${c.state}: the run is not fully saved`)
+    for (const i of this.all<IntegrationRow>('SELECT * FROM integrations WHERE workspace = ? AND workflow = ? AND run = ? AND state NOT IN (\'integrated\', \'superseded\', \'refused\')', ...where)) out.push(`integration ${i.id} is ${i.state}`)
+    return out
+  }
+
+  // The remote workers that may hold a copy of the run: every worker an attempt
+  // ran on, and the one the record names.
+  remoteHostsOf(workspace: string, ref: RunRef, record: RunRecord): string[] {
+    const cfg = this.workers()
+    const hosts = new Set(this.all<{ worker: string | null }>('SELECT DISTINCT worker FROM attempts WHERE workspace = ? AND workflow = ? AND run = ?', workspace, ref.workflow, ref.run).map(a => a.worker ?? cfg.default))
+    hosts.add(this.nodeOf(record))
+    return [...hosts].filter(h => cfg.workers[h] && !isLocalNode(cfg, h)).sort()
+  }
+
+  // A task for a worker's own copy; a file per run, picked up on its heartbeat.
+  private storageTaskDir(worker: string) { return join(this.ctx.area, '.local', 'exec', 'storage-tasks', worker) }
+  async storageTask(worker: string, t: StorageTask): Promise<void> {
+    const dir = this.storageTaskDir(worker)
+    await mkdir(dir, { recursive: true })
+    await atomicWrite(join(dir, `${t.workspace}__${t.workflow}__${t.run}.json`), `${JSON.stringify(t)}\n`)
+  }
+  async storageTasks(worker: string): Promise<StorageTask[]> {
+    const dir = this.storageTaskDir(worker)
+    const out: StorageTask[] = []
+    for (const f of await readdir(dir).catch(() => [] as string[])) if (f.endsWith('.json')) out.push(JSON.parse(await readFile(join(dir, f), 'utf8')))
+    return out
+  }
+  async storageTaskDone(worker: string, t: Pick<StorageTask, 'workspace' | 'workflow' | 'run'>): Promise<void> {
+    await rm(join(this.storageTaskDir(worker), `${t.workspace}__${t.workflow}__${t.run}.json`), { force: true })
+  }
+
+  // A job found a retired run: its restoration is started once, outside the
+  // claim (it can take minutes), and the job waits. The lifecycle lock makes a
+  // second start end at once; a crashed one is started again by the next claim.
+  requestRestore(ws: Workspace, ref: RunRef) {
+    const cli = join(dirname(fileURLToPath(import.meta.url)), '..', 'cli', 'wfe.ts')
+    const p = spawn(process.execPath, [cli, 'run', 'restore', runKey(ref), '--by', this.executor, '--workspace', ws.reg.id], { detached: true, stdio: 'ignore', env: { ...process.env, WFE_REGISTRY: this.ctx.registryFile, WFE_AREA: this.ctx.area } })
+    p.on('error', () => null)
+    p.unref()
   }
 
   // The guarded bindings (project_migration p4) of the definition the run

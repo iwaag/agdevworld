@@ -124,8 +124,8 @@ the end; the coordinator never looks at a remote worker's process ids.
 | | Coordinator | Remote worker |
 | --- | --- | --- |
 | Copy | the **record copy** (`<workspace>/.local/wfe/runs/…/tree`, as in [storage.md](storage.md)) | its working copy, `copies/<workspace>/<workflow>/<run>/tree` |
-| `run.json` | the authority: every operation writes it, under the run's lock | a snapshot brought back after each command; never written there, never uploaded |
-| Run folder documents | uploaded before each forwarded command and at the end | written by the agent |
+| `run.json` | the authority, in the durable record beside the tree (improve_wfrun p2): every operation writes it, under the run's lock | a snapshot brought back after each command; never written there, never uploaded |
+| Run folder documents | uploaded into the durable record before each forwarded command and at the end | written by the agent, in a real folder |
 | Code | follows the worker's commits at each worker checkpoint | edited, built and run by the agent |
 | Attempt log | `<area>/.local/exec/logs/<attempt>.jsonl`, shipped by offset with every heartbeat and at the end | written by the harness |
 
@@ -156,6 +156,10 @@ repository fetched and moved forward to the pushed commit (never backwards,
 never forced), `run.json` kept as it is. Until that checkpoint is published,
 the coordinator publishes nothing of the run and integration waits; then
 integration runs on the coordinator as before, on the worker's commits.
+
+**Retirement** ([storage.md](storage.md) *Retirement*). A run's retirement asks every worker that ran it to archive
+what only it holds, and removes the worker's copy once the run is retired. Lost contact holds it at `retiring`; a stale report
+or upload changes nothing; files of a run that is not ready are refused.
 
 ## Contact lost, restarts
 

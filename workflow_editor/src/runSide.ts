@@ -21,7 +21,7 @@ import { hostOwes, isAwaitingPerson, owedContinuation, reviewStateText } from '.
 import { reportStep } from '../shared/compile.ts'
 import { sessionPolicyOf } from '../shared/model.ts'
 import { WORKFLOW_TALK, WORKFLOW_TALK_INSTRUCTIONS } from '../shared/workflowTalk.ts'
-import type { AdjustView, DelegationsView, DelegationView, PresentationView, RunExecView, RunNotifyView } from './api.ts'
+import type { AdjustView, DelegationsView, DelegationView, PresentationView, RunExecView, RunStorageView, RunNotifyView } from './api.ts'
 import { ACTIVITY_LABEL, STATE_GLYPH, TYPE_LABEL } from './canvas.ts'
 import { stepFacts, stepLabel } from './inspector.ts'
 import { h, when } from './dom.ts'
@@ -43,6 +43,7 @@ export interface RunData {
   shown: RunResponse | null // the last reading with a usable record
   resp: RunResponse | null // the latest reading, usable or not
   execView: RunExecView | null
+  storageView?: RunStorageView | null
   execError: string
   notifyView: RunNotifyView | null
   presentViews: PresentationView[]
@@ -1204,6 +1205,7 @@ export class RunSide {
       nf ? h(`p.small.node-line.${nf.tone === 'ok' ? 'muted' : 'warn-text'}`, { dataset: { node: nf.node } }, nf.line, open && nf.remote && nf.state !== 'available' ? '. Its attempt stays open and assigned; its process may still be working.' : '') : null,
       this.sessionLine(rec),
       // Where the run's work is kept (p9, docs/storage.md).
+      this.storageFacts(),
       d.resp?.place?.kind === 'run-copy' ? h('p.small.muted.run-place', `Work: this run's own copy of the project, saved to branch ${d.resp.place.branch ?? '(unknown)'} — not on the project's shared branch until it is integrated.${nf?.remote ? ` It is worked on ${nf.node}: files here are its last published checkpoint and the documents it uploaded; ${open ? 'live changes there are not shown until its attempt ends' : 'nothing is newer there'}.` : ''}`) : null,
       h('div.row.tight', h('button', { disabled: frozen || !!rec.control.hold || !!rec.control.stop || sit === 'completed', title: STOP_TITLE, dataset: { action: 'stop-run' } }, 'Stop')))
     const queued = ev?.jobs.filter(j => j.state === 'queued' || j.state === 'claimed') ?? []
@@ -1227,6 +1229,28 @@ export class RunSide {
   // The run's frozen session policy and its sessions (agent_session p1):
   // which conversation is current, how many attempts it served, and why an
   // earlier one was replaced or retired. Transcripts stay on the host.
+  // The working copy as a storage fact (improve_wfrun p2): Simple says whether the
+  // work is retained and what can be done; Detail adds hosts, sizes and failures.
+  private storageFacts() {
+    const v = this.data.storageView
+    if (!v?.managed) return null
+    const size = (b: number | null | undefined) => (b === null || b === undefined ? '—' : b > 1073741824 ? `${(b / 1073741824).toFixed(1)} GB` : `${(b / 1048576).toFixed(1)} MB`)
+    const l = v.lifecycle
+    const showReasons = v.state === 'ready' && v.reasons.length
+    return h('div.run-storage',
+      h('p.small', v.retained, ' ',
+        v.action === 'restore' ? h('button', { dataset: { action: 'storage-restore' } }, 'Restore copy') : null,
+        v.action === 'retire' ? h('button.d-only', { title: 'Keeps the record readable, saves the work and frees the copy', dataset: { action: 'storage-retire' } }, v.state === 'retiring' ? 'Continue retiring' : 'Retire copy') : null),
+      l?.failure ? h('p.small.warn-text', `The last operation stopped at ${l.failure.step}: ${l.failure.message}`) : null,
+      h('details.d-only.small', h('summary', 'Storage details'),
+        showReasons ? h('p', 'Keeps its copy because: ', v.reasons.join('; ')) : null,
+        l?.sizes ? h('p', `Copy when retired: ${size(l.sizes.treeBytes)}`) : null,
+        l?.archive ? h('p', `Archive: ${l.archive.files} files, ${size(l.archive.bytes)}, verified ${when(l.archive.verified)}; ${l.archive.published} as published outputs, ${l.archive.discarded} discarded`) : null,
+        l?.repositories?.length ? h('p', 'Saved commits: ', l.repositories.map(r => `${r.path === '.' ? 'root' : r.path} ${r.head?.slice(0, 10) ?? '—'}`).join(', ')) : null,
+        ...Object.entries(v.hosts).map(([id, p]) => h('p', `Worker ${id}: ${p.state}${p.detail ? ` (${p.detail})` : ''}${p.archive ? `, ${size(p.archive.bytes)} archived` : ''}, ${when(p.at)}`)),
+        ...(l?.history ?? []).slice(-4).map(e => h('p.muted', `${when(e.at)} ${e.op} by ${e.by}: ${e.result}`))))
+  }
+
   private sessionLine(rec: RunRecord): HTMLElement | null {
     const wf = this.data.resp?.bundle?.[rec.definition.root]?.workflow
     const policy = sessionPolicyOf(wf?.execution)

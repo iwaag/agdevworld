@@ -4,7 +4,7 @@
 // service, so no command needs it running. `wfe help` is the index.
 import { spawn } from 'node:child_process'
 import { realpathSync } from 'node:fs'
-import { readFile } from 'node:fs/promises'
+import { readFile, writeFile } from 'node:fs/promises'
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import type { Diagnostic, RepositoryStatus, WorkflowSummary } from '../shared/api.ts'
@@ -417,6 +417,29 @@ sync     fast-forwards the root (on the published branch, clean, only
          nothing is stashed, reset, merged or rebased. Each repository's step
          is reported; after a partial update, fix the named repository and
          run sync again. --dry-run says what would move.`,
+  branches: `wfe branches inventory [--workspace <id>]
+wfe branches preview [--workspace <id>] [--run <wf>/<run>]... [--selection-out <file>]
+wfe branches delete --selection <file.json> --by <name> [--dry-run]
+wfe branches recreate <wf>/<run> --workspace <id> --by <name> [--dry-run]
+
+Run branches on the configured Gitea (improve_wfrun p3, docs/storage.md *Run
+branch cleanup*). Explicit only: no age, name prefix or reachability from main
+decides anything, and nothing runs by itself.
+  inventory exact repository/ref/object tuples and which run owns each, nested and
+            shared repositories included; run branches nobody owns here are unknown.
+  preview   read-only: what could go, with reasons for what stays, the expected ref
+            change, and what is known about storage. A branch may go only when its
+            run is finished, retired and settled on every worker, and its exact tip is
+            in retained storage and in a verified backup of the run's current generation.
+  delete    consumes a selection (--selection-out writes one), rechecks all of it under
+            the run's lifecycle lock and deletes only the object it saw: a branch
+            that moved is left and reported. Retention refs, tags, main and other
+            branches are never in a selection. Run again to continue a partial one.
+  recreate  puts a deleted branch back at its recorded object from retained storage;
+            one that exists elsewhere is reported, never overwritten.
+Branch absence is not run absence: records, receipts and run numbers do not change,
+and a correction of a restored run publishes its branch again.
+Exit 1 when anything was refused, left or failed.`,
   backup: `wfe backup create --by <name>
 wfe backup status [--json]
 wfe backup list [--json]
@@ -1826,6 +1849,54 @@ async function cmdMigrate(p: Parsed): Promise<number> {
   } finally { x.close(); execStore = undefined }
 }
 
+// Run branch cleanup (improve_wfrun p3, docs/storage.md).
+async function cmdBranches(p: Parsed): Promise<number> {
+  const m = await import('../server/branchCleanup.ts')
+  const [sub, arg] = p.positional
+  const x = await openExec(p)
+  try {
+    const c = await m.cleanupContext(x)
+    const by = () => { const v = opt(p, 'by'); if (!v) throw new UsageError('--by <name> is required'); return v }
+    const { workspaces } = await import('../server/migrate.ts')
+    const only = opt(p, 'workspace')
+    const all = async () => { const list = await workspaces(x); const pick = list.filter(w => !only || w.reg.id === only); if (only && !pick.length) throw new Refused(`workspace "${only}" is not available`); return pick }
+    if (sub === 'inventory') {
+      const rows = []
+      for (const ws of await all()) rows.push(await m.inventory(c, ws))
+      const lines = rows.map(r => `  ${r.workspace.padEnd(16)} ${String(r.totals.refs).padStart(4)} run branches in ${Object.keys(r.totals.byRepository).length} repositories, ${r.unknown.length} with no owner here${r.unread.length ? `, ${r.unread.length} remotes unread` : ''}`)
+      out([`Run branches: ${rows.reduce((n, r) => n + r.totals.refs, 0)}.`, ...lines].join('\n'), { workspaces: rows })
+      return rows.some(r => r.unread.length) ? 1 : 0
+    }
+    if (sub === 'preview') {
+      const previews = []
+      for (const ws of await all()) previews.push(await m.previewWorkspace(c, ws, p.opts.get('run')))
+      const runs = previews.flatMap(v => v.runs)
+      const selection = m.selectionFrom(runs)
+      const file = opt(p, 'selection-out')
+      if (file) await writeFile(file, `${JSON.stringify(selection, null, 1)}\n`)
+      const lines = runs.map(r => `  ${`${r.workspace}:${r.ref}`.padEnd(44)} ${r.eligible ? `can go: ${r.refs.filter(z => z.eligible).length} branches` : `stays: ${r.reasons[0] ?? ''}`}`)
+      out([`${runs.filter(r => r.eligible).length} of ${runs.length} runs could lose ${selection.reduce((n, s) => n + s.refs.length, 0)} branches (nothing was changed).${file ? ` Selection: ${file}.` : ''}`, ...lines, m.STORAGE_LIMITS].join('\n'), { previews, selection, limits: m.STORAGE_LIMITS })
+      return 0
+    }
+    const wsOf = async (id: string) => { const w = (await workspaces(x)).find(z => z.reg.id === id); if (!w) throw new Refused(`workspace "${id}" is not available`); return w }
+    if (sub === 'delete') {
+      const file = opt(p, 'selection'); if (!file) throw new UsageError('--selection <file.json> is required')
+      const selection = JSON.parse(await readFile(file, 'utf8'))
+      const r = await m.deleteSelection(c, wsOf, selection, { by: by(), dryRun: p.flags.has('dry-run') })
+      out(r.map(z => `  ${z.workspace}:${z.ref} ${z.outcome}${z.reasons.length ? `: ${z.reasons[0]}` : ''}\n${z.refs.map(v => `    ${v.result} ${v.ref} at ${v.oid.slice(0, 12)}${v.detail ? ` (${v.detail})` : ''}`).join('\n')}`).join('\n'), { results: r })
+      return r.every(z => z.outcome === 'done') ? 0 : 1
+    }
+    if (sub === 'recreate') {
+      if (!arg || !only) throw new UsageError('wfe branches recreate <wf>/<run> --workspace <id> --by <name> [--dry-run]')
+      const [workflow, run] = arg.split('/')
+      const r = await m.recreateBranches(c, await wsOf(only), { workflow, run }, { by: by(), dryRun: p.flags.has('dry-run') })
+      out(r.refs.map(v => `  ${v.result} ${v.ref} at ${v.oid.slice(0, 12)}${v.detail ? ` (${v.detail})` : ''}`).join('\n') || '  (nothing was deleted for this run)', r)
+      return r.refs.some(v => v.result === 'conflict' || v.result === 'failed') ? 1 : 0
+    }
+    throw new UsageError('wfe branches inventory|preview|delete|recreate')
+  } finally { x.close(); execStore = undefined }
+}
+
 // Backup of retired runs (improve_wfrun p3, docs/storage.md).
 async function cmdBackup(p: Parsed): Promise<number> {
   const b = await import('../server/runBackup.ts')
@@ -1886,7 +1957,7 @@ async function cmdBackup(p: Parsed): Promise<number> {
 }
 
 const COMMANDS: Record<string, (p: Parsed) => Promise<number>> = {
-  backup: cmdBackup,
+  backup: cmdBackup, branches: cmdBranches,
   runs: cmdRuns, observe: cmdObserve, projects: cmdProjects, run: cmdRun, delegate: cmdDelegate, review: cmdReview, present: cmdPresent, share: cmdShare, project: cmdProject, repo: cmdRepo, gitea: cmdGitea, dashboard: cmdDashboard, exec: cmdExec, request: cmdRequest, notify: cmdNotify, intake: cmdIntake,
   create: cmdCreate, register: cmdRegister, list: cmdList, status: cmdStatus, validate: cmdValidate,
   approve: cmdApprove, arrange: cmdArrange, 'add-repo': cmdAddRepo, workflow: cmdWorkflow, serve: cmdServe, setup: cmdSetup,

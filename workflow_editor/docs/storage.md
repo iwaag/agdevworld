@@ -234,7 +234,7 @@ index is only read.
 ## Lifetime
 
 Copies are kept when a run is held, completed or cancelled, until someone retires one
-explicitly (*Retirement*). No age or schedule retires anything. Run branches are kept. A person
+explicitly (*Retirement*). No age or schedule retires anything. Run branches are kept until an explicit cleanup (*Run branch cleanup*). A person
 who removes a tree by hand leaves the run reported as missing, with its branch, and
 its durable record readable.
 
@@ -337,6 +337,29 @@ Losing the coordinator whole also loses Gitea and the workspaces. This backup th
 
 **Rollback to pre-p2 code is not part of this.** It would need the reverse of relocation and is **unverified**; do not present it as a fallback.
 
+## Run branch cleanup (improve_wfrun p3, `server/branchCleanup.ts`, `wfe branches`)
+
+**Branch absence is not run absence.** A retired run's identity, receipt, number, latest record, frozen definition and evidence links do not depend on its branch. Nothing here is automatic, and age, a name prefix or reachability from main decide nothing: a cancelled, unintegrated run keeps its work in retention like any other.
+
+**One answer for the CLI and the service** (`assess`: `wfe branches preview`, `GET …/runs/<wf>/<run>/branches`). A run's branch can go when:
+
+- it has a managed copy, `retired` and `released`, with no failure on its last storage operation;
+- every worker that held a copy reports `removed` or `absent`;
+- it has no open attempt, queued continuation, pending checkpoint or integration, hold, standing run, available presentation or review in progress;
+- the latest verified backup covers it at its current `generation`;
+- each branch's exact tip on the remote is fully in the retention repository, reached by this run's own retained refs, and reached by what the backup holds of them;
+- in a nested repository, a commit the parent's default branch pins stays reachable through some other remote ref, because a later collection there would otherwise break cloning the project.
+
+Only `refs/heads/wfe/<project>/<workflow>/<run>` of the owning run, in the repositories its manifest or archive names, on the configured Gitea. Retention refs, tags, main and other branches are outside any selection. A remote on another host is `outside`; a run branch with no copy here is `unknown` in the inventory and never selected.
+
+**Deleting** consumes an explicit selection of repository, ref and object. Each run is rechecked under its lifecycle lock; the entry is written to `branch-cleanup.json` (`ag.wfe-branch-cleanup.v1`, beside `copy.json`, in the backup) before the push; the push carries `--force-with-lease=<ref>:<object>`, so a branch that moved is left as it is and reported (`changed`). A failed push stays journaled, and running the same selection again continues: a ref found gone is recorded as deleted, a ref already absent with no entry is reported as such. Each run's mapping is durable before the next backup holds it; run `wfe backup create` after a batch.
+
+**Recreating** (`wfe branches recreate`) pushes the recorded object from the retention repository with a lease that the ref must not exist. One that is there at the same object is recorded; at another, it is a conflict and nothing changes. A correction of a restored run does not need this: its publication pushes the branch again.
+
+**Bytes are a separate question.** Deleting a ref removes no object. The remote collects by its own maintenance, later; other refs, reflogs and hard links may keep objects; retention and backup hold their own copy. Measure allocated bytes per location, and run ordinary maintenance only on a selected, backed-up repository. Zero is a valid result, and a batch's result is not an estimate for the rest.
+
+**Caches.** Access caches may keep a deleted ref until they refresh. Nothing reads a retired run's work through them: its record is on disk, its files come from retention, and its number stays taken because its copy folder stays.
+
 ## Relocation (`wfe runs relocate`, `server/relocate.ts`)
 
 Copies made before improve_wfrun p2 keep their folder in the tree until moved, and the resolver reads them as before.
@@ -424,6 +447,8 @@ workspace and its nested module; devdocs as a submodule read at the pin;
 discovery after `invalidate`; Gitea unreachable; existing runs unchanged.
 `test/workspaceSync.test.ts`: relations, sync refusals, a partial update and its
 continuation, and trials.
+
+`test/runBackup.test.ts` (improve_wfrun p3): a generation published only after verification; interruption, a byte changed in staging, a restoration during capture; a run the last generation covered; damage named by run; recovery with the originals renamed away, nested commits and output bytes; reinstating without overwriting newer events; expiry. `test/branchCleanup.test.ts`: every reason to stay, a pin, ownership, recreation, a branch moved before and during deletion, a partial deletion continued, identity and publication after deletion, a cancelled unintegrated run.
 
 `test/runrecord.test.ts` (improve_wfrun p2): one set of bytes through the link, one lock, the
 snapshot in both devdocs modes, the agent's `git add -A`, Git refusing between snapshots, a replaced

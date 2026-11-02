@@ -507,6 +507,9 @@ export function createHandler(config: ServiceConfig) {
         return await workerRoute({ exec: needExec(), registryFile: config.registryFile, area }, req, res, parts.slice(2), url)
       }
 
+      // Backup of retired runs (improve_wfrun p3, docs/storage.md): read-only here.
+      if (a === 'backup' && method === 'GET') return send(res, 200, await (await import('./runBackup.ts')).backupOverview(needExec()))
+
       // Usage (retire_old_ui p1, docs/usage.md): read-only.
       if (a === 'usage' && method === 'GET') {
         if (!config.usage) throw new RequestError(503, 'usage is not configured on this service')
@@ -734,7 +737,7 @@ export function createHandler(config: ServiceConfig) {
         }
         const ref: RunRef = { workflow: parts[4] ?? '', run: parts[5] ?? '' }
         const sub = parts[6]
-        if (!ref.workflow || !ref.run || (parts.length > 7 && sub !== 'checkpoints' && sub !== 'presentations' && sub !== 'delegations' && sub !== 'reviews' && sub !== 'storage')) throw new RequestError(404, 'not found')
+        if (!ref.workflow || !ref.run || (parts.length > 7 && sub !== 'checkpoints' && sub !== 'presentations' && sub !== 'delegations' && sub !== 'reviews' && sub !== 'storage' && sub !== 'branches')) throw new RequestError(404, 'not found')
         if (!sub && method === 'GET') return send(res, 200, await runResponse(ws, ref, { rev: url.searchParams.get('rev') || undefined }))
         if (sub === 'exec' && method === 'GET') return send(res, 200, await needExec().runView(ws.reg.id, ref))
         // The working copy's lifecycle (improve_wfrun p2, docs/storage.md): the
@@ -752,6 +755,20 @@ export function createHandler(config: ServiceConfig) {
           p.on('error', () => null)
           p.unref()
           return send(res, 202, { ok: true, started: parts[7] })
+        }
+        // Run branch cleanup (improve_wfrun p3, docs/storage.md): the same answer as wfe branches.
+        if (sub === 'branches') {
+          const m = await import('./branchCleanup.ts')
+          const c = await m.cleanupContext(needExec())
+          if (!parts[7] && method === 'GET') return send(res, 200, { ...await m.assess(c, ws, ref), limits: m.STORAGE_LIMITS, record: await m.readCleanupRecord(ws, ref) })
+          if ((parts[7] === 'delete' || parts[7] === 'recreate') && method === 'POST') {
+            const input = await body(req) as Record<string, unknown>
+            const by = typeof input.by === 'string' ? input.by.trim() : ''
+            if (!by) throw new RequestError(400, 'by is required: the name of who asks')
+            if (parts[7] === 'recreate') return send(res, 200, await m.recreateBranches(c, ws, ref, { by, dryRun: input.dryRun === true }))
+            if (!Array.isArray(input.refs)) throw new RequestError(400, 'refs is required: the exact repository, ref and oid the preview showed')
+            return send(res, 200, (await m.deleteSelection(c, async () => ws, [{ workspace: ws.reg.id, ref: runKey(ref), refs: input.refs as never }], { by, dryRun: input.dryRun === true }))[0])
+          }
         }
         // What each attempt was prepared with and the next attempt now (p13, docs/context.md).
         if (sub === 'context' && method === 'GET') return send(res, 200, await (await import('./contextView.ts')).runContextView(needExec(), ws, ref))

@@ -613,6 +613,13 @@ export async function rehearse(o: { into: string; by: string; failureCases?: boo
       } else add('receipt replay', true, 'this run has no receipt', label)
       const used = await usedRuns(ws, r.project, ref.workflow)
       add('run number stays taken', used.has(ref.run), `${used.size} numbers taken in ${ref.workflow}`, label)
+      // Refs deleted from a remote can be recreated from what was restored here.
+      const cleaned = JSON.parse(await readTextOrNull(join(copyDir(ws, ref), CLEANUP_RECORD)) ?? 'null') as { entries: { ref: string; oid: string; key: string | null; state: string }[] } | null
+      for (const e of cleaned?.entries.filter(z => z.state === 'deleted') ?? []) {
+        const present = e.key ? (await git(retentionRepo(ws, e.key), ['rev-list', '--objects', '--quiet', e.oid])).code === 0 : false
+        compared++
+        add('deleted branch recoverable', present, `${e.ref} at ${e.oid.slice(0, 12)}`, label)
+      }
     }
     // Numbers of the runs that are not in the backup in full stay taken, and their receipts answer.
     let identities = 0, identityBad = 0
@@ -679,7 +686,7 @@ export async function rehearse(o: { into: string; by: string; failureCases?: boo
   } finally { x.close() }
   const result: Rehearsal = {
     schema: 'ag.wfe-recovery-rehearsal.v1', generation: m.id, at: now(), host: hostname(), ok: checks.every(c => c.ok), seconds: Math.round((Date.now() - t0) / 1000), checks,
-    restored: { runs: restoredRuns, bytes: restoredBytes }, compared, external: ['the software at the manifest\'s revisions', ...m.credentials.map(c => `to publish again: ${c}`), 'Gitea, to push any restored branch again (a restored copy names its original remote)'],
+    restored: { runs: restoredRuns, bytes: restoredBytes }, compared, external: ['the software at the manifest\'s revisions', 'to publish again: Gitea and its tokens (a restored copy names its original remote)'],
   }
   await writeFile(join(o.into, 'rehearsal.json'), `${JSON.stringify(result, null, 1)}\n`)
   return result

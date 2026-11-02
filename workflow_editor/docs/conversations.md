@@ -203,6 +203,25 @@ conductor, which rests again; nothing withdrawn, completed or held is
 replayed — ask again, or resume. Both are activity events (`room` closed /
 reopened).
 
+Who may close (fix p2, `devdocs/episodes/fix/p2/`): anyone who names the
+conversation by its id — the person (the page's button, the HTTP route, the
+CLI with `--author`), or a run of any project from its executing attempt
+(`wfe conversation close <id> [--reason <why>]`), whether or not that project
+takes part in the room; the remote worker's `wfe` forwards it to the
+coordinator like any other command. The event's `data` keeps the actor as
+recorded (`by`: an attempt's agent name, never the person it acts for; the
+configured person for the page), the `run` and `attempt` when it was done
+from one (`null` from the page), and the `reason` (`null` when none was
+given); the archive carries the same record (*Archive*). Closing a closed
+room, or reopening an open one, records nothing again and repeats no
+withdrawal (`already: true`). The answer of `close` carries the room's state,
+the withdrawn request ids and the room's `status`, so a client shows
+success from the record rather than from the request having been sent.
+Closing neither completes nor approves work: a closed room's unfinished work
+stays in `status` (`working`, `owed`, `held`, `continuations`) and in
+`wfe conversation state`. Nothing closes a room by itself: no words of
+anyone, no inactivity.
+
 ## Archive
 
 WFE's store is authoritative for live speech. The archive is a reproducible
@@ -283,7 +302,7 @@ lets the person start a child's review from the room without a manual link.
 | `POST …/members {participant, action: join\|leave, note?}` | membership; starts nothing |
 | `POST …/requests {participant, question, re?, token?}`, `…/requests/<n>/withdraw {reason}`, `…/requests/<n>/retry` | the person's request; withdraw one not started; try a failed one again |
 | `POST …/resume {request?}` | run held continuations once |
-| `POST …/close`, `…/reopen` | the conductor's run stands closed / open again (p18) |
+| `POST …/close {author?, reason?}`, `…/reopen {author?, reason?}` | close / reopen (*Closing and reopening*); the conductor's run stands closed / open again (p18); the answer carries `already`, `conversation`, `withdrawn` (close) and `status` (fix p2) |
 | `GET …/conductor`, `POST …/conductor {action: replace, reason, token?}` | (p18) the conductor's run, standing and status; a new conductor for a cancelled one, naming it |
 | `POST …/meta {category?, displayTitle?, ifUntitled?, note?}`, `GET`/`POST …/overview` (`displayTitle?`, `ifUntitled?`) | records about the conversation; `skipped` says why an `ifUntitled` title was not written |
 | `GET …/workflows[/<n>[/current]]` | workflows beside the speech (reads only) |

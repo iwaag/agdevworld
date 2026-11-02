@@ -1469,7 +1469,7 @@ export class ConversationService {
       await this.startNode(o.run, o.node, t.node.state, { by: o.author, attempt: o.attempt, receipt: `discussion:${conv}:activity:${row.id}` })
       await this.finishNode(o.run, o.node, `announced #${said.message.id}${obligations ? `; conclusion with ${obligations.length} outstanding: ${obligations.map(b => `${b.ref} (${b.owes}; owner ${b.owner}; to ${b.receiver})`).join('; ') || 'none'}` : ''}`, { by: o.author, attempt: o.attempt, receipt: `discussion:${conv}:activity:${row.id}` })
     }
-    const closed = o.close ? await this.close(conv, { by: o.author }) : null
+    const closed = o.close ? await this.close(conv, { by: o.author, run: o.run, attempt: o.attempt, reason: `concluded by ${o.run} (#${said.message.id})` }) : null
     return { message: said.message, duplicate: said.duplicate, activity: this.activityView(this.activityRow(row.id)!), closed }
   }
 
@@ -1794,27 +1794,38 @@ export class ConversationService {
   // conductor is continued while closed (its continuation is held).
   // p18: the conductor stands closed — finalized if it rests, still waiting
   // on what it asked otherwise; no child is cancelled, no review approved.
-  async close(conv: string, o: { by: string }): Promise<{ conversation: ConversationRow; withdrawn: number[]; standing?: string | null }> {
+  // fix p2: the room event keeps who closed it (the actor as recorded: a
+  // person, or an agent — never the person it serves), the run and attempt
+  // it was done from when there was one, and an optional reason; the same
+  // facts reach the archive. Closing a closed room records nothing again and
+  // repeats no side effect (`already`); the answer still says where the room
+  // stands and what is left to look at (`wfe conversation state`).
+  async close(conv: string, o: { by: string; run?: string | null; attempt?: string | null; reason?: string | null }): Promise<{ conversation: ConversationRow; withdrawn: number[]; already: boolean; standing?: string | null; status: DiscussionStatus }> {
     this.need(conv)
+    const reason = o.reason?.trim() || null
     const r = this.tx(() => {
       const was = this.cs.conversation(conv)!.state
+      if (was === 'closed') return { conversation: this.cs.conversation(conv)!, withdrawn: [] as number[], already: true }
       this.db.prepare('UPDATE conversations SET state = \'closed\', updated = ? WHERE id = ?').run(now(), conv)
-      if (was !== 'closed') this.activityEvent(conv, null, 'room', 'closed', o.by, `${o.by} closed the conversation`, { by: o.by })
+      this.activityEvent(conv, null, 'room', 'closed', o.by, `${o.by} closed the conversation${reason ? `: ${reason}` : ''}`, { by: o.by, run: o.run ?? null, attempt: o.attempt ?? null, reason })
       const pending = this.all<InvitationRow>('SELECT * FROM invitations WHERE conv = ? AND state IN (\'pending\', \'failed\')', conv)
-      for (const i of pending) this.withdrawRow(i, `the conversation was closed by ${o.by}`)
-      return { conversation: this.cs.conversation(conv)!, withdrawn: pending.map(i => i.id) }
+      for (const i of pending) this.withdrawRow(i, `the conversation was closed by ${o.by}${reason ? ` (${reason})` : ''}`)
+      return { conversation: this.cs.conversation(conv)!, withdrawn: pending.map(i => i.id), already: false }
     })
-    return { ...r, standing: await this.syncStanding(conv).catch(e => `not recorded yet (${(e as Error).message}); reconcile records it`) }
+    const standing = await this.syncStanding(conv).catch(e => `not recorded yet (${(e as Error).message}); reconcile records it`)
+    return { ...r, standing, status: await this.status(conv) }
   }
   // The conversation continues; nothing withdrawn, completed or held is
   // replayed (held continuations wait for resume). p18: the same conductor
-  // stands again, what waited for it held.
-  async reopen(conv: string, o: { by: string }): Promise<ConversationRow> {
+  // stands again, what waited for it held. fix p2: the same provenance as
+  // closing; reopening an open room records nothing.
+  async reopen(conv: string, o: { by: string; run?: string | null; attempt?: string | null; reason?: string | null }): Promise<ConversationRow> {
     this.need(conv)
+    const reason = o.reason?.trim() || null
     this.tx(() => {
       if (this.cs.conversation(conv)!.state === 'open') return
       this.db.prepare('UPDATE conversations SET state = \'open\', updated = ? WHERE id = ?').run(now(), conv)
-      this.activityEvent(conv, null, 'room', 'reopened', o.by, `${o.by} reopened the conversation`, { by: o.by })
+      this.activityEvent(conv, null, 'room', 'reopened', o.by, `${o.by} reopened the conversation${reason ? `: ${reason}` : ''}`, { by: o.by, run: o.run ?? null, attempt: o.attempt ?? null, reason })
     })
     await this.syncStanding(conv).catch(() => null)
     return this.cs.conversation(conv)!

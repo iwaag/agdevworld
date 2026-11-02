@@ -153,11 +153,19 @@ leave <id> <participant> [--note <n>] [--author <who>]   a member leaves; its sp
 withdraw <id> <request> --reason <why> [--author <person>]
                               withdraw a request not started yet
 retry <id> <request>          try a failed request again, at the same recipient
-close <id> [--author <who>]   end automatic dispatch: requests not started are withdrawn; started
-                              runs finish and are recorded; nothing is cancelled; a continuation
-                              that comes due is held
-reopen <id> [--author <who>]  continue it with the same conductor; nothing withdrawn, completed or held
-                              is replayed
+close <id> [--reason <why>] [--author <who>]
+                              end automatic dispatch: requests not started are withdrawn; started
+                              runs finish and are recorded; nothing is cancelled, completed or
+                              approved; a continuation that comes due is held. Any conversation by
+                              its id, from any project's run or from outside one (fix p2). The
+                              record keeps who closed it (an attempt's agent, never the person it
+                              serves; --author outside an attempt), the run and attempt, and the
+                              reason. The answer says the room's state, what was withdrawn and
+                              what is still open (details: state <id>). Closing a closed room
+                              records nothing again
+reopen <id> [--reason <why>] [--author <who>]
+                              continue it with the same conductor; nothing withdrawn, completed or held
+                              is replayed. A person's later post reopens it too
 resume <id> [<request>] [--author <who>]
                               run held continuations once (what a conductor awaited, resolved
                               while the room was closed or no longer facilitated) and release what
@@ -670,16 +678,28 @@ export async function conversationCommand(c: ConversationCli): Promise<number> {
         return 0
       }
       case 'close': {
+        // fix p2: any room by its id; the actor is the attempt's agent when
+        // there is one (an agent closes as itself, not as the person), the
+        // run and attempt go with it, and the answer says what is left open.
         const id = args[0]; if (!id) throw c.usage('close needs <id>')
+        if (!CONVERSATION_ID.test(id)) throw c.usage(`"${id}" is not a conversation id`)
+        const o = await own()
         const by = await who() ?? 'person'
-        const r = await ds.close(id, { by })
-        c.out(`Closed ${id}${r.withdrawn.length ? `; withdrawn requests ${r.withdrawn.join(', ')}` : ''}. Started runs finish and are recorded.`, { ok: true, ...r })
+        const r = await ds.close(id, { by, run: o?.run ?? null, attempt: o?.attempt ?? null, reason: c.opt('reason') ?? null })
+        const st = r.status
+        const left = [st.working ? `work still open ${st.working}` : '', st.awaiting.length ? `answers awaited ${st.awaiting.length}` : '', st.held.length ? `stopped runs ${st.held.length}` : '', st.continuations.length ? `held continuations ${st.continuations.length}` : ''].filter(Boolean)
+        c.out([`${r.already ? `${id} was already closed; nothing recorded again` : `Closed ${id} (by ${by}${o ? `, from ${o.run}` : ''}${c.opt('reason') ? `: ${c.opt('reason')}` : ''})`}.`,
+          `Room: ${r.conversation.state}. Withdrawn requests: ${r.withdrawn.length ? r.withdrawn.join(', ') : 'none'}. ${left.length ? `Still recorded: ${left.join('; ')} (wfe conversation state ${id}).` : 'Nothing is recorded as open.'}`,
+          'Started runs finish and are recorded; nothing is completed or approved by closing. A person\'s post reopens the room.'].join('\n'), { ok: true, ...r })
         return 0
       }
       case 'reopen': {
         const id = args[0]; if (!id) throw c.usage('reopen needs <id>')
-        const r = await ds.reopen(id, { by: await who() ?? 'person' })
-        c.out(`Reopened ${id}.${ds.invitations(id).some(i => i.held) ? ` Held continuations stay held: wfe conversation resume ${id}.` : ''}`, { ok: true, conversation: r })
+        if (!CONVERSATION_ID.test(id)) throw c.usage(`"${id}" is not a conversation id`)
+        const o = await own()
+        const was = ds.conversation(id)?.state
+        const r = await ds.reopen(id, { by: await who() ?? 'person', run: o?.run ?? null, attempt: o?.attempt ?? null, reason: c.opt('reason') ?? null })
+        c.out(`${was === 'open' ? `${id} was already open; nothing recorded again` : `Reopened ${id}`}.${ds.invitations(id).some(i => i.held) ? ` Held continuations stay held: wfe conversation resume ${id}.` : ''}`, { ok: true, conversation: r, already: was === 'open' })
         return 0
       }
       case 'dispatch': {

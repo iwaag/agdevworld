@@ -466,3 +466,74 @@ test('firstLine: the first nonempty line, whitespace collapsed, shortened at a c
   const e = firstLine('👩‍👩‍👧'.repeat(20))
   assert.ok(e.length <= 80 && e.endsWith('…') && /^(👩‍👩‍👧)+…$/u.test(e), e)
 })
+
+// fix p2 (devdocs/episodes/fix/p2/): closing is available to any run by the
+// room's id, keeps who did it and from where, and says what is left open.
+test('close by id from an unrelated project\'s attempt: the actor, run, attempt and reason are recorded and archived; a repeated close records nothing again; reopen likewise', async () => {
+  const s = await setup()
+  // front talks in c5; the room to close is kid's alone, with a request kid cannot take (failed, not started).
+  const kidWf = join(s.area, 'pj-kid', 'devdocs', 'workflows', 'converse.yaml')
+  await rm(kidWf)
+  const x = await s.ds.post('c-x', { text: 'Hello kid.', author: 'Pat', token: 'tok-cx-0001', with: 'kid' })
+  assert.equal(x.invitations[0]!.state, 'failed')
+  await s.ds.post('c5', { text: 'Make an icon.', author: 'Pat', token: 'tok-c5-0001', with: 'front' })
+  const c = await s.x.claim('test')
+  assert.ok('attempt' in c)
+  const cli = (args: string[], env: Record<string, string> = { WFE_ATTEMPT: c.attempt.id }) => pexec(process.execPath, [join(pkg, 'cli', 'wfe.ts'), ...args, '--registry', s.registry, '--area', s.area, '--json'], { env: { ...process.env, ...env } })
+    .then(r => ({ code: 0, out: JSON.parse(r.stdout), err: r.stderr }), e => ({ code: e.code as number, out: JSON.parse(e.stdout || '{}'), err: String(e.stderr) }))
+  const before = s.cs.conversation('c-x')!.updated
+  const closed = await cli(['conversation', 'close', 'c-x', '--reason', 'the person said it is finished (#1)', '--author', 'Pat'])
+  assert.equal(closed.code, 0, closed.err)
+  assert.deepEqual([closed.out.already, closed.out.conversation.state, closed.out.withdrawn, closed.out.status.room], [false, 'closed', [x.invitations[0]!.id], 'closed'])
+  assert.equal(s.ds.invitation(x.invitations[0]!.id)!.state, 'withdrawn', 'a request not started is withdrawn')
+  const ev = s.ds.activityEvents('c-x').filter(e => e.kind === 'room')
+  assert.equal(ev.length, 1)
+  assert.deepEqual([ev[0]!.state, ev[0]!.by, JSON.parse(ev[0]!.data)], ['closed', 'front-agent', { by: 'front-agent', run: 'front/converse/run-001', attempt: c.attempt.id, reason: 'the person said it is finished (#1)' }], 'the agent closes as itself (--author is not its to use); its run and attempt go with it')
+  assert.match(ev[0]!.note, /front-agent closed the conversation: the person said/)
+  // Again: nothing recorded, nothing touched.
+  const again = await cli(['conversation', 'close', 'c-x', '--reason', 'once more'])
+  assert.equal(again.code, 0, again.err)
+  assert.deepEqual([again.out.already, again.out.withdrawn, again.out.conversation.state], [true, [], 'closed'])
+  assert.equal(s.ds.activityEvents('c-x').filter(e => e.kind === 'room').length, 1, 'no second event')
+  assert.equal(s.cs.conversation('c-x')!.updated, closed.out.conversation.updated, 'the second close moves nothing')
+  assert.notEqual(before, closed.out.conversation.updated)
+  // Outside an attempt the author is named; reopen keeps the same facts; reopening an open room records nothing.
+  const re = await cli(['conversation', 'reopen', 'c-x', '--reason', 'more to say', '--author', 'Pat'], { WFE_ATTEMPT: '' })
+  assert.equal(re.code, 0, re.err)
+  assert.deepEqual([re.out.already, re.out.conversation.state], [false, 'open'])
+  const ev2 = s.ds.activityEvents('c-x').filter(e => e.kind === 'room')
+  assert.deepEqual([ev2.length, ev2[1]!.state, JSON.parse(ev2[1]!.data)], [2, 'reopened', { by: 'Pat', run: null, attempt: null, reason: 'more to say' }])
+  assert.equal((await cli(['conversation', 'reopen', 'c-x', '--author', 'Pat'], { WFE_ATTEMPT: '' })).out.already, true)
+  assert.equal(s.ds.activityEvents('c-x').filter(e => e.kind === 'room').length, 2)
+  // Not an id: refused before anything is read.
+  assert.equal((await cli(['conversation', 'close', 'please close this', '--author', 'Pat'], { WFE_ATTEMPT: '' })).code, 2)
+  // HTTP: the page's act is the person's, with a reason, without a run.
+  const { createHandler } = await import('../server/api.ts')
+  const { createServer } = await import('node:http')
+  const server = createServer(createHandler({ registryFile: s.registry, allowedOrigins: [], exec: s.x, conversations: s.cs }))
+  await new Promise<void>(r => server.listen(0, '127.0.0.1', r))
+  const base = `http://127.0.0.1:${(server.address() as { port: number }).port}/api/conversations`
+  try {
+    const h = await (await fetch(`${base}/c-x/close`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ reason: 'from the room header' }) })).json() as { ok: boolean; already: boolean; conversation: { state: string }; status: { room: string; working: number } }
+    assert.deepEqual([h.ok, h.already, h.conversation.state, h.status.room], [true, false, 'closed', 'closed'])
+    const ev3 = s.ds.activityEvents('c-x').filter(e => e.kind === 'room')
+    assert.deepEqual([ev3.length, JSON.parse(ev3[2]!.data)], [3, { by: 'Pat', run: null, attempt: null, reason: 'from the room header' }])
+    const h2 = await (await fetch(`${base}/c-x/close`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' })).json() as { already: boolean }
+    assert.equal(h2.already, true)
+    const h3 = await (await fetch(`${base}/c-x/reopen`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' })).json() as { already: boolean; conversation: { state: string }; status: { room: string } }
+    assert.deepEqual([h3.already, h3.conversation.state, h3.status.room], [false, 'open', 'open'])
+  } finally { server.closeAllConnections(); server.close() }
+  // The archive carries the same facts.
+  const a = new ConversationArchive(s.ds)
+  assert.deepEqual((await a.publish(['c-x'])).failed, [])
+  const fresh = join(s.area, 'fresh-x')
+  await gitOk(s.area, ['clone', '-q', s.bare, fresh])
+  const lines = (await readFile(join(fresh, 'conversations', 'c-x', 'transcript.jsonl'), 'utf8')).trim().split('\n').map(l => JSON.parse(l) as { type: string; kind?: string; state?: string; by?: string; data?: { run: string | null; attempt: string | null; reason: string | null } })
+  const rooms = lines.filter(l => l.type === 'activity' && l.kind === 'room')
+  assert.deepEqual(rooms.map(r => [r.state, r.by, r.data!.run, r.data!.reason]), [
+    ['closed', 'front-agent', 'front/converse/run-001', 'the person said it is finished (#1)'],
+    ['reopened', 'Pat', null, 'more to say'],
+    ['closed', 'Pat', null, 'from the room header'],
+    ['reopened', 'Pat', null, null]])
+  s.cs.close(); s.x.close()
+})

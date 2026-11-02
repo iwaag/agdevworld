@@ -550,8 +550,11 @@ export function createHandler(config: ServiceConfig) {
           if (opt('action') !== 'replace') throw new RequestError(400, 'action is replace (a new conductor for a cancelled one)')
           return send(res, 200, { ok: true, ...await ds.replaceConductor(wsId, { by: opt('author') ?? c.person, reason: words('reason'), token: opt('token') }) })
         }
-        if (wsId && b === 'close' && method === 'POST') { const c = need(); return send(res, 200, { ok: true, ...await ds.close(wsId, { by: opt('author') ?? c.person }) }) }
-        if (wsId && b === 'reopen' && method === 'POST') { const c = need(); return send(res, 200, { ok: true, conversation: await ds.reopen(wsId, { by: opt('author') ?? c.person }) }) }
+        // fix p2: the page's act is the configured person's (or a named trial
+        // author's), with an optional reason; the answer carries the room's
+        // state and status so a client shows success only from the record.
+        if (wsId && b === 'close' && method === 'POST') { const c = need(); return send(res, 200, { ok: true, ...await ds.close(wsId, { by: opt('author') ?? c.person, reason: opt('reason') ?? null }) }) }
+        if (wsId && b === 'reopen' && method === 'POST') { const c = need(); const was = ds.conversation(wsId)?.state; return send(res, 200, { ok: true, already: was === 'open', conversation: await ds.reopen(wsId, { by: opt('author') ?? c.person, reason: opt('reason') ?? null }), status: await ds.status(wsId) }) }
         // Character dialogue (argue p5, docs/dialogue.md): the presentation
         // path, apart from every read above. A read may queue lines for the
         // dialogue worker; it never calls a model and changes nothing else.

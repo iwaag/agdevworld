@@ -15,7 +15,7 @@
 import { spawn } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { createReadStream, createWriteStream } from 'node:fs'
-import { copyFile, lstat, mkdir, open, readdir, readlink, rename, rm, stat, statfs, writeFile } from 'node:fs/promises'
+import { chmod, copyFile, lstat, mkdir, open, readdir, readFile, readlink, rename, rm, stat, statfs, writeFile } from 'node:fs/promises'
 import { dirname, join, relative } from 'node:path'
 import { pipeline } from 'node:stream/promises'
 import { runFolder, runKey, type RunRecord, type RunRef } from '../shared/run.ts'
@@ -25,7 +25,7 @@ import { withLock } from './lock.ts'
 import { linkRecord, recordFolderOf } from './runrecord.ts'
 import { readRun, RUN_FILE } from './runs.ts'
 import { tarCreate, tarExtract } from './tarball.ts'
-import { copyDir, listCopies, ownerOf, readCopy, recordOwner, updateManifest, type CopyManifest, type RunCopy } from './runspace.ts'
+import { copyDir, listCopies, ownerOf, readCopy, recordOwner, runSpace, updateManifest, type CopyManifest, type RunCopy } from './runspace.ts'
 import { RequestError, type Workspace } from './workspace.ts'
 import type { ExecStore } from './exec.ts'
 
@@ -298,18 +298,43 @@ async function compareEntries(root: string, entries: Entry[]): Promise<string[]>
   return bad
 }
 
-// A file already kept as a verified published output of this run.
-async function publishedHashes(ws: Workspace, r: RunRecord): Promise<{ hashes: Set<string>; problems: string[] }> {
-  const hashes = new Set<string>(), problems: string[] = []
-  const { checkOutput } = await import('./shares.ts')
-  const dir = await readRun(ws, r).then(x => x.dir)
+// Files already kept as verified published outputs of this run, by content:
+// where each is on the shared area. An output that does not verify gives none,
+// and says why.
+async function publishedSources(ws: Workspace, r: RunRecord): Promise<{ sources: Map<string, string>; problems: string[] }> {
+  const sources = new Map<string, string>(), problems: string[] = []
+  const { checkOutput, resolveRef } = await import('./shares.ts')
+  const space = await runSpace(ws, r) // the run's own record, not a project tree's snapshot of it
+  const dir = await readRun(space, r).then(x => x.dir)
   for (const o of Object.values(r.outputs ?? {})) {
-    const check = await checkOutput(ws, r, o.id).catch(e => ({ status: 'unavailable', detail: (e as Error).message }))
-    if (check.status !== 'verified') { problems.push(`output ${o.id}: ${check.status} (${check.detail}); files that match it are archived instead`); continue }
+    const check = await checkOutput(space, r, o.id).catch(e => ({ status: 'unavailable', detail: (e as Error).message }))
+    if (check.status !== 'verified') { problems.push(`output ${o.id}: ${check.status} (${check.detail})`); continue }
     const text = await readTextOrNull(join(dir, 'outputs', `${o.id}.json`))
-    for (const f of (text ? JSON.parse(text).files ?? [] : []) as { sha256?: string }[]) if (f.sha256) hashes.add(f.sha256)
+    const root = (await resolveRef(o.ref)).abs
+    if (root) for (const f of (text ? JSON.parse(text).files ?? [] : []) as { path: string; sha256?: string }[]) if (f.sha256) sources.set(f.sha256, join(root, f.path))
   }
-  return { hashes, problems }
+  return { sources, problems }
+}
+
+// Files classified as published outputs go back from the shared area, each checked
+// by its hash. One that cannot be had is reported, by name: the rest of the copy
+// is still the saved work, and the output's owner is the shared area.
+async function restorePublished(ws: Workspace, ref: RunRef, staging: string, entries: Entry[]): Promise<string[]> {
+  const wanted = entries.filter(e => e.class === 'published-output')
+  if (!wanted.length) return []
+  const r = (await readRun(ws, ref)).record
+  const { sources, problems } = r ? await publishedSources(ws, r) : { sources: new Map<string, string>(), problems: ['the record cannot be read'] }
+  const out = problems.map(p => `not verified on the shared area now: ${p}`)
+  for (const e of wanted) {
+    const src = e.sha256 ? sources.get(e.sha256) : undefined
+    const to = join(staging, e.path)
+    if (!src) { out.push(`${e.path}: its published output is unavailable; it was not restored`); continue }
+    await mkdir(dirname(to), { recursive: true })
+    await copyFile(src, to)
+    if (await sha256File(to) !== e.sha256) { await rm(to, { force: true }); out.push(`${e.path}: the published bytes differ from what was saved; it was not restored`); continue }
+    await chmod(to, e.mode & 0o777)
+  }
+  return out
 }
 
 interface Contents { schema: 'ag.wfe-run-archive.v1'; ref: string; created: string; repositories: InventoryRepo[]; entries: Entry[]; notes: string[]; files: string | null }
@@ -319,10 +344,10 @@ async function writeArchive(ws: Workspace, c: RunCopy & { manifest: CopyManifest
   const staging = join(c.dir, ARCHIVE_STAGING), final = join(c.dir, ARCHIVE)
   await rm(staging, { recursive: true, force: true })
   await mkdir(staging, { recursive: true })
-  const { hashes, problems } = await publishedHashes(ws, record)
+  const { sources, problems } = await publishedSources(ws, record)
   for (const e of inv.entries.filter(x => x.class === 'archive' && x.type === 'file')) {
     e.sha256 = await sha256File(join(c.tree, e.path))
-    if (hashes.has(e.sha256)) { e.class = 'published-output'; e.reason = 'the same bytes are a verified published output of this run' }
+    if (sources.has(e.sha256)) { e.class = 'published-output'; e.reason = 'the same bytes are a verified published output of this run' }
   }
   const kept = inv.entries.filter(e => e.class === 'archive')
   const need = kept.reduce((n, e) => n + e.size, 0) * 2 + 64 * 1024 * 1024
@@ -611,6 +636,7 @@ export async function restoreRun(_x: ExecStore, ws: Workspace, ref: RunRef, o: {
         if (head !== r.head) wrong.push(`${r.path}: at ${head?.slice(0, 12)}, saved at ${r.head?.slice(0, 12)}`)
       }
       if (wrong.length) throw new Error(`the rebuilt copy differs from what was saved: ${wrong.slice(0, 5).join('; ')}`)
+      const unavailable = await restorePublished(ws, ref, staging, contents.entries)
       step = 'commit'
       await rm(join(staging, runFolder(ref)), { recursive: true, force: true })
       await rename(staging, c.tree)
@@ -619,9 +645,9 @@ export async function restoreRun(_x: ExecStore, ws: Workspace, ref: RunRef, o: {
         m.state = 'ready'
         m.generation = (m.generation ?? 0) + 1
         m.lifecycle!.phase = 'restored'
-        note(m, 'restore', o.by, 'restored')
+        note(m, 'restore', o.by, unavailable.length ? `restored; ${unavailable.length} published files not restored` : 'restored')
       })
-      return { ref: key, state: 'ready', outcome: 'restored' as const, reasons: [], discarded: contents.entries.filter(e => e.class === 'discard').map(e => ({ path: e.path, reason: e.reason })) }
+      return { ref: key, state: 'ready', outcome: 'restored' as const, reasons: unavailable, discarded: contents.entries.filter(e => e.class === 'discard').map(e => ({ path: e.path, reason: e.reason })) }
     } catch (e) {
       const message = (e as Error).message
       const m = await updateManifest(ws, ref, m => { if (step === 'verify') m.state = 'retired'; if (m.lifecycle) m.lifecycle.failure = { at: now(), step, message } }).catch(() => null)
@@ -649,6 +675,12 @@ export async function retainedFile(ws: Workspace, ref: RunRef, path: string): Pr
       t.on('close', x => resolve(x ?? 1)); t.on('error', () => resolve(1))
     })
     if (code === 0) return Buffer.concat(out)
+  }
+  const published = contents.entries.find(e => e.path === path && e.class === 'published-output')
+  if (published?.sha256) {
+    const rec = (await readRun(ws.shared, ref)).record
+    const src = rec ? (await publishedSources(ws.shared, rec)).sources.get(published.sha256) : undefined
+    return src ? readFile(src) : null
   }
   const owner = ownerOf(path, contents.repositories.map(r => r.path))
   const r = contents.repositories.find(x => x.path === owner)

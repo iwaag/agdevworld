@@ -260,7 +260,7 @@ facts, not as a request for permission. A legacy or IDE run has no managed copy 
 | Every commit reachable from local branches, tags, `refs/wfe`, `refs/stash`, `HEAD`, the base, and the index's tree (staged bytes) | the project's retention repository `<workspace>/.local/wfe/retention/<repo>.git`, under refs of this run | every object reachable, `rev-list --objects` |
 | Modified, untracked and ignored files, modes and symbolic links as links | `archive/files.tgz` and the list `archive/contents.json` | extracted in staging and compared file by file; sha256 of both recorded |
 | Index and `info/exclude` of each repository | `archive/<repo>.index`, `.exclude` | copied as they are |
-| A file with the same bytes as a verified published output of the run | the shared area, under its existing identity and retention | the output is re-verified; if unavailable, the file is archived |
+| A file with the same bytes as a verified published output of the run | the shared area, under its existing identity and retention; restoration copies it back by hash and names any it cannot have | the output is re-verified; if unavailable at retirement, the file is archived |
 | What the responsible agent says is expendable (`--discard <path>=<reason>`) | nowhere; the path and reason are recorded and reported at restoration | — |
 | Anything else (unreadable, a socket or pipe with no discard) | **the copy stays** | listed as unclassified |
 

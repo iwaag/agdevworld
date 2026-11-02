@@ -452,3 +452,42 @@ test('HTTP and tools on a retired run: run view, files, history links, observati
     assert.equal(run.identity.run, 'run-001')
   } finally { srv.close(); s.x.close() }
 })
+
+test('a file that is a verified published output is not archived twice, returns from the shared area at restoration, and an unavailable share is reported as that', async () => {
+  const s = await setup()
+  try {
+    const { publishOutput, setShareArea } = await import('../server/shares.ts')
+    const shareDir = join(root, `share-${n}`)
+    await mkdir(shareDir, { recursive: true })
+    await writeFile(join(shareDir, '.wfe-share.json'), JSON.stringify({ share: 'agshare' }))
+    await writeFile(join(s.area, 'shares.json'), JSON.stringify({ shares: { agshare: { root: shareDir } } }))
+    setShareArea(s.area)
+    const ref = await make(s)
+    await runOp(s.ws, ref, { op: 'node.start', node: 'build' } as never, { by: 'a', via: 'cli' })
+    const c = (await readCopy(s.ws, ref))!
+    await mkdir(join(c.tree, 'build', 'out'), { recursive: true }) // ignored by the project
+    await writeFile(join(c.tree, 'build', 'out', 'rig.bin'), 'the published bytes\n')
+    await chmod(join(c.tree, 'build', 'out', 'rig.bin'), 0o755)
+    await writeFile(join(c.tree, 'build', 'only-here.bin'), 'not published\n')
+    await publishOutput(s.ws, ref, { node: 'build', source: 'build/out', title: 'Rig', candidate: 'rig', share: 'agshare' }, { by: 'agent', via: 'cli' })
+    await runOp(s.ws, ref, { op: 'node.complete', node: 'build', outcome: 'done' } as never, { by: 'a', via: 'cli' })
+    const r = await retireRun(s.x, s.ws, ref, { by: 'check' })
+    assert.equal(r.outcome, 'retired', r.reasons.join())
+    assert.equal(r.archive!.published, 1)
+    assert.equal(r.archive!.files, 1, 'only what exists nowhere else is archived')
+    assert.equal((await retainedFile(s.ws, ref, 'build/out/rig.bin'))!.toString(), 'the published bytes\n', 'read from the shared area')
+    assert.equal((await stat(join(shareDir, 'runs'))).isDirectory(), true, 'retirement deletes nothing on the share')
+    const back = await restoreRun(s.x, s.ws, ref, { by: 'check' })
+    assert.equal(back.outcome, 'restored'); assert.deepEqual(back.reasons, [])
+    assert.equal(await readFile(join(c.tree, 'build/out/rig.bin'), 'utf8'), 'the published bytes\n')
+    assert.ok((await stat(join(c.tree, 'build/out/rig.bin'))).mode & 0o100)
+    assert.equal(await readFile(join(c.tree, 'build/only-here.bin'), 'utf8'), 'not published\n')
+    // The share goes away: named as unavailable, never as empty or as success without it.
+    assert.equal((await retireRun(s.x, s.ws, ref, { by: 'check' })).outcome, 'retired')
+    await rename(shareDir, `${shareDir}.away`)
+    const without = await restoreRun(s.x, s.ws, ref, { by: 'check' })
+    assert.equal(without.outcome, 'restored')
+    assert.match(without.reasons.join(), /build\/out\/rig\.bin: its published output is unavailable/)
+    setShareArea(undefined)
+  } finally { s.x.close() }
+})

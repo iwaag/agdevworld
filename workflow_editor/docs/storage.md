@@ -297,7 +297,7 @@ announced by the heartbeat's answer) archives its non-committed files, and commi
 worker removes its copy (`remove-pending`, then `removed`), so a run can be retired while a worker still holds an old copy; the
 view says so. A report of an older generation changes nothing, and files of a run that is not ready are refused, so a
 delayed message cannot overwrite a newer record or resurrect a tree. A new dispatch to a worker that has no copy brings
-those files back into the new copy; its bundles arrive as files under `.local/wfe-worker-bundles/`, not as refs.
+those files back into the new copy; its bundles arrive as files under `.local/wfe-worker-bundles/`, not as refs. Files that come back untracked are what any untracked file in a copy is: the next checkpoint commits them to the run branch, and an integration carries them on (seen in improve_wfrun p3, `wfrun-trial stamp/run-008`). What must not be published is ignored or discarded when it is retired.
 
 **Moving bytes is not freeing them.** The archive and retention repository live on the same disk as the copies here. Local
 clones hard-link Git objects, so a copy's own `du` overstates what removing it frees: measure the

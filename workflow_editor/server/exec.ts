@@ -1407,6 +1407,9 @@ export class ExecStore {
     return out
   }
 
+  // What a recovery rehearsal shows did not grow (docs/storage.md).
+  countsForRehearsal() { return { jobs: this.all<{ n: number }>('SELECT count(*) AS n FROM jobs')[0].n, attempts: this.all<{ n: number }>('SELECT count(*) AS n FROM attempts')[0].n } }
+
   // The remote workers that may hold a copy of the run: every worker an attempt
   // ran on, and the one the record names.
   remoteHostsOf(workspace: string, ref: RunRef, record: RunRecord): string[] {

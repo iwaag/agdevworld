@@ -15,7 +15,7 @@
 import { spawn } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { createReadStream, createWriteStream } from 'node:fs'
-import { chmod, copyFile, lstat, mkdir, open, readdir, readFile, readlink, rename, rm, stat, statfs, writeFile } from 'node:fs/promises'
+import { chmod, copyFile, lstat, mkdir, open, readdir, readFile, readlink, realpath, rename, rm, stat, statfs, writeFile } from 'node:fs/promises'
 import { dirname, join, relative } from 'node:path'
 import { pipeline } from 'node:stream/promises'
 import { runFolder, runKey, type RunRecord, type RunRef } from '../shared/run.ts'
@@ -31,11 +31,12 @@ import type { ExecStore } from './exec.ts'
 
 export const ARCHIVE = 'archive'
 const ARCHIVE_STAGING = 'archive.staging'
-const FILES = 'files.tgz'
+export const FILES = 'files.tgz'
 const CONTENTS = 'contents.json'
 const TREE_RESTORING = 'tree.restoring'
 const TREE_REMOVING = 'tree.removing'
 export const RETENTION_DIR = '.local/wfe/retention' // under the project workspace
+export const CLEANUP_RECORD = 'branch-cleanup.json' // beside copy.json: refs deleted from remotes, docs/storage.md
 const GIT_LONG = 3_600_000
 
 export type ItemClass = 'archive' | 'published-output' | 'discard'
@@ -69,7 +70,7 @@ const mustCopy = async (ws: Workspace, ref: RunRef): Promise<RunCopy & { manifes
 
 export interface Eligibility { ref: string; workspace: string; managed: boolean; state: string; eligible: boolean; reasons: string[]; hosts: string[] }
 
-function recordReasons(r: RunRecord): string[] {
+export function recordReasons(r: RunRecord): string[] {
   const out: string[] = []
   if (r.standing && !r.cancelled) out.push(`a standing conductor run (${r.execution.state}) is not finished`)
   else if (!r.cancelled && r.execution.state !== 'completed') out.push(`the run is ${r.execution.state}, not completed or cancelled`)
@@ -258,7 +259,7 @@ async function retainCommits(ws: Workspace, c: RunCopy & { manifest: CopyManifes
 }
 
 // That every recorded object is present with what it reaches.
-async function verifyRetained(ws: Workspace, ref: RunRef, repos: InventoryRepo[]): Promise<string[]> {
+export async function verifyRetained(ws: Workspace, ref: RunRef, repos: InventoryRepo[]): Promise<string[]> {
   const bad: string[] = []
   for (const r of repos) {
     const bare = retentionRepo(ws, r.key)
@@ -337,7 +338,7 @@ async function restorePublished(ws: Workspace, ref: RunRef, staging: string, ent
   return out
 }
 
-interface Contents { schema: 'ag.wfe-run-archive.v1'; ref: string; created: string; repositories: InventoryRepo[]; entries: Entry[]; notes: string[]; files: string | null }
+export interface Contents { schema: 'ag.wfe-run-archive.v1'; ref: string; created: string; repositories: InventoryRepo[]; entries: Entry[]; notes: string[]; files: string | null }
 
 // Writes and verifies the run's archive in staging, then moves it into place.
 async function writeArchive(ws: Workspace, c: RunCopy & { manifest: CopyManifest }, inv: Walked, record: RunRecord) {
@@ -384,7 +385,7 @@ async function writeArchive(ws: Workspace, c: RunCopy & { manifest: CopyManifest
   return sum
 }
 
-async function readContents(c: RunCopy & { manifest: CopyManifest }): Promise<Contents> {
+export async function readContents(c: RunCopy & { manifest: CopyManifest }): Promise<Contents> {
   const a = c.manifest.lifecycle?.archive
   const file = join(c.dir, ARCHIVE, CONTENTS)
   const text = await readTextOrNull(file)
@@ -408,7 +409,7 @@ const du = async (p: string): Promise<number | null> => new Promise(resolve => {
   d.on('close', code => resolve(code === 0 ? Number(out.split(/\s/)[0]) * 1024 : null))
 })
 
-const lifecycleLock = (dir: string) => join(dir, 'lifecycle')
+export const lifecycleLock = (dir: string) => join(dir, 'lifecycle')
 const note = (m: CopyManifest, op: string, by: string, result: string) => { (m.lifecycle ??= { requestedBy: by, requestedAt: now(), phase: op, failure: null, hosts: {}, history: [] }).history.push({ at: now(), op, by, result }) }
 
 export interface RetireResult { ref: string; state: string; outcome: 'dry-run' | 'refused' | 'waiting' | 'retired' | 'failed'; reasons: string[]; inventory?: { repositories: Omit<InventoryRepo, 'refs'>[]; archive: number; discard: number; bytes: number; unclassified: Unclassified[] }; hosts?: Record<string, HostProgress>; failure?: string; treeBytes?: number | null; archive?: Lifecycle['archive'] }
@@ -540,8 +541,9 @@ async function fetchRetained(ws: Workspace, ref: RunRef, r: InventoryRepo, cwd: 
 
 // Rebuilds the tree in staging with Git's standard layout (relative paths, so
 // the finished tree can be renamed into place).
-async function rebuildTree(ws: Workspace, ref: RunRef, staging: string, contents: Contents, archiveDir: string) {
-  await mkdir(staging, { recursive: true })
+async function rebuildTree(ws: Workspace, ref: RunRef, stagingPath: string, contents: Contents, archiveDir: string) {
+  await mkdir(stagingPath, { recursive: true })
+  const staging = await realpath(stagingPath) // Git answers with real paths; the relative layout is computed from both
   const ordered = [...contents.repositories].sort((a, b) => a.path.split('/').length - b.path.split('/').length || (a.path === '.' ? -1 : 1))
   const paths = ordered.map(r => r.path).filter(p => p !== '.')
   for (const r of ordered) {

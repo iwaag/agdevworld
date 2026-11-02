@@ -305,8 +305,37 @@ aggregate allocation before and after, per storage location. `lifecycle.sizes` i
 
 **Recovery.** A pre-p2 release cannot read relocated records: it finds an empty run folder link it does not
 understand. Going back means moving folders back (the reverse of relocation, by hand, from `record/` into the tree) after
-saving any newer events; retired runs must be restored first. Backups: the retention repositories and `archive/` live in the
-workspaces' `.local/`, and the area's backup procedure does not cover them, as it did not cover copies.
+saving any newer events; retired runs must be restored first. That procedure is unverified. Data recovery on the current release is *Backup and recovery*.
+
+## Backup and recovery (improve_wfrun p3, `server/runBackup.ts`, `wfe backup`)
+
+**What it is.** A generation on another machine, named by `<area>/run-backup.json` (`{"host", "path", "ssh", "keep", "checkouts"}`), holding what a retired run needs to be read and restored. **It is not disaster recovery for the service.** Gitea, project workspaces, credentials and the trees of runs that are not retired are outside it; the manifest names those runs as `identityOnly`, with their numbers, receipts, manifests and records so a recovered area does not reuse them.
+
+| Held for a retired run | Checked against |
+| --- | --- |
+| `copy.json`, `record/`, `branch-cleanup.json` | hashes at capture |
+| `archive/` | the checksums the manifest recorded at retirement |
+| `worker-archive/<worker>/` | the checksum the worker reported |
+| The project's retention repository, whole | hashes under its lock, then every recorded ref with `rev-list --objects` at the destination |
+| Its published outputs on the share, because archives omit those bytes | each file's hash in the output manifest |
+
+Also held: the area's settings (no secrets), `VACUUM INTO` copies of the stores, and the release and checkout revisions. Token files and SSH keys are named, never copied. A generation has no project workspace in it.
+
+**Consistency boundary: one retired run.** Its manifest and record are copied holding its lifecycle and record locks; a retention repository is hashed and copied holding the lock retirement fetches under; archives are immutable until a run's `generation` changes. After every transfer each run's state, generation, archive checksums and retained refs are read again. A change fails the whole generation by name. Stores are consistent one by one, with their own times; they are context, and a retired run's authority is its own record. A later event on a retired run's record is simply newer than the backup.
+
+**Publication.** `staging/<id>.partial` → every listed file's hash read back at the destination → every retained ref checked with Git there → `generations/<id>` → `LATEST`, by rename. A failed or interrupted capture leaves the previous generation in place. A generation that loses a run the previous one covered is kept but does not move `LATEST` (`degraded`). A run that could never be covered is listed as `covered: false` with its reason, and reported by `wfe backup status`. Generations hard-link unchanged files to the previous one: they protect against bad captures and later logical damage, and they share one copy of each byte, so they are **not** independent copies against the backup disk failing.
+
+**Cadence.** Daily, by launchd (`com.agdev.wfe-backup`), and by hand before and after a retirement or cleanup batch. Nothing depends on it running: `wfe backup status` reports the last verified generation, its age, what it does not cover and the last failure. A generation older than a retirement does not cover that run, and cleanup refuses it. Expiry keeps the newest `keep` generations (default 7) and always `LATEST`, and runs only after a new generation verified.
+
+**Recovery of data, on the current release.**
+
+1. Find a usable generation: `wfe backup verify` (`--generation <id>`); a failure names the affected runs.
+2. Isolated: `wfe backup restore --into <empty folder>`, or with `--from <path>` on the backup host and no registry. It verifies every hash and ref, then builds `area/` with paths remapped and logical identities unchanged. No Gitea, Zulip, Slack, worker or presentation setting is carried, and `recovery.json` makes `wfe exec|notify|intake|request` refuse it. Use `WFE_REGISTRY=<folder>/area/registry.json WFE_AREA=<folder>/area wfe run show|restore …` to read and restore there. `wfe backup rehearse --into <folder> --by <name>` runs every check.
+3. Live, after losing pieces: `wfe backup reinstate --by <name> --dry-run`, then without `--dry-run`, with the executor stopped. What is missing comes back; a damaged retention repository or archive is moved aside and replaced. **What exists and is intact is never overwritten**, so an older backup cannot erase newer events; a record kept newer and refs only in the damaged copy are reported. A run whose `generation` moved past the backup's keeps what it has.
+
+Losing the coordinator whole also loses Gitea and the workspaces. This backup then recovers retired runs' records and work, not the service; re-creating a remote from a retained commit is a separate act.
+
+**Rollback to pre-p2 code is not part of this.** It would need the reverse of relocation and is **unverified**; do not present it as a fallback.
 
 ## Relocation (`wfe runs relocate`, `server/relocate.ts`)
 

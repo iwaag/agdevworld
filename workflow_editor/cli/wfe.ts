@@ -45,7 +45,7 @@ class Refused extends Error { detail?: unknown; constructor(m: string, detail?: 
 // ---- arguments ---------------------------------------------------------------
 
 interface Parsed { positional: string[]; opts: Map<string, string[]>; flags: Set<string> }
-const FLAGS = new Set(['json', 'help', 'resume', 'h', 'new', 'history', 'no-gitea', 'reuse', 'lost', 'uncertain', 'found', 'complete', 'not-posted', 'ok', 'about-plan', 'all', 'dry-run', 'commit', 'push', 'status', 'rebuild', 'allow-live-executor', 'terminal', 'missing', 'retire', 'upstream', 'published', 'regex', 'ignore-case', 'refresh', 'quick', 'verify-all', 'rendered', 'delivered', 'undelivered', 'partial', 'person', 'integration', 'conclude', 'close', 'no-title', 'if-untitled', 'queue', 'yes', 'no-default', 'none', 'no-change', 'synthetic', 'apply', 'replace', 'current', 'reopen', 'check-bytes', 'editing']) // p7: present stop --all, run adjust --dry-run
+const FLAGS = new Set(['json', 'help', 'resume', 'h', 'new', 'history', 'no-gitea', 'reuse', 'lost', 'uncertain', 'found', 'complete', 'not-posted', 'ok', 'about-plan', 'all', 'dry-run', 'commit', 'push', 'status', 'rebuild', 'allow-live-executor', 'terminal', 'missing', 'retire', 'upstream', 'published', 'regex', 'ignore-case', 'refresh', 'quick', 'verify-all', 'rendered', 'delivered', 'undelivered', 'partial', 'person', 'integration', 'conclude', 'close', 'no-title', 'if-untitled', 'queue', 'yes', 'no-default', 'none', 'no-change', 'synthetic', 'apply', 'replace', 'current', 'reopen', 'check-bytes', 'editing', 'no-failure-cases']) // p7: present stop --all, run adjust --dry-run
 function parse(argv: string[]): Parsed {
   const p: Parsed = { positional: [], opts: new Map(), flags: new Set() }
   for (let i = 0; i < argv.length; i++) {
@@ -417,6 +417,35 @@ sync     fast-forwards the root (on the published branch, clean, only
          nothing is stashed, reset, merged or rebased. Each repository's step
          is reported; after a partial update, fix the named repository and
          run sync again. --dry-run says what would move.`,
+  backup: `wfe backup create --by <name>
+wfe backup status [--json]
+wfe backup list [--json]
+wfe backup verify [--generation <id>]
+wfe backup restore --into <empty folder> [--generation <id>] [--from <path>]
+wfe backup rehearse --into <restored folder> --by <name> [--run <ws>:<wf>/<run>]... [--no-failure-cases]
+wfe backup reinstate --by <name> [--generation <id>] [--workspace <id>] [--dry-run]
+
+Backup of retired runs on another machine (improve_wfrun p3, docs/storage.md
+*Backup and recovery*). The destination is <area>/run-backup.json. It covers
+retired runs in full (record, manifest, archives, worker archives, retention
+repositories, published outputs), and records of every other run for its identity
+only. It is not disaster recovery for the service: Gitea and workspaces are outside.
+  create    captures, verifies every file and retained ref at the destination, then
+            publishes. A failed, interrupted or inconsistent one leaves the last
+            generation in place. Exit 1 when nothing was published.
+  status    the last verified generation, its age, coverage and failures; retired
+            runs it does not hold now.
+  verify    reads every file's hash and every retained ref at the destination;
+            names the runs a failure affects. Exit 1 on any failure.
+  restore   brings a generation here, verifies it, and makes an isolated recovery
+            area: paths remapped, no Gitea, Zulip, Slack, worker or presentation
+            settings. --from <path> reads a backup folder on this host, with no registry.
+  rehearse  on that area: reads records, reports and evidence, compares output
+            bytes, replays receipts, checks run numbers, shows failures are reported
+            by run, restores every selected run, verifies worker archives. Writes
+            <folder>/rehearsal.json. Exit 1 when a check fails.
+  reinstate puts missing or damaged pieces back into this live area. What exists and
+            is intact is never overwritten; newer events and refs are reported.`,
   share: `wfe share <subcommand> …   (shared areas on this host; docs/shares.md)
 
 A share is where people put materials for agents and pick results up. They
@@ -1797,7 +1826,67 @@ async function cmdMigrate(p: Parsed): Promise<number> {
   } finally { x.close(); execStore = undefined }
 }
 
+// Backup of retired runs (improve_wfrun p3, docs/storage.md).
+async function cmdBackup(p: Parsed): Promise<number> {
+  const b = await import('../server/runBackup.ts')
+  const [sub] = p.positional
+  const need = (k: string) => { const v = opt(p, k); if (!v) throw new UsageError(`--${k} is required`); return v }
+  if (sub === 'restore') {
+    const into = resolve(need('into'))
+    const from = opt(p, 'from')
+    const cfg = from ? { file: null, host: null, path: resolve(from).replace(/\/+$/, ''), ssh: [], keep: 7, checkouts: {} } : await b.loadBackupConfig(areaDir(p))
+    if (!cfg) throw new Refused('no backup destination is configured; pass --from <path>')
+    const r = await b.restoreGeneration(cfg, { generation: opt(p, 'generation'), into })
+    out(r.failures.length ? [`Generation ${r.id} does not verify; no recovery area was made.`, ...r.failures.slice(0, 20).map(f => `  ${f}`), `Runs affected: ${r.affected.join(', ') || '(all)'}`].join('\n') : `Generation ${r.id} restored and verified in ${r.seconds} s: ${r.files} files, ${(r.bytes / 2 ** 30).toFixed(2)} GiB. Isolated area: ${r.area}`, r)
+    return r.failures.length ? 1 : 0
+  }
+  if (sub === 'rehearse') {
+    const r = await b.rehearse({ into: resolve(need('into')), by: need('by'), failureCases: !p.flags.has('no-failure-cases'), only: p.opts.get('run') })
+    const bad = r.checks.filter(c => !c.ok)
+    out([`Rehearsal of ${r.generation} on ${r.host}: ${r.ok ? 'every check passed' : `${bad.length} of ${r.checks.length} checks failed`} in ${r.seconds} s. ${r.restored.runs} runs restored, ${(r.restored.bytes / 2 ** 30).toFixed(2)} GiB; ${r.compared} comparisons.`, ...bad.map(c => `  FAILED ${c.check}${c.run ? ` ${c.run}` : ''}: ${c.detail}`), `Details: ${join(resolve(need('into')), 'rehearsal.json')}`].join('\n'), r)
+    return r.ok ? 0 : 1
+  }
+  const area = areaDir(p)
+  const x = await openExec(p)
+  try {
+    const cfg = await b.loadBackupConfig(area)
+    if (sub === 'create') {
+      const r = await b.createBackup(x, { by: need('by') })
+      const covered = r.manifest?.runs.filter(z => z.covered).length ?? 0
+      out(r.outcome === 'failed' ? [`Backup failed; the last generation stays in place.`, ...r.failures.map(f => `  ${f}`)].join('\n') : [`Backup ${r.id}: ${r.outcome}. ${covered} of ${r.manifest!.runs.length} retired runs covered, ${r.manifest!.identityOnly.length} other runs for identity only, ${r.manifest!.files} files, ${(r.manifest!.bytes / 2 ** 30).toFixed(2)} GiB.`, ...r.failures.map(f => `  ${f}`), ...r.manifest!.runs.filter(z => !z.covered).map(z => `  not covered ${z.workspace}:${z.ref}: ${z.reasons[0]}`)].join('\n'), { ...r, manifest: undefined })
+      return r.outcome === 'failed' ? 1 : 0
+    }
+    if (sub === 'status') {
+      const o = await b.backupOverview(x) as { configured: boolean; destination: string | null; latest: string | null; status: Awaited<ReturnType<typeof b.readStatus>>; ageSeconds: number | null; generations: string[]; retired: number; uncovered: string[]; outside: { identityOnly: number; legacy: number } | null }
+      out(!o.configured ? 'No backup destination is configured.' : [`Last verified: ${o.status.last ? `${o.status.last.id}, ${Math.round((o.ageSeconds ?? 0) / 3600)} h ago, ${(o.status.last.bytes / 2 ** 30).toFixed(2)} GiB` : 'none'}. At the destination: LATEST ${o.latest ?? 'none'}, ${o.generations.length} generations.`, `Retired runs: ${o.retired}; not covered at their current generation: ${o.uncovered.length ? o.uncovered.join(', ') : 'none'}.`, `Outside the guarantee: ${o.outside ? `${o.outside.identityOnly} runs for identity only, ${o.outside.legacy} legacy names` : 'unknown'}; Gitea, workspaces, credentials.`, ...(o.status.lastAttempt ? [`Last attempt: ${o.status.lastAttempt.outcome} at ${o.status.lastAttempt.at}${o.status.lastAttempt.failures.length ? `: ${o.status.lastAttempt.failures.join('; ')}` : ''}`] : [])].join('\n'), o)
+      return 0
+    }
+    if (!cfg) throw new Refused('no backup destination is configured (run-backup.json)')
+    const dest = new b.Dest(cfg)
+    if (sub === 'list') {
+      const ids = await dest.generations(), latest = await dest.latest()
+      const rows = []
+      for (const id of ids) { const m = await b.readManifest(dest, id).catch(() => null); rows.push({ id, latest: id === latest, covered: m?.runs.filter(r => r.covered).length ?? null, runs: m?.runs.length ?? null, bytes: m?.bytes ?? null, release: m?.source.release?.agdevworld ?? null }) }
+      out(rows.map(r => `  ${r.id}${r.latest ? ' LATEST' : ''}  ${r.covered ?? '?'}/${r.runs ?? '?'} runs  ${r.bytes === null ? '?' : (r.bytes / 2 ** 30).toFixed(2)} GiB`).join('\n') || '  (no generations)', { generations: rows })
+      return 0
+    }
+    if (sub === 'verify') {
+      const r = await b.verifyGeneration(dest, opt(p, 'generation'))
+      out(r.ok ? `Generation ${r.id}: every file and retained ref verified at ${dest.where}.` : [`Generation ${r.id ?? '(none)'} does NOT verify:`, ...r.failures.slice(0, 30).map(f => `  ${f}`), `Runs affected: ${r.affected.join(', ') || '(none named)'}`].join('\n'), r)
+      return r.ok ? 0 : 1
+    }
+    if (sub === 'reinstate') {
+      const r = await b.reinstate(x, cfg, { generation: opt(p, 'generation'), workspace: opt(p, 'workspace'), dryRun: p.flags.has('dry-run'), by: need('by') })
+      const changed = r.items.filter(i => i.action !== 'present')
+      out([`Reinstating from ${r.generation}${p.flags.has('dry-run') ? ' (dry run, nothing changed)' : ''}: ${changed.length} of ${r.items.length} items.`, ...changed.map(i => `  ${i.action} ${i.item}${i.detail ? `: ${i.detail}` : ''}`), ...r.losses.map(l => `  LOSS ${l}`)].join('\n'), r)
+      return 0
+    }
+    throw new UsageError('wfe backup create|status|list|verify|restore|rehearse|reinstate')
+  } finally { x.close(); execStore = undefined }
+}
+
 const COMMANDS: Record<string, (p: Parsed) => Promise<number>> = {
+  backup: cmdBackup,
   runs: cmdRuns, observe: cmdObserve, projects: cmdProjects, run: cmdRun, delegate: cmdDelegate, review: cmdReview, present: cmdPresent, share: cmdShare, project: cmdProject, repo: cmdRepo, gitea: cmdGitea, dashboard: cmdDashboard, exec: cmdExec, request: cmdRequest, notify: cmdNotify, intake: cmdIntake,
   create: cmdCreate, register: cmdRegister, list: cmdList, status: cmdStatus, validate: cmdValidate,
   approve: cmdApprove, arrange: cmdArrange, 'add-repo': cmdAddRepo, workflow: cmdWorkflow, serve: cmdServe, setup: cmdSetup,
@@ -1949,6 +2038,8 @@ export async function main(argv: string[]): Promise<number> {
   // (docs/shares.md); a command without a registry (setup) has no area yet.
   try { (await import('../server/shares.ts')).setShareArea(areaDir(p)) } catch (e) { if (!(e instanceof UsageError)) throw e }
   try {
+    // An isolated recovery area (docs/storage.md) never runs the operating commands.
+    if (['exec', 'notify', 'intake', 'request'].includes(cmd)) { let area = ''; try { area = areaDir(p) } catch { /* no registry */ } if (area && existsSync(join(area, 'recovery.json'))) throw new Refused(`${area} is an isolated recovery area: wfe ${cmd} is not available in it`) }
     return await COMMANDS[cmd](p)
   } catch (e) {
     if (e instanceof UsageError) { console.error(`wfe ${cmd}: ${e.message}\n\n${cmd === 'run' ? 'See: wfe run help <subcommand>' : cmd === 'delegate' ? 'See: wfe delegate help <subcommand>' : cmd === 'review' ? 'See: wfe review help <subcommand>' : cmd === 'conversation' || cmd === 'discussion' ? 'Nothing was posted or recorded. See: wfe conversation help' : cmd === 'challenge' ? 'Nothing was written. See: wfe challenge help' : HELP[cmd]}`); return 2 }

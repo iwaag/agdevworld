@@ -42,6 +42,7 @@ import { loadRegistry, observe, type Registration } from './registry.ts'
 import { catalogOf, createRunInCopy, listRuns, readRun, RUN_FILE, runDir, runOp } from './runs.ts'
 import { readCopy, runSpace, treeSpace } from './runspace.ts'
 import { atomicWrite } from './files.ts'
+import type { DefinitionCheck } from '../shared/run.ts'
 import { withLock } from './lock.ts'
 import { catalogBrief } from '../shared/catalog.ts'
 import { activityOf } from './activity.ts'
@@ -1374,6 +1375,25 @@ export class ExecStore {
     return { space, record, decision: record.seq }
   }
 
+  // The workflows this integration added or changed, validated at the revision
+  // that reached the default branch (improve_wfrun p2). A failure of the check is
+  // reported as its own state; it never affects the integration.
+  private async integratedDefinitions(ws: Workspace, space: Workspace, project: string, repositories: { path: string; observed: string; result: string; method: string }[]): Promise<DefinitionCheck | null> {
+    const { changedDefinitions, checkDefinitions } = await import('./definitionCheck.ts')
+    const root = repositories.find(r => r.path === '.')
+    const owner = (await space.devdocs().catch(() => null))?.owner === 'devdocs' ? 'devdocs' : '.'
+    const step = repositories.find(r => r.path === owner)
+    if (!root || !step || step.method === 'already') return null
+    try {
+      const changed = await changedDefinitions(owner === '.' ? space.root : join(space.root, owner), owner === '.' ? 'devdocs/workflows' : 'workflows', step.observed, step.result)
+      if (!changed.some(c => c.status !== 'D')) return null
+      if (this.ctx.gitea) await (await import('./access.ts')).invalidate(this.accessContext(), project).catch(() => [])
+      return await checkDefinitions(this.ctx.gitea ? this.accessContext() : null, ws.reg, root.result, changed)
+    } catch (e) {
+      return { revision: root.result, state: 'incomplete', detail: (e as Error).message, findings: [] }
+    }
+  }
+
   // ---- working-copy lifecycle (improve_wfrun p2, docs/storage.md) -------------------------
 
   // What in this store still needs the run's tree.
@@ -1477,8 +1497,9 @@ export class ExecStore {
       }
       if (r.state === 'integrated') {
         const repositories = r.steps.map(s => ({ path: s.repo, target: s.target, observed: s.observed!, candidate: s.candidate!, method: s.method!, result: s.result! }))
+        const definitions = await this.integratedDefinitions(ws, space, ok.record.project, repositories)
         try {
-          await runOp(space, ref, { op: 'run.integrate', decision: row.decision, repositories, integration: String(row.id), receipt: `integration:${row.id}` }, { by: o.by, via: o.via })
+          await runOp(space, ref, { op: 'run.integrate', decision: row.decision, repositories, integration: String(row.id), receipt: `integration:${row.id}`, ...(definitions ? { definitions } : {}) }, { by: o.by, via: o.via })
         } catch (e) {
           r = { ...r, state: 'attention' as const, error: `integrated, but the record could not say so: ${(e as Error).message}; retry to record it` }
         }

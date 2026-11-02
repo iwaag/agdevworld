@@ -39,7 +39,25 @@ export async function producerAdvice(ws: Workspace, ref: RunRef, at: { started?:
   // The run's own copy, where its changes are (evidence-fixture/run-003: read
   // against the project workspace, nothing was chosen).
   const space = await runSpace(ws, ref).catch(() => ws)
-  return producerLines({ context: await contextOf(space, r, authored), requester: r.input.kind === 'request' ? r.input.requester ?? null : null, report: finalStep ? `${runFolder(r)}/${graph.nodes[finalStep].step!.output}` : null })
+  const lines = producerLines({ context: await contextOf(space, r, authored), requester: r.input.kind === 'request' ? r.input.requester ?? null : null, report: finalStep ? `${runFolder(r)}/${graph.nodes[finalStep].step!.output}` : null })
+  return [...lines, ...await changedWorkflowLines(space, r)]
+}
+
+// A workflow this run changed and that does not validate in its copy: said while
+// the agent can still correct it (improve_wfrun p2; gimmickimg freework/run-018
+// added one it had not validated). Only its own content: peers are not read here.
+async function changedWorkflowLines(space: Workspace, r: RunRecord): Promise<string[]> {
+  const paths = await changedPaths(space, r).catch(() => null) ?? []
+  const out: string[] = []
+  for (const p of paths) {
+    const m = /^devdocs\/workflows\/([^/]+\.ya?ml)$/.exec(p.path)
+    if (!m || p.mtime === null) continue
+    const res = await space.workflowResponse(m[1]).catch(() => null)
+    if (!res) continue
+    const errors = res.workflow ? res.issues.filter(i => i.severity === 'error') : [{ message: res.problem?.message ?? 'it cannot be read' }]
+    if (errors.length) out.push(`  · ${p.path} does not validate, so the workflow would be published but could not run: ${errors.map(e => e.message).join('; ')}`)
+  }
+  return out
 }
 
 async function contextOf(ws: Workspace, r: RunRecord, authored: Parameters<typeof templatesOf>[1]) {

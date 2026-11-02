@@ -6,7 +6,7 @@
 // rejects the push (partial, then retried), and a crash after the push.
 import { after, before, test } from 'node:test'
 import assert from 'node:assert/strict'
-import { chmod, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createProject } from '../server/create.ts'
@@ -295,4 +295,31 @@ test('p12: an acceptance recorded during an attempt integrates when the attempt 
   assert.equal(s.x.integrations(s.id, ref)[0].state, 'integrated')
   assert.equal(await show(s.remote, 'main:app.txt'), 'accepted work\n')
   s.x.close()
+})
+
+// improve_wfrun p2 step 4: a definition a run adds is validated where it lands.
+test('the account of integrated definitions: invalid, valid and incomplete are different statements; only what changed is checked', async () => {
+  const { checkDefinitions, changedDefinitions } = await import('../server/definitionCheck.ts')
+  const { definitionLine } = await import('../shared/run.ts')
+  const line = (c: Parameters<typeof definitionLine>[0]) => definitionLine(c)
+  assert.match(line({ revision: 'abcdef012345', state: 'invalid', findings: [{ file: 'p.yaml', status: 'A', state: 'invalid', issues: ['Node "review" confirms the result but is "review"; only a talk node asks the person.'] }] }), /cannot run: p\.yaml: Node "review" confirms.*NOT READY/)
+  assert.match(line({ revision: 'abcdef012345', state: 'incomplete', detail: 'published peers cannot be read: x', findings: [{ file: 'p.yaml', status: 'A', state: 'unchecked' }] }), /could not be fully checked.*no verdict/)
+  assert.match(line({ revision: 'abcdef012345', state: 'valid', findings: [{ file: 'p.yaml', status: 'A', state: 'valid' }] }), /validate at abcdef0123/)
+  // No published source: incomplete, never valid or invalid.
+  const none = await checkDefinitions(null, { id: 'x', label: 'x', host: '', path: '', project: 'x' }, 'c0', [{ file: 'p.yaml', status: 'A' }])
+  assert.equal(none!.state, 'incomplete')
+  assert.equal(none!.findings[0].state, 'unchecked')
+  assert.equal(await checkDefinitions(null, { id: 'x', label: 'x', host: '', path: '', project: 'x' }, 'c0', [{ file: 'gone.yaml', status: 'D' }]), null, 'a removed definition has nothing to validate')
+  // Only what changed between the two commits, in the folder asked about.
+  const dir = await mkdtemp(join(tmpdir(), 'wfe-defs-'))
+  await gitOk(dir, ['init', '-q', '--initial-branch=main'])
+  await mkdir(join(dir, 'devdocs/workflows'), { recursive: true })
+  await writeFile(join(dir, 'devdocs/workflows/old.yaml'), 'a\n'); await writeFile(join(dir, 'devdocs/workflows/del.yaml'), 'd\n'); await writeFile(join(dir, 'other.yaml'), 'x\n')
+  await gitOk(dir, ['add', '-A']); await gitOk(dir, ['commit', '-q', '-m', 'one'])
+  const from = (await gitOk(dir, ['rev-parse', 'HEAD'])).trim()
+  await writeFile(join(dir, 'devdocs/workflows/old.yaml'), 'b\n'); await writeFile(join(dir, 'devdocs/workflows/new.yaml'), 'n\n'); await writeFile(join(dir, 'other.yaml'), 'y\n'); await rm(join(dir, 'devdocs/workflows/del.yaml'))
+  await gitOk(dir, ['add', '-A']); await gitOk(dir, ['commit', '-q', '-m', 'two'])
+  const changed = await changedDefinitions(dir, 'devdocs/workflows', from, 'HEAD')
+  assert.deepEqual(changed.sort((a, b) => a.file.localeCompare(b.file)), [{ status: 'D', file: 'del.yaml' }, { status: 'A', file: 'new.yaml' }, { status: 'M', file: 'old.yaml' }])
+  await rm(dir, { recursive: true, force: true })
 })

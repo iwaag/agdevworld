@@ -230,3 +230,16 @@ test('relocation: dry run changes nothing, moves under a journal with recovery c
     assert.equal((await relocate(x, { by: 'test', allowLive: true })).moved.length, 0, 'a second pass moves nothing')
   } finally { x.close() }
 })
+
+test('wfe validate inside a run\'s copy reads the copy, not the registered workspace', async () => {
+  const { registry, ws } = await setup()
+  const ref = await make(ws)
+  const c = (await readCopy(ws, ref))!
+  await writeFile(join(c.tree, 'devdocs/workflows/added.yaml'), WF.replace('id: ship', 'id: added').replace('type: do', 'type: review\n    confirms: result'))
+  const { execFile } = await import('node:child_process')
+  const { fileURLToPath } = await import('node:url')
+  const cli = fileURLToPath(new URL('../cli/wfe.ts', import.meta.url))
+  const r = await new Promise<{ code: number; out: string }>(res => execFile(process.execPath, [cli, 'validate', 'added'], { cwd: c.tree, env: { ...process.env, WFE_REGISTRY: registry } }, (e, out, err) => res({ code: e ? 1 : 0, out: out + err })))
+  assert.equal(r.code, 1)
+  assert.match(r.out, /confirms the result but is "review"/)
+})

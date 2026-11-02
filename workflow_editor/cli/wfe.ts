@@ -833,7 +833,15 @@ async function cmdStatus(p: Parsed): Promise<number> {
 }
 
 async function cmdValidate(p: Parsed): Promise<number> {
-  const ws = await workspace(p)
+  // Inside a run's copy, the copy's files are what is asked about, not the
+  // registered workspace's (gimmickimg freework/run-019 could not validate its fix).
+  const shared = await workspace(p)
+  const { copyWorkspace, readCopy, COPIES_DIR } = await import('../server/runspace.ts')
+  const here = relative(realpathSync(shared.root), realpathSync(process.cwd())).split(sep).join('/')
+  const m = here.startsWith(`${COPIES_DIR}/`) ? /^([^/]+)\/([^/]+)\/tree(\/|$)/.exec(here.slice(COPIES_DIR.length + 1)) : null
+  const copy = m ? await readCopy(shared, { workflow: m[1], run: m[2] }) : null
+  const ws = copy?.manifest && !copy.problem ? copyWorkspace(shared, copy) : shared
+  ws.peers = shared.peers
   const files = p.positional[0] ? [await workflowFile(ws, p.positional[0])] : await ws.workflowFiles()
   const results = []
   for (const f of files) {

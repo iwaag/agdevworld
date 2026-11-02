@@ -405,6 +405,18 @@ export interface IntegrationRecord {
   decision: number // index into decisions
   at: string; by: string
   repositories: { path: string; target: string; observed: string; candidate: string; method: 'already' | 'fast-forward' | 'merge'; result: string }[]
+  definitions?: DefinitionCheck // improve_wfrun p2: the workflows this integration added or changed, as they validate there
+}
+// `invalid` is the definitions' own content; `incomplete` means the check could
+// not finish and says nothing about them.
+export interface DefinitionFinding { file: string; status: string; state: 'valid' | 'invalid' | 'unchecked'; issues?: string[] }
+export interface DefinitionCheck { revision: string; state: 'valid' | 'invalid' | 'incomplete'; detail?: string; findings: DefinitionFinding[] }
+
+export function definitionLine(c: DefinitionCheck): string {
+  const invalid = c.findings.filter(f => f.state === 'invalid')
+  if (c.state === 'invalid') return `A workflow this run changed cannot run: ${invalid.map(f => `${f.file}: ${f.issues?.join('; ') ?? 'invalid'}`).join(' · ')}. It is on the default branch at ${c.revision.slice(0, 10)} and stays NOT READY until corrected (wfe delegate targets).`
+  if (c.state === 'incomplete') return `The workflows this run changed could not be fully checked (${c.detail ?? 'unknown'}): ${c.findings.map(f => f.file).join(', ')}. That is no verdict on them; wfe delegate targets shows their readiness.`
+  return `The workflows this run changed validate at ${c.revision.slice(0, 10)}: ${c.findings.map(f => f.file).join(', ')}.`
 }
 export interface Decision {
   decision: 'accepted' | 'rejected'; by: string; at: string; evidence: string; note: string
@@ -574,7 +586,7 @@ export type OpInput =
   | { op: 'artifact.attach'; path: string; node?: string; title?: string }
   | { op: 'run.cancel'; reason: string; because?: BecauseRef }
   | { op: 'run.decide'; decision: 'accepted' | 'rejected'; evidence?: string; note?: string; question?: string; answer?: number; subject?: DocumentEvidence[]; revision?: RevisionEntry[] }
-  | { op: 'run.integrate'; decision: number; repositories: IntegrationRecord['repositories']; integration?: string }
+  | { op: 'run.integrate'; decision: number; repositories: IntegrationRecord['repositories']; integration?: string; definitions?: DefinitionCheck }
   // p9 migration: a run recorded in the project workspace now lives in its
   // own copy. Nothing else changes: nodes, questions, holds and decisions
   // stay as they were; what it published before stays published.
@@ -1744,7 +1756,7 @@ export function apply(prev: RunState | null, e: HistoryEntry | (OpInput & EntryM
         if (!isObj(r) || !normalizeRepoPath(String(r.path)) || ![r.target, r.observed, r.candidate, r.result].every(v => typeof v === 'string' && v) || !['already', 'fast-forward', 'merge'].includes(r.method)) fail('shape', `repositories[${i}] needs path, target, observed, candidate, method and result`)
         return { path: r.path, target: r.target, observed: r.observed, candidate: r.candidate, method: r.method, result: r.result }
       })
-      s.integrations = [...(s.integrations ?? []), { decision: e.decision as number, at, by, repositories }]
+      s.integrations = [...(s.integrations ?? []), { decision: e.decision as number, at, by, repositories, ...(e.definitions ? { definitions: e.definitions as DefinitionCheck } : {}) }]
       break
     }
     case 'presentation.register': {
@@ -2781,7 +2793,7 @@ export function notableEvents(r: RunRecord, sinceSeq = 0): NotableEvent[] {
       push('reviewed', true, v?.decision?.feedback ?? d.feedback ?? '', { review: d.review, outcome: d.outcome, holder: d.outcome === 'changes' ? r.executor.name : 'WFE (review cleanup)', node: v?.node })
     }
     if (e.op === 'review.cleanup' && (e as unknown as { results: { status: string }[] }).results.some(x => x.status === 'stop-failed')) push('review-cleanup-failed', true, (e as unknown as { results: { status: string; detail: string }[] }).results.filter(x => x.status === 'stop-failed').map(x => x.detail).join('; '), { review: d.review })
-    if (e.op === 'run.integrate') push('integrated', false, (d.repositories as unknown as IntegrationRecord['repositories']).filter(x => x.method !== 'already').map(x => `${x.path === '.' ? 'project root' : x.path} → ${x.target} (${x.method}, ${x.result.slice(0, 10)})`).join('; '))
+    if (e.op === 'run.integrate') push('integrated', false, (d.repositories as unknown as IntegrationRecord['repositories']).filter(x => x.method !== 'already').map(x => `${x.path === '.' ? 'project root' : x.path} → ${x.target} (${x.method}, ${x.result.slice(0, 10)})`).join('; ') + (d.definitions ? `\n${definitionLine(d.definitions as unknown as DefinitionCheck)}` : ''))
     if (e.op === 'run.record-done') push('adjusted', false, `recorded afterwards as done: ${d.node} — ${d.reason}`, { revision: d.revision, node: d.node, adjusted: { added: [d.node], removed: [] } })
     if (e.op === 'run.adjust') {
       const diff = (e as unknown as { diff?: AdjustDiff }).diff ?? r.definition.revisions?.find(x => x.revision === d.revision)?.diff

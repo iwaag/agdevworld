@@ -17,7 +17,7 @@ import type { RunCatalog } from './catalog.ts'
 import { latestResult, originText, type Delegation, type DelegationEvent, type ResultManifest } from './delegation.ts'
 import type { Workflow } from './model.ts'
 import { isNotes, isViewable, roleOf, substantiveNodes, type Reminder } from './reminders.ts'
-import { isOpen, questionState, runFolder, runKey, type RunGraph, type RunRecord } from './run.ts'
+import { definitionLine, isOpen, questionState, runFolder, runKey, type RunGraph, type RunRecord } from './run.ts'
 import { isAwaitingPerson, reviewStateText, roundsUsing, type ReviewRound } from './humanReview.ts'
 import { correctionLine, receiverQuestions, templatesOf, workContext } from './resultEvidence.ts'
 
@@ -299,6 +299,8 @@ export function claimBeside(m: ResultManifest | null, c: { frozen: RunRecord | n
   const changedPaths = (c.changed ?? []).map(p => p.path).filter(p => !removed.includes(p))
   const outputs = Object.values((c.now ?? fr)?.outputs ?? {})
   const evidence: string[] = []
+  // A workflow the child changed that cannot run is part of what it returned (improve_wfrun p2).
+  for (const i of (c.now ?? fr)?.integrations ?? []) if (i.definitions && i.definitions.state !== 'valid') evidence.push(definitionLine(i.definitions))
   if (c.changed === null) evidence.push(`${c.who}'s copy could not be read: its changed files are unknown`)
   else evidence.push(changedPaths.length ? `changed outside its run folder (${changedPaths.length}): ${few(changedPaths, 6)}` : 'no file changed outside its run folder')
   if (removed.length) evidence.push(`removed: ${few(removed, 4)}`)

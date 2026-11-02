@@ -10,7 +10,7 @@ import { mkdtemp, readFile, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { gitOk } from '../server/git.ts'
-import { listRuns } from '../server/runs.ts'
+import { listRuns, runOp } from '../server/runs.ts'
 import { readCopy, runSpace } from '../server/runspace.ts'
 import { KID_STREAM, KID_WF, delegationSuite, dispatched, rec, setup } from './delegateFixture.ts'
 
@@ -106,4 +106,51 @@ test('the result evidence says which workflow and revision the child ran, agains
   assert.match(ranLine(d, child(pub('b'.repeat(40))))!, /not the dispatched aaaaaaaaaa/)
   assert.match(ranLine(d, child(pub('a'.repeat(40)), 'freework'))!, /^kid\/freework \(run-001\), not the dispatched kid\/make/)
   assert.match(ranLine(d, child(undefined))!, /not recorded/)
+})
+
+// improve_wfrun p2 step 4: a workflow a run adds, validated where it lands
+// (gimmickimg freework/run-018 added an invalid one and finished unaware).
+const REVIEW_CONFIRMS = (id: string) => KID_WF.replace('id: make', `id: ${id}`).replace('name: Make', `name: ${id}`).replace('intake: {zulip: requests}\n', '').replace('    type: do\n    description: Build it.', '    type: review\n    description: Build it.\n    confirms: result')
+
+async function addWorkflow(s: Awaited<ReturnType<typeof setup>>, receipt: string, file: string, text: string) {
+  const { ref } = await s.x.request({ workspace: s.kid.reg.id, workflow: 'make', text: 'Add a workflow.', author: 'Test Person', receipt, via: 'browser' })
+  const c = await s.x.claim('t')
+  assert.ok('attempt' in c, JSON.stringify(c))
+  s.x.started(c.attempt.id, process.pid)
+  const say = (o: object) => runOp(s.kid, ref, { ...o, attempt: c.attempt.id } as never, { by: 'kid-agent', via: 'cli' })
+  await say({ op: 'node.start', node: 'scope' }); await say({ op: 'node.complete', node: 'scope', outcome: 'small' })
+  await say({ op: 'node.start', node: 'build' })
+  await writeFile(join(c.cwd, 'devdocs/workflows', file), text)
+  await say({ op: 'node.complete', node: 'build', outcome: 'added' })
+  for (const id of Object.keys((await rec(s.kid, ref)).nodes)) if ((await rec(s.kid, ref)).nodes[id].state === 'pending') { await say({ op: 'node.start', node: id }); await say({ op: 'node.complete', node: id, outcome: 'done' }) }
+  await s.x.finished(c.attempt.id, { code: 0, signal: null })
+  await runOp(s.kid, ref, { op: 'run.decide', decision: 'accepted', evidence: 'looked at it' } as never, { by: 'Test Person', via: 'browser' })
+  await s.x.afterDecision(s.kid, ref, 'accepted')
+  const r = await s.x.integrateRun(s.kid, ref, { by: 'test', via: 'test' })
+  assert.equal(r.state, 'integrated', r.error)
+  return { ref, record: await rec(s.kid, ref) }
+}
+
+test('an invalid workflow a run adds is integrated and reported against the integrated revision, not the stale workspace; a valid one reads valid; a check that cannot finish is no verdict', async () => {
+  const s = await setup({ published: true })
+  const bad = await addWorkflow(s, 'definition-bad', 'partial.yaml', REVIEW_CONFIRMS('partial'))
+  const check = bad.record.integrations![0].definitions!
+  assert.equal(check.state, 'invalid', JSON.stringify(check))
+  assert.equal(check.findings[0].file, 'partial.yaml')
+  assert.match(check.findings[0].issues!.join(), /confirms the result but is "review"; only a talk node asks the person/)
+  assert.equal(check.revision, await head(join(s.area, 'kid.git'), 'main'))
+  assert.ok(!(await s.kid.workflowSummaries()).list.some(w => w.id === 'partial'), 'the editing workspace never had it: only the integrated revision did')
+  const told = bad.record.history.find(h => h.op === 'run.integrate') as unknown as { definitions: { state: string } }
+  assert.equal(told.definitions.state, 'invalid', 'in the record, so its replay and its timeline keep it')
+  // No approval gate: the run stays integrated, and the record replays.
+  assert.equal(bad.record.integrations!.length, 1)
+  const good = await addWorkflow(s, 'definition-good', 'fine.yaml', KID_WF.replace('id: make', 'id: fine').replace('name: Make', 'name: Fine'))
+  assert.equal(good.record.integrations![0].definitions!.state, 'valid')
+  // Peers unavailable: neither valid nor invalid.
+  const orig = s.x.accessContext.bind(s.x)
+  const { checkDefinitions } = await import('../server/definitionCheck.ts')
+  const broken = await checkDefinitions({ ...orig(), registryFile: join(s.area, 'no-such-registry.json') }, s.kid.reg, await head(join(s.area, 'kid.git'), 'main'), [{ file: 'fine.yaml', status: 'A' }])
+  assert.equal(broken!.state, 'incomplete', JSON.stringify(broken))
+  assert.notEqual(broken!.findings[0].state, 'invalid')
+  assert.match(broken!.detail ?? '', /cannot be read/)
 })

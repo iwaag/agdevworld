@@ -29,3 +29,16 @@ history sequence for new integration requests. Historical rows retain their
 original values; it is no longer consulted as an acceptance index. Multiple
 requests share an unfinished integration, preserving its durable progress.
 Actual integrated commits, rather than decisions, establish what was delivered.
+
+## Workflows an integration adds or changes (improve_wfrun p2)
+
+Creating a workflow and it being able to run are separate results. When an integration reaches a
+default branch, the workflow files it added or changed are validated at that revision and against the
+published peers (`server/definitionCheck.ts`), not in the editing workspace. `run.integrate` records `definitions`
+(`valid`, `invalid` with each file's errors, or `incomplete`), the run's timeline and a requester's result
+assessment say it, and `wfe delegate targets` keeps showing the readiness. It refuses nothing: the integration
+has already happened, and there is no approval. `incomplete` means the check could not finish (peers or the
+revision unreadable, no published source) and is no verdict on the definitions.
+
+Earlier, while its agent can still correct it, the advice at the end of a run's work names a changed workflow that does
+not validate in the run's copy, and `wfe validate` run inside a copy reads that copy.

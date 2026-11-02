@@ -612,6 +612,10 @@ export class RunSide {
     // Conditions beside the main one, so none is hidden by it.
     if (hold && kind !== 'held' && !d.rev) blocks.push(h('p.small.warn-text', `The run is also held (${hold.kind}): `, h('a', { href: '#', dataset: { action: 'goto-resume' } }, 'resume it below')))
     if (ex.failed.length && kind !== 'failed' && !rec.cancelled) blocks.push(h('p.small.error', `Failed: ${ex.failed.map(name).join(', ')}.`))
+    // Whether the work is retained and what can be done (improve_wfrun p2): said
+    // in Simple too once the copy is not simply in place.
+    const stored = d.storageView
+    if (!d.rev && stored?.managed && stored.state !== 'ready') blocks.push(h('p.small.run-storage-note', stored.retained, ' ', stored.action === 'restore' ? h('button', { dataset: { action: 'storage-restore' } }, 'Restore copy') : null))
     patchContent(this.focusDisplay, ...blocks)
 
     // The resume form lives here while the run is held.
@@ -1239,7 +1243,6 @@ export class RunSide {
     const showReasons = v.state === 'ready' && v.reasons.length
     return h('div.run-storage',
       h('p.small', v.retained, ' ',
-        v.action === 'restore' ? h('button', { dataset: { action: 'storage-restore' } }, 'Restore copy') : null,
         v.action === 'retire' ? h('button.d-only', { title: 'Keeps the record readable, saves the work and frees the copy', dataset: { action: 'storage-retire' } }, v.state === 'retiring' ? 'Continue retiring' : 'Retire copy') : null),
       l?.failure ? h('p.small.warn-text', `The last operation stopped at ${l.failure.step}: ${l.failure.message}`) : null,
       h('details.d-only.small', h('summary', 'Storage details'),

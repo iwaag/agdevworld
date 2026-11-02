@@ -675,7 +675,7 @@ export async function storageView(x: ExecStore, ws: Workspace, ref: RunRef): Pro
         : state === 'restoring' ? 'Its working copy is being restored. The record stays readable.'
           : c?.problem ? `Its working copy has a problem: ${c.problem}`
             : 'Its working copy is in place.'
-  return { ref: runKey(ref), managed: e.managed, state, retained, action: state === 'retired' ? 'restore' : state === 'ready' && e.eligible ? 'retire' : state === 'retiring' ? 'retire' : null, eligible: e.eligible, reasons: e.reasons, problem: c?.problem ?? null, lifecycle, generation: c?.manifest?.generation ?? 0, hosts: lifecycle?.hosts ?? {} }
+  return { ref: runKey(ref), managed: e.managed, state, retained, action: state === 'retired' ? 'restore' : state === 'ready' && e.eligible ? 'retire' : state === 'retiring' ? 'retire' : null, eligible: e.eligible, reasons: state === 'retired' ? [] : e.reasons, problem: c?.problem ?? null, lifecycle, generation: c?.manifest?.generation ?? 0, hosts: lifecycle?.hosts ?? {} }
 }
 
 // ---- worker reports (the coordinator's side) -------------------------------------------------

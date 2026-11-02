@@ -486,6 +486,7 @@ export function runIndex(): string {
   show <run>               one run in full (--history, --rev [root:]<commit>)
   state <run>              current state and pending input only (--since <seq>: entries after it)
   check [<run>]            check records and their definition copies
+  storage / retire / restore <run>   the working copy's lifecycle (docs/storage.md)
   start <run> <node>       record a start (ready nodes), resume, or restart a failed node
   progress <run> <node>    add a progress note
   wait <run> <node>        wait for an external result

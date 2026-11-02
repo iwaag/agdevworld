@@ -1733,7 +1733,7 @@ async function cmdRunsStorage(p: Parsed, sub: string): Promise<number> {
     if (sub === 'storage') {
       const ws = await workspace(p)
       const all = await inspectWorkspace(x, ws)
-      const lines = [`Run copies of workspace ${ws.reg.id}: ${all.filter(e => e.eligible).length} of ${all.length} could be retired now (running processes are checked when a run is retired).`, ...all.map(e => `  ${e.ref.padEnd(32)} ${e.state.padEnd(9)} ${e.eligible ? 'candidate' : e.reasons[0] ?? ''}`)]
+      const lines = [`Run copies of workspace ${ws.reg.id}: ${all.filter(e => e.eligible).length} of ${all.length} could be retired now (running processes are checked when a run is retired).`, ...all.map(e => `  ${e.ref.padEnd(32)} ${e.state.padEnd(9)} ${e.eligible ? 'candidate' : e.state === 'retired' ? '' : e.reasons[0] ?? ''}`)]
       out(lines.join('\n'), { workspace: ws.reg.id, runs: all })
       return 0
     }

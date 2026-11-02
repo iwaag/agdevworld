@@ -7,15 +7,19 @@ import assert from 'node:assert/strict'
 import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { createServer } from 'node:http'
+import type { AddressInfo } from 'node:net'
 import type { AccessContext, RepoHost } from '../server/access.ts'
+import { createHandler } from '../server/api.ts'
 import { createProject } from '../server/create.ts'
 import { applyDraft, compareDraft, discardDraft, DraftStore, newWorkflowDraft, readDraft, resolveDraft, saveDraft, startDraft, type ApplyResult } from '../server/drafts.ts'
 import { gitOk, LOCAL_TRANSPORT } from '../server/git.ts'
 import type { GiteaRepo } from '../server/gitea.ts'
 import { importEdit, localEdits } from '../server/localEdits.ts'
-import { publishedHead, publishedWorkspace, resolvePublished } from '../server/published.ts'
+import { digestOf, publishedHead, publishedWorkspace, resolvePublished } from '../server/published.ts'
 import { loadRegistry, type Registration } from '../server/registry.ts'
 import { createRunInCopy } from '../server/runs.ts'
+import { readCopy } from '../server/runspace.ts'
 import { Workspace } from '../server/workspace.ts'
 
 let root = ''
@@ -380,6 +384,20 @@ test('submodule mode: the definition is published to its repository and the root
   assert.match((await pub.readWorkflowFile('freework.yaml')).text!, /Ship through the pin/)
 })
 
+test('submodule mode: a new run takes the applied definition at the new pin', async () => {
+  const pub = await publishedWorkspace(s.ctx, s.h, { fresh: true })
+  const created = await createRunInCopy(new Workspace(s.h), { workflow: 'freework', input: { kind: 'braindump', text: 'run it', author: by }, executor: { host: 'h1' }, by, via: 'test', area: s.area, receipt: 'request:h-1', access: s.ctx }, {})
+  const src = created.record.definition.source
+  assert.equal(src?.kind, 'published')
+  if (src?.kind === 'published') {
+    assert.equal(src.commit, pub.source.commit)
+    assert.equal(src.definitions?.repository, 'dev/pj-h-devdocs')
+    assert.equal(src.definitions?.commit, pub.source.definitions?.commit)
+  }
+  const copy = (await readCopy(new Workspace(s.h), created.ref))!
+  assert.match(await readFile(join(copy.tree, created.dir, 'definition', 'freework.yaml'), 'utf8'), /Ship through the pin/)
+})
+
 test('submodule mode: a pin that did not arrive is finished by a retry, not published twice', async () => {
   const d = await startDraft(s.ctx, s.store, s.h, { file: 'freework.yaml', by })
   const saved = await saveDraft(s.store, d.id, { revision: 1, by, text: d.text.replace('Spacer one.', 'Spacer partial.') })
@@ -449,4 +467,45 @@ test('existing edits: a checkout merely behind has none; uncommitted, local-comm
   assert.equal(e2.baseCommit, headBefore)
   await gitOk(s.gDir, ['reset', '-q', '--hard', headBefore])
   assert.ok((await readdir(s.gDir)).includes('unrelated.txt'))
+})
+
+test('HTTP: published reads and drafts answer without the checkout; a draft is refused for another project; a read names its source', async () => {
+  const reg = JSON.parse(await readFile(s.ctx.registryFile, 'utf8'))
+  const moved = join(root, 'no-checkout-registry.json')
+  // The same project with its checkout gone from this host.
+  await writeFile(moved, JSON.stringify({ ...reg, workspaces: reg.workspaces.map((w: Registration) => (w.project === 'h' ? { ...w, path: join(root, 'nothing-here') } : w)) }))
+  await writeFile(join(s.area, 'moved.json'), await readFile(moved, 'utf8'))
+  const server = createServer(createHandler({ registryFile: join(s.area, 'moved.json'), area: s.area, allowedOrigins: [], gitea: s.ctx.gitea as never }))
+  await new Promise<void>(r => server.listen(0, '127.0.0.1', r))
+  const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}/api/workspaces`
+  const call = async (method: string, path: string, body?: unknown) => { const r = await fetch(`${base}${path}`, { method, ...(body ? { headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) } : {}) }); return { status: r.status, body: await r.json() as Record<string, unknown> } }
+  try {
+    const head = await call('GET', '/h/published-head')
+    assert.equal(head.status, 200)
+    assert.equal((head.body.source as { project: string }).project, 'h')
+    const read = await call('GET', '/h/published/freework.yaml')
+    assert.equal(read.status, 200)
+    const descriptor = read.body.descriptor as { kind: string; definition: { repository: string; revision: string }; root: { repository: string; commit: string }; digest: string }
+    assert.equal(descriptor.kind, 'published')
+    assert.equal(descriptor.definition.repository, 'dev/pj-h-devdocs')
+    assert.equal(descriptor.root.repository, 'dev/pj-h')
+    assert.notEqual(descriptor.definition.revision, descriptor.root.commit)
+    assert.equal(descriptor.digest, digestOf(read.body.text as string))
+    const list = await call('GET', '/h/published')
+    assert.equal(list.status, 200)
+    assert.match((list.body.relation as { problem: string }).problem, /no checkout/)
+    const started = await call('POST', '/h/drafts', { file: 'freework.yaml', by })
+    assert.equal(started.status, 201)
+    const id = (started.body.draft as { id: string }).id
+    const edits = await call('GET', '/h/drafts/local-edits')
+    assert.equal(edits.body.available, false)
+    // A draft is reached through its own project only.
+    assert.equal((await call('GET', `/g/drafts/${id}`)).status, 404)
+    const stale = await call('PUT', `/h/drafts/${id}`, { revision: 9, by, text: 'x: 1\n' })
+    assert.equal(stale.status, 409)
+    assert.equal((stale.body.detail as { code: string }).code, 'draft-revision-conflict')
+    const absent = await call('GET', '/h/published/nothing.yaml')
+    assert.equal((absent.body.problem as { kind: string }).kind, 'missing')
+    assert.equal((await call('DELETE', `/h/drafts/${id}`, { revision: 1, by })).status, 200)
+  } finally { server.close(); server.closeAllConnections() }
 })

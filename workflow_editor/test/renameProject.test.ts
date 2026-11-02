@@ -54,3 +54,14 @@ test('former names resolve existing records only by explicit lookup', () => {
   assert.equal(holdsProject(w[0], 'agops'), true)
   assert.equal(holdsProject(w[1], 'agops'), false)
 })
+
+test('a run renamed while held goes on working, and its uid does not change', () => {
+  let s = apply(apply(null, create, graph).state, rename, graph).state
+  s = apply(s, { op: 'node.start', node: 'a', ...meta(3) } as never, graph).state
+  s = apply(s, { op: 'node.complete', node: 'a', outcome: 'done under the new name', ...meta(4) } as never, graph).state
+  assert.equal(s.nodes.a.state, 'completed')
+  assert.equal(s.project, 'warden')
+  assert.equal(runUid(s, 'abc'), 'agops/recover/run-001#abc')
+  const again = replay([create, rename, { op: 'node.start', node: 'a', ...meta(3) }, { op: 'node.complete', node: 'a', outcome: 'done under the new name', ...meta(4) }] as never, graph).state
+  assert.equal(again.nodes.a.state, 'completed')
+})

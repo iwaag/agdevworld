@@ -488,6 +488,14 @@ test('a file that is a verified published output is not archived twice, returns 
     const without = await restoreRun(s.x, s.ws, ref, { by: 'check' })
     assert.equal(without.outcome, 'restored')
     assert.match(without.reasons.join(), /build\/out\/rig\.bin: its published output is unavailable/)
+    // Retired again while it could not come back, then the share returns: nothing was forgotten
+    // (a live re-retirement before this existed lost the list for gimmickimg freework/run-015).
+    await rename(`${shareDir}.away`, shareDir)
+    await runOp(s.ws, ref, { op: 'node.progress', node: 'build', text: 'note' } as never, { by: 'a', via: 'cli' }).catch(() => null)
+    assert.equal((await retireRun(s.x, s.ws, ref, { by: 'check' })).outcome, 'retired')
+    const again = await restoreRun(s.x, s.ws, ref, { by: 'check' })
+    assert.deepEqual(again.reasons, [])
+    assert.equal(await readFile(join(c.tree, 'build/out/rig.bin'), 'utf8'), 'the published bytes\n')
     setShareArea(undefined)
   } finally { s.x.close() }
 })

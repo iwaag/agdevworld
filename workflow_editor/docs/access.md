@@ -237,3 +237,10 @@ reason, exactly as a missing local guide does.
 - cross-project guides at claim.
 
 Every case checks that the workspace's refs and status are unchanged.
+
+## Runs without a working copy (improve_wfrun p2)
+
+A live run read (`wfe run show`, the run's files, `wfe projects run`) reads the durable record and never needs a checkout, so a retired
+run reads like any other. A file outside its folder comes from the retained commit, the archive or its verified published output. See
+[storage.md](storage.md) *Retirement*.
+

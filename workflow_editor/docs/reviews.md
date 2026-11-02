@@ -242,3 +242,9 @@ decided.
 Error codes: `review-unknown`, `review-open`, `review-subjects`,
 `review-state`, `review-starting`, `review-stale`, `review-closed`,
 `review-unavailable`, `review-superseded`, `review-agent`.
+
+## Reviews and retirement (improve_wfrun p2)
+
+A review round that is not settled, and a presentation still available, keep the run's working copy ([storage.md](storage.md)
+*Retirement*). History does not: a settled review stays in the durable record, and an old presentation's files are in the run's folder.
+

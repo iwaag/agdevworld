@@ -349,6 +349,11 @@ async function writeArchive(ws: Workspace, c: RunCopy & { manifest: CopyManifest
     e.sha256 = await sha256File(join(c.tree, e.path))
     if (sources.has(e.sha256)) { e.class = 'published-output'; e.reason = 'the same bytes are a verified published output of this run' }
   }
+  // What an earlier restoration could not bring back from the shared area is still
+  // the run's: it stays listed, so a later retirement does not forget it.
+  const earlier = await readTextOrNull(join(final, CONTENTS)).then(t => (t ? JSON.parse(t) as Contents : null)).catch(() => null)
+  const here = new Set(inv.entries.map(e => e.path))
+  for (const e of earlier?.entries ?? []) if (e.class === 'published-output' && !here.has(e.path)) { inv.entries.push(e); problems.push(`${e.path}: listed from the previous retirement; it was not in the tree`) }
   const kept = inv.entries.filter(e => e.class === 'archive')
   const need = kept.reduce((n, e) => n + e.size, 0) * 2 + 64 * 1024 * 1024
   const fs = await statfs(c.dir)

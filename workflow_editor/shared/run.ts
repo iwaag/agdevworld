@@ -210,7 +210,7 @@ export interface BundleEntry {
 export type DefinitionSource =
   | { kind: 'published'; project: string; selector: 'default-branch' | 'commit'; repository: string; branch: string; commit: string; definitions: { path: string; repository: string; commit: string } | null; fetch: { state: string; at: string } }
   | { kind: 'workspace'; workspace: string; reason: string; head?: string | null; branch?: string | null; dirty?: boolean }
-  | { kind: 'trial'; workspace: string; file: string; sha256: string; head: string | null; dirty: boolean; baseline: { project: string; repository: string; branch: string; commit: string } }
+  | { kind: 'trial'; workspace: string; file: string; sha256: string; head: string | null; dirty: boolean; baseline: { project: string; repository: string; branch: string; commit: string }; draft?: { id: string; revision: number; author: string } }
 export interface DefinitionRef { root: string; workflows: Record<string, BundleEntry>; warnings: string[]; effective?: EffectiveGraph; active?: string; revisions?: Revision[]; source?: DefinitionSource }
 export const REVISION_ID = /^r[0-9]{1,4}$/
 export type AdjustSource =

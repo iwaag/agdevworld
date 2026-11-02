@@ -375,26 +375,32 @@ export class Workspace {
   // Refusals name the field they are about (detail.field), so a form can
   // show them beside the input.
   async createWorkflow(id: string, name: string, documentation?: string | Documentation, template = 'empty'): Promise<{ file: string }> {
+    const dir = await this.workflowsDir()
+    const made = await this.newWorkflow(id, name, documentation, template)
+    if (!dir.exists) throw new RequestError(409, `cannot create a workflow: ${dir.reason}`)
+    const target = await inside(this.root, `${WORKFLOWS_DIR}/${made.file}`)
+    try {
+      await createExclusive(target, made.text)
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code === 'EEXIST') throw new RequestError(409, `${made.file} already exists`, { field: 'id' })
+      throw e
+    }
+    return { file: made.file }
+  }
+
+  // A new definition's file name and bytes, refused as a creation would be;
+  // writes nothing (a draft keeps them in its own storage, p20).
+  async newWorkflow(id: string, name: string, documentation?: string | Documentation, template = 'empty'): Promise<{ file: string; text: string }> {
     if (!ID_PATTERN.test(id)) throw new RequestError(400, `workflow id must match ${ID_PATTERN.source} (lowercase letters, digits, - _ .)`, { field: 'id' })
     const doc: Documentation | undefined = typeof documentation === 'string' ? { policy: documentation } : documentation
     if (doc && !docSteps(doc)) throw new RequestError(400, (DOC_POLICIES as readonly string[]).includes(doc.policy) ? `documentation policy ${doc.policy} ${doc.policy === 'custom' ? 'declares each of plan, reports and final (true or false)' : 'declares none of plan, reports and final'}` : `documentation policy must be ${DOC_POLICIES.join(', ')}`, { field: 'policy' })
     if (!templateIds().includes(template)) throw new RequestError(400, `workflow template must be ${templateIds().join(' or ')}`, { field: 'template' })
-    const dir = await this.workflowsDir()
-    if (!dir.exists) throw new RequestError(409, `cannot create a workflow: ${dir.reason}`)
     const { list } = await this.workflowSummaries()
     const clash = list.find(s => s.id === id)
     if (clash) throw new RequestError(409, `workflow id "${id}" is already used by ${clash.file}`, { field: 'id' })
-    const file = `${id}.yaml`
-    const target = await inside(this.root, `${WORKFLOWS_DIR}/${file}`)
-    try {
-      const w = await workflowFromTemplate(template, id, name, this)
-      if (doc) w.documentation = { ...doc }
-      await createExclusive(target, newWorkflowText(w))
-    } catch (e) {
-      if ((e as NodeJS.ErrnoException).code === 'EEXIST') throw new RequestError(409, `${file} already exists`, { field: 'id' })
-      throw e
-    }
-    return { file }
+    const w = await workflowFromTemplate(template, id, name, this)
+    if (doc) w.documentation = { ...doc }
+    return { file: `${id}.yaml`, text: newWorkflowText(w) }
   }
 
   // Saves a draft. Refuses to write over a file that is currently malformed or

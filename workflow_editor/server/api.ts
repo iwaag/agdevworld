@@ -12,7 +12,7 @@ import type { Gitea } from './gitea.ts'
 import type { ExecStore } from './exec.ts'
 import { REPO_CATEGORIES, type RepoCategory } from './registry.ts'
 import { BoundaryError, inside } from './files.ts'
-import { loadRegistry, observe, registerWorkspace, RegistryError, type Registry } from './registry.ts'
+import { loadRegistry, observe, registerWorkspace, RegistryError, type Registration, type Registry } from './registry.ts'
 import { listRuns, readRunFile, runOp, runResponse, resolveRef } from './runs.ts'
 import { OPS, hostOf, runKey, type OpInput, type RunRef } from '../shared/run.ts'
 import type { Watcher } from './watch.ts'
@@ -192,6 +192,104 @@ export function createHandler(config: ServiceConfig) {
     const repos = await ws.repositories()
     repoCache.set(ws.reg.id, { key, repos })
     ws.knownRepositories = repos
+  }
+
+  const accessOf = (url: URL): import('./access.ts').AccessContext => ({ registryFile: config.registryFile, area, gitea: config.gitea, giteaProblem: config.giteaProblem, refresh: url.searchParams.get('refresh') === '1' })
+  async function registered(id: string): Promise<Registration> {
+    const reg = (await registry()).workspaces.find(w => w.id === id)
+    if (!reg) throw new RequestError(404, `workspace "${id}" is not registered`)
+    await assertWorkspaceAllowed(await loadBoundary(config.registryFile, area), reg, 'Opening')
+    return reg
+  }
+
+  // Definitions by source (p20, docs/drafts.md): GET published-head, the check an
+  // open view polls; GET published[/<file>], what ordinary execution runs, with the
+  // checkout's relation beside the list when there is a checkout.
+  async function handleDefinitions(req: IncomingMessage, res: ServerResponse, url: URL, method: string, wsId: string, b: string, file: string | undefined, action: string | undefined): Promise<boolean> {
+    const reg = await registered(wsId)
+    const ctx = accessOf(url)
+    const pubs = await import('./published.ts')
+    if (b === 'published-head' && method === 'GET') {
+      if (!reg.project) throw new RequestError(409, `workspace ${reg.id} names no registered project`)
+      send(res, 200, { source: await pubs.publishedHead(ctx, reg.project, { refresh: ctx.refresh }) })
+      return true
+    }
+    if (b === 'published' && method === 'GET') {
+      const pub = await pubs.publishedWorkspace(ctx, reg, { ttlMs: pubs.OPEN_VIEW_TTL_MS })
+      if (file) {
+        const r = await pub.workflowResponse(file)
+        send(res, 200, { ...r, source: pub.source, descriptor: pubs.publishedDescriptor(pub.source, file, r.workflow?.id ?? null, r.text) })
+        return true
+      }
+      const { list, dir } = await pub.workflowSummaries()
+      const relation = await (async () => {
+        if (!(await observe(reg)).available) return { problem: 'this project has no checkout available on this host' }
+        return (await import('./workspaceSync.ts')).workspaceRelation(ctx, new Workspace(reg))
+      })().catch(e => ({ problem: (e as Error).message }))
+      send(res, 200, { source: pub.source, workflows: list, ...(dir.exists ? {} : { problem: dir.reason }), relation })
+      return true
+    }
+    if (b !== 'drafts') return false
+    if (!reg.project) throw new RequestError(409, `workspace ${reg.id} names no registered project, so it has no drafts`)
+    const d = await import('./drafts.ts')
+    const store = new d.DraftStore(area)
+    const input = method === 'GET' ? {} : await body(req) as Record<string, unknown>
+    const by = typeof input.by === 'string' ? input.by : ''
+    const rev = () => { if (typeof input.revision !== 'number') throw new RequestError(400, 'revision is required: the draft revision you read'); return input.revision }
+    if (!file && method === 'GET') { send(res, 200, { drafts: (await store.list({ project: reg.project, file: url.searchParams.get('file') || undefined })).map(d.draftMeta) }); return true }
+    if (file === 'local-edits' && method === 'GET') {
+      const { localEdits } = await import('./localEdits.ts')
+      send(res, 200, await localEdits(ctx, store, reg))
+      return true
+    }
+    if (!file && method === 'POST') {
+      let created
+      if (input.new && typeof input.new === 'object') {
+        const n = input.new as Record<string, unknown>
+        created = await d.newWorkflowDraft(ctx, store, reg, { id: str(n.id, 'id'), name: typeof n.name === 'string' ? n.name : '', documentation: n.documentation && typeof n.documentation === 'object' ? n.documentation as Documentation : typeof n.policy === 'string' ? n.policy : undefined, template: typeof n.template === 'string' ? n.template : 'empty', by })
+      } else if (input.import && typeof input.import === 'object') {
+        const i = input.import as Record<string, unknown>
+        const { importEdit } = await import('./localEdits.ts')
+        created = await importEdit(ctx, store, reg, { file: str(i.file, 'file'), sha256: str(i.sha256, 'sha256'), by })
+      } else created = await d.startDraft(ctx, store, reg, { file: str(input.file, 'file'), by, another: input.another === true })
+      send(res, 201, { draft: d.draftMeta(created) })
+      return true
+    }
+    if (!file) return false
+    if (!action && method === 'GET') { send(res, 200, await d.readDraft(ctx, store, reg, file)); return true }
+    if (!action && method === 'PUT') {
+      const saved = await d.saveDraft(store, file, { revision: rev(), by, ...(input.workflow ? { workflow: asWorkflow(input.workflow) } : {}), ...(typeof input.text === 'string' ? { text: input.text } : {}) })
+      send(res, 200, await d.readDraft(ctx, store, reg, saved.id))
+      return true
+    }
+    if (!action && method === 'DELETE') { send(res, 200, { draft: d.draftMeta(await d.discardDraft(store, file, { revision: rev(), by })) }); return true }
+    if (action === 'compare' && method === 'POST') { send(res, 200, await d.compareDraft(ctx, store, reg, file)); return true }
+    if (action === 'approve' && method === 'POST') {
+      if (!(APPROVAL_KINDS as readonly string[]).includes(input.kind as string)) throw new RequestError(400, 'kind must be intent or definition')
+      const saved = await d.approveDraft(ctx, store, reg, file, { revision: rev(), kind: input.kind as ApprovalKind, approver: typeof input.approver === 'string' ? input.approver : '' })
+      send(res, 200, await d.readDraft(ctx, store, reg, saved.id))
+      return true
+    }
+    if (action === 'resolve' && method === 'POST') {
+      const saved = await d.resolveDraft(ctx, store, reg, file, { revision: rev(), by, latest: typeof input.latest === 'string' ? input.latest : null, ...(typeof input.text === 'string' ? { text: input.text } : {}), ...(input.recreate === true ? { recreate: true } : {}), ...(typeof input.retarget === 'string' ? { retarget: input.retarget } : {}) })
+      send(res, 200, await d.readDraft(ctx, store, reg, saved.id))
+      return true
+    }
+    if (action === 'apply' && method === 'POST') {
+      const r = await d.applyDraft(ctx, store, reg, file, { revision: rev(), by, ...(typeof input.key === 'string' ? { key: input.key } : {}) })
+      send(res, r.ok ? 200 : r.apply.outcome === 'conflict' ? 409 : r.apply.outcome === 'invalid' ? 422 : 502, r)
+      return true
+    }
+    // A trial runs the exact saved revision, on the published code.
+    if (action === 'try' && method === 'POST') {
+      const draft = await store.read(file)
+      if (draft.project !== reg.project) throw new RequestError(404, `draft ${file} is of project ${draft.project}`)
+      if (draft.revision !== rev()) throw new RequestError(409, `draft ${file} is at revision ${draft.revision}, not ${String(input.revision)}: a trial runs a saved revision you have seen`, { code: 'draft-revision-conflict', revision: draft.revision })
+      const r = await needExec().request({ workspace: reg.id, workflow: draft.file, text: str(input.text, 'the request text'), author: str(input.author, 'author'), receipt: str(input.receipt, 'receipt'), by: typeof input.by === 'string' ? input.by : undefined, via: 'browser', ...(typeof input.node === 'string' && input.node ? { node: input.node } : {}), trial: { file: draft.file, sha256: draft.sha256, draft: { id: draft.id, revision: draft.revision, author: draft.author, text: draft.text } } })
+      send(res, 200, { ok: true, ref: r.ref, job: r.job, duplicate: r.duplicate })
+      return true
+    }
+    return false
   }
 
   async function serveStatic(res: ServerResponse, url: URL): Promise<boolean> {
@@ -567,8 +665,11 @@ export function createHandler(config: ServiceConfig) {
         const q = (k: string) => url.searchParams.get(k) || undefined
         if (!wsId && method === 'GET') {
           const { contextMatrix } = await import('./contextView.ts')
-          const ws = await workspace(str(q('workspace'), 'workspace'))
-          return send(res, 200, await contextMatrix({ registryFile: config.registryFile, area, gitea: config.gitea, giteaProblem: config.giteaProblem }, ws, q('workflow') ?? null))
+          const access = { registryFile: config.registryFile, area, gitea: config.gitea, giteaProblem: config.giteaProblem }
+          // What a run would be given reads the published source (p20), not a checkout.
+          const reg = await registered(str(q('workspace'), 'workspace'))
+          const ws = config.gitea && reg.project ? await (await import('./published.ts')).publishedWorkspace(access, reg, { discovery: true }) : await workspace(reg.id)
+          return send(res, 200, await contextMatrix(access, ws, q('workflow') ?? null))
         }
         // Blocks of one scope, or of every scope (?all=1).
         if (wsId === 'blocks' && !b && method === 'GET') {
@@ -707,6 +808,13 @@ export function createHandler(config: ServiceConfig) {
         if (!config.watcher) throw new RequestError(404, 'watching is disabled')
         const ws = await workspace(wsId)
         return await config.watcher.stream(ws, req, res)
+      }
+
+      // Published reads and drafts (p20) need the registration, not its checkout:
+      // they are answered whatever the checkout's state, or without one.
+      if (b === 'published-head' || b === 'published' || b === 'drafts') {
+        const definitions = await handleDefinitions(req, res, url, method, wsId, b, file, action)
+        if (definitions) return
       }
 
       const ws = await workspace(wsId)
@@ -1002,17 +1110,6 @@ export function createHandler(config: ServiceConfig) {
         assertNotRetired(retiredByUrl(await loadBoundary(config.registryFile, area), input.url), `Adding ${input.url} as a submodule`)
         const result = await ws.addSubmodule(input.path, input.url)
         return send(res, result.ok ? 200 : 422, result)
-      }
-      // The published workflows (improve_wfrun p1): what ordinary execution
-      // runs, with the workspace's relation to that revision beside them.
-      if (b === 'published' && method === 'GET') {
-        const ctx: import('./access.ts').AccessContext = { registryFile: config.registryFile, area, gitea: config.gitea, giteaProblem: config.giteaProblem, refresh: url.searchParams.get('refresh') === '1' }
-        const { publishedWorkspace } = await import('./published.ts')
-        const pub = await publishedWorkspace(ctx, ws.reg, { discovery: true })
-        if (file) return send(res, 200, { ...(await pub.workflowResponse(file)), source: pub.source })
-        const { list, dir } = await pub.workflowSummaries()
-        const relation = await (await import('./workspaceSync.ts')).workspaceRelation(ctx, ws).catch(e => ({ problem: (e as Error).message }))
-        return send(res, 200, { source: pub.source, workflows: list, ...(dir.exists ? {} : { problem: dir.reason }), relation })
       }
       // Bringing the workspace forward to the published revision, only by
       // fast-forward; refused (nothing changed) otherwise.

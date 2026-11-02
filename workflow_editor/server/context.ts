@@ -161,6 +161,15 @@ async function guideSource(ctx: AccessContext, ws: Workspace, key: string, g: { 
       return { ...base, origin: { project: fromMain, file: path, commit: r.commit }, delivery: 'body', text: r.text, sha256: r.sha256, note: 'a standing run reads its own guides from its project\'s committed main' }
     } catch (e) { unread = `its project's committed main could not be read (${(e as Error).message}); read from this run's copy` }
   }
+  // A published view (p20) has no file on this host to read: the guide as committed.
+  const published = (ws as { source?: { project: string } }).source?.project
+  if (published) {
+    try {
+      const { committedText } = await import('./access.ts')
+      const r = await committedText(ctx, published, path)
+      return { ...base, origin: { project: published, file: path, commit: r.commit }, delivery: 'body', text: r.text, sha256: r.sha256 }
+    } catch (e) { return { ...base, origin: { file: path }, delivery: 'error', note: `${path} cannot be read at the published revision: ${(e as Error).message}` } }
+  }
   try {
     const abs = await inside(ws.root, path)
     const l = await lstat(abs)

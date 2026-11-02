@@ -520,8 +520,9 @@ export interface CreateRunOptions {
   // A trial of editing content (improve_wfrun p1): the workspace file's exact
   // bytes (checked against `sha256` when given: what the person saw) as the
   // definition, on the published code. Uncommitted project code is never
-  // part of it.
-  trial?: { file: string; sha256?: string }
+  // part of it. `draft` (p20): a saved draft revision's bytes instead of the
+  // workspace's; the checkout is not read at all.
+  trial?: { file: string; sha256?: string; draft?: { id: string; revision: number; author: string; text: string } }
   // Set by createRunInCopy: the bundle already read and where it came from.
   bundle?: SourceBundle
   definitionSource?: DefinitionSource
@@ -732,7 +733,8 @@ async function createPublished(ws: Workspace, project: string, o: CreateRunOptio
   const pub = await publishedWorkspace(o.access!, ws.reg, frozen ? { rev: frozen } : o.rev ? { rev: o.rev } : { fresh: true })
   const info = await pub.devdocs()
   if (info.problem) throw new RequestError(409, `${project}@${pub.source.commit.slice(0, 10)}: ${info.problem.message}; nothing was created.`)
-  const src = await sourceBundle(o.trial ? ws : pub, o.trial?.file ?? o.workflow)
+  const draft = o.trial?.draft
+  const src = await sourceBundle(draft ? pub.overlaid(o.trial!.file, draft.text) : o.trial ? ws : pub, o.trial?.file ?? o.workflow)
   const trialText = o.trial ? Object.values(src.files)[0].text : null
   if (o.trial?.sha256 && sha256(trialText!) !== o.trial.sha256) throw new RequestError(409, `${src.files[src.root].source} changed since it was shown (sha256 ${sha256(trialText!).slice(0, 12)}, not ${o.trial.sha256.slice(0, 12)}); look at it again and retry`, { code: 'definition-conflict' })
   const workflow = src.files[src.root].workflow
@@ -754,8 +756,8 @@ async function createPublished(ws: Workspace, project: string, o: CreateRunOptio
   const s = pub.source
   let definitionSource: DefinitionSource = { kind: 'published', project: s.project, selector: s.selector, repository: s.repository, branch: s.branch, commit: s.commit, definitions: s.definitions, fetch: { state: s.fetch.state, at: s.fetch.at } }
   if (o.trial) {
-    const w = await workspaceSource(ws, 'trial')
-    definitionSource = { kind: 'trial', workspace: ws.reg.id, file: src.files[src.root].source, sha256: sha256(trialText!), head: w.kind === 'workspace' ? w.head ?? null : null, dirty: w.kind === 'workspace' && !!w.dirty, baseline: { project: s.project, repository: s.repository, branch: s.branch, commit: s.commit } }
+    const w = draft ? null : await workspaceSource(ws, 'trial')
+    definitionSource = { kind: 'trial', workspace: ws.reg.id, file: src.files[src.root].source, sha256: sha256(trialText!), head: w?.kind === 'workspace' ? w.head ?? null : null, dirty: w?.kind === 'workspace' && !!w.dirty, baseline: { project: s.project, repository: s.repository, branch: s.branch, commit: s.commit }, ...(draft ? { draft: { id: draft.id, revision: draft.revision, author: draft.author } } : {}) }
   }
   return createRunUnlocked(ws, { ...o, workflow: src.root, name: copy.ref.run, into, storage: storageOf(copy.manifest!), bundle: src, definitionWs: pub, definitionSource })
 }

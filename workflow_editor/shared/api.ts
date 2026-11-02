@@ -287,6 +287,18 @@ export interface PublishedSourceView {
   definitions: { path: string; repository: string; commit: string } | null
   fetch: { state: 'fresh' | 'recent' | 'stale'; at: string; error?: string }
 }
+// What a definition reading is, for published, draft and run reads alike
+// (workflow_editor p20, docs/drafts.md). `definition` is where the bytes are:
+// in submodule mode its repository is the submodule, at the commit `root` pins.
+export interface DefinitionDescriptor {
+  schema: string; kind: 'published' | 'draft' | 'run'; project: string; workflow: string | null; file: string
+  definition: { repository: string; path: string; revision: string } | null
+  root: { repository: string; branch: string; commit: string } | null
+  digest: string | null
+  fetch?: { state: 'fresh' | 'recent' | 'stale'; at: string; error?: string }
+  draft?: { id: string; revision: number }
+  run?: { ref: string; revision: string }
+}
 export interface RepoRelationView { path: string; head: string | null; branch: string | null; published: string | null; relation: 'same' | 'behind' | 'ahead' | 'diverged' | 'unknown'; behind: number | null; ahead: number | null; dirty: number; initialized: boolean; problem?: string }
 export interface WorkspaceRelationView { workspace: string; project: string; source: PublishedSourceView; observed: string; root: RepoRelationView; submodules: RepoRelationView[]; summary: string; next: 'none' | 'sync' | 'resolve-by-hand' }
 export interface PublishedResponse { source: PublishedSourceView; workflows: WorkflowSummary[]; problem?: string; relation: WorkspaceRelationView | { problem: string } }

@@ -9,14 +9,17 @@
 // view is a Workspace whose project.yaml, workflow files and repositories
 // come from that commit, so listing, validation and run creation read one
 // revision through the same code an editing workspace uses. It is read-only:
-// editing happens in the workspace.
+// editing happens in a draft (server/drafts.ts), which is this same view with
+// one definition's bytes laid over it (`overlaid`), so a draft validates against
+// the revision it would be published on and never against a checkout.
 //
 // Freshness and identity are separate facts. Discovery (the editor list,
 // intake routes, notifier targets, delegate targets) may read a cache a few
 // seconds old and says so; ordinary execution resolves the default branch
 // with a fetch that succeeded, or a revision named explicitly. A source that
 // cannot be read is an error, never an empty list and never the workspace.
-import type { FileProblem, PeerProject, RepositoryStatus } from '../shared/api.ts'
+import { createHash } from 'node:crypto'
+import type { DefinitionDescriptor, FileProblem, PeerProject, RepositoryStatus } from '../shared/api.ts'
 import { normalizeRepoPath, type Project, type Workflow } from '../shared/model.ts'
 import { delegateTargets } from '../shared/validate.ts'
 import { gitmodules } from './agdev.ts'
@@ -29,11 +32,16 @@ import { RequestError, Workspace, WORKFLOW_FILE, WORKFLOWS_DIR } from './workspa
 import { parseProject, parseWorkflow } from './yamlDoc.ts'
 
 export const PUBLISHED_SCHEMA = 'ag.wfe-published-source.v1'
+export const DESCRIPTOR_SCHEMA = 'ag.wfe-definition-source.v1'
 // How old a cache discovery may read without fetching (the editor list,
 // intake routes, notifier targets, delegate targets). An integration marks
 // the caches it changed as due (access.ts invalidate), so a new workflow is
 // not hidden for this long.
 export const DISCOVERY_TTL_MS = 30_000
+// An open view's check of the default branch (workflow_editor p20): with the
+// browser's 3 s poll, a push is seen within about 7 s plus one fetch, inside
+// the 10 s the contract promises. Only open views ask.
+export const OPEN_VIEW_TTL_MS = 4_000
 
 // The portable identity of a published source: what a run or a delegation
 // records. No host paths, no URLs.
@@ -49,7 +57,7 @@ export interface PublishedSource {
   fetch: FetchInfo
 }
 
-interface Resolved { source: PublishedSource; rootDir: string; defs: { dir: string; commit: string; inner: string } | null; defsProblem?: string }
+export interface Resolved { source: PublishedSource; rootDir: string; defs: { dir: string; commit: string; inner: string } | null; defsProblem?: string }
 
 const isCommit = (s: string) => /^[0-9a-f]{40,64}$/.test(s)
 
@@ -61,7 +69,7 @@ export async function resolvePublished(ctx: AccessContext, project: string, o: {
   return (await resolve(ctx, project, o)).source
 }
 
-async function resolve(ctx: AccessContext, project: string, o: { rev?: string; fresh?: boolean }): Promise<Resolved> {
+export async function resolve(ctx: AccessContext, project: string, o: { rev?: string; fresh?: boolean }): Promise<Resolved> {
   if (project.includes(':')) throw new RequestError(400, 'workflows belong to projects; a repository has none')
   if (o.rev !== undefined && !isCommit(o.rev)) throw new RequestError(400, `"${o.rev}" is not a full commit id; a published revision is named by its root commit`)
   const c: AccessContext = o.fresh && !o.rev ? { ...ctx, refresh: true } : ctx
@@ -100,7 +108,19 @@ const parsed = new Map<string, { text: string; workflow?: Workflow; problem?: Fi
 export class PublishedWorkspace extends Workspace {
   readonly source: PublishedSource
   private readonly r: Resolved
-  constructor(reg: Registration, r: Resolved) { super(reg); this.r = r; this.source = r.source }
+  // One definition's bytes in place of the revision's: a draft (p20).
+  private readonly overlay?: { file: string; text: string }
+  constructor(reg: Registration, r: Resolved, overlay?: { file: string; text: string }) { super(reg); this.r = r; this.source = r.source; this.overlay = overlay }
+
+  // This revision with `file` holding `text`: what validation, approval and a
+  // trial read for a draft. Other files, repositories and peers stay the revision's.
+  overlaid(file: string, text: string): PublishedWorkspace {
+    const o = new PublishedWorkspace(this.reg, this.r, { file, text })
+    o.peers = this.peers
+    return o
+  }
+  // Where the definitions and the root are, for the service's publication.
+  get located(): Resolved { return this.r }
 
   private async show(path: string): Promise<string | null> {
     const g = await git(this.r.rootDir, ['show', `${this.r.source.commit}:${path}`])
@@ -191,13 +211,17 @@ export class PublishedWorkspace extends Workspace {
 
   override async workflowFiles(): Promise<string[]> {
     const d = this.r.defs
-    if (!d) return []
-    return parseLsTree((await git(d.dir, ['ls-tree', '-z', d.commit, '--', `${d.inner}/`])).stdout)
-      .filter(e => e.type === 'blob').map(e => e.path.split('/').pop()!).filter(f => WORKFLOW_FILE.test(f)).sort()
+    const files = d ? parseLsTree((await git(d.dir, ['ls-tree', '-z', d.commit, '--', `${d.inner}/`])).stdout)
+      .filter(e => e.type === 'blob').map(e => e.path.split('/').pop()!).filter(f => WORKFLOW_FILE.test(f)) : []
+    return [...new Set([...files, ...(this.overlay ? [this.overlay.file] : [])])].sort()
   }
 
   override async readWorkflowFile(file: string): Promise<{ text: string | null; workflow?: Workflow; problem?: FileProblem }> {
     if (!WORKFLOW_FILE.test(file)) throw new RequestError(400, `invalid workflow file name "${file}"`)
+    if (this.overlay?.file === file) {
+      const p = parseWorkflow(this.overlay.text)
+      return p.ok ? { text: this.overlay.text, workflow: p.model } : { text: this.overlay.text, problem: p.problem }
+    }
     const d = this.r.defs
     if (!d) return { text: null, problem: { kind: 'missing', message: this.r.defsProblem ?? `${WORKFLOWS_DIR} does not exist` } }
     const key = `${d.dir}@${d.commit}:${file}`
@@ -227,12 +251,40 @@ function categoryOf(path: string): RepositoryStatus['category'] {
 // one here, a registration naming only the project). Its peers — the
 // other projects' delegate targets — are published too.
 // `discovery`: a cache up to DISCOVERY_TTL_MS old is read without fetching.
-export async function publishedWorkspace(ctx: AccessContext, reg: Registration, o: { rev?: string; fresh?: boolean; discovery?: boolean } = {}): Promise<PublishedWorkspace> {
+// `ttlMs`: this one resolution's cache age (an open view's), peers keeping their own.
+export async function publishedWorkspace(ctx: AccessContext, reg: Registration, o: { rev?: string; fresh?: boolean; discovery?: boolean; ttlMs?: number } = {}): Promise<PublishedWorkspace> {
   if (!reg.project) throw new RequestError(409, `workspace ${reg.id} names no registered project, so it has no published workflows`)
-  const c: AccessContext = o.discovery ? { ...ctx, fetchTtlMs: ctx.fetchTtlMs ?? DISCOVERY_TTL_MS } : ctx
+  const c: AccessContext = o.ttlMs !== undefined ? { ...ctx, fetchTtlMs: o.ttlMs } : o.discovery ? { ...ctx, fetchTtlMs: ctx.fetchTtlMs ?? DISCOVERY_TTL_MS } : ctx
   const ws = new PublishedWorkspace(reg, await resolve(c, reg.project, o))
   ws.peers = () => publishedPeers(ctx, reg.project)
   return ws
+}
+
+// The head of a project's published source for an open view: at most one
+// reading per project at a time, however many views ask (p20; the earlier
+// intake delays came from readings per caller).
+const heads = new Map<string, Promise<PublishedSource>>()
+export function publishedHead(ctx: AccessContext, project: string, o: { refresh?: boolean } = {}): Promise<PublishedSource> {
+  const key = `${ctx.registryFile}\0${project}\0${o.refresh ? 'r' : ''}`
+  const hit = heads.get(key)
+  if (hit) return hit
+  const p = resolvePublished({ ...ctx, fetchTtlMs: OPEN_VIEW_TTL_MS, refresh: o.refresh }, project).finally(() => heads.delete(key))
+  heads.set(key, p)
+  return p
+}
+
+export const digestOf = (text: string) => createHash('sha256').update(text).digest('hex')
+
+// What a definition reading is, whichever its kind (docs/drafts.md): the
+// project, the workflow, the repository and path its bytes are at, the
+// revision of that repository, the project root's revision apart, and the digest.
+export function publishedDescriptor(s: PublishedSource, file: string, workflow: string | null, text: string | null): DefinitionDescriptor {
+  return {
+    schema: DESCRIPTOR_SCHEMA, kind: 'published', project: s.project, workflow, file,
+    definition: s.definitions ? { repository: s.definitions.repository, path: `${s.definitions.path}/${file}`, revision: s.definitions.commit } : null,
+    root: { repository: s.repository, branch: s.branch, commit: s.commit },
+    digest: text === null ? null : digestOf(text), fetch: s.fetch,
+  }
 }
 
 // What a request needs to know about one published workflow before

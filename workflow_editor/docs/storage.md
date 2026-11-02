@@ -194,7 +194,7 @@ and `target`, with no paths on this host and no URLs.
 The registered workspace is the editing area. Its age, its local commits and
 its uncommitted changes do not decide which workflows exist or what a run
 follows. How it relates to the published revision is read, never assumed
-(`server/workspaceSync.ts`; `wfe workspace status`, the editor's Workflows card):
+(`server/workspaceSync.ts`; `wfe workspace status`, Developer details in the editor's Workflows card):
 
 - per repository (the root and every submodule the published revision pins):
   `same`, `behind`, `ahead`, `diverged` or `unknown`, with counts, decided from
@@ -204,8 +204,13 @@ follows. How it relates to the published revision is read, never assumed
 - the situation in a sentence and the next action (`none`, `sync`,
   `resolve-by-hand`).
 
-**Synchronization is optional** (`wfe workspace sync [--dry-run]`, the editor's
-Update workspace). It only fast-forwards: the root on the published branch,
+Viewing, editing, trying and applying a workflow do not use the checkout
+([drafts.md](drafts.md)); drafts live in `<area>/.local/wfe-drafts/`. A checkout
+remains the working area for whoever chooses to work in one, and the base a
+run's copy is cloned beside.
+
+**Synchronization is optional** (`wfe workspace sync [--dry-run]`, Update workspace
+in Developer details). It only fast-forwards: the root on the published branch,
 clean and only behind; each submodule whose pin moved, clean and at its old pin
 (a branch is fast-forwarded, a detached checkout moved to the pin). Anything
 else is refused with the concrete reasons and nothing changes. State is read

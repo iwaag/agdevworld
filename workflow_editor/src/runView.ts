@@ -77,7 +77,8 @@ export function renderRunView(root: HTMLElement, wsId: string, workflow: string,
   const activity = new ActivityView() // Simple's activity line (p8/ex2), kept across renders
   const titleFacts = h('div.run-facts-row')
   const detailsToggle = h('button.panel-toggle.d-only', { 'aria-expanded': 'false', 'aria-controls': 'run-details', onclick: () => toggleDetails() }, icon('list', 'icon small'), 'Run details')
-  const openDefinition = h('a.button.panel-toggle.d-only', { hidden: true }, icon('doc', 'icon small'), 'Open current definition')
+  // What this run started with, from its own record: never today's file (p20).
+  const openDefinition = h('a.button.panel-toggle', { href: `#/ws/${encodeURIComponent(wsId)}/run/${encodeURIComponent(workflow)}/${encodeURIComponent(run)}/definition`, title: 'The definition this run started with, and its later revisions, from the run\'s own record' }, icon('doc', 'icon small'), 'Definition used by this run')
   const summary = h('section.title-band.run-summary', titleMain, h('div.title-side', titleFacts, h('div.title-actions', openDefinition, detailsToggle)))
   const details = h('section.run-details.d-only#run-details', { hidden: true, 'aria-label': 'Run details' })
   const canvas = new Canvas({ select: sel => select(sel?.kind === 'node' || sel?.kind === 'step' ? sel.id : null), move: () => {}, connect: () => {} }, { autoHeight: { min: 300, max: 620 } })
@@ -382,7 +383,7 @@ export function renderRunView(root: HTMLElement, wsId: string, workflow: string,
     patchContent(titleMain,
       h('h1.run-name', { title: t.title }, t.title),
       progress(rec), activity.el, conversationLinks(),
-      rec.definition.source?.kind === 'trial' ? h('p.chip.warn.trial-chip', { title: sourceText(rec) }, 'Trial of editing content') : null,
+      rec.definition.source?.kind === 'trial' ? h('p.chip.warn.trial-chip', { title: sourceText(rec) }, rec.definition.source.draft ? `Trial of a draft (revision ${rec.definition.source.draft.revision})` : 'Trial of a checkout\'s file') : null,
       h('p.run-lead.d-only', statusLine(rec)),
       h('p.wf-file.d-only', `${t.sub} · ${rec.definition.revisions?.length ? `adjusted, ${rec.definition.active ?? 'r1'} in force` : 'fixed snapshot'}`))
     const last = rec.decisions.at(-1)
@@ -399,13 +400,6 @@ export function renderRunView(root: HTMLElement, wsId: string, workflow: string,
         : rev && last ? h(`span.decision-chip.${last.decision === 'accepted' ? 'ok' : 'error'}`, last.decision === 'accepted' ? 'Accepted' : 'Rejected') : null,
       rev ? null : h(`span.status-chip.d-only.tone-${st.tone}`, { dataset: { status: st.state }, title: st.detail ?? st.text }, st.text),
       rev ? null : h(`span.chip.d-only.sit-${sit}`, { title: 'What runs now: this host\'s execution facts, separate from the recorded node states' }, `${SITUATION[sit] ?? sit}${process}`))
-    const src = r!.sources.find(s => s.workflow === rec.definition.root)
-    openDefinition.hidden = !src?.file
-    if (src?.file) {
-      const href = `#/ws/${encodeURIComponent(wsId)}/wf/${encodeURIComponent(src.file.replace(/^devdocs\/workflows\//, ''))}`
-      if (openDefinition.getAttribute('href') !== href) openDefinition.setAttribute('href', href)
-      openDefinition.title = 'The editable, reusable definition in devdocs/workflows; this run follows its own fixed copy'
-    }
     renderDetails(rec)
   }
 
@@ -469,7 +463,8 @@ export function renderRunView(root: HTMLElement, wsId: string, workflow: string,
     const r = shown!
     const ex = rec.execution
     const src = r.sources.find(s => s.workflow === rec.definition.root)
-    const srcText = !src ? null : src.status === 'same' ? 'this workspace\'s file: same as this snapshot' : src.status === 'changed' ? 'this workspace\'s file: changed since this snapshot' : src.status === 'deleted' ? 'not in this workspace' : `snapshot: ${src.detail}`
+    // A problem with the run's own snapshot; a checkout's file says nothing about this run.
+    const srcText = src && !['same', 'changed', 'deleted'].includes(src.status) ? `snapshot: ${src.detail}` : null
     const input = rec.input
     const last = rec.decisions.at(-1)
     patchContent(details,
@@ -482,7 +477,7 @@ export function renderRunView(root: HTMLElement, wsId: string, workflow: string,
         fact('Last recorded update', `${when(rec.updated)} (${ago(rec.updated)})`, 'last-update'),
         ...countFacts(rec),
         fact('Source', sourceText(rec), 'definition-source'),
-        h(`div.fact.run-title.src-state.${src?.status ?? 'none'}`, h('span.k', 'Definition'), h('span.v', `${rec.definition.root} · ${rec.definition.active ?? 'r1'} in force${srcText ? ` · ${srcText}${src?.renamed ? ` (now ${src.file})` : ''}` : ''}`)),
+        h(`div.fact.run-title.src-state.${src?.status ?? 'none'}`, h('span.k', 'Definition'), h('span.v', `${rec.definition.root} · ${rec.definition.active ?? 'r1'} in force${srcText ? ` · ${srcText}` : ''}`)),
         rec.control.attempt ? fact('Open attempt', `${rec.control.attempt.id} since ${when(rec.control.attempt.began)}`) : rec.control.last ? fact('Last attempt', `${rec.control.last.id}: ${rec.control.last.outcome}, ${when(rec.control.last.ended)}`) : null),
       h('div.run-now',
         line('Active', ex.active.length ? ex.active.map(n => effectiveOf(rec)?.nodes[n]?.step?.kind === 'report' ? h('span', 'Writing report on ', nodeLink(n, effectiveOf(rec)!.nodes[n].step!.for ?? n)) : nodeLink(n)) : ['—']),
@@ -530,7 +525,7 @@ export function renderRunView(root: HTMLElement, wsId: string, workflow: string,
     const tally = (c: Record<string, number>) => `${c.completed ?? 0}/${Object.values(c).reduce((a, b) => a + b, 0)}`
     patchContent(graphHead,
       h('h2', 'Run workflow'),
-      h('span.chip.d-only', { title: 'The run follows this fixed copy; editing the reusable workflow does not change it' }, rec.definition.revisions?.length ? `Fixed snapshot · ${rec.definition.active ?? 'r1'} in force` : 'Fixed snapshot · r1'),
+      h('span.chip.d-only', { title: 'The run follows this fixed copy; applying a later version of the workflow does not change it' }, rec.definition.revisions?.length ? `Fixed snapshot · ${rec.definition.active ?? 'r1'} in force` : 'Fixed snapshot · r1'),
       h('span.chip.muted.d-only', icon('lock', 'icon tiny'), 'Read-only'),
       h('span.graph-counts.small.d-only', split ? `Work ${tally(split.work)} completed · Documentation ${tally(split.docs)} completed` : `${tally(rec.execution.counts)} completed · no generated documents`),
       h('span.muted.small.graph-hint.d-only', 'Select a card to inspect its record'))

@@ -201,9 +201,10 @@ workflow files and repositories at that one commit through a read-only
 
 | Reader | Freshness |
 | --- | --- |
-| the editor's Published list (`GET api/workspaces/<ws>/published[/<file>]`), validation peers, conversation targets | discovery: a cache up to 30 s old, labelled `recent` |
+| the editor's list and graph (`GET api/workspaces/<ws>/published[/<file>]`, [drafts.md](drafts.md)) | at most 4 s old; an open view checks `published-head` every 3 s, so a push shows within 10 s |
+| validation peers, conversation targets | discovery: a cache up to 30 s old, labelled `recent` |
 | intake routes, notifier channel targets, `wfe delegate targets` | discovery |
-| run creation (requests, Zulip posts), delegation dispatch (target and cycles) | fetched now; refused (`fetch-failed`) when Gitea cannot be read, unless a root commit is named |
+| run creation (requests, Zulip posts), delegation dispatch (target and cycles), starting and applying a draft | fetched now; refused (`fetch-failed`) when Gitea cannot be read, unless a root commit is named |
 
 An integration that is `integrated` or `partial` marks the project's caches due
 (`invalidate`: the root and the submodules its default branch names), so the next

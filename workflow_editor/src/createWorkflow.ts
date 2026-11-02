@@ -33,7 +33,8 @@ export function freeId(base: string, taken: Set<string>): string {
   for (let n = 2; ; n++) if (!taken.has(`${root}-${n}`)) return `${root}-${n}`
 }
 
-export function workflowCreator(wsId: string, onCreated: (file: string) => void): WorkflowCreator {
+// A new workflow is a draft until applied (p20): nothing exists for runs yet.
+export function workflowCreator(wsId: string, onCreated: (draft: { file: string; id: string }) => void, who: () => string): WorkflowCreator {
   let existing = new Set<string>()
   let enabled = true
   let idTouched = false
@@ -41,6 +42,8 @@ export function workflowCreator(wsId: string, onCreated: (file: string) => void)
   let templatesLoaded = false
   const errors: Record<string, string> = {}
 
+  const by = h('input', { 'aria-label': 'Your name', autocomplete: 'name' }) as HTMLInputElement
+  const byField = h('label.field', h('span', 'Your name'), by)
   const name = h('input', { 'aria-label': 'Name of the new workflow', placeholder: 'What this workflow does, e.g. Release check', autocomplete: 'off' })
   const id = h('input', { 'aria-label': 'Id of the new workflow', autocomplete: 'off', spellcheck: false })
   // The documentation setting starts as the chosen template's (p8/ex2).
@@ -66,9 +69,9 @@ export function workflowCreator(wsId: string, onCreated: (file: string) => void)
     h('div.field', h('span', 'Documents'), policy, policyError))
   const form = h('form.create-wf', { hidden: true, 'aria-label': 'Create a workflow', novalidate: true },
     h('h3', 'New workflow'),
-    h('label.field', h('span', 'Name'), name, nameError),
+    h('label.field', h('span', 'Name'), name, nameError), byField,
     templateField, more, formError, disabledNote,
-    h('div.save-row', submit, cancel))
+    h('div.save-row', submit, cancel, h('span.small.muted', 'Starts a draft. It exists for runs once you apply it.')))
   const button = h('button.create-wf-open', { type: 'button', 'aria-expanded': 'false', onclick: () => (form.hidden ? open() : close()) }, icon('plus', 'icon small'), 'Create workflow')
 
   const derived = () => freeId(idFromName(name.value), existing)
@@ -109,6 +112,8 @@ export function workflowCreator(wsId: string, onCreated: (file: string) => void)
 
   function open() {
     form.hidden = false
+    if (!by.value) by.value = who()
+    byField.hidden = !!who()
     button.setAttribute('aria-expanded', 'true')
     syncId()
     void loadTemplates()
@@ -126,16 +131,20 @@ export function workflowCreator(wsId: string, onCreated: (file: string) => void)
     for (const k of Object.keys(errors)) delete errors[k]
     const wid = (id.value.trim() || derived())
     if (!name.value.trim()) errors.name = 'Give the workflow a name.'
+    const author = (by.value.trim() || who())
+    if (!author && !errors.name) errors.form = 'Give your name: a draft records who made it.'
+    if (!author) byField.hidden = false
     if (!ID_PATTERN.test(wid)) errors.id = 'Use lowercase letters, digits and - _ . (starting with a letter or digit).'
     else if (existing.has(wid)) errors.id = `"${wid}" is already used by another workflow of this project.`
     if (errors.id) more.open = true
-    if (errors.name || errors.id) { paint(); (errors.name ? name : id).focus(); return }
+    if (errors.name || errors.id || errors.form) { paint(); (errors.name ? name : errors.id ? id : by).focus(); return }
     busy = true; paint()
     try {
       const t = template.querySelector<HTMLInputElement>('input:checked')?.value ?? 'empty'
-      const r = await api.createWorkflow(wsId, wid, name.value.trim(), documentation, t)
+      try { localStorage.setItem('workflow-editor.actor', author) } catch { /* not remembered */ }
+      const r = await api.newWorkflowDraft(wsId, { id: wid, name: name.value.trim(), template: t, documentation }, author)
       name.value = ''; id.value = ''; idTouched = false; docTouched = false
-      onCreated(r.file)
+      onCreated({ file: r.draft.file, id: r.draft.id })
     } catch (e) {
       const field = (e instanceof ApiError ? (e.detail as { field?: string } | undefined)?.field : undefined) ?? 'form'
       errors[field] = (e as Error).message

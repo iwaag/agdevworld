@@ -1,11 +1,15 @@
-// Workflow editor: a slim header (crumbs, save), a title band (name,
-// purpose, approval states, validation and the two explicit entry points —
-// "Intent & approvals" and "Workflow settings"), the canvas with its toolbar,
-// and an inspector that opens for a selection or for settings (p8). The file
-// on disk is the authority; the view holds a draft until an explicit Save,
-// and guards the draft against external changes. Opening or closing a panel
-// never saves or discards anything: every panel edits the same draft.
-import type { FileProblem, WorkflowResponse } from '../shared/api.ts'
+// The one graph of a workflow definition, by source (p20, docs/drafts.md): the
+// published definition, a draft, what a run started with, or what a checkout
+// holds. Only a draft edits. A slim header (crumbs, the source's actions), a band
+// saying what this definition is, a title band (name, purpose, approval states,
+// validation and the two explicit entry points — "Intent & approvals" and
+// "Workflow settings"), the canvas with its toolbar, and an inspector that opens
+// for a selection or for settings (p8). The service holds the saved state; the
+// view holds unsaved edits until an explicit save, and guards them against
+// external changes. Opening or closing a panel never saves or discards anything:
+// every panel edits the same edits.
+import type { FileProblem, PublishedSourceView, WorkflowResponse } from '../shared/api.ts'
+import type { DraftConflict, DraftMeta, DraftResponse } from '../shared/drafts.ts'
 import { approvalStates, canonicalJson, type ApprovalState } from '../shared/canonical.ts'
 import { compile, hasDocSteps } from '../shared/compile.ts'
 import { policySummary } from './docPolicy.ts'
@@ -13,10 +17,12 @@ import { NODE_TYPES, cloneWorkflow, docSteps, type ApprovalKind, type Issue, typ
 import { instantiate, type NodeTemplate } from '../shared/catalog.ts'
 import { WORKFLOW_TALK, workflowTalkNode } from '../shared/workflowTalk.ts'
 import { hasErrors, validateWorkflow, type ValidationContext } from '../shared/validate.ts'
-import { api } from './api.ts'
+import { api, ApiError } from './api.ts'
+import { conflictPanel, draftHash, draftsChooser } from './draftPanels.ts'
+import { sourceText } from './runCommon.ts'
 import { live, serial } from './live.ts'
 import { Canvas, TYPE_LABEL, type Selection } from './canvas.ts'
-import { h, when } from './dom.ts'
+import { h, short, when } from './dom.ts'
 import { icon } from './icons.ts'
 import { renderInspector } from './inspector.ts'
 import { displayToggle, isSimple, onDisplay, setDisplay } from './displayMode.ts'
@@ -26,6 +32,13 @@ import type { ViewHandle } from './main.ts'
 
 const MODE_KEY = 'workflow-editor.mode'
 const APPROVER_KEY = 'workflow-editor.approver'
+const ACTOR_KEY = 'workflow-editor.actor'
+// What an open published or draft view checks, and how often (docs/drafts.md).
+const POLL_MS = 3_000
+// Said once on the next view: what a finished apply did.
+let flash = ''
+
+export type DefinitionView = { kind: 'published' } | { kind: 'draft'; id: string } | { kind: 'run'; workflow: string; run: string; revision?: string } | { kind: 'checkout' }
 function stored(key: string, fallback: string) { try { return localStorage.getItem(key) ?? fallback } catch { return fallback } }
 function store(key: string, value: string) { try { localStorage.setItem(key, value) } catch { /* per-viewer convenience only */ } }
 
@@ -39,14 +52,37 @@ const TYPE_HINT: Record<string, string> = {
   review: 'The person reviews finished work later (WFE serves it, records the decision, cleans up)',
 }
 
-export function renderWorkflowView(root: HTMLElement, wsId: string, file: string, opts: { context?: boolean } = {}): ViewHandle {
+export function renderWorkflowView(root: HTMLElement, wsId: string, fileName: string, opts: { context?: boolean; source?: DefinitionView } = {}): ViewHandle {
+  const source: DefinitionView = opts.source ?? { kind: 'published' }
+  let file = fileName
   let resp: WorkflowResponse | null = null
-  let saved: Workflow | null = null // last valid content read from disk
-  let draft: Workflow | null = null
+  let saved: Workflow | null = null // last valid content read from its source
+  let draft: Workflow | null = null // what is shown and, in a draft, edited
   let rev: string | null = null
-  // The revision the draft was made from: a save names it, so a file changed
-  // on disk meanwhile is not overwritten (project_migration p8).
-  let draftRev: string | null = null
+  // A draft (the record): saved revision, its base, its apply journal.
+  let meta: DraftMeta | null = null
+  // The saved revision the browser's edits were made on: a save names it, so
+  // another tab's newer save refuses this one instead of being overwritten.
+  let editRevision = 0
+  let latest: DraftResponse['latest'] = null
+  let pubSource: PublishedSourceView | null = null // the revision this view read
+  let head: PublishedSourceView | null = null // the last check of the default branch
+  let sourceProblem = '' // the source cannot be read now
+  let existingDrafts: DraftMeta[] = []
+  let chooser = false
+  let conflict: DraftConflict | null = null
+  let comparedAt: string | null = null // the latest digest a comparison was asked for
+  let mergeNote = ''
+  let applying = false
+  let applyKey = ''
+  let applyNote: { tone: string; text: string; link?: { href: string; label: string } } | null = null
+  let tryOpen = false
+  let tryKey = ''
+  let tryResult: HTMLElement | null = null
+  let runFacts: { href: string; text: string; revisions: string[]; active: string } | null = null
+  let textOpen = false
+  let flashText = flash
+  flash = ''
   let problem: FileProblem | undefined
   let externalChange = false
   let saveError = ''
@@ -63,7 +99,8 @@ export function renderWorkflowView(root: HTMLElement, wsId: string, file: string
   let connected = true
 
   const dirty = () => !!draft && !!saved && canonicalJson(draft) !== canonicalJson(saved)
-  const readonly = () => !!problem
+  const draftOpen = () => source.kind === 'draft' && meta?.state === 'open'
+  const readonly = () => !!problem || !draftOpen()
   const inspectorOpen = () => !!selection || settingsOpen
 
   // ---- static structure (inputs keep focus across updates) --------------
@@ -75,8 +112,21 @@ export function renderWorkflowView(root: HTMLElement, wsId: string, file: string
   const approveIntent = h('button', { onclick: () => void approve('intent'), title: 'Approve the saved intent' }, 'Approve intent')
   const approveDefinition = h('button', { onclick: () => void approve('definition') }, 'Approve definition')
   const crumbs = h('nav.crumbs', { 'aria-label': 'Breadcrumb' })
-  const saveButton = h('button.primary', { onclick: () => void save() }, 'Save')
-  const refreshButton = h('button.ghost-dark.d-only', { title: 'Re-read the file and the repositories\' Git state now', onclick: () => void load({ refresh: true }) }, 'Refresh')
+  const saveButton = h('button', { onclick: () => void save() }, 'Save draft')
+  const refreshButton = h('button.ghost-dark.d-only', { title: 'Read this definition again now', onclick: () => void load({ refresh: true }) }, 'Refresh')
+  const editButton = h('button.primary', { onclick: () => void edit(false) }, 'Edit')
+  const textButton = h('button.ghost-dark', { 'aria-pressed': 'false', title: 'This definition as text', onclick: () => { textOpen = !textOpen; update(false) } }, 'Text')
+  const tryButton = h('button', { title: 'Run a saved revision of this draft, on the published code', onclick: () => { tryOpen = !tryOpen; renderSource() } }, 'Try draft')
+  const applyButton = h('button', { title: 'Publish the saved draft: later runs use it', onclick: () => void apply(false) }, 'Apply')
+  const saveApplyButton = h('button.primary', { title: 'Save these changes and publish them: later runs use them', onclick: () => void apply(true) }, 'Save and apply')
+  const discardButton = h('button.ghost-dark', { title: 'Remove this draft', onclick: () => void discard() }, 'Discard draft')
+  // Who edits: asked only where it is not known.
+  const whoInput = h('input.who-input', { placeholder: 'your name', 'aria-label': 'Your name', size: 14, value: stored(ACTOR_KEY, '') }) as HTMLInputElement
+  const sourceBand = h('section.source-band', { 'aria-label': 'What this definition is' })
+  const textEdit = h('textarea.yaml.definition-text', { rows: 24, spellcheck: false, 'aria-label': 'The draft as text' }) as HTMLTextAreaElement
+  let textBase = ''
+  const textSave = h('button.primary', { onclick: () => void saveText() }, 'Save text')
+  const textPanel = h('div.definition-text-panel', { hidden: true }, textEdit, h('div.save-row', textSave, h('span.small.muted', 'Saved in this draft, readable or not. Applying needs a valid definition.')))
   const saveStateEl = h('span.save-state')
   const purpose = h('p.wf-purpose')
   const fileLine = h('p.wf-file.d-only')
@@ -137,20 +187,20 @@ export function renderWorkflowView(root: HTMLElement, wsId: string, file: string
   const rawView = h('pre.raw')
   // Scoped context of this workflow (p13): its defaults and the local overrides.
   const contextLink = h('a.button.d-only', { href: `#/context/${encodeURIComponent(wsId)}`, title: 'Compare this workflow\'s instructions with the project\'s and all projects\', side by side' }, 'Context overview')
-  const body = h('main.wf-body', h('div.canvas-col', toolbar, canvas.el, rawView), inspector)
+  const body = h('main.wf-body', h('div.canvas-col', toolbar, canvas.el, rawView, textPanel), inspector)
 
   // Context (p13 ex1): the workflow's purpose and guides (this view's one
   // draft and Save) and its local instructions, with what it inherits from
   // the project and from all projects; shown in both modes.
   const guidesEditor = new ListEditor({ label: 'Guides', item: 'Guide', placeholder: 'agent/guide.md, or <project>:<path>', addLabel: 'Add guide', onInput: (v, structural) => { if (draft) { draft.execution.guides = v; update(structural) } } })
-  const sharedSave = h('button.primary', { onclick: () => void save() }, 'Save workflow')
+  const sharedSave = h('button.primary', { onclick: () => void save() }, 'Save draft')
   const sharedState = h('span.ctx-save-state')
   const sharedControls = h('div.ctx-workflow-shared',
     h('label.field', h('span', 'Purpose (intent)'), intentInput),
     h('p.small.muted', 'Everything else in the workflow is reviewed against this text; runs and authors are given it.'),
     guidesEditor.el,
     h('p.small.muted', 'Guides the project declares are given to every workflow already (Inherited); list here only this workflow\'s own.'),
-    h('div.save-row', sharedSave, sharedState, h('span.small.muted', 'Writes the workflow file.')))
+    h('div.save-row', sharedSave, sharedState, h('span.small.muted', 'Saved in the draft: not used by runs until applied.')))
   const ctxSection = new ContextSection({
     scope: 'workflow', wsId, shared: sharedControls,
     sharedSummary: () => { const w = draft ?? saved; return !w ? 'workflow not read' : [w.intent.trim() ? 'purpose set' : 'no purpose', `${w.execution.guides.length} guide${w.execution.guides.length === 1 ? '' : 's'}`].join(' · ') },
@@ -159,7 +209,8 @@ export function renderWorkflowView(root: HTMLElement, wsId: string, file: string
   })
 
   root.append(
-    h('header.app-header', crumbs, h('div.top-actions', contextLink, refreshButton, saveStateEl, saveButton, displayToggle())),
+    h('header.app-header', crumbs, h('div.top-actions', contextLink, refreshButton, saveStateEl, textButton, discardButton, tryButton, saveButton, applyButton, saveApplyButton, editButton, displayToggle())),
+    sourceBand,
     h('section.title-band',
       h('div.title-main', nameInput, purpose, fileLine),
       h('div.title-side', approvalPills, h('div.title-actions', simpleApproval, validation, intentToggle, settingsToggle))),
@@ -269,18 +320,65 @@ export function renderWorkflowView(root: HTMLElement, wsId: string, file: string
     }
   }
 
+  // A definition by source, as the graph reads it.
+  async function read(refresh?: boolean): Promise<WorkflowResponse> {
+    if (source.kind === 'published') {
+      const r = await api.publishedWorkflow(wsId, file, refresh)
+      pubSource = r.source
+      head ??= r.source
+      existingDrafts = (await api.drafts(wsId, file).catch(() => ({ drafts: [] as DraftMeta[] }))).drafts
+      return r
+    }
+    if (source.kind === 'draft') {
+      const r = await api.draft(wsId, source.id)
+      adoptDraft(r)
+      return r
+    }
+    if (source.kind === 'checkout') return api.workflow(wsId, file, refresh)
+    const r = await api.run(wsId, source.workflow, source.run)
+    const rec = r.record
+    if (!rec) throw new Error(r.problem?.message ?? `the run ${source.workflow}/${source.run} cannot be read`)
+    const root = rec.definition.root
+    const revisions = ['r1', ...(r.revisions ?? []).map(x => x.revision)]
+    const shown = source.revision ?? 'r1'
+    const entry = shown === 'r1' ? r.bundle[root] : r.revisions?.find(x => x.revision === shown)
+    if (!entry) throw new Error(`${source.workflow}/${source.run} has no definition revision ${shown}`)
+    file = (rec.definition.workflows[root]?.source ?? `${root}.yaml`).replace(/^devdocs\/workflows\//, '')
+    runFacts = { href: `#/ws/${encodeURIComponent(wsId)}/run/${encodeURIComponent(source.workflow)}/${encodeURIComponent(source.run)}`, text: sourceText(rec), revisions, active: rec.definition.active ?? 'r1' }
+    return {
+      workspace: wsId, file, rev: entry.text ?? shown, text: entry.text ?? null, workflow: entry.workflow, issues: [],
+      ...(entry.workflow ? {} : { problem: { kind: 'unsupported' as const, message: 'problem' in entry && entry.problem ? String(entry.problem) : 'this definition cannot be read' } }),
+      repositories: rec.context.repositories.map(c => ({ path: c.path, name: c.path, kind: c.path === '.' ? 'root' as const : 'submodule' as const, category: 'other' as const, initialized: true, dirty: c.dirty ?? 0 })),
+      workflows: Object.entries(r.bundle).filter(([, b]) => b.workflow).map(([id, b]) => ({ file: b.file, id, name: b.workflow!.name, errors: 0, warnings: 0, delegates: [] })),
+    }
+  }
+
+  function adoptDraft(r: DraftResponse) {
+    meta = r.draft
+    latest = r.latest
+    pubSource = r.source
+    if (r.source) head ??= r.source
+    sourceProblem = r.sourceProblem ?? ''
+    file = r.draft.file
+    // A comparison is asked for once per published version this draft has not taken in.
+    if (r.draft.state === 'open' && r.latest?.changed && comparedAt !== r.latest.sha256) { comparedAt = r.latest.sha256; void compare() }
+    if (!r.latest?.changed) { comparedAt = null; mergeNote = ''; if (conflict?.kind !== 'exists') conflict = null }
+  }
+
   interface LoadOpts { force?: boolean; contextOnly?: boolean; refresh?: boolean }
   // Loads run one at a time; merged requests never lose a content reload.
   const load = serial<LoadOpts>(async opts => {
     try {
-      const r = await api.workflow(wsId, file, opts.refresh)
+      const r = await read(opts.refresh)
       if (disposed) return
       resp = r
-      // A refresh that keeps the draft does not rebuild the inspector while
+      if (source.kind !== 'draft') sourceProblem = ''
+      connected = true
+      // A refresh that keeps the edits does not rebuild the inspector while
       // someone is typing in it; it is rebuilt on the next selection or edit.
       const typing = inspector.contains(document.activeElement)
       if (opts.contextOnly) { update(!typing); void ctxSection.reload(); return }
-      const changedOnDisk = r.rev !== rev
+      const changedAtSource = r.rev !== rev
       const before = draft
       rev = r.rev
       if (r.workflow) {
@@ -289,24 +387,37 @@ export function renderWorkflowView(root: HTMLElement, wsId: string, file: string
         saved = cloneWorkflow(r.workflow)
         if (!wasDirty || opts.force || !draft) {
           if (opts.force || !draft || canonicalJson(draft) !== canonicalJson(r.workflow)) draft = cloneWorkflow(r.workflow)
-          draftRev = r.rev
+          if (meta) editRevision = meta.revision
           externalChange = false; saveError = ''
-        } else if (changedOnDisk) externalChange = true // e.g. edited while the stream was down
-        if (opts.force) saveState = 'Reloaded from disk'
+        } else if (changedAtSource) externalChange = true // saved elsewhere meanwhile
+        if (opts.force && source.kind === 'draft') saveState = 'Reloaded the saved draft'
       } else {
-        // Keep the last valid rendering (if any) and show why the file cannot be used.
+        // Keep the last valid rendering (if any) and show why it cannot be used.
         problem = r.problem
         if (opts.force && saved) draft = cloneWorkflow(saved)
+        if (meta) editRevision = meta.revision
         externalChange = false
       }
+      syncText(r.text ?? '')
       const replaced = draft !== before
       update(replaced || !typing, replaced)
-      if (changedOnDisk) void ctxSection.reload()
+      if (changedAtSource) void ctxSection.reload()
     } catch (e) {
-      notice = (e as Error).message
+      if (disposed) return
+      // The last graph stays, marked as what it is; a checkout never replaces it.
+      sourceProblem = (e as Error).message
+      if (e instanceof ApiError && e.status === 0) connected = false
+      sourceState = e instanceof ApiError ? (e.detail as { state?: string } | undefined)?.state ?? '' : ''
       update(true)
     }
   }, (a, b) => ({ force: a.force || b.force, refresh: a.refresh || b.refresh, contextOnly: !!a.contextOnly && !!b.contextOnly }))
+  let sourceState = ''
+
+  function syncText(text: string) {
+    if (textEdit.value === textBase || textEdit.disabled) textEdit.value = text
+    textBase = text
+  }
+  const textDirty = () => source.kind === 'draft' && textEdit.value !== textBase
 
   async function loadProjectName() {
     const p = await api.project(wsId).catch(() => null)
@@ -314,6 +425,8 @@ export function renderWorkflowView(root: HTMLElement, wsId: string, file: string
     const list = await api.workspaces().catch(() => null)
     // The registry's approver, only into a name nobody has typed.
     if (list?.approver && !approverInput.value && document.activeElement !== approverInput) approverInput.value = list.approver
+    if (list?.approver && !whoInput.value && document.activeElement !== whoInput) whoInput.value = list.approver
+    renderSource()
     renderCrumbs()
   }
 
@@ -381,24 +494,164 @@ export function renderWorkflowView(root: HTMLElement, wsId: string, file: string
     update(true)
   }
 
-  async function save() {
-    if (!draft || readonly() || !dirty()) return
+  // Who is acting; a person who has not said so is asked in the band.
+  function actor(): string {
+    const who = whoInput.value.trim()
+    if (who) store(ACTOR_KEY, who)
+    else { whoInput.hidden = false; renderSource(); whoInput.focus(); notice = 'Give your name: drafts and what is applied record who did it.'; renderBanners() }
+    return who
+  }
+  const draftId = () => (source.kind === 'draft' ? source.id : '')
+
+  // A save names the saved revision the edits were made on; another tab's
+  // newer save refuses it, with these edits still here.
+  async function save(): Promise<boolean> {
+    if (!draft || readonly()) return false
+    if (!dirty()) return true
+    const by = actor()
+    if (!by) return false
     saveError = ''
     saveButton.disabled = true
     saveStateEl.textContent = 'Saving…'
     try {
-      const r = await api.saveWorkflow(wsId, file, draft, draftRev)
+      const shown = draft
+      const r = await api.saveDraft(wsId, draftId(), { revision: editRevision, by, workflow: shown })
+      adoptDraft(r)
+      editRevision = r.draft.revision
+      resp = r
       rev = r.rev
-      draftRev = r.rev
-      saved = cloneWorkflow(draft)
+      saved = cloneWorkflow(shown)
       externalChange = false
-      saveState = `Saved ${new Date().toLocaleTimeString()}`
-      await load({ contextOnly: true })
-      void ctxSection.reload()
-    } catch (e) {
-      saveError = `Save failed: ${(e as Error).message}. The draft is kept; retry when resolved.`
+      saveState = `Draft saved ${new Date().toLocaleTimeString()}`
+      syncText(r.text ?? '')
       update(false)
+      void ctxSection.reload()
+      return true
+    } catch (e) {
+      const code = e instanceof ApiError ? (e.detail as { code?: string } | undefined)?.code : undefined
+      if (code === 'draft-revision-conflict') externalChange = true
+      saveError = `Not saved: ${(e as Error).message}. Your edits are kept here.`
+      update(false)
+      return false
     }
+  }
+
+  async function saveText() {
+    if (!draftOpen() || !meta) return
+    const by = actor()
+    if (!by) return
+    try {
+      await api.saveDraft(wsId, draftId(), { revision: dirty() ? editRevision : meta.revision, by, text: textEdit.value })
+      saveError = ''
+      textEdit.disabled = true // the saved text replaces what was typed
+      await load({ force: true })
+      textEdit.disabled = false
+    } catch (e) { textEdit.disabled = false; saveError = `Not saved: ${(e as Error).message}. Your text is kept here.`; update(false) }
+  }
+
+  // Edit: the saved draft when one exists and the person has not asked for
+  // another; a new one starts from the published definition fetched now.
+  async function edit(another: boolean) {
+    const by = actor()
+    if (!by) return
+    try {
+      const r = await api.startDraft(wsId, file, by, another)
+      location.hash = draftHash(wsId, file, r.draft.id)
+    } catch (e) {
+      const d = e instanceof ApiError ? e.detail as { code?: string; drafts?: DraftMeta[] } | undefined : undefined
+      if (d?.code === 'draft-exists' && d.drafts) { existingDrafts = d.drafts; chooser = true; renderSource(); return }
+      notice = `A draft could not be started: ${(e as Error).message}`
+      renderBanners()
+    }
+  }
+
+  async function compare() {
+    if (source.kind !== 'draft') return
+    try {
+      const c = await api.compareDraft(wsId, source.id)
+      if (disposed) return
+      const cmp = c.comparison
+      conflict = cmp.state === 'conflict' ? cmp.conflict : null
+      mergeNote = cmp.state === 'merged' ? 'Applying keeps both: the latest version\'s changes and this draft\'s do not touch the same places.' + (c.check?.issues.length || c.check?.problem ? ' The combined definition would have validation errors.' : '') : ''
+      renderSource()
+    } catch { /* the band already says when the source cannot be read */ }
+  }
+
+  // Apply publishes a saved revision. A timeout, lost response or a second click
+  // is answered by the journal, and the key stays until the outcome is known.
+  async function apply(saving: boolean) {
+    if (applying || !meta || !draftOpen()) return
+    const by = actor()
+    if (!by) return
+    if (saving && !(await save())) return
+    applying = true
+    applyNote = { tone: 'warn', text: 'Applying…' }
+    applyKey ||= `browser-${Array.from(crypto.getRandomValues(new Uint8Array(12)), b => b.toString(16).padStart(2, '0')).join('')}`
+    renderSource()
+    updateActions()
+    try {
+      const r = await api.applyDraft(wsId, draftId(), { revision: meta!.revision, by, key: applyKey })
+      meta = r.draft
+      if (r.ok) {
+        applyKey = ''
+        const done = r.apply.noChange ? 'The published definition already was this.' : `Applied${r.duplicate ? ' (found applied earlier)' : ''}. New runs use this version; runs already created keep theirs.`
+        if (r.draft.state === 'applied') { flash = done; location.hash = `#/ws/${encodeURIComponent(wsId)}/wf/${encodeURIComponent(file)}`; return }
+        applyNote = { tone: 'ok', text: `${done} Newer edits saved meanwhile stay in this draft, not yet applied.` }
+      } else {
+        if (r.apply.outcome === 'conflict' || r.apply.outcome === 'invalid') applyKey = ''
+        conflict = r.conflict ?? null
+        const issues = r.issues?.map(i => i.message).join('; ')
+        applyNote = {
+          tone: 'error',
+          text: r.apply.outcome === 'conflict' ? 'Not applied: the latest version has to be taken into account first. This draft is intact.'
+            : r.apply.outcome === 'invalid' ? `Not applied: ${r.problem ?? issues ?? r.apply.error}. This draft is intact.`
+              : r.apply.outcome === 'uncertain' ? `Not known yet: ${r.apply.error} Apply again to finish; nothing is published twice.`
+                : `Not applied: ${r.apply.error}`,
+        }
+      }
+      await load({})
+    } catch (e) {
+      // No answer: what happened is in the journal.
+      applyNote = { tone: 'error', text: `No answer from the service (${(e as Error).message}). Whether it was applied is not known yet; this view checks when it reconnects, and Apply finishes it without publishing twice.` }
+      await load({}).catch(() => undefined)
+      if (meta?.state === 'applied' || meta?.apply?.outcome === 'applied') applyNote = { tone: 'ok', text: 'Applied: the service had finished it.' }
+    } finally {
+      applying = false
+      renderSource()
+      updateActions()
+    }
+  }
+
+  async function resolveConflict(r: { text?: string; recreate?: boolean; retarget?: string }) {
+    if (!meta || !conflict) return
+    const by = actor()
+    if (!by) return
+    try {
+      const res = await api.resolveDraft(wsId, draftId(), { revision: meta.revision, by, latest: conflict.latest.sha256, ...r })
+      conflict = null; comparedAt = null
+      applyNote = { tone: 'ok', text: 'Resolved in this draft. Apply publishes it.' }
+      if (r.retarget) { location.hash = draftHash(wsId, r.retarget, draftId()); return }
+      adoptDraft(res)
+      textEdit.disabled = true
+      await load({ force: true })
+      textEdit.disabled = false
+    } catch (e) {
+      applyNote = { tone: 'error', text: `Not resolved: ${(e as Error).message}` }
+      comparedAt = null
+      await load({})
+    }
+    renderSource()
+  }
+
+  async function discard() {
+    if (!meta || !draftOpen()) return
+    const by = actor()
+    if (!by || !confirm('Remove this draft? Its changes are not applied.')) return
+    try {
+      await api.discardDraft(wsId, draftId(), meta.revision, by)
+      draft = saved // nothing left to warn about on the way out
+      location.hash = `#/ws/${encodeURIComponent(wsId)}/wf/${encodeURIComponent(file)}`
+    } catch (e) { saveError = `Not discarded: ${(e as Error).message}`; update(false) }
   }
 
   async function approve(kind: ApprovalKind) {
@@ -407,8 +660,7 @@ export function renderWorkflowView(root: HTMLElement, wsId: string, file: string
     if (!approver) { approvalError = 'Enter the approver name.'; renderApprovals(); approverInput.focus(); return }
     store(APPROVER_KEY, approver)
     try {
-      const r = await api.approve(wsId, file, kind, approver)
-      rev = r.rev
+      await api.approveDraft(wsId, draftId(), meta!.revision, kind, approver)
       await load({})
     } catch (e) {
       approvalError = `Approval refused: ${(e as Error).message}`
@@ -430,7 +682,8 @@ export function renderWorkflowView(root: HTMLElement, wsId: string, file: string
     crumbs.replaceChildren(
       h('a', { href: '#/' }, 'Projects'), h('span.sep', '/'),
       h('a', { href: `#/ws/${encodeURIComponent(wsId)}` }, projectName), h('span.sep', '/'),
-      h('span.here', 'Workflow'))
+      ...(runFacts ? [h('a', { href: runFacts.href }, `${source.kind === 'run' ? `${source.workflow}/${source.run}` : ''}`), h('span.sep', '/')] : []),
+      h('span.here', source.kind === 'run' ? 'Definition' : source.kind === 'draft' ? 'Draft' : source.kind === 'checkout' ? 'Checkout' : 'Workflow'))
   }
 
   function renderModeSwitch() {
@@ -473,31 +726,129 @@ export function renderWorkflowView(root: HTMLElement, wsId: string, file: string
     approveIntent.disabled = !canAct || !draft.intent.trim()
     approveDefinition.disabled = !canAct || hasErrors(issues)
     approveDefinition.title = hasErrors(issues) ? 'The definition has validation errors' : 'Approve the saved definition'
-    approvalNote.textContent = readonly() ? 'The file cannot be used now; nothing can be approved.' : dirty() ? 'States reflect the unsaved draft. Save before approving.' : 'Approvals record the saved file; a later change shows here as "changed since approval".'
+    approveIntent.hidden = approveDefinition.hidden = !draftOpen()
+    approvalNote.textContent = !draftOpen() ? 'Approvals are recorded in a draft: Edit to record one.' : problem ? 'The draft cannot be read now; nothing can be approved.' : dirty() ? 'States reflect unsaved edits. Save the draft before approving.' : 'Approvals record the saved draft; a later change shows here as "changed since approval".'
     approvalErrorEl.textContent = approvalError
     approvalErrorEl.hidden = !approvalError
   }
 
+  const publishedHash = (f = file) => `#/ws/${encodeURIComponent(wsId)}/wf/${encodeURIComponent(f)}`
   function renderBanners() {
     banners.replaceChildren()
+    if (flashText) banners.append(h('div.banner.ok', flashText, h('button.icon-btn', { 'aria-label': 'Dismiss', onclick: () => { flashText = ''; renderBanners() } }, '×')))
     if (!connected) {
-      banners.append(h('div.banner.warn', h('strong', 'Not connected to the editor service.'), ' Changes on disk are not shown until it reconnects; this view re-reads everything when it does.'))
+      banners.append(h('div.banner.warn', h('strong', 'Not connected to the editor service.'), ` What is shown may be out of date${head ? `; last checked ${when(head.fetch.at)}` : ''}. This view reads everything again when it reconnects.`))
     }
+    const where = source.kind === 'draft' ? 'this draft' : source.kind === 'checkout' ? 'the checkout' : source.kind === 'run' ? 'the run\'s record' : 'the published version'
     if (problem?.kind === 'missing') {
       const moved = saved && resp?.workflows.find(w => w.id === saved!.id && w.file !== file)
-      banners.append(h('div.banner.error', h('strong', `${file} no longer exists on disk`), ' (deleted or renamed). ',
-        saved ? 'The last version is shown read-only; saving is disabled and nothing is recreated. ' : '',
-        moved ? h('a.button', { href: `#/ws/${encodeURIComponent(wsId)}/wf/${encodeURIComponent(moved.file)}` }, `Open ${moved.file} (same workflow id)`) : 'Restore the file, or open the workflow under its new name from the project.'))
+      banners.append(h('div.banner.error', h('strong', `${file} is not in ${where}`), source.kind === 'published' ? ' (deleted, renamed or not applied yet). ' : ' (deleted or renamed). ',
+        saved ? 'The last version is shown read-only. ' : '',
+        moved ? h('a.button', { href: source.kind === 'checkout' ? `${publishedHash(moved.file)}/checkout` : publishedHash(moved.file) }, `Open ${moved.file} (same workflow id)`) : source.kind === 'published' ? 'Open the workflow from the project.' : ''))
     } else if (problem) {
-      banners.append(h('div.banner.error', h('strong', `The file on disk cannot be used: ${problem.kind}`), ` — ${problem.message}${problem.line ? ` (line ${problem.line}${problem.col ? `, column ${problem.col}` : ''})` : ''}. `,
-        saved ? 'Showing the last valid version read-only; saving is disabled so it cannot overwrite the file. Fix the file and the editor recovers.' : 'Fix the file; the editor reloads when it changes.'))
+      banners.append(h('div.banner.error', h('strong', `The definition in ${where} cannot be used: ${problem.kind}`), ` — ${problem.message}${problem.line ? ` (line ${problem.line}${problem.col ? `, column ${problem.col}` : ''})` : ''}. `,
+        draftOpen() ? 'Repair it as text below.' : source.kind === 'published' ? 'A run of it would be refused. Edit opens its text for repair.' : ''))
     }
+    if (source.kind === 'published' && sourceProblem && connected) {
+      banners.append(h('div.banner.error', h('strong', sourceState === 'absent' && !resp ? 'Not yet applied.' : 'The published version cannot be read now.'), ` ${sourceProblem}`, saved ? ' The last version read is shown; it may be out of date.' : ' Nothing from a checkout is shown in its place.'))
+    }
+    if (source.kind === 'draft' && sourceProblem && connected) banners.append(h('div.banner.warn', `The published version cannot be read now: ${sourceProblem}. Your draft is safe; validation and applying wait for it.`))
     if (externalChange) {
-      banners.append(h('div.banner.warn', 'The file changed on disk while you have unsaved edits. Your draft is kept. ',
-        h('button', { onclick: () => void load({ force: true }) }, 'Reload from disk (discard my edits)')))
+      banners.append(h('div.banner.warn', `This draft was saved elsewhere${meta ? ` (revision ${meta.revision}, by ${meta.updatedBy})` : ''} while you have unsaved edits. Yours are kept here and that save is kept there. `,
+        h('button', { onclick: () => void load({ force: true }) }, 'Show the saved draft (discard my edits)')))
     }
     if (saveError) banners.append(h('div.banner.error', saveError))
     if (notice) banners.append(h('div.banner.warn', notice, h('button.icon-btn', { 'aria-label': 'Dismiss', onclick: () => { notice = ''; renderBanners() } }, '×')))
+  }
+
+  // What this definition is, in simple mode too: the effect in words, revisions
+  // in the details, and what a draft or a change upstream means for the next run.
+  function renderSource() {
+    const facts: (HTMLElement | string | null)[] = []
+    const tag = (cls: string, text: string) => h(`span.source-tag.${cls}`, { dataset: { source: text } }, text)
+    const d = (pubSource ?? head)
+    if (source.kind === 'published') {
+      facts.push(tag(sourceProblem || problem ? 'warn' : 'ok', 'Applied'), h('span', problem || (!resp && sourceProblem) ? 'The project\'s published version.' : 'What a new run uses.'))
+      if (head?.fetch.state === 'stale') facts.push(h('span.source-stale', { dataset: { state: 'stale' } }, `Not up to date: Gitea could not be read (${head.fetch.error ?? 'unknown'}). Last checked ${when(head.fetch.at)}.`))
+      else if (head) facts.push(h('span.small.muted', { dataset: { checked: head.fetch.at } }, `Checked ${when(head.fetch.at)}`))
+    } else if (source.kind === 'draft') {
+      if (meta?.state === 'applied') facts.push(tag('ok', 'Applied'), h('span', `This draft was applied${meta.apply?.updated ? ` ${when(meta.apply.updated)}` : ''}. `), h('a', { href: publishedHash() }, 'See what runs use now'))
+      else if (meta?.state === 'discarded') facts.push(tag('warn', 'Discarded'), h('span', `This draft was discarded by ${meta.discarded?.by ?? 'someone'}. `), h('a', { href: publishedHash() }, 'See what runs use now'))
+      else if (!meta) facts.push(h('span.small.muted', sourceProblem || 'Reading the draft…'))
+      else {
+        facts.push(tag('edit', 'Editing'), h('span.source-state', { dataset: { state: 'not-applied' } }, 'Changes not yet applied'), h('span.small.muted', `Draft by ${meta.author} · revision ${meta.revision}, saved ${when(meta.updated)}${meta.updatedBy !== meta.author ? ` by ${meta.updatedBy}` : ''}`))
+        if (meta.provenance.kind === 'import') facts.push(h('span.small.muted', `Imported from ${meta.provenance.workspace}'s checkout (${meta.provenance.edit})`))
+        if (meta.provenance.kind === 'new') facts.push(h('span.small.muted', 'A new workflow: it does not exist for runs until applied'))
+      }
+    } else if (source.kind === 'run' && runFacts) {
+      facts.push(tag('run', 'Definition used by this run'), h('span', source.revision && source.revision !== 'r1' ? `Revision ${source.revision} of this run's definition.` : 'What this run started with.'), h('span.small.muted', `In force now: ${runFacts.active}`), h('a', { href: runFacts.href }, 'Back to the run\'s progress'), h('a', { href: publishedHash() }, 'Latest version'))
+      if (runFacts.revisions.length > 1) facts.push(h('span.run-revisions', ...runFacts.revisions.map(r => h(`a.button${(source.revision ?? 'r1') === r ? '.active' : ''}`, { href: `${runFacts!.href}/definition/${r}` }, r))))
+    } else if (source.kind === 'checkout') {
+      facts.push(tag('warn', 'Checkout'), h('span', 'What one host\'s checkout holds. Runs do not read it.'), h('a', { href: publishedHash() }, 'See what runs use'))
+    }
+    if (whoNeeded()) facts.push(h('label.small.who-label', 'Your name ', whoInput))
+    const details = source.kind === 'run' && runFacts ? runFacts.text
+      : d ? `${d.definitions?.repository ?? d.repository}@${short(d.definitions?.commit ?? d.commit)}:${d.definitions?.path ?? 'devdocs/workflows'}/${file}${d.definitions && d.definitions.repository !== d.repository ? ` · pinned by ${d.repository}@${short(d.commit)}` : ''} on ${d.branch}${rev && source.kind === 'published' ? ` · sha256 ${(resp as { descriptor?: { digest?: string | null } } | null)?.descriptor?.digest?.slice(0, 12) ?? ''}` : ''}` : ''
+    const panels: (HTMLElement | null)[] = []
+    if (source.kind === 'published') {
+      const newer = head && pubSource && head.commit !== pubSource.commit
+      if (newer) panels.push(h('div.banner.warn', 'Latest version changed; reading it…'))
+      const mine = existingDrafts
+      if (chooser && mine.length) panels.push(draftsChooser(wsId, mine, (resp as { descriptor?: { digest?: string | null } } | null)?.descriptor?.digest ?? null, () => void edit(true)))
+      else if (mine.length) panels.push(h('div.banner.draft-note', h('span', mine.length === 1 ? `A draft by ${mine[0]!.author} is not yet applied.` : `${mine.length} drafts are not yet applied.`), h('a.button', { href: draftHash(wsId, file, mine[0]!.id) }, mine.length === 1 ? 'Resume draft' : 'Resume the latest'), mine.length > 1 ? h('button', { type: 'button', onclick: () => { chooser = true; renderSource() } }, 'See all') : null))
+    }
+    if (source.kind === 'draft' && draftOpen()) {
+      if (latest?.changed && !conflict) panels.push(h('div.banner.warn', h('strong', 'Latest version changed'), ` since this draft began. ${mergeNote || 'Applying takes it into account.'}`, h('a.small', { href: publishedHash(), target: '_blank' }, ' See the latest')))
+      if (latest?.deleted && !conflict) panels.push(h('div.banner.warn', `${file} is not in the published version any more.`))
+      if (tryOpen) panels.push(renderTry())
+      if (conflict) panels.push(conflictPanel(conflict, { busy: applying, resolve: r => void resolveConflict(r), discard: () => void discard() }))
+    }
+    if (applyNote && source.kind === 'draft') panels.push(h(`div.banner.${applyNote.tone}`, { dataset: { apply: meta?.apply?.outcome ?? '' }, role: 'status' }, applyNote.text))
+    sourceBand.replaceChildren(h('div.source-line', ...facts), details ? h('p.small.muted.d-only.source-details', details) : '', ...panels.filter((x): x is HTMLElement => !!x))
+  }
+  const whoNeeded = () => (source.kind === 'published' || source.kind === 'draft') && (!whoInput.value.trim() || document.activeElement === whoInput)
+
+  // A trial: the exact saved revision, on the published code. Unsaved edits are
+  // saved by the action, so the run tries what was on the screen.
+  const tryText = h('textarea', { rows: 3, 'aria-label': 'What to ask this trial', placeholder: 'Your words: what this trial should do.' }) as HTMLTextAreaElement
+  function renderTry(): HTMLElement {
+    const src = pubSource
+    const go = h('button.primary', { onclick: async () => {
+      const by = actor()
+      if (!by) return
+      if (!tryText.value.trim()) { tryResult = h('div.banner.error', 'Give your words for the trial.'); renderSource(); return }
+      if (dirty() && !(await save())) return
+      tryKey ||= `browser-${Array.from(crypto.getRandomValues(new Uint8Array(16)), b => b.toString(16).padStart(2, '0')).join('')}`
+      go.disabled = true
+      try {
+        const r = await api.tryDraft(wsId, draftId(), { revision: meta!.revision, text: tryText.value, author: by, receipt: tryKey, by })
+        tryResult = h('div.banner.ok', `${r.duplicate ? 'Already started' : 'Started'}: `, h('a', { href: `#/ws/${encodeURIComponent(wsId)}/run/${encodeURIComponent(r.ref.workflow)}/${encodeURIComponent(r.ref.run)}` }, `${r.ref.workflow}/${r.ref.run}`), ` trying revision ${meta!.revision} of this draft.`)
+        tryText.value = ''; tryKey = ''
+      } catch (e) { tryResult = h('div.banner.error', `Not started: ${(e as Error).message}`) }
+      renderSource()
+    } }, dirty() ? 'Save and try' : 'Try this revision')
+    return h('section.try-panel', { 'aria-label': 'Try this draft' },
+      h('p.small', `Runs revision ${meta?.revision ?? ''} of this draft${dirty() ? ', after saving your edits as the next revision,' : ''} on the project's published code${src ? ` (${src.repository}@${short(src.commit)})` : ''}. It tries the definition: project code that is not published is not part of it. The run records this draft and revision.`),
+      tryText, h('div.save-row', go), tryResult)
+  }
+
+  // The header's actions follow the source and what can be done now.
+  function updateActions() {
+    const open = draftOpen()
+    editButton.hidden = source.kind !== 'published' || (!!sourceProblem && !resp)
+    editButton.textContent = problem ? 'Edit text' : 'Edit'
+    saveButton.hidden = applyButton.hidden = saveApplyButton.hidden = tryButton.hidden = discardButton.hidden = !open
+    const canSave = !problem && dirty()
+    saveButton.disabled = !canSave || applying
+    tryButton.disabled = !!problem || applying
+    applyButton.hidden ||= canSave
+    applyButton.disabled = !!problem || applying
+    applyButton.textContent = applying ? 'Applying…' : 'Apply'
+    saveApplyButton.hidden ||= !canSave
+    saveApplyButton.disabled = applying
+    saveApplyButton.textContent = applying ? 'Applying…' : 'Save and apply'
+    textButton.setAttribute('aria-pressed', String(textOpen))
+    textButton.classList.toggle('active', textOpen)
   }
 
   function update(rebuildInspector: boolean, fromDisk = false) {
@@ -505,22 +856,26 @@ export function renderWorkflowView(root: HTMLElement, wsId: string, file: string
     if (disposed) return
     renderCrumbs()
     renderModeSwitch()
-    fileLine.textContent = `workflows/${file} · workspace ${wsId}`
+    fileLine.textContent = `workflows/${file}`
+    renderSource()
+    updateActions()
+    // The text: read-only, or a draft's own to repair.
+    const textWanted = textOpen || !draft
+    const writing = textWanted && draftOpen()
+    textPanel.hidden = !writing
+    if (!writing) rawView.textContent = resp?.text ?? ''
+    rawView.hidden = !textWanted || writing || !resp?.text
+    canvas.el.hidden = textWanted
+    toolbar.hidden = textWanted
     if (!draft) {
       nameInput.disabled = intentInput.disabled = true
-      rawView.textContent = resp?.text ?? ''
-      rawView.hidden = !resp?.text
-      canvas.el.hidden = true
       renderBanners()
       validation.hidden = true
       policyChip.hidden = true
-      saveButton.disabled = true
       addButton.disabled = arrangeButton.disabled = settingsToggle.disabled = intentToggle.disabled = true
       purpose.textContent = ''
       return
     }
-    canvas.el.hidden = false
-    rawView.hidden = true
     if (fromDisk || document.activeElement !== nameInput) nameInput.value = draft.name
     if (fromDisk || document.activeElement !== intentInput) intentInput.value = draft.intent
     intentInput.rows = Math.min(10, Math.max(3, intentInput.value.split('\n').reduce((n, line) => n + Math.max(1, Math.ceil(line.length / 72)), 0)))
@@ -534,13 +889,15 @@ export function renderWorkflowView(root: HTMLElement, wsId: string, file: string
     purpose.replaceChildren(first ? h('span', { title: draft.intent }, first) : h('span.warn-text', 'No purpose yet — write it in Context.'))
     if (savedIntent.textContent !== (saved?.intent ?? '')) savedIntent.textContent = saved?.intent ?? ''
     guidesEditor.set(draft.execution.guides, readonly())
+    sharedSave.hidden = !draftOpen()
     sharedSave.disabled = readonly() || !dirty()
     sharedState.textContent = saveStateEl.textContent
-    ctxSection.setWorkflow(saved?.id || draft.id || null)
+    // A workflow that exists only as this draft has no published context yet.
+    ctxSection.setWorkflow(source.kind === 'draft' && meta?.base.sha256 === null ? null : saved?.id || draft.id || null)
     ctxSection.updateSummary()
     const issues = validateWorkflow(draft, context())
     const errors = issues.filter(i => i.severity === 'error'), warnings = issues.filter(i => i.severity === 'warning')
-    validation.hidden = false
+    validation.hidden = source.kind === 'run' // a run's record is what it was, not checked again
     validation.className = `v-summary${errors.length ? ' error' : warnings.length ? ' warn' : ' ok'}`
     validation.replaceChildren(icon(errors.length || warnings.length ? 'alert' : 'check', 'icon small'),
       errors.length || warnings.length ? `${errors.length} error${errors.length === 1 ? '' : 's'}, ${warnings.length} warning${warnings.length === 1 ? '' : 's'}` : 'Valid')
@@ -558,10 +915,10 @@ export function renderWorkflowView(root: HTMLElement, wsId: string, file: string
       !steps ? `Documentation: ${policySummary(draft.documentation)}`
         : !compiled.ok && generated ? `${policy === 'custom' ? 'Custom' : 'Default'} documentation — preview unavailable: ${compiled.message}`
           : generated ? `${policy === 'custom' ? 'Custom' : 'Default'} documentation: ${generated}` : `${policy === 'custom' ? 'Custom' : 'Manual'} documentation: no plan or reports`)
-    saveButton.disabled = readonly() || !dirty()
-    saveStateEl.textContent = saveError ? 'Save failed' : problem ? 'Read-only' : dirty() ? 'Unsaved changes' : (saveState || 'Saved')
+    updateActions()
+    saveStateEl.textContent = source.kind !== 'draft' ? (source.kind === 'checkout' ? 'Read-only' : '') : saveError ? 'Not saved' : !draftOpen() ? 'Read-only' : problem ? 'Cannot be read' : dirty() ? 'Unsaved changes' : (saveState || 'Saved in the draft')
     saveStateEl.className = `save-state${saveError ? ' error' : dirty() ? ' dirty' : ''}`
-    sharedState.textContent = saveError ? 'Save failed — see the banner above' : saveStateEl.textContent
+    sharedState.textContent = saveError ? 'Not saved — see the banner above' : saveStateEl.textContent
     if (selection?.kind === 'node' && !draft.nodes[selection.id]) selection = null
     if (selection?.kind === 'edge' && !draft.edges[selection.index]) selection = null
     if (selection?.kind === 'step' && !effective?.nodes[selection.id]) selection = null
@@ -584,14 +941,11 @@ export function renderWorkflowView(root: HTMLElement, wsId: string, file: string
 
   // ---- external changes ----------------------------------------------------
 
-  const stream = live(api.eventsUrl(wsId), {
+  // A checkout's file changes on its disk; the service says so while this is open.
+  const stream = source.kind !== 'checkout' ? null : live(api.eventsUrl(wsId), {
     classify: ev => {
-      if (ev.kind === 'workflow' && ev.file === file) {
-        if (ev.rev !== null && ev.rev === rev) return null // our own save, or content we already show
-        if (dirty() && ev.rev !== null) { externalChange = true; renderBanners(); return null }
-        return ['content']
-      }
-      // Run progress never touches a definition or its draft.
+      if (ev.kind === 'workflow' && ev.file === file) return ev.rev !== null && ev.rev === rev ? null : ['content']
+      // Run progress never touches a definition.
       if (ev.kind === 'registry' || ev.kind === 'run' || ev.kind === 'runs') return null
       // Other workflows, the project, .gitmodules or Git state: references and repositories.
       return ['context']
@@ -600,9 +954,43 @@ export function renderWorkflowView(root: HTMLElement, wsId: string, file: string
     state: c => { connected = c; renderBanners() },
   })
 
+  // A published or draft view keeps up with the project: the default branch's
+  // head, cheap and coalesced by the service, and in a draft its own revision.
+  // Unsaved edits are never replaced by either.
+  let polling = false
+  async function poll() {
+    if (disposed || polling || document.hidden || (source.kind !== 'published' && source.kind !== 'draft')) return
+    polling = true
+    try {
+      const was = connected
+      const check = await api.publishedHead(wsId).catch(e => {
+        if (e instanceof ApiError && e.status !== 0) { sourceProblem = e.message; sourceState = (e.detail as { state?: string } | undefined)?.state ?? ''; return null }
+        throw e
+      })
+      if (disposed) return
+      connected = true
+      if (check) head = check.source
+      const moved = !!check && check.source.commit !== pubSource?.commit
+      let again = !was || moved
+      if (source.kind === 'draft' && meta) {
+        const mine = (await api.drafts(wsId, file)).drafts.find(x => x.id === source.id)
+        // Gone from the open list, or saved elsewhere, or an apply elsewhere went on.
+        if (!mine || mine.revision !== meta.revision || mine.apply?.updated !== meta.apply?.updated) again = true
+      }
+      if (again) await load({})
+      else { if (check && source.kind === 'published' && sourceProblem) { sourceProblem = ''; await load({}) } renderSource(); renderBanners() }
+    } catch {
+      if (connected) { connected = false; renderBanners() }
+    } finally { polling = false }
+  }
+  const timer = setInterval(() => void poll(), POLL_MS)
+  const onVisible = () => { if (!document.hidden) void poll() }
+  document.addEventListener('visibilitychange', onVisible)
+  whoInput.addEventListener('blur', () => { if (whoInput.value.trim()) { store(ACTOR_KEY, whoInput.value.trim()); renderSource() } })
+
   const onKey = (e: KeyboardEvent) => {
     const t = e.target as HTMLElement
-    if ((e.metaKey || e.ctrlKey) && e.key === 's') { e.preventDefault(); void save(); return }
+    if ((e.metaKey || e.ctrlKey) && e.key === 's') { e.preventDefault(); if (draftOpen()) void save(); return }
     if (t.closest('input, textarea, select')) return
     if (e.key === 'Escape') {
       if (!palette.hidden) { closePalette(true); return }
@@ -617,11 +1005,13 @@ export function renderWorkflowView(root: HTMLElement, wsId: string, file: string
 
   renderCrumbs()
   void load({})
+  renderSource()
+  updateActions()
   void loadProjectName()
   if (opts.context) requestAnimationFrame(() => ctxSection.reveal(false))
 
   return {
-    dispose: () => { disposed = true; offDisplay(); stream.close(); canvas.dispose(); ctxSection.dispose(); window.removeEventListener('keydown', onKey); document.removeEventListener('pointerdown', onOutside) },
-    isDirty: () => dirty() || ctxSection.isDirty(),
+    dispose: () => { disposed = true; clearInterval(timer); document.removeEventListener('visibilitychange', onVisible); offDisplay(); stream?.close(); canvas.dispose(); ctxSection.dispose(); window.removeEventListener('keydown', onKey); document.removeEventListener('pointerdown', onOutside) },
+    isDirty: () => dirty() || textDirty() || ctxSection.isDirty(),
   }
 }

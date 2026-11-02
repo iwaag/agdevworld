@@ -137,6 +137,7 @@ test('a draft is saved durably, with revision checks, and ordinary execution sti
   assert.equal(saved.revision, 2)
   // A second tab holding revision 1 overwrites nothing.
   await assert.rejects(saveDraft(s.store, d.id, { revision: 1, by: 'Bea', text: wf('freework', 'Other tab.') }), (e: Error & { detail?: { code: string; revision: number } }) => e.detail?.code === 'draft-revision-conflict' && e.detail.revision === 2)
+  await assert.rejects(saveDraft(s.store, d.id, { revision: 2, by, text: ' \n' }), /empty definition/)
   // A new store (a restart) reads the same bytes.
   const again = await new DraftStore(s.area).read(d.id)
   assert.match(again.text, /Build carefully/)

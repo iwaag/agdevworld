@@ -45,7 +45,7 @@ class Refused extends Error { detail?: unknown; constructor(m: string, detail?: 
 // ---- arguments ---------------------------------------------------------------
 
 interface Parsed { positional: string[]; opts: Map<string, string[]>; flags: Set<string> }
-const FLAGS = new Set(['preview', 'json', 'help', 'resume', 'h', 'new', 'history', 'no-gitea', 'reuse', 'lost', 'uncertain', 'found', 'complete', 'not-posted', 'ok', 'about-plan', 'all', 'dry-run', 'commit', 'push', 'status', 'rebuild', 'allow-live-executor', 'terminal', 'missing', 'retire', 'upstream', 'published', 'regex', 'ignore-case', 'refresh', 'quick', 'verify-all', 'rendered', 'delivered', 'undelivered', 'partial', 'person', 'integration', 'conclude', 'close', 'no-title', 'if-untitled', 'queue', 'yes', 'no-default', 'none', 'no-change', 'synthetic', 'apply', 'replace', 'current', 'reopen', 'check-bytes', 'editing', 'no-failure-cases']) // p7: present stop --all, run adjust --dry-run
+const FLAGS = new Set(['preview', 'json', 'help', 'resume', 'h', 'new', 'history', 'no-gitea', 'reuse', 'lost', 'uncertain', 'found', 'complete', 'not-posted', 'ok', 'about-plan', 'all', 'dry-run', 'commit', 'push', 'status', 'rebuild', 'allow-live-executor', 'terminal', 'missing', 'retire', 'upstream', 'published', 'regex', 'ignore-case', 'refresh', 'quick', 'verify-all', 'rendered', 'delivered', 'undelivered', 'partial', 'person', 'integration', 'conclude', 'close', 'no-title', 'if-untitled', 'queue', 'yes', 'no-default', 'none', 'no-change', 'synthetic', 'apply', 'replace', 'current', 'reopen', 'check-bytes', 'editing', 'no-failure-cases', 'another']) // p7: present stop --all, run adjust --dry-run
 function parse(argv: string[]): Parsed {
   const p: Parsed = { positional: [], opts: new Map(), flags: new Set() }
   for (let i = 0; i < argv.length; i++) {
@@ -336,15 +336,45 @@ same operation as the project view's "Add submodule": git submodule add.
 Local file transport is enabled for this command only. The submodule is
 staged in the project root, not committed.
 Exit 0 added; 1 failed (what Git left behind is reported; nothing is reset).`,
+  draft: `wfe draft list [<file>] [--workspace <id>]
+wfe draft show <id> [--workspace <id>]
+wfe draft start <file> --by <name> [--another] [--workspace <id>]
+wfe draft save <id> --file <yaml|-> --revision <n> --by <name> [--workspace <id>]
+wfe draft compare <id> [--workspace <id>]
+wfe draft try <id> --revision <n> --braindump <file|-> --author <person> [--receipt <id>] [--workspace <id>]
+wfe draft apply <id> --revision <n> --by <name> [--key <id>] [--workspace <id>]
+wfe draft discard <id> --revision <n> --by <name> [--workspace <id>]
+wfe draft edits [--workspace <id>]
+wfe draft import <file> --sha256 <hash> --by <name> [--workspace <id>]
+
+Drafts of a project's workflow definitions, as the editor makes them
+(docs/drafts.md). They live in the service's storage, not in a checkout, and
+need no Git operation. Saving changes nothing a run reads.
+
+start    a draft of the published definition, fetched now; refused when one
+         exists unless --another
+save     names the revision it was made from; another's newer save refuses it
+compare  what applying would do now, publishing nothing
+try      a trial of that exact saved revision, on the published code; project
+         code that is not published is not part of it
+apply    publishes the revision: merges with upstream changes, validates, commits
+         only the definition (and a submodule's pin) and reads it back through
+         the resolver ordinary runs use. Exit 0 applied; 1 conflict, invalid,
+         failed or uncertain, with the draft intact. Applying again is safe.
+edits    workflow edits only this checkout holds; a checkout merely behind has none
+import   makes one of them a draft, with its real base; the checkout is unchanged`,
   workflow: `wfe workflow new <id> [--name <name>] [--policy default|manual|custom [--steps plan,reports,final]] [--template <id>] [--workspace <id>]
 wfe workflow show <workflow> [--workspace <id>]
 wfe workflow save <workflow> --file <yaml|-> --base <rev> [--workspace <id>]
 
+These operate on this workspace's checkout, for whoever deliberately works
+there. Runs do not read it: the effect reaches them only when the file reaches
+the project's default branch (a person's draft goes there by wfe draft apply).
+
 show prints the definition file as it is on disk and its revision (the
-content hash the editor shows). save writes a changed definition the way the
-editor's Save does — the file only, never a commit — after checking that the
-file is still at --base: a file someone changed since (in the editor or on
-disk) is not overwritten; the refusal names its current revision (exit 1,
+content hash the checkout view shows). save writes the checkout's file only,
+never a commit, and is not a draft save — after checking that the
+file is still at --base: a file someone changed since (on disk) is not overwritten; the refusal names its current revision (exit 1,
 code definition-conflict), so read it again and reapply the change. The new
 text must parse as a workflow (ag.workflow.v2); the file's own comments and
 key order are kept where the model did not change. Validation issues are
@@ -368,8 +398,8 @@ the branch has an upstream.
 
 Creates devdocs/workflows/<id>.yaml from a template (--template, default
 "empty": schema, id, name, empty intent, no nodes; documentation policy
---policy, default the template's), as the project view's "Create workflow"
-does. --policy custom takes --steps: the generated documents to keep, any of
+--policy, default the template's), in this checkout (the project view's "Create
+workflow" starts a draft instead). --policy custom takes --steps: the generated documents to keep, any of
 plan, reports, final, comma-separated ("none" for none).
 \`wfe workflow templates\` lists the templates. Under the default
 policy a run plans, reports each node and reports the whole (docs/contract.md,
@@ -405,7 +435,8 @@ Which definition runs (improve_wfrun p1): the workflow as published on the
 project's default branch on Gitea, fetched now, and the run's code at the same
 commit — never this workspace's files, whether it is behind, edited or on
 another branch. run.json definition.source names the commit.
---editing runs a trial of this workspace's file of <workflow> instead: its
+--editing runs a trial of this checkout's file of <workflow> instead (a
+person's unapplied changes are tried with wfe draft try): its
 exact bytes (definition.source kind trial, with their sha256) on the published
 code; the workspace's uncommitted project code is not part of it.`,
   workspace: `wfe workspace status [--workspace <id>] [--refresh]
@@ -778,8 +809,11 @@ Projects and workspaces
   projects <subcommand>     read any managed project: list, show, tree, read, search, runs, run
                             (committed by default, at a revision, with provenance; docs/access.md)
   request <workflow> …      a person's request to the executor (autolab): a run of the published
-                            workflow, queued (--editing: a trial of this workspace's file)
-  workspace status|sync     this workspace against the published source; fast-forward it when safe
+                            workflow, queued (--editing: a trial of this checkout's file)
+  draft <subcommand>        drafts of a workflow, as the editor makes them: list, show, start, save,
+                            compare, try, apply, discard, edits, import (docs/drafts.md)
+  workspace status|sync     this checkout against the published source; fast-forward it when safe
+                            (for whoever works in it: nothing about workflows depends on it)
   intake <subcommand>       requests from Zulip: status, messages, receive, process … (autolab fetches)
   exec <subcommand>         the executor's interface: claim, started, finished, stops, reconcile …
   runs index [--rebuild]    runs' own working copies on this host (p9)
@@ -802,7 +836,7 @@ Projects and workspaces
                             from), get|set|clear|history (the local overrides), run (used vs next)
 
 Workflows (by file name or id)
-  workflow new <id>         create devdocs/workflows/<id>.yaml from the template
+  workflow new <id>         create devdocs/workflows/<id>.yaml in this checkout, from the template
   nodes <subcommand>        the person's node catalog: list, show, create, update, delete,
                             example, instantiate (a template into a workflow or a run draft)
   validate [<workflow>]     validation issues
@@ -1996,7 +2030,7 @@ const COMMANDS: Record<string, (p: Parsed) => Promise<number>> = {
   runs: cmdRuns, 'rename-project': cmdRenameProject, observe: cmdObserve, projects: cmdProjects, run: cmdRun, delegate: cmdDelegate, review: cmdReview, present: cmdPresent, share: cmdShare, project: cmdProject, repo: cmdRepo, gitea: cmdGitea, dashboard: cmdDashboard, exec: cmdExec, request: cmdRequest, notify: cmdNotify, intake: cmdIntake,
   create: cmdCreate, register: cmdRegister, list: cmdList, status: cmdStatus, validate: cmdValidate,
   approve: cmdApprove, arrange: cmdArrange, 'add-repo': cmdAddRepo, workflow: cmdWorkflow, serve: cmdServe, setup: cmdSetup,
-  version: cmdVersion, nodes: cmdNodes, workspace: cmdWorkspace, boast: cmdBoast, context: cmdContext, challenge: cmdChallenge, conversation: cmdConversation, discussion: cmdConversation, dialogue: cmdDialogue,
+  version: cmdVersion, nodes: cmdNodes, workspace: cmdWorkspace, draft: cmdDraft, boast: cmdBoast, context: cmdContext, challenge: cmdChallenge, conversation: cmdConversation, discussion: cmdConversation, dialogue: cmdDialogue,
 }
 
 // Challenges (challenge p1, docs/challenges.md).
@@ -2036,6 +2070,72 @@ async function cmdContext(p: Parsed): Promise<number> {
     workspace: () => workspace(p), exec: () => openExec(p),
     resolveRun: async (ws, text) => (await import('../server/runs.ts')).resolveRef(ws, text),
   })
+}
+
+// Drafts (workflow_editor p20, docs/drafts.md): the service's code, on its storage.
+async function cmdDraft(p: Parsed): Promise<number> {
+  const [sub, arg] = p.positional
+  const ws = await workspace(p)
+  const g = await giteaOf(p)
+  if (!g) throw new Refused(`drafts are published through Gitea, which is not configured here (${giteaFile(p)})`)
+  const ctx = { registryFile: registryFile(p), area: areaDir(p), gitea: g }
+  const d = await import('../server/drafts.ts')
+  const store = new d.DraftStore(areaDir(p))
+  const need = (k: string) => { const v = opt(p, k); if (!v) throw new UsageError(`--${k} is required`); return v }
+  const revision = () => { const n = Number(need('revision')); if (!Number.isInteger(n)) throw new UsageError('--revision is a number'); return n }
+  const id = () => { if (!arg) throw new UsageError(`draft ${sub} needs a draft id`); return arg }
+  const line = (x: import('../shared/drafts.ts').DraftMeta) => `  ${x.id}  ${x.file.padEnd(24)} r${String(x.revision).padEnd(4)} ${x.state.padEnd(9)} by ${x.author}, saved ${x.updated}${x.apply ? `; last apply ${x.apply.outcome}` : ''}`
+  const said = (x: import('../shared/drafts.ts').DraftRecord, what: string) => { out(`${what}\n${line(d.draftMeta(x))}`, d.draftMeta(x)); return 0 }
+  try {
+    if (sub === 'list') {
+      const list = (await store.list({ project: ws.reg.project, file: arg })).map(d.draftMeta)
+      out(list.length ? list.map(line).join('\n') : 'No open drafts.', { drafts: list })
+      return 0
+    }
+    if (sub === 'show') {
+      const r = await d.readDraft(ctx, store, ws.reg, id())
+      const errors = r.issues.filter(i => i.severity === 'error')
+      out([line(r.draft), `base: ${r.draft.base.source?.definition ? `${r.draft.base.source.definition.repository}@${r.draft.base.source.definition.revision.slice(0, 10)}` : r.draft.provenance.kind}`, `latest version: ${r.sourceProblem ?? (r.latest?.deleted ? 'deleted' : r.latest?.changed ? 'changed since this draft began' : 'unchanged')}`, `validation: ${r.problem ? r.problem.message : errors.length ? errors.map(i => i.message).join('; ') : 'no errors'}`, '', r.text ?? ''].join('\n'), r)
+      return 0
+    }
+    if (sub === 'start') { if (!arg) throw new UsageError('draft start needs a workflow file'); return said(await d.startDraft(ctx, store, ws.reg, { file: arg, by: need('by'), another: p.flags.has('another') }), 'Started from the published definition.') }
+    if (sub === 'save') return said(await d.saveDraft(store, id(), { revision: revision(), by: need('by'), text: readFileSync(need('file') === '-' ? 0 : resolve(need('file')), 'utf8') }), 'Saved. Runs use it once applied.')
+    if (sub === 'discard') return said(await d.discardDraft(store, id(), { revision: revision(), by: need('by') }), 'Discarded.')
+    if (sub === 'compare') {
+      const r = await d.compareDraft(ctx, store, ws.reg, id())
+      const c = r.comparison
+      out(c.state === 'conflict' ? `conflict (${c.conflict.kind}): ${c.conflict.message}` : `${c.state}${r.check?.problem || r.check?.issues.length ? `; would be invalid: ${r.check.problem ?? r.check.issues.map(i => i.message).join('; ')}` : ''}`, r)
+      return 0
+    }
+    if (sub === 'apply') {
+      const r = await d.applyDraft(ctx, store, ws.reg, id(), { revision: revision(), by: need('by'), key: opt(p, 'key') })
+      const src = r.apply.result
+      out(r.ok ? `Applied${r.duplicate ? ' (found applied earlier)' : ''}: ${src?.definition ? `${src.definition.repository}@${src.definition.revision.slice(0, 10)}` : ''}${r.apply.root ? `, pin ${r.apply.root.repository}@${r.apply.root.commit.slice(0, 10)}` : ''}. New runs use it.` : `Not applied (${r.apply.outcome}): ${r.apply.error}${r.issues?.length ? `\n${r.issues.map(i => `  ${i.message}`).join('\n')}` : ''}\nThe draft is kept.`, r)
+      return r.ok ? 0 : 1
+    }
+    if (sub === 'try') {
+      const dr = await store.read(id())
+      if (dr.project !== ws.reg.project) throw new Refused(`draft ${dr.id} is of project ${dr.project}`)
+      if (dr.revision !== revision()) throw new Refused(`draft ${dr.id} is at revision ${dr.revision}, not ${opt(p, 'revision')}`)
+      const x = await openExec(p)
+      try {
+        const r = await x.request({ workspace: ws.reg.id, workflow: dr.file, text: readFileSync(need('braindump') === '-' ? 0 : resolve(need('braindump')), 'utf8'), author: need('author'), receipt: opt(p, 'receipt') ?? `cli-${Date.now()}-${process.pid}`, via: 'cli', trial: { file: dr.file, sha256: dr.sha256, draft: { id: dr.id, revision: dr.revision, author: dr.author, text: dr.text } } })
+        out(`${r.duplicate ? 'Already started' : 'Started'} ${r.ref.workflow}/${r.ref.run}, trying revision ${dr.revision} of ${dr.id} on the published code.`, r)
+        return 0
+      } finally { x.close() }
+    }
+    if (sub === 'edits' || sub === 'import') {
+      const m = await import('../server/localEdits.ts')
+      if (sub === 'import') { if (!arg) throw new UsageError('draft import needs a workflow file'); return said(await m.importEdit(ctx, store, ws.reg, { file: arg, sha256: need('sha256'), by: need('by') }), 'Imported; the checkout is unchanged and nothing is applied.') }
+      const v = await m.localEdits(ctx, store, ws.reg)
+      out(v.edits.length ? v.edits.map(e => `  ${e.file.padEnd(24)} ${e.edit.padEnd(14)} sha256 ${e.sha256}${e.draft ? `  (draft ${e.draft.id}, ${e.draft.state})` : ''}`).join('\n') : `No workflow edits only in this checkout.${v.available ? '' : ` (${v.reason})`}`, v)
+      return 0
+    }
+    throw new UsageError('draft needs list, show, start, save, compare, try, apply, discard, edits or import')
+  } catch (e) {
+    if (e instanceof RequestError) throw new Refused(e.message)
+    throw e
+  }
 }
 
 // The workspace beside the published source (improve_wfrun p1).

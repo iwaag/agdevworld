@@ -23,14 +23,14 @@ work is kept (its own working copy and branches, p9) is in
 [docs/storage.md](docs/storage.md), and how an accepted result reaches the
 project's shared branches in [docs/integration.md](docs/integration.md).
 
-**Published and editing (improve_wfrun p1).** Which workflows a project offers,
-and what an ordinary run follows, is its committed default branch on Gitea,
-resolved to one commit for the definition and the run's code
+**Published and drafts (improve_wfrun p1, workflow_editor p20).** Which workflows a project offers,
+and what an ordinary run follows, is the project's committed default branch on Gitea
 ([docs/access.md](docs/access.md) *Published workflows*, [docs/runs.md](docs/runs.md)
-*Definition snapshot*). The registered workspace is where workflows are edited;
-the editor shows both, a trial runs editing bytes on the published code, and the
-workspace can be fast-forwarded when that is safe
-([docs/storage.md](docs/storage.md) *The workspace and the published source*).
+*Definition snapshot*). The editor shows that graph; a person edits it in a durable
+draft, tries a saved revision on the published code, and applies it from the GUI:
+merged with upstream changes, validated, published and read back, with no Git
+operation and no checkout involved ([docs/drafts.md](docs/drafts.md)). A checkout is
+for whoever chooses to work in one (`wfe workspace status|sync`).
 
 **Writers take turns.** UI edits and external edits are assumed not to overlap.
 
@@ -304,8 +304,10 @@ opens it). Work and documentation steps are counted apart. Under `manual`
 nothing is added. Changing the policy changes the preview and makes the
 definition approval stale; it never changes a saved run.
 
-**The two screens (p8).** The workflow editor has a slim header (crumbs,
-Refresh, save state, Save), a title band (the editable name, the intent's
+**The two screens (p8).** The workflow view has a slim header (crumbs,
+Refresh, save state, the source's actions: Edit on a published definition; Try draft,
+Save draft, Apply or Save and apply, Discard draft on a draft), a band saying what the
+definition is, a title band (the editable name, the intent's
 first line, both approval states, a validation chip and two explicit entries:
 **Intent & approvals** — the authoritative intent, the declared approver and
 the two approvals — and **Workflow settings** — policy, bindings, the full

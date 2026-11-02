@@ -1,9 +1,9 @@
 // Thin client for the local service. Errors carry the service's message.
 import type {
   AddSubmoduleResponse, AgdevResult, CreateProjectResult, DashboardResponse, ProjectResponse, RegisterResponse, RunOpResponse, RunResponse, RunSummary, SaveResponse,
-  WorkflowResponse, WorkspacesResponse, PublishedResponse, PublishedSourceView, SyncResultView,
+  WorkflowResponse, WorkspacesResponse, PublishedResponse, PublishedSourceView, SyncResultView, DefinitionDescriptor,
 } from '../shared/api.ts'
-import type { ApprovalState } from '../shared/canonical.ts'
+import type { ApplyResult, CompareResponse, DraftMeta, DraftResponse, LocalEditsView } from '../shared/drafts.ts'
 import type { RoundView } from '../shared/humanReview.ts'
 import type { BudgetBoard, Period, SourceState, UsageResponse } from '../shared/usage.ts'
 import type { ApprovalKind, Documentation, Project, Workflow } from '../shared/model.ts'
@@ -83,6 +83,7 @@ async function call<T>(method: string, path: string, body?: unknown, okStatuses:
 // under agdevworld's same-origin prefix (/wfe/) alike.
 const ws = (id: string) => `api/workspaces/${encodeURIComponent(id)}`
 const wf = (id: string, file: string) => `${ws(id)}/workflows/${encodeURIComponent(file)}`
+const drafts = (id: string) => `${ws(id)}/drafts`
 
 export const api = {
   workspaces: () => call<WorkspacesResponse>('GET', 'api/workspaces'),
@@ -111,14 +112,8 @@ export const api = {
   saveProject: (id: string, project: Project, base?: string | null) => call<SaveResponse>('PUT', `${ws(id)}/project`, { project, ...(base ? { base } : {}) }),
   addSubmodule: (id: string, path: string, url: string) => call<AddSubmoduleResponse>('POST', `${ws(id)}/submodules`, { path, url }, [422]),
   addNewRepository: (id: string, path: string) => call<AddSubmoduleResponse>('POST', `${ws(id)}/submodules`, { path, create: true }, [422]),
-  // documentation: a policy name or a whole declaration; absent, the template's (p8/ex2).
-  createWorkflow: (id: string, wid: string, name: string, documentation?: string | Documentation, template = 'empty') =>
-    call<{ file: string }>('POST', `${ws(id)}/workflows`, { id: wid, name, template, ...(typeof documentation === 'string' ? { policy: documentation } : documentation ? { documentation } : {}) }),
   workflowTemplates: (id: string) => call<{ id: string; name: string; description: string; documentation: Documentation }[]>('GET', `${ws(id)}/workflow-templates`),
   workflow: (id: string, file: string, refresh = false) => call<WorkflowResponse>('GET', `${wf(id, file)}${refresh ? '?refresh=1' : ''}`),
-  saveWorkflow: (id: string, file: string, workflow: Workflow, base?: string | null) => call<SaveResponse>('PUT', wf(id, file), { workflow, ...(base ? { base } : {}) }),
-  approve: (id: string, file: string, kind: ApprovalKind, approver: string) =>
-    call<SaveResponse & { state: ApprovalState }>('POST', `${wf(id, file)}/approve`, { kind, approver }),
   runs: (id: string) => call<RunSummary[]>('GET', `${ws(id)}/runs`),
   run: (id: string, workflow: string, run: string, rev?: string, signal?: AbortSignal) =>
     call<RunResponse>('GET', `${ws(id)}/runs/${encodeURIComponent(workflow)}/${encodeURIComponent(run)}${rev ? `?rev=${encodeURIComponent(rev)}` : ''}`, undefined, [], signal),
@@ -146,9 +141,25 @@ export const api = {
   retryCheckpoint: (id: string, workflow: string, run: string, checkpoint: number) => call<unknown>('POST', `${ws(id)}/runs/${encodeURIComponent(workflow)}/${encodeURIComponent(run)}/checkpoints/${checkpoint}/publish`),
   // improve_wfrun p1: the published workflows with the workspace's relation, one published definition, and the optional fast-forward.
   published: (id: string, refresh = false) => call<PublishedResponse>('GET', `${ws(id)}/published${refresh ? '?refresh=1' : ''}`),
-  publishedWorkflow: (id: string, file: string) => call<WorkflowResponse & { source: PublishedSourceView }>('GET', `${ws(id)}/published/${encodeURIComponent(file)}`),
+  publishedHead: (id: string) => call<{ source: PublishedSourceView }>('GET', `${ws(id)}/published-head`),
+  publishedWorkflow: (id: string, file: string, refresh = false) => call<WorkflowResponse & { source: PublishedSourceView; descriptor: DefinitionDescriptor }>('GET', `${ws(id)}/published/${encodeURIComponent(file)}${refresh ? '?refresh=1' : ''}`),
+  // Drafts (p20, docs/drafts.md): saved editing state, published only by applying.
+  drafts: (id: string, file?: string) => call<{ drafts: DraftMeta[] }>('GET', `${drafts(id)}${file ? `?file=${encodeURIComponent(file)}` : ''}`),
+  draft: (id: string, draft: string) => call<DraftResponse>('GET', `${drafts(id)}/${draft}`),
+  startDraft: (id: string, file: string, by: string, another = false) => call<{ draft: DraftMeta }>('POST', drafts(id), { file, by, another }),
+  newWorkflowDraft: (id: string, n: { id: string; name: string; template: string; documentation?: string | Documentation }, by: string) => call<{ draft: DraftMeta }>('POST', drafts(id), { new: n, by }),
+  importEdit: (id: string, file: string, sha256: string, by: string) => call<{ draft: DraftMeta }>('POST', drafts(id), { import: { file, sha256 }, by }),
+  localEdits: (id: string) => call<LocalEditsView>('GET', `${drafts(id)}/local-edits`),
+  saveDraft: (id: string, draft: string, input: { revision: number; by: string; workflow?: Workflow; text?: string }) => call<DraftResponse>('PUT', `${drafts(id)}/${draft}`, input),
+  discardDraft: (id: string, draft: string, revision: number, by: string) => call<{ draft: DraftMeta }>('DELETE', `${drafts(id)}/${draft}`, { revision, by }),
+  compareDraft: (id: string, draft: string) => call<CompareResponse>('POST', `${drafts(id)}/${draft}/compare`, {}),
+  approveDraft: (id: string, draft: string, revision: number, kind: ApprovalKind, approver: string) => call<DraftResponse>('POST', `${drafts(id)}/${draft}/approve`, { revision, kind, approver }),
+  resolveDraft: (id: string, draft: string, input: { revision: number; by: string; latest: string | null; text?: string; recreate?: boolean; retarget?: string }) => call<DraftResponse>('POST', `${drafts(id)}/${draft}/resolve`, input),
+  // Conflicts, invalid results and unknown outcomes come back as an outcome, with the draft intact.
+  applyDraft: (id: string, draft: string, input: { revision: number; by: string; key: string }) => call<ApplyResult>('POST', `${drafts(id)}/${draft}/apply`, input, [409, 422, 502]),
+  tryDraft: (id: string, draft: string, input: { revision: number; text: string; author: string; receipt: string; by: string }) => call<{ ok: true; ref: { workflow: string; run: string }; job: { id: number; state: string }; duplicate: boolean }>('POST', `${drafts(id)}/${draft}/try`, input),
   syncWorkspace: (id: string, dryRun = false) => call<SyncResultView>('POST', `${ws(id)}/sync`, { dryRun }, [409]),
-  requestRun: (id: string, input: { workflow: string; text: string; author: string; receipt: string; trial?: { file: string } }) =>
+  requestRun: (id: string, input: { workflow: string; text: string; author: string; receipt: string }) =>
     call<{ ok: true; duplicate: boolean; ref: { workflow: string; run: string }; job: { id: number; state: string } }>('POST', `${ws(id)}/runs`, input),
   catalog: () => call<CatalogView>('GET', 'api/nodes'),
   createTemplate: (body: TemplateBody & { id: string }) => call<{ template: NodeTemplate }>('POST', 'api/nodes', body),

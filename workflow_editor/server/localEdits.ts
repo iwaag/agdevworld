@@ -11,19 +11,11 @@ import { git } from './git.ts'
 import type { AccessContext } from './access.ts'
 import { digestOf, publishedDescriptor, publishedWorkspace } from './published.ts'
 import { observe, type Registration } from './registry.ts'
-import { draftMeta, DRAFT_SCHEMA, type DraftMeta, type DraftRecord, type DraftStore } from './drafts.ts'
+import type { DraftRecord, LocalEdit, LocalEditsView } from '../shared/drafts.ts'
+import { draftMeta, DRAFT_SCHEMA, type DraftStore } from './drafts.ts'
 import { RequestError, Workspace, WORKFLOWS_DIR } from './workspace.ts'
 import { parseWorkflow } from './yamlDoc.ts'
 import { randomBytes } from 'node:crypto'
-
-export interface LocalEdit {
-  file: string; workflow: string | null; name: string | null
-  edit: 'uncommitted' | 'local-commits' | 'untracked'
-  sha256: string; head: string | null; ahead: number | null; baseCommit: string | null; baseSha256: string | null
-  publishedSha256: string | null
-  draft: DraftMeta | null // already imported, or an open draft with the same bytes
-}
-export interface LocalEditsView { workspace: string; available: boolean; reason?: string; edits: LocalEdit[]; unread: string[] }
 
 interface Found extends Omit<LocalEdit, 'draft'> { text: string; baseText: string | null }
 

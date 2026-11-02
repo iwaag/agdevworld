@@ -46,8 +46,9 @@ What you have:
 - A repository a project needs but does not have yet can be created locally
   with `wfe add-repo <path> --new`. (Added after the p2/pre1 rehearsal, where
   it had to be improvised with raw Git.)
-- The editor and `wfe` never commit, except the initial commits that `wfe
-  create` and `add-repo --new` make. When to commit is ordinary Git work for
+- `wfe` never commits here, except the initial commits that `wfe create` and
+  `add-repo --new` make; the browser editor commits only when a person applies a
+  draft, and it needs no checkout for that. When to commit is ordinary Git work for
   you and the person; uncommitted changes show in `git status` and in the
   editor's repository rows. A commit before handing work over gives the other
   side a baseline to `git diff` against. (p2/pre1 rehearsal: the commit
@@ -59,9 +60,10 @@ What you have:
   permission to execute and not acceptance of a result; nothing waits for it.
 - This task authorizes you to create and register projects here, to edit
   their files, and to run the local Git operations they need.
-- You and the browser editor take turns writing. The editor shows your saved
-  changes without a reload unless it holds unsaved edits. You see the
-  person's browser edits in the files once they save.
+- The browser editor shows a workflow as published on the project's default
+  branch, and keeps a person's edits in drafts (`wfe draft --help`), not in your
+  files. Your changes to a definition reach it and new runs when they reach the
+  default branch; theirs reach your checkout when you pull after they apply.
 - The editor service is started with `wfe serve`. No `wfe` command needs it
   running.
 

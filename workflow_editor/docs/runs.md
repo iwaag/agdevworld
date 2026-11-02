@@ -143,7 +143,7 @@ exception: the workspace file's exact bytes on the published code.
 | `kind` | Fields | Meaning |
 | --- | --- | --- |
 | `published` | `project`, `selector` (`default-branch`/`commit`), `repository`, `branch`, `commit`, `definitions` (`path`, `repository`, `commit`), `fetch` | definition and code from that root commit |
-| `trial` | `workspace`, `file`, `sha256`, `head`, `dirty`, `baseline` (`project`, `repository`, `branch`, `commit`) | the bytes of a workspace file (hash checked against what the person saw) on the published code at `baseline`; uncommitted project code is not part of it |
+| `trial` | `workspace`, `file`, `sha256`, `head`, `dirty`, `baseline` (`project`, `repository`, `branch`, `commit`), `draft` (`id`, `revision`, `author`) | with `draft`: that saved draft revision's bytes ([drafts.md](drafts.md)). Otherwise the bytes of a workspace file (`wfe request --editing`; hash checked against what the person saw). Either way on the published code at `baseline`; uncommitted project code is not part of it |
 | `workspace` | `workspace`, `reason`, `head`, `branch`, `dirty` | a workspace's files: an IDE agent's `wfe run create` in the workspace, or a host without Gitea |
 
 A record without `definition.source` was created before p1. Its meaning is

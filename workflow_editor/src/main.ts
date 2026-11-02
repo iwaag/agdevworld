@@ -1,6 +1,9 @@
 // Hash routes: #/ (projects, create and register), #/nodes (user nodes, p7/ex1), #/ws/<workspace>
-// (project editor), #/ws/<workspace>/wf/<file> (workflow editor) and
+// (project editor), #/ws/<workspace>/wf/<file> (the published workflow) and
 // #/ws/<workspace>/run/<workflow>/<run>[/at/<devdocs commit>] (run view) and
+// #/ws/<workspace>/wf/<file>/draft/<id> (a draft), .../wf/<file>/checkout (what a
+// checkout holds), #/ws/<workspace>/run/<workflow>/<run>/definition[/<revision>]
+// (what a run started with) (one graph, by source: p20, docs/drafts.md) and
 // #/ws/<workspace>/run/<workflow>/<run>/io/<attempt>/<line> (one IO entry in full, p10)
 // and #/context[/<workspace>[/<workflow>]] (the scoped context overview, p13)
 // and #/usage (subscription windows and what executions used, retire_old_ui p1)
@@ -40,10 +43,15 @@ function route() {
     current = renderIoEntry(app, parts[1], parts[3], parts[4], parts[6], Number(parts[7]))
   } else if (parts[0] === 'ws' && parts[1] && parts[2] === 'review' && parts[3] && parts[4] && parts[5]) {
     current = renderReviewView(app, parts[1], parts[3], parts[4], parts[5])
+  } else if (parts[0] === 'ws' && parts[1] && parts[2] === 'run' && parts[3] && parts[4] && parts[5] === 'definition') {
+    current = renderWorkflowView(app, parts[1], `${parts[3]}.yaml`, { source: { kind: 'run', workflow: parts[3], run: parts[4], revision: parts[6] } })
   } else if (parts[0] === 'ws' && parts[1] && parts[2] === 'run' && parts[3] && parts[4]) {
     current = renderRunView(app, parts[1], parts[3], parts[4], parts[5] === 'at' ? parts[6] : undefined)
   } else if (parts[0] === 'ws' && parts[1] && parts[2] === 'wf' && parts[3]) {
-    current = renderWorkflowView(app, parts[1], parts[3], { context: parts[4] === 'context' })
+    current = renderWorkflowView(app, parts[1], parts[3], {
+      context: parts[4] === 'context',
+      source: parts[4] === 'draft' && parts[5] ? { kind: 'draft', id: parts[5] } : parts[4] === 'checkout' ? { kind: 'checkout' } : { kind: 'published' },
+    })
   } else if (parts[0] === 'context') {
     current = parts[1] ? renderContextView(app, parts[1], parts[2]) : renderContextChooser(app)
   } else if (parts[0] === 'usage') {

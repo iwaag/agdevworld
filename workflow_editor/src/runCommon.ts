@@ -113,6 +113,7 @@ export function sourceText(rec: RunRecord): string {
   const at = (repo: string, commit: string, branch?: string) => `${repo}@${commit.slice(0, 10)}${branch ? ` (${branch})` : ''}`
   if (!s) return 'not recorded (a run created before published sources)'
   if (s.kind === 'published') return `published — definition and code from ${at(s.repository, s.commit, s.branch)}${s.selector === 'commit' ? ', the revision named at creation' : ''}${s.definitions && s.definitions.repository !== s.repository ? `; definitions at ${at(s.definitions.repository, s.definitions.commit)}` : ''}`
+  if (s.kind === 'trial' && s.draft) return `trial — revision ${s.draft.revision} of draft ${s.draft.id} by ${s.draft.author} (sha256 ${s.sha256.slice(0, 12)}, ${s.file}) on the published code ${at(s.baseline.repository, s.baseline.commit, s.baseline.branch)}; project code that is not published is not included`
   if (s.kind === 'trial') return `trial — the bytes of ${s.file} in workspace ${s.workspace} (sha256 ${s.sha256.slice(0, 12)}${s.dirty ? ', with uncommitted changes' : ''}) on the published code ${at(s.baseline.repository, s.baseline.commit, s.baseline.branch)}; uncommitted project code not included`
   return `workspace ${s.workspace} — its files${s.head ? ` at ${s.head.slice(0, 10)}` : ''}${s.dirty ? ' with uncommitted definition changes' : ''} (${s.reason})`
 }

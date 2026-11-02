@@ -585,13 +585,18 @@ directly. Approval actions work on saved content without errors.
 
 ## Saving and external changes
 
-- The filesystem is authoritative. The UI holds a draft until an explicit Save.
-- Save writes the definition file only. It never commits or pushes.
-- A save names the revision its draft was made from (`base`, the content hash
+Workflow definitions are viewed from the published source and edited in drafts
+([drafts.md](drafts.md)): saving a draft and applying it are the service's, and no
+checkout is read. What follows is `project.yaml` in the project editor, and the
+checkout operations `wfe workflow show|save` and the checkout's read-only view.
+
+- The filesystem is authoritative. The UI holds unsaved edits until an explicit Save.
+- Save writes the file only. It never commits or pushes.
+- A save names the revision its edits were made from (`base`, the content hash
   the editor shows). A file that changed since — in another view, by
   `wfe workflow|project save`, or on disk — is not overwritten: the save is
   refused with code `definition-conflict` and the current revision, and the
-  draft is kept (project_migration p8). `wfe workflow show <wf>` and `wfe
+  edits are kept (project_migration p8). `wfe workflow show <wf>` and `wfe
   project show` print a file with its revision; `save --file … --base <rev>`
   writes a changed one the same way.
 - Saves write a temporary file in the same directory and rename it over the

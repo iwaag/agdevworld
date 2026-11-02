@@ -17,7 +17,8 @@ import { randomBytes } from 'node:crypto'
 import { mkdir, mkdtemp, open, readdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import type { DefinitionDescriptor } from '../shared/api.ts'
+import type { DefinitionDescriptor, WorkflowResponse } from '../shared/api.ts'
+import type { ApplyJournal, ApplyOutcome, ApplyResult, Comparison, DraftConflict, DraftMeta, DraftRecord, DraftResponse, MergeSegment, Provenance } from '../shared/drafts.ts'
 import { approvalStates } from '../shared/canonical.ts'
 import type { ApprovalKind, Documentation, Issue, Workflow } from '../shared/model.ts'
 import { hasErrors, validateWorkflow } from '../shared/validate.ts'
@@ -29,44 +30,12 @@ import type { Registration } from './registry.ts'
 import { RequestError, WORKFLOW_FILE, WORKFLOWS_DIR } from './workspace.ts'
 import { parseWorkflow, renderWorkflow } from './yamlDoc.ts'
 
-export const DRAFT_SCHEMA = 'ag.wfe-draft.v1'
+export const DRAFT_SCHEMA = 'ag.wfe-draft.v1' as const
+export type { ApplyResult, DraftRecord } from '../shared/drafts.ts'
 const KEPT_REVISIONS = 200
 const PUBLISH_TRIES = 4
 // An apply this long without a journal entry and not finished lost its process.
 const APPLY_SILENT_MS = 5 * 60_000
-
-export type Provenance =
-  | { kind: 'published' }
-  | { kind: 'new'; template: string }
-  | { kind: 'import'; workspace: string; edit: 'uncommitted' | 'local-commits' | 'untracked'; head: string | null; baseCommit: string | null; at: string }
-
-export type ApplyOutcome = 'in-progress' | 'applied' | 'conflict' | 'invalid' | 'failed' | 'uncertain'
-export interface ApplyJournal {
-  key: string; revision: number; by: string; outcome: ApplyOutcome; phase: string; started: string; updated: string
-  merged?: string // sha256 of the bytes being published
-  // What was built, written before it can reach the remote.
-  definition?: { repository: string; branch: string; path: string; parent: string; commit: string; pushed: boolean }
-  root?: { repository: string; branch: string; parent: string; commit: string; pushed: boolean; pinFrom: string | null; pinTo: string }
-  result?: DefinitionDescriptor
-  noChange?: boolean // the published definition already was this
-  superseded?: boolean // a later publication already changed the file again
-  error?: string
-}
-
-export interface DraftRecord {
-  schema: typeof DRAFT_SCHEMA
-  id: string; project: string; workspace: string; workflow: string | null; file: string
-  author: string; created: string; updated: string; updatedBy: string
-  state: 'open' | 'applied' | 'discarded'
-  revision: number; text: string; sha256: string
-  base: { text: string | null; sha256: string | null; source: DefinitionDescriptor | null }
-  provenance: Provenance
-  revisions: { revision: number; sha256: string; text: string; at: string; by: string }[]
-  apply: ApplyJournal | null
-  discarded?: { by: string; at: string }
-}
-// What a list shows: everything but the texts.
-export type DraftMeta = Omit<DraftRecord, 'text' | 'revisions' | 'base'> & { base: { sha256: string | null; source: DefinitionDescriptor | null } }
 
 const nowIso = () => new Date().toISOString()
 const ID = /^d-[0-9a-f]{12}$/
@@ -169,16 +138,7 @@ export async function newWorkflowDraft(ctx: AccessContext, store: DraftStore, re
 
 // ---- reading and saving --------------------------------------------------------------
 
-export interface DraftView {
-  draft: DraftMeta
-  descriptor: DefinitionDescriptor
-  source: PublishedWorkspace['source'] | null
-  sourceProblem?: string
-  // The published definition now, against what this draft began from.
-  latest: { sha256: string | null; changed: boolean; deleted: boolean; renamedTo?: string } | null
-}
-
-export async function readDraft(ctx: AccessContext, store: DraftStore, reg: Registration, id: string) {
+export async function readDraft(ctx: AccessContext, store: DraftStore, reg: Registration, id: string): Promise<DraftResponse> {
   const d = await store.read(id)
   if (d.project !== reg.project) throw new RequestError(404, `draft ${id} is of project ${d.project}`)
   const parsed = parseWorkflow(d.text)
@@ -189,11 +149,10 @@ export async function readDraft(ctx: AccessContext, store: DraftStore, reg: Regi
     const here = await pub.readWorkflowFile(d.file)
     const latestSha = here.text === null ? null : digestOf(here.text)
     const renamedTo = here.text === null && d.workflow ? (await pub.workflowSummaries()).list.find(s => s.id === d.workflow)?.file : undefined
-    const view: DraftView = { draft: draftMeta(d), descriptor: descriptorOf(d, pub.source), source: pub.source, latest: { sha256: latestSha, changed: latestSha !== d.base.sha256, deleted: here.text === null && d.base.text !== null, ...(renamedTo ? { renamedTo } : {}) } }
-    return { ...resp, ...view, baseText: d.base.text }
+    return { ...resp, draft: draftMeta(d), descriptor: descriptorOf(d, pub.source), source: pub.source, latest: { sha256: latestSha, changed: latestSha !== d.base.sha256, deleted: here.text === null && d.base.text !== null, ...(renamedTo ? { renamedTo } : {}) }, baseText: d.base.text }
   } catch (e) {
-    const view: DraftView = { draft: draftMeta(d), descriptor: descriptorOf(d, null), source: null, sourceProblem: (e as Error).message, latest: null }
-    return { ...bare, issues: [] as Issue[], repositories: [], workflows: [], ...view, baseText: d.base.text }
+    const none: Pick<WorkflowResponse, 'issues' | 'repositories' | 'workflows'> = { issues: [], repositories: [], workflows: [] }
+    return { ...bare, ...none, draft: draftMeta(d), descriptor: descriptorOf(d, null), source: null, sourceProblem: (e as Error).message, latest: null, baseText: d.base.text }
   }
 }
 
@@ -225,6 +184,7 @@ export async function saveDraft(store: DraftStore, id: string, o: { revision: nu
       text = renderWorkflow(parsed.doc, o.workflow)
     }
     if (typeof text !== 'string') throw new RequestError(400, 'a save carries workflow or text')
+    if (!text.trim()) throw new RequestError(400, 'an empty definition is not saved; discard the draft to drop it')
     if (text !== d.text) record(d, text, o.by.trim())
   })
 }
@@ -258,7 +218,6 @@ export async function approveDraft(ctx: AccessContext, store: DraftStore, reg: R
 
 // ---- comparing with what is published ------------------------------------------------
 
-export type MergeSegment = string | { n: number; mine: string; base: string; latest: string }
 const MARK = 16
 
 async function mergeTexts(mine: string, base: string, latest: string): Promise<{ clean: boolean; text: string; segments: MergeSegment[] }> {
@@ -287,19 +246,6 @@ function segmentsOf(out: string): MergeSegment[] {
   if (plain) segments.push(plain)
   return segments
 }
-
-export interface DraftConflict {
-  kind: 'text' | 'deleted' | 'renamed' | 'exists'
-  message: string
-  latest: { text: string | null; sha256: string | null; source: DefinitionDescriptor } // what to resolve against
-  segments?: MergeSegment[]
-  renamedTo?: string
-}
-export type Comparison =
-  | { state: 'same'; text: string } // the published definition already is the draft
-  | { state: 'unchanged'; text: string } // nothing edited: the latest stands
-  | { state: 'direct' | 'merged'; text: string } // what applying would publish
-  | { state: 'conflict'; conflict: DraftConflict }
 
 // The definition as a push would have it: at the head of the repository that
 // holds the definitions, one in submodule mode possibly past the root's pin.
@@ -383,11 +329,6 @@ export async function resolveDraft(ctx: AccessContext, store: DraftStore, reg: R
 }
 
 // ---- applying ------------------------------------------------------------------------
-
-export interface ApplyResult {
-  ok: boolean; duplicate?: boolean; draft: DraftMeta; apply: ApplyJournal
-  conflict?: DraftConflict; issues?: Issue[]; problem?: string
-}
 
 const BOT = { 'user.name': 'WFE drafts', 'user.email': 'wfe-drafts@agdev.invalid' }
 const isAncestor = async (dir: string, a: string, b: string) => (await git(dir, ['merge-base', '--is-ancestor', a, b])).code === 0

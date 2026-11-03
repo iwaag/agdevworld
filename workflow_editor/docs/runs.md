@@ -306,6 +306,50 @@ a name. Both are declarations, as approvers are. **Who records (p9):**
 Independent branches may be performed one after another; nothing runs nodes
 by itself, and no timer changes a state.
 
+### Examples (improve_wfnode p1)
+
+An example ([contract.md](contract.md) *Examples*) is not work:
+
+- it stays `pending`, is never in `ready` or `blocked`, and `execution.counts` and the
+  work/documentation split leave it out; `execution.examples` lists those not yet
+  specialized, separately from work progress;
+- starting or cancelling it is refused (`example-not-executable`), which is a semantic
+  error and not a request for permission. So nothing can dispatch it, ask from it or complete it;
+- it gets no report step. What follows it waits for it, the final report included;
+- a run with one never reads as completed. With nothing else to do the run is
+  `in-progress` and owes a revision ([adjustments.md](adjustments.md) *Specializing
+  examples*). No human approval is involved;
+- an attempt that exits with nothing running, ready or waiting beside unresolved
+  examples is held as interrupted (cause `left-examples`), like work left ready.
+  The Observer and a recovery agent read it the same way.
+
+### Expectation assessments (improve_wfnode p1)
+
+A node's `expectations` ([contract.md](contract.md) *Expectations*) are frozen with the
+graph, with the meaning of each documented key in `effective.meanings`: later catalog,
+definition or code changes do not reword them for an existing run. Groups are frozen
+in `effective.groups` the same way.
+
+`wfe run expectation <run> <node> <key> --status met|unmet|unverified` (op
+`expectation.assess`) records one compact statement on the node record
+(`nodes.<id>.assessments.<key>`): status, note, evidence, who, when and whether an attempt
+recorded it (`reporter: agent`). A later statement replaces it; history keeps both.
+Evidence uses the same checked kinds as work recorded afterwards: files by hash, commits,
+history entries, and this run's presentations, outputs and questions.
+
+| Strength | Status | Reads |
+| --- | --- | --- |
+| any | none, or `unverified` | Unverified |
+| any | `met` (needs evidence or a note) | Met |
+| preferred | `unmet` (needs a note) | Alternative: the agent chose differently and said so |
+| required | `unmet` (needs a note) | Unmet |
+
+Neither attaching a key, nor an artifact, nor completing the node states anything.
+Strength gates nothing. A finished run with a required expectation unmet still
+completes, and its status says so (`Done · …; required unmet: Browser on show`, tone
+warn). There is no compliance engine and no report file per key. The CLI's `wfe run show`,
+the brief, the continuation and the run view read the same `expectationStates`.
+
 ### Documentation steps (p5)
 
 Under the `default` policy the run has generated steps beside the authored

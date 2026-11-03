@@ -22,7 +22,8 @@
 // final); default is all three, manual none. Without reports an authored
 // dependency stays A → B and the final report follows the authored terminal
 // nodes themselves.
-import { DOC_POLICIES, docSteps, ID_PATTERN, type DocPolicy, type DocSteps, type Edge, type Workflow } from './model.ts'
+import { DOC_POLICIES, docSteps, ID_PATTERN, type DocPolicy, type DocSteps, type Edge, type NodeExpectation, type Specializes, type Workflow } from './model.ts'
+import { EXPECTATION_KEYS, strengthOf } from './expectations.ts'
 import { findCycle } from './validate.ts'
 
 // Changes whenever the expansion, the identities or the step instructions
@@ -36,7 +37,12 @@ import { findCycle } from './validate.ts'
 // follows the work before it instead: the agent finishes its work and the
 // review waits for the person alone. Graphs without review nodes are node
 // for node and edge for edge what v4 made.
-export const COMPILER_VERSION = 'ag.wfe-compile.v5'
+// v6 (improve_wfnode p1): authored nodes keep `example`, `expectations` and
+// `specializes`; the graph carries its `groups` and the `meanings` of the
+// expectation keys it uses, frozen with the run. An example gets no report
+// step. Graphs without any of them are node for node and edge for edge what
+// v5 made. A changed meaning (shared/expectations.ts) changes this version.
+export const COMPILER_VERSION = 'ag.wfe-compile.v6'
 
 // Generated identities start with "_", which an authored id never does
 // (ID_PATTERN), so the two can never collide.
@@ -62,10 +68,14 @@ export interface StepSpec {
   purpose: string // one line, for views and notifications
   instructions: string // what the executing agent is asked to write
 }
-export interface EffectiveNode { type: string; workflow?: string; project?: string; accepts?: string; confirms?: string; activity?: string; step?: StepSpec }
+export interface EffectiveNode { type: string; workflow?: string; project?: string; accepts?: string; confirms?: string; activity?: string; example?: boolean; expectations?: NodeExpectation[]; specializes?: Specializes; step?: StepSpec }
+// A group as a run follows it: what it means, without its display color.
+export interface EffectiveGroup { name: string; kind: string; cardinality: string; description: string; members: string[] }
 // `documentation` (v3): the steps the policy generates; a v2 graph has none
 // and is read by its policy (docStepsOf).
-export interface EffectiveGraph { compiler: string; policy: DocPolicy; documentation?: DocSteps; nodes: Record<string, EffectiveNode>; edges: Edge[] }
+// `groups` and `meanings` (v6): present when the definition has any; `meanings`
+// is each documented key's words as this run was given them.
+export interface EffectiveGraph { compiler: string; policy: DocPolicy; documentation?: DocSteps; nodes: Record<string, EffectiveNode>; edges: Edge[]; groups?: Record<string, EffectiveGroup>; meanings?: Record<string, { label: string; about: string; meaning: string }> }
 
 // The documentation steps a frozen graph was compiled with.
 export function docStepsOf(g: Pick<EffectiveGraph, 'policy' | 'documentation'>): DocSteps {
@@ -93,14 +103,19 @@ const byEdge = (a: Edge, b: Edge) => (a.from < b.from ? -1 : a.from > b.from ? 1
 
 // An authored node as runs follow it: its type, a delegate's target, and
 // whether it is the result confirmation.
-export function authoredNode(n: Pick<Workflow['nodes'][string], 'type' | 'workflow' | 'project' | 'accepts' | 'confirms' | 'activity'>): EffectiveNode {
-  return { type: n.type, ...(n.workflow ? { workflow: n.workflow } : {}), ...(n.project ? { project: n.project } : {}), ...(n.accepts ? { accepts: n.accepts } : {}), ...(n.confirms ? { confirms: n.confirms } : {}), ...(n.activity ? { activity: n.activity } : {}) }
+export function authoredNode(n: Pick<Workflow['nodes'][string], 'type' | 'workflow' | 'project' | 'accepts' | 'confirms' | 'activity' | 'example' | 'expectations' | 'specializes'>): EffectiveNode {
+  return {
+    type: n.type, ...(n.workflow ? { workflow: n.workflow } : {}), ...(n.project ? { project: n.project } : {}), ...(n.accepts ? { accepts: n.accepts } : {}), ...(n.confirms ? { confirms: n.confirms } : {}), ...(n.activity ? { activity: n.activity } : {}),
+    ...(n.example ? { example: true } : {}),
+    ...(n.expectations?.length ? { expectations: n.expectations.map(x => ({ key: x.key, strength: strengthOf(x), ...(x.note ? { note: x.note } : {}) })) } : {}),
+    ...(n.specializes ? { specializes: { examples: [...n.specializes.examples], revision: n.specializes.revision } } : {}),
+  }
 }
 
 // Compiles an authored definition. Refuses what is not an executable graph
 // (no nodes, broken or cyclic edges, malformed ids, an unknown policy)
 // instead of letting generated steps make it look executable.
-export function compile(w: Pick<Workflow, 'nodes' | 'edges' | 'documentation'>): CompileResult {
+export function compile(w: Pick<Workflow, 'nodes' | 'edges' | 'documentation' | 'groups'>): CompileResult {
   const policy = w.documentation.policy as DocPolicy
   if (!(DOC_POLICIES as readonly string[]).includes(policy)) return { ok: false, code: 'documentation-policy', message: policy ? `documentation policy "${policy}" is not supported` : 'no documentation policy is declared' }
   const docs = docSteps(w.documentation)
@@ -122,6 +137,10 @@ export function compile(w: Pick<Workflow, 'nodes' | 'edges' | 'documentation'>):
   const cycle = findCycle(ids, id => out.get(id) ?? [])
   if (cycle) return { ok: false, code: 'graph-cycle', message: `the graph has a cycle: ${cycle.join(' → ')}` }
 
+  for (const [g, x] of Object.entries(w.groups ?? {})) {
+    const missing = x.members.find(m => !(m in w.nodes))
+    if (missing) return { ok: false, code: 'group-member-unknown', message: `group "${g}" lists "${missing}", which is not a node of this workflow` }
+  }
   const nodes: Record<string, EffectiveNode> = {}
   if (docs.plan) nodes[PLAN_STEP] = { type: 'talk', step: step('plan', null) }
   for (const id of ids) nodes[id] = authoredNode(w.nodes[id])
@@ -129,14 +148,17 @@ export function compile(w: Pick<Workflow, 'nodes' | 'edges' | 'documentation'>):
   const hasIncoming = new Set(edges.map(e => e.to))
   // What a successor (or the final report) waits for: the node's report, or the node itself.
   const review = (id: string) => w.nodes[id].type === 'review'
-  const after = (id: string) => (docs.reports && !review(id) ? reportStep(id) : id)
+  // An example (improve_wfnode p1) is a model, not work: nothing to report on.
+  // What follows it waits for it, so the final report waits for its replacement.
+  const reported = (id: string) => docs.reports && !review(id) && !w.nodes[id].example
+  const after = (id: string) => (reported(id) ? reportStep(id) : id)
   // The final report follows the work: nodes whose successors are all
   // human reviews (or none); review nodes themselves only when the graph
   // has nothing else.
   const workEnd = (id: string) => !review(id) && (out.get(id) ?? []).every(review)
   const ends = ids.some(workEnd) ? ids.filter(workEnd) : ids.filter(id => !out.has(id))
   for (const id of ids) {
-    if (docs.reports && !review(id)) {
+    if (reported(id)) {
       nodes[reportStep(id)] = { type: 'report', step: step('report', id) }
       expanded.push({ from: id, to: reportStep(id) })
     }
@@ -145,7 +167,16 @@ export function compile(w: Pick<Workflow, 'nodes' | 'edges' | 'documentation'>):
   }
   for (const e of edges) expanded.push({ from: after(e.from), to: e.to })
   if (docs.final) nodes[FINAL_STEP] = { type: 'report', step: step('final-report', null, docs.reports) }
-  return { ok: true, graph: { compiler: COMPILER_VERSION, policy, documentation: docs, nodes, edges: expanded.sort(byEdge) } }
+  const groups = Object.entries(w.groups ?? {}).sort(([a], [b]) => (a < b ? -1 : 1)).map(([g, x]) => [g, { name: x.name, kind: x.kind, cardinality: x.cardinality, description: x.description, members: [...x.members] } as EffectiveGroup] as const)
+  const keys = [...new Set(ids.flatMap(id => (w.nodes[id].expectations ?? []).map(x => x.key)))].filter(k => k in EXPECTATION_KEYS).sort()
+  return {
+    ok: true,
+    graph: {
+      compiler: COMPILER_VERSION, policy, documentation: docs, nodes, edges: expanded.sort(byEdge),
+      ...(groups.length ? { groups: Object.fromEntries(groups) } : {}),
+      ...(keys.length ? { meanings: Object.fromEntries(keys.map(k => [k, { ...EXPECTATION_KEYS[k] }])) } : {}),
+    },
+  }
 }
 
 // The authored node a step belongs to, for views: a report belongs to its
@@ -159,6 +190,7 @@ export function ownerOf(graph: Pick<EffectiveGraph, 'nodes'>, id: string): strin
 export function splitCounts<S extends string>(graph: Pick<EffectiveGraph, 'nodes'>, states: Record<string, { state: S }>): { work: Record<string, number>; docs: Record<string, number> } {
   const work: Record<string, number> = {}, docs: Record<string, number> = {}
   for (const [id, n] of Object.entries(states)) {
+    if (graph.nodes[id]?.example) continue // a model for work: never counted as done or pending
     const into = graph.nodes[id]?.step ? docs : work
     into[n.state] = (into[n.state] ?? 0) + 1
   }

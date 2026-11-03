@@ -29,7 +29,7 @@ import { DEFAULT_LANE, sessionPolicyOf, type Workflow } from '../shared/model.ts
 import { attemptContext, renderContext, type AttemptContext } from '../shared/context.ts'
 import { contextErrors, resolveContext } from './context.ts'
 import { ContextStore } from './contextStore.ts'
-import { configChanges, currentSession, unverifiedReason, unverifiedSession, describeSteps, effectiveOf, holderOf, hostOf, openCorrections, pendingInstructions, runKey, sameConfig, sessionConfig, situation, standingEvents, type AttemptSession, type AttemptSettings, type BecauseRef, type RecoveryAgent, type RunRecord, type RunRef } from '../shared/run.ts'
+import { configChanges, currentSession, definitionMeaningBrief, unverifiedReason, unverifiedSession, describeSteps, effectiveOf, holderOf, hostOf, openCorrections, pendingInstructions, runKey, sameConfig, sessionConfig, situation, standingEvents, type AttemptSession, type AttemptSettings, type BecauseRef, type RecoveryAgent, type RunRecord, type RunRef } from '../shared/run.ts'
 import { wake } from './standing.ts'
 import { git } from './git.ts'
 import { docStepsOf } from '../shared/compile.ts'
@@ -1063,6 +1063,7 @@ export class ExecStore {
     lines.push(...presentationBrief(r))
     lines.push(...await shareBrief(ws, ref, r, job.kind === 'start' ? null : { by: this.executor }, view))
     lines.push(...delegationBrief(r, await this.assessedLines(r)))
+    lines.push(...definitionMeaningBrief(r))
     lines.push(...catalogBrief(catalogOf(r, reading.bundle), runKey(ref)))
     if (r.definition.revisions?.length) lines.push('', `Definition: revision ${r.definition.active} is in force (adjusted ${r.definition.revisions.length} time${r.definition.revisions.length === 1 ? '' : 's'}; wfe run revisions <run>); the original is definition/${r.definition.root}.yaml.`)
     lines.push(...documentationBrief(r))

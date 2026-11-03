@@ -7,7 +7,7 @@ import type { RunResponse } from '../shared/api.ts'
 import { accessAt } from '../shared/access.ts'
 import { normalizeRepoPath, sessionPolicyOf } from '../shared/model.ts'
 import { docStepsOf, hasDocSteps, splitCounts } from '../shared/compile.ts'
-import { describeSteps, effectiveOf, EXECUTOR_OPS, holderOf, hostOf, notableEvents, questionState, runKey, type BecauseRef, type Correction, type EntrustRef, type HistoryEntry, type Instruction, type OpInput, type RunRecord, type RunRef } from '../shared/run.ts'
+import { assessmentWords, describeSteps, effectiveOf, EXECUTOR_OPS, expectationStates, holderOf, hostOf, notableEvents, questionState, runKey, type BecauseRef, type Correction, type EntrustRef, type HistoryEntry, type Instruction, type OpInput, type RunRecord, type RunRef } from '../shared/run.ts'
 import {
   adjustRun, checkRun, createRun, listRuns, readRun, recordDone, resolveRef, runDir, runOp, runResponse, usableRun, type AdjustResult, type CreateRunOptions,
 } from '../server/runs.ts'
@@ -417,7 +417,36 @@ running node's completion atomically; the completion is checked for
 reminders as in wfe run complete, on the revised graph. Stale revisions and
 writers receive concrete diagnostics so the agent can re-read and retry.
 Work that already happened without a node is recorded with wfe run
-record-done instead. Writes revision files and run.json.`,
+record-done instead. Examples are replaced here too (wfe run help specialize).
+Writes revision files and run.json.`,
+  specialize: `Specializing examples: there is no separate command; it is one wfe run adjust.
+
+An example (example: true) is a model for concrete work and cannot be started.
+Choose the concrete tasks and their count from the request and the group's
+description. Edit the definition in force (wfe run revisions <run> --show <r>),
+and in one revision:
+- add the concrete nodes, each with the type, target and expectations it needs,
+  and specializes: {examples: [<example ids it replaces>], revision: <the revision
+  they were read from>}. One example may become several nodes, several one, or none;
+- remove the examples, or drop example: true from one that becomes the work in place;
+- update groups.<id>.members to the actual nodes, in order (an empty list is valid);
+- state every dependency under edges. Nothing is guessed from list order. A revision
+  is refused when what led through a removed example no longer leads to what followed it;
+- say in --reason what was chosen and why, including any omitted work.
+
+wfe run adjust <run> --definition <file> --reason <text> --dry-run shows the
+result; a node with execution history cannot become an example. Earlier revisions
+keep the original examples and membership.`,
+  expectation: `wfe run expectation <run> <node> <key> --status met|unmet|unverified [--note <text>] [--artifact <path>]... [--commit <id>]... [--entry <seq>]... [--presentation <p>]... [--output <o>]... [--question <q>]...
+
+States whether a result met one of its node's expectations. Met needs evidence or
+an explanation; unmet needs an explanation of what was delivered instead and why.
+Evidence is checked to exist, not judged: --artifact files of the run's copy (by
+hash), --commit commits, --entry history entries, and this run's presentations,
+outputs and questions. A later statement of the same key replaces it; history
+keeps both. Recorded inside an attempt, it is labeled as the agent's report. It
+permits and proves nothing, and a statement never made reads as unverified.
+A required expectation that is unmet stays visible on the finished run. Writes run.json.`,
   nodes: `wfe run nodes <run> [--show <template>]
 
 The person's node catalog as this run was given it at creation (docs/catalog.md):
@@ -512,6 +541,7 @@ export function runIndex(): string {
   integrate <run>          bring saved work into the shared branches (or --dry-run, --status)
   reversal <run>           what undoing the run involves (facts only)
   adjust <run>             change the run's future work (a recorded revision)
+  expectation <run> <node> <key>  state whether a result met an expectation
   record-done <run>        record work already done without a node as a completed node
   revisions <run>          the original definition and each adjustment
   nodes <run>              the person's node catalog as this run was given it
@@ -628,9 +658,11 @@ export function describeRun(r: RunResponse, opts: { history?: boolean; url?: str
     const split = splitCounts(eff, rec.nodes)
     lines.push(`Documentation policy: ${eff.policy}, ${describeSteps(docStepsOf(eff))} (frozen at creation, ${eff.compiler})${hasDocSteps(eff) ? ` — work: ${count(split.work)}; documentation steps: ${count(split.docs)}` : ''}`)
   } else lines.push('Documentation policy: none (created before p5; the authored graph)')
-  lines.push(`Nodes (${count(ex.counts)}):`)
+  lines.push(`Nodes (${count(ex.counts)}${ex.examples?.length ? `; ${ex.examples.length} example${ex.examples.length === 1 ? '' : 's'} not specialized` : ''}):`)
+  const groupOf = (id: string) => Object.entries(eff?.groups ?? {}).find(([, g]) => g.members.includes(id))?.[0]
   for (const [id, n] of Object.entries(rec.nodes)) {
     let what = ''
+    if (eff?.nodes[id]?.example) { lines.push(`  ${id.padEnd(20)} example   a model for concrete work, not a task${groupOf(id) ? `; in list ${groupOf(id)}` : ''}; replace it with wfe run adjust (wfe run help specialize)`); continue }
     if (n.state === 'pending') what = ex.ready.includes(id) ? 'READY to start' : ex.blocked.includes(id) ? 'blocked: a predecessor failed or was cancelled' : 'waits for predecessors'
     else if (n.state === 'running') what = `reported started ${n.started}; last update ${ago(n.updated)}`
     else if (n.state === 'waiting' && n.wait) what = `waits: ${n.wait.reason}; next move: ${holderOf(rec, id)}${'external' in n.wait.on ? `; awaiting ${n.wait.on.external}` : ''}`
@@ -643,6 +675,13 @@ export function describeRun(r: RunResponse, opts: { history?: boolean; url?: str
     lines.push(`  ${id.padEnd(20)} ${n.state.padEnd(9)} ${what}${doc}${last && n.state !== 'completed' ? `\n${' '.repeat(33)}note: ${first(last.text, 120)}` : ''}`)
   }
   if (ex.ready.length) lines.push(`Ready: ${ex.ready.join(', ')}`)
+  for (const [id, g] of Object.entries(eff?.groups ?? {})) lines.push(`Group ${id} "${g.name}" (${g.kind}, ${g.cardinality}): ${g.members.join(', ') || '(no items)'}${g.description.trim() ? `\n${' '.repeat(33)}${first(g.description.trim(), 300)}` : ''}`)
+  for (const v of rec.definition.revisions ?? []) for (const x of v.examples ?? []) lines.push(`Example ${x.example} of ${v.parent}: ${x.replacedBy.length ? `replaced by ${x.replacedBy.join(', ')}` : 'omitted'} in ${v.revision} ("${first(v.reason, 120)}")`)
+  const expected = expectationStates(rec)
+  if (expected.length) {
+    lines.push('Expectations:')
+    for (const x of expected) lines.push(`  ${x.node}: ${x.label} · ${x.strength === 'required' ? 'Required' : 'Preferred'} · ${assessmentWords(x)}${x.assessment ? ` (reported by ${x.assessment.by}${x.assessment.reporter === 'agent' ? ', agent' : ''}${x.assessment.note ? `: ${first(x.assessment.note, 200)}` : ''}${x.assessment.evidence.length ? `; evidence: ${x.assessment.evidence.map(e => e.kind === 'artifact' ? e.path : e.kind === 'commit' ? e.commit.slice(0, 10) : e.kind === 'entry' ? `entry ${e.seq}` : `${e.kind} ${e.id}`).join(', ')}` : ''})` : ''}${x.note ? `\n${' '.repeat(33)}note: ${first(x.note, 200)}` : ''}`)
+  }
   const qs = Object.values(rec.questions)
   if (qs.length) {
     lines.push('Questions:')
@@ -679,6 +718,10 @@ function adjustText(r: AdjustResult, ref: string): string {
   for (const p of r.problems) lines.push(`  ${p.code}: ${p.message}`)
   for (const n of r.notes ?? []) lines.push(`  note: ${n}`)
   lines.push(`  work added: ${a.added.join(', ') || '—'}; removed: ${a.removed.join(', ') || '—'}; changed: ${a.changed.map(c => `${c.id} (${c.fields.join(', ')})`).join(', ') || '—'}${a.restyled.length ? `; restyled: ${a.restyled.join(', ')}` : ''}`)
+  const g = a.groups
+  if (g) lines.push(`  groups added: ${g.added.join(', ') || '—'}; removed: ${g.removed.join(', ') || '—'}; changed: ${g.changed.map(x => `${x.id} (${x.fields.join(', ')})`).join(', ') || '—'}; reordered: ${g.reordered.join(', ') || '—'}`)
+  const resolved = r.revision ? r.record?.definition.revisions?.find(v => v.revision === r.revision)?.examples : undefined
+  for (const x of resolved ?? []) lines.push(`  example ${x.example}${x.group ? ` (${x.group})` : ''}: ${x.replacedBy.length ? `replaced by ${x.replacedBy.join(', ')}` : 'omitted; the reason explains it'}`)
   lines.push(`  graph: +${r.graph.added.length} −${r.graph.removed.length} nodes, +${r.graph.edgesAdded.length} −${r.graph.edgesRemoved.length} edges${r.graph.edgesAdded.length ? ` (new: ${r.graph.edgesAdded.map(([f, t]) => `${f} → ${t}`).join('; ')})` : ''}`)
   return lines.join('\n')
 }
@@ -1186,6 +1229,14 @@ export async function runCommand(c: RunCli): Promise<number> {
       const o = res.record.outputs![res.output]
       const url = (await m.availability(res.record)).outputs[o.id]?.url
       return report(r, res.record, res.duplicate ? `Already recorded (same receipt): output ${res.output}.` : `Published output ${o.id} (${o.candidate}): ${o.count} files, ${humanBytes(o.bytes)}, ${o.digest.slice(0, 19)}… at ${o.ref}${url ? `\nDownload: ${url}` : ''}\nManifest: ${o.file}. Ask about it: wfe run ask ${runKey(r)} <confirming node> --output ${o.id} …`)
+    }
+    case 'expectation': {
+      const r = await ref()
+      if (!args[1] || !args[2]) throw c.usage('<node> and <key> are required')
+      const num = c.opts('entry').map(Number)
+      const root = await rootOf(r)
+      const claims = { artifacts: c.opts('artifact').map(p => artifactPath(root, r, p)), commits: c.opts('commit').map(commit => ({ commit })), entries: num, questions: c.opts('question'), outputs: c.opts('output'), presentations: c.opts('presentation') }
+      return op({ op: 'expectation.assess', node: args[1], key: args[2], status: need(c, 'status', 'met, unmet or unverified'), ...(c.opt('note') ? { note: c.opt('note') } : {}), claims }, rec => `Recorded: ${args[2]} on ${args[1]} is ${rec.nodes[args[1]].assessments?.[args[2]].status} (as ${rec.nodes[args[1]].assessments?.[args[2]].reporter === 'agent' ? 'the agent\'s report' : 'a person\'s statement'}).`, r)
     }
     case 'attach': {
       const r = await ref()

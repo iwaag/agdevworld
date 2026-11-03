@@ -17,7 +17,7 @@
 // write-time refusals, as before.
 import { sourceLabel } from '../shared/intake.ts'
 import { openContinuations } from '../shared/humanReview.ts'
-import { effectiveOf, holderOf, questionState, replay, runKey, type HistoryEntry, type Question, type RunRecord } from '../shared/run.ts'
+import { assessmentWords, effectiveOf, expectationStates, holderOf, questionState, replay, runKey, type HistoryEntry, type Question, type RunRecord } from '../shared/run.ts'
 import { attachedLines, delegationBrief, instructionBrief } from './exec.ts'
 import { answerReminder } from '../shared/reminders.ts'
 import { runDir } from './runs.ts'
@@ -73,6 +73,9 @@ export function stateLines(r: RunRecord): string[] {
     const next = v.state === 'complete' ? v.release?.unlocked.filter(n => ex.ready.includes(n)) ?? [] : []
     if (next.length) out.push(`Review ${v.id}: approved by ${v.decision!.by}; ${next.join(', ')} ready after it (wfe review show ${runKey(r)} ${v.id}).`)
   }
+  if (ex.examples?.length) out.push(`Examples not yet specialized: ${ex.examples.join(', ')}; they are models, not tasks (wfe run help specialize).`)
+  const unsettled = expectationStates(r).filter(x => x.status !== 'met')
+  if (unsettled.length) out.push(`Expectations not met or not verified: ${unsettled.map(x => `${x.label} on ${x.node}, ${x.strength}, ${assessmentWords(x)}`).join('; ')} (wfe run expectation).`)
   if (r.definition.revisions?.length) out.push(`Definition: revision ${r.definition.active} in force (wfe run revisions <run>).`)
   for (const d of r.decisions) out.push(`Decision: ${d.decision} by ${d.by} at ${d.at}${d.confirmation ? ` (answer ${d.confirmation.answer} to ${d.confirmation.question})` : ''}.`)
   return out

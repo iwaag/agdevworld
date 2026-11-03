@@ -4,7 +4,7 @@
 // See docs/runs.md for the contract.
 import { canonicalJson } from './canonical.ts'
 import { contextChanges, changeWords, type AttemptContext, type ContextDelivery } from './context.ts'
-import { docStepsOf, type EffectiveGraph, type StepSpec } from './compile.ts'
+import { docStepsOf, type EffectiveGraph, type EffectiveGroup, type EffectiveNode, type StepSpec } from './compile.ts'
 import type { DocSteps } from './model.ts'
 import type { AttemptCatalog, CatalogContext } from './catalog.ts'
 import { INSTRUCTION_RESPONSES, sourceLabel, type AttachmentRef, type ChallengeAttachmentRef, type FileAttachmentRef, type SourceRef } from './intake.ts'
@@ -226,7 +226,13 @@ export type AdjustSource =
   | { kind: 'request'; input: string; sha256: string } // the run's original braindump or entrusted request asks for this work (p7/ex1); by file and hash
   | { kind: 'record-done'; node: string } // fix5: the revision of run.record-done, adding work already done
   | { kind: 'wake'; events: string[] } // p18: WFE continues a resting standing run for these events (a new ponder node)
-export interface AdjustDiff { added: string[]; removed: string[]; changed: string[]; edgesAdded: [string, string][]; edgesRemoved: [string, string][] }
+export interface GroupDiff { added: string[]; removed: string[]; changed: string[]; reordered: string[] }
+export interface AdjustDiff { added: string[]; removed: string[]; changed: string[]; edgesAdded: [string, string][]; edgesRemoved: [string, string][]; groups?: GroupDiff }
+// What became of an example in a revision (improve_wfnode p1): the nodes that
+// replace it (itself, when it became concrete in place), none when the realized
+// work omits it, in which case the revision's reason explains. Provenance by
+// the revision's record, never inferred from names.
+export interface ExampleResolution { example: string; group?: string; replacedBy: string[] }
 export interface Revision {
   revision: string // r2, r3, …
   parent: string // the revision it was made from (r1 = the original)
@@ -237,6 +243,7 @@ export interface Revision {
   reason: string
   source: AdjustSource
   diff: AdjustDiff
+  examples?: ExampleResolution[]
   at: string
   by: string
 }
@@ -277,7 +284,14 @@ export interface NodeRecord {
   document?: DocumentEvidence // a documentation step's checked document (p5)
   agreement?: { question: string } // the plan step: the question whose taken-up answer agreed to that document
   retrospective?: Retrospective // recorded afterwards (fix5): work done before it was a node
+  assessments?: Record<string, ExpectationAssessment> // improve_wfnode p1, by expectation key: the latest statement of each
 }
+// Whether a result met one expectation of its node (docs/runs.md *Expectation
+// assessments*). A statement by whoever recorded it, with what shows it; none
+// recorded reads as unverified. `reporter`: agent when an attempt recorded it.
+export const ASSESSMENTS = ['met', 'unmet', 'unverified'] as const
+export type AssessmentStatus = typeof ASSESSMENTS[number]
+export interface ExpectationAssessment { status: AssessmentStatus; note: string; evidence: RetroEvidence[]; reporter: 'agent' | 'person'; by: string; at: string; seq: number }
 // Work recorded as done after it happened (workflow_editor fix5,
 // docs/adjustments.md "Recording work already done"): the node was added and
 // completed in one entry (run.record-done). Nothing ran it then; `at` and
@@ -285,6 +299,7 @@ export interface NodeRecord {
 // as the recorder stated them (null: unknown), `evidence` what shows it
 // happened, each checked to exist when it was recorded.
 export interface Retrospective { seq: number; at: string; by: string; reason: string; reported: { started: string | null; ended: string | null }; evidence: RetroEvidence[] }
+export interface EvidenceClaims { artifacts?: string[]; commits?: { commit: string; repository?: string }[]; entries?: number[]; questions?: string[]; outputs?: string[]; presentations?: string[] }
 export type RetroEvidence =
   | { kind: 'artifact'; path: string; sha256: string; bytes: number }
   | { kind: 'commit'; repository: string; commit: string }
@@ -438,6 +453,9 @@ export interface Execution {
   active: string[]
   waiting: { node: string; holder: string; on: WaitOn }[]
   failed: string[]
+  // improve_wfnode p1, when there are any: examples not yet specialized. Not
+  // work: outside counts, ready and blocked; the run owes a revision for them.
+  examples?: string[]
 }
 
 // Execution control (p4): which launch of the executor is current, how the
@@ -456,7 +474,7 @@ export type HoldKind = 'stopped' | 'interrupted' | 'unknown'
 // launched for and did not take up; `process`: the executor saw the process
 // fail (`detail`); `lost`: the process was gone and its outcome is unknown.
 export type HoldCause =
-  | { code: 'left-running' | 'left-ready' | 'nothing-recorded'; nodes: string[] }
+  | { code: 'left-running' | 'left-ready' | 'left-examples' | 'nothing-recorded'; nodes: string[] }
   | { code: 'missed-event'; events: { delegation: string; n: number; type: string }[] }
   | { code: 'missed-correction'; corrections: string[] } // fix6: a correction left unaddressed
   | { code: 'missed-review'; reviews: string[] } // p17: requested changes left unaddressed
@@ -580,6 +598,8 @@ export type OpInput =
   | { op: 'node.progress'; node: string; text: string }
   | { op: 'node.wait'; node: string; reason: string; holder: string; external: string; deadline?: string }
   | { op: 'node.complete'; node: string; outcome: string; artifacts?: string[]; document?: DocumentEvidence; agreement?: string }
+  // `claims` is what the caller names; the file layer checks it into `evidence`.
+  | { op: 'expectation.assess'; node: string; key: string; status: string; note?: string; evidence?: RetroEvidence[]; claims?: EvidenceClaims }
   | { op: 'node.fail'; node: string; reason: string }
   | { op: 'node.cancel'; node: string; reason: string }
   | { op: 'question.ask'; question: string; node?: string; text: string; to: string; document?: DocumentEvidence; plan?: boolean; subjects?: string[]; subject?: DocumentEvidence[]; presentation?: string; output?: string; adjustment?: string }
@@ -697,7 +717,7 @@ function targetSourceOf(v: unknown): { source?: import('./delegation.ts').Delega
   return { source: { kind: 'published', repository: v.repository as string, branch: v.branch as string, commit: v.commit, definitions: d } }
 }
 
-export const OPS = ['run.create', 'node.start', 'node.progress', 'node.wait', 'node.complete', 'node.fail', 'node.cancel',
+export const OPS = ['run.create', 'node.start', 'node.progress', 'node.wait', 'node.complete', 'node.fail', 'node.cancel', 'expectation.assess',
   'question.ask', 'question.answer', 'question.take-up', 'question.withdraw', 'instruction.receive', 'instruction.ack', 'artifact.attach', 'run.cancel', 'run.decide',
   'attempt.begin', 'attempt.end', 'run.stop', 'run.resume', 'presentation.register', 'presentation.observe', 'run.adjust', 'run.record-done', 'run.integrate', 'run.relocate', 'run.rename-project', 'run.assign', 'run.recover', 'attempt.session', 'attempt.context', 'session.retire',
   'delegation.dispatch', 'delegation.bind', 'delegation.event', 'delegation.take-up', 'delegation.answer', 'delegation.instruct', 'delegation.dispose',
@@ -708,7 +728,7 @@ export const OPS = ['run.create', 'node.start', 'node.progress', 'node.wait', 'n
 // The executor's own reports. While an attempt is open they must carry its
 // id (`attempt`), so a stopped or superseded attempt cannot write into the
 // record of the one that replaced it.
-export const EXECUTOR_OPS: readonly string[] = ['node.start', 'node.progress', 'node.wait', 'node.complete', 'node.fail', 'question.ask', 'question.take-up', 'question.withdraw', 'instruction.ack', 'artifact.attach', 'presentation.register',
+export const EXECUTOR_OPS: readonly string[] = ['node.start', 'node.progress', 'node.wait', 'node.complete', 'node.fail', 'question.ask', 'question.take-up', 'question.withdraw', 'instruction.ack', 'artifact.attach', 'expectation.assess', 'presentation.register',
   'delegation.dispatch', 'delegation.take-up', 'delegation.answer', 'delegation.instruct', 'delegation.dispose', 'delegation.revise', 'correction.take-up',
   'review.prepare', 'review.take-up',
   'input.select', 'output.publish']
@@ -750,7 +770,7 @@ export function runDisplayTitle(rec: Pick<RunRecord, 'workflow' | 'presentations
 // The graph the run follows: its frozen effective graph (p5), or, for a run
 // created before p5, the root workflow of its bundle. A node with `step` is a
 // generated documentation step.
-export interface RunGraph { nodes: Record<string, { type: string; workflow?: string; project?: string; accepts?: string; confirms?: string; activity?: string; step?: StepSpec }>; edges: Edge[] }
+export interface RunGraph { nodes: Record<string, EffectiveNode>; edges: Edge[]; groups?: Record<string, EffectiveGroup> }
 export const stepOf = (graph: RunGraph, node: string): StepSpec | undefined => graph.nodes[node]?.step
 // The document a step writes, project-relative.
 export const documentPath = (r: RunRef, step: StepSpec) => `${runFolder(r)}/${step.output}`
@@ -785,7 +805,7 @@ export function readiness(nodes: Record<string, { state: NodeState }>, graph: Ru
   }
   const ready: string[] = [], blocked: string[] = []
   for (const id of Object.keys(graph.nodes).sort()) {
-    if (nodes[id]?.state !== 'pending') continue
+    if (nodes[id]?.state !== 'pending' || graph.nodes[id]?.example) continue
     if ((preds.get(id) ?? []).every(p => nodes[p]?.state === 'completed')) ready.push(id)
     else if (isBlocked(id)) blocked.push(id)
   }
@@ -797,7 +817,10 @@ export function readiness(nodes: Record<string, { state: NodeState }>, graph: Ru
 // result it returned is not announced again.
 export function summarize(s: Pick<RunState, 'nodes' | 'cancelled'> & Partial<Pick<RunState, 'corrections' | 'reviews' | 'standing'>>, graph: RunGraph): Execution {
   const counts = Object.fromEntries(NODE_STATES.map(k => [k, 0])) as Record<NodeState, number>
-  const ids = Object.keys(s.nodes).sort()
+  // Examples (improve_wfnode p1) are no work: they count for nothing, and
+  // keep the run from reading as completed until a revision resolves them.
+  const examples = Object.keys(s.nodes).sort().filter(id => graph.nodes[id]?.example)
+  const ids = Object.keys(s.nodes).sort().filter(id => !graph.nodes[id]?.example)
   for (const id of ids) counts[s.nodes[id].state]++
   const { ready, blocked } = readiness(s.nodes, graph)
   const active = ids.filter(id => s.nodes[id].state === 'running')
@@ -805,15 +828,15 @@ export function summarize(s: Pick<RunState, 'nodes' | 'cancelled'> & Partial<Pic
   const failed = ids.filter(id => s.nodes[id].state === 'failed')
   let state: ExecutionState
   if (s.cancelled) state = 'cancelled'
-  else if (ids.length > 0 && ids.filter(id => !graph.nodes[id]?.step || ['running', 'waiting', 'failed'].includes(s.nodes[id].state)).every(id => s.nodes[id].state === 'completed' || s.nodes[id].state === 'cancelled')) state = 'completed'
+  else if (ids.length > 0 && !examples.length && ids.filter(id => !graph.nodes[id]?.step || ['running', 'waiting', 'failed'].includes(s.nodes[id].state)).every(id => s.nodes[id].state === 'completed' || s.nodes[id].state === 'cancelled')) state = 'completed'
   else if (counts.pending === ids.length) state = 'not-started'
-  else if (active.length || waiting.length || ready.length) state = 'in-progress'
+  else if (active.length || waiting.length || ready.length || examples.length) state = 'in-progress'
   else state = 'stopped'
   // p17: so do changes a person requested in a human review.
   if (state === 'completed' && (openCorrections(s).length || openContinuations(s).length)) state = 'in-progress'
   // p18: a standing run rests instead of completing, until its room closes.
   if (state === 'completed' && s.standing && s.standing.state !== 'closed') state = 'idle'
-  return { state, counts, ready, blocked, active, waiting, failed }
+  return { state, counts, ready, blocked, active, waiting, failed, ...(examples.length ? { examples } : {}) }
 }
 
 // Who holds the next move on a waiting node, as the view states it.
@@ -1046,8 +1069,93 @@ export function graphDiff(a: RunGraph, b: RunGraph): AdjustDiff {
     changed: Object.keys(b.nodes).filter(n => n in a.nodes && canonicalJson(a.nodes[n]) !== canonicalJson(b.nodes[n])).sort(),
     edgesAdded: b.edges.filter(e => !ea.has(key(e))).map(e => [e.from, e.to] as [string, string]).sort(),
     edgesRemoved: a.edges.filter(e => !eb.has(key(e))).map(e => [e.from, e.to] as [string, string]).sort(),
+    ...groupChanges(a.groups ?? {}, b.groups ?? {}),
   }
 }
+function groupChanges(a: NonNullable<RunGraph['groups']>, b: NonNullable<RunGraph['groups']>): { groups?: GroupDiff } {
+  const shared = Object.keys(b).filter(g => g in a).sort()
+  const bare = (x: EffectiveGroup, members: string[]) => canonicalJson({ ...x, members })
+  const groups: GroupDiff = {
+    added: Object.keys(b).filter(g => !(g in a)).sort(),
+    removed: Object.keys(a).filter(g => !(g in b)).sort(),
+    changed: shared.filter(g => bare(a[g], [...a[g].members].sort()) !== bare(b[g], [...b[g].members].sort())),
+    reordered: shared.filter(g => bare(a[g], [...a[g].members].sort()) === bare(b[g], [...b[g].members].sort()) && canonicalJson(a[g].members) !== canonicalJson(b[g].members)),
+  }
+  return Object.values(groups).some(l => l.length) ? { groups } : {}
+}
+
+// The graph of a revision of this run, for provenance.
+export function revisionGraph(s: { definition: DefinitionRef }, revision: string): EffectiveGraph | undefined {
+  return revision === 'r1' ? s.definition.effective : s.definition.revisions?.find(r => r.revision === revision)?.effective
+}
+
+// What a revision does to the examples in force (docs/adjustments.md
+// *Specializing examples*). A removed example's dependencies stay intended: what
+// led through it still leads to what followed it, through its replacements when
+// it has any. Boundary edges are the agent's to state; none is guessed from list
+// order, so a revision that loses one is refused with the edge to add.
+function resolveExamples(graph: RunGraph, next: RunGraph): ExampleResolution[] {
+  const out = new Map<string, string[]>()
+  for (const e of next.edges) out.set(e.from, [...(out.get(e.from) ?? []), e.to])
+  const reaches = (from: string, to: string): boolean => {
+    const seen = new Set([from]), todo = [from]
+    while (todo.length) for (const t of out.get(todo.pop()!) ?? []) { if (t === to) return true; if (!seen.has(t)) { seen.add(t); todo.push(t) } }
+    return false
+  }
+  const authored = (id: string) => (id.startsWith('_report.') ? id.slice('_report.'.length) : id)
+  const groupOf = (id: string) => Object.entries(graph.groups ?? {}).find(([, g]) => g.members.includes(id))?.[0]
+  const resolved: ExampleResolution[] = []
+  for (const id of Object.keys(graph.nodes).filter(n => graph.nodes[n].example).sort()) {
+    const stays = next.nodes[id]
+    if (stays?.example) continue
+    const named = Object.keys(next.nodes).filter(n => n !== id && next.nodes[n].specializes?.examples.includes(id)).sort()
+    const group = groupOf(id)
+    resolved.push({ example: id, ...(group ? { group } : {}), replacedBy: stays ? [id, ...named] : named })
+    if (stays) continue
+    const before = graph.edges.filter(e => e.to === id && e.from in next.nodes).map(e => e.from)
+    const after = graph.edges.filter(e => e.from === id && e.to in next.nodes).map(e => e.to)
+    for (const p of before) for (const f of after) if (!reaches(p, f)) fail('example-boundary', `removing example "${id}" loses its dependency: ${authored(p)} led through it to ${authored(f)}. Add the edge the concrete graph needs, such as - {from: ${authored(p)}, to: ${named[0] ?? authored(f)}}`)
+    if (!named.length) continue
+    for (const p of before) if (!named.some(r => reaches(p, r))) fail('example-boundary', `example "${id}" waited for ${authored(p)}, and none of its replacements (${named.join(', ')}) does. Add the edge, such as - {from: ${authored(p)}, to: ${named[0]}}`)
+    for (const f of after) if (!named.some(r => reaches(r, f))) fail('example-boundary', `${authored(f)} waited for example "${id}", and for none of its replacements (${named.join(', ')}). Add the edge, such as - {from: ${named.at(-1)}, to: ${authored(f)}}`)
+  }
+  return resolved
+}
+
+// The definition's groups, examples and expectations as this run was given
+// them, for the agent's brief; empty when it has none.
+export function definitionMeaningBrief(r: { workflow: string; run: string; definition: DefinitionRef; nodes: Record<string, NodeRecord>; execution: Execution }): string[] {
+  const eff = effectiveOf(r)
+  if (!eff) return []
+  const out: string[] = []
+  const groups = Object.entries(eff.groups ?? {})
+  if (groups.length) out.push('', `Groups of this run's definition. A list's members are its work in order; the order creates no dependency, and the example count does not fix the item count:`,
+    ...groups.map(([id, g]) => `- ${id} "${g.name}" (${g.kind}, ${g.cardinality}): ${g.members.join(', ') || '(no items)'}${g.description.trim() ? `. ${g.description.trim().split('\n').join(' ')}` : ''}`))
+  const examples = r.execution.examples ?? []
+  if (examples.length) out.push('', `Examples not yet specialized: ${examples.join(', ')}. Each is a model for concrete work, not a task: it cannot be started, and the run is not finished while it stands. Choose the concrete work and its count from the request and the group's description, then replace the examples in one revision, before performing that work (wfe run help specialize).`)
+  const concrete = expectationStates(r)
+  const models = Object.entries(eff.nodes).filter(([, n]) => n.example && n.expectations?.length)
+  const says = (key: string, x: { strength?: string; note?: string }) => `${eff.meanings?.[key]?.label ?? key} (${key}), ${x.strength ?? 'preferred'}${eff.meanings?.[key] ? `: ${eff.meanings[key].meaning}` : ''}${x.note ? ` Note: ${x.note}` : ''}`
+  if (concrete.length || models.length) out.push('', `What the author expects of results. Preferred: prioritize it; explain a different choice and what you delivered instead. Required: a condition of a satisfactory result; when it is not met it stays visible as unmet. A key states an intent and establishes nothing: say what actually holds with wfe run expectation (wfe run help expectation); a statement left unmade reads as unverified. Hosts and storage endpoints are environment facts from your context.`,
+    ...concrete.map(x => `- ${x.node}: ${says(x.key, x)} [${assessmentWords(x)}]`),
+    ...models.flatMap(([id, n]) => (n.expectations ?? []).map(x => `- ${id} (example; carry it onto what replaces it): ${says(x.key, x)}`)))
+  return out
+}
+
+// Every expectation of the graph's concrete nodes as the records stand, for
+// views and the brief: a key with no statement is unverified.
+export interface ExpectationState { node: string; key: string; strength: string; note: string; label: string; meaning: string; status: AssessmentStatus; assessment: ExpectationAssessment | null }
+export function expectationStates(r: { definition: DefinitionRef; nodes: Record<string, NodeRecord> }): ExpectationState[] {
+  const eff = effectiveOf(r)
+  if (!eff) return []
+  return Object.entries(eff.nodes).filter(([, n]) => !n.example).flatMap(([node, n]) => (n.expectations ?? []).map(x => {
+    const assessment = r.nodes[node]?.assessments?.[x.key] ?? null
+    return { node, key: x.key, strength: x.strength ?? 'preferred', note: x.note ?? '', label: eff.meanings?.[x.key]?.label ?? x.key, meaning: eff.meanings?.[x.key]?.meaning ?? '', status: assessment?.status ?? 'unverified' as AssessmentStatus, assessment }
+  }))
+}
+// The words for a state. A preferred expectation that was not met is an
+// alternative the agent explained; a required one stays unmet.
+export const assessmentWords = (x: Pick<ExpectationState, 'strength' | 'status'>): string => x.status === 'met' ? 'Met' : x.status === 'unverified' ? 'Unverified' : x.strength === 'required' ? 'Unmet' : 'Alternative'
 
 // A registered presentation's manifest (p7): computed by the file layer;
 // here only its shape and that every path lies in the presentation's folder.
@@ -1202,6 +1310,11 @@ export function apply(prev: RunState | null, e: HistoryEntry | (OpInput & EntryM
     if (typeof id !== 'string' || !(id in s.nodes)) fail('node-unknown', `node "${String(id)}" is not in this run's definition`)
     return s.nodes[id as string]
   }
+  // An example (improve_wfnode p1) is resolved by a revision. Performing it
+  // is a semantic error, not something a person's permission could allow.
+  const concrete = (id: string, what: string) => {
+    if (graph.nodes[id]?.example) fail('example-not-executable', `"${id}" is an example, a model for concrete work; it cannot be ${what}. Replace it with the concrete work through wfe run adjust (wfe run help specialize), then perform that`)
+  }
   const move = (id: string, to: NodeState) => {
     const n = s.nodes[id]
     const from = change.nodes?.[id]?.[0] ?? n.state
@@ -1246,6 +1359,7 @@ export function apply(prev: RunState | null, e: HistoryEntry | (OpInput & EntryM
     case 'node.start': {
       live()
       const n = node(e.node)
+      concrete(e.node, 'started')
       if (n.state === 'pending') {
         n.started = at
         if (!s.started) s.started = at
@@ -1311,9 +1425,24 @@ export function apply(prev: RunState | null, e: HistoryEntry | (OpInput & EntryM
       move(e.node, 'failed')
       break
     }
+    case 'expectation.assess': {
+      live()
+      const n = node(e.node)
+      concrete(e.node, 'assessed')
+      const known = graph.nodes[e.node]?.expectations ?? []
+      if (!known.some(x => x.key === e.key)) fail('expectation-unknown', `node "${e.node}" has no expectation "${e.key}" (${known.map(x => x.key).join(', ') || 'none'})`)
+      if (!(ASSESSMENTS as readonly string[]).includes(e.status)) fail('shape', `status must be one of ${ASSESSMENTS.join(', ')}`)
+      const note = optText(e.note, 'the note')
+      const proof = retroEvidence(e.evidence ?? [], s, e.seq)
+      if (e.status === 'met' && !note.trim() && !proof.length) fail('expectation-evidence', `saying "${e.key}" is met needs evidence or an explanation; attaching a key or completing a node establishes nothing`)
+      if (e.status === 'unmet' && !note.trim()) fail('expectation-evidence', `saying "${e.key}" is unmet needs an explanation: what was delivered instead, and why`)
+      n.assessments = { ...n.assessments, [e.key]: { status: e.status as AssessmentStatus, note, evidence: proof, reporter: e.attempt ? 'agent' : 'person', by, at, seq: e.seq } }
+      break
+    }
     case 'node.cancel': {
       live()
       const n = node(e.node)
+      concrete(e.node, 'cancelled')
       if (n.state === 'completed' || n.state === 'cancelled') fail('state', `node "${e.node}" is ${n.state}; it cannot be cancelled`)
       n.cancellation = { reason: text(e.reason, 'the reason'), at, by }
       n.wait = null; n.ended = at
@@ -1586,6 +1715,13 @@ export function apply(prev: RunState | null, e: HistoryEntry | (OpInput & EntryM
       // next attempt's: the executor queues it after this end.
       const arrived = new Set(Object.values(s.reviews ?? {}).flatMap(r => r.release && !r.release.continued && r.release.during === e.attempt ? r.release.unlocked : []))
       const ownReady = ex.ready.filter(id => !arrived.has(id))
+      // Examples left with nothing else happening (improve_wfnode p1): the run
+      // owes their specialization, and no one but its agent can do that.
+      if (outcome === 'exited' && !s.cancelled && ex.examples?.length && !ex.active.length && !ownReady.length && !ex.waiting.length) {
+        outcome = 'interrupted'
+        why = `the executor exited with ${ex.examples.join(', ')} not specialized and nothing waiting${detail ? `; ${detail}` : ''}`
+        cause = { code: 'left-examples', nodes: ex.examples }
+      }
       if (outcome === 'exited' && !s.cancelled && ex.state === 'in-progress' && (ex.active.length || (ownReady.length && !deferred))) {
         outcome = 'interrupted'
         why = `the executor exited with ${ex.active.length ? `${ex.active.join(', ')} recorded as running` : `${ownReady.join(', ')} ready and nothing waiting`}${detail ? `; ${detail}` : ''}`
@@ -1661,7 +1797,7 @@ export function apply(prev: RunState | null, e: HistoryEntry | (OpInput & EntryM
         const answered = s.execution.waiting.some(w => 'question' in w.on && (() => { const q = s.questions[w.on.question]; return !!q && q.answers.length > 0 && !q.takenUp && !q.withdrawn })())
         const relayed = Object.values(s.delegations ?? {}).some(d => isOpenDelegation(d) && pendingEvents(d).length > 0)
         const owed = openContinuations(s).length > 0
-        if (!s.execution.ready.length && !s.execution.active.length && !answered && !relayed && !owed && s.execution.state !== 'not-started') fail('state', 'the run is not held and nothing in it waits for the executor; there is nothing to recover')
+        if (!s.execution.ready.length && !s.execution.active.length && !s.execution.examples?.length && !answered && !relayed && !owed && s.execution.state !== 'not-started') fail('state', 'the run is not held and nothing in it waits for the executor; there is nothing to recover')
       }
       const reason = text(e.reason, 'the reason for the recovery')
       let agent: RecoveryAgent | undefined
@@ -1941,7 +2077,15 @@ export function apply(prev: RunState | null, e: HistoryEntry | (OpInput & EntryM
       if (source.kind === 'request') {
         if (source.input !== s.input.file || !s.input.sha256 || source.sha256 !== s.input.sha256) fail('adjust-source', 'the request citation does not identify the original input; use source kind agent for an agent-selected revision')
       }
-      const diff = graphDiff(graph, { nodes, edges })
+      const groups = next.groups as RunGraph['groups']
+      const diff = graphDiff(graph, { nodes, edges, groups })
+      // Examples (improve_wfnode p1): the record's rules for what replaces them.
+      for (const [nid, n] of Object.entries(nodes)) {
+        const had = s.nodes[nid]
+        if (n.example && had && (had.state !== 'pending' || had.started || had.retrospective)) fail('example-history', `"${nid}" is ${had.state} with execution history, so it cannot become an example: its history would read as a model's. Add a separate example node`)
+        if (n.specializes) for (const x of n.specializes.examples) if (!revisionGraph(s, n.specializes.revision)?.nodes[x]?.example) fail('specializes-unknown', `"${nid}" says it specializes "${x}" of ${n.specializes.revision}, which ${revisionGraph(s, n.specializes.revision) ? 'has no such example' : 'is not a revision of this run'}`)
+      }
+      const resolved = resolveExamples(graph, { nodes, edges })
       if (retro) {
         // Only the one node and its generated steps are new; nothing else
         // changes and nothing goes.
@@ -1957,11 +2101,12 @@ export function apply(prev: RunState | null, e: HistoryEntry | (OpInput & EntryM
         const cut = diff.edgesRemoved.filter(([a, b]) => !isStep(a) && !isStep(b) && !(pre.has(a) && post.has(b)))
         if (extra.length || diff.removed.length || diff.changed.some(n => n !== node && !nodes[n]?.step) || cut.length) fail('adjust-graph', `a revision recording work done adds only "${node}" (and its generated steps); it ${extra.length ? `adds ${extra.join(', ')}` : diff.removed.length ? `removes ${diff.removed.join(', ')}` : cut.length ? `removes the edge${cut.length === 1 ? '' : 's'} ${cut.map(([a, b]) => `${a} → ${b}`).join(', ')}` : 'changes other nodes'}`)
         if (nodes[node].step) fail('adjust-graph', `"${node}" is a generated step`)
+        if (nodes[node].example) fail('adjust-graph', `"${node}" is an example; work already done is concrete work`)
         // It follows nodes that were done or under way when the work happened
         // (a talk it was done inside is still running), never future work.
         for (const ed of edges) if (ed.to === node && !['completed', 'running', 'waiting'].includes(s.nodes[ed.from]?.state ?? '')) fail('state', `${node} would follow ${ed.from}, which is ${s.nodes[ed.from]?.state ?? 'new'}; work already done follows nodes that are completed or under way, not future work`)
       }
-      const rev: Revision = { revision: id, parent: active, file: e.file, sha256: e.sha256, definitionDigest: e.definitionDigest, effective: next as EffectiveGraph, reason: text(e.reason, 'the reason'), source, diff, at, by }
+      const rev: Revision = { revision: id, parent: active, file: e.file, sha256: e.sha256, definitionDigest: e.definitionDigest, effective: next as EffectiveGraph, reason: text(e.reason, 'the reason'), source, diff, ...(resolved.length ? { examples: resolved } : {}), at, by }
       s.definition = { ...s.definition, active: id, revisions: [...revisions, rev] }
       // Unchanged nodes keep their records; new work starts pending; removed
       // (pending) work leaves the state, its history stays as it was.
@@ -1969,7 +2114,7 @@ export function apply(prev: RunState | null, e: HistoryEntry | (OpInput & EntryM
       for (const nid of Object.keys(nodes).sort()) if (!(nid in s.nodes)) s.nodes[nid] = emptyNode()
       s.nodes = Object.fromEntries(Object.keys(s.nodes).sort().map(k2 => [k2, s.nodes[k2]]))
       change.revision = [active, id]
-      graph = { nodes, edges }
+      graph = { nodes, edges, ...(groups ? { groups } : {}) }
       if (source.kind === 'wake') {
         const added = diff.added.filter(n => !nodes[n]?.step)
         if (added.length !== 1 || diff.removed.length || diff.changed.some(n => !nodes[n]?.step)) fail('adjust-graph', 'a wake adds one node and changes nothing else')
@@ -2580,7 +2725,7 @@ export function replay(history: unknown[], graph: RunGraph): { state: RunState; 
 // created with (p7). Undefined for records without a frozen graph.
 export function graphOfState(s: { definition: DefinitionRef }): RunGraph | undefined {
   const eff = effectiveOf(s)
-  return eff ? { nodes: eff.nodes, edges: eff.edges } : undefined
+  return eff ? { nodes: eff.nodes, edges: eff.edges, ...(eff.groups ? { groups: eff.groups } : {}) } : undefined
 }
 
 export function stateOf(record: RunRecord): RunState {
@@ -2688,6 +2833,7 @@ export function dueReason(s: Pick<RunState, 'execution'> & Partial<Pick<RunState
   const and = (xs: string[]) => xs.length <= 2 ? xs.join(' and ') : `${xs.slice(0, -1).join(', ')} and ${xs.at(-1)}`
   if (s.execution.ready.length && !s.execution.waiting.length) return `${and(s.execution.ready)} ready`
   if (s.execution.active.length) return `${and(s.execution.active)} recorded as running`
+  if (s.execution.examples?.length && !s.execution.waiting.length) return `${and(s.execution.examples)} not specialized`
   return null
 }
 

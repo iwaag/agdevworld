@@ -28,7 +28,7 @@ function wake(r: RunRecord, node: string, events: string[], after = 'ponder'): {
   const graph: RunGraph = { nodes: { ...prev.nodes, [node]: { type: 'do', activity: 'ponder' } }, edges: [...prev.edges, { from: after, to: node }] }
   const n = (r.definition.revisions?.length ?? 0) + 2
   const prevGraph: RunGraph = { nodes: prev.nodes, edges: prev.edges }
-  r = op(r, { op: 'run.adjust', revision: `r${n}`, parent: r.definition.active ?? 'r1', file: `definition/r${n}/conduct.yaml`, sha256: 'a'.repeat(64), definitionDigest: `sha256:${'b'.repeat(64)}`, effective: { compiler: 'ag.wfe-compile.v5', ...graph } as never, reason: `woken for ${events.join(', ')}`, source: { kind: 'wake', events } } as OpInput, 'conversation', 'conversation', prevGraph)
+  r = op(r, { op: 'run.adjust', revision: `r${n}`, parent: r.definition.active ?? 'r1', file: `definition/r${n}/conduct.yaml`, sha256: 'a'.repeat(64), definitionDigest: `sha256:${'b'.repeat(64)}`, effective: { compiler: 'ag.wfe-compile.v6', ...graph } as never, reason: `woken for ${events.join(', ')}`, source: { kind: 'wake', events } } as OpInput, 'conversation', 'conversation', prevGraph)
   return { r, graph }
 }
 

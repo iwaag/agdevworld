@@ -25,6 +25,35 @@ node's completion atomically. Other nodes may be running. Questions,
 proposals (`--propose <name>`), plans and reports remain available when useful;
 none is required to authorize an adjustment.
 
+## Specializing examples (improve_wfnode p1)
+
+An example ([contract.md](contract.md) *Examples*) is resolved through an ordinary
+revision. There is no second execution path, automatic fan-out or fixed count: the
+agent chooses the concrete tasks and their count from the request and the group's
+description, and `wfe run help specialize` says how. One `wfe run adjust` changes
+nodes, `groups.<id>.members` and edges atomically, and honors `--expect-revision`.
+
+- **Replacing.** A concrete node names what it replaces with
+  `specializes: {examples: [...], revision: rN}`. One-to-many, many-to-one and
+  many-to-many are all possible. An example that becomes the work in place drops
+  `example: true` and keeps its id.
+- **Omitting.** An example no node names is omitted, including every example of an empty
+  realized list. The revision's reason explains it. An empty list stays in the definition.
+- **Boundary edges.** Nothing is guessed from list order. A revision is refused
+  (`example-boundary`, with the edge to add) when what led through a removed example no
+  longer reaches what followed it, when none of its replacements follows what it
+  followed, or when what followed it follows none of its replacements. Paths count, so
+  a chain and parallel branches are both valid.
+- **Provenance.** `specializes` must name examples of that revision (`specializes-unknown`).
+  The revision records `examples: [{example, group, replacedBy}]`, and an empty
+  `replacedBy` means omitted. Group identity, the revision's difference and this record
+  together explain the specialization; earlier revisions keep the original examples and membership.
+- **History.** A node with execution history cannot become an example (`example-history`):
+  its history would read as a model's. Removing a started node stays an ordinary revision.
+
+The difference (`diff.groups`, and `authored.groups` in the answer) reports groups
+added, removed, changed and reordered.
+
 ## Recording work already done (workflow_editor fix5)
 
 `wfe run record-done <run> --template <t> --id <node> --after <node>

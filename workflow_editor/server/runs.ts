@@ -14,7 +14,7 @@ import { validateWorkflow } from '../shared/validate.ts'
 import {
   activeRevision, checkRecord, documentPath, fileAttachmentOf, graphOfState, hostOf, operate, presentationFolder, runDisplayTitle, type AdjustSource, type AdjustDiff, graphDiff, RUN_ID, RunError, runFolder, RUNS_ROOT, runKey, validRunRef, type Presentation,
   type BundleEntry, type DefinitionRef, type DefinitionSource, type DocumentEvidence, type EntrustRef, type Executor, type OpInput, type RepoContext, type RunGraph,
-  type EntryMeta, type RetroEvidence, type RunInput, type RunRecord, type RunRef, type RunState, type RunStorage,
+  type EntryMeta, type EvidenceClaims, type RetroEvidence, type RunInput, type RunRecord, type RunRef, type RunState, type RunStorage,
 } from '../shared/run.ts'
 import { runStatus } from '../shared/status.ts'
 import type { SourceRef } from '../shared/intake.ts'
@@ -54,6 +54,7 @@ export function graphOf(w: Workflow): RunGraph {
   return {
     nodes: Object.fromEntries(Object.entries(w.nodes).map(([id, n]) => [id, authoredNode(n)])),
     edges: w.edges.map(e => ({ from: e.from, to: e.to })),
+    ...(w.groups && Object.keys(w.groups).length ? { groups: Object.fromEntries(Object.entries(w.groups).map(([k, g]) => [k, { name: g.name, kind: g.kind, cardinality: g.cardinality, description: g.description, members: [...g.members] }])) } : {}),
   }
 }
 
@@ -195,7 +196,7 @@ function followedGraph(def: DefinitionRef, bundle: Bundle): RunGraph | string {
     const again = compile(root)
     if (!again.ok || canonicalJson(again.graph) !== canonicalJson(eff)) return `the frozen graph differs from what ${COMPILER_VERSION} produces for the bundled definition`
   }
-  return { nodes: eff.nodes, edges: eff.edges }
+  return { nodes: eff.nodes, edges: eff.edges, ...(eff.groups ? { groups: eff.groups } : {}) }
 }
 
 async function bundleSigs(dir: string): Promise<string> {
@@ -923,6 +924,10 @@ interface PreparedOp { op: OpInput & EntryMeta; docProblem?: string }
 async function prepareOp(ws: Workspace, ref: RunRef, record: RunRecord, graph: RunGraph, input: OpInput & EntryMeta): Promise<PreparedOp> {
   const op = structuredClone(input) as OpInput & EntryMeta
   if (op.op === 'question.ask' && !op.question) op.question = nextQuestionId(record)
+  if (op.op === 'expectation.assess' && op.claims) {
+    op.evidence = (await checkedEvidence(ws, record, op.claims)).evidence
+    delete op.claims
+  }
   if (op.op === 'artifact.attach' || (op.op === 'node.complete' && op.artifacts)) {
     for (const p of op.op === 'artifact.attach' ? [op.path] : op.artifacts ?? []) {
       const n = normalizeRepoPath(p)
@@ -1193,7 +1198,7 @@ export async function adjustRun(ws: Workspace, ref: RunRef, o: AdjustOptions, ct
     if (!compiled.ok) problem('adjust-graph', compiled.message)
     const authored = authoredDiff(active.workflow, next)
     const notes = adjustNotes(parsed.doc.toJS(), active.workflow, next)
-    const newGraph = compiled.ok ? { nodes: compiled.graph.nodes, edges: compiled.graph.edges } : graph
+    const newGraph = compiled.ok ? { nodes: compiled.graph.nodes, edges: compiled.graph.edges, ...(compiled.graph.groups ? { groups: compiled.graph.groups } : {}) } : graph
     const gdiff = graphDiff(graph, newGraph)
     const base = { dryRun: !!o.dryRun, parent, authored, graph: gdiff, ...(notes.length ? { notes } : {}) }
     const revision = `r${(record.definition.revisions?.length ?? 0) + 2}`
@@ -1270,6 +1275,38 @@ export interface RecordDoneOptions {
   expectRevision?: string
 }
 
+// What a caller names as evidence, checked to exist now: files of the run's
+// copy by hash, commits as full ids; the reducer checks what lies in the record.
+async function checkedEvidence(ws: Workspace, record: RunRecord, o: EvidenceClaims): Promise<{ evidence: RetroEvidence[]; artifacts: string[] }> {
+  const evidence: RetroEvidence[] = []
+  const artifacts: string[] = []
+  for (const p of o.artifacts ?? []) {
+    const n = normalizeRepoPath(p)
+    if (!n || n === '.') throw new RequestError(400, `artifact "${p}" must be a project-relative file`)
+    const abs = await inside(ws.root, n)
+    const l = await lstat(abs).catch(() => null)
+    if (!l?.isFile()) throw new RequestError(422, `${n} does not exist as a file in the run's copy; evidence names what exists`, { code: 'evidence-unknown' })
+    const bytes = await readFile(abs)
+    artifacts.push(n)
+    evidence.push({ kind: 'artifact', path: n, sha256: sha256(bytes), bytes: bytes.length })
+  }
+  for (const c of o.commits ?? []) {
+    const repo = normalizeRepoPath(c.repository ?? '.') ?? '.'
+    const r = await git(await inside(ws.root, repo), ['rev-parse', '--verify', '--quiet', `${c.commit}^{commit}`])
+    if (r.code !== 0) throw new RequestError(422, `commit ${c.commit} does not exist in ${repo === '.' ? 'the run\'s copy' : repo}`, { code: 'evidence-unknown' })
+    evidence.push({ kind: 'commit', repository: repo, commit: r.stdout.trim() })
+  }
+  for (const seq of o.entries ?? []) {
+    const e = record.history[seq - 1]
+    if (!e) throw new RequestError(422, `entry ${seq} is not in this run's history`, { code: 'evidence-unknown' })
+    evidence.push({ kind: 'entry', seq, op: e.op })
+  }
+  for (const id of o.questions ?? []) evidence.push({ kind: 'question', id } as RetroEvidence)
+  for (const id of o.outputs ?? []) evidence.push({ kind: 'output', id, digest: '' } as RetroEvidence)
+  for (const id of o.presentations ?? []) evidence.push({ kind: 'presentation', id, revision: '' } as RetroEvidence)
+  return { evidence, artifacts }
+}
+
 // Adds a node and records it as already done, in one entry under the run's
 // lock: the revision file first, then run.json; a refusal removes the file.
 // Nothing is started, launched, dispatched or answered.
@@ -1316,32 +1353,7 @@ export async function recordDone(ws: Workspace, ref: RunRef, o: RecordDoneOption
     const compiled = compile(next)
     if (!compiled.ok) throw new RequestError(422, compiled.message, { code: 'adjust-graph' })
     // The evidence, checked to exist now.
-    const evidence: RetroEvidence[] = []
-    const artifacts: string[] = []
-    for (const p of o.artifacts ?? []) {
-      const n = normalizeRepoPath(p)
-      if (!n || n === '.') throw new RequestError(400, `artifact "${p}" must be a project-relative file`)
-      const abs = await inside(ws.root, n)
-      const l = await lstat(abs).catch(() => null)
-      if (!l?.isFile()) throw new RequestError(422, `${n} does not exist as a file in the run's copy; evidence names what exists`, { code: 'evidence-unknown' })
-      const bytes = await readFile(abs)
-      artifacts.push(n)
-      evidence.push({ kind: 'artifact', path: n, sha256: sha256(bytes), bytes: bytes.length })
-    }
-    for (const c of o.commits ?? []) {
-      const repo = normalizeRepoPath(c.repository ?? '.') ?? '.'
-      const r = await git(await inside(ws.root, repo), ['rev-parse', '--verify', '--quiet', `${c.commit}^{commit}`])
-      if (r.code !== 0) throw new RequestError(422, `commit ${c.commit} does not exist in ${repo === '.' ? 'the run\'s copy' : repo}`, { code: 'evidence-unknown' })
-      evidence.push({ kind: 'commit', repository: repo, commit: r.stdout.trim() })
-    }
-    for (const seq of o.entries ?? []) {
-      const e = record.history[seq - 1]
-      if (!e) throw new RequestError(422, `entry ${seq} is not in this run's history`, { code: 'evidence-unknown' })
-      evidence.push({ kind: 'entry', seq, op: e.op })
-    }
-    for (const id of o.questions ?? []) evidence.push({ kind: 'question', id } as RetroEvidence)
-    for (const id of o.outputs ?? []) evidence.push({ kind: 'output', id, digest: '' } as RetroEvidence)
-    if (o.presentation) evidence.push({ kind: 'presentation', id: o.presentation, revision: '' } as RetroEvidence)
+    const { evidence, artifacts } = await checkedEvidence(ws, record, { artifacts: o.artifacts, commits: o.commits, entries: o.entries, questions: o.questions, outputs: o.outputs, presentations: o.presentation ? [o.presentation] : [] })
     const revision = `r${(record.definition.revisions?.length ?? 0) + 2}`
     const revFile = `${DEFINITION_DIR}/${revision}/${record.definition.root}.yaml`
     const input = {

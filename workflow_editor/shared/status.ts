@@ -7,7 +7,7 @@
 // detail. Shared by the service, the CLI, the browser and the Front Desk.
 import type { Delegation } from './delegation.ts'
 import { isAwaitingPerson, reviewStateText } from './humanReview.ts'
-import { dueReason, type HoldCause, type RunState } from './run.ts'
+import { dueReason, expectationStates, type HoldCause, type RunState } from './run.ts'
 
 export type StatusState =
   | 'working' | 'stopping' // an attempt is open
@@ -68,6 +68,7 @@ export function causeText(cause: HoldCause | null | undefined, reason = '', name
     switch (cause.code) {
       case 'left-running': return `${nodes(cause.nodes, 'left running at exit')}`
       case 'left-ready': return `${nodes(cause.nodes, 'left ready at exit')}, nothing waiting`
+      case 'left-examples': return `${cap(named(cause.nodes))} not specialized at exit`
       case 'nothing-recorded': return 'Ended with none of its work recorded'
       case 'missed-event': return `${cause.events.map(e => `${e.type === 'completed' ? 'Result' : cap(e.type)} of ${e.delegation}`).join(', ')} not taken up`
       case 'process': return cap(short(cause.detail, 70))
@@ -156,7 +157,7 @@ const heldDetail = (s: Partial<Pick<RunState, 'standing'>>): string | null => s.
 const status = (state: StatusState, label: string, reason: string, tone: RunStatus['tone'], waits: StatusWait[], extra: Partial<RunStatus> = {}): RunStatus =>
   ({ state, label, reason, text: `${label} · ${reason}`, tone, waits, detail: null, ...extra })
 
-export function runStatus(s: Pick<RunState, 'nodes' | 'questions' | 'delegations' | 'execution' | 'control' | 'cancelled' | 'decisions' | 'instructions' | 'input'> & Partial<Pick<RunState, 'reviews' | 'corrections' | 'standing'>>, facts: StatusFacts = {}): RunStatus {
+export function runStatus(s: Pick<RunState, 'nodes' | 'questions' | 'delegations' | 'execution' | 'control' | 'cancelled' | 'decisions' | 'instructions' | 'input'> & Partial<Pick<RunState, 'reviews' | 'corrections' | 'standing' | 'definition'>>, facts: StatusFacts = {}): RunStatus {
   const waits = waitsOf(s, facts)
   const names = facts.names ?? {}
   const ctl = s.control
@@ -176,7 +177,11 @@ export function runStatus(s: Pick<RunState, 'nodes' | 'questions' | 'delegations
   if (s.execution.state === 'completed' && s.standing?.state === 'closed') return status('closed', 'Closed', 'Conversation closed; reopening continues this run', 'done', [], { detail: heldDetail(s) })
   if (s.execution.state === 'completed') {
     const d = s.decisions.at(-1)?.decision
-    return status('done', 'Done', d === 'accepted' ? 'Result accepted' : d === 'rejected' ? 'Result rejected' : 'Every step completed', 'done', [])
+    // improve_wfnode p1: finished work does not make a required expectation met.
+    const unmet = s.definition ? expectationStates({ definition: s.definition, nodes: s.nodes }).filter(x => x.strength === 'required' && x.status === 'unmet') : []
+    const reason = d === 'accepted' ? 'Result accepted' : d === 'rejected' ? 'Result rejected' : 'Every step completed'
+    if (unmet.length) return status('done', 'Done', `${reason}; required unmet: ${list(unmet.map(x => `${x.label} on ${names[x.node] ?? x.node}`))}`, 'warn', [])
+    return status('done', 'Done', reason, 'done', [])
   }
   const due = dueReason(s)
   if (facts.job) {

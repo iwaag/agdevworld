@@ -213,6 +213,7 @@ function waitingOf(r: RunRecord, job: JobRow | null, coordinated = false): Obser
   const owed = openContinuations(r)[0]
   if (owed) return { reason: `changes requested in review ${owed.id} by ${owed.decision?.by}, not addressed, no job queued`, responsible: 'executor', since: owed.decision?.at ?? r.updated }
   if (r.execution.ready.length || r.execution.active.length) return { reason: `${r.execution.active.length ? `${r.execution.active.join(', ')} recorded as running` : `${r.execution.ready.join(', ')} ready`}, no attempt and no job`, responsible: 'executor', since: r.updated }
+  if (r.execution.examples?.length) return { reason: `${r.execution.examples.join(', ')} not specialized, no attempt and no job`, responsible: 'executor', since: r.updated }
   if (r.execution.state === 'not-started') return { reason: 'not started, no job', responsible: 'executor', since: r.created }
   // p18: a standing conductor at rest is the conversation's next event's to
   // continue — not stalled, not anyone's work — unless words it was not

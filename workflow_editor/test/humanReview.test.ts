@@ -142,7 +142,7 @@ test('requested changes close the round, keep the run open, continue the agent a
   assert.equal(held.control.hold?.cause?.code, 'missed-review')
   // Appended work and a new review node address it.
   const g2: RunGraph = { nodes: { ...GRAPH.nodes, fix: { type: 'do' }, 'review-2': { type: 'review' } }, edges: [...GRAPH.edges, { from: 'review', to: 'fix' }, { from: 'fix', to: 'review-2' }] }
-  r = op(r, { op: 'run.adjust', revision: 'r2', parent: 'r1', file: 'definition/r2/conduct.yaml', sha256: 'c'.repeat(64), definitionDigest: `sha256:${'d'.repeat(64)}`, effective: { compiler: 'ag.wfe-compile.v5', policy: 'manual', nodes: g2.nodes, edges: g2.edges }, reason: 'rv1 asked for a blue torus', source: { kind: 'agent' }, attempt: B } as OpInput)
+  r = op(r, { op: 'run.adjust', revision: 'r2', parent: 'r1', file: 'definition/r2/conduct.yaml', sha256: 'c'.repeat(64), definitionDigest: `sha256:${'d'.repeat(64)}`, effective: { compiler: 'ag.wfe-compile.v6', policy: 'manual', nodes: g2.nodes, edges: g2.edges }, reason: 'rv1 asked for a blue torus', source: { kind: 'agent' }, attempt: B } as OpInput)
   assert.equal(openContinuations(r).length, 0)
   assert.equal(r.reviews!.rv1.continuation!.addressed!.how, 'work')
   GRAPH = g2

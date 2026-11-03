@@ -216,7 +216,8 @@ test('coordination: a stale basis applies nothing; a person\'s placement is kept
   await assert.rejects(s.x.decide({ action: 'start', workspace: s.id, ref: chosen.ref, worker: 'studio', reason: 'studio is idle', by: 'warden-cli', via: 'cli' }), /stays on pc: the request named pc/)
   assert.equal(s.x.decisionsOf(s.id, chosen.ref).at(-1)!.state, 'refused')
   // The workflow's node is a preference: warden moves the run and admits it; the record names who and why.
-  const moved = await s.x.decide({ action: 'start', workspace: s.id, ref: onpc.ref, worker: 'studio', reason: 'pc is unavailable; studio can serve it', by: 'warden-cli', via: 'cli' })
+  const onpcBasis = (await s.x.coordinationView()).queued.find(q => q.workflow === 'onpc')!.basis!
+  const moved = await s.x.decide({ action: 'start', workspace: s.id, ref: onpc.ref, worker: 'studio', reason: 'pc is unavailable; studio can serve it', basis: onpcBasis, by: 'warden-cli', via: 'cli' })
   assert.ok(moved.applied)
   assert.match(moved.notes.join(' '), /Moved: from its next attempt .* runs on studio \(was pc\)/)
   const r = await s.rec(onpc.ref)

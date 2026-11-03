@@ -1945,7 +1945,8 @@ export class ExecStore {
     if (isCoordinationRun(cfg, o.workspace, o.ref.workflow)) throw new RequestError(409, `${runKey(o.ref)} is a coordination run; it is admitted by its own lane, not by a decision`, { code: 'decision-self' })
     const job = this.one<JobRow>('SELECT * FROM jobs WHERE workspace = ? AND workflow = ? AND run = ? AND state = \'queued\'', o.workspace, o.ref.workflow, o.ref.run) ?? null
     const node = this.nodeOf(rec)
-    const facts = () => this.basisFacts(o.workspace, o.ref, rec, job, o.worker ?? node)
+    // The basis is the view's: over the run's current node, whatever node the decision names.
+    const facts = () => this.basisFacts(o.workspace, o.ref, rec, job, node)
     const notes: string[] = []
     const scope = o.scope ?? (o.action === 'note' || o.action === 'assign' ? 'job' : 'run')
     const insert = (state: DecisionRow['state'], detail: string | null, worker: string | null, batch: number | null) => {

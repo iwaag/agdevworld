@@ -193,7 +193,7 @@ A run that used, adapted or rejected a finding says so in its ordinary report or
 ```
 ````
 
-- `wfe knowledge cite <qid>` prints the block for what you read.
+- `wfe knowledge cite <qid>` prints the block for what you read. In misc freework/run-013 the agent ran it, then wrote the same facts as a paragraph in another file, which reads as no decision at all; the command now says where the block goes.
 - Record relevant candidates, not every search result. No block means nothing
   was recorded, which is allowed.
 - **Unpublished bytes.** `unpublished: true` with `preserved: <a copy in the run

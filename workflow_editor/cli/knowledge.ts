@@ -135,7 +135,7 @@ export async function knowledgeCommand(c: KnowledgeCli): Promise<number> {
     case 'cite': {
       if (!a1) throw c.usage('cite needs <collection>#<id>')
       const r = await x.citation(ctx, a1, o, c.opt('decision'))
-      c.out(r.block, r)
+      c.out(`${r.block}\n\nPut the block itself in this run's report.md or outcome.md, with the placeholders filled in; a sentence about it elsewhere cannot be read back: wfe knowledge decisions <project> <workflow>/<run> reads this block.`, r)
       return 0
     }
     case 'decisions': {

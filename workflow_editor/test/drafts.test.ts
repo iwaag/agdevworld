@@ -182,6 +182,26 @@ test('apply: publishes only the definition, from a checkout that is dirty and be
   assert.equal(await rev(s.gRemote, 'main'), after)
 })
 
+test('improve_wfnode p1: expectations, example status and list order survive save, apply and the published read', async () => {
+  const { parseWorkflow } = await import('../server/yamlDoc.ts')
+  const d = await startDraft(s.ctx, s.store, s.g, { file: 'freework.yaml', by })
+  const edited = d.text
+    .replace('  build:\n    type: do\n', '  build:\n    type: do\n    example: true\n    expectations:\n      - {key: webbrowser, strength: required, note: On the review PC.}\n')
+    .replace(/^edges:/m, 'groups:\n  work:\n    name: Work\n    kind: list\n    cardinality: variable\n    members: [spacer1, build]\n    description: Items.\nedges:')
+  const saved = await saveDraft(s.store, d.id, { revision: 1, by, text: edited })
+  const r = await applyDraft(s.ctx, s.store, s.g, d.id, { revision: saved.revision, by })
+  assert.ok(r.ok, r.apply.error)
+  const back = parseWorkflow(await show(s.gRemote, `main:${fileG}`))
+  assert.ok(back.ok)
+  assert.equal(back.model.nodes.build.example, true)
+  assert.deepEqual(back.model.nodes.build.expectations, [{ key: 'webbrowser', strength: 'required', note: 'On the review PC.' }])
+  assert.deepEqual(back.model.groups?.work.members, ['spacer1', 'build'])
+  // The next test reads a definition without them.
+  const again = await startDraft(s.ctx, s.store, s.g, { file: 'freework.yaml', by })
+  const plain = await saveDraft(s.store, again.id, { revision: 1, by, text: wf('freework', 'Applied once.') })
+  assert.ok((await applyDraft(s.ctx, s.store, s.g, again.id, { revision: plain.revision, by })).ok)
+})
+
 test('compatible upstream changes survive the merge; conflicting ones keep the draft and are resolved through the service', async () => {
   const d = await startDraft(s.ctx, s.store, s.g, { file: 'freework.yaml', by })
   const base = d.text

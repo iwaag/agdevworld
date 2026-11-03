@@ -267,6 +267,19 @@ export function evaluate(b: Boundary, f: Facts): Reminder[] {
     })
   }
 
+  // improve_wfnode p1: scene-world/run-002 presented its gallery and finished
+  // with its required webbrowser expectation unstated: the brief and the guide's
+  // reference were not enough, and unverified on a finished run reads as neglect.
+  if (completing) {
+    const open = (graph.nodes[completing]?.expectations ?? []).filter(x => !record.nodes[completing]?.assessments?.[x.key])
+    if (open.length) add({
+      code: 'expectation-unstated', refs: [completing],
+      text: `${completing} has expectations nobody has stated anything about: ${open.map(x => `${x.key} (${x.strength ?? 'preferred'})`).join(', ')}. They will read as unverified beside the result. WFE cannot tell whether they hold; that is what you can say, including that you could not check.`,
+      repair: open.map(x => `wfe run expectation ${runKey(record)} ${completing} ${x.key} --status met|unmet|unverified --note "<what actually holds>" [--artifact <path>] [--presentation <p>] [--commit <id>]`),
+      summary: `${completing}: state ${open.map(x => x.key).join(', ')} (wfe run expectation), or they read as unverified`,
+    })
+  }
+
   // A presentation registered from a node that is not its own, or with
   // nothing planned to stop it.
   if (b.kind === 'present') {

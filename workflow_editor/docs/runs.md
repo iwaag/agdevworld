@@ -704,6 +704,7 @@ action, and cannot judge whether a result needs a presentation.
 | --- | --- | --- |
 | `presentation-missing` | the completion that completes the run; completing the last work node; an outward result report; a result-confirmation question that presents nothing | work completed after the latest presentation was registered (and not linked to it), and no present node is planned |
 | `presentation-serving` | the run-completing completion; a report; completing a cleanup node; completing a node that took an answer about a presentation | a presentation is still recorded as serving, and no cleanup node is planned |
+| `expectation-unstated` | completing a node | it has expectations with no statement (improve_wfnode p1, seen in trial: `scene-world/run-002` finished with all three unstated) |
 | `presentation-inside-work` | `wfe present register` | registered from a talk, work, confirmation or discussion-activity node |
 | `cleanup-unplanned` | `wfe present register` | no cleanup node is planned |
 | `document-missing` | completing a documentation step (`_plan`, `_report.<node>`, `_final-report`) | its document is not a nonempty file of the run folder, so the completion would record none (tidy p1: protoprey freework/run-006 completed `_final-report` "Report written" after the command that wrote it had failed) |

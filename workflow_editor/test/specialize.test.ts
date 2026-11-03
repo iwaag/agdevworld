@@ -14,6 +14,7 @@ import { adjustRun, createRun, readRun, runOp } from '../server/runs.ts'
 import { RequestError, Workspace } from '../server/workspace.ts'
 import { compile, FINAL_STEP, reportStep, splitCounts } from '../shared/compile.ts'
 import { assessmentWords, checkRecord, definitionMeaningBrief, effectiveOf, expectationStates, graphOfState, summarize, type OpInput, type RunRef } from '../shared/run.ts'
+import { evaluate } from '../shared/reminders.ts'
 import { runStatus } from '../shared/status.ts'
 import { parseWorkflow } from '../server/yamlDoc.ts'
 
@@ -248,4 +249,19 @@ test('a run keeps the words it was created with: a later definition edit changes
   const r = await rec(ws, ref)
   assert.deepEqual(effectiveOf(r), before)
   assert.equal(effectiveOf(r)!.nodes.scene1.expectations![0].strength, 'required')
+})
+
+test('completing a node with expectations nobody stated is a reminder that says what to record', async () => {
+  const text = def(plain('show', '    expectations:\n      - {key: webbrowser, strength: required}\n      - {key: native}\n'), [], [], 'manual').replace('edges:\n', 'edges: []\n')
+  const { ws, ref } = await setup(text)
+  await op(ws, ref, { op: 'node.start', node: 'show' })
+  const facts = (r: Awaited<ReturnType<typeof rec>>) => ({ record: r, after: r, graph: graphOfState(r)!, authored: undefined, catalog: { state: 'none' as const } })
+  const said = evaluate({ kind: 'complete', node: 'show' }, facts(await rec(ws, ref))).find(x => x.code === 'expectation-unstated')
+  assert.match(said?.text ?? '', /webbrowser \(required\), native \(preferred\)/)
+  assert.equal(said?.repair.length, 2)
+  await op(ws, ref, { op: 'expectation.assess', node: 'show', key: 'webbrowser', status: 'unverified' })
+  const fewer = evaluate({ kind: 'complete', node: 'show' }, facts(await rec(ws, ref))).find(x => x.code === 'expectation-unstated')
+  assert.deepEqual(fewer?.repair.length, 1) // saying it could not be checked is a statement
+  await op(ws, ref, { op: 'expectation.assess', node: 'show', key: 'native', status: 'met', note: 'It launches.' })
+  assert.equal(evaluate({ kind: 'complete', node: 'show' }, facts(await rec(ws, ref))).some(x => x.code === 'expectation-unstated'), false)
 })

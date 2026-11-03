@@ -8,7 +8,7 @@ import { join } from 'node:path'
 import { AccessError, type AccessContext, type RepoHost } from '../server/access.ts'
 import { gitOk } from '../server/git.ts'
 import type { GiteaRepo } from '../server/gitea.ts'
-import { checkCollection, citation, collections, listFindings, parseFindingDocument, runDecisions, showFinding } from '../server/knowledge.ts'
+import { checkCollection, checkFolder, citation, collections, listFindings, parseFindingDocument, runDecisions, showFinding } from '../server/knowledge.ts'
 import { RequestError } from '../server/workspace.ts'
 
 let root = ''
@@ -244,4 +244,14 @@ test('a recorded decision reads back at its revision; a later edit does not rewr
   assert.ok(first.current && 'changed' in first.current && first.current.changed && first.current.commit === edited)
   assert.deepEqual(first.work, [{ ref: 'notes/run.md', state: 'found' }])
   assert.deepEqual(first.verification, [{ ref: 'devdocs/runs/w/run-001/nothing.md', state: 'missing' }])
+})
+
+test('check --dir reads a folder as it stands, before anything is published', async () => {
+  const dir = join(a.src, 'wedo')
+  await writeFile(join(dir, 'findings', 'draft.md'), doc('f-1', 'A second f-1', { refs: '  - {role: evidence, ref: notes/run.md}\n  - {role: evidence, ref: notes/absent.md}\n  - {role: context, ref: "https://example.test/x"}' }))
+  const r = await checkFolder(dir)
+  assert.ok(r.items.some(i => i.code === 'duplicate-id'))
+  assert.ok(r.items.some(i => i.code === 'missing-reference' && /notes\/absent\.md/.test(i.message)))
+  assert.ok(r.references.unchecked >= 1)
+  await rm(join(dir, 'findings', 'draft.md'))
 })

@@ -2,9 +2,12 @@
 // the documents projects keep in their own study/wedo areas. No registry and
 // no stored index: what exists is read from project.yaml, .gitmodules,
 // knowledge.yaml and the documents at one commit, through server/access.ts.
+import { readdir, readFile, stat } from 'node:fs/promises'
+import { join as pathJoin } from 'node:path'
 import { parse as parseYaml, stringify as stringifyYaml } from 'yaml'
 import { AccessError, host, list, read, run as readRun, runFile, tree, type AccessContext, type FailureState, type FetchInfo, type Provenance, type ReadOptions } from './access.ts'
 import { RequestError } from './workspace.ts'
+import { git } from './git.ts'
 import { loadRegistry } from './registry.ts'
 import { parseProject } from './yamlDoc.ts'
 
@@ -318,6 +321,36 @@ export async function checkCollection(ctx: AccessContext, name: string, o: Knowl
     }
   }
   return { collection: c.id, state: c.state, ...(c.revision ? { revision: c.revision } : {}), findings: c.findings.length, unstructured: c.unstructured.length, items, references }
+}
+
+// The documents of a folder as they stand, before anything is committed or
+// pushed: a run's own copy, which no read through project access can see (both
+// first authors could only say "check again after integration").
+export async function checkFolder(dir: string): Promise<{ dir: string; findings: number; unstructured: number; items: CheckItem[]; references: { resolved: number; missing: number; unchecked: number } }> {
+  if (!(await stat(dir).then(x => x.isDirectory(), () => false))) throw new AccessError('absent', `${dir} is not a folder on this host`)
+  const root = (await git(dir, ['rev-parse', '--show-toplevel'])).stdout.trim() || dir
+  const out = { dir, findings: 0, unstructured: 0, items: [] as CheckItem[], references: { resolved: 0, missing: 0, unchecked: 0 } }
+  const docs = (await readdir(pathJoin(dir, 'findings'), { recursive: true }).catch(() => [] as string[])).filter(n => n.endsWith('.md')).sort()
+  const ids = new Map<string, string[]>()
+  for (const name of docs) {
+    const doc = parseFindingDocument(await readFile(pathJoin(dir, 'findings', name), 'utf8'))
+    const at = `findings/${name}`
+    if (!doc) { out.unstructured++; continue }
+    if (doc.errors.length) { out.items.push({ path: at, severity: 'error', code: 'invalid-header', message: doc.errors.join('; ') }); continue }
+    out.findings++
+    ids.set(String(doc.meta.id), [...(ids.get(String(doc.meta.id)) ?? []), at])
+    for (const k of doc.meta.categories as string[]) if (!CATEGORIES.includes(k)) out.items.push({ path: at, severity: 'warning', code: 'unknown-category', message: `category "${k}" is not one of ${CATEGORIES.join(', ')}` })
+    for (const r of doc.meta.references as FindingReference[]) {
+      if (!REFERENCE_ROLES.includes(r.role)) out.items.push({ path: at, severity: 'warning', code: 'unknown-role', message: `reference role "${r.role}" is not one of ${REFERENCE_ROLES.join(', ')}` })
+      const stray = Object.keys(r).filter(k => !['role', 'ref', 'by', 'note'].includes(k))
+      if (stray.length) out.items.push({ path: at, severity: 'warning', code: 'unknown-reference-field', message: `${r.ref}: unexpected ${stray.map(k => `"${k}"`).join(', ')}; a comma in an unquoted flow value ends the value, so quote it` })
+      if (/\s|^[^/]*:/.test(r.ref.trim()) || r.ref.startsWith('/') || r.role === 'unchecked') { out.references.unchecked++; continue }
+      if (await stat(pathJoin(root, r.ref)).then(() => true, () => false)) out.references.resolved++
+      else { out.references.missing++; out.items.push({ path: at, severity: 'error', code: 'missing-reference', message: `${r.ref}: not in this repository's working tree` }) }
+    }
+  }
+  for (const [id, paths] of ids) if (paths.length > 1) out.items.push({ path: paths.join(', '), severity: 'error', code: 'duplicate-id', message: `the id "${id}" is used by ${paths.length} documents; give each its own id` })
+  return out
 }
 
 // The block a run puts in its report (docs/knowledge.md, Recording a decision).

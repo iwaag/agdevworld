@@ -8,6 +8,7 @@ export const KNOWLEDGE_HELP = `wfe knowledge collections [--project <p>]
 wfe knowledge list [<collection>] [--project <p>] [--category <c>]… [--tag <t>]… [--text <words>]
 wfe knowledge show <collection>#<id> [--as <project> | --rev <commit> | --upstream] [--source worktree [--workspace <id>]]
 wfe knowledge check <collection> [--as <project> | --rev <commit> | --upstream]
+wfe knowledge check --dir <folder of the collection>
 wfe knowledge cite <collection>#<id> [--decision adopted|adapted|rejected] [--as … | --rev …]
 wfe knowledge decisions <project> <workflow>/<run>
 
@@ -36,7 +37,9 @@ show         one finding: the document, its references each resolved, examples
              text) and missing are said as such.
 check        readable headers, unique ids, resolvable references, against one
              revision. Exit 1 on errors; a duplicate id is one. It cannot tell
-             whether a finding is right.
+             whether a finding is right. --dir checks a folder as it stands,
+             such as the area in your own run copy, before it is published;
+             paths in references are checked against that repository's tree.
 cite         the block to put in your report: the commit, path and sha256 you
              actually read, for your decision, reason, work and verification.
 decisions    what a run recorded, each entry read back at its recorded
@@ -114,7 +117,15 @@ export async function knowledgeCommand(c: KnowledgeCli): Promise<number> {
       return 0
     }
     case 'check': {
-      if (!a1) throw c.usage('check needs <collection>')
+      const dir = c.opt('dir')
+      if (dir) {
+        const r = await x.checkFolder(dir)
+        const errors = r.items.filter(i => i.severity === 'error').length
+        c.out([`${dir}: ${r.findings} finding(s), ${r.unstructured} without a header; references ${r.references.resolved} resolved, ${r.references.missing} missing, ${r.references.unchecked} not checked here`,
+          ...r.items.map(i => `  ${i.severity}${i.path ? ` ${i.path}` : ''} [${i.code}]: ${i.message}`), errors ? `${errors} error(s).` : 'No errors. This says nothing about whether the findings are right.'].join('\n'), r)
+        return errors ? 1 : 0
+      }
+      if (!a1) throw c.usage('check needs <collection> or --dir <folder>')
       const r = await x.checkCollection(ctx, a1, o)
       const errors = r.items.filter(i => i.severity === 'error').length
       c.out([`${r.collection}: ${r.state === 'read' ? `${r.findings} finding(s), ${r.unstructured} without a header; references ${r.references.resolved} resolved, ${r.references.missing} missing, ${r.references.unchecked} unchecked` : r.state}${r.revision ? ` — ${revisionLine(r.revision)}` : ''}`,

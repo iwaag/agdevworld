@@ -84,7 +84,9 @@ change without changing what a reference means.
 **`categories`.** What the finding is useful for, the small vocabulary a later
 node can ask for: `motion`, `extraction`, `generation`, `composition`,
 `verification`, `process`, `domain`. Several are normal, and a task can combine
-findings. An unknown category is a warning and is kept. Technique, subject,
+findings. An unknown category is a warning and is kept; the list came from a
+media project's and a discussion project's first entries (ponderer found it
+media-shaped and put its subject in tags), and grows when real entries need it. Technique, subject,
 tool and environment are **tags**, which are free and multiple. The first entries
 used `technique`/`lesson`/`comparison`, which overlapped on every entry while
 the tags did the finding (freework/run-021's report); that kind of statement
@@ -102,6 +104,9 @@ belongs in the body or `status`.
 | `illustration` | something to look at. It does not show that the method works |
 | `context` | a tool, documentation or background |
 | `unchecked` | cited, and the writer did not verify it |
+
+External evidence is `evidence` with its external `ref`: the role says what it is
+for and the reader says it is unchecked.
 
 | A `ref` is | Resolved against |
 | --- | --- |
@@ -133,6 +138,11 @@ resolvable references at one revision; it exits 1 on an invalid header, a
 duplicate id or a missing reference. It cannot establish that a claim is true. A
 reference's `resolved` means the thing exists at that revision. External or
 unavailable evidence stays `unchecked`, and is not counted as either.
+
+`wfe knowledge check --dir <folder>` reads a folder as it stands, for an area in a
+run's own copy, which project access cannot see: both first authors (gimmickimg
+freework/run-022, ponderer freework/run-003) could only say "check again after
+integration".
 
 ## Revisions
 

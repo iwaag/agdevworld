@@ -10,6 +10,7 @@ import { join } from 'node:path'
 import { createProject } from '../server/create.ts'
 import { gitOk } from '../server/git.ts'
 import { loadRegistry } from '../server/registry.ts'
+import { main } from '../cli/wfe.ts'
 import { adjustRun, createRun, readRun, runOp } from '../server/runs.ts'
 import { RequestError, Workspace } from '../server/workspace.ts'
 import { compile, FINAL_STEP, reportStep, splitCounts } from '../shared/compile.ts'
@@ -264,4 +265,28 @@ test('completing a node with expectations nobody stated is a reminder that says 
   assert.deepEqual(fewer?.repair.length, 1) // saying it could not be checked is a statement
   await op(ws, ref, { op: 'expectation.assess', node: 'show', key: 'native', status: 'met', note: 'It launches.' })
   assert.equal(evaluate({ kind: 'complete', node: 'show' }, facts(await rec(ws, ref))).some(x => x.code === 'expectation-unstated'), false)
+})
+
+// The command itself: scene-world/run-004's agent found --status refused (a
+// global flag took it), recorded nothing and passed the reminder with --yes.
+test('wfe run expectation through the command line, with each kind of evidence', async () => {
+  const text = def(plain('show', '    expectations:\n      - {key: webbrowser, strength: required}\n      - {key: native}\n      - {key: s3}\n'), [], [], 'manual').replace('edges:\n', 'edges: []\n')
+  const { ws, ref, dir } = await setup(text)
+  await op(ws, ref, { op: 'node.start', node: 'show' })
+  const head = (await gitOk(dir, ['rev-parse', 'HEAD'])).trim()
+  const registry = join(dir, '..', 'registry.json')
+  const cli = async (args: string[]) => {
+    const log = console.log, err = console.error, lines: string[] = []
+    console.log = (...a: unknown[]) => { lines.push(a.join(' ')) }; console.error = (...a: unknown[]) => { lines.push(a.join(' ')) }
+    try { return { code: await main(['run', 'expectation', 'world/run-001', 'show', ...args, '--by', 'agent', '--workspace', 'p', '--registry', registry]), out: lines.join('\n') } } finally { console.log = log; console.error = err }
+  }
+  const met = await cli(['webbrowser', 'met', '--artifact', 'shown.html', '--made', head, '--note', 'Opens.'])
+  assert.equal(met.code, 0, met.out)
+  assert.match(met.out, /webbrowser on show is met/)
+  assert.equal((await cli(['native', 'unmet', '--note', 'Browser only.'])).code, 0)
+  assert.equal((await cli(['s3', 'unverified'])).code, 0)
+  assert.notEqual((await cli(['s3'])).code, 0) // the status is required
+  const r = await rec(ws, ref)
+  assert.deepEqual(expectationStates(r).map(assessmentWords), ['Met', 'Alternative', 'Unverified'])
+  assert.deepEqual(expectationStates(r)[0].assessment?.evidence.map(e => e.kind), ['artifact', 'commit'])
 })

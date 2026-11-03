@@ -330,7 +330,7 @@ graph, with the meaning of each documented key in `effective.meanings`: later ca
 definition or code changes do not reword them for an existing run. Groups are frozen
 in `effective.groups` the same way.
 
-`wfe run expectation <run> <node> <key> --status met|unmet|unverified` (op
+`wfe run expectation <run> <node> <key> met|unmet|unverified` (op
 `expectation.assess`) records one compact statement on the node record
 (`nodes.<id>.assessments.<key>`): status, note, evidence, who, when and whether an attempt
 recorded it (`reporter: agent`). A later statement replaces it; history keeps both.

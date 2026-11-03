@@ -100,7 +100,7 @@ test('presets make ordinary do nodes that run like any do node', () => {
   w = instantiate(w, { id: 'cleanup', revision: 1, ...SEEDS.cleanup }, { id: 'tidy', after: ['show'] }).workflow
   const c = compile(w)
   assert.ok(c.ok)
-  assert.deepEqual(c.graph.nodes, { show: { type: 'do' }, tidy: { type: 'do' } })
+  assert.deepEqual(c.graph.nodes, { show: { type: 'do', expectations: SEEDS.present.expectations!.map(x => ({ key: x.key, strength: x.strength!, note: x.note! })) }, tidy: { type: 'do' } })
   const graph: RunGraph = { nodes: c.graph.nodes, edges: c.graph.edges }
   let at = Date.parse('2026-10-12T00:00:00.000Z')
   const ctx = () => ({ at: new Date(at += 1000).toISOString(), by: 'Agent', via: 'test', graph })

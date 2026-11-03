@@ -10,6 +10,7 @@ import { api, type CatalogView } from './api.ts'
 import { colorOf, iconOf, TYPE_LABEL } from './canvas.ts'
 import { append, h, when } from './dom.ts'
 import { icon } from './icons.ts'
+import { expectationEditor } from './nodeMeaning.ts'
 import type { ViewHandle } from './main.ts'
 import { displayToggle, showDetail } from './displayMode.ts'
 
@@ -57,7 +58,7 @@ export function renderNodesView(root: HTMLElement): ViewHandle {
     }
     if (!disposed) render()
   }
-  const contentFrom = (t: TemplateContent): TemplateContent => ({ name: t.name, type: t.type, description: t.description, expectation: t.expectation, appearance: { icon: t.appearance?.icon ?? '', color: t.appearance?.color ?? '' } })
+  const contentFrom = (t: TemplateContent): TemplateContent => ({ name: t.name, type: t.type, description: t.description, expectation: t.expectation, appearance: { icon: t.appearance?.icon ?? '', color: t.appearance?.color ?? '' }, ...(t.target ? { target: { ...t.target } } : {}), ...(t.expectations ? { expectations: t.expectations.map(x => ({ ...x })) } : {}), ...(t.example ? { example: true } : {}) })
 
   function select(t: NodeTemplate | null) {
     if (dirty() && !confirm('Discard the unsaved changes to this template?')) return
@@ -113,6 +114,12 @@ export function renderNodesView(root: HTMLElement): ViewHandle {
       h('p.muted.small', 'Copied into the node\'s description when the template is used. The node then runs like any node of its type.'),
       h('label.field', h('span', 'Expectation — for whoever designs the workflow: how you expect this to appear'), h('textarea', { rows: 3, value: d.content.expectation, 'aria-label': 'Template expectation', oninput: set('expectation') })),
       h('p.muted.small', 'Agents planning a run are told that you recognize this activity as a distinct step and generally expect it as a visible node when it is relevant. They still decide whether and where.'),
+      h('div.field', h('span', 'What the node\'s result should satisfy — copied into the node'), expectationEditor(d.content.expectations ?? [], false, (list, rebuild) => {
+        if (list.length) d.content.expectations = list; else delete d.content.expectations
+        refresh()
+        if (rebuild) render()
+      })),
+      h('label.check', h('input', { type: 'checkbox', checked: !!d.content.example, 'aria-label': 'Nodes start as examples', onchange: (e: Event) => { if ((e.target as HTMLInputElement).checked) d.content.example = true; else delete d.content.example; refresh() } }), h('span', 'Example: nodes made from this are models a run specializes')),
       h('div.field', h('span', 'Appearance (display only)'), h('div.appearance-row',
         h('select', { 'aria-label': 'Template icon', onchange: setA('icon') }, opt(APPEARANCE_ICONS, d.content.appearance?.icon ?? '', 'icon')),
         h('select', { 'aria-label': 'Template color', onchange: setA('color') }, opt(APPEARANCE_COLORS, d.content.appearance?.color ?? '', 'color'))))),

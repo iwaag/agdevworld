@@ -21,6 +21,7 @@ import type { RunOpResponse, RunResponse } from '../shared/api.ts'
 import { describeSteps, effectiveOf, holderOf, situation, type RunRecord } from '../shared/run.ts'
 import { api, ApiError, type AdjustView, type DelegationsView, type PresentationView, type RunExecView, type RunNotifyView, type RunStorageView } from './api.ts'
 import { Canvas, STATE_GLYPH } from './canvas.ts'
+import { assessmentWords, expectationStates } from '../shared/run.ts'
 import { docStepsOf, FINAL_STEP, hasDocSteps, splitCounts } from '../shared/compile.ts'
 import { h, when } from './dom.ts'
 import { icon } from './icons.ts'
@@ -99,7 +100,18 @@ export function renderRunView(root: HTMLElement, wsId: string, workflow: string,
     actor: () => side.actorName, setActor: n => { side.setActor(n); if (n) store(ACTOR_KEY, n) },
     record: (op, done) => record(op, done),
   })
-  const graphCard = h('section.graph-card', graphHead, canvas.el, legend)
+  const groupFacts = h('div.group-facts')
+  const graphCard = h('section.graph-card', graphHead, canvas.el, groupFacts, legend)
+  // What a run's lists hold now and how they got there (improve_wfnode p1):
+  // the source examples stay reachable from the revision that replaced them.
+  const definitionAt = (rev: string) => `#/ws/${encodeURIComponent(wsId)}/run/${encodeURIComponent(workflow)}/${encodeURIComponent(run)}/definition/${encodeURIComponent(rev)}`
+  function groupFactLines(rec: RunRecord): HTMLElement[] {
+    const eff = effectiveOf(rec)
+    const lists = Object.entries(eff?.groups ?? {}).map(([id, g]) => h('div.group-fact', h('strong', g.name || id), ` · List · Variable · ${g.members.length} item${g.members.length === 1 ? '' : 's'}${g.members.length ? `: ${g.members.join(', ')}` : ''}`,
+      ...(rec.definition.revisions ?? []).filter(v => v.examples?.some(x => x.group === id)).map(v => h('div.small.muted',
+        h('a', { href: definitionAt(v.parent) }, `Examples of ${v.parent}`), `: ${v.examples!.filter(x => x.group === id).map(x => `${x.example} → ${x.replacedBy.join(', ') || 'omitted'}`).join('; ')}. `, h('a', { href: definitionAt(v.revision) }, v.revision), `: ${v.reason}`))))
+    return lists
+  }
 
   root.append(
     h('header.app-header.run-top', crumbs, h('div.top-actions', liveState, refreshButton, displayToggle())),
@@ -376,6 +388,7 @@ export function renderRunView(root: HTMLElement, wsId: string, workflow: string,
     const t = runTitle(rec, wf?.name)
     const st = viewStatus(rec, { names: Object.fromEntries(Object.keys(rec.nodes).map(n => [n, label(rec, n)])), exec: execView, delegations: delegView })
     activity.update(describeActivity({
+      requiredUnmet: expectationStates(rec).filter(x => x.strength === 'required' && x.status === 'unmet').length,
       rev: !!rev, connected, execError: !!execError, exec: execView, situation: situation(rec), state: ex.state,
       active: ex.active.map(n => label(rec, n)), waitingFor: ex.waiting.length ? holderOf(rec, ex.waiting[0].node) : null,
       failed: ex.failed.map(n => label(rec, n)), holdKind: rec.control.hold?.kind ?? null, status: rev ? null : st,
@@ -532,7 +545,8 @@ export function renderRunView(root: HTMLElement, wsId: string, workflow: string,
       h('span.graph-counts.small.d-only', split ? `Work ${tally(split.work)} completed · Documentation ${tally(split.docs)} completed` : `${tally(rec.execution.counts)} completed · no generated documents`),
       h('span.muted.small.graph-hint.d-only', 'Select a card to inspect its record'))
     const states = new Set(Object.keys(rec.nodes).map(id => nodeLabel(rec, id).state))
-    const present = ['pending', 'ready', 'running', 'waiting', 'completed', 'failed', 'cancelled', 'blocked'].filter(s => states.has(s))
+    const present = ['example', 'pending', 'ready', 'running', 'waiting', 'completed', 'failed', 'cancelled', 'blocked'].filter(s => states.has(s))
+    patchContent(groupFacts, ...groupFactLines(rec))
     patchContent(legend, ...present.map(s => chip(s, `${STATE_GLYPH[s]} ${STATE_LABEL[s]}`)),
       eff && docStepsOf(eff).reports ? h('span.muted.small.legend-doc', 'The small icon in a card’s corner is its report; “Writing report” marks the one being written.') : null)
   }
@@ -556,13 +570,16 @@ export function renderRunView(root: HTMLElement, wsId: string, workflow: string,
     }
     const eff = effectiveOf(rec)
     const sel = selection && eff?.nodes[selection]?.step ? { kind: 'step' as const, id: selection } : selection && rec.nodes[selection] ? { kind: 'node' as const, id: selection } : null
-    const key = JSON.stringify([rec.definition.active ?? 'r1', Object.keys(r!.bundle), status, sel, rec.context.repositories])
+    const expected = expectationStates(rec)
+    const assessed: Record<string, Record<string, string>> = {}
+    for (const x of expected) assessed[x.node] = { ...assessed[x.node], [x.key]: assessmentWords(x) }
+    const key = JSON.stringify([rec.definition.active ?? 'r1', Object.keys(r!.bundle), status, sel, rec.context.repositories, assessed])
     if (key === canvasShown) return
     canvasShown = key
     // Bindings resolve against the repositories recorded at creation.
     const repositories = rec.context.repositories.map(c => ({ path: c.path, name: c.path, kind: c.path === '.' ? 'root' as const : 'submodule' as const, category: 'other' as const, initialized: true, dirty: c.dirty ?? 0 }))
     canvas.render(wf, {
-      repositories, readonly: true, errorNodes: new Set(), run: status, effective: hasDocSteps(eff) ? eff : null, focus: focusOf(rec),
+      repositories, readonly: true, errorNodes: new Set(), run: status, effective: hasDocSteps(eff) ? eff : null, focus: focusOf(rec), assessed, meanings: eff?.meanings,
       workflows: Object.entries(r!.bundle).filter(([, b]) => b.workflow).map(([id, b]) => ({ file: b.file, id, name: b.workflow!.name, errors: 0, warnings: 0, delegates: [] })),
     }, sel)
   }

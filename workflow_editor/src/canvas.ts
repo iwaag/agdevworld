@@ -5,6 +5,7 @@ import type { PeerProject, RepositoryStatus, WorkflowSummary } from '../shared/a
 import { APPEARANCE_COLORS, APPEARANCE_ICONS, NODE_TYPES, normalizeRepoPath, type Appearance, type Point, type Workflow } from '../shared/model.ts'
 import { h } from './dom.ts'
 import { icon } from './icons.ts'
+import { expectationBadge } from './nodeMeaning.ts'
 import { METRICS, PAD, positions, STEP_X, type DisplayMode, type Metrics } from '../shared/layout.ts'
 import { FINAL_STEP, PLAN_STEP, type EffectiveGraph } from '../shared/compile.ts'
 
@@ -17,10 +18,10 @@ const EDGE_COLOR: Record<string, string> = { study: '#9aaedc', do: '#e2b867', de
 // `step`: a generated documentation step (p5) — the plan talk, a report
 // icon or the final report. It is shown, selectable and inspectable, never
 // edited or moved on its own.
-export type Selection = { kind: 'node'; id: string } | { kind: 'edge'; index: number } | { kind: 'step'; id: string } | null
+export type Selection = { kind: 'node'; id: string } | { kind: 'edge'; index: number } | { kind: 'step'; id: string } | { kind: 'group'; id: string } | null
 
 // Text glyphs so a state is readable without its color.
-export const STATE_GLYPH: Record<string, string> = { pending: '○', ready: '◇', blocked: '⊘', running: '✎', waiting: '⏸', completed: '✓', failed: '✕', cancelled: '–' }
+export const STATE_GLYPH: Record<string, string> = { example: '◌', pending: '○', ready: '◇', blocked: '⊘', running: '✎', waiting: '⏸', completed: '✓', failed: '✕', cancelled: '–' }
 const REPORT_SIZE = 26 // the report icon's side, px
 const REPORT_INSET = { x: 10, y: 9 } // its distance from its card's lower-right corner, inside the card, px
 const FINAL = { width: 176, height: 70 }
@@ -44,6 +45,9 @@ export interface CanvasContext {
   readonly: boolean
   // Run view: each node's recorded state, shown as text and color.
   run?: Record<string, { state: string; label: string; title?: string }>
+  // Run view (improve_wfnode p1): what the records say of each node's expectations, by key; and their frozen words.
+  assessed?: Record<string, Record<string, string>>
+  meanings?: Record<string, { meaning: string }>
   // The effective graph whose generated steps are drawn around the authored
   // cards (p5): the compiled draft in the editor, the frozen graph in a run.
   effective?: Pick<EffectiveGraph, 'nodes' | 'edges'> | null
@@ -64,11 +68,13 @@ export interface CanvasEvents {
   select(sel: Selection): void
   move(id: string, p: Point): void
   connect(from: string, to: string): void
+  moveMany?(points: Record<string, Point>): void // a group's members, moved together
 }
 
 const typeKey = (t: string) => ((NODE_TYPES as readonly string[]).includes(t) ? t : 'unknown')
 // A node's own appearance (p7), when it names a known icon or color; the
 // type's otherwise. Display only: state keeps its own text, glyph and color.
+const GROUP_PAD = { x: 14, y: 14, top: 36 }
 export const iconOf = (type: string, a?: Appearance) => (a?.icon && (APPEARANCE_ICONS as readonly string[]).includes(a.icon) ? a.icon : typeKey(type))
 export const colorOf = (a?: Appearance) => (a?.color && (APPEARANCE_COLORS as readonly string[]).includes(a.color) ? a.color : null)
 // Edge colors of the palette, matching styles.css --c-<token>.
@@ -103,7 +109,7 @@ export class Canvas {
   private readonly frameNote = h('div.frame-note', { hidden: true })
   // A card that grows or shrinks after it was placed (fonts, badges, a
   // status line) carries its report icon and the step edges with it.
-  private resized = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(() => { if (this.ctx?.effective) { this.placeSteps(); this.drawEdges() } this.measure() })
+  private resized = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(() => { if (this.ctx?.effective || this.draft?.groups) { this.placeSteps(); this.drawEdges() } this.measure() })
   // The canvas itself changes size when a side panel opens or closes, or the
   // window changes. The view is never reset for that: the person's zoom and
   // pan stay, and only the first real size sets the initial view.
@@ -141,7 +147,7 @@ export class Canvas {
 
   // Pans just enough to bring a card fully into view.
   reveal(id: string) {
-    const card = this.surface.querySelector<HTMLElement>(`.node[data-id="${CSS.escape(id)}"], [data-step="${CSS.escape(id)}"]`)
+    const card = this.surface.querySelector<HTMLElement>(`.node[data-id="${CSS.escape(id)}"], [data-step="${CSS.escape(id)}"], [data-group-box="${CSS.escape(id)}"]`)
     if (!card) return
     const c = card.getBoundingClientRect(), r = this.el.getBoundingClientRect(), m = 24
     let dx = 0, dy = 0
@@ -203,7 +209,7 @@ export class Canvas {
   }
 
   private cardBoxes() {
-    return [...this.surface.querySelectorAll<HTMLElement>('.node, .step-card, .report-icon, .final-step')].filter(c => !c.hidden).map(c => this.surfaceBox(c))
+    return [...this.surface.querySelectorAll<HTMLElement>('.node, .step-card, .report-icon, .final-step, .group-box')].filter(c => !c.hidden).map(c => this.surfaceBox(c))
   }
 
   // Cards' boxes for the in-view count, read once per render or move.
@@ -244,7 +250,7 @@ export class Canvas {
     const active = document.activeElement instanceof HTMLElement && this.surface.contains(document.activeElement) ? document.activeElement : null
     const refocus = active ? (active.dataset.id ? `.node[data-id="${CSS.escape(active.dataset.id)}"]` : active.dataset.step ? `[data-step="${CSS.escape(active.dataset.step)}"]` : null) : null
     this.points = positions(draft)
-    for (const old of this.surface.querySelectorAll('.node, .step-card, .report-icon, .final-step')) old.remove()
+    for (const old of this.surface.querySelectorAll('.node, .step-card, .report-icon, .final-step, .group-box')) old.remove()
     const m = this.metrics()
     this.resized?.disconnect()
     for (const [id, node] of Object.entries(draft.nodes)) {
@@ -253,6 +259,7 @@ export class Canvas {
       this.surface.append(card)
       this.resized?.observe(card)
     }
+    this.renderGroups()
     this.renderSteps()
     this.drawEdges()
     if (refocus) this.surface.querySelector<HTMLElement>(refocus)?.focus({ preventScroll: true })
@@ -335,10 +342,101 @@ export class Canvas {
       foot.append(h(`div.run-status.state-${run.state}`, { title: run.title ?? run.label }, h('span.glyph', { 'aria-hidden': 'true' }, STATE_GLYPH[run.state] ?? ''), ` ${this.simple ? shortLabel(run) : run.label}`))
     } else if (node.repositories.length && !this.simple) foot.append(this.bindingBadges(node.repositories))
     if (this.ctx.effective?.nodes[`_report.${id}`]) card.classList.add('has-report')
+    // improve_wfnode p1: an example says so in words; expectations are compact
+    // badges with their explanation in the title. Simple keeps the required ones.
+    const assessed = this.ctx.assessed?.[id]
+    const shown = (node.expectations ?? []).filter(x => !this.simple || x.strength === 'required' || (assessed?.[x.key] && assessed[x.key] !== 'Met'))
+    if (node.example) card.classList.add('is-example')
+    if (node.example || shown.length) card.append(h('div.node-meaning', node.example ? h('span.example-badge', { title: 'A model for concrete work: a run specializes it through a revision, and it is not performed itself.' }, 'Example') : null,
+      ...shown.map(x => expectationBadge(x, assessed?.[x.key], this.ctx.meanings?.[x.key]?.meaning))))
     card.append(foot)
     if (!this.ctx.readonly) card.append(h('span.port', { title: 'Drag to another node to connect', dataset: { port: id } }))
     this.installCardDrag(card, id)
     return card
+  }
+
+  // ---- groups (improve_wfnode p1) ------------------------------------------
+
+  // A named boundary around a group's members, behind the cards: the data's
+  // membership, not their color. Only the label takes pointer events, so
+  // members stay selectable and draggable and edges cross it. An empty list
+  // has no members to surround, and shows as a label below the graph.
+  private renderGroups() {
+    const groups = Object.entries(this.draft.groups ?? {})
+    for (const [id, g] of groups.reverse()) {
+      const selected = this.selection?.kind === 'group' && this.selection.id === id
+      const color = g.appearance?.color && (APPEARANCE_COLORS as readonly string[]).includes(g.appearance.color) ? `.color-${g.appearance.color}` : ''
+      const words = `${g.kind === 'list' ? 'List' : g.kind}${g.cardinality === 'variable' ? ' · Variable' : g.cardinality ? ` · ${g.cardinality}` : ''}`
+      const label = h('div.group-label', {
+        role: 'button', tabIndex: 0, dataset: { group: id }, 'aria-label': `${g.name || id}, ${words}, ${g.members.length} member${g.members.length === 1 ? '' : 's'}`,
+        title: `${g.name || id} — ${words}\n${g.description}\nMembers in order: ${g.members.join(', ') || 'none'}`,
+      }, h('strong.group-name', g.name || id), h('span.group-kind', words), g.members.length ? null : h('span.group-kind', 'no items'))
+      const box = h(`div.group-box${color}${selected ? '.selected' : ''}${g.members.length ? '' : '.empty'}`, { dataset: { groupBox: id } }, label)
+      this.surface.prepend(box)
+      this.installGroupDrag(label, id)
+    }
+    this.placeGroups()
+  }
+
+  private placeGroups() {
+    const groups = Object.entries(this.draft.groups ?? {})
+    if (!groups.length) return
+    const all = Object.keys(this.draft.nodes).map(id => this.cardBox(id)).filter((b): b is NonNullable<typeof b> => !!b)
+    const left = all.length ? Math.min(...all.map(b => b.x)) : 0
+    let below = (all.length ? Math.max(...all.map(b => b.y + b.h)) : 0) + GROUP_PAD.y * 2
+    for (const [id, g] of groups) {
+      const box = this.surface.querySelector<HTMLElement>(`[data-group-box="${CSS.escape(id)}"]`)
+      if (!box) continue
+      const members = g.members.map(m => this.cardBox(m)).filter((b): b is NonNullable<typeof b> => !!b)
+      if (!members.length) {
+        box.style.left = `${left}px`; box.style.top = `${below}px`; box.style.width = ''; box.style.height = ''
+        below += 44
+        continue
+      }
+      const x = Math.min(...members.map(b => b.x)) - GROUP_PAD.x, y = Math.min(...members.map(b => b.y)) - GROUP_PAD.top
+      box.style.left = `${x}px`; box.style.top = `${y}px`
+      box.style.width = `${Math.max(...members.map(b => b.x + b.w)) + GROUP_PAD.x - x}px`
+      box.style.height = `${Math.max(...members.map(b => b.y + b.h)) + GROUP_PAD.y - y}px`
+    }
+  }
+
+  private installGroupDrag(label: HTMLElement, id: string) {
+    label.addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); this.events.select({ kind: 'group', id }) } })
+    label.addEventListener('pointerdown', e => {
+      if (e.button !== 0) return
+      e.stopPropagation()
+      const m = this.metrics()
+      const members = (this.draft.groups?.[id]?.members ?? []).filter(n => this.points.has(n))
+      const starts = new Map(members.map(n => [n, this.points.get(n)!]))
+      const origin = this.toSurface(e.clientX, e.clientY)
+      let moved = false
+      label.setPointerCapture(e.pointerId)
+      const move = (ev: PointerEvent) => {
+        const cur = this.toSurface(ev.clientX, ev.clientY)
+        const dx = (cur.x - origin.x) / m.scale, dy = (cur.y - origin.y) / m.scale
+        if (!moved && Math.hypot(dx, dy) < 4) return
+        if (this.ctx.readonly || !members.length) return
+        moved = true
+        for (const [n, s] of starts) {
+          const p = { x: Math.round(s.x + dx), y: Math.round(s.y + dy) }
+          this.points.set(n, p)
+          const card = this.surface.querySelector<HTMLElement>(`.node[data-id="${CSS.escape(n)}"]`)
+          if (card) { card.style.left = `${p.x * m.scale}px`; card.style.top = `${p.y * m.scale}px` }
+        }
+        this.placeSteps()
+        this.drawEdges()
+      }
+      const up = () => {
+        label.removeEventListener('pointermove', move)
+        label.removeEventListener('pointerup', up)
+        label.removeEventListener('pointercancel', up)
+        if (moved) { this.measure(); this.events.moveMany?.(Object.fromEntries(members.map(n => [n, this.points.get(n)!]))) }
+        else this.events.select({ kind: 'group', id })
+      }
+      label.addEventListener('pointermove', move)
+      label.addEventListener('pointerup', up)
+      label.addEventListener('pointercancel', up)
+    })
   }
 
   // ---- generated documentation steps (p5) ---------------------------------
@@ -413,6 +511,7 @@ export class Canvas {
 
   // Positions follow the authored cards (also while one is dragged).
   private placeSteps() {
+    this.placeGroups()
     const eff = this.ctx.effective
     if (!eff) return
     const m = this.metrics()
@@ -602,7 +701,7 @@ export class Canvas {
 
   private installPanZoom() {
     this.el.addEventListener('pointerdown', e => {
-      if (e.button !== 0 || (e.target as HTMLElement).closest('.node, .step-card, .zoom-controls, .frame-note, .edge, .report-icon, .final-step')) return
+      if (e.button !== 0 || (e.target as HTMLElement).closest('.node, .step-card, .zoom-controls, .frame-note, .edge, .report-icon, .final-step, .group-label')) return
       this.events.select(null)
       const start = { x: e.clientX, y: e.clientY, vx: this.view.x, vy: this.view.y }
       this.el.setPointerCapture(e.pointerId)

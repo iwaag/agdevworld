@@ -7,13 +7,14 @@
 import type { PeerProject, RepositoryStatus, WorkflowSummary } from '../shared/api.ts'
 import type { EffectiveGraph } from '../shared/compile.ts'
 import type { NodeTemplate } from '../shared/catalog.ts'
-import { ACCESS_LEVELS, APPEARANCE_COLORS, APPEARANCE_ICONS, ID_PATTERN, NODE_TYPES, normalizeRepoPath, SESSION_POLICIES, type Issue, type Workflow } from '../shared/model.ts'
+import { GROUP_CARDINALITIES, GROUP_KINDS, ACCESS_LEVELS, APPEARANCE_COLORS, APPEARANCE_ICONS, ID_PATTERN, NODE_TYPES, normalizeRepoPath, SESSION_POLICIES, type Issue, type Workflow } from '../shared/model.ts'
 import { bindingCategory, iconOf, TYPE_LABEL, type Selection } from './canvas.ts'
 import { WORKFLOW_TALK, WORKFLOW_TALK_INSTRUCTIONS } from '../shared/workflowTalk.ts'
 import { h } from './dom.ts'
 import { icon } from './icons.ts'
 import { setDisplay } from './displayMode.ts'
 import { docPolicyEditor } from './docPolicy.ts'
+import { expectationEditor, expectationText } from './nodeMeaning.ts'
 
 export interface InspectorContext {
   draft: Workflow
@@ -123,6 +124,7 @@ export function renderInspector(panel: HTMLElement, ctx: InspectorContext, actio
   if (sel?.kind === 'node' && ctx.draft.nodes[sel.id]) panel.append(...nodePanel(ctx, sel.id, actions))
   else if (sel?.kind === 'edge' && ctx.draft.edges[sel.index]) panel.append(...edgePanel(ctx, sel.index, actions))
   else if (sel?.kind === 'step' && ctx.effective?.nodes[sel.id]?.step) panel.append(...stepPanel(ctx, sel.id, actions))
+  else if (sel?.kind === 'group' && ctx.draft.groups?.[sel.id]) panel.append(...groupPanel(ctx, sel.id, actions))
   else panel.append(...workflowPanel(ctx, actions))
   panel.dataset.shows = JSON.stringify(ctx.selection)
   panel.dataset.panel = sel?.kind ?? 'settings'
@@ -145,7 +147,11 @@ function nodePanel(ctx: InspectorContext, id: string, actions: InspectorActions)
   ]
   if (n.type === WORKFLOW_TALK && n.description !== WORKFLOW_TALK_INSTRUCTIONS) out.push(h('p.small', WORKFLOW_TALK_INSTRUCTIONS))
   if (n.type === 'delegate' || n.workflow || n.project || n.accepts) out.push(...delegateFields(ctx, n, ro, actions))
-  out.push(moreDetails('type, appearance, repositories, connections'))
+  const listed = Object.entries(w.groups ?? {}).find(([, g]) => g.members.includes(id))
+  if (listed) out.push(h('p.small', 'In list ', h('a', { href: '#', onclick: (e: Event) => { e.preventDefault(); actions.select({ kind: 'group', id: listed[0] }) } }, listed[1].name || listed[0]), ` · position ${listed[1].members.indexOf(id) + 1} of ${listed[1].members.length}`))
+  if (n.example) out.push(h('p.small.s-only', 'Example: a model for concrete work, specialized in a run.'))
+  out.push(moreDetails('type, list, example, expectations, appearance, repositories, connections'))
+  out.push(meaningField(ctx, id, ro, actions))
   out.push(appearanceField(n, ro, actions))
   // Repository bindings of this node
   const bindings = Object.entries(w.repositories)
@@ -199,6 +205,80 @@ function provenanceField(t: NonNullable<Workflow['nodes'][string]['template']>, 
       h('div.small', h('code', t.id), ` revision ${t.revision}.${since}`),
       h('div.template-provenance', { 'aria-label': 'Template expectation' }, h('span.muted', 'You expected: '), t.expectation || '—'),
       h('p.muted.small', 'Provenance only: outside approval and the executed graph. Edit the node freely; the catalog is not changed.')))
+}
+
+// What the node states beyond what it does (improve_wfnode p1): its list, whether
+// it is an example, and what its author expects of the result.
+function meaningField(ctx: InspectorContext, id: string, ro: boolean, actions: InspectorActions): HTMLElement {
+  const w = ctx.draft
+  const n = w.nodes[id]
+  const groups = Object.entries(w.groups ?? {})
+  const current = groups.find(([, g]) => g.members.includes(id))?.[0] ?? ''
+  const NEW = '\u0000new'
+  const setList = (v: string) => {
+    for (const [, g] of groups) g.members = g.members.filter(m => m !== id)
+    if (v === NEW) {
+      let g = 'list'
+      for (let k = 2; g in (w.groups ?? {}); k++) g = `list-${k}`
+      w.groups = { ...w.groups, [g]: { name: 'List', kind: GROUP_KINDS[0], cardinality: GROUP_CARDINALITIES[0], description: '', members: [id] } }
+      actions.select({ kind: 'group', id: g })
+      return
+    }
+    if (v) w.groups![v].members.push(id)
+    actions.changed(true)
+  }
+  const said = [current ? `list ${w.groups![current].name || current}` : '', n.example ? 'example' : '', ...(n.expectations ?? []).map(x => expectationText(x))].filter(Boolean).join(' · ')
+  return group('meaning', 'List, example, expectations', said || 'none', !!said,
+    h('label.field', h('span', 'List'), h('select', { disabled: ro, 'aria-label': 'List this node belongs to', onchange: (e: Event) => setList((e.target as HTMLSelectElement).value) },
+      h('option', { value: '', selected: !current }, 'Not in a list'),
+      ...groups.map(([g, x]) => h('option', { value: g, selected: g === current }, x.name || g)),
+      h('option', { value: NEW }, 'New list with this node…'))),
+    h('label.check', h('input', {
+      type: 'checkbox', checked: !!n.example, disabled: ro, 'aria-label': 'This node is an example',
+      onchange: (e: Event) => { if ((e.target as HTMLInputElement).checked) n.example = true; else delete n.example; actions.changed(true) },
+    }), h('span', 'Example: a model a run specializes into concrete work, not performed itself')),
+    h('div.field', h('span', 'What you expect of the result'), expectationEditor(n.expectations ?? [], ro, (list, rebuild) => {
+      if (list.length) n.expectations = list; else delete n.expectations
+      actions.changed(rebuild)
+    })),
+    h('p.muted.small', 'Preferred: the agent prioritizes it, and explains a different choice. Required: a condition of a satisfactory result, which stays visible as unmet. Neither gates anything nor proves anything; the run says what was actually delivered.'))
+}
+
+// A list: its name, what a run should realize from it, and its members in
+// order. `members` is the authority; removing a member or the list never
+// removes a node.
+function groupPanel(ctx: InspectorContext, id: string, actions: InspectorActions): HTMLElement[] {
+  const w = ctx.draft
+  const g = w.groups![id]
+  const ro = ctx.readonly
+  const inOther = new Set(Object.entries(w.groups ?? {}).filter(([k]) => k !== id).flatMap(([, x]) => x.members))
+  const free = Object.keys(w.nodes).filter(n => !g.members.includes(n) && !inOther.has(n))
+  const swap = (i: number, j: number) => { [g.members[i], g.members[j]] = [g.members[j], g.members[i]]; actions.changed(true) }
+  const remove = (m: string) => { g.members = g.members.filter(x => x !== m); actions.changed(true) }
+  const rows = g.members.map((m, i) => h('li.group-member',
+    h('a', { href: '#', onclick: (e: Event) => { e.preventDefault(); actions.select({ kind: 'node', id: m }) } }, nodeLabel(w, m)), w.nodes[m]?.example ? h('span.example-badge', 'Example') : null,
+    h('span.toolbar-fill'),
+    h('button.icon-btn', { type: 'button', disabled: ro || i === 0, title: 'Earlier in the list', 'aria-label': `Move ${m} earlier`, onclick: () => swap(i, i - 1) }, '↑'),
+    h('button.icon-btn', { type: 'button', disabled: ro || i === g.members.length - 1, title: 'Later in the list', 'aria-label': `Move ${m} later`, onclick: () => swap(i, i + 1) }, '↓'),
+    h('button.icon-btn', { type: 'button', disabled: ro, title: 'Take it out of the list; the node stays', 'aria-label': `Take ${m} out of the list`, onclick: () => remove(m) }, '×')))
+  const pick = h('select', { disabled: ro || !free.length, 'aria-label': 'Add a node to this list' }, h('option', { value: '' }, free.length ? '— node —' : 'No node is free'), ...free.map(n => h('option', { value: n }, nodeLabel(w, n))))
+  const issues = ctx.issues.filter(i => i.field === 'groups' && i.message.includes(`"${id}"`))
+  return [
+    head('flag', g.name || id, id, actions),
+    h('p.small', h('strong', g.kind === 'list' ? 'List' : g.kind), g.cardinality === 'variable' ? ' · Variable: a run decides how many items it needs. The number of members here fixes nothing.' : ` · ${g.cardinality}`),
+    h('label.field', h('span', 'Name'), h('input', { value: g.name, disabled: ro, 'aria-label': 'List name', oninput: (e: Event) => { g.name = (e.target as HTMLInputElement).value; actions.changed(false) } })),
+    h('label.field', h('span', 'What a run should realize from it'), h('textarea', { rows: 4, value: g.description, disabled: ro, 'aria-label': 'List description', oninput: (e: Event) => { g.description = (e.target as HTMLTextAreaElement).value; actions.changed(false) } })),
+    h('div.field', h('span', `Members in order (${g.members.length})`),
+      g.members.length ? h('ol.group-members', rows) : h('p.muted.small', 'No items. An empty list is valid.'),
+      h('div.row.tight', pick, h('button', { type: 'button', disabled: ro || !free.length, onclick: () => { if (pick.value) { g.members.push(pick.value); actions.changed(true) } } }, 'Add'))),
+    h('p.muted.small', 'List order creates no dependency: connections alone do, and they may cross the boundary.'),
+    h('label.field.d-only', h('span', 'Accent (display only)'), h('select', {
+      disabled: ro, 'aria-label': 'List color',
+      onchange: (e: Event) => { const v = (e.target as HTMLSelectElement).value; if (v) g.appearance = { color: v }; else delete g.appearance; actions.changed(true) },
+    }, h('option', { value: '', selected: !g.appearance?.color }, 'default'), ...APPEARANCE_COLORS.map(c => h('option', { value: c, selected: c === g.appearance?.color }, c)))),
+    issueList(issues, actions),
+    h('div.insp-foot', h('button.danger', { type: 'button', disabled: ro, title: 'The members stay as ordinary nodes', onclick: () => { delete w.groups![id]; if (!Object.keys(w.groups!).length) delete w.groups; actions.select(null) } }, 'Remove list, keep nodes')),
+  ]
 }
 
 // Appearance (p7): how the card looks. Display only — it changes neither

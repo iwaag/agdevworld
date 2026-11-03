@@ -171,6 +171,12 @@ export function renderWorkflowView(root: HTMLElement, wsId: string, fileName: st
       draft.layout.nodes[id] = p
       update(false)
     },
+    moveMany: points => {
+      if (!draft || readonly()) return
+      if (Object.keys(draft.nodes).some(n => !draft!.layout.nodes[n])) completeLayout(draft)
+      Object.assign(draft.layout.nodes, points)
+      update(false)
+    },
     connect: (from, to) => connect(from, to),
   })
   canvas.setMode(mode)
@@ -483,6 +489,7 @@ export function renderWorkflowView(root: HTMLElement, wsId: string, fileName: st
     delete draft.nodes[id]
     draft.edges = draft.edges.filter(e => e.from !== id && e.to !== id)
     delete draft.layout.nodes[id]
+    for (const g of Object.values(draft.groups ?? {})) g.members = g.members.filter(m => m !== id)
     selection = null
     update(true)
   }
@@ -922,6 +929,7 @@ export function renderWorkflowView(root: HTMLElement, wsId: string, fileName: st
     if (selection?.kind === 'node' && !draft.nodes[selection.id]) selection = null
     if (selection?.kind === 'edge' && !draft.edges[selection.index]) selection = null
     if (selection?.kind === 'step' && !effective?.nodes[selection.id]) selection = null
+    if (selection?.kind === 'group' && !draft.groups?.[selection.id]) selection = null
     canvas.render(draft, { repositories: resp?.repositories ?? [], workflows: resp?.workflows ?? [], project: resp?.project, peers: resp?.peers, errorNodes: new Set(errors.map(i => i.node).filter((n): n is string => !!n)), readonly: readonly(), effective }, selection)
     const open = inspectorOpen()
     if (inspector.hidden === open) { inspector.hidden = !open; body.classList.toggle('with-inspector', open) }

@@ -16,7 +16,8 @@
 // runView.ts keeps the server snapshot and the operations; this module reads
 // the data it is given and asks the view to act.
 import type { RunOpResponse, RunResponse } from '../shared/api.ts'
-import { effectiveOf, holderOf, isOpen, questionState, runKey, situation, type Because, type Question, type RunRecord } from '../shared/run.ts'
+import { assessmentWords, effectiveOf, expectationStates, holderOf, isOpen, questionState, runKey, situation, type Because, type ExpectationState, type Question, type RunRecord } from '../shared/run.ts'
+import { expectationBadge } from './nodeMeaning.ts'
 import { hostOwes, isAwaitingPerson, owedContinuation, reviewStateText } from '../shared/humanReview.ts'
 import { reportStep } from '../shared/compile.ts'
 import { sessionPolicyOf } from '../shared/model.ts'
@@ -572,6 +573,13 @@ export class RunSide {
     const blocks: (Node | null)[] = [h('div.focus-top', h(`span.focus-icon.tone-${done}`, icon(FOCUS_ICON[kind] ?? 'flag', 'icon')), h('div.focus-words', h('h2.focus-head', { dataset: { status: st.state } }, head), h('p.focus-lead', lead), more))]
     // The one-click review, while it is served (p7); otherwise what became of it.
     if (!d.rev) blocks.push(this.reviewLink(rec, kind))
+    // improve_wfnode p1: unresolved examples, and expectations short of met, beside the result.
+    if (ex.examples?.length) blocks.push(h('p.small.focus-examples', h('span.example-badge', 'Examples'), ` ${ex.examples.map(name).join(', ')} still to be specialized into concrete work.`))
+    const requiredUnmet = expectationStates(rec).filter(x => x.strength === 'required' && x.status === 'unmet')
+    if (requiredUnmet.length) blocks.push(h('p.banner.error.small', `Required expectation unmet: ${requiredUnmet.map(x => `${x.label} on ${name(x.node)}`).join(', ')}. ${ex.state === 'completed' ? 'The work is finished; this condition of a satisfactory result is not met.' : 'It stays visible until a later statement says otherwise.'}`))
+    const severity = (x: ExpectationState) => ['Unmet', 'Alternative', 'Unverified', 'Met'].indexOf(assessmentWords(x))
+    const expected = [...expectationStates(rec)].sort((a, b) => severity(a) - severity(b))
+    if (expected.length) blocks.push(h('div.focus-expectations', ...expected.map(x => h('span.expect-on', expectationBadge(x, assessmentWords(x), x.meaning || undefined), h('span.small.muted', ` ${name(x.node)}`)))))
     if (kind === 'working' || kind === 'accepted') blocks.push(this.activeBlock(rec, name))
     // Where the accepted result stands (p9): saved, accepted, integrated.
     const integ = !d.rev && (kind === 'completed' || kind === 'accepted' || kind === 'reaccept' || kind === 'integration') ? integrationStatus(rec, d.execView, d.resp?.place) : null
@@ -746,6 +754,15 @@ export class RunSide {
     patchContent(this.selected.content.children[0] as HTMLElement, this.nodeDetail(rec, id!))
   }
 
+  // One expectation as the records say: the words, whose statement it is, and what shows it.
+  private expectationRow(x: ExpectationState): HTMLElement {
+    const a = x.assessment
+    return h('div.expect-row-view', expectationBadge(x, assessmentWords(x), x.meaning || undefined),
+      x.note ? h('span.small.muted', ` ${x.note}`) : null,
+      a ? h('div.small', `${a.reporter === 'agent' ? 'Reported by the agent' : 'Stated by'} ${a.by}, ${when(a.at)}${a.note ? `: ${a.note}` : ''}`) : h('div.small.muted', 'No one has stated whether this holds.'),
+      a?.evidence.length ? h('div.small', 'Evidence: ', ...a.evidence.flatMap((e, i) => [i ? ', ' : '', e.kind === 'artifact' ? fileLink(e.path) : e.kind === 'commit' ? `commit ${e.commit.slice(0, 10)}` : e.kind === 'entry' ? `entry ${e.seq}` : `${e.kind} ${e.id}`])) : null)
+  }
+
   private nodeDetail(rec: RunRecord, id: string): HTMLElement {
     const r = this.data.shown!
     const n = rec.nodes[id]
@@ -783,6 +800,15 @@ export class RunSide {
       box.append(h('p.small', 'Its report: ', nodeLink(rs, `report-${id}.md`), ` — ${nodeLabel(rec, rs).label}`, h('span.d-only', '. Successors wait for the report, not only for this work.'), rf ? h('span.s-only', ' · ', fileLink(`${r.dir}/${rf.name}`, 'Read it')) : null))
     }
     if (n.outcome) box.append(h('div.outcome', h('strong', 'Recorded outcome: '), n.outcome.text, ...n.outcome.artifacts.map(a => h('div.small', fileLink(a)))))
+    // improve_wfnode p1: a model, what it was made from, and what is expected of it.
+    if (eff?.nodes[id]?.example) box.append(h('p.small', h('span.example-badge', 'Example'), ' A model for concrete work: the agent replaces it through a revision and performs what replaces it. Starting it is refused; it counts for nothing.'))
+    const made = eff?.nodes[id]?.specializes
+    if (made) box.append(h('p.small', `Specialized from ${made.examples.join(', ')} of `, h('a', { href: `#/ws/${encodeURIComponent(this.data.wsId)}/run/${encodeURIComponent(rec.workflow)}/${encodeURIComponent(rec.run)}/definition/${encodeURIComponent(made.revision)}` }, made.revision), '.'))
+    const listed = Object.entries(eff?.groups ?? {}).find(([, g]) => g.members.includes(id))
+    if (listed) box.append(h('p.small.muted', `In list ${listed[1].name || listed[0]}, position ${listed[1].members.indexOf(id) + 1} of ${listed[1].members.length}.${listed[1].description.trim() ? ` ${listed[1].description.trim()}` : ''}`))
+    const expected = expectationStates(rec).filter(x => x.node === id)
+    if (expected.length) box.append(h('div.expect-list', ...expected.map(x => this.expectationRow(x))))
+    if (eff?.nodes[id]?.example) for (const x of eff.nodes[id].expectations ?? []) box.append(h('div.expect-row-view', expectationBadge(x, undefined, eff.meanings?.[x.key]?.meaning), x.note ? h('span.small.muted', ` ${x.note}`) : null))
     // Work recorded as done afterwards (workflow_editor fix5): said as such.
     const rt = n.retrospective
     if (rt) box.append(h('div.retro-box', h('strong', 'Recorded afterwards: '), `${rt.by}, ${when(rt.at)} (entry ${rt.seq}). Nothing ran this node; the work was done before it was a node. Why: ${rt.reason}`,

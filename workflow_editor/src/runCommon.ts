@@ -9,7 +9,7 @@ import { reviewStateText } from '../shared/humanReview.ts'
 import { h, when } from './dom.ts'
 
 export const STATE_LABEL: Record<string, string> = {
-  pending: 'Pending', ready: 'Ready', blocked: 'Blocked', running: 'Running (reported)', waiting: 'Waiting',
+  example: 'Example, to be specialized', pending: 'Pending', ready: 'Ready', blocked: 'Blocked', running: 'Running (reported)', waiting: 'Waiting',
   completed: 'Completed', failed: 'Failed', cancelled: 'Cancelled',
   'not-started': 'Not started', 'in-progress': 'In progress', stopped: 'Stopped',
 }
@@ -43,6 +43,7 @@ export const runHash = (ws: string, ref: string, rev?: string) =>
 function shownState(rec: RunRecord, id: string): string {
   const n = rec.nodes[id]
   if (n.state !== 'pending') return n.state
+  if (rec.execution.examples?.includes(id)) return 'example'
   return rec.execution.ready.includes(id) ? 'ready' : rec.execution.blocked.includes(id) ? 'blocked' : 'pending'
 }
 

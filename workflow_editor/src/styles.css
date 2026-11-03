@@ -1216,3 +1216,42 @@ html[data-display="detail"] .dash-glance { max-width: none; padding: 0; }
 .definition-text-panel { display: flex; flex-direction: column; gap: 8px; padding: 8px; }
 .wf-row .wf-state-draft { margin-left: 6px; }
 .local-edits .draft-choice { width: 100%; }
+
+/* Lists, examples and expectations (improve_wfnode p1). The boundary and its
+   words are the contract; a shared accent only supplements them. */
+.group-box { position: absolute; border: 2px solid #8a94a6; border-radius: 12px; background: rgba(120, 132, 155, .07); pointer-events: none; box-sizing: border-box; }
+.group-box.selected { border-color: #3f6fd8; box-shadow: 0 0 0 2px rgba(63, 111, 216, .25); }
+.group-box.empty { border-style: dashed; background: none; height: auto; }
+.group-box.color-blue { border-color: var(--c-blue); background: var(--c-blue-bg); }
+.group-box.color-amber { border-color: var(--c-amber); background: var(--c-amber-bg); }
+.group-box.color-violet { border-color: var(--c-violet); background: var(--c-violet-bg); }
+.group-box.color-teal { border-color: var(--c-teal); background: var(--c-teal-bg); }
+.group-box.color-green { border-color: var(--c-green); background: var(--c-green-bg); }
+.group-box.color-rose { border-color: var(--c-rose); background: var(--c-rose-bg); }
+.group-box.color-slate { border-color: var(--c-slate); background: var(--c-slate-bg); }
+.group-box.color-orange { border-color: var(--c-orange); background: var(--c-orange-bg); }
+.group-label { pointer-events: auto; cursor: grab; display: inline-flex; gap: 8px; align-items: baseline; padding: 6px 10px; font-size: 13px; max-width: 100%; white-space: nowrap; overflow: hidden; }
+.group-label:active { cursor: grabbing; }
+.group-name { overflow: hidden; text-overflow: ellipsis; }
+.group-kind { font-size: 11.5px; color: var(--muted); }
+.node.is-example { border-style: dashed; border-width: 2px; }
+.node-meaning { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 6px; }
+.example-badge { display: inline-block; font-size: 11px; font-weight: 600; color: #4c4f7a; background: #ecedf8; border: 1px dashed #8d90c4; border-radius: 6px; padding: 1px 6px; }
+.expect-badge { display: inline-block; font-size: 11px; border-radius: 6px; padding: 1px 6px; border: 1px solid #c9ced6; color: #3b424c; background: #fff; white-space: nowrap; }
+.expect-badge.expect-required { border-color: #7a5300; color: #7a5300; font-weight: 600; }
+.expect-badge.expect-met { border-color: var(--ok); color: var(--ok); background: var(--ok-bg); }
+.expect-badge.expect-unmet { border-color: var(--error); color: var(--error); background: var(--error-bg); font-weight: 600; }
+.expect-badge.expect-alternative { border-color: var(--warn); color: var(--warn); background: var(--warn-bg); }
+.expect-badge.expect-unverified { border-style: dashed; color: var(--muted); }
+.expect-editor { display: flex; flex-direction: column; gap: 6px; }
+.expect-row { display: grid; grid-template-columns: minmax(60px, auto) minmax(92px, auto) minmax(80px, 1fr) auto; gap: 6px; align-items: center; }
+.expect-key { font-size: 13px; }
+.group-members { margin: 0; padding-left: 22px; display: flex; flex-direction: column; gap: 3px; }
+.group-member { display: list-item; }
+.group-member > * { vertical-align: middle; }
+.group-member .icon-btn { margin-left: 2px; }
+.group-facts { padding: 6px 12px 0; font-size: 13px; display: flex; flex-direction: column; gap: 4px; }
+.group-facts:empty { display: none; }
+.expect-list { display: flex; flex-direction: column; gap: 6px; margin: 8px 0; }
+.focus-expectations { display: flex; flex-wrap: wrap; gap: 6px 10px; margin-top: 8px; }
+.run-status.state-example, .state-chip.state-example { color: #4c4f7a; border-color: #8d90c4; background: #ecedf8; }

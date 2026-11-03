@@ -346,3 +346,46 @@ test('workers: a worker-only file is archived before anything goes; lost contact
     assert.ok(existsSync(join(tree, '.local/wfe-worker-bundles/root.bundle')), 'its unpublished commit travels as a bundle')
   } else assert.fail(`the correction was not dispatched: ${JSON.stringify(again)}`)
 })
+
+test('workers (improve_wfrun p4): two attempts of one remote worker at once — forwarded commands, heartbeats and ends at the same time keep both, publish both, and a stop touches one', async () => {
+  const s = await setup()
+  await writeFile(join(s.area, 'workers.json'), JSON.stringify({ default: 'studio', coordination: { worker: 'studio', lane: 'coordination', workspace: s.id, workflow: 'no-such-coordinate' }, workers: { studio: { local: true, lanes: ['coordination'] }, pc: { label: 'the PC', tokenFile: 'pc.token' } } }))
+  const ids: { ref: { workflow: string; run: string } }[] = []
+  for (const i of [1, 2, 3]) {
+    const r = await request(s.x, s.id, 'onpc', `workers-p4-000${i}`)
+    assert.equal((await s.x.decide({ action: 'start', workspace: s.id, ref: r.ref, reason: 'test', by: 'test', via: 'cli' })).applied, true)
+    ids.push(r)
+  }
+  const claim = async () => { const c = await s.wfe(['exec', 'claim', ...OFFER, '--json']); assert.equal(c.code, 0, c.stderr); const j = JSON.parse(c.stdout); assert.ok(j.attempt, c.stdout); return j }
+  const [c1, c2, c3] = [await claim(), await claim(), await claim()]
+  assert.equal(new Set([c1.attempt.id, c2.attempt.id, c3.attempt.id]).size, 3, 'three attempts on one worker: no slot count')
+  assert.equal(s.x.workersState().find(w => w.id === 'pc')!.slots.length, 3)
+  await Promise.all([c1, c2, c3].map(c => s.wfe(['exec', 'started', c.attempt.id, '--pid', String(process.pid), '--json'])))
+  // Forwarded commands and heartbeats at once, in each attempt's own copy.
+  const forwarded = await Promise.all([c1, c2].flatMap(c => [s.wfe(['run', 'start', `onpc/${c.ref.run}`, 'build', '--json'], { cwd: c.cwd, attempt: c.attempt.id })]).concat([s.wfe(['exec', 'heartbeat', '--pid', '1', '--detail', 'x', '--facts-json', JSON.stringify({ load: { at: 'now', cpus: 2 } }), '--json'])]))
+  for (const f of forwarded) assert.equal(f.code, 0, f.stderr)
+  assert.equal(s.x.workersState().find(w => w.id === 'pc')!.load?.cpus, 2, 'the measured load arrives with the heartbeat')
+  const state = async () => JSON.parse(await readFile(join(s.warea, '.local', 'worker', 'state.json'), 'utf8')) as { attempts: Record<string, unknown> }
+  assert.equal(Object.keys((await state()).attempts).length, 3, 'no attempt lost from the bookkeeping')
+  // A stop names one attempt only.
+  await s.x.stop(s.ws, c3.ref, 'Test Person', 'enough', 'browser')
+  const stops = JSON.parse((await s.wfe(['exec', 'stops', '--json'])).stdout) as { id: string }[]
+  assert.deepEqual(stops.map(x => x.id), [c3.attempt.id])
+  // Work, completion and ends at the same time: each publishes its own branch.
+  await Promise.all([c1, c2].map(async c => {
+    await writeFile(join(c.cwd, `made-${c.ref.run}.txt`), `${c.ref.run}\n`)
+    const done = await s.wfe(['run', 'complete', `onpc/${c.ref.run}`, 'build', '--outcome', 'built', '--json'], { cwd: c.cwd, attempt: c.attempt.id })
+    assert.equal(done.code, 0, done.stderr)
+  }))
+  const ends = await Promise.all([c1, c2, c3].map(c => s.wfe(['exec', 'finished', c.attempt.id, ...(c === c3 ? ['--signal', 'SIGTERM'] : ['--exit-code', '0']), '--json'])))
+  for (const e of ends) assert.equal(e.code, 0, e.stderr)
+  assert.deepEqual(Object.keys((await state()).attempts), [], 'each end removed only its own attempt')
+  for (const c of [c1, c2]) {
+    const view = await s.x.runView(s.id, c.ref)
+    assert.ok(view.checkpoints.some(k => k.mode === 'worker' && k.state === 'published'), JSON.stringify(view.checkpoints))
+    assert.equal((await git(s.remote, ['show', `wfe/${s.id}/onpc/${c.ref.run}:made-${c.ref.run}.txt`])).stdout, `${c.ref.run}\n`)
+    assert.equal((await s.x.runView(s.id, c.ref)).attempts[0].outcome, 'exited')
+  }
+  assert.equal((await readRun(await runSpace(s.ws, c3.ref), c3.ref)).record!.control.hold?.kind, 'stopped', 'the stopped one alone')
+  s.x.close()
+})

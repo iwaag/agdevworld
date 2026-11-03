@@ -191,6 +191,14 @@ state`, the attempt's log, `wfe observe`. Missing facts are shown as missing
 
 ## Limits
 
+- Every turn is a model run and a run copy of the coordinating project. Measured in improve_wfrun p4:
+  about 20 s and US$0.13 per turn on `sonnet`. A run's first job costs a turn unless it joins one; a run's
+  later jobs are admitted by its standing decision without one.
+- The status reads `By warden` for any deferral, also one recorded by hand with `--by`; the decision names
+  the actual actor.
+- A coordination run that is interrupted stays held, and its incident stays open until someone cancels it:
+  the next turn has already taken over its work.
+
 - Nothing predicts a collision. Shared host state (`/tmp`, ports, displays,
   GPU memory, process names) is shared between attempts on a node; the brief
   says so and warden's notes can name paths. A collision is observed after

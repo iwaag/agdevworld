@@ -28,6 +28,7 @@ import { CONTEXT_HELP, contextCommand } from './context.ts'
 import { CHALLENGE_HELP, challengeCommand } from './challenge.ts'
 import { CONVERSATION_HELP, conversationCommand } from './conversation.ts'
 import { DIALOGUE_HELP, dialogueCommand } from './dialogue.ts'
+import { COORDINATE_HELP, coordinateCommand } from './coordinate.ts'
 import { codeVersion } from '../server/version.ts'
 import { assertNotRetired, assertWorkspaceAllowed, loadBoundary, retiredByUrl } from '../server/boundary.ts'
 import { discussionTurn, quietly } from './evidence.ts'
@@ -102,9 +103,9 @@ const ownerName = (text: string | undefined, what: string) => {
 }
 const port = (p: Parsed) => Number(opt(p, 'port') ?? process.env.WFE_PORT ?? 8095)
 
-async function workspace(p: Parsed): Promise<Workspace> {
+async function workspace(p: Parsed): Promise<Workspace> { return workspaceNamed(p, opt(p, 'workspace')) }
+async function workspaceNamed(p: Parsed, id: string | undefined): Promise<Workspace> {
   const reg = await loadRegistry(registryFile(p))
-  const id = opt(p, 'workspace')
   let w: Registration | undefined
   if (id) {
     w = reg.workspaces.find(x => x.id === id)
@@ -183,6 +184,7 @@ reference  the optional technical reference (docs/boast.md): paths,
   conversation: CONVERSATION_HELP,
   discussion: CONVERSATION_HELP,
   dialogue: DIALOGUE_HELP,
+  coordinate: COORDINATE_HELP,
   projects: PROJECTS_HELP,
   create: `wfe create <dir> --name <name> [--id <id>] [--intent <text>] [--goal <text>]... [--devdocs directory|submodule] [--devdocs-source <path|url>] [--resume]
 
@@ -590,12 +592,17 @@ result-confirmation question; the answer binds that revision). Host settings:
 
 Every subcommand acts for one execution node: --worker <id>, or the local
 worker of <area>/workers.json (docs/workers.md). A worker claims only jobs of
-runs assigned to it, has one slot of its own, and only it reports, stops or
-publishes its attempts.
+runs assigned to it, and only it reports, stops or publishes its attempts.
+Since improve_wfrun p4 a worker holds as many attempts as warden decided
+should run on it (docs/coordination.md): a claim takes the oldest queued job
+of this worker that a decision admitted; a job without one waits with
+"awaiting warden's coordination decision". The coordination lane (--lane
+<name>, workers.json "coordination") takes coordination runs, one at a time,
+without a decision. An area without coordination keeps one attempt per lane.
 
 claim [--backend <text>] [--profiles-json <{name: backend}>] [--contract <name>=<sha256>]
       [--sessions-json <{profile: "explicit"}>] [--lane <name>]
-                                  take the next queued job if the slot is free:
+                                  take the next queued job this worker may start:
                                   records attempt.begin with the settings it is
                                   launched with (agent, profile → backend, the
                                   contract and the project guides by hash, and
@@ -626,7 +633,9 @@ finished <attempt> --exit-code <n> [--signal <name>] [--lost]
                                   which holds the run; --attached: a session id
                                   the harness reported and not yet recorded
 stops                             this worker's attempts to terminate (stop or cancel requested)
-heartbeat --pid <pid> [--detail …]
+heartbeat --pid <pid> [--detail …] [--facts-json <{load: {…}}>]
+                                  this worker reports; --facts-json carries what
+                                  it measured of its host (improve_wfrun p4)
 reconcile [--holding <attempt>]   after a restart: gone processes become
                                   "unknown"; requests and answers that were not
                                   queued are queued again under their receipts.
@@ -816,6 +825,8 @@ Projects and workspaces
                             (for whoever works in it: nothing about workflows depends on it)
   intake <subcommand>       requests from Zulip: status, messages, receive, process … (autolab fetches)
   exec <subcommand>         the executor's interface: claim, started, finished, stops, reconcile …
+  coordinate <subcommand>   execution coordination (warden): view, events, start, defer, assign, note,
+                            reconsider, wake, decisions (improve_wfrun p4; docs/coordination.md)
   runs index [--rebuild]    runs' own working copies on this host (p9)
   observe                   a read-only snapshot of every run for monitors (observer p3)
   rename-project <a> <b>    rename a managed project on this host, with a preview and a journal (rename/warden)
@@ -1363,7 +1374,11 @@ async function cmdExec(p: Parsed): Promise<number> {
         out('', { ok: true, ...await x.contextDelivery(arg, { delivered: p.flags.has('delivered'), detail: opt(p, 'detail') }, worker()) }); return 0
       }
       case 'stops': out('', x.stopsDue(worker()).map(a => ({ id: a.id, pid: a.pid, run: `${a.workflow}/${a.run}`, workspace: a.workspace, requested: a.stop_requested }))); return 0
-      case 'heartbeat': x.heartbeat(worker(), num('pid'), opt(p, 'detail') ?? ''); out('', { ok: true }); return 0
+      case 'heartbeat': {
+        // --facts-json (improve_wfrun p4): the host's measured load, kept with the heartbeat.
+        const facts = opt(p, 'facts-json')
+        x.heartbeat(worker(), num('pid'), opt(p, 'detail') ?? '', facts ? { facts: JSON.parse(facts) as import('../server/exec.ts').WorkerFacts } : undefined); out('', { ok: true }); return 0
+      }
       case 'reconcile': {
         if (x.isRemote(worker())) throw new UsageError(`reconcile runs on the coordinator for its local worker; ${worker()} reconciles its own attempts through its wfe`)
         const notes = await x.reconcile(p.opts.get('holding') ?? [])
@@ -2030,7 +2045,17 @@ const COMMANDS: Record<string, (p: Parsed) => Promise<number>> = {
   runs: cmdRuns, 'rename-project': cmdRenameProject, observe: cmdObserve, projects: cmdProjects, run: cmdRun, delegate: cmdDelegate, review: cmdReview, present: cmdPresent, share: cmdShare, project: cmdProject, repo: cmdRepo, gitea: cmdGitea, dashboard: cmdDashboard, exec: cmdExec, request: cmdRequest, notify: cmdNotify, intake: cmdIntake,
   create: cmdCreate, register: cmdRegister, list: cmdList, status: cmdStatus, validate: cmdValidate,
   approve: cmdApprove, arrange: cmdArrange, 'add-repo': cmdAddRepo, workflow: cmdWorkflow, serve: cmdServe, setup: cmdSetup,
-  version: cmdVersion, nodes: cmdNodes, workspace: cmdWorkspace, draft: cmdDraft, boast: cmdBoast, context: cmdContext, challenge: cmdChallenge, conversation: cmdConversation, discussion: cmdConversation, dialogue: cmdDialogue,
+  version: cmdVersion, nodes: cmdNodes, workspace: cmdWorkspace, draft: cmdDraft, boast: cmdBoast, context: cmdContext, challenge: cmdChallenge, conversation: cmdConversation, discussion: cmdConversation, dialogue: cmdDialogue, coordinate: cmdCoordinate,
+}
+
+// Execution coordination (improve_wfrun p4, docs/coordination.md).
+async function cmdCoordinate(p: Parsed): Promise<number> {
+  return coordinateCommand({
+    positional: p.positional, opt: k => opt(p, k), opts: k => p.opts.get(k) ?? [], flag: k => p.flags.has(k), out,
+    usage: m => new UsageError(m), refused: (m, d) => new Refused(m, d),
+    exec: () => openExec(p), workspace: id => workspaceNamed(p, id),
+    resolveRun: async (ws, text) => (await import('../server/runs.ts')).resolveRef(ws, text),
+  })
 }
 
 // Challenges (challenge p1, docs/challenges.md).

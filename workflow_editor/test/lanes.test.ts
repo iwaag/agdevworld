@@ -1,11 +1,15 @@
-// project_migration p8: worker lanes. A worker declares extra lanes in
-// workers.json; a workflow names the lane its runs are claimed in
-// (execution.lane, frozen as executor.lane). Covered: a conversation-lane job
-// is claimed while a long default-lane attempt holds the default slot, the
-// lane's own capacity, a default claim never takes another lane's job, a lane
-// the worker does not offer is served by its default lane, the views list
-// every open attempt with `busy` still the default lane's, and a worker
-// without lanes keeps exactly its one slot.
+// project_migration p8, improve_wfrun p4: worker lanes. A worker declares
+// extra lane names in workers.json; a workflow names the lane its runs are
+// claimed in (execution.lane, frozen as executor.lane). Since p4 a lane has
+// no capacity: in an area WITHOUT coordination (no `coordination` in
+// workers.json) each lane keeps the one attempt it always had, so a
+// conversation-lane job is claimed while a long default-lane attempt holds
+// the default slot; with coordination, admission is warden's decision
+// (test/coordination.test.ts). Covered here: the legacy one-per-lane rule, a
+// default claim never takes another lane's job, a lane the worker does not
+// offer is served by its default lane, the views list every open attempt with
+// `busy` still the default lane's, a worker without lanes keeps exactly its one
+// slot, and workers.json is checked (lane names; the legacy object form).
 import { after, before, test } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdtemp, rm, writeFile } from 'node:fs/promises'
@@ -60,17 +64,19 @@ async function setup(workers: unknown) {
   return { area, x, ws, id: `l${n}`, request }
 }
 const OFFER = { profiles: { '': 'fake / m' } }
-const WITH_LANE = { default: 'studio', workers: { studio: { local: true, label: 'the studio', lanes: { conversation: 1 } } } }
+const WITH_LANE = { default: 'studio', workers: { studio: { local: true, label: 'the studio', lanes: ['conversation'] } } }
 
-test('lanes: a conversation is claimed while a long attempt holds the default slot', async () => {
+test('lanes (no coordination): a conversation is claimed while a long attempt holds the default slot', async () => {
   const s = await setup(WITH_LANE)
-  assert.deepEqual(loadWorkers(s.area).workers.studio.lanes, { default: 1, conversation: 1 })
+  assert.deepEqual(loadWorkers(s.area).workers.studio.lanes, ['conversation'])
+  assert.equal(loadWorkers(s.area).coordination, null)
   const long = await s.request('long', 'lanes-req-0001')
   const c1 = await s.request('front', 'lanes-req-0002')
   const c2 = await s.request('front', 'lanes-req-0003')
   const rec = async (ref: typeof long.ref) => (await readRun(await runSpace(s.ws, ref), ref)).record!
   assert.equal((await rec(c1.ref)).executor.lane, 'conversation', 'the lane is frozen into the record')
   assert.equal((await rec(long.ref)).executor.lane, undefined, 'the default lane is not recorded')
+  assert.equal((await rec(long.ref)).executor.placed, 'default', 'where the node came from is recorded (p4)')
 
   // The default claim takes the long run, though the conversation jobs are queued too.
   const a = await s.x.claim('fake / m', OFFER)
@@ -78,7 +84,7 @@ test('lanes: a conversation is claimed while a long attempt holds the default sl
   assert.equal(a.ref.workflow, 'long')
   assert.equal(a.attempt.lane, null)
   assert.equal(a.lane, 'default')
-  // Held: the default lane is idle and never takes a conversation job.
+  // Held: without coordination the default lane keeps one attempt and never takes a conversation job.
   const idle = await s.x.claim('fake / m', OFFER)
   assert.ok('idle' in idle && /the slot is held by attempt/.test(idle.idle), JSON.stringify(idle))
 
@@ -88,7 +94,7 @@ test('lanes: a conversation is claimed while a long attempt holds the default sl
   assert.equal(b.ref.run, c1.ref.run)
   assert.equal(b.attempt.lane, 'conversation')
   assert.equal(b.lane, 'conversation')
-  // Its one slot is held now: the second conversation waits.
+  // Its one attempt is held now: the second conversation waits.
   const held = await s.x.claim('fake / m', OFFER, { lane: 'conversation' })
   assert.ok('idle' in held && /in lane conversation is held by attempt/.test(held.idle), JSON.stringify(held))
   assert.equal((await s.x.runView(s.id, c2.ref)).jobs[0].state, 'queued')
@@ -97,7 +103,7 @@ test('lanes: a conversation is claimed while a long attempt holds the default sl
   const w = s.x.workersState().find(x => x.id === 'studio')!
   assert.equal(w.busy?.attempt, a.attempt.id)
   assert.deepEqual(w.slots.map(x => [x.attempt, x.lane]), [[a.attempt.id, 'default'], [b.attempt.id, 'conversation']])
-  assert.deepEqual(w.lanes, { default: 1, conversation: 1 })
+  assert.deepEqual(w.lanes, ['conversation'])
   assert.match(w.detail, /conversation lane: front\//)
   const q = s.x.queueView()
   assert.equal(q.busy?.id, a.attempt.id)
@@ -138,9 +144,9 @@ test('lanes: a lane the worker does not offer is served by its default lane', as
   await assert.rejects(s.x.claim('fake / m', OFFER, { lane: 'conversation' }), /has no lane "conversation"/)
 })
 
-test('lanes: without lanes a worker keeps exactly one slot', async () => {
+test('lanes: without lanes and without coordination a worker keeps exactly one slot', async () => {
   const s = await setup({ default: 'studio', workers: { studio: { local: true } } })
-  assert.deepEqual(loadWorkers(s.area).workers.studio.lanes, { default: 1 })
+  assert.deepEqual(loadWorkers(s.area).workers.studio.lanes, [])
   await s.request('long', 'lanes-req-0301')
   await s.request('long', 'lanes-req-0302')
   const a = await s.x.claim('fake / m', OFFER)
@@ -148,22 +154,32 @@ test('lanes: without lanes a worker keeps exactly one slot', async () => {
   const b = await s.x.claim('fake / m', OFFER)
   assert.ok('idle' in b && b.idle === `the slot is held by attempt ${a.attempt.id} (${s.id} long/${a.ref.run})`, JSON.stringify(b))
   const w = s.x.workersState()[0]
-  assert.deepEqual(w.lanes, { default: 1 })
+  assert.deepEqual(w.lanes, [])
   assert.equal(w.slots.length, 1)
 })
 
-test('lanes: workers.json is checked', async () => {
-  const bad = async (lanes: unknown, re: RegExp) => {
+test('lanes: workers.json is checked; the legacy object form reads as lane names', async () => {
+  const bad = async (lanes: unknown, re: RegExp, coordination?: unknown) => {
     const area = join(root, `bad-${++n}`)
     await rm(area, { recursive: true, force: true })
     await import('node:fs/promises').then(m => m.mkdir(area, { recursive: true }))
-    await writeFile(join(area, 'workers.json'), JSON.stringify({ workers: { studio: { local: true, lanes } } }))
+    await writeFile(join(area, 'workers.json'), JSON.stringify({ workers: { studio: { local: true, lanes } }, ...(coordination ? { coordination } : {}) }))
     assert.throws(() => loadWorkers(area), re)
   }
-  await bad({ default: 2 }, /the "default" lane always has one slot/)
-  await bad({ Chat: 1 }, /lane "Chat" must match/)
-  await bad({ conversation: 0 }, /needs a capacity of 1 or more/)
-  await bad(['conversation'], /"lanes" must map lane names/)
+  await bad(['default'], /the "default" lane is every worker's/)
+  await bad(['Chat'], /lane "Chat" must match/)
+  await bad('conversation', /"lanes" lists lane names/)
+  await bad(['coordination'], /does not declare the coordination lane "coord"/, { worker: 'studio', lane: 'coord', workspace: 'warden', workflow: 'coordinate' })
+  await bad(['coordination'], /coordination needs "workspace"/, { worker: 'studio', lane: 'coordination' })
+  await bad(['coordination'], /coordination worker "pc" is not listed/, { worker: 'pc', lane: 'coordination', workspace: 'warden', workflow: 'coordinate' })
+  const legacy = join(root, `legacy-${++n}`)
+  await import('node:fs/promises').then(m => m.mkdir(legacy, { recursive: true }))
+  await writeFile(join(legacy, 'workers.json'), JSON.stringify({ workers: { studio: { local: true, lanes: { conversation: 1 } } } }))
+  assert.deepEqual(loadWorkers(legacy).workers.studio.lanes, ['conversation'])
+  const ok = join(root, `ok-${++n}`)
+  await import('node:fs/promises').then(m => m.mkdir(ok, { recursive: true }))
+  await writeFile(join(ok, 'workers.json'), JSON.stringify({ coordination: { worker: 'studio', lane: 'coordination', workspace: 'warden', workflow: 'coordinate' }, workers: { studio: { local: true, lanes: ['conversation', 'coordination'] } } }))
+  assert.deepEqual(loadWorkers(ok).coordination, { worker: 'studio', lane: 'coordination', workspace: 'warden', workflow: 'coordinate' })
 })
 
 test('lanes: execution.lane round-trips, is validated and is part of the definition', async () => {

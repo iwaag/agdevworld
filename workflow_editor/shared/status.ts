@@ -46,7 +46,10 @@ export interface RunStatus {
 // `children`: a delegation's child as read now (keyed by delegation id).
 // `person`: whose answers read as "Your answer". `names`: node labels.
 export interface StatusFacts {
-  job?: { state: 'queued' | 'claimed'; reason?: string } | null
+  // `decision` (improve_wfrun p4): how the queued job is admitted — start
+  // (warden decided), defer (deferred; `deferUntil`), null: awaiting warden's
+  // decision; absent: the host has no coordination (admitted as queued).
+  job?: { state: 'queued' | 'claimed'; reason?: string; decision?: 'start' | 'defer' | null; deferUntil?: string | null; deferReason?: string | null } | null
   children?: Record<string, { situation: string | null; hold?: string | null; execution?: string | null; run?: string | null }>
   person?: string | null
   names?: Record<string, string>
@@ -176,7 +179,15 @@ export function runStatus(s: Pick<RunState, 'nodes' | 'questions' | 'delegations
     return status('done', 'Done', d === 'accepted' ? 'Result accepted' : d === 'rejected' ? 'Result rejected' : 'Every step completed', 'done', [])
   }
   const due = dueReason(s)
-  if (facts.job) return status('queued', facts.job.state === 'claimed' ? 'Starting' : 'Queued', facts.job.state === 'claimed' ? 'An execution slot was taken' : 'Waiting for an execution slot', 'queued', waits, { detail: due ?? facts.job.reason ?? null })
+  if (facts.job) {
+    const j = facts.job
+    if (j.state === 'claimed') return status('queued', 'Starting', 'Its execution node took the job', 'queued', waits, { detail: due ?? j.reason ?? null })
+    // improve_wfrun p4: what the job waits for is warden's decision, not a slot.
+    if (j.decision === 'defer') return status('queued', 'Deferred', `By warden${j.deferUntil ? `, until ${j.deferUntil.replace(/\.\d{3}Z$/, 'Z')}` : ''}${j.deferReason ? `: ${short(j.deferReason, 60)}` : ''}`, 'queued', waits, { detail: j.deferReason ?? due ?? j.reason ?? null })
+    if (j.decision === 'start') return status('queued', 'Queued', 'Starts when its execution node next claims', 'queued', waits, { detail: due ?? j.reason ?? null })
+    if (j.decision === null) return status('queued', 'Queued', 'Awaiting warden\'s decision', 'queued', waits, { detail: due ?? j.reason ?? null })
+    return status('queued', 'Queued', 'Waiting for its execution node', 'queued', waits, { detail: due ?? j.reason ?? null })
+  }
   if (s.execution.state === 'not-started') return facts.job === null ? status('stalled', 'Not started', 'Nothing is queued to start it', 'warn', waits) : status('not-started', 'Not started', 'Waiting to be started', 'muted', waits)
   if (due) return facts.job === null
     ? status('stalled', 'Stalled', `${cap(due)}; nothing queued to continue it`, 'warn', waits, { detail: due })

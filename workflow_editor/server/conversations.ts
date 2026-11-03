@@ -404,7 +404,7 @@ export class ConversationStore {
           if (c) queue.push({ key: `${c.workspace}/${c.workflow}/${c.run}`, relation: `delegated by ${key} (${d.id})`, uid: c.uid })
         }
         const job = this.exec.runRows(workspace, ref).jobs.find(j => j.state === 'queued' || j.state === 'claimed') ?? null
-        const status = runStatus(rec, { names: nodeNames(reading.bundle, rec), job: job && { state: job.state as 'queued' | 'claimed', reason: job.reason }, person })
+        const status = runStatus(rec, { names: nodeNames(reading.bundle, rec), job: job && { state: job.state as 'queued' | 'claimed', reason: job.reason, ...(this.exec.workers().coordination ? { decision: job.decision ?? null, deferUntil: job.defer_until ?? null } : {}) }, person })
         const presenter = rec.presentations ? this.presenter() : null
         const shown = presenter ? (await presenter.view(ws, rec).catch(() => [])).filter(p => p.live && p.url && !p.local).map(p => ({ id: p.id, title: p.title, url: p.url! })) : []
         const reviews = Object.values(rec.reviews ?? {}).map((v): ConversationReview => ({

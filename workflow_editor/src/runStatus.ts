@@ -8,5 +8,5 @@ import type { DelegationsView, RunExecView } from './api.ts'
 export function viewStatus(rec: RunRecord, o: { names?: Record<string, string>; exec?: RunExecView | null; delegations?: DelegationsView | null } = {}): RunStatus {
   const job = o.exec ? o.exec.jobs.find(j => j.state === 'queued' || j.state === 'claimed') ?? null : undefined
   const children = o.delegations ? Object.fromEntries(o.delegations.delegations.filter(d => d.childNow).map(d => [d.id, { situation: d.childNow!.situation, hold: d.childNow!.hold ?? null, execution: d.childNow!.execution, run: d.child?.run ?? null }])) : undefined
-  return runStatus(rec, { names: o.names, ...(job !== undefined ? { job: job && { state: job.state as 'queued' | 'claimed', reason: job.reason } } : {}), ...(children ? { children } : {}) })
+  return runStatus(rec, { names: o.names, ...(job !== undefined ? { job: job && { state: job.state as 'queued' | 'claimed', reason: job.reason, ...(o.exec?.coordinated ? { decision: job.decision ?? null, deferUntil: job.defer_until ?? null } : {}) } } : {}), ...(children ? { children } : {}) })
 }

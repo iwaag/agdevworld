@@ -378,7 +378,7 @@ the run, a child's current situation and node names — never stored.
 | a question to the run's person | `Waiting · Your answer` (to someone else: `Waiting · Answer from <them>`) |
 | a delegation | `Waiting · jevlab study result`; a child known paused or interrupted is said in it (`… (child interrupted)`) |
 | an external wait | `Waiting · <its reason>` (`(overdue)` past its deadline) |
-| the executor's move, a job queued | `Queued · Waiting for an execution slot` (`Starting` once claimed) |
+| the executor's move, a job queued | `Queued · Awaiting warden's decision` / `Deferred · By warden, until …` / `Queued · Starts when its execution node next claims` (improve_wfrun p4; `Queued · Waiting for its execution node` without coordination), `Starting · Its execution node took the job` once claimed |
 | the executor's move, no host facts | `Continuing · Answer to q1 arrived`, `… Result from jevlab study arrived` |
 | the executor's move, nothing queued (host facts) | `Stalled · …; nothing queued to continue it` |
 | a person's stop | `Paused · <their recorded reason>` |
@@ -796,7 +796,7 @@ autolab, `agautolab.wfexec` — is queued. Two kinds of fact are kept apart:
 | Where | What |
 | --- | --- |
 | `run.json` (durable work record) | `control`: the open attempt (id, reason, backend), how the last one ended, a hold, a requested stop; the history of `attempt.begin`, `attempt.end`, `run.stop`, `run.resume` |
-| `<area>/.local/exec/exec.sqlite` (the coordinator) | the queue, one execution slot per worker, each attempt's worker, process id, times and log, publication checkpoints, every worker's heartbeat (`server/exec.ts`, [workers.md](workers.md)) |
+| `<area>/.local/exec/exec.sqlite` (the coordinator) | the queue with each job's admission, each attempt's worker, process id, times and log, publication checkpoints, every worker's heartbeat and load, warden's coordination decisions, events and turns (`server/exec.ts`, [workers.md](workers.md), [coordination.md](coordination.md)) |
 
 **Activity (p8/ex2).** `GET runs/<wf>/<run>/exec` (and `wfe exec status
 <run>`) gives each attempt an `activity` summary read from its own log on
@@ -914,12 +914,14 @@ queued (once per answer, by receipt). A stopped run is not resumed by an
 answer. Recording an answer, taking it up, completing the node and accepting
 the result remain separate records.
 
-**One slot (p9).** One attempt executes at a time on this host; other jobs
-wait in the queue. Since p7 that is one slot per worker, and since
-project_migration p8 a worker may declare extra **lanes** — slots of their
-own for runs whose workflow names that lane, e.g. a conversation answered
-while a long attempt holds the default slot ([workers.md](workers.md),
-"Lanes"). Nothing else is shared:
+**Admission (p9, improve_wfrun p4).** Until p4 one attempt executed at a
+time per worker lane. Since p4 a queued job starts when warden decided it
+does ([coordination.md](coordination.md)): a worker holds as many attempts
+at once as were admitted, a job awaiting a decision or deferred waits with
+that said, and the status reads `Queued · Awaiting warden's decision`,
+`Deferred · By warden …` or `Queued · Starts when its execution node next
+claims`. An area without coordination keeps one attempt per lane
+([workers.md](workers.md), "Lanes"). Nothing else is shared:
 
 - Every run works in its own copy, so no run reserves its project. A held, a
   waiting or a working run never refuses another request (until p9, a begun
@@ -931,7 +933,7 @@ while a long attempt holds the default slot ([workers.md](workers.md),
   is migrated first (`wfe runs migrate`).
 
 **Recovery.** After a restart, an attempt whose process is gone is ended as
-`unknown`; one whose process lives keeps the slot. Requests and answers whose
+`unknown`; one whose process lives is adopted. Requests and answers whose
 queue entry was lost are queued again under their receipts. Nothing is
 completed, failed or rerun by itself.
 

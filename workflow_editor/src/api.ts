@@ -21,7 +21,11 @@ export interface RunStorageView {
 export interface RunExecView {
   attempts: { id: string; state: string; began: string; ended: string | null; exit_code: number | null; signal: string | null; outcome: string | null; backend: string | null; pid: number | null; alive: boolean | null; stop_requested: string | null; log: string | null; worker?: string | null; host?: string
     activity?: { unit: 'turn' | null; count: number | null; last: string | null; bytes: number; problem?: string } | null }[] // p8/ex2: observed on the host that has the log
-  jobs: { id: number; kind: string; state: string; reason: string; created: string; note: string | null; worker?: string | null }[]
+  jobs: { id: number; kind: string; state: string; reason: string; created: string; note: string | null; worker?: string | null; decision?: 'start' | 'defer' | null; decision_id?: number | null; defer_until?: string | null }[]
+  // improve_wfrun p4: whether this host admits ordinary work by warden's decisions.
+  coordinated?: boolean
+  // improve_wfrun p4: warden's decisions about this run, latest last.
+  decisions?: { id: number; at: string; by: string; action: string; worker: string | null; scope: string; reason: string; state: string; detail: string | null; attempt: string | null; reconsider: string | null }[]
   checkpoints: { id: number; kind: string; state: string; created: string; updated: string; error: string | null; steps: { repo: string; include: string[]; excluded: string[]; conflicts: string[]; commit?: string; pushed?: boolean; branch?: string; error?: string }[] }[]
   // p9: the integration journal of the run's accepted results (server/integrate.ts)
   integrations?: IntegrationView[]
@@ -30,8 +34,10 @@ export interface RunExecView {
   workers?: WorkerView[]
 }
 export interface WorkerView { id: string; label: string; local: boolean; default: boolean; state: 'available' | 'unavailable' | 'unknown'; at: string | null; ageSeconds: number | null; detail: string
+  slots?: { attempt: string; workspace: string; workflow: string; run: string; state: string; lane: string; decision?: number | null }[]
   busy: { attempt: string; workspace: string; workflow: string; run: string; state: string; stopRequested: string | null } | null
-  queued: { id: number; workspace: string; workflow: string; run: string; kind: string; note: string | null }[]; profiles: string[] | null; facts: { label?: string; host?: Record<string, string> } | null }
+  queued: { id: number; workspace: string; workflow: string; run: string; kind: string; note: string | null; decision?: string | null; deferUntil?: string | null }[]; profiles: string[] | null; facts: { label?: string; host?: Record<string, string> } | null
+  coordination?: boolean; load?: { at: string; cpus?: number; load1?: number; load5?: number; memTotalMB?: number; memFreeMB?: number } | null }
 export interface IntegrationStepView { repo: string; target: string; branch: string; state: string; method?: string; observed?: string; candidate?: string; result?: string; pushed?: boolean; files?: string[]; error?: string }
 export interface IntegrationView { id: number; decision: number; state: string; created: string; updated: string; error: string | null; requested_by: string; steps: IntegrationStepView[] }
 

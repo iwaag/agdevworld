@@ -31,7 +31,7 @@ test('a person\'s answer pending reads "Waiting · Your answer"; an answer recor
   r = operate(r, { op: 'question.answer', question: 'q1', text: 'The first.', from: 'iwaag' }, { at: new Date(t += 1000).toISOString(), by: 'iwaag', via: 'browser', graph: GRAPH })
   assert.equal(situation(r), 'due')
   assert.equal(runStatus(r).text, 'Continuing · Answer to q1 arrived')
-  assert.equal(runStatus(r, { job: { state: 'queued' } }).text, 'Queued · Waiting for an execution slot')
+  assert.equal(runStatus(r, { job: { state: 'queued' } }).text, 'Queued · Waiting for its execution node')
   assert.equal(runStatus(r, { job: null }).state, 'stalled', 'host facts say nothing is queued: a missing continuation')
 })
 

@@ -18,7 +18,7 @@
 // run until a person resumes it. A request or answer sent twice (same
 // receipt) is queued once.
 import { spawn } from 'node:child_process'
-import { randomBytes, randomUUID } from 'node:crypto'
+import { createHash, randomBytes, randomUUID } from 'node:crypto'
 import { existsSync, mkdirSync, readFileSync } from 'node:fs'
 import { mkdir, readdir, readFile, rm } from 'node:fs/promises'
 import { hostname } from 'node:os'
@@ -54,7 +54,7 @@ import { delegationState, isOpenDelegation, pendingEvents } from '../shared/dele
 import { named, openStore, transaction } from './sqlite.ts'
 import { briefedSteps, changeLines, newStepLines, pendingAnswerLines, stateLines } from './continuation.ts'
 import { RequestError, Workspace } from './workspace.ts'
-import { alignRecordCopy, isLocalNode, laneOn, loadWorkers, nodeOfRecord, workerTree, type WorkersConfig } from './workers.ts'
+import { alignRecordCopy, isCoordinationLane, isCoordinationRun, isLocalNode, laneOn, loadWorkers, nodeOfRecord, workerTree, type WorkersConfig } from './workers.ts'
 
 export const EXECUTOR = 'autolab'
 
@@ -69,19 +69,24 @@ export const EXECUTOR = 'autolab'
 // here keeps no conversation the host can resume: the `run` policy is
 // refused for it, and `fresh` attempts carry no session id.
 // What the views say about one worker (p7).
-// `busy` is the default lane's slot (what it was before p8); `slots` every
-// open attempt of the worker with its lane, `lanes` the capacity per lane.
+// `busy` is the first open attempt of the default lane (what "the slot" was
+// before improve_wfrun p4); `slots` every open attempt of the worker with its
+// lane, `lanes` the extra lane names it serves, `load` what its executor last
+// measured of its host (p4: evidence for warden's judgment, never a gate).
 export interface WorkerState { id: string; label: string; local: boolean; default: boolean; state: 'available' | 'unavailable' | 'unknown'; at: string | null; ageSeconds: number | null; pid: number | null; reported: string | null; detail: string
   busy: { attempt: string; workspace: string; workflow: string; run: string; state: string; stopRequested: string | null } | null
-  slots: { attempt: string; workspace: string; workflow: string; run: string; state: string; stopRequested: string | null; lane: string }[]
-  lanes: Record<string, number>
-  queued: { id: number; workspace: string; workflow: string; run: string; kind: string; note: string | null }[]
-  profiles: string[] | null; facts: WorkerFacts | null }
+  slots: { attempt: string; workspace: string; workflow: string; run: string; state: string; stopRequested: string | null; lane: string; decision: number | null }[]
+  lanes: string[]
+  coordination: boolean
+  queued: { id: number; workspace: string; workflow: string; run: string; kind: string; note: string | null; decision: string | null; deferUntil: string | null }[]
+  profiles: string[] | null; facts: WorkerFacts | null; load: WorkerLoad | null }
 export interface HostOffer { profiles?: Record<string, string>; contract?: { name: string; sha256: string }; sessions?: Record<string, 'explicit'> }
 // What a worker says about itself (p7) beside its offer: a label, where its
 // run copies are, the facts of its host an agent works under (OS, tools,
 // display) and the software it runs. Shown in briefs and views; not a gate.
-export interface WorkerFacts { label?: string; root?: string; host?: Record<string, string>; software?: Record<string, string> }
+// `load` (improve_wfrun p4): what the executor measured when it reported.
+export interface WorkerFacts { label?: string; root?: string; host?: Record<string, string>; software?: Record<string, string>; load?: WorkerLoad }
+export interface WorkerLoad { at: string; cpus?: number; load1?: number; load5?: number; memTotalMB?: number; memFreeMB?: number; gpu?: { name?: string; memUsedMB?: number; memTotalMB?: number; utilPercent?: number }[]; processes?: number; detail?: string }
 // How a remote worker sees one run (p7): its own copy, never the
 // coordinator's paths.
 export interface WorkerView { worker: string; root: string; facts: WorkerFacts }
@@ -356,8 +361,46 @@ const alive = (pid: number | null) => { if (!pid) return false; try { process.ki
 
 export interface ExecContext { registryFile: string; area: string; gitea?: Gitea; executor?: string }
 
-export interface JobRow { id: number; receipt: string; kind: 'start' | 'resume'; workspace: string; workflow: string; run: string; reason: string; state: 'queued' | 'claimed' | 'done' | 'dropped'; created: string; claimed: string | null; attempt: string | null; note: string | null; worker: string | null }
-export interface AttemptRow { id: string; job: number; workspace: string; workflow: string; run: string; host: string; pid: number | null; state: 'launching' | 'running' | 'ended'; began: string; ended: string | null; exit_code: number | null; signal: string | null; outcome: string | null; log: string | null; stop_requested: string | null; backend: string | null; baseline: string | null; worker: string | null; claim: string | null; response: string | null; lane: string | null }
+// `decision` (improve_wfrun p4, docs/coordination.md): how the job is
+// admitted — `start` (warden's decision, or a standing one of its run),
+// `defer` (warden deferred it; `defer_until` when it is looked at again by
+// time), NULL: awaiting warden's decision. `decision_id` names the row.
+export interface JobRow { id: number; receipt: string; kind: 'start' | 'resume'; workspace: string; workflow: string; run: string; reason: string; state: 'queued' | 'claimed' | 'done' | 'dropped'; created: string; claimed: string | null; attempt: string | null; note: string | null; worker: string | null; decision: 'start' | 'defer' | null; decision_id: number | null; defer_until: string | null }
+export interface AttemptRow { id: string; job: number; workspace: string; workflow: string; run: string; host: string; pid: number | null; state: 'launching' | 'running' | 'ended'; began: string; ended: string | null; exit_code: number | null; signal: string | null; outcome: string | null; log: string | null; stop_requested: string | null; backend: string | null; baseline: string | null; worker: string | null; claim: string | null; response: string | null; lane: string | null; decision: number | null }
+// One coordination decision (improve_wfrun p4): what warden decided about a
+// run's queued work, why, on what it looked at, and what came of it.
+// `scope` run: a `start` stands for the run's later jobs on that worker and a
+// `defer` for them too, until a later decision; job: this job only.
+// `state`: applied, stale (the basis it was made on had changed; nothing
+// applied), refused (a constraint or the record refused it), superseded.
+export interface DecisionRow { id: number; at: string; by: string; action: 'start' | 'defer' | 'assign' | 'note'; workspace: string; workflow: string; run: string; job: number | null; worker: string | null; scope: 'run' | 'job'; reason: string; observations: string | null; assumptions: string | null; reconsider: string | null; basis: string | null; state: 'applied' | 'stale' | 'refused' | 'superseded'; detail: string | null; agent: string | null; attempt: string | null; woken: string | null; batch: number | null }
+export interface Reconsider { until?: string; on?: string[] }
+// What prompts warden to look (p4): a job queued, an attempt ended, a
+// worker's contact gained or lost, an explicit request to reconsider, a
+// deferral's wake time. `taken_by` is the coordination attempt that had it.
+export type CoordinationEventKind = 'queued' | 'attempt-ended' | 'worker-available' | 'worker-unavailable' | 'reconsider' | 'wake'
+export interface CoordinationEventRow { id: number; at: string; kind: CoordinationEventKind; workspace: string | null; workflow: string | null; run: string | null; job: number | null; attempt: string | null; worker: string | null; detail: string | null; taken_by: string | null; taken_at: string | null }
+// One coordination run's turn (p4): created when something awaits a
+// decision, one at a time; ended with how many decisions it applied.
+export interface CoordinationBatchRow { id: number; created: string; state: 'creating' | 'open' | 'ended' | 'failed' | 'lost'; workspace: string | null; workflow: string | null; run: string | null; job: number | null; attempt: string | null; ended: string | null; outcome: string | null; decisions: number; error: string | null }
+// Why a queued job is not claimable yet, or is (p4).
+export type Admission = { ok: true; decision: number | null; how: 'decision' | 'standing' | 'coordination' } | { ok: false; why: string; awaiting: boolean; decision: number | null }
+export interface CoordinationRunFacts { readable: boolean; project: string | null; request: string | null; active: string[]; ready: string[]; progress: { op: string; at: string; node: string | null; text: string | null } | null; situation: string | null; hold: string | null; placed: string | null; constraint: string | null; requester: string | null; created: string | null; seq: number | null }
+// What warden reads before deciding (p4): every worker with its contact,
+// load and open attempts; every queued ordinary job with its admission;
+// recent decisions, pending events, the coordination path's own state.
+export interface CoordinationView {
+  schema: 'ag.wfe-coordination.v1'; observedAt: string; configured: boolean; coordination: import('./workers.ts').CoordinationSetting | null
+  turn: { id: number; state: string; run: string | null; attempt: string | null; since: string } | null
+  stalled: { since: string; failures: number; until: string; last: string } | null
+  recentTurns: { id: number; state: string; run: string | null; created: string; ended: string | null; outcome: string | null; decisions: number; error: string | null }[]
+  workers: { id: string; label: string; local: boolean; default: boolean; coordination: boolean; state: string; heartbeatAt: string | null; ageSeconds: number | null; load: WorkerLoad | null; profiles: string[] | null; host: Record<string, string> | null
+    attempts: { attempt: string; workspace: string; workflow: string; run: string; project: string | null; lane: string; coordination: boolean; state: string; began: string; stopRequested: string | null; decision: number | null; request: string | null; active: string[]; progress: CoordinationRunFacts['progress']; logLast: string | null; pid: number | null }[] }[]
+  queued: { job: number; workspace: string; workflow: string; run: string; project: string | null; kind: string; reason: string; created: string; worker: string; lane: string; admission: 'awaiting' | 'deferred' | 'admitted'; decision: { id: number; by: string; at: string; action: string; scope: string; reason: string; reconsider: Reconsider | null } | null; note: string | null; servable: boolean; request: string | null; requester: string | null; created_run: string | null; ready: string[]; situation: string | null; placed: string | null; constraint: string | null; basis: string | null }[]
+  decisions: (Omit<DecisionRow, 'observations' | 'assumptions' | 'reconsider' | 'agent'> & { observations: string[] | null; assumptions: string[] | null; reconsider: Reconsider | null; agent: RecoveryAgent | null })[]
+  events: CoordinationEventRow[]
+  needs: { yes: boolean; why: string[] }
+}
 // One integration of an accepted result (p9, server/integrate.ts): queued
 // when the acceptance exists, carried out once the run is completed and
 // saved, its steps the per-repository journal.
@@ -427,6 +470,25 @@ export class ExecStore {
       // in; NULL is the default lane, which every attempt so far held.
       version: 4,
       up: db => db.exec('ALTER TABLE attempts ADD COLUMN lane TEXT'),
+    }, {
+      // improve_wfrun p4: agent-directed execution coordination. Jobs carry
+      // warden's decision; decisions, the events that prompt them and the
+      // coordination runs' turns are journaled here. Jobs queued before this
+      // release await a decision like any other.
+      version: 5,
+      up: db => db.exec(`
+        ALTER TABLE jobs ADD COLUMN decision TEXT;
+        ALTER TABLE jobs ADD COLUMN decision_id INTEGER;
+        ALTER TABLE jobs ADD COLUMN defer_until TEXT;
+        ALTER TABLE attempts ADD COLUMN decision INTEGER;
+        ALTER TABLE heartbeat ADD COLUMN seen_state TEXT;
+        CREATE TABLE decisions (id INTEGER PRIMARY KEY, at TEXT NOT NULL, by TEXT NOT NULL, action TEXT NOT NULL, workspace TEXT NOT NULL, workflow TEXT NOT NULL, run TEXT NOT NULL,
+          job INTEGER, worker TEXT, scope TEXT NOT NULL, reason TEXT NOT NULL, observations TEXT, assumptions TEXT, reconsider TEXT, basis TEXT, state TEXT NOT NULL, detail TEXT,
+          agent TEXT, attempt TEXT, woken TEXT, batch INTEGER);
+        CREATE INDEX decisions_run ON decisions (workspace, workflow, run, id);
+        CREATE TABLE coordination_events (id INTEGER PRIMARY KEY, at TEXT NOT NULL, kind TEXT NOT NULL, workspace TEXT, workflow TEXT, run TEXT, job INTEGER, attempt TEXT, worker TEXT, detail TEXT, taken_by TEXT, taken_at TEXT);
+        CREATE TABLE coordination_batches (id INTEGER PRIMARY KEY, created TEXT NOT NULL, state TEXT NOT NULL, workspace TEXT, workflow TEXT, run TEXT, job INTEGER, attempt TEXT, ended TEXT, outcome TEXT, decisions INTEGER NOT NULL DEFAULT 0, error TEXT);
+      `),
     }])
   }
   // The workers of this area (p7), read from <area>/workers.json when it changes.
@@ -501,6 +563,9 @@ export class ExecStore {
   // claimed job of the same run, is returned instead.
   // `worker`: the node the run is assigned to, when the caller knows it (a
   // view fact; the claim reads the record again).
+  // improve_wfrun p4: an ordinary job is admitted by warden's decision. A
+  // standing decision of its run (on this worker) admits or defers it at
+  // once; otherwise it awaits one, and the queued event prompts warden.
   enqueue(workspace: string, ref: RunRef, kind: 'start' | 'resume', receipt: string, reason: string, worker: string | null = null): JobRow {
     return this.tx(() => {
       const same = this.one<JobRow>('SELECT * FROM jobs WHERE receipt = ?', receipt)
@@ -508,6 +573,12 @@ export class ExecStore {
       const open = this.one<JobRow>('SELECT * FROM jobs WHERE workspace = ? AND workflow = ? AND run = ? AND state IN (\'queued\', \'claimed\')', workspace, ref.workflow, ref.run)
       if (open) return open
       const id = Number(this.run('INSERT INTO jobs (receipt, kind, workspace, workflow, run, reason, state, created, worker) VALUES (?, ?, ?, ?, ?, ?, \'queued\', ?, ?)', receipt, kind, workspace, ref.workflow, ref.run, reason, now(), worker).lastInsertRowid)
+      const cfg = this.workers()
+      if (cfg.coordination && !isCoordinationRun(cfg, workspace, ref.workflow)) {
+        const job = this.one<JobRow>('SELECT * FROM jobs WHERE id = ?', id)!
+        const a = this.standingAdmission(job, worker ?? cfg.default)
+        this.event('queued', { workspace, workflow: ref.workflow, run: ref.run, job: id, worker, detail: `${kind}: ${reason}${a ? `; ${a.ok ? 'admitted' : 'deferred'} by standing decision ${a.decision}` : ''}` })
+      }
       return this.one<JobRow>('SELECT * FROM jobs WHERE id = ?', id)!
     })
   }
@@ -658,18 +729,27 @@ export class ExecStore {
     if (!cfg.workers[worker]) throw new RequestError(404, `worker "${worker}" is not a worker of this area (${Object.keys(cfg.workers).sort().join(', ')})`, { code: 'worker-unknown' })
     const remote = this.isRemote(worker)
     const lane = o.lane ?? DEFAULT_LANE
-    const capacity = cfg.workers[worker].lanes[lane]
-    if (!capacity) throw new RequestError(400, `worker "${worker}" has no lane "${lane}" (${Object.keys(cfg.workers[worker].lanes).sort().join(', ')}); declare it in workers.json`, { code: 'lane-unknown' })
-    const laneHeld = () => this.all<AttemptRow>('SELECT * FROM attempts WHERE state != \'ended\' AND worker = ? AND coalesce(lane, ?) = ? ORDER BY began', worker, DEFAULT_LANE, lane)
+    if (lane !== DEFAULT_LANE && !cfg.workers[worker].lanes.includes(lane)) throw new RequestError(400, `worker "${worker}" has no lane "${lane}" (${[DEFAULT_LANE, ...cfg.workers[worker].lanes].join(', ')}); declare it in workers.json`, { code: 'lane-unknown' })
+    // improve_wfrun p4: the coordination lane serves coordination runs, one
+    // at a time, admitted by nothing but their queue; every other lane of the
+    // worker serves ordinary work, each job once warden decided it starts.
+    const coordination = isCoordinationLane(cfg, worker, lane)
     const where = lane === DEFAULT_LANE ? '' : ` in lane ${lane}`
     if (o.receipt) {
       const again = this.one<AttemptRow>('SELECT * FROM attempts WHERE worker = ? AND claim = ?', worker, o.receipt)
       if (again?.response && again.state === 'launching') return JSON.parse(again.response)
       if (again) return { idle: `claim ${o.receipt} was answered with attempt ${again.id}, which is ${again.state}` }
     }
-    const held = laneHeld()
-    if (held.length >= capacity) return { idle: `the slot${capacity > 1 ? 's' : ''}${remote ? ` of ${worker}` : ''}${where} ${capacity > 1 ? 'are' : 'is'} held by ${held.map(b => `attempt ${b.id} (${b.workspace} ${b.workflow}/${b.run})`).join(', ')}` }
+    // An area without coordination (no `coordination` in workers.json: a
+    // fixture, an isolated area) keeps one attempt per lane, as before p4.
+    const legacy = !cfg.coordination
+    const laneHeld = () => this.all<AttemptRow>('SELECT * FROM attempts WHERE state != \'ended\' AND worker = ? AND coalesce(lane, ?) = ? ORDER BY began', worker, DEFAULT_LANE, lane)
+    if (coordination || legacy) {
+      const held = laneHeld()
+      if (held.length) return { idle: `the ${coordination ? 'coordination lane' : 'slot'}${remote ? ` of ${worker}` : ''}${coordination ? '' : where} is held by ${held.map(b => `attempt ${b.id} (${b.workspace} ${b.workflow}/${b.run})`).join(', ')}` }
+    }
     const waiting: string[] = []
+    let awaiting = 0
     for (const job of this.all<JobRow>('SELECT * FROM jobs WHERE state = \'queued\' ORDER BY id')) {
       const ref = { workflow: job.workflow, run: job.run }
       const mine = (job.worker ?? cfg.default) === worker
@@ -681,10 +761,12 @@ export class ExecStore {
       const rec = reading.record
       if (!rec) { if (mine) drop('the run cannot be read'); continue }
       const node = this.nodeOf(rec)
-      if (job.worker !== node) this.run('UPDATE jobs SET worker = ? WHERE id = ?', node, job.id)
+      if (job.worker !== node) { this.run('UPDATE jobs SET worker = ? WHERE id = ?', node, job.id); job.worker = node }
       if (node !== worker) continue
-      // Another lane's job is left to that lane's claims, untouched (p8).
-      if (laneOn(cfg.workers[worker], rec.executor.lane) !== lane) continue
+      // The coordination lane's jobs are its own; every other job is ordinary
+      // work (p4). Without coordination each lane takes its own jobs (p8).
+      const jobLane = laneOn(cfg.workers[worker], rec.executor.lane)
+      if (legacy ? jobLane !== lane : isCoordinationLane(cfg, worker, jobLane) !== coordination) continue
       // One execution mode (p9): a run works in its own copy. A run recorded
       // in the project workspace before p9 is migrated first.
       if (!space.copyOf) { drop(`the run has no working copy of its own (recorded before p9); migrate it first (wfe runs migrate --workspace ${job.workspace})`); continue }
@@ -702,6 +784,12 @@ export class ExecStore {
       }
       // p18: a standing conductor at rest (or finalized with its room closed) has nothing to do; the conversation wakes it.
       if (rec.standing && (rec.execution.state === 'idle' || rec.execution.state === 'completed')) { drop(`the run rests (${rec.execution.state}): nothing is ready; the conversation's next event wakes it`); continue }
+      // improve_wfrun p4: ordinary work starts when warden decided it does.
+      let admission: Admission = { ok: true, decision: null, how: 'coordination' }
+      if (!coordination && cfg.coordination) {
+        admission = this.admission(job, worker)
+        if (!admission.ok) { wait(admission.why); if (admission.awaiting) awaiting++; continue }
+      }
       const execution = await this.execution(space, rec, activeWorkflow(rec, reading.bundle), backend, offer)
       if ('refused' in execution) { if (execution.wait) wait(`waiting for worker ${worker}: ${execution.refused}`); else drop(execution.refused); continue }
       const session = this.sessionFor(rec, execution, sessionPolicyOf(reading.bundle.entries[rec.definition.root]?.workflow?.execution), offer)
@@ -722,10 +810,12 @@ export class ExecStore {
       const id = `a${Date.now().toString(36)}-${randomBytes(3).toString('hex')}`
       const label = remote ? (o.facts?.label || cfg.workers[worker].label) : hostname()
       const claimed = this.tx(() => {
-        if (laneHeld().length >= capacity) return false
+        if ((coordination || legacy) && laneHeld().length) return false
         const r = this.run('UPDATE jobs SET state = \'claimed\', claimed = ?, attempt = ? WHERE id = ? AND state = \'queued\'', now(), id, job.id)
         if (Number(r.changes) !== 1) return false
-        this.run('INSERT INTO attempts (id, job, workspace, workflow, run, host, state, began, backend, worker, claim, lane) VALUES (?, ?, ?, ?, ?, ?, \'launching\', ?, ?, ?, ?, ?)', id, job.id, job.workspace, job.workflow, job.run, label, now(), execution.backend, worker, o.receipt ?? null, lane === DEFAULT_LANE ? null : lane)
+        this.run('INSERT INTO attempts (id, job, workspace, workflow, run, host, state, began, backend, worker, claim, lane, decision) VALUES (?, ?, ?, ?, ?, ?, \'launching\', ?, ?, ?, ?, ?, ?)', id, job.id, job.workspace, job.workflow, job.run, label, now(), execution.backend, worker, o.receipt ?? null, jobLane === DEFAULT_LANE ? null : jobLane, admission.ok ? admission.decision : null)
+        if (admission.ok && admission.decision) this.run('UPDATE decisions SET attempt = coalesce(attempt, ?) WHERE id = ?', id, admission.decision)
+        if (coordination) this.run('UPDATE coordination_batches SET attempt = ?, state = \'open\' WHERE job = ? AND state IN (\'creating\', \'open\')', id, job.id)
         return true
       })
       if (!claimed) return { idle: 'another executor claimed it first' }
@@ -750,6 +840,9 @@ export class ExecStore {
       if (remote) this.run('UPDATE attempts SET response = ? WHERE id = ?', JSON.stringify({ ...answer, attempt: { ...answer.attempt, response: null } }), id)
       return answer
     }
+    // Something awaits a decision: the coordination path is woken (once; a
+    // batch already open or being created is left to itself).
+    if (awaiting && !coordination) await this.ensureCoordination().catch(() => null)
     return { idle: waiting.length ? `nothing ${worker}${where} can take now: ${waiting.join('; ')}` : `no queued job${where}` }
   }
 
@@ -960,6 +1053,7 @@ export class ExecStore {
     lines.push(...workflowTalkBrief(r))
     lines.push(...pendingAnswerLines(r))
     lines.push(...instructionBrief(r))
+    lines.push(...this.coordinationBrief(ws.reg.id, ref, job))
     lines.push(...presentationBrief(r))
     lines.push(...await shareBrief(ws, ref, r, job.kind === 'start' ? null : { by: this.executor }, view))
     lines.push(...delegationBrief(r, await this.assessedLines(r)))
@@ -998,7 +1092,7 @@ export class ExecStore {
     lines.push('', delta.count ? `Recorded since your previous attempt began (after seq ${since}), not by it (${delta.count}):` : `Nothing was recorded since your previous attempt began (seq ${since}) except by it.`, ...delta.lines)
     lines.push('', ...stateLines(r))
     lines.push(...workflowTalkBrief(r))
-    lines.push(...pendingAnswerLines(r), ...instructionBrief(r), ...delegationBrief(r, await this.assessedLines(r)))
+    lines.push(...pendingAnswerLines(r), ...instructionBrief(r), ...this.coordinationBrief(ws.reg.id, ref, job), ...delegationBrief(r, await this.assessedLines(r)))
     lines.push(...await shareBrief(ws, ref, r, { by: this.executor }, view))
     lines.push(...newStepLines(r, briefedSteps(r, sinceBootstrap(r, attempts.slice(0, -1)))))
     lines.push('', `Unchanged and not repeated: the contract, the context (the same bundle, fingerprint ${currentSession(r)?.config.context?.fingerprint.slice(7, 19) ?? 'not recorded'}), the node catalog (wfe run nodes ${runKey(ref)}) and the documentation policy you were given. This is the record at seq ${r.seq}; wfe run state ${runKey(ref)} --since ${r.seq} shows what is recorded after it, wfe run show ${runKey(ref)} the full record.`)
@@ -1080,6 +1174,13 @@ export class ExecStore {
       if (!rec) throw e
     }
     const kind = situation(rec)
+    // improve_wfrun p4: the end is an event for warden; a coordination
+    // attempt's end closes its turn, and what it left is looked at again.
+    const cfg = this.workers()
+    if (cfg.coordination) {
+      if (isCoordinationRun(cfg, a.workspace, a.workflow)) this.closeBatch(a, outcome, kind)
+      else this.event('attempt-ended', { workspace: a.workspace, workflow: a.workflow, run: a.run, attempt, worker: a.worker, detail: `${outcome}: ${kind}${detail ? ` — ${detail}` : ''}` })
+    }
     const checkpoint = await this.checkpoint(ws, ref, `after attempt ${attempt}: ${kind}`, attempt, a.baseline)
     // A completed run is integrated (p9). So is an acceptance the attempt
     // recorded from a confirmation, as a person's decision through the
@@ -1103,6 +1204,7 @@ export class ExecStore {
     // p18: the conversation's words that arrived while the attempt ran wake
     // a standing conductor that has nothing else to do now.
     if (rec.standing) resumeJob = resumeJob ?? await this.afterStanding(ws, ref)
+    if (cfg.coordination) await this.ensureCoordination().catch(() => null)
     return { outcome: rec.control.last?.outcome ?? outcome, checkpoint, resumeJob }
   }
 
@@ -1638,16 +1740,380 @@ export class ExecStore {
     // Delegations: indexed from their records, then relayed (p10).
     try { notes.push(...await this.delegate.rebuild(), ...await this.delegate.relay()) } catch (e) { notes.push(`delegation relay: ${(e as Error).message}`) }
     notes.push(...await this.integrateDue())
+    // Coordination (improve_wfrun p4): deferrals whose time came, workers
+    // fallen silent, a coordination turn whose run is gone, and anything
+    // awaiting a decision with no turn open.
+    notes.push(...await this.reconcileCoordination().catch(e => [`coordination: ${(e as Error).message}`]))
     return notes
+  }
+
+
+  // ---- coordination (improve_wfrun p4, docs/coordination.md) ------------------------------
+
+  // The latest standing decision about a run (a `start` or `defer` of scope
+  // `run`, applied, on this worker), or null.
+  private standing(workspace: string, ref: RunRef, worker: string): DecisionRow | null {
+    const d = this.one<DecisionRow>('SELECT * FROM decisions WHERE workspace = ? AND workflow = ? AND run = ? AND action IN (\'start\', \'defer\') AND state = \'applied\' ORDER BY id DESC LIMIT 1', workspace, ref.workflow, ref.run)
+    if (!d || d.scope !== 'run') return null
+    return d.worker === null || d.worker === worker ? d : null
+  }
+  // Applies a run's standing decision to a job that has none yet; returns
+  // what it did, or null when the job keeps awaiting a decision.
+  private standingAdmission(job: JobRow, worker: string): { ok: boolean; decision: number } | null {
+    if (job.decision) return null
+    const d = this.standing(job.workspace, { workflow: job.workflow, run: job.run }, worker)
+    if (!d) return null
+    const rc = d.reconsider ? JSON.parse(d.reconsider) as Reconsider : {}
+    this.run('UPDATE jobs SET decision = ?, decision_id = ?, defer_until = ? WHERE id = ? AND state = \'queued\' AND decision IS NULL', d.action, d.id, d.action === 'defer' ? rc.until ?? null : null, job.id)
+    job.decision = d.action as 'start' | 'defer'; job.decision_id = d.id
+    return { ok: d.action === 'start', decision: d.id }
+  }
+  // Whether a queued ordinary job may be claimed by this worker now (p4).
+  admission(job: JobRow, worker: string): Admission {
+    if (!job.decision) this.standingAdmission(job, worker)
+    const d = job.decision_id ? this.one<DecisionRow>('SELECT * FROM decisions WHERE id = ?', job.decision_id) ?? null : null
+    if (job.decision === 'start') {
+      if (d && d.worker && d.worker !== worker) return { ok: false, why: `decided to start on ${d.worker} (decision ${d.id}), but the run is assigned to ${worker}; awaiting warden's decision`, awaiting: true, decision: d.id }
+      return { ok: true, decision: job.decision_id, how: d?.scope === 'run' && d.job !== job.id ? 'standing' : 'decision' }
+    }
+    if (job.decision === 'defer') {
+      const rc = d?.reconsider ? JSON.parse(d.reconsider) as Reconsider : {}
+      const when = [rc.until ? `at ${rc.until}` : '', rc.on?.length ? `on ${rc.on.join(', ')}` : ''].filter(Boolean).join(' or ')
+      return { ok: false, why: `deferred by ${d?.by ?? 'warden'} (decision ${d?.id ?? job.decision_id}): ${d?.reason ?? ''}${when ? `; reconsidered ${when}` : '; reconsidered at warden\'s next look'}`, awaiting: false, decision: d?.id ?? null }
+    }
+    return { ok: false, why: 'awaiting warden\'s coordination decision', awaiting: true, decision: null }
+  }
+
+  // Appends one event for warden (p4). Nothing is woken here: the claim,
+  // the end of an attempt and the reconcile call ensureCoordination.
+  event(kind: CoordinationEventKind, e: { workspace?: string | null; workflow?: string | null; run?: string | null; job?: number | null; attempt?: string | null; worker?: string | null; detail?: string | null }): number {
+    return Number(this.run('INSERT INTO coordination_events (at, kind, workspace, workflow, run, job, attempt, worker, detail) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)', now(), kind, e.workspace ?? null, e.workflow ?? null, e.run ?? null, e.job ?? null, e.attempt ?? null, e.worker ?? null, e.detail ?? null).lastInsertRowid)
+  }
+  // Events not yet taken by a coordination attempt, oldest first.
+  pendingEvents(): CoordinationEventRow[] { return this.all<CoordinationEventRow>('SELECT * FROM coordination_events WHERE taken_by IS NULL ORDER BY id') }
+  recentEvents(n = 30): CoordinationEventRow[] { return this.all<CoordinationEventRow>('SELECT * FROM coordination_events ORDER BY id DESC LIMIT ?', n).reverse() }
+  // A coordination attempt takes the pending events: they are its to consider.
+  takeEvents(attempt: string, worker?: string): CoordinationEventRow[] {
+    const a = this.fence(attempt, worker)
+    if (a.state === 'ended') throw new RequestError(409, `attempt ${attempt} has ended`, { code: 'attempt-stale' })
+    return this.tx(() => {
+      const events = this.pendingEvents()
+      if (events.length) this.run('UPDATE coordination_events SET taken_by = ?, taken_at = ? WHERE taken_by IS NULL AND id <= ?', attempt, now(), events.at(-1)!.id)
+      return events
+    })
+  }
+
+  // Whether something waits for warden's look (p4): a job with no decision,
+  // a deferral whose time came or whose named event happened, or an explicit
+  // request to reconsider. Informational events alone wake nothing.
+  needsCoordination(): { yes: boolean; why: string[] } {
+    const cfg = this.workers()
+    if (!cfg.coordination) return { yes: false, why: [] }
+    const why: string[] = []
+    const queued = this.all<JobRow>('SELECT * FROM jobs WHERE state = \'queued\' ORDER BY id').filter(j => !isCoordinationRun(cfg, j.workspace, j.workflow))
+    const awaiting = queued.filter(j => !j.decision)
+    if (awaiting.length) why.push(`${awaiting.length} queued job${awaiting.length === 1 ? '' : 's'} awaiting a decision (${awaiting.slice(0, 5).map(j => `${j.workspace} ${j.workflow}/${j.run}`).join(', ')}${awaiting.length > 5 ? ', …' : ''})`)
+    const t = now()
+    const pending = this.pendingEvents()
+    for (const j of queued.filter(j => j.decision === 'defer')) {
+      const d = j.decision_id ? this.one<DecisionRow>('SELECT * FROM decisions WHERE id = ?', j.decision_id) : null
+      const rc = d?.reconsider ? JSON.parse(d.reconsider) as Reconsider : {}
+      if (rc.until && rc.until <= t) why.push(`deferral of ${j.workspace} ${j.workflow}/${j.run} is due since ${rc.until}`)
+      else if (rc.on?.length && pending.some(e => rc.on!.includes(e.kind) && e.id > (d?.id ?? 0) && e.at > (d?.at ?? ''))) why.push(`deferral of ${j.workspace} ${j.workflow}/${j.run} named ${rc.on.join(', ')}, which happened`)
+    }
+    const asked = pending.filter(e => e.kind === 'reconsider')
+    if (asked.length) why.push(`${asked.length} reconsideration request${asked.length === 1 ? '' : 's'} (${asked.slice(0, 3).map(e => e.detail ?? '').join('; ')})`)
+    return { yes: why.length > 0, why }
+  }
+
+  // The coordination turn that is open now, if any (p4): its run's job is
+  // queued or claimed, or its attempt is open.
+  openBatch(): CoordinationBatchRow | null {
+    const b = this.one<CoordinationBatchRow>('SELECT * FROM coordination_batches WHERE state IN (\'creating\', \'open\') ORDER BY id DESC LIMIT 1')
+    if (!b) return null
+    if (b.state === 'creating') return Date.now() - Date.parse(b.created) < 10 * 60_000 ? b : this.closeBatchRow(b, 'lost', 'the coordination run was never created (creation did not finish)')
+    const job = b.job ? this.one<JobRow>('SELECT * FROM jobs WHERE id = ?', b.job) : null
+    const open = b.run ? this.one<AttemptRow>('SELECT * FROM attempts WHERE workspace = ? AND workflow = ? AND run = ? AND state != \'ended\'', b.workspace!, b.workflow!, b.run!) : null
+    if ((job && (job.state === 'queued' || job.state === 'claimed')) || open) return b
+    return this.closeBatchRow(b, 'lost', job ? `its job ${job.id} is ${job.state}${job.note ? ` (${job.note})` : ''} and no attempt is open` : 'its run has no job and no open attempt')
+  }
+  private closeBatchRow(b: CoordinationBatchRow, state: 'ended' | 'failed' | 'lost', outcome: string): null {
+    const n = b.attempt ? this.one<{ n: number }>('SELECT count(*) AS n FROM decisions WHERE attempt IS NOT NULL AND agent LIKE ? AND state = \'applied\'', `%"attempt":"${b.attempt}"%`)?.n ?? 0 : 0
+    this.run('UPDATE coordination_batches SET state = ?, ended = ?, outcome = ?, decisions = ? WHERE id = ? AND state IN (\'creating\', \'open\')', state, now(), outcome, n, b.id)
+    return null
+  }
+  // The end of a coordination attempt closes its turn (p4): events created
+  // before it began were its to see, and are taken by it now.
+  private closeBatch(a: AttemptRow, outcome: string, kind: string) {
+    const b = this.one<CoordinationBatchRow>('SELECT * FROM coordination_batches WHERE attempt = ? AND state IN (\'creating\', \'open\')', a.id)
+      ?? this.one<CoordinationBatchRow>('SELECT * FROM coordination_batches WHERE workspace = ? AND workflow = ? AND run = ? AND state IN (\'creating\', \'open\')', a.workspace, a.workflow, a.run)
+    this.run('UPDATE coordination_events SET taken_by = ?, taken_at = ? WHERE taken_by IS NULL AND at <= ?', a.id, now(), a.began)
+    const decided = this.one<{ n: number }>('SELECT count(*) AS n FROM decisions WHERE agent LIKE ? AND state = \'applied\'', `%"attempt":"${a.id}"%`)?.n ?? 0
+    if (b) this.run('UPDATE coordination_batches SET state = \'ended\', ended = ?, outcome = ?, decisions = ?, attempt = coalesce(attempt, ?) WHERE id = ?', now(), `${outcome}: ${kind}; ${decided} decision${decided === 1 ? '' : 's'} applied`, decided, a.id, b.id)
+  }
+  // When coordination turns keep ending without a decision while something
+  // awaits one, the next turn waits (p4): three such turns in a row pause
+  // automatic creation for ten minutes; the state stays visible, and
+  // `wfe coordinate wake` (or the next event after the pause) tries again.
+  coordinationStall(): { since: string; failures: number; until: string; last: string } | null {
+    const last = this.all<CoordinationBatchRow>('SELECT * FROM coordination_batches WHERE state IN (\'ended\', \'failed\', \'lost\') ORDER BY id DESC LIMIT 3')
+    if (last.length < 3 || last.some(b => b.decisions > 0 || b.outcome?.startsWith('exited'))) return null
+    const until = new Date(Date.parse(last[0].ended ?? last[0].created) + 10 * 60_000).toISOString()
+    if (until <= now()) return null
+    return { since: last[2].created, failures: last.length, until, last: `${last[0].state}: ${last[0].outcome ?? last[0].error ?? ''}` }
+  }
+
+  // Opens a coordination turn when something awaits a decision and none is
+  // open (p4): one coordination run, created from the configured project's
+  // published workflow and queued in the coordination lane. Idempotent: a
+  // turn already open is answered; a stall pauses creation.
+  async ensureCoordination(o: { force?: boolean } = {}): Promise<CoordinationBatchRow | null> {
+    const cfg = this.workers()
+    const c = cfg.coordination
+    if (!c) return null
+    const open = this.openBatch()
+    if (open) return open
+    const need = this.needsCoordination()
+    if (!need.yes && !o.force) return null
+    if (!o.force && this.coordinationStall()) return null
+    const id = Number(this.run('INSERT INTO coordination_batches (created, state, workspace, workflow) VALUES (?, \'creating\', ?, ?)', now(), c.workspace, c.workflow).lastInsertRowid)
+    const text = [`Coordination turn ${id}.`, '', ...(need.why.length ? need.why.map(w => `- ${w}`) : ['- requested explicitly']), '',
+      'Look at the queue and the workers (wfe coordinate view), take the pending events (wfe coordinate events --take), decide what starts, moves or waits, apply it (wfe coordinate start|defer|assign|note), and end. wfe coordinate --help explains the operations.'].join('\n')
+    try {
+      const r = await this.request({ workspace: c.workspace, workflow: c.workflow, text, author: 'WFE', receipt: `coordinate:turn-${id}`, via: 'coordination', node: c.worker,
+        input: { kind: 'request', text, requester: 'WFE', entrustedBy: { kind: 'note', text: `coordination turn ${id}: ${need.why.join('; ') || 'requested explicitly'}` } } })
+      this.run('UPDATE coordination_batches SET state = \'open\', run = ?, job = ? WHERE id = ?', r.ref.run, r.job.id, id)
+      return this.one<CoordinationBatchRow>('SELECT * FROM coordination_batches WHERE id = ?', id)!
+    } catch (e) {
+      this.run('UPDATE coordination_batches SET state = \'failed\', ended = ?, error = ? WHERE id = ?', now(), (e as Error).message, id)
+      return null
+    }
+  }
+
+  // The reconcile's part (p4): wake events for deferrals whose time came,
+  // workers fallen silent, lost turns, and a turn for whatever awaits one.
+  async reconcileCoordination(): Promise<string[]> {
+    const cfg = this.workers()
+    if (!cfg.coordination) return []
+    const notes: string[] = []
+    const t = now()
+    for (const d of this.all<DecisionRow>('SELECT * FROM decisions WHERE action = \'defer\' AND state = \'applied\' AND woken IS NULL AND reconsider IS NOT NULL')) {
+      const rc = JSON.parse(d.reconsider!) as Reconsider
+      if (!rc.until || rc.until > t) continue
+      const job = this.one<JobRow>('SELECT * FROM jobs WHERE workspace = ? AND workflow = ? AND run = ? AND state = \'queued\'', d.workspace, d.workflow, d.run)
+      this.run('UPDATE decisions SET woken = ? WHERE id = ?', t, d.id)
+      if (!job) continue
+      this.event('wake', { workspace: d.workspace, workflow: d.workflow, run: d.run, job: job.id, worker: job.worker, detail: `deferral ${d.id} (${d.reason}) reached ${rc.until}` })
+      notes.push(`coordination: deferral ${d.id} of ${d.workspace} ${d.workflow}/${d.run} is due`)
+    }
+    for (const hb of this.all<{ name: string; at: string; seen_state: string | null }>('SELECT name, at, seen_state FROM heartbeat')) {
+      if (!cfg.workers[hb.name] || hb.seen_state !== 'available' || Date.now() - Date.parse(hb.at) < 45_000) continue
+      this.run('UPDATE heartbeat SET seen_state = \'unavailable\' WHERE name = ?', hb.name)
+      this.event('worker-unavailable', { worker: hb.name, detail: `${hb.name} has not reported since ${hb.at}` })
+      notes.push(`coordination: worker ${hb.name} has not reported since ${hb.at}`)
+    }
+    const before = this.openBatch()
+    const b = await this.ensureCoordination()
+    if (b && !before) notes.push(`coordination: turn ${b.id} opened (${b.workflow}/${b.run})`)
+    const stall = this.coordinationStall()
+    if (stall && this.needsCoordination().yes) notes.push(`coordination: ${stall.failures} turns ended without a decision; the next automatic turn waits until ${stall.until} (wfe coordinate wake starts one now)`)
+    return notes
+  }
+
+  // A decision of warden's about a run's queued work (p4). Who decides is
+  // the coordination run's agent (inside its attempt) or --by. The job and
+  // the record are read now; a basis the caller names that no longer holds
+  // makes the decision stale: nothing is applied and the changed facts are
+  // answered. A placement a person chose is not moved.
+  async decide(o: { action: DecisionRow['action']; workspace: string; ref: RunRef; worker?: string; scope?: 'run' | 'job'; reason: string; observations?: string[]; assumptions?: string[]; reconsider?: Reconsider; basis?: string; by?: string; attempt?: string; via: string }): Promise<{ decision: DecisionRow; applied: boolean; changed?: { basis: string; facts: Record<string, unknown> }; job: JobRow | null; record: RunRecord | null; notes: string[] }> {
+    const cfg = this.workers()
+    const ws = await this.workspace(o.workspace)
+    const space = await runSpace(ws, o.ref)
+    const rec = (await readRun(space, o.ref)).record
+    if (!rec) throw new RequestError(409, `run ${runKey(o.ref)} cannot be read`)
+    let by = o.by?.trim() || ''
+    let agent: RecoveryAgent | undefined
+    if (o.attempt) {
+      const own = this.attemptRow(o.attempt)
+      if (!own || own.state === 'ended') throw new RequestError(409, `attempt ${o.attempt} is not an open attempt on this host; a decision is recorded by the coordination run's open attempt, or with --by outside one`, { code: 'decision-actor' })
+      const ownRec = (await readRun(await this.workspace(own.workspace), { workflow: own.workflow, run: own.run })).record
+      if (!ownRec) throw new RequestError(409, `the deciding run ${own.workflow}/${own.run} cannot be read`, { code: 'decision-actor' })
+      by = ownRec.executor.name
+      agent = { workspace: own.workspace, workflow: own.workflow, run: own.run, attempt: own.id }
+    }
+    if (!by) throw new RequestError(400, 'who decides? Pass --by <name>, or run it from the coordination run\'s attempt (WFE_ATTEMPT)', { code: 'decision-actor' })
+    if (isCoordinationRun(cfg, o.workspace, o.ref.workflow)) throw new RequestError(409, `${runKey(o.ref)} is a coordination run; it is admitted by its own lane, not by a decision`, { code: 'decision-self' })
+    const job = this.one<JobRow>('SELECT * FROM jobs WHERE workspace = ? AND workflow = ? AND run = ? AND state = \'queued\'', o.workspace, o.ref.workflow, o.ref.run) ?? null
+    const node = this.nodeOf(rec)
+    const facts = () => this.basisFacts(o.workspace, o.ref, rec, job, o.worker ?? node)
+    const notes: string[] = []
+    const scope = o.scope ?? (o.action === 'note' || o.action === 'assign' ? 'job' : 'run')
+    const insert = (state: DecisionRow['state'], detail: string | null, worker: string | null, batch: number | null) => {
+      const id = Number(this.run('INSERT INTO decisions (at, by, action, workspace, workflow, run, job, worker, scope, reason, observations, assumptions, reconsider, basis, state, detail, agent, batch) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+        now(), by, o.action, o.workspace, o.ref.workflow, o.ref.run, job?.id ?? null, worker, scope, o.reason, o.observations?.length ? JSON.stringify(o.observations) : null, o.assumptions?.length ? JSON.stringify(o.assumptions) : null, o.reconsider && (o.reconsider.until || o.reconsider.on?.length) ? JSON.stringify(o.reconsider) : null, o.basis ?? null, state, detail, agent ? JSON.stringify(agent) : null, batch).lastInsertRowid)
+      return this.one<DecisionRow>('SELECT * FROM decisions WHERE id = ?', id)!
+    }
+    const batch = agent ? this.one<CoordinationBatchRow>('SELECT * FROM coordination_batches WHERE attempt = ?', agent.attempt)?.id ?? null : null
+    const current = facts()
+    if (o.basis && o.basis !== current.basis) {
+      const d = insert('stale', `the basis ${o.basis} no longer holds (now ${current.basis}): nothing applied`, o.worker ?? null, batch)
+      return { decision: d, applied: false, changed: current, job, record: rec, notes }
+    }
+    if (o.action === 'note') {
+      const d = insert('applied', null, null, batch)
+      return { decision: d, applied: true, job, record: rec, notes: ['The note reaches the run\'s agent in its next brief (and wfe coordinate notes shows it now).'] }
+    }
+    // Where the run runs (p4): a move is a run.assign between attempts,
+    // recorded as warden's; a placement a person chose, or anyone's explicit
+    // assignment, is a constraint this does not override.
+    let worker = o.worker ?? node
+    let record = rec
+    if ((o.action === 'assign' || o.action === 'start') && o.worker && o.worker !== node) {
+      if (!cfg.workers[o.worker]) throw new RequestError(400, `execution node "${o.worker}" is not a worker of this area (${Object.keys(cfg.workers).sort().join(', ')})`, { code: 'node-unknown' })
+      const constraint = this.placementConstraint(rec)
+      if (constraint) { const d = insert('refused', `not moved: ${constraint}`, o.worker, batch); throw new RequestError(409, `run ${runKey(o.ref)} stays on ${node}: ${constraint} (decision ${d.id} recorded as refused)`, { code: 'placement-constraint', decision: d.id }) }
+      if (rec.control.attempt) { const d = insert('refused', `not moved: attempt ${rec.control.attempt.id} is open`, o.worker, batch); throw new RequestError(409, `run ${runKey(o.ref)} is executing (attempt ${rec.control.attempt.id}); it moves between attempts (decision ${d.id} recorded as refused)`, { code: 'attempt-open', decision: d.id }) }
+      try {
+        record = (await runOp(space, o.ref, { op: 'run.assign', node: o.worker, reason: `coordination: ${o.reason}` } as never, { by, via: 'coordination' })).record
+      } catch (e) {
+        const d = insert('refused', `not moved: ${(e as Error).message}`, o.worker, batch)
+        throw new RequestError(409, `${(e as Error).message} (decision ${d.id} recorded as refused)`, { code: 'assign-refused', decision: d.id })
+      }
+      this.run('UPDATE jobs SET worker = ?, note = NULL WHERE workspace = ? AND workflow = ? AND run = ? AND state = \'queued\'', o.worker, o.workspace, o.ref.workflow, o.ref.run)
+      worker = o.worker
+      notes.push(`Moved: from its next attempt ${runKey(o.ref)} runs on ${o.worker} (was ${node}).${this.sessionNote(rec, o.worker)}`)
+    }
+    if (o.action === 'assign') {
+      const d = insert('applied', null, worker, batch)
+      return { decision: d, applied: true, job, record, notes }
+    }
+    // start / defer: the job now, and (scope run) the run's later jobs.
+    if (o.action === 'start' && rec.control.attempt) throw new RequestError(409, `run ${runKey(o.ref)} is already executing (attempt ${rec.control.attempt.id})`, { code: 'attempt-open' })
+    if (o.action === 'start' && !job && scope === 'job') throw new RequestError(409, `run ${runKey(o.ref)} has no queued job to start; a standing admission for its later jobs is --scope run`, { code: 'no-job' })
+    const d = insert('applied', null, worker, batch)
+    if (job) {
+      this.run('UPDATE jobs SET decision = ?, decision_id = ?, defer_until = ?, note = NULL WHERE id = ? AND state = \'queued\'', o.action as 'start' | 'defer', d.id, o.action === 'defer' ? o.reconsider?.until ?? null : null, job.id)
+      // An earlier decision on this job is superseded by this one.
+      this.run('UPDATE decisions SET state = \'superseded\' WHERE job = ? AND id != ? AND state = \'applied\' AND action IN (\'start\', \'defer\')', job.id, d.id)
+    }
+    if (o.action === 'start') notes.push(job ? `Job ${job.id} (${job.kind}) starts on ${worker} when its executor next claims${scope === 'run' ? '; the run\'s later jobs on that worker start without another decision until one says otherwise' : ''}.` : `Standing: the run's later jobs on ${worker} start without another decision until one says otherwise.`)
+    else notes.push(`${job ? `Job ${job.id} waits` : 'The run\'s jobs wait'}${o.reconsider?.until ? ` until ${o.reconsider.until}` : ''}${o.reconsider?.on?.length ? ` or until ${o.reconsider.on.join(', ')}` : ''}${!o.reconsider?.until && !o.reconsider?.on?.length ? ' until a later decision' : ''}.`)
+    return { decision: d, applied: true, job: job ? this.one<JobRow>('SELECT * FROM jobs WHERE id = ?', job.id)! : null, record, notes }
+  }
+  // Why a run's placement is not warden's to change (p4): the request named
+  // the node, or someone other than coordination assigned it last.
+  placementConstraint(rec: RunRecord): string | null {
+    const last = rec.assignments?.at(-1)
+    if (last) {
+      const entry = rec.history.find(h => h.seq === last.seq) as { via?: string } | undefined
+      if (entry?.via !== 'coordination') return `${last.by} assigned it to ${last.node} (${last.reason})`
+      return null
+    }
+    if (rec.executor.placed === 'request') return `the request named ${rec.executor.node} as its execution node`
+    return null
+  }
+  private sessionNote(rec: RunRecord, worker: string): string {
+    const cur = currentSession(rec)
+    return cur ? ` Its retained session ${cur.id ?? ''} is on its former node; ${worker} replaces it through the record at the next attempt.` : ''
+  }
+  // What a decision is made on (p4): the record's sequence, the job and the
+  // worker's open attempts. A load sample is not part of it.
+  basisFacts(workspace: string, ref: RunRef, rec: RunRecord, job: JobRow | null, worker: string): { basis: string; facts: Record<string, unknown> } {
+    // Coordination attempts are not work on the node: they are left out.
+    const cfg = this.workers()
+    const open = this.all<AttemptRow>('SELECT id, lane FROM attempts WHERE state != \'ended\' AND worker = ? ORDER BY id', worker).filter(a => !isCoordinationLane(cfg, worker, a.lane ?? DEFAULT_LANE)).map(a => a.id)
+    const facts = { run: `${workspace}/${runKey(ref)}`, seq: rec.seq, job: job ? { id: job.id, state: job.state, decision: job.decision } : null, worker, node: this.nodeOf(rec), attemptsOn: open, hold: rec.control.hold?.kind ?? null, openAttempt: rec.control.attempt?.id ?? null }
+    const basis = `b${createHash('sha256').update(JSON.stringify(facts)).digest('hex').slice(0, 10)}`
+    return { basis, facts }
+  }
+  decisionsOf(workspace: string, ref: RunRef, n = 20): DecisionRow[] { return this.all<DecisionRow>('SELECT * FROM decisions WHERE workspace = ? AND workflow = ? AND run = ? ORDER BY id DESC LIMIT ?', workspace, ref.workflow, ref.run, n).reverse() }
+  recentDecisions(n = 20): DecisionRow[] { return this.all<DecisionRow>('SELECT * FROM decisions ORDER BY id DESC LIMIT ?', n).reverse() }
+  recentBatches(n = 5): CoordinationBatchRow[] { return this.all<CoordinationBatchRow>('SELECT * FROM coordination_batches ORDER BY id DESC LIMIT ?', n).reverse() }
+
+  // What a run's agent is told of coordination at the start of an attempt
+  // (p4): warden's notes to it, and who shares its node now.
+  coordinationBrief(workspace: string, ref: RunRef, job: JobRow): string[] {
+    const cfg = this.workers()
+    if (!cfg.coordination || isCoordinationRun(cfg, workspace, ref.workflow)) return []
+    const out: string[] = []
+    const notes = this.all<DecisionRow>('SELECT * FROM decisions WHERE workspace = ? AND workflow = ? AND run = ? AND action = \'note\' ORDER BY id DESC LIMIT 5', workspace, ref.workflow, ref.run).reverse()
+    const d = job.decision_id ? this.one<DecisionRow>('SELECT * FROM decisions WHERE id = ?', job.decision_id) : null
+    const others = this.all<AttemptRow>('SELECT * FROM attempts WHERE state != \'ended\' AND worker = ? AND NOT (workspace = ? AND workflow = ? AND run = ?) ORDER BY began', job.worker ?? cfg.default, workspace, ref.workflow, ref.run).filter(a => !isCoordinationRun(cfg, a.workspace, a.workflow))
+    if (!notes.length && !others.length && !d) return []
+    out.push('', `Execution coordination (warden decides what runs where; wfe coordinate --help):`)
+    if (d) out.push(`- this attempt starts by decision ${d.id} (${d.by}, ${d.at}): ${d.reason}${d.assumptions ? `; assumptions: ${(JSON.parse(d.assumptions) as string[]).join('; ')}` : ''}`)
+    if (others.length) out.push(`- sharing this execution node now: ${others.map(a => `${a.workspace} ${a.workflow}/${a.run} (attempt ${a.id}, since ${a.began})`).join('; ')}. Shared host state (/tmp paths, ports, displays, process names) is shared with them; use paths and names of your own.`)
+    for (const n of notes) out.push(`- note from ${n.by} (${n.at}): ${n.reason}`)
+    out.push(`- if another run's work interferes with yours, or your work becomes much heavier than it looked: wfe coordinate reconsider --reason "<what you see>" (warden looks again; it may move, defer or note).`)
+    return out
+  }
+
+  // The concise read view warden decides from (p4, docs/coordination.md).
+  async coordinationView(): Promise<CoordinationView> {
+    const cfg = this.workers()
+    const observedAt = now()
+    const workers: CoordinationView['workers'] = []
+    const runFacts = async (workspace: string, ref: RunRef): Promise<CoordinationRunFacts> => {
+      try {
+        const ws = await this.workspace(workspace)
+        const space = await runSpace(ws, ref)
+        const r = (await readRun(space, ref)).record
+        if (!r) return { readable: false, project: null, request: null, active: [], ready: [], progress: null, situation: null, hold: null, placed: null, constraint: null, requester: null, created: null, seq: null }
+        let request: string | null = null
+        try { request = readFileSync(join(space.copyOf?.recordRoot ?? space.root, runDir(ref), r.input.file), 'utf8').replace(/\s+/g, ' ').trim().slice(0, 280) } catch { request = null }
+        const p = [...r.history].reverse().find(e => ['node.progress', 'node.start', 'node.complete', 'question.ask', 'node.wait', 'delegation.dispatch'].includes(e.op))
+        return { readable: true, project: r.project, request, active: r.execution.active, ready: r.execution.ready, progress: p ? { op: p.op, at: p.at, node: (p as { node?: string }).node ?? null, text: (p as { text?: string; outcome?: string }).text ?? (p as { outcome?: string }).outcome ?? null } : null,
+          situation: situation(r), hold: r.control.hold?.kind ?? null, placed: r.executor.placed ?? null, constraint: this.placementConstraint(r), requester: r.input.requester ?? r.input.author ?? null, created: r.created, seq: r.seq }
+      } catch (e) { return { readable: false, project: null, request: `(${(e as Error).message})`, active: [], ready: [], progress: null, situation: null, hold: null, placed: null, constraint: null, requester: null, created: null, seq: null } }
+    }
+    for (const w of this.workersState()) {
+      const attempts: CoordinationView['workers'][number]['attempts'] = []
+      for (const a of this.all<AttemptRow>('SELECT * FROM attempts WHERE state != \'ended\' AND worker = ? ORDER BY began', w.id)) {
+        const f = await runFacts(a.workspace, { workflow: a.workflow, run: a.run })
+        const log = a.log && (this.localPid(a) || this.isRemote(a.worker)) ? await activityOf(a.log).catch(() => null) : null
+        attempts.push({ attempt: a.id, workspace: a.workspace, workflow: a.workflow, run: a.run, project: f.project, lane: a.lane ?? DEFAULT_LANE, coordination: isCoordinationRun(cfg, a.workspace, a.workflow), state: a.state, began: a.began, stopRequested: a.stop_requested, decision: a.decision, request: f.request, active: f.active, progress: f.progress, logLast: log?.last ?? null, pid: a.pid })
+      }
+      workers.push({ id: w.id, label: w.label, local: w.local, default: w.default, coordination: w.coordination, state: w.state, heartbeatAt: w.at, ageSeconds: w.ageSeconds === null ? null : Math.round(w.ageSeconds), load: w.load, profiles: w.profiles, host: w.facts?.host ?? null, attempts })
+    }
+    const queued: CoordinationView['queued'] = []
+    for (const j of this.all<JobRow>('SELECT * FROM jobs WHERE state = \'queued\' ORDER BY id')) {
+      if (isCoordinationRun(cfg, j.workspace, j.workflow)) continue
+      const ref = { workflow: j.workflow, run: j.run }
+      const f = await runFacts(j.workspace, ref)
+      const worker = j.worker ?? cfg.default
+      const d = j.decision_id ? this.one<DecisionRow>('SELECT * FROM decisions WHERE id = ?', j.decision_id) ?? null : null
+      const w = workers.find(x => x.id === worker)
+      const servable = w?.profiles && j.note?.includes('does not offer') ? false : true
+      queued.push({ job: j.id, workspace: j.workspace, workflow: j.workflow, run: j.run, project: f.project, kind: j.kind, reason: j.reason, created: j.created, worker, lane: j.worker ? laneOn(cfg.workers[worker], undefined) : DEFAULT_LANE,
+        admission: j.decision === 'start' ? 'admitted' : j.decision === 'defer' ? 'deferred' : 'awaiting', decision: d ? { id: d.id, by: d.by, at: d.at, action: d.action, scope: d.scope, reason: d.reason, reconsider: d.reconsider ? JSON.parse(d.reconsider) as Reconsider : null } : null,
+        note: j.note, servable, request: f.request, requester: f.requester, created_run: f.created, ready: f.ready, situation: f.situation, placed: f.placed, constraint: f.constraint, basis: f.seq !== null ? this.basisFacts(j.workspace, ref, { seq: f.seq, control: { hold: f.hold ? { kind: f.hold } : null, attempt: null }, executor: { node: worker } } as never, j, worker).basis : null })
+    }
+    const stall = this.coordinationStall()
+    const open = this.openBatch()
+    return { schema: 'ag.wfe-coordination.v1', observedAt, configured: !!cfg.coordination, coordination: cfg.coordination, turn: open ? { id: open.id, state: open.state, run: open.run, attempt: open.attempt, since: open.created } : null,
+      stalled: stall, recentTurns: this.recentBatches(5).map(b => ({ id: b.id, state: b.state, run: b.run, created: b.created, ended: b.ended, outcome: b.outcome, decisions: b.decisions, error: b.error })),
+      workers, queued, decisions: this.recentDecisions(12).map(d => ({ ...d, observations: d.observations ? JSON.parse(d.observations) as string[] : null, assumptions: d.assumptions ? JSON.parse(d.assumptions) as string[] : null, reconsider: d.reconsider ? JSON.parse(d.reconsider) as Reconsider : null, agent: d.agent ? JSON.parse(d.agent) as RecoveryAgent : null })),
+      events: this.pendingEvents(), needs: this.needsCoordination() }
   }
 
   // ---- views ------------------------------------------------------------------------------
 
   // One heartbeat per worker (p7), keyed by the worker id. A remote worker
   // sends its offer and facts with it, so the views say what it can do.
+  // `offer.facts.load` (improve_wfrun p4): what the executor measured of its
+  // host now; kept with the heartbeat as evidence for coordination. A worker
+  // heard from again after silence is an event for warden.
   heartbeat(worker: string, pid: number, detail: string, offer?: { offer?: HostOffer; facts?: WorkerFacts }) {
-    if (!this.workers().workers[worker]) throw new RequestError(404, `worker "${worker}" is not a worker of this area`, { code: 'worker-unknown' })
-    this.run('INSERT INTO heartbeat (name, at, pid, detail, offer) VALUES (?, ?, ?, ?, ?) ON CONFLICT(name) DO UPDATE SET at = excluded.at, pid = excluded.pid, detail = excluded.detail, offer = coalesce(excluded.offer, heartbeat.offer)', worker, now(), pid, detail, offer ? JSON.stringify(offer) : null)
+    const cfg = this.workers()
+    if (!cfg.workers[worker]) throw new RequestError(404, `worker "${worker}" is not a worker of this area`, { code: 'worker-unknown' })
+    this.tx(() => {
+      const before = this.one<{ at: string; offer: string | null; seen_state: string | null }>('SELECT at, offer, seen_state FROM heartbeat WHERE name = ?', worker)
+      let merged = offer ? JSON.stringify(offer) : null
+      // The load alone, from a local executor that offers nothing else here, joins the kept offer.
+      if (offer && !offer.offer && before?.offer) { try { const kept = JSON.parse(before.offer) as { offer?: HostOffer; facts?: WorkerFacts }; merged = JSON.stringify({ ...kept, facts: { ...kept.facts, ...offer.facts } }) } catch { /* keep the new one */ } }
+      this.run('INSERT INTO heartbeat (name, at, pid, detail, offer, seen_state) VALUES (?, ?, ?, ?, ?, \'available\') ON CONFLICT(name) DO UPDATE SET at = excluded.at, pid = excluded.pid, detail = excluded.detail, offer = coalesce(excluded.offer, heartbeat.offer), seen_state = \'available\'', worker, now(), pid, detail, merged)
+      if (cfg.coordination && before?.seen_state !== 'available') this.event('worker-available', { worker, detail: before ? `${worker} reports again (last heard ${before.at})` : `${worker} reports for the first time` })
+    })
   }
 
   // The local worker's state: what "the executor" meant before p7, and what
@@ -1672,13 +2138,14 @@ export class ExecStore {
       const jobs = this.all<JobRow>('SELECT * FROM jobs WHERE state = \'queued\' AND coalesce(worker, ?) = ? ORDER BY id', cfg.default, w.id)
       const offered = hb?.offer ? JSON.parse(hb.offer) as { offer?: HostOffer; facts?: WorkerFacts } : null
       const state = !hb ? 'unknown' as const : age! < 45 ? 'available' as const : 'unavailable' as const
-      const detail = `${w.id}${busy ? `; executing ${busy.workflow}/${busy.run} (${busy.id})` : '; idle'}${extra.map(a => `; ${a.lane ?? DEFAULT_LANE} lane: ${a.workflow}/${a.run} (${a.id})`).join('')}${jobs.length ? `; ${jobs.length} queued` : ''}`
+      const awaiting = jobs.filter(j => !j.decision).length, deferred = jobs.filter(j => j.decision === 'defer').length
+      const detail = `${w.id}${busy ? `; executing ${busy.workflow}/${busy.run} (${busy.id})` : '; idle'}${extra.map(a => `; ${a.lane ?? DEFAULT_LANE} lane: ${a.workflow}/${a.run} (${a.id})`).join('')}${jobs.length ? `; ${jobs.length} queued${awaiting ? ` (${awaiting} awaiting a decision)` : ''}${deferred ? ` (${deferred} deferred)` : ''}` : ''}`
       return { id: w.id, label: w.label, local: w.local, default: cfg.default === w.id, state, at: hb?.at ?? null, ageSeconds: age, pid: hb?.pid ?? null, reported: hb?.detail ?? null, detail,
         busy: busy ? { attempt: busy.id, workspace: busy.workspace, workflow: busy.workflow, run: busy.run, state: busy.state, stopRequested: busy.stop_requested } : null,
-        slots: open.map(a => ({ attempt: a.id, workspace: a.workspace, workflow: a.workflow, run: a.run, state: a.state, stopRequested: a.stop_requested, lane: a.lane ?? DEFAULT_LANE })),
-        lanes: { ...w.lanes },
-        queued: jobs.map(j => ({ id: j.id, workspace: j.workspace, workflow: j.workflow, run: j.run, kind: j.kind, note: j.note })),
-        profiles: offered?.offer?.profiles ? Object.keys(offered.offer.profiles).sort() : null, facts: offered?.facts ?? null }
+        slots: open.map(a => ({ attempt: a.id, workspace: a.workspace, workflow: a.workflow, run: a.run, state: a.state, stopRequested: a.stop_requested, lane: a.lane ?? DEFAULT_LANE, decision: a.decision })),
+        lanes: [...w.lanes], coordination: !!cfg.coordination && cfg.coordination.worker === w.id,
+        queued: jobs.map(j => ({ id: j.id, workspace: j.workspace, workflow: j.workflow, run: j.run, kind: j.kind, note: j.note, decision: j.decision, deferUntil: j.defer_until })),
+        profiles: offered?.offer?.profiles ? Object.keys(offered.offer.profiles).sort() : null, facts: offered?.facts ?? null, load: offered?.facts?.load ?? null }
     })
   }
 
@@ -1730,6 +2197,9 @@ export class ExecStore {
     const checkpoints = this.all<CheckpointRow>('SELECT * FROM checkpoints WHERE workspace = ? AND workflow = ? AND run = ? ORDER BY id', workspace, ref.workflow, ref.run)
       .map(c => ({ ...c, baseline: undefined, steps: JSON.parse(c.steps) as RepoStep[] }))
     const integrations = this.integrations(workspace, ref).map(i => ({ ...i, steps: JSON.parse(i.steps) as IntegrationStep[] }))
-    return { attempts, jobs, checkpoints, integrations, executor: this.executorState(), workers: this.workersState() }
+    // improve_wfrun p4: how this host admits work, and warden's decisions about the run.
+    const coordinated = !!this.workers().coordination
+    const decisions = coordinated ? this.decisionsOf(workspace, ref, 20).map(d => ({ id: d.id, at: d.at, by: d.by, action: d.action, worker: d.worker, scope: d.scope, reason: d.reason, state: d.state, detail: d.detail, attempt: d.attempt, reconsider: d.reconsider })) : []
+    return { attempts, jobs, checkpoints, integrations, executor: this.executorState(), workers: this.workersState(), coordinated, decisions }
   }
 }

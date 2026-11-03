@@ -12,7 +12,8 @@ lives is in [storage.md](storage.md).
 | --- | --- | --- |
 | Request, plan, questions, answers, instructions, holds, completion | `run.json` (the run's own copy) and the documents it references | WFE operations |
 | Work products, checkpoints, integrated changes | the run copy, its run branches, the publication and integration journals | WFE / executor |
-| Attempts, process identity, queue, slot, heartbeat, activity | `<area>/.local/exec/exec.sqlite` and the attempt's log | executor (autolab) through `wfe exec` |
+| Attempts, process identity, queue and admission, heartbeat and load, activity | `<area>/.local/exec/exec.sqlite` and the attempt's log | executor (autolab) through `wfe exec` |
+| Coordination decisions, events, turns | `<area>/.local/exec/exec.sqlite` (`decisions`, `coordination_events`, `coordination_batches`) | warden through `wfe coordinate` ([coordination.md](coordination.md)) |
 | Incidents, recovery assignments, verified outcomes | Observer's own store, linked to the run identity below | Observer |
 | Agent-to-agent requests and replies | Zulip, carrying references to the records above | transport |
 
@@ -80,11 +81,22 @@ whatever its state. The same document is served at `GET /api/observe`
     "slot": { "attempt": "a…", "workspace": "jevlab", "run": "study/run-001", "uid": "…" },
     "queued": 0
   },
+  "workers": [ { "id": "studio", "state": "available", "slot": { … }, "slots": [ { "attempt": "a…", "run": "…", "lane": "default", "decision": 12 } ], "lanes": ["conversation", "coordination"], "coordination": true, "load": { "at": "…", "cpus": 12, "load1": 2.1, "memFreeMB": 20480 }, "queued": 2, "awaiting": 1, "deferred": 1, "waiting": [ { "job": 9, "run": "…", "note": "…", "decision": "defer", "deferUntil": "…" } ] } ],
+  "coordination": { "configured": true, "worker": "studio", "lane": "coordination", "workflow": "warden/coordinate", "turn": { "id": 4, "run": "run-004", "attempt": "a…", "since": "…" } | null,
+    "stalled": { "since": "…", "failures": 3, "until": "…", "last": "…" } | null, "awaiting": 1, "deferred": 1, "needs": ["…"], "pendingEvents": 3, "oldestPendingEvent": "…",
+    "overdue": [ { "job": 9, "workspace": "…", "run": "…", "uid": "…", "until": "…", "decision": 7 } ], "lastTurn": { "id": 3, "state": "ended", "ended": "…", "outcome": "…", "decisions": 2 } },
   "workspaces": [ { "id": "jevlab", "available": true, "problem": null } ],
   "runs": [ { …one run, below… } ],
   "problems": [ { "code": "…", "message": "…" } ]
 }
 ```
+
+`workers[]` (project_migration p7, p8, improve_wfrun p4): every execution
+node with its contact, every open attempt (`slots`, with the decision that
+admitted it) and its measured load. `coordination` (p4,
+[coordination.md](coordination.md)): the coordination path's own state — a
+monitor reads a stall or an overdue deferral there, never infers one from a
+queue wait.
 
 One run:
 
@@ -100,9 +112,9 @@ One run:
 | `attempts` | `{count, beganSeq, open: {id, began, reason, backend, agent} \| null, last: {id, outcome, ended, detail} \| null, ends: [{attempt, seq, at, outcome, held, cause, recovered}]}` — `beganSeq` is the sequence of the latest `attempt.begin`; `ends` (p8 ex1) the last five attempt ends with the hold each derived, its cause and whether a recovery followed it |
 | `session` | agent_session p1, from the record ([sessions.md](sessions.md)): `{policy: fresh \| run, current: {id, began, attempts, attached, mismatch} \| null, count, ended: [{id, state, at, by, reason}]}` (the last three replaced or retired). A session is a conversation, not a process: it proves no liveness and its age is no stall timer |
 | `process` | the open (or last) attempt's host facts: `{attempt, state: launching \| running \| ended, host, local, pid, alive, began, ended, exit, signal, outcome, stopRequested, session: {id, resumed} \| null (from the record), group: {members, cpuSeconds} \| null, log: {last, bytes, turns, session, problem, openTool: {name, since, timeoutSeconds, summary} \| null, ended: {subtype, stopReason} \| null, backgroundStopped, partial}}`; `alive`/`group`/`log` are `null` with a reason in `unavailable` when not observable here. `log.ended` is the harness's own end of the session; `backgroundStopped` counts background tasks the harness reported stopped (they die with the session); `partial` says the tail did not reach the log's start |
-| `queue` | `{job: {id, kind, state, created, reason, receipt} \| null, position, ahead: [{uid, kind, state}]}` |
+| `queue` | `{job: {id, kind, state, created, reason, receipt, decision, decisionId, deferUntil, reconsider, admission} \| null, position, ahead: [{uid, kind, state}]}` — `admission` (p4): `awaiting` (warden's decision), `deferred` (`deferUntil`, `reconsider`), `admitted` (its node's next claim), `claimed`; an area without coordination reads `admitted` |
 | `inputs` | `{questions: [{id, node, to, asked, state}], answeredNotTakenUp: [q…], instructionsPending: n}` |
-| `waiting` | `{reason, responsible, since}` — what the run waits for and whose move it is: `person:<name>`, `executor` (an answer recorded, ready work, a queued job), `external:<ref>`, `recovery` (an interrupted/unknown hold) or `none` |
+| `waiting` | `{reason, responsible, since}` — what the run waits for and whose move it is: `person:<name>`, `executor` (an answer recorded, ready work, an admitted job), `coordination` (p4: a queued job awaiting warden's decision or deferred by it), `external:<ref>`, `recovery` (an interrupted/unknown hold) or `none` |
 | `progress` | `{seq, at, op, by, attempt}` of the last report the run's agent made itself (an executor operation in its name); null when it never reported |
 | `recoveries` | `run.recover` entries: `{seq, at, by, incident, attempt, agent: {run, attempt}}` |
 | `publication` | `{failed: [{id, kind, error}], attention: […], pending: […]}` checkpoints that are not published |

@@ -6,14 +6,21 @@
 // (server/workerApi.ts); its `wfe` forwards (cli/remote.ts).
 //
 // <area>/workers.json:
-//   { "default": "<id>", "workers": { "<id>": { "local": true, "label": "…", "lanes": { "conversation": 1 } }, "<id>": { "tokenFile": "…" } } }
-// No file: one local worker, `local`, which is also the default.
+//   { "default": "<id>",
+//     "coordination": { "worker": "<id>", "lane": "coordination", "workspace": "warden", "workflow": "coordinate" },
+//     "workers": { "<id>": { "local": true, "label": "…", "lanes": ["conversation", "coordination"] }, "<id>": { "tokenFile": "…" } } }
+// No file: one local worker, `local`, which is also the default, and no
+// coordination (every ordinary job is admitted as it is queued).
 //
-// Lanes (project_migration p8): every worker has one slot in the `default`
-// lane; `lanes` declares extra named slots (name → how many attempts may be
-// open in it at once), so a conversational run can be answered while a long
-// attempt holds the default slot. A run claims in the lane its definition
-// names when its worker offers that lane, else in `default`.
+// Lanes (project_migration p8, improve_wfrun p4): a lane names which claim
+// loop of a worker's executor serves a run (`execution.lane`); it is a label,
+// not a slot count. Since improve_wfrun p4 no lane has a capacity: ordinary
+// work (every lane but the coordination lane) starts when warden's
+// coordination decided it should (docs/coordination.md), however many
+// attempts the worker already holds, and the coordination lane carries that
+// coordination itself, one coordination run at a time, admitted by nothing
+// but its own queue. A legacy object form `{ "conversation": 1 }` is read as
+// the lane names; the numbers are ignored.
 import { existsSync, readFileSync, statSync } from 'node:fs'
 import { dirname, isAbsolute, join, posix, resolve } from 'node:path'
 import { DEFAULT_LANE, LANE_PATTERN, NODE_PATTERN, type Project, type Workflow } from '../shared/model.ts'
@@ -30,34 +37,37 @@ import { RequestError, type Workspace } from './workspace.ts'
 
 export const WORKERS_FILE = 'workers.json'
 
-// `lanes`: capacity per lane, `default` (1) always included.
-export interface WorkerSetting { id: string; local: boolean; label: string; tokenFile: string | null; lanes: Record<string, number> }
-export interface WorkersConfig { file: string | null; default: string; local: string; workers: Record<string, WorkerSetting> }
+// `lanes`: the extra lane names the worker's executor serves beside `default`.
+export interface WorkerSetting { id: string; local: boolean; label: string; tokenFile: string | null; lanes: string[] }
+// Where coordination runs (improve_wfrun p4): the worker and lane that carry
+// them, and the project workspace and workflow WFE creates them from.
+export interface CoordinationSetting { worker: string; lane: string; workspace: string; workflow: string }
+export interface WorkersConfig { file: string | null; default: string; local: string; workers: Record<string, WorkerSetting>; coordination: CoordinationSetting | null }
 
 const cache = new Map<string, { mtime: number; config: WorkersConfig }>()
 
 export function loadWorkers(area: string): WorkersConfig {
   const file = join(area, WORKERS_FILE)
-  if (!existsSync(file)) return { file: null, default: 'local', local: 'local', workers: { local: { id: 'local', local: true, label: 'this host', tokenFile: null, lanes: { [DEFAULT_LANE]: 1 } } } }
+  if (!existsSync(file)) return { file: null, default: 'local', local: 'local', workers: { local: { id: 'local', local: true, label: 'this host', tokenFile: null, lanes: [] } }, coordination: null }
   const { mtimeMs } = statSync(file)
   const hit = cache.get(file)
   if (hit && hit.mtime === mtimeMs) return hit.config
   let raw: unknown
   try { raw = JSON.parse(readFileSync(file, 'utf8')) } catch (e) { throw new RequestError(500, `${file} cannot be read: ${(e as Error).message}`) }
-  const o = (raw ?? {}) as { default?: unknown; workers?: Record<string, { local?: unknown; label?: unknown; tokenFile?: unknown; lanes?: unknown }> }
+  const o = (raw ?? {}) as { default?: unknown; coordination?: unknown; workers?: Record<string, { local?: unknown; label?: unknown; tokenFile?: unknown; lanes?: unknown }> }
   const workers: Record<string, WorkerSetting> = {}
   for (const [id, w] of Object.entries(o.workers ?? {})) {
     if (!NODE_PATTERN.test(id)) throw new RequestError(500, `${file}: worker id "${id}" must match ${NODE_PATTERN.source}`)
     const tokenFile = typeof w?.tokenFile === 'string' && w.tokenFile ? (isAbsolute(w.tokenFile) ? w.tokenFile : resolve(dirname(file), w.tokenFile)) : null
-    const lanes: Record<string, number> = { [DEFAULT_LANE]: 1 }
+    const lanes: string[] = []
     if (w?.lanes !== undefined && w.lanes !== null) {
-      if (typeof w.lanes !== 'object' || Array.isArray(w.lanes)) throw new RequestError(500, `${file}: worker "${id}": "lanes" must map lane names to capacities`)
-      for (const [lane, n] of Object.entries(w.lanes as Record<string, unknown>)) {
-        // The default lane is the worker's one slot of before p8; it is not resized.
-        if (lane === DEFAULT_LANE) throw new RequestError(500, `${file}: worker "${id}": the "${DEFAULT_LANE}" lane always has one slot; declare only extra lanes`)
-        if (!LANE_PATTERN.test(lane)) throw new RequestError(500, `${file}: worker "${id}": lane "${lane}" must match ${LANE_PATTERN.source}`)
-        if (typeof n !== 'number' || !Number.isInteger(n) || n < 1) throw new RequestError(500, `${file}: worker "${id}": lane "${lane}" needs a capacity of 1 or more`)
-        lanes[lane] = n
+      const names = Array.isArray(w.lanes) ? w.lanes : typeof w.lanes === 'object' ? Object.keys(w.lanes as Record<string, unknown>) : null
+      if (!names) throw new RequestError(500, `${file}: worker "${id}": "lanes" lists lane names`)
+      for (const lane of names) {
+        if (typeof lane !== 'string' || !LANE_PATTERN.test(lane)) throw new RequestError(500, `${file}: worker "${id}": lane "${String(lane)}" must match ${LANE_PATTERN.source}`)
+        // The default lane is every worker's; it is not declared.
+        if (lane === DEFAULT_LANE) throw new RequestError(500, `${file}: worker "${id}": the "${DEFAULT_LANE}" lane is every worker's; declare only extra lanes`)
+        if (!lanes.includes(lane)) lanes.push(lane)
       }
     }
     workers[id] = { id, local: w?.local === true, label: typeof w?.label === 'string' ? w.label : id, tokenFile, lanes }
@@ -66,7 +76,19 @@ export function loadWorkers(area: string): WorkersConfig {
   if (locals.length !== 1) throw new RequestError(500, `${file}: exactly one worker must be "local" (the one sharing the coordinator's files); found ${locals.length}`)
   const def = typeof o.default === 'string' ? o.default : locals[0].id
   if (!workers[def]) throw new RequestError(500, `${file}: the default worker "${def}" is not listed`)
-  const config = { file, default: def, local: locals[0].id, workers }
+  let coordination: CoordinationSetting | null = null
+  if (o.coordination !== undefined && o.coordination !== null) {
+    const c = o.coordination as Record<string, unknown>
+    if (typeof c !== 'object' || Array.isArray(c)) throw new RequestError(500, `${file}: "coordination" names the worker, lane, workspace and workflow of coordination runs`)
+    const worker = typeof c.worker === 'string' ? c.worker : def
+    if (!workers[worker]) throw new RequestError(500, `${file}: coordination worker "${worker}" is not listed`)
+    const lane = typeof c.lane === 'string' ? c.lane : 'coordination'
+    if (!LANE_PATTERN.test(lane) || lane === DEFAULT_LANE) throw new RequestError(500, `${file}: coordination lane "${lane}" must be an extra lane name`)
+    if (!workers[worker].lanes.includes(lane)) throw new RequestError(500, `${file}: worker "${worker}" does not declare the coordination lane "${lane}"`)
+    if (typeof c.workspace !== 'string' || !c.workspace || typeof c.workflow !== 'string' || !c.workflow) throw new RequestError(500, `${file}: coordination needs "workspace" (the registered workspace of the coordinating project) and "workflow" (its coordination workflow)`)
+    coordination = { worker, lane, workspace: c.workspace, workflow: c.workflow }
+  }
+  const config = { file, default: def, local: locals[0].id, workers, coordination }
   cache.set(file, { mtime: mtimeMs, config })
   return config
 }
@@ -94,8 +116,13 @@ export function chooseLane(o: { workflow?: Workflow | null; project?: Project | 
 // The lane a run is claimed in on a worker: the one its record names when the
 // worker offers it, else `default`.
 export function laneOn(w: WorkerSetting | undefined, lane: string | null | undefined): string {
-  return lane && w?.lanes[lane] ? lane : DEFAULT_LANE
+  return lane && w?.lanes.includes(lane) ? lane : DEFAULT_LANE
 }
+// Whether a claim in this lane of this worker is the coordination path
+// (improve_wfrun p4): served without a coordination decision, one run at a time.
+export const isCoordinationLane = (cfg: WorkersConfig, worker: string, lane: string) => !!cfg.coordination && cfg.coordination.worker === worker && cfg.coordination.lane === lane
+// Whether a run of this workflow is a coordination run.
+export const isCoordinationRun = (cfg: WorkersConfig, workspace: string, workflow: string) => !!cfg.coordination && cfg.coordination.workspace === workspace && cfg.coordination.workflow === workflow
 
 // The node that performs a run: the one its record names, else the area's
 // default (records made before p7).

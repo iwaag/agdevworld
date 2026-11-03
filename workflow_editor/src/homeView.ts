@@ -265,7 +265,9 @@ export function renderHomeView(root: HTMLElement, opts: { context?: boolean } = 
         h('div', h('strong', w.label || w.id),
           h('div.small', w.state === 'available' ? (running.length ? null : h('span.muted', 'idle')) : h('span.warn-text', w.state === 'unknown' ? 'never reported' : `contact lost${w.at ? ` (last ${when(w.at)})` : ''}`)),
           ...running.map(r => h('div.small', h('a', { href: runHref(r.workspace, `${r.workflow}/${r.run}`) }, icon('play', 'icon small'), ` ${r.workspace} · ${r.workflow}/${r.run}`), r.lane !== 'default' ? h('span.muted', ` (${r.lane} lane)`) : null)),
-          w.queued.length ? h('div.small.muted', `${plural(w.queued.length, 'job')} queued`) : null))
+          // improve_wfrun p4: what waits, and for what (warden's decision, a deferral, the node).
+          w.queued.length ? h('div.small.muted', `${plural(w.queued.length, 'job')} queued${w.coordination !== undefined && w.queued.some(j => j.decision !== undefined) ? ` — ${[w.queued.filter(j => !j.decision).length ? `${w.queued.filter(j => !j.decision).length} awaiting warden` : '', w.queued.filter(j => j.decision === 'defer').length ? `${w.queued.filter(j => j.decision === 'defer').length} deferred` : '', w.queued.filter(j => j.decision === 'start').length ? `${w.queued.filter(j => j.decision === 'start').length} admitted` : ''].filter(Boolean).join(', ')}` : ''}`) : null,
+          w.load ? h('div.small.muted', `load ${w.load.load1 ?? '?'}${w.load.cpus ? ` of ${w.load.cpus} cpus` : ''}${w.load.memFreeMB !== undefined ? `, ${Math.round(w.load.memFreeMB / 1024)} GB free` : ''}`) : null))
     })))
     return card
   }

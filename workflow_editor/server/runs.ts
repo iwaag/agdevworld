@@ -809,14 +809,16 @@ async function createRunUnlocked(ws: Workspace, o: CreateRunOptions): Promise<Cr
   // The worker lane (p8) is frozen beside it; the default lane is not recorded.
   let chosen = node
   let lane: string | undefined
+  let placed: Executor['placed']
   if (host && o.area) {
     const { chooseLane, chooseNode, loadWorkers } = await import('./workers.ts')
     const project = (await defWs.readProject().catch(() => ({ project: undefined }))).project
-    chosen = chooseNode(loadWorkers(o.area), { request: node, workflow: src.files[src.root].workflow, project }).node
+    const pick = chooseNode(loadWorkers(o.area), { request: node, workflow: src.files[src.root].workflow, project })
+    chosen = pick.node; placed = pick.from
     const l = chooseLane({ workflow: src.files[src.root].workflow, project })
     if (l !== DEFAULT_LANE) lane = l
   }
-  const executor: Executor = host ? { name: agent || host, backend: null, host, ...(chosen ? { node: chosen } : {}), ...(lane ? { lane } : {}) } : o.executor as Executor
+  const executor: Executor = host ? { name: agent || host, backend: null, host, ...(chosen ? { node: chosen } : {}), ...(lane ? { lane } : {}), ...(placed ? { placed } : {}) } : o.executor as Executor
   const record = createRecord(project, ref, input, { ...o, executor }, definition, context, graph, o.receipt, o.storage)
   for (const [id, f] of Object.entries(src.files)) files[`${DEFINITION_DIR}/${id}.yaml`] = f.text
   if (o.plan !== undefined) files['plan.md'] = o.plan
@@ -824,7 +826,7 @@ async function createRunUnlocked(ws: Workspace, o: CreateRunOptions): Promise<Cr
 }
 
 function createRecord(project: string, ref: RunRef, input: RunInput, o: Pick<CreateRunOptions, 'predecessor' | 'by' | 'via' | 'now' | 'standing'> & { executor: Executor }, definition: DefinitionRef, context: RunState['context'], graph: RunGraph, receipt?: string, storage?: RunStorage): RunRecord {
-  const executor: Executor = { name: o.executor.name.trim(), backend: o.executor.backend?.trim() || null, ...(o.executor.host ? { host: o.executor.host } : {}), ...(o.executor.node ? { node: o.executor.node } : {}), ...(o.executor.lane ? { lane: o.executor.lane } : {}) }
+  const executor: Executor = { name: o.executor.name.trim(), backend: o.executor.backend?.trim() || null, ...(o.executor.host ? { host: o.executor.host } : {}), ...(o.executor.node ? { node: o.executor.node } : {}), ...(o.executor.lane ? { lane: o.executor.lane } : {}), ...(o.executor.placed ? { placed: o.executor.placed } : {}) }
   try {
     return operate(null, {
       op: 'run.create', project, workflow: ref.workflow, run: ref.run, input, executor, predecessor: o.predecessor ?? null,

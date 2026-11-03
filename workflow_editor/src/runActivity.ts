@@ -61,7 +61,7 @@ export function describeActivity(i: ActivityInput): ActivityLine | null {
     return line
   }
   const queued = i.exec?.jobs.some(j => j.state === 'queued' || j.state === 'claimed')
-  if (queued) return { tone: 'quiet', text: i.status?.state === 'queued' ? i.status.text : 'Queued', note: 'starts when the executor is free' }
+  if (queued) return { tone: 'quiet', text: i.status?.state === 'queued' ? i.status.text : 'Queued', note: i.exec?.coordinated ? 'starts when warden decided it does and its node claims it' : 'starts when the executor is free' }
   if (i.status && ['waiting', 'due', 'stalled'].includes(i.status.state)) return { tone: i.status.state === 'stalled' ? 'warn' : 'waiting', text: i.status.text }
   // p18: a standing conductor at rest waits for no one in particular.
   if (i.status && ['listening', 'suspended', 'closed'].includes(i.status.state)) return { tone: 'muted', text: i.status.text }

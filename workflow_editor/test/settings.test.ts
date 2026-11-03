@@ -133,7 +133,7 @@ test('a run is performed as the definition\'s agent; the host is recorded beside
   const { x, ws } = await setup()
   const r = await x.request({ workspace: ws.reg.id, workflow: 'make', text: 'Make a thing.', author: 'Test Person', receipt: 'settings-req-0001', via: 'browser' })
   const rec = (await readRun(ws, r.ref)).record!
-  assert.deepEqual(rec.executor, { name: 'ppt-agent', backend: null, host: 'autolab', node: 'local' })
+  assert.deepEqual(rec.executor, { name: 'ppt-agent', backend: null, host: 'autolab', node: 'local', placed: 'default' })
   const [s] = await listRuns(ws)
   assert.equal(s.executor, 'ppt-agent')
   assert.equal(s.executorHost, 'autolab')

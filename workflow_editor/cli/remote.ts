@@ -24,6 +24,7 @@ import { hostname, tmpdir } from 'node:os'
 import { dirname, isAbsolute, join, normalize, relative, resolve, sep } from 'node:path'
 import { Readable } from 'node:stream'
 import { atomicWrite } from '../server/files.ts'
+import { withLock } from '../server/lock.ts'
 import { tarCreate, tarExtract } from '../server/tarball.ts'
 import type { StorageTask } from '../server/exec.ts'
 import { git } from '../server/git.ts'
@@ -63,6 +64,14 @@ async function readState(c: WorkerConfig): Promise<State> {
   try { return JSON.parse(await readFile(stateFile(c), 'utf8')) as State } catch { return { attempts: {} } }
 }
 async function saveState(c: WorkerConfig, s: State) { await mkdir(dirname(stateFile(c)), { recursive: true }); await atomicWrite(stateFile(c), `${JSON.stringify(s, null, 2)}\n`) }
+// Several `wfe exec` processes of one worker run at once since improve_wfrun
+// p4 (the executor's keeper, its claims, the ends of several attempts): the
+// bookkeeping is read, changed and written under one lock, and never from a
+// copy read before it. `fn` returns what to answer; the state it changed is saved.
+async function mutateState<T>(c: WorkerConfig, fn: (s: State) => Promise<T> | T): Promise<T> {
+  await mkdir(dirname(stateFile(c)), { recursive: true })
+  return withLock(stateFile(c), async () => { const s = await readState(c); const r = await fn(s); await saveState(c, s); return r }, { what: `worker ${c.worker} state` })
+}
 
 // ---- HTTP ------------------------------------------------------------------------------
 
@@ -283,21 +292,18 @@ async function execCommand(c: WorkerConfig, p: Parsed): Promise<unknown> {
   const s = await readState(c)
   switch (sub) {
     case 'claim': {
-      // Lanes (project_migration p8) are served by the local worker only for
-      // now: this worker's bookkeeping (state.json, one pending claim) is
-      // read and rewritten by one executor at a time, and two lanes claiming
-      // at once would lose each other's attempts.
+      // The coordination lane (improve_wfrun p4) is the coordinator's host's;
+      // a remote worker serves its ordinary work in its default loop, as
+      // many attempts at once as the coordinator admits (state.json is
+      // changed under a lock, so several wfe processes may run at once).
       const lane = opt(p, 'lane')
-      if (lane && lane !== 'default') throw new Failure(`${c.worker} is a remote worker; extra lanes ("${lane}") are served on the local worker only (docs/workers.md, "Lanes")`)
+      if (lane && lane !== 'default') throw new Failure(`${c.worker} is a remote worker; extra lanes ("${lane}") are served on the coordinator's host only (docs/workers.md, "Lanes")`)
       const profiles = opt(p, 'profiles-json'), sessions = opt(p, 'sessions-json'), contract = opt(p, 'contract')
       const m = contract ? /^([^=]+)=([0-9a-f]{64})$/.exec(contract) : null
       const offer = { ...(profiles ? { profiles: JSON.parse(profiles) } : {}), ...(sessions ? { sessions: JSON.parse(sessions) } : {}), ...(m ? { contract: { name: m[1], sha256: m[2] } } : {}) }
-      s.offer = offer
-      s.claim ??= { receipt: randomUUID(), at: new Date().toISOString() }
-      await saveState(c, s)
-      const answer = (await call(c, 'POST', 'claim', { body: { backend: opt(p, 'backend') ?? null, offer, receipt: s.claim.receipt, facts: { label: c.label, root: copiesRoot(c), host: c.facts } } })).json as Record<string, unknown>
-      delete s.claim
-      await saveState(c, s)
+      const receipt = await mutateState(c, st => { st.offer = offer; st.claim ??= { receipt: randomUUID(), at: new Date().toISOString() }; return st.claim.receipt })
+      const answer = (await call(c, 'POST', 'claim', { body: { backend: opt(p, 'backend') ?? null, offer, receipt, facts: { label: c.label, root: copiesRoot(c), host: c.facts } } })).json as Record<string, unknown>
+      await mutateState(c, st => { delete st.claim })
       if ('idle' in answer) return answer
       const attempt = answer.attempt as { id: string; log: string | null }
       const ref = answer.ref as { workflow: string; run: string }
@@ -318,14 +324,13 @@ async function execCommand(c: WorkerConfig, p: Parsed): Promise<unknown> {
         if (r?.checkpoint?.mode === 'worker') await call(c, 'POST', 'checkpoint', { body: { id: r.checkpoint.id, state: 'nothing', steps: [] } }).catch(() => null)
         return { idle: why }
       }
-      s.attempts[attempt.id] = h
-      await saveState(c, s)
+      await mutateState(c, st => { st.attempts[attempt.id] = h })
       await mkdir(dirname(h.log), { recursive: true })
       return { ...answer, cwd: h.tree, attempt: { ...attempt, log: h.log } }
     }
     case 'started': {
       await call(c, 'POST', 'started', { body: { attempt: arg, pid: Number(opt(p, 'pid')) } })
-      if (s.attempts[arg]) { s.attempts[arg].pid = Number(opt(p, 'pid')); await saveState(c, s) }
+      await mutateState(c, st => { if (st.attempts[arg]) st.attempts[arg].pid = Number(opt(p, 'pid')) })
       return { ok: true }
     }
     case 'finished': {
@@ -337,9 +342,16 @@ async function execCommand(c: WorkerConfig, p: Parsed): Promise<unknown> {
     case 'stops': return (await call(c, 'GET', 'stops')).json
     case 'storage-tick': return storageTick(c, s)
     case 'heartbeat': {
-      const beat = await call(c, 'POST', 'heartbeat', { body: { pid: Number(opt(p, 'pid')) || process.pid, detail: opt(p, 'detail') ?? '', offer: s.offer, facts: { label: c.label, root: copiesRoot(c), host: c.facts } } })
-      for (const [id, h] of Object.entries(s.attempts)) await shipLog(c, id, h).catch(() => null)
-      await saveState(c, s)
+      // --facts-json (improve_wfrun p4): the executor's measured load joins this host's facts.
+      let extra: Record<string, unknown> = {}
+      try { extra = JSON.parse(opt(p, 'facts-json') ?? '{}') as Record<string, unknown> } catch { extra = {} }
+      const beat = await call(c, 'POST', 'heartbeat', { body: { pid: Number(opt(p, 'pid')) || process.pid, detail: opt(p, 'detail') ?? '', offer: s.offer, facts: { label: c.label, root: copiesRoot(c), host: c.facts, ...extra } } })
+      // Logs are shipped outside the lock (it can take a while); each offset
+      // is then recorded against the state as it is now.
+      for (const [id, h] of Object.entries(s.attempts)) {
+        const at = await shipLog(c, id, h).catch(() => null)
+        if (at !== null) await mutateState(c, st => { if (st.attempts[id]) st.attempts[id].shipped = Math.max(st.attempts[id].shipped, at) })
+      }
       if ((beat.json as { storageTasks?: number }).storageTasks) startStorageTick(c)
       return { ok: true }
     }
@@ -477,7 +489,8 @@ async function heldFrom(c: WorkerConfig, a: { id: string; workspace: string; wor
 async function finish(c: WorkerConfig, s: State, id: string, exit: { code: number | null; signal: string | null; lost?: boolean; interrupted?: string; attached?: string }) {
   const h = s.attempts[id]
   if (h) {
-    await shipLog(c, id, h).catch(() => null)
+    const at = await shipLog(c, id, h).catch(() => null)
+    if (at !== null) await mutateState(c, st => { if (st.attempts[id]) st.attempts[id].shipped = Math.max(st.attempts[id].shipped, at) })
     await upload(c, h, [runFolder(h)])
   }
   const r = (await call(c, 'POST', 'finished', { body: { attempt: id, ...exit } })).json as { outcome: string; checkpoint: { id: number; mode: string; state: string } | null; resumeJob: unknown }
@@ -485,8 +498,7 @@ async function finish(c: WorkerConfig, s: State, id: string, exit: { code: numbe
   if (checkpoint?.mode === 'worker' && !['published', 'nothing'].includes(checkpoint.state)) {
     checkpoint = h ? await publish(c, h, checkpoint as never) : (await call(c, 'POST', 'checkpoint', { body: { id: checkpoint.id, state: 'nothing', steps: [], error: `${c.worker} holds no copy of this attempt` } })).json as typeof checkpoint
   }
-  if (h && (!checkpoint || ['published', 'nothing'].includes(checkpoint.state))) delete s.attempts[id]
-  await saveState(c, s)
+  if (h && (!checkpoint || ['published', 'nothing'].includes(checkpoint.state))) await mutateState(c, st => { delete st.attempts[id] })
   return { ok: true, ...r, checkpoint }
 }
 
@@ -513,7 +525,7 @@ async function reconcile(c: WorkerConfig, s: State, holding: string[]): Promise<
     // A claim whose answer never arrived holds no state here: an attempt of
     // this worker that was never registered (launching) is gone after the
     // launch window; its copy, if one was made, is found on disk.
-    if (!s.attempts[a.id] && a.state !== 'launching') { const found = await heldFrom(c, a); if (found) s.attempts[a.id] = found }
+    if (!s.attempts[a.id] && a.state !== 'launching') { const found = await heldFrom(c, a); if (found) { s.attempts[a.id] = found; await mutateState(c, st => { st.attempts[a.id] ??= found }) } }
     const h = s.attempts[a.id]
     const pid = a.pid ?? h?.pid ?? null
     if (a.state === 'launching' ? Date.now() - Date.parse(a.began) < LAUNCH_STALE_MS : pidAlive(pid)) continue
@@ -526,7 +538,7 @@ async function reconcile(c: WorkerConfig, s: State, holding: string[]): Promise<
     const h = s.attempts[cp.attempt] ?? await heldFrom(c, { id: cp.attempt, workspace: cp.workspace, workflow: cp.workflow, run: cp.run, pid: null, began: '' })
     const r = h ? await publish(c, h, cp).catch(e => ({ state: `failed: ${(e as Error).message}` }))
       : (await call(c, 'POST', 'checkpoint', { body: { id: cp.id, state: 'nothing', steps: [], error: `${c.worker} holds no copy of this attempt` } })).json as { state: string }
-    if (['published', 'nothing'].includes(r.state)) { delete s.attempts[cp.attempt]; await saveState(c, s) }
+    if (['published', 'nothing'].includes(r.state)) { delete s.attempts[cp.attempt]; await mutateState(c, st => { delete st.attempts[cp.attempt] }) }
     notes.push(`checkpoint ${cp.id}: ${r.state}`)
   }
   return notes

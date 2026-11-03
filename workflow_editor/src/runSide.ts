@@ -679,9 +679,22 @@ export class RunSide {
       steps.length ? h('ul.active-list', ...steps) : h('p.small.muted', 'No node is recorded as running.'),
       seen ? h(`p.s-only.observation.${tone}`, icon(tone === 'ok' ? 'play' : tone === 'warn' ? 'alert' : 'history', 'icon small'), seen) : null,
       h('p.small.executor-line.d-only', `Executor: ${host}${d.execView && !nf?.remote ? ` · executor ${d.execView.executor.state}` : ''}`),
+      // improve_wfrun p4: what else runs on the same node now, and the decision this attempt started by.
+      ...(open && d.execView?.coordinated ? [this.coordinationLine(rec, open)] : []),
       nf?.remote ? h(`p.small.node-line.${nf.tone === 'ok' ? 'muted' : 'warn-text'}`, nf.line, open && nf.state !== 'available' ? '. Its process may still be working; nothing is decided from the silence.' : '') : null,
       h('div.row.tight.focus-actions', h('button', { title: STOP_TITLE, dataset: { action: 'stop-run' }, disabled: this.frozen || !!rec.control.hold || !!rec.control.stop || sit === 'completed' }, icon('stop', 'icon tiny'), 'Stop'),
         rec.control.stop ? h('span.small.warn-text', `Stop requested by ${rec.control.stop.by}${becauseText(rec.control.stop.because)}; waiting for the process to end, then its work is saved.`) : null))
+  }
+
+  // improve_wfrun p4 (Detail): the open attempts sharing the node, the decision.
+  private coordinationLine(rec: RunRecord, open: NonNullable<RunExecView['attempts'][number]>): HTMLElement | null {
+    const d = this.data
+    const node = rec.executor.node ?? d.execView?.workers?.find(w => w.default)?.id
+    const w = d.execView?.workers?.find(x => x.id === node)
+    const others = (w?.slots ?? []).filter(s => s.attempt !== open.id)
+    const decision = d.execView?.decisions?.find(x => x.attempt === open.id) ?? d.execView?.decisions?.filter(x => x.state === 'applied' && x.action === 'start').at(-1)
+    if (!others.length && !decision) return null
+    return h('p.small.muted.d-only.coordination-line', decision ? `Started by warden's decision ${decision.id} (${decision.by}): ${decision.reason}. ` : '', others.length ? `Sharing ${node}: ${others.map(s => `${s.workspace} ${s.workflow}/${s.run}`).join(', ')}.` : '')
   }
 
   // Whether this host executes the run (it has queued jobs for it): an answer

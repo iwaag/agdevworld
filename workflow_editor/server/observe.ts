@@ -62,7 +62,10 @@ export interface ObservedRun {
   // about liveness and its age is no stall timer).
   session: SessionFacts | null
   process: ProcessFacts | null
-  queue: { job: Pick<JobRow, 'id' | 'kind' | 'state' | 'created' | 'reason' | 'receipt'> | null; position: number | null; ahead: { uid: string | null; ref: string; workspace: string; kind: 'attempt' | 'job'; state: string }[] }
+  // `job.decision` (improve_wfrun p4): how the job is admitted — `start`
+  // (warden decided), `defer` (deferred; `deferUntil`, `reconsider`), null:
+  // awaiting warden's decision. `admission` reads the same in one word.
+  queue: { job: (Pick<JobRow, 'id' | 'kind' | 'state' | 'created' | 'reason' | 'receipt'> & { decision: 'start' | 'defer' | null; decisionId: number | null; deferUntil: string | null; reconsider: import('./exec.ts').Reconsider | null; admission: 'awaiting' | 'deferred' | 'admitted' | 'claimed' }) | null; position: number | null; ahead: { uid: string | null; ref: string; workspace: string; kind: 'attempt' | 'job'; state: string }[] }
   inputs: { questions: { id: string; node: string | null; to: string; asked: string; state: string }[]; answeredNotTakenUp: string[]; instructionsPending: number }
   waiting: { reason: string; responsible: string; since: string | null } | null
   progress: { seq: number; at: string; op: string; by: string; attempt: string | null } | null
@@ -115,7 +118,15 @@ export interface Observation {
   // project_migration p7: every execution node. `executor` above is the
   // local worker's (what it always was); a remote worker's state is its last
   // contact — `unavailable` means contact is lost, not that its work ended.
-  workers: { id: string; label: string; local: boolean; default: boolean; state: string; heartbeatAt: string | null; ageSeconds: number | null; detail: string; slot: { attempt: string; workspace: string; run: string; uid: string | null; stopRequested: string | null } | null; slots: { attempt: string; workspace: string; run: string; uid: string | null; stopRequested: string | null; lane: string }[]; lanes: Record<string, number>; queued: number; waiting: { job: number; run: string; note: string }[]; profiles: string[] | null }[]
+  workers: { id: string; label: string; local: boolean; default: boolean; state: string; heartbeatAt: string | null; ageSeconds: number | null; detail: string; slot: { attempt: string; workspace: string; run: string; uid: string | null; stopRequested: string | null } | null; slots: { attempt: string; workspace: string; run: string; uid: string | null; stopRequested: string | null; lane: string; decision: number | null }[]; lanes: string[]; coordination: boolean; load: import('./exec.ts').WorkerLoad | null; queued: number; awaiting: number; deferred: number; waiting: { job: number; run: string; note: string; decision: string | null; deferUntil: string | null }[]; profiles: string[] | null }[]
+  // improve_wfrun p4: the coordination path's own state. `configured` false:
+  // every job is admitted as queued. `turn`: the coordination run open now;
+  // `stalled`: turns keep ending without a decision while something awaits
+  // one; `awaiting`/`deferred`: queued ordinary jobs by admission;
+  // `overdue`: deferrals whose time passed without a later decision.
+  coordination: { configured: boolean; worker: string | null; lane: string | null; workflow: string | null; turn: { id: number; run: string | null; attempt: string | null; since: string } | null
+    stalled: { since: string; failures: number; until: string; last: string } | null; awaiting: number; deferred: number; needs: string[]; pendingEvents: number; oldestPendingEvent: string | null
+    overdue: { job: number; workspace: string; run: string; uid: string | null; until: string; decision: number }[]; lastTurn: { id: number; state: string; ended: string | null; outcome: string | null; decisions: number } | null }
   workspaces: { id: string; available: boolean; problem: string | null }[]
   runs: ObservedRun[]
   problems: { code: string; message: string }[]
@@ -160,7 +171,7 @@ async function sourceOf(ws: Workspace, ref: RunRef): Promise<{ state: SourceStat
   return { state: /still being created/.test(p) ? 'copy-creating' : /is missing|has no/.test(p) ? 'copy-missing' : 'copy-damaged', problem: p, location: 'copy' }
 }
 
-function waitingOf(r: RunRecord, job: JobRow | null): ObservedRun['waiting'] {
+function waitingOf(r: RunRecord, job: JobRow | null, coordinated = false): ObservedRun['waiting'] {
   const ctl = r.control
   if (r.cancelled) return { reason: 'cancelled', responsible: 'none', since: r.cancelled.at }
   if (r.execution.state === 'completed') return null
@@ -171,6 +182,8 @@ function waitingOf(r: RunRecord, job: JobRow | null): ObservedRun['waiting'] {
     if (ctl.hold.kind === 'stopped') return { reason: `held by ${ctl.hold.by}: ${ctl.hold.reason}`, responsible: `person:${ctl.hold.because?.from ?? ctl.hold.by}`, since: ctl.hold.since }
     return { reason: `held: ${ctl.hold.kind} (${ctl.hold.reason})`, responsible: 'recovery', since: ctl.hold.since }
   }
+  // improve_wfrun p4: a queued job is warden's move until a decision admits it.
+  if (job && job.state === 'queued' && coordinated && job.decision !== 'start') return { reason: `${job.kind} queued${job.worker ? ` for ${job.worker}` : ''}, ${job.decision === 'defer' ? `deferred by warden${job.defer_until ? ` until ${job.defer_until}` : ''}` : 'awaiting warden\'s decision'} (${job.reason})`, responsible: 'coordination', since: job.created }
   if (job) return { reason: `${job.kind} ${job.state}${job.worker ? ` for ${job.worker}` : ''} (${job.note ?? job.reason})`, responsible: 'executor', since: job.created }
   for (const w of r.execution.waiting) {
     if ('question' in w.on) {
@@ -313,10 +326,36 @@ export class Observer {
       workers: (queue?.workers ?? []).map(w => ({ id: w.id, label: w.label, local: w.local, default: w.default, state: w.state, heartbeatAt: w.at, ageSeconds: w.ageSeconds === null ? null : Math.round(w.ageSeconds * 10) / 10, detail: w.detail,
         slot: w.busy ? { attempt: w.busy.attempt, workspace: w.busy.workspace, run: `${w.busy.workflow}/${w.busy.run}`, uid: uidOf(w.busy.workspace, `${w.busy.workflow}/${w.busy.run}`), stopRequested: w.busy.stopRequested } : null,
         // Every open attempt with its lane (p8); `slot` stays the default lane's.
-        slots: w.slots.map(a => ({ attempt: a.attempt, workspace: a.workspace, run: `${a.workflow}/${a.run}`, uid: uidOf(a.workspace, `${a.workflow}/${a.run}`), stopRequested: a.stopRequested, lane: a.lane })), lanes: w.lanes,
-        queued: w.queued.length, waiting: w.queued.filter(j => j.note).map(j => ({ job: j.id, run: `${j.workflow}/${j.run}`, note: j.note! })), profiles: w.profiles })),
+        slots: w.slots.map(a => ({ attempt: a.attempt, workspace: a.workspace, run: `${a.workflow}/${a.run}`, uid: uidOf(a.workspace, `${a.workflow}/${a.run}`), stopRequested: a.stopRequested, lane: a.lane, decision: a.decision })), lanes: w.lanes, coordination: w.coordination, load: w.load,
+        queued: w.queued.length, awaiting: w.queued.filter(j => !j.decision).length, deferred: w.queued.filter(j => j.decision === 'defer').length,
+        waiting: w.queued.filter(j => j.note || j.decision !== 'start').map(j => ({ job: j.id, run: `${j.workflow}/${j.run}`, note: j.note ?? (j.decision === 'defer' ? 'deferred by warden' : 'awaiting warden\'s decision'), decision: j.decision, deferUntil: j.deferUntil })), profiles: w.profiles })),
+      coordination: this.coordinationFacts(uidOf),
       workspaces, runs, problems,
     }
+  }
+
+  // The coordination path as a monitor reads it (improve_wfrun p4).
+  private coordinationFacts(uidOf: (workspace: string, ref: string) => string | null): Observation['coordination'] {
+    const none = { configured: false, worker: null, lane: null, workflow: null, turn: null, stalled: null, awaiting: 0, deferred: 0, needs: [], pendingEvents: 0, oldestPendingEvent: null, overdue: [], lastTurn: null }
+    if (!this.exec) return none
+    const cfg = this.exec.workers()
+    if (!cfg.coordination) return none
+    const x = this.exec
+    const jobs = x.queueView().jobs.filter(j => j.state === 'queued' && !(cfg.coordination!.workspace === j.workspace && cfg.coordination!.workflow === j.workflow))
+    const t = new Date().toISOString()
+    const overdue: Observation['coordination']['overdue'] = []
+    for (const j of jobs) {
+      if (j.decision !== 'defer' || !j.defer_until || j.defer_until > t) continue
+      overdue.push({ job: j.id, workspace: j.workspace, run: `${j.workflow}/${j.run}`, uid: uidOf(j.workspace, `${j.workflow}/${j.run}`), until: j.defer_until, decision: j.decision_id ?? 0 })
+    }
+    const turn = x.openBatch()
+    const last = x.recentBatches(1).at(-1) ?? null
+    const events = x.pendingEvents()
+    const needs = x.needsCoordination()
+    return { configured: true, worker: cfg.coordination.worker, lane: cfg.coordination.lane, workflow: `${cfg.coordination.workspace}/${cfg.coordination.workflow}`,
+      turn: turn ? { id: turn.id, run: turn.run, attempt: turn.attempt, since: turn.created } : null, stalled: x.coordinationStall(),
+      awaiting: jobs.filter(j => !j.decision).length, deferred: jobs.filter(j => j.decision === 'defer').length, needs: needs.why, pendingEvents: events.length, oldestPendingEvent: events[0]?.at ?? null, overdue,
+      lastTurn: last ? { id: last.id, state: last.state, ended: last.ended, outcome: last.outcome, decisions: last.decisions } : null }
   }
 
   // A run with nothing left to watch: completed or cancelled, nothing
@@ -390,13 +429,13 @@ export class Observer {
       },
       session: sessionFacts(r, policy),
       process: null,
-      queue: { job: openJob ? { id: openJob.id, kind: openJob.kind, state: openJob.state, created: openJob.created, reason: openJob.reason, receipt: openJob.receipt } : null, position: null, ahead: [] },
+      queue: { job: openJob ? jobFacts(openJob, this.exec) : null, position: null, ahead: [] },
       inputs: {
         questions: Object.values(r.questions).map(q => ({ id: q.id, node: q.node, to: q.to, asked: q.asked, state: questionState(q) })),
         answeredNotTakenUp: Object.values(r.questions).filter(q => questionState(q) === 'answered').map(q => q.id),
         instructionsPending: Object.values(r.instructions ?? {}).filter(i => !i.ack).length,
       },
-      waiting: waitingOf(r, openJob),
+      waiting: waitingOf(r, openJob, !!this.exec?.workers().coordination),
       progress: progressOf(r),
       recoveries: r.history.filter(e => (e.op as string) === 'run.recover').map(e => { const x = e as unknown as { seq: number; at: string; by: string; incident: string; attempt: string; agent?: unknown }; return { seq: x.seq, at: x.at, by: x.by, incident: x.incident, attempt: x.attempt, agent: x.agent ?? null } }),
       publication: { failed: [], attention: [], pending: [] },
@@ -459,7 +498,7 @@ export class Observer {
   private async withRows(out: ObservedRun, ws: Workspace, ref: RunRef, groups: Map<number, { members: number; cpuSeconds: number }> | string, given?: ReturnType<ExecStore['runRows']>, rec?: RunRecord): Promise<ObservedRun> {
     const rows = given ?? (this.exec ? this.exec.runRows(ws.reg.id, ref) : null)
     if (!rows) return out
-    if (!out.queue.job) { const j = rows.jobs.find(x => x.state === 'queued' || x.state === 'claimed'); if (j) out.queue.job = { id: j.id, kind: j.kind, state: j.state, created: j.created, reason: j.reason, receipt: j.receipt } }
+    if (!out.queue.job) { const j = rows.jobs.find(x => x.state === 'queued' || x.state === 'claimed'); if (j) out.queue.job = jobFacts(j, this.exec) }
     const a: AttemptRow | undefined = rows.attempts.find(x => x.state !== 'ended') ?? rows.attempts.at(-1)
     if (a) {
       const remote = this.exec?.isRemote(a.worker) ?? false
@@ -503,6 +542,14 @@ export class Observer {
 }
 
 export const runKeyOf = (r: ObservedRun) => runKey({ workflow: r.identity.workflow, run: r.identity.run })
+
+// A queued or claimed job with its admission (improve_wfrun p4).
+function jobFacts(j: JobRow, exec: ExecStore | null): NonNullable<ObservedRun['queue']['job']> {
+  const d = j.decision_id && exec ? exec.db.prepare('SELECT reconsider FROM decisions WHERE id = ?').get(j.decision_id) as { reconsider: string | null } | undefined : undefined
+  return { id: j.id, kind: j.kind, state: j.state, created: j.created, reason: j.reason, receipt: j.receipt, decision: j.decision, decisionId: j.decision_id, deferUntil: j.defer_until,
+    reconsider: d?.reconsider ? JSON.parse(d.reconsider) as import('./exec.ts').Reconsider : null,
+    admission: j.state === 'claimed' ? 'claimed' : j.decision === 'start' ? 'admitted' : j.decision === 'defer' ? 'deferred' : exec?.workers().coordination ? 'awaiting' : 'admitted' }
+}
 
 // agent_session p1: what the record says of the run's sessions.
 function sessionFacts(r: RunRecord, policy: 'fresh' | 'run'): SessionFacts {

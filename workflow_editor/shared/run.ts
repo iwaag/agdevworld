@@ -90,7 +90,11 @@ export type InputAttachment = (ChallengeAttachmentRef & { file: string }) | File
 // area's default worker (records made before p7).
 // lane (project_migration p8): the worker lane its attempts are claimed in,
 // frozen at creation like the node; absent = `default`.
-export interface Executor { name: string; backend: string | null; host?: string; node?: string; lane?: string }
+// placed (improve_wfrun p4): where the node came from at creation — the
+// request's explicit choice, the workflow's, the project's or the area's
+// default. A request's choice is a placement constraint coordination keeps.
+export type Placed = 'request' | 'workflow' | 'project' | 'default'
+export interface Executor { name: string; backend: string | null; host?: string; node?: string; lane?: string; placed?: Placed }
 export const hostOf = (e: Executor) => e.host ?? e.name
 export { NODE_PATTERN }
 // Who assigned the run's node, when it was not chosen at creation (p7).
@@ -1161,6 +1165,7 @@ export function apply(prev: RunState | null, e: HistoryEntry | (OpInput & EntryM
     if (eff && canonicalJson({ nodes: eff.nodes, edges: eff.edges }) !== canonicalJson({ nodes: graph.nodes, edges: graph.edges })) fail('graph', 'the graph followed differs from the frozen effective graph')
     if (e.executor?.node !== undefined && (typeof e.executor.node !== 'string' || !NODE_PATTERN.test(e.executor.node))) fail('shape', `executor.node "${String(e.executor.node)}" must match ${NODE_PATTERN.source}`)
     if (e.executor?.lane !== undefined && (typeof e.executor.lane !== 'string' || !NODE_PATTERN.test(e.executor.lane))) fail('shape', `executor.lane "${String(e.executor.lane)}" must match ${NODE_PATTERN.source}`)
+    if (e.executor?.placed !== undefined && !['request', 'workflow', 'project', 'default'].includes(String(e.executor.placed))) fail('shape', `executor.placed "${String(e.executor.placed)}" is request, workflow, project or default`)
     if (e.input?.source !== undefined) sourceOf(e.input.source) // checked, recorded as given
     if (e.input?.references !== undefined) {
       if (!Array.isArray(e.input.references)) fail('shape', 'input.references must be a list')

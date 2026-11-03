@@ -289,4 +289,11 @@ test('wfe run expectation through the command line, with each kind of evidence',
   const r = await rec(ws, ref)
   assert.deepEqual(expectationStates(r).map(assessmentWords), ['Met', 'Alternative', 'Unverified'])
   assert.deepEqual(expectationStates(r)[0].assessment?.evidence.map(e => e.kind), ['artifact', 'commit'])
+  // scene-world/run-005: wfe run show read the entry's evidence list as text and crashed.
+  const lines: string[] = []
+  const log = console.log
+  console.log = (...a: unknown[]) => { lines.push(a.join(' ')) }
+  try { assert.equal(await main(['run', 'show', 'world/run-001', '--history', '--workspace', 'p', '--registry', registry]), 0) } finally { console.log = log }
+  assert.match(lines.join('\n'), /expectation\.assess[\s\S]*webbrowser on show: met — Opens\./)
+  assert.match(lines.join('\n'), /show: Browser · Required · Met \(reported by agent: Opens\.; evidence: shown\.html, [0-9a-f]{10}\)/)
 })

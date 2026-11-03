@@ -609,7 +609,8 @@ function entryLine(e: HistoryEntry): string {
     e.op === 'instruction.receive' && `instruction ${e.change.instruction?.[1] ?? ''}`, Array.isArray(d.instructions) && `instructions ${(d.instructions as string[]).join(', ')} (${String(d.response)})`].filter(Boolean).join(', ')
   const moves = Object.entries(e.change.nodes ?? {}).map(([n, [a, b]]) => a === null ? `${n} added as ${b} (recorded afterwards)` : `${n} ${a}→${b}`)
   if (e.change.execution) moves.push(`run ${e.change.execution[0] ?? '—'}→${e.change.execution[1]}`)
-  const detail = (d.reason ?? d.outcome ?? d.text ?? d.evidence ?? d.external ?? d.note ?? '') as string
+  // improve_wfnode p1: an assessment's evidence is a list, its words are the status and note.
+  const detail = e.op === 'expectation.assess' ? `${String(d.key)} on ${String(d.node)}: ${String(d.status)}${d.note ? ` — ${String(d.note)}` : ''}` : (d.reason ?? d.outcome ?? d.text ?? d.evidence ?? d.external ?? d.note ?? '') as string
   return `  ${String(e.seq).padStart(3)} ${e.at}  ${e.op.padEnd(17)} ${e.by} (${e.via})${subject ? `  ${subject}` : ''}${moves.length ? `  [${moves.join(', ')}]` : ''}${detail ? `\n${' '.repeat(30)}${first(detail, 140)}` : ''}`
 }
 

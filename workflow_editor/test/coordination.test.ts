@@ -310,3 +310,53 @@ test('coordination: racing decisions and claims — one attempt per run, the sec
   assert.equal(s.x.pendingEvents().filter(e => e.kind === 'queued').length, 3)
   s.x.close()
 })
+
+test('coordination: a deferral --on an event is looked at again when that event happens, whatever the ids of the two tables', async () => {
+  const s = await setup({ pc: false })
+  const a = await s.request('long', 'coord-req-0401')
+  const b = await s.request('quick', 'coord-req-0402')
+  await s.x.decide({ action: 'start', workspace: s.id, ref: a.ref, reason: 'first', by: 'w', via: 'cli' })
+  // Many decisions, few events: a decision's id is above any event's.
+  for (let i = 0; i < 12; i++) await s.x.decide({ action: 'note', workspace: s.id, ref: b.ref, reason: `note ${i}`, by: 'w', via: 'cli' })
+  const d = await s.x.decide({ action: 'defer', workspace: s.id, ref: b.ref, reason: 'needs the node quiet', reconsider: { on: ['attempt-ended'] }, by: 'w', via: 'cli' })
+  // Close whatever turn the queue opened, so only the deferral can ask for one.
+  s.x.db.prepare('UPDATE coordination_events SET taken_by = ?').run('test')
+  s.x.db.prepare('UPDATE jobs SET state = \'dropped\' WHERE workflow = \'coordinate\'').run()
+  s.x.openBatch()
+  assert.equal(s.x.needsCoordination().yes, false, 'nothing named has happened')
+  const c = await claimed(s.x)
+  assert.equal(c.ref.workflow, 'long')
+  assert.equal(s.x.needsCoordination().yes, false, 'another job starting is not the named event')
+  s.x.started(c.attempt.id, process.pid)
+  await new Promise(r => setTimeout(r, 5))
+  await s.x.finished(c.attempt.id, { code: 0, signal: null })
+  const need = s.x.needsCoordination()
+  assert.ok(need.yes && need.why.some(w => /named attempt-ended, which happened/.test(w)), JSON.stringify(need))
+  assert.ok(s.x.pendingEvents().at(-1)!.id < d.decision.id, 'the event id is below the decision id: the comparison must not use them')
+  s.x.close()
+})
+
+test('coordination: a turn whose job is claimed before it is linked still counts its attempt and decisions', async () => {
+  const s = await setup({ pc: false })
+  const a = await s.request('long', 'coord-req-0501')
+  await idle(s.x)
+  const t = s.x.openBatch()!
+  // As turn 14 was live: the executor claimed between the request and the link.
+  s.x.db.prepare('UPDATE coordination_batches SET state = \'creating\', job = NULL, run = NULL WHERE id = ?').run(t.id)
+  const c = await claimed(s.x, { lane: 'coordination' })
+  const linked = s.x.openBatch()!
+  assert.equal(linked.id, t.id, 'one turn, not a second')
+  assert.equal(linked.attempt, c.attempt.id)
+  assert.equal(linked.run, c.ref.run)
+  await s.x.decide({ action: 'start', workspace: s.id, ref: a.ref, reason: 'go', attempt: c.attempt.id, via: 'cli' })
+  s.x.started(c.attempt.id, process.pid)
+  await s.x.finished(c.attempt.id, { code: 0, signal: null })
+  const end = s.x.recentBatches(5).find(b => b.id === t.id)!
+  assert.equal(end.state, 'ended', end.outcome ?? '')
+  assert.equal(end.decisions, 1)
+  // Several asks at once make one turn.
+  await s.request('quick', 'coord-req-0502')
+  const turns = await Promise.all([s.x.ensureCoordination(), s.x.ensureCoordination(), s.x.ensureCoordination()])
+  assert.equal(new Set(turns.map(b => b?.id)).size, 1, JSON.stringify(turns.map(b => b?.id)))
+  s.x.close()
+})

@@ -128,7 +128,7 @@ it admitted; `batch`: the turn).
 sequence, the job and its state, the run's node, the ordinary attempts open
 on the worker. A decision made with `--basis` whose token no longer holds
 is recorded as `stale`, applies nothing, and answers the facts as they are
-now (`decision-stale`). A changed load sample is not part of the basis.
+now (`wfe coordinate` exits 1). A changed load sample is not part of the basis.
 Without `--basis` the decision applies to what is there now.
 
 **Placement.** `executor.placed` records where a run's node came from at

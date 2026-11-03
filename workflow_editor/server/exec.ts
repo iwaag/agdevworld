@@ -417,6 +417,9 @@ export function activeWorkflow(rec: RunRecord, bundle: import('./runs.ts').Bundl
 // A worker's part in a run's working-copy lifecycle (improve_wfrun p2).
 export interface StorageTask { workspace: string; workflow: string; run: string; action: 'archive' | 'remove'; generation: number; repositories?: { path: string; head: string | null }[] }
 
+// The coordination turn a job was queued for (improve_wfrun p4), from its receipt.
+const turnOfReceipt = (receipt: string): number | null => { const m = /^request:coordinate:turn-(\d+)$/.exec(receipt); return m ? Number(m[1]) : null }
+
 export class ExecStore {
   readonly db: DatabaseSync
   readonly ctx: ExecContext
@@ -815,7 +818,10 @@ export class ExecStore {
         if (Number(r.changes) !== 1) return false
         this.run('INSERT INTO attempts (id, job, workspace, workflow, run, host, state, began, backend, worker, claim, lane, decision) VALUES (?, ?, ?, ?, ?, ?, \'launching\', ?, ?, ?, ?, ?, ?)', id, job.id, job.workspace, job.workflow, job.run, label, now(), execution.backend, worker, o.receipt ?? null, jobLane === DEFAULT_LANE ? null : jobLane, admission.ok ? admission.decision : null)
         if (admission.ok && admission.decision) this.run('UPDATE decisions SET attempt = coalesce(attempt, ?) WHERE id = ?', id, admission.decision)
-        if (coordination) this.run('UPDATE coordination_batches SET attempt = ?, state = \'open\' WHERE job = ? AND state IN (\'creating\', \'open\')', id, job.id)
+        // The turn is named by the job's receipt: the executor can claim the job
+        // before ensureCoordination has written the job and run on the turn (p4, turn 14).
+        const turn = coordination ? turnOfReceipt(job.receipt) : null
+        if (turn) this.run('UPDATE coordination_batches SET attempt = ?, job = ?, run = ?, state = \'open\' WHERE id = ? AND state IN (\'creating\', \'open\')', id, job.id, job.run, turn)
         return true
       })
       if (!claimed) return { idle: 'another executor claimed it first' }
@@ -1819,7 +1825,7 @@ export class ExecStore {
       const d = j.decision_id ? this.one<DecisionRow>('SELECT * FROM decisions WHERE id = ?', j.decision_id) : null
       const rc = d?.reconsider ? JSON.parse(d.reconsider) as Reconsider : {}
       if (rc.until && rc.until <= t) why.push(`deferral of ${j.workspace} ${j.workflow}/${j.run} is due since ${rc.until}`)
-      else if (rc.on?.length && pending.some(e => rc.on!.includes(e.kind) && e.id > (d?.id ?? 0) && e.at > (d?.at ?? ''))) why.push(`deferral of ${j.workspace} ${j.workflow}/${j.run} named ${rc.on.join(', ')}, which happened`)
+      else if (rc.on?.length && pending.some(e => rc.on!.includes(e.kind) && e.at > (d?.at ?? ''))) why.push(`deferral of ${j.workspace} ${j.workflow}/${j.run} named ${rc.on.join(', ')}, which happened`)
     }
     const asked = pending.filter(e => e.kind === 'reconsider')
     if (asked.length) why.push(`${asked.length} reconsideration request${asked.length === 1 ? '' : 's'} (${asked.slice(0, 3).map(e => e.detail ?? '').join('; ')})`)
@@ -1871,18 +1877,25 @@ export class ExecStore {
     const cfg = this.workers()
     const c = cfg.coordination
     if (!c) return null
-    const open = this.openBatch()
-    if (open) return open
+    // Checked and reserved together: the claim, an end and the reconcile may
+    // ask at once from different processes, and one turn opens.
     const need = this.needsCoordination()
-    if (!need.yes && !o.force) return null
-    if (!o.force && this.coordinationStall()) return null
-    const id = Number(this.run('INSERT INTO coordination_batches (created, state, workspace, workflow) VALUES (?, \'creating\', ?, ?)', now(), c.workspace, c.workflow).lastInsertRowid)
+    const reserved = this.tx(() => {
+      const open = this.openBatch()
+      if (open) return open
+      if (!need.yes && !o.force) return null
+      if (!o.force && this.coordinationStall()) return null
+      return Number(this.run('INSERT INTO coordination_batches (created, state, workspace, workflow) VALUES (?, \'creating\', ?, ?)', now(), c.workspace, c.workflow).lastInsertRowid)
+    })
+    if (reserved === null || typeof reserved !== 'number') return reserved
+    const id = reserved
     const text = [`Coordination turn ${id}.`, '', ...(need.why.length ? need.why.map(w => `- ${w}`) : ['- requested explicitly']), '',
       'Look at the queue and the workers (wfe coordinate view), take the pending events (wfe coordinate events --take), decide what starts, moves or waits, apply it (wfe coordinate start|defer|assign|note), and end. wfe coordinate --help explains the operations.'].join('\n')
     try {
       const r = await this.request({ workspace: c.workspace, workflow: c.workflow, text, author: 'WFE', receipt: `coordinate:turn-${id}`, via: 'coordination', node: c.worker,
         input: { kind: 'request', text, requester: 'WFE', entrustedBy: { kind: 'note', text: `coordination turn ${id}: ${need.why.join('; ') || 'requested explicitly'}` } } })
-      this.run('UPDATE coordination_batches SET state = \'open\', run = ?, job = ? WHERE id = ?', r.ref.run, r.job.id, id)
+      // The claim may already have linked it, or the turn may even have ended.
+      this.run('UPDATE coordination_batches SET state = CASE WHEN state = \'creating\' THEN \'open\' ELSE state END, run = ?, job = ? WHERE id = ?', r.ref.run, r.job.id, id)
       return this.one<CoordinationBatchRow>('SELECT * FROM coordination_batches WHERE id = ?', id)!
     } catch (e) {
       this.run('UPDATE coordination_batches SET state = \'failed\', ended = ?, error = ? WHERE id = ?', now(), (e as Error).message, id)

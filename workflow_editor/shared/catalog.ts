@@ -5,7 +5,8 @@
 // validation, the seeds and the example, and instantiation — a template
 // copied into an ordinary workflow node with its provenance.
 import { canonicalJson } from './canonical.ts'
-import { APPEARANCE_COLORS, APPEARANCE_ICONS, ID_PATTERN, type Appearance, type Workflow, type WorkflowNode } from './model.ts'
+import { APPEARANCE_COLORS, APPEARANCE_ICONS, ID_PATTERN, type Appearance, type NodeExpectation, type Workflow, type WorkflowNode } from './model.ts'
+import { EXPECTATION_STRENGTHS } from './expectations.ts'
 
 export const CATALOG_SCHEMA = 'ag.node-catalog.v1'
 export const SNAPSHOT_SCHEMA = 'ag.node-catalog-snapshot.v1'
@@ -29,6 +30,10 @@ export interface TemplateContent {
   // p10, delegate templates only: the target and who accepts the child's
   // result, copied into the node it becomes (each may be left to the author).
   target?: { project?: string; workflow?: string; accepts?: string }
+  // improve_wfnode p1, copied into the node it becomes: what its author expects
+  // of the result, and whether it starts as an example. A template owns no group.
+  expectations?: NodeExpectation[]
+  example?: boolean
 }
 export interface NodeTemplate extends TemplateContent {
   id: string
@@ -71,7 +76,7 @@ export function catalogBrief(c: RunCatalog, run: string): string[] {
   const t = c.snapshot.templates
   if (!t.length) return ['', 'The person\'s node catalog was empty when this run was created: they have named no activity they expect as a workflow node of its own.']
   return ['', `The person's node catalog, as it was when this run was created (wfe run nodes ${run} shows each template in full):`, CATALOG_MEANING,
-    ...t.map(x => `- ${x.id} "${x.name}" (${x.type}, revision ${x.revision}): ${x.expectation.trim().split('\n').join(' ')}`),
+    ...t.map(x => `- ${x.id} "${x.name}" (${x.type}, revision ${x.revision}${x.example ? ', an example' : ''}${x.expectations?.length ? `, expecting ${x.expectations.map(e => `${e.key} ${e.strength ?? 'preferred'}`).join(', ')}` : ''}): ${x.expectation.trim().split('\n').join(' ')}`),
     `A node from one of them goes into a draft of this run's definition with wfe nodes instantiate <template> --run ${run} --file <draft> (wfe nodes help); the draft becomes future work with wfe run adjust, with --source request when the request already asks for that work (wfe run help adjust).`]
 }
 
@@ -103,6 +108,21 @@ export function contentProblems(t: Partial<TemplateContent>): string[] {
   }
   if (!txt(t.description)) out.push('description is required: what the agent performing this activity does and records')
   if (!txt(t.expectation)) out.push('expectation is required: how you expect this activity to appear in a workflow')
+  if (t.expectations !== undefined) {
+    if (!Array.isArray(t.expectations)) out.push('expectations must be a list of {key, strength?, note?}')
+    else {
+      const keys = new Set<string>()
+      for (const x of t.expectations as unknown[]) {
+        const e = (isObj(x) ? x : {}) as Record<string, unknown>
+        if (typeof e.key !== 'string' || !ID_PATTERN.test(e.key)) out.push(`expectation key "${String(e.key)}" must match ${ID_PATTERN.source}`)
+        else if (keys.has(e.key)) out.push(`expectation "${e.key}" is listed twice`)
+        else keys.add(e.key)
+        if (e.strength !== undefined && !(EXPECTATION_STRENGTHS as readonly unknown[]).includes(e.strength)) out.push(`expectation "${String(e.key)}" has strength "${String(e.strength)}"; expected ${EXPECTATION_STRENGTHS.join(' or ')}`)
+        if (e.note !== undefined && typeof e.note !== 'string') out.push(`expectation "${String(e.key)}" note must be text`)
+      }
+    }
+  }
+  if (t.example !== undefined && typeof t.example !== 'boolean') out.push('example must be true or false')
   if (t.appearance !== undefined) {
     if (!isObj(t.appearance) || typeof t.appearance.icon !== 'string' || typeof t.appearance.color !== 'string') out.push('appearance must be {icon, color}')
     else {
@@ -117,9 +137,9 @@ export function contentProblems(t: Partial<TemplateContent>): string[] {
 export function normalizeContent(t: TemplateContent): TemplateContent {
   const a = t.appearance && (t.appearance.icon || t.appearance.color) ? { appearance: { icon: t.appearance.icon ?? '', color: t.appearance.color ?? '' } } : {}
   const g = t.type === 'delegate' && t.target ? Object.fromEntries((['project', 'workflow', 'accepts'] as const).filter(k => t.target![k]).map(k => [k, t.target![k]])) : {}
-  return { name: t.name.trim(), type: t.type, description: t.description, expectation: t.expectation, ...a, ...(Object.keys(g).length ? { target: g } : {}) }
+  return { name: t.name.trim(), type: t.type, description: t.description, expectation: t.expectation, ...a, ...(Object.keys(g).length ? { target: g } : {}), ...(t.expectations?.length ? { expectations: t.expectations.map(x => ({ key: x.key, ...(x.strength ? { strength: x.strength } : {}), ...(x.note ? { note: x.note } : {}) })) } : {}), ...(t.example ? { example: true } : {}) }
 }
-export const contentOf = (t: TemplateContent): TemplateContent => normalizeContent({ name: t.name, type: t.type, description: t.description, expectation: t.expectation, ...(t.appearance ? { appearance: t.appearance } : {}), ...(t.target ? { target: t.target } : {}) })
+export const contentOf = (t: TemplateContent): TemplateContent => normalizeContent({ name: t.name, type: t.type, description: t.description, expectation: t.expectation, ...(t.appearance ? { appearance: t.appearance } : {}), ...(t.target ? { target: t.target } : {}), ...(t.expectations ? { expectations: t.expectations } : {}), ...(t.example ? { example: t.example } : {}) })
 export const sameContent = (a: TemplateContent, b: TemplateContent) => canonicalJson(contentOf(a)) === canonicalJson(contentOf(b))
 
 // Reads parsed JSON as a catalog; throws CatalogError('catalog-invalid')
@@ -141,7 +161,7 @@ export function parseCatalog(raw: unknown): Catalog {
     seen.add(id)
     if (typeof t.revision !== 'number' || !Number.isInteger(t.revision) || t.revision < 1) fail('catalog-invalid', `template ${id}: revision must be a positive integer`)
     for (const k of ['name', 'type', 'description', 'expectation', 'updated', 'by']) if (typeof t[k] !== 'string') fail('catalog-invalid', `template ${id}: ${k} must be text`)
-    const content = { name: t.name, type: t.type, description: t.description, expectation: t.expectation, ...(t.appearance !== undefined ? { appearance: t.appearance } : {}) } as TemplateContent
+    const content = { name: t.name, type: t.type, description: t.description, expectation: t.expectation, ...(t.appearance !== undefined ? { appearance: t.appearance } : {}), ...(t.target !== undefined ? { target: t.target } : {}), ...(t.expectations !== undefined ? { expectations: t.expectations } : {}), ...(t.example !== undefined ? { example: t.example } : {}) } as TemplateContent
     const problems = contentProblems(content)
     if (problems.length) fail('catalog-invalid', `template ${id}: ${problems.join('; ')}`)
     return { id, revision: t.revision as number, ...contentOf(content), updated: t.updated as string, by: t.by as string }
@@ -179,8 +199,9 @@ export const SEED_BY = 'workflow_editor p7/ex1'
 export const SEEDS: Record<string, TemplateContent> = {
   present: {
     type: 'do', name: 'Present', appearance: { icon: 'present', color: 'teal' },
-    description: 'Prepare the result for the person: freeze it as a presentation with an explanation of what changed, how to use it and what to check; start its server and confirm the review link opens.',
+    description: 'Prepare the result for the person: freeze it as a presentation with an explanation of what changed, how to use it and what to check; make it available as this node\'s expectations say, and confirm that it can actually be reached that way.',
     expectation: 'When a run delivers something I can look at or try, I expect a node that presents it to me for review, before the step where I confirm the result.',
+    expectations: [{ key: 'webbrowser', strength: 'preferred', note: 'The presentation service serves HTTP review links. Change this expectation on the node when the result should be tried another way.' }],
   },
   cleanup: {
     type: 'do', name: 'Clean up', appearance: { icon: 'cleanup', color: 'slate' },
@@ -250,6 +271,8 @@ export function instantiate(w: Workflow, t: Pick<NodeTemplate, 'id' | 'revision'
     ...(t.type === 'delegate' && t.target?.project ? { project: t.target.project } : {}),
     ...(t.type === 'delegate' && t.target?.accepts ? { accepts: t.target.accepts } : {}),
     template: { id: t.id, revision: t.revision, expectation: t.expectation },
+    ...(t.expectations?.length ? { expectations: t.expectations.map(x => ({ ...x })) } : {}),
+    ...(t.example ? { example: true } : {}),
   }
   const next = structuredClone(w)
   next.nodes[id] = node

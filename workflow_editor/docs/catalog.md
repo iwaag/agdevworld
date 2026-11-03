@@ -76,6 +76,14 @@ resource system are not part of p7/ex1.
 Catalog fields: `generation` is +1 on every successful write. `initialized`
 records the one-time initialization (below). `deleted` lists retired ids.
 
+### Expectations and example status (improve_wfnode p1)
+
+`expectations` (a list of `{key, strength?, note?}`) and `example: true` are optional
+template content, validated like a node's, part of the revision and of a run's
+snapshot. `expectations` says what the node's result should satisfy. The older singular
+`expectation` says how the person expects the activity to appear in a workflow, for its
+designer. The two are separate.
+
 ### Type-specific fields
 
 A template has no type-specific fields. When a node is made from a template,
@@ -146,7 +154,10 @@ nodes:
 
 - **Node id.** By default it is the template id, made unique in the workflow
   (`research`, `research-2`, …). An explicit id that is taken is refused.
-- **Copied content.** Type, name, description and appearance are copied.
+- **Copied content.** Type, name, description, appearance, expectations and
+  example status are copied ([contract.md](contract.md) *Expectations*, *Examples*).
+  Group membership is not: a template owns no workflow's group ids, and a node joins
+  a list through that workflow's `groups`.
   The node is then edited like any other. Editing it never touches the
   catalog, and editing the catalog never touches the node.
 - **Provenance** (`template`: `id`, `revision`, and the `expectation` at

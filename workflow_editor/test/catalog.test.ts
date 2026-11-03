@@ -128,3 +128,58 @@ test('the example becomes an ordinary template of the person', async () => {
   assert.match(template.description, /sources consulted/)
   assert.equal(template.by, 'Pat')
 })
+
+test('improve_wfnode p1: a template carries expectations and example status through revisions, snapshot and instantiation', async () => {
+  const { instantiate, parseCatalog, snapshotOf } = await import('../shared/catalog.ts')
+  const { emptyWorkflow } = await import('../shared/model.ts')
+  const a = await area()
+  await rejects(createTemplate(a.dir, 'bad', content({ expectations: [{ key: 'webbrowser', strength: 'always' }] }) as never, 'iwaag'), 'template-invalid')
+  await rejects(createTemplate(a.dir, 'twice', content({ expectations: [{ key: 'human' }, { key: 'human' }] }) as never, 'iwaag'), 'template-invalid')
+  const exp = [{ key: 'webbrowser', strength: 'required' }, { key: 'native', note: 'On the review PC.' }]
+  const c = await createTemplate(a.dir, 'scene', content({ expectations: exp, example: true }) as never, 'iwaag')
+  assert.deepEqual(c.template.expectations, exp)
+  assert.equal(c.template.example, true)
+  const up = await updateTemplate(a.dir, 'scene', { ...content(), expectations: [exp[1]] } as never, 1, 'iwaag')
+  assert.equal(up.template.revision, 2)
+  assert.deepEqual(up.template.expectations, [exp[1]])
+  assert.equal(up.template.example, undefined)
+  const up2 = await updateTemplate(a.dir, 'scene', { ...content(), expectations: exp, example: true } as never, 2, 'iwaag')
+  const r = await readCatalog(a.dir)
+  assert.ok(r.state === 'ok')
+  if (r.state !== 'ok') return
+  const again = parseCatalog(JSON.parse(JSON.stringify(r.catalog)))
+  assert.deepEqual(again.templates.find(t => t.id === 'scene')?.expectations, exp)
+  const snap = snapshotOf(again, 'now').templates.find(t => t.id === 'scene')!
+  assert.deepEqual(snap.expectations, exp)
+  const w = instantiate(emptyWorkflow('w', 'W'), snap)
+  assert.deepEqual(w.workflow.nodes[w.node].expectations, exp)
+  assert.equal(w.workflow.nodes[w.node].example, true)
+  assert.equal(up2.template.revision, 3)
+  // The seed says what it expects instead of assuming a browser in its words.
+  const seed = r.catalog.templates.find(t => t.id === 'present')!
+  assert.equal(seed.expectations?.[0].key, 'webbrowser')
+  assert.doesNotMatch(seed.description, /start its server/)
+})
+
+test('a delegate template\'s target survives reading the catalog back', async () => {
+  const a = await area()
+  await createTemplate(a.dir, 'd', content({ type: 'delegate', target: { workflow: 'scene', project: 'world' } }) as never, 'iwaag')
+  const r = await readCatalog(a.dir)
+  assert.ok(r.state === 'ok')
+  if (r.state === 'ok') assert.deepEqual(r.catalog.templates.find(t => t.id === 'd')?.target, { project: 'world', workflow: 'scene' })
+})
+
+test('wfe nodes: --expect and --example; an update keeps what it does not name', async () => {
+  const a = await area()
+  const base = ['nodes', '--registry', a.registry, '--by', 'iwaag']
+  const made = await captured([...base.slice(0, 1), 'create', 'scene', ...base.slice(1), '--name', 'Scene', '--type', 'do', '--description', 'd', '--expectation', 'e', '--expect', 'webbrowser:required', '--expect', 'native:preferred:On: the review PC', '--example'])
+  assert.equal(made.code, 0, JSON.stringify(made.out))
+  const t = (made.out as { template: Record<string, unknown> }).template
+  assert.deepEqual(t.expectations, [{ key: 'webbrowser', strength: 'required' }, { key: 'native', strength: 'preferred', note: 'On: the review PC' }])
+  const kept = await captured([...base.slice(0, 1), 'update', 'scene', ...base.slice(1), '--expect-revision', '1', '--name', 'Scene 2'])
+  assert.equal((kept.out as { template: { example?: boolean; expectations?: unknown[] } }).template.example, true)
+  assert.equal((kept.out as { template: { expectations?: unknown[] } }).template.expectations?.length, 2)
+  const cleared = await captured([...base.slice(0, 1), 'update', 'scene', ...base.slice(1), '--expect-revision', '2', '--no-expect', '--no-example'])
+  assert.equal((cleared.out as { template: { example?: boolean; expectations?: unknown[] } }).template.expectations, undefined)
+  assert.equal((cleared.out as { template: { example?: boolean } }).template.example, undefined)
+})

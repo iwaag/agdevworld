@@ -12,6 +12,7 @@ export interface NodesCli {
   positional: string[]
   opt: (k: string) => string | undefined
   opts: (k: string) => string[]
+  flag: (k: string) => boolean
   area: () => string
   by: () => string | undefined // the registry's approver, when no --by is given
   workspace: () => Promise<Workspace>
@@ -56,14 +57,19 @@ Fields of a template:
                expects this activity to appear (as its own node, where).
                It stays with the node as provenance, not as instructions
   icon, color  display only: ${APPEARANCE_ICONS.join(' ')} / ${APPEARANCE_COLORS.join(' ')}
+  --expect     what the node's result should satisfy, repeatable, replacing
+               the list: <key>[:preferred|required[:<note>]] (docs/contract.md
+               *Expectations*); --no-expect clears it. Not the expectation above
+  --example    the node starts as an example, a model specialized in a run
+               (--no-example clears it). A template owns no group
 --description-file / --expectation-file read the text from a file.
 
 Revisions: a template's revision goes up when its content changes. An update
 or deletion names the revision it was based on (--expect-revision) and is
 refused if the template changed meanwhile. Deleted ids are not reused.
 
-Instantiation copies type, name, description and appearance into an ordinary
-node and records template: {id, revision, expectation}. Editing the node
+Instantiation copies type, name, description, appearance, expectations and
+example status into an ordinary node and records template: {id, revision, expectation}. Editing the node
 never changes the catalog, and editing the catalog never changes a workflow.
   --workflow <wf>  a workflow of this workspace (devdocs/workflows), saved
   --file <path>    any workflow YAML file, e.g. a draft of a run's definition
@@ -85,11 +91,13 @@ The catalog is <area>/node-catalog.json, beside the registry. A file that
 cannot be read is reported and never replaced with defaults.`
 
 const line = (t: Pick<NodeTemplate, 'id' | 'revision' | 'type' | 'name' | 'expectation'>) => `  ${t.id.padEnd(24)} r${String(t.revision).padEnd(3)} ${t.type.padEnd(6)} ${t.name}\n      expects: ${t.expectation.split('\n').join('\n               ')}`
-export const full = (t: Pick<NodeTemplate, 'id' | 'revision' | 'type' | 'name' | 'expectation' | 'description' | 'appearance'> & Partial<Pick<NodeTemplate, 'updated' | 'by'>>) => [
+export const full = (t: Pick<NodeTemplate, 'id' | 'revision' | 'type' | 'name' | 'expectation' | 'description' | 'appearance' | 'expectations' | 'example'> & Partial<Pick<NodeTemplate, 'updated' | 'by'>>) => [
   `${t.id} (revision ${t.revision}) — ${t.name}, type ${t.type}${t.appearance ? `, icon ${t.appearance.icon || '(type)'} color ${t.appearance.color || '(type)'}` : ''}`,
   ...(t.updated ? [`changed ${t.updated}${t.by ? ` by ${t.by}` : ''}`] : []),
   '', 'Expectation (for the workflow designer):', ...t.expectation.split('\n').map(l => `  ${l}`),
   '', 'Description (for the agent performing it; copied into the node):', ...t.description.split('\n').map(l => `  ${l}`),
+  ...(t.example ? ['', 'Starts as an example: a model for concrete work, specialized in a run.'] : []),
+  ...(t.expectations?.length ? ['', 'Expectations of the result (copied into the node):', ...t.expectations.map(x => `  ${x.key}, ${x.strength ?? 'preferred'}${x.note ? `: ${x.note}` : ''}`)] : []),
 ].join('\n')
 
 export async function nodesCommand(c: NodesCli): Promise<number> {
@@ -108,6 +116,14 @@ export async function nodesCommand(c: NodesCli): Promise<number> {
     const kept = Object.fromEntries(Object.entries(g).filter(([, v]) => v))
     return Object.keys(kept).length ? { target: kept } : {}
   }
+  // improve_wfnode p1: --expect <key>[:<strength>[:<note>]] replaces the list; --no-expect clears it.
+  const expects = (base?: TemplateContent['expectations']) => {
+    if (c.flag('no-expect')) return {}
+    const given = c.opts('expect').map(v => { const [key, strength, ...note] = v.split(':'); return { key, ...(strength ? { strength } : {}), ...(note.length ? { note: note.join(':') } : {}) } })
+    const list = given.length ? given : base ?? []
+    return list.length ? { expectations: list } : {}
+  }
+  const exampleOf = (base?: boolean) => ((c.flag('example') || base) && !c.flag('no-example') ? { example: true } : {})
   const live = async () => {
     const r = await readCatalog(c.area())
     if (r.state !== 'ok') throw c.refused(`the node catalog is unavailable: ${r.problem}`)
@@ -129,14 +145,14 @@ export async function nodesCommand(c: NodesCli): Promise<number> {
     }
     case 'create': {
       if (!arg) throw c.usage('create <id> --name … --type … --description … --expectation …')
-      const r = await createTemplate(c.area(), arg, { name: c.opt('name') ?? '', type: c.opt('type') ?? '', description: text('description') ?? '', expectation: text('expectation') ?? '', ...appearance(), ...target() }, by())
+      const r = await createTemplate(c.area(), arg, { name: c.opt('name') ?? '', type: c.opt('type') ?? '', description: text('description') ?? '', expectation: text('expectation') ?? '', ...appearance(), ...target(), ...expects(), ...exampleOf() }, by())
       c.out(`Created template ${r.template.id} (revision 1).`, { ok: true, template: r.template })
       return 0
     }
     case 'update': {
       if (!arg) throw c.usage('update <id> --expect-revision <n> …')
       const cur = templateIn((await live()).catalog, arg)
-      const r = await updateTemplate(c.area(), arg, { name: c.opt('name') ?? cur.name, type: c.opt('type') ?? cur.type, description: text('description') ?? cur.description, expectation: text('expectation') ?? cur.expectation, ...appearance(cur.appearance), ...target(cur.target) }, rev(), by())
+      const r = await updateTemplate(c.area(), arg, { name: c.opt('name') ?? cur.name, type: c.opt('type') ?? cur.type, description: text('description') ?? cur.description, expectation: text('expectation') ?? cur.expectation, ...appearance(cur.appearance), ...target(cur.target), ...expects(cur.expectations), ...exampleOf(cur.example) }, rev(), by())
       c.out(r.changed ? `Template ${arg} is now revision ${r.template.revision}.` : `Nothing changed; template ${arg} stays at revision ${r.template.revision}.`, { ok: true, changed: r.changed, template: r.template })
       return 0
     }

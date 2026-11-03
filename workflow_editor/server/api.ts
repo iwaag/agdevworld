@@ -732,6 +732,8 @@ export function createHandler(config: ServiceConfig) {
           name: typeof input.name === 'string' ? input.name : '', type: typeof input.type === 'string' ? input.type : '',
           description: typeof input.description === 'string' ? input.description : '', expectation: typeof input.expectation === 'string' ? input.expectation : '',
           ...(isObj(input.appearance) ? { appearance: { icon: String(input.appearance.icon ?? ''), color: String(input.appearance.color ?? '') } } : {}),
+          ...(input.expectations !== undefined ? { expectations: input.expectations as never } : {}),
+          ...(input.example === true ? { example: true } : {}),
         })
         if (!wsId && method === 'GET') {
           const r = await readCatalog(area)

@@ -275,7 +275,7 @@ export function evaluate(b: Boundary, f: Facts): Reminder[] {
     if (open.length) add({
       code: 'expectation-unstated', refs: [completing],
       text: `${completing} has expectations nobody has stated anything about: ${open.map(x => `${x.key} (${x.strength ?? 'preferred'})`).join(', ')}. They will read as unverified beside the result. WFE cannot tell whether they hold; that is what you can say, including that you could not check.`,
-      repair: open.map(x => `wfe run expectation ${runKey(record)} ${completing} ${x.key} met|unmet|unverified --note "<what actually holds>" [--artifact <path>] [--presentation <p>] [--made <commit>]`),
+      repair: open.map(x => `wfe run expectation ${runKey(record)} ${completing} ${x.key} met|unmet|unverified --note "<what actually holds>" [--artifact <path>] [--presentation <p>] [--commit-id <sha>]`),
       summary: `${completing}: state ${open.map(x => x.key).join(', ')} (wfe run expectation), or they read as unverified`,
     })
   }

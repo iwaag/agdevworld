@@ -437,12 +437,12 @@ and in one revision:
 wfe run adjust <run> --definition <file> --reason <text> --dry-run shows the
 result; a node with execution history cannot become an example. Earlier revisions
 keep the original examples and membership.`,
-  expectation: `wfe run expectation <run> <node> <key> met|unmet|unverified [--note <text>] [--artifact <path>]... [--made <commit>]... [--entry <seq>]... [--presentation <p>]... [--output <o>]... [--question <q>]...
+  expectation: `wfe run expectation <run> <node> <key> met|unmet|unverified [--note <text>] [--artifact <path>]... [--commit-id <sha>[@<repository>]]... [--entry <seq>]... [--presentation <p>]... [--output <o>]... [--question <q>]...
 
 States whether a result met one of its node's expectations. Met needs evidence or
 an explanation; unmet needs an explanation of what was delivered instead and why.
 Evidence is checked to exist, not judged: --artifact files of the run's copy (by
-hash), --made commits, --entry history entries, and this run's presentations,
+hash), --commit-id commits, --entry history entries, and this run's presentations,
 outputs and questions. A later statement of the same key replaces it; history
 keeps both. Recorded inside an attempt, it is labeled as the agent's report. It
 permits and proves nothing, and a statement never made reads as unverified.
@@ -1236,7 +1236,7 @@ export async function runCommand(c: RunCli): Promise<number> {
       if (!args[1] || !args[2] || !args[3]) throw c.usage('<node>, <key> and met, unmet or unverified are required')
       const num = c.opts('entry').map(Number)
       const root = await rootOf(r)
-      const claims = { artifacts: c.opts('artifact').map(p => artifactPath(root, r, p)), commits: c.opts('made').map(commit => ({ commit })), entries: num, questions: c.opts('question'), outputs: c.opts('output'), presentations: c.opts('presentation') }
+      const claims = { artifacts: c.opts('artifact').map(p => artifactPath(root, r, p)), commits: c.opts('commit-id').map(v => { const [commit, repository] = v.split('@'); return { commit, ...(repository ? { repository } : {}) } }), entries: num, questions: c.opts('question'), outputs: c.opts('output'), presentations: c.opts('presentation') }
       return op({ op: 'expectation.assess', node: args[1], key: args[2], status: args[3], ...(c.opt('note') ? { note: c.opt('note') } : {}), claims }, rec => `Recorded: ${args[2]} on ${args[1]} is ${rec.nodes[args[1]].assessments?.[args[2]].status} (as ${rec.nodes[args[1]].assessments?.[args[2]].reporter === 'agent' ? 'the agent\'s report' : 'a person\'s statement'}).`, r)
     }
     case 'attach': {

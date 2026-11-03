@@ -280,7 +280,7 @@ test('wfe run expectation through the command line, with each kind of evidence',
     console.log = (...a: unknown[]) => { lines.push(a.join(' ')) }; console.error = (...a: unknown[]) => { lines.push(a.join(' ')) }
     try { return { code: await main(['run', 'expectation', 'world/run-001', 'show', ...args, '--by', 'agent', '--workspace', 'p', '--registry', registry]), out: lines.join('\n') } } finally { console.log = log; console.error = err }
   }
-  const met = await cli(['webbrowser', 'met', '--artifact', 'shown.html', '--made', head, '--note', 'Opens.'])
+  const met = await cli(['webbrowser', 'met', '--artifact', 'shown.html', '--commit-id', head, '--note', 'Opens.'])
   assert.equal(met.code, 0, met.out)
   assert.match(met.out, /webbrowser on show is met/)
   assert.equal((await cli(['native', 'unmet', '--note', 'Browser only.'])).code, 0)

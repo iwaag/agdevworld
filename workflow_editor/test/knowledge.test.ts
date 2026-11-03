@@ -208,7 +208,8 @@ test('a recorded decision reads back at its revision; a later edit does not rewr
   const live = await showFinding(ctx, 'a:wedo#f-1')
   const cite = await citation(ctx, 'a:wedo#f-1', {}, 'adapted')
   assert.match(cite.block, /^```knowledge-decisions\n/)
-  assert.equal(cite.entry.commit, live.finding.commit); assert.equal(cite.entry.sha256, live.finding.sha256)
+  assert.equal(cite.entries[0].commit, live.finding.commit); assert.equal(cite.entries[0].sha256, live.finding.sha256)
+  assert.equal((await citation(ctx, ['a:wedo#f-1', 'a:wedo#f-2'])).entries.length, 2)
   const entries = `\`\`\`knowledge-decisions
 - finding: a:wedo#f-1
   commit: ${live.finding.commit}

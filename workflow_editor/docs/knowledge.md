@@ -193,7 +193,7 @@ A run that used, adapted or rejected a finding says so in its ordinary report or
 ```
 ````
 
-- `wfe knowledge cite <qid>` prints the block for what you read. In misc freework/run-013 the agent ran it, then wrote the same facts as a paragraph in another file, which reads as no decision at all; the command now says where the block goes.
+- `wfe knowledge cite <qid>` prints the block for what you read. In misc freework/run-013 the agent ran it, then wrote the same facts as a paragraph in another file, which reads as no decision at all; the command now says where the block goes. It takes several ids (partial-animation/run-007 passed two; the second was ignored, and the agent filled in its hash by hand).
 - Record relevant candidates, not every search result. No block means nothing
   was recorded, which is allowed.
 - **Unpublished bytes.** `unpublished: true` with `preserved: <a copy in the run
@@ -206,6 +206,10 @@ A run that used, adapted or rejected a finding says so in its ordinary report or
 The block is the agent's statement. A past example does not verify a new result,
 and saying a finding was used is a claim to compare with the artifacts:
 *verification* of the outcome stays in the run's own evidence and expectations.
+`resolved` here means the recorded revision holds that document, not that the
+agent read it. partial-animation/run-007 recorded `adopted` for a finding whose
+document its log shows it never opened: it had seen only the title and summary.
+Only the attempt's log can show that.
 
 ## For a person
 

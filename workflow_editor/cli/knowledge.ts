@@ -9,7 +9,7 @@ wfe knowledge list [<collection>] [--project <p>] [--category <c>]… [--tag <t>
 wfe knowledge show <collection>#<id> [--as <project> | --rev <commit> | --upstream] [--source worktree [--workspace <id>]]
 wfe knowledge check <collection> [--as <project> | --rev <commit> | --upstream]
 wfe knowledge check --dir <folder of the collection>
-wfe knowledge cite <collection>#<id> [--decision adopted|adapted|rejected] [--as … | --rev …]
+wfe knowledge cite <collection>#<id>… [--decision adopted|adapted|rejected] [--as … | --rev …]
 wfe knowledge decisions <project> <workflow>/<run>
 
 Findings are what a project learned, kept in its own study/wedo area as one
@@ -42,6 +42,9 @@ check        readable headers, unique ids, resolvable references, against one
              paths in references are checked against that repository's tree.
 cite         the block to put in your report: the commit, path and sha256 you
              actually read, for your decision, reason, work and verification.
+             It records a revision for you; it is your statement that you read
+             the document at that revision. Citing what you only saw listed
+             says more than happened.
 decisions    what a run recorded, each entry read back at its recorded
              revision, with whether the document has changed since. These are
              the agent's statements; compare them with the work.
@@ -133,8 +136,9 @@ export async function knowledgeCommand(c: KnowledgeCli): Promise<number> {
       return errors ? 1 : 0
     }
     case 'cite': {
-      if (!a1) throw c.usage('cite needs <collection>#<id>')
-      const r = await x.citation(ctx, a1, o, c.opt('decision'))
+      const ids = c.positional.slice(1)
+      if (!ids.length) throw c.usage('cite needs <collection>#<id>')
+      const r = await x.citation(ctx, ids, o, c.opt('decision'))
       c.out(`${r.block}\n\nPut the block itself in this run's report.md or outcome.md, with the placeholders filled in; a sentence about it elsewhere cannot be read back: wfe knowledge decisions <project> <workflow>/<run> reads this block.`, r)
       return 0
     }

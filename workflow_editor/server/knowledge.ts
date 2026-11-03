@@ -354,15 +354,18 @@ export async function checkFolder(dir: string): Promise<{ dir: string; findings:
 }
 
 // The block a run puts in its report (docs/knowledge.md, Recording a decision).
-export async function citation(ctx: AccessContext, q: string, o: KnowledgeOptions = {}, decision?: string): Promise<{ qid: string; block: string; entry: Record<string, unknown> }> {
+export async function citation(ctx: AccessContext, qs: string | string[], o: KnowledgeOptions = {}, decision?: string): Promise<{ block: string; entries: Record<string, unknown>[] }> {
   if (decision !== undefined && !DECISIONS.includes(decision)) throw new RequestError(400, `--decision is ${DECISIONS.join(', ')}`)
-  const { f } = await locateFinding(ctx, q, o)
-  const entry: Record<string, unknown> = {
-    finding: f.qid, title: f.title, repository: f.repository, commit: f.commit, path: f.path, sha256: f.sha256,
-    ...(f.unpublished ? { unpublished: true, preserved: '<a copy of the document in this run folder>' } : {}),
-    decision: decision ?? '<adopted|adapted|rejected>', reason: '<why, under this task\'s conditions>', work: ['<what was actually made: commit or path>'], verification: ['<how the outcome was checked: path>'],
+  const entries: Record<string, unknown>[] = []
+  for (const q of Array.isArray(qs) ? qs : [qs]) {
+    const { f } = await locateFinding(ctx, q, o)
+    entries.push({
+      finding: f.qid, title: f.title, repository: f.repository, commit: f.commit, path: f.path, sha256: f.sha256,
+      ...(f.unpublished ? { unpublished: true, preserved: '<a copy of the document in this run folder>' } : {}),
+      decision: decision ?? '<adopted|adapted|rejected>', reason: '<why, under this task\'s conditions>', work: ['<what was actually made: commit or path>'], verification: ['<how the outcome was checked: path>'],
+    })
   }
-  return { qid: f.qid, entry, block: `\`\`\`knowledge-decisions\n${stringifyYaml([entry]).trimEnd()}\n\`\`\`` }
+  return { entries, block: `\`\`\`knowledge-decisions\n${stringifyYaml(entries).trimEnd()}\n\`\`\`` }
 }
 
 export interface DecisionView {

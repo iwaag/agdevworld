@@ -10,6 +10,13 @@ import type { ApprovalKind, Documentation, Project, Workflow } from '../shared/m
 import type { Catalog, NodeTemplate, TemplateContent } from '../shared/catalog.ts'
 import type { ContextBundle, ContextChange, AttemptContext, BlockKind, BlockRevision, BlockState, EvidenceRef, ScopeTarget } from '../shared/context.ts'
 
+// What a project's knowledge areas hold (improve_workflow p2, docs/knowledge.md).
+export interface KnowledgeView {
+  gitea?: string
+  findings: { qid: string; id: string; title: string; summary: string; categories: string[]; tags: string[]; status?: string; collection: string; kind: string; repository: string; commit: string; path: string; unpublished: boolean; references: { role: string; ref: string; by?: string; note?: string }[] }[]
+  collections: { id: string; kind: string; state: string; problem?: string; unstructured: string[]; problems: { path: string; message: string }[]; revision?: { repository: string; commit: string; resolvedBy: string } }[]
+}
+
 // The run's working copy as a storage fact (improve_wfrun p2, server/retention.ts storageView).
 export interface RunStorageView {
   ref: string; managed: boolean; state: string; retained: string; action: 'retire' | 'restore' | null; eligible: boolean; reasons: string[]; problem: string | null; generation: number
@@ -121,6 +128,7 @@ export const api = {
   workflowTemplates: (id: string) => call<{ id: string; name: string; description: string; documentation: Documentation }[]>('GET', `${ws(id)}/workflow-templates`),
   workflow: (id: string, file: string, refresh = false) => call<WorkflowResponse>('GET', `${wf(id, file)}${refresh ? '?refresh=1' : ''}`),
   runs: (id: string) => call<RunSummary[]>('GET', `${ws(id)}/runs`),
+  knowledge: (project: string) => call<KnowledgeView>('GET', `api/knowledge?project=${encodeURIComponent(project)}`),
   run: (id: string, workflow: string, run: string, rev?: string, signal?: AbortSignal) =>
     call<RunResponse>('GET', `${ws(id)}/runs/${encodeURIComponent(workflow)}/${encodeURIComponent(run)}${rev ? `?rev=${encodeURIComponent(rev)}` : ''}`, undefined, [], signal),
   runFile: (id: string, workflow: string, run: string, path: string, rev?: string, signal?: AbortSignal) =>

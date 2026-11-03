@@ -24,6 +24,7 @@ import { setupArea } from './setup.ts'
 import { runCommand, runIndex } from './run.ts'
 import { NODES_HELP, nodesCommand } from './nodes.ts'
 import { PROJECTS_HELP, projectsCommand } from './projects.ts'
+import { KNOWLEDGE_HELP, knowledgeCommand } from './knowledge.ts'
 import { CONTEXT_HELP, contextCommand } from './context.ts'
 import { CHALLENGE_HELP, challengeCommand } from './challenge.ts'
 import { CONVERSATION_HELP, conversationCommand } from './conversation.ts'
@@ -186,6 +187,7 @@ reference  the optional technical reference (docs/boast.md): paths,
   dialogue: DIALOGUE_HELP,
   coordinate: COORDINATE_HELP,
   projects: PROJECTS_HELP,
+  knowledge: KNOWLEDGE_HELP,
   create: `wfe create <dir> --name <name> [--id <id>] [--intent <text>] [--goal <text>]... [--devdocs directory|submodule] [--devdocs-source <path|url>] [--resume]
 
 Creates a new project and registers it as a workspace. With a Gitea setting
@@ -816,6 +818,7 @@ Projects and workspaces
   gitea whoami|repo|git     Gitea as a chosen principal (--as): who, its access, git with its auth
   dashboard               every project and shared repository, with where each fact was read
   projects <subcommand>     read any managed project: list, show, tree, read, search, runs, run
+  knowledge <subcommand>    findings projects keep from practice: collections, list, show, check, cite, decisions
                             (committed by default, at a revision, with provenance; docs/access.md)
   request <workflow> …      a person's request to the executor (autolab): a run of the published
                             workflow, queued (--editing: a trial of this checkout's file)
@@ -2042,7 +2045,7 @@ async function cmdBackup(p: Parsed): Promise<number> {
 
 const COMMANDS: Record<string, (p: Parsed) => Promise<number>> = {
   backup: cmdBackup, branches: cmdBranches,
-  runs: cmdRuns, 'rename-project': cmdRenameProject, observe: cmdObserve, projects: cmdProjects, run: cmdRun, delegate: cmdDelegate, review: cmdReview, present: cmdPresent, share: cmdShare, project: cmdProject, repo: cmdRepo, gitea: cmdGitea, dashboard: cmdDashboard, exec: cmdExec, request: cmdRequest, notify: cmdNotify, intake: cmdIntake,
+  runs: cmdRuns, 'rename-project': cmdRenameProject, observe: cmdObserve, projects: cmdProjects, knowledge: cmdKnowledge, run: cmdRun, delegate: cmdDelegate, review: cmdReview, present: cmdPresent, share: cmdShare, project: cmdProject, repo: cmdRepo, gitea: cmdGitea, dashboard: cmdDashboard, exec: cmdExec, request: cmdRequest, notify: cmdNotify, intake: cmdIntake,
   create: cmdCreate, register: cmdRegister, list: cmdList, status: cmdStatus, validate: cmdValidate,
   approve: cmdApprove, arrange: cmdArrange, 'add-repo': cmdAddRepo, workflow: cmdWorkflow, serve: cmdServe, setup: cmdSetup,
   version: cmdVersion, nodes: cmdNodes, workspace: cmdWorkspace, draft: cmdDraft, boast: cmdBoast, context: cmdContext, challenge: cmdChallenge, conversation: cmdConversation, discussion: cmdConversation, dialogue: cmdDialogue, coordinate: cmdCoordinate,
@@ -2193,6 +2196,16 @@ async function cmdProjects(p: Parsed): Promise<number> {
   return projectsCommand({
     positional: p.positional, opt: k => opt(p, k), flag: k => p.flags.has(k), out, json: () => json,
     usage: m => new UsageError(m),
+    ctx: async () => { const g = await giteaOf(p); return { registryFile: registryFile(p), area: areaDir(p), gitea: g, giteaProblem: g ? undefined : `no Gitea setting at ${giteaFile(p)}`, refresh: p.flags.has('refresh') } },
+  })
+}
+
+// Reusable findings (improve_workflow p2): over the same project access.
+async function cmdKnowledge(p: Parsed): Promise<number> {
+  return knowledgeCommand({
+    positional: p.positional, opt: k => opt(p, k), opts: k => p.opts.get(k) ?? [], flag: k => p.flags.has(k), out,
+    usage: m => new UsageError(m),
+    currentProject: async () => (await workspace(p).catch(() => null))?.reg.project ?? undefined,
     ctx: async () => { const g = await giteaOf(p); return { registryFile: registryFile(p), area: areaDir(p), gitea: g, giteaProblem: g ? undefined : `no Gitea setting at ${giteaFile(p)}`, refresh: p.flags.has('refresh') } },
   })
 }

@@ -654,6 +654,20 @@ export function createHandler(config: ServiceConfig) {
         throw new RequestError(404, 'not found')
       }
 
+      // ---- reusable findings (improve_workflow p2, docs/knowledge.md): read-only ----
+      if (a === 'knowledge' && method === 'GET') {
+        const k = await import('./knowledge.ts')
+        const ctx: import('./access.ts').AccessContext = { registryFile: config.registryFile, area, gitea: config.gitea, giteaProblem: config.giteaProblem, refresh: url.searchParams.get('refresh') === '1' }
+        const q = (n: string) => url.searchParams.get(n) || undefined
+        const o = { rev: q('rev'), as: q('as'), upstream: q('upstream') === '1' }
+        if (!wsId) return send(res, 200, await k.listFindings(ctx, { ...o, collection: q('collection'), project: q('project'), category: url.searchParams.getAll('category'), tag: url.searchParams.getAll('tag'), text: q('text') }))
+        if (wsId === 'collections' && !b) return send(res, 200, await k.listFindings(ctx, { ...o, project: q('project') }))
+        if (wsId === 'finding' && !b) return send(res, 200, await k.showFinding(ctx, str(q('id'), 'id'), o))
+        if (wsId === 'check' && !b) return send(res, 200, await k.checkCollection(ctx, str(q('collection'), 'collection'), o))
+        if (wsId === 'decisions' && !b) return send(res, 200, await k.runDecisions(ctx, str(q('project'), 'project'), str(q('run'), 'run')))
+        throw new RequestError(404, 'not found')
+      }
+
       // ---- scoped context (p13, p14; docs/context.md): the matrix, blocks, details ----
       if (a === 'context') {
         const { ContextStore, applyBlockOp, scopeTarget } = await import('./contextStore.ts')

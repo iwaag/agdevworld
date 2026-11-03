@@ -184,6 +184,11 @@ its time (p3 ex1: the specialists said "not on main" from a stale local
 
 A disposition such as "not integrated" names which of these it rests on.
 
+## Findings over this access
+
+Reusable findings in projects' study and wedo areas are read by id, at a stated
+revision, through this module: [knowledge.md](knowledge.md), `wfe knowledge`.
+
 ## Through agdevworld
 
 These are `GET` routes over managed project content only. No route takes a

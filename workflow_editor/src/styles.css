@@ -591,6 +591,11 @@ ul.notes, ul.files { margin: 4px 0; padding-left: 18px; font-size: 13px; }
 .decide { display: flex; flex-direction: column; gap: 6px; }
 ol.history { margin: 0; padding-left: 26px; font-size: 13px; display: flex; flex-direction: column; gap: 6px; }
 ol.history code { font-size: 12px; background: #eef0f3; border-radius: 4px; padding: 0 4px; }
+.knowledge-collection { margin: 14px 0 6px; font-size: 14px; overflow-wrap: anywhere; }
+.knowledge-finding { padding: 10px 0; border-bottom: 1px solid #eef0f3; }
+.knowledge-finding p { margin: 4px 0; overflow-wrap: anywhere; }
+.knowledge-title { font-weight: 600; }
+.knowledge-id { font-family: ui-monospace, monospace; }
 .runs-card .run-row { display: flex; align-items: center; gap: 12px; padding: 10px 0; border-bottom: 1px solid #eef0f3; }
 
 .node .unsupported { color: #b5532f; font-weight: 600; margin-top: 2px; }

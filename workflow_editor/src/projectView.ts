@@ -3,7 +3,7 @@ import type { DraftMeta, LocalEditsView } from '../shared/drafts.ts'
 import type { DashboardResponse, ProjectResponse, PublishedResponse, RepositoryStatus, RunSummary, WorkflowResponse, WorkspaceSummary } from '../shared/api.ts'
 import { PROJECT_SCHEMA, type Project } from '../shared/model.ts'
 import { validateProject } from '../shared/validate.ts'
-import { api, ApiError } from './api.ts'
+import { api, ApiError, type KnowledgeView } from './api.ts'
 import { live, serial } from './live.ts'
 import { h, short } from './dom.ts'
 import { diagnosticList } from './homeView.ts'
@@ -121,6 +121,40 @@ export function renderProjectView(root: HTMLElement, wsId: string, opts: { conte
   }
   // Kept across renders: run progress refreshes only this card.
   const runsCard = h('section.card.runs-card')
+  // What this project has learned (improve_workflow p2): derived, read-only.
+  const knowledgeCard = h('section.card.knowledge-card')
+  let knowledgeOf = ''
+  const loadKnowledge = async (project: string) => {
+    knowledgeOf = project
+    const k = await api.knowledge(project).catch((e: Error) => e)
+    if (disposed || knowledgeOf !== project) return
+    knowledgeCard.replaceChildren(h('div.card-head', h('h2', 'Knowledge')),
+      h('p.muted.small', 'Findings this project keeps in its study and wedo areas, at the revision each is read. They are what was observed, for a task to use, adapt or reject: not instructions, and not proof of a new result.'))
+    if (k instanceof Error) { knowledgeCard.append(h('div.banner.error', k.message)); return }
+    if (!k.collections.length) knowledgeCard.append(h('p.muted.small', 'No study or wedo area is declared.'))
+    const atCommit = (f: KnowledgeView['findings'][number], path: string) => k.gitea ? `${k.gitea}/${f.repository}/src/commit/${f.commit}/${path}` : undefined
+    for (const c of k.collections) {
+      const here = k.findings.filter(f => f.collection === c.id)
+      knowledgeCard.append(h('h3.knowledge-collection', c.id, h('span.muted.small', ` ${c.kind}${c.revision ? ` · ${c.revision.repository}@${c.revision.commit.slice(0, 10)} (${c.revision.resolvedBy})` : ''}`)))
+      if (c.state !== 'read') { knowledgeCard.append(h('div.banner.warn', `Unavailable (${c.state}): ${c.problem}`)); continue }
+      if (!here.length) knowledgeCard.append(h('p.muted.small', `No findings${c.unstructured.length ? `; ${c.unstructured.length} document(s) in findings/ have no header` : ''}. Topic files may still hold knowledge.`))
+      for (const p of c.problems) knowledgeCard.append(h('div.banner.warn', `${p.path}: ${p.message}`))
+      for (const f of here) {
+        const examples = f.references.filter(r => r.role === 'illustration')
+        const link = atCommit(f, f.path)
+        knowledgeCard.append(h('div.knowledge-finding', { dataset: { finding: f.qid } },
+          h('div.knowledge-title', link ? h('a', { href: link, target: '_blank', rel: 'noopener' }, f.title) : f.title),
+          h('p.small', f.summary),
+          h('p.muted.small', [...f.categories, ...f.tags].join(' · '), f.status ? ` · ${f.status}` : '', f.kind === 'study' ? ' · imported, not locally verified' : ''),
+          h('p.muted.small.knowledge-id', f.qid),
+          examples.length ? h('p.small', 'To look at: ', ...examples.map((r, i) => {
+            const url = /^[^\s:]+$/.test(r.ref) ? atCommit(f, r.ref) : undefined
+            const label = r.ref.split('/').filter(Boolean).pop() ?? r.ref
+            return h('span', { title: r.note ?? '' }, i ? ', ' : '', url ? h('a', { href: url, target: '_blank', rel: 'noopener' }, label) : `${r.ref} (not checked)`)
+          })) : false))
+      }
+    }
+  }
 
   const header = h('header.topbar')
   // Boast (p12) sits below the heading in both modes and is never detached:
@@ -159,6 +193,7 @@ export function renderProjectView(root: HTMLElement, wsId: string, opts: { conte
       if (changedOnDisk || !contextRead || opts.refresh) { contextRead = true; void context.reload() }
       if (accessWorkflow) accessData = await api.publishedWorkflow(wsId, accessWorkflow).catch(() => null)
       render()
+      if (p.project?.id && knowledgeOf !== p.project.id) void loadKnowledge(p.project.id)
     } catch (e) {
       bodySlot.replaceChildren(h('p.error', (e as Error).message))
     }
@@ -640,7 +675,7 @@ export function renderProjectView(root: HTMLElement, wsId: string, opts: { conte
       renderHeroState()
       bodySlot.replaceChildren(
         h('div.col.d-only', renderProjectCard(), renderRepos()),
-        h('div.col.project-work', renderWorkspaces(), runsCard, renderWorkflows()))
+        h('div.col.project-work', renderWorkspaces(), runsCard, knowledgeCard, renderWorkflows()))
     })
     boast.show(data?.project?.id ?? workspaces.find(w => w.id === wsId)?.observed.projectId ?? null, wsId)
   }

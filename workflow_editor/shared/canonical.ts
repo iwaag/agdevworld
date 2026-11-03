@@ -56,8 +56,16 @@ export function definitionProjection(w: Workflow) {
       ...(n.accepts ? { accepts: n.accepts } : {}),
       ...(n.confirms ? { confirms: n.confirms } : {}),
       ...(n.activity ? { activity: n.activity } : {}),
+      // improve_wfnode p1, when declared. Entries are cumulative, so their order means nothing.
+      ...(n.example ? { example: true } : {}),
+      ...(n.expectations?.length ? { expectations: [...n.expectations].map(x => ({ key: x.key, strength: x.strength ?? 'preferred', note: normalizeText(x.note ?? '') })).sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0)) } : {}),
+      ...(n.specializes ? { specializes: { examples: [...n.specializes.examples].sort(), revision: n.specializes.revision } } : {}),
     }
   }
+  // Groups (improve_wfnode p1), when declared: member order is meaningful;
+  // a group's display color is not.
+  const groups: Record<string, unknown> = {}
+  for (const [id, g] of Object.entries(w.groups ?? {})) groups[id] = { name: normalizeText(g.name), kind: g.kind, cardinality: g.cardinality, description: normalizeText(g.description), members: g.members }
   const seen = new Set<string>()
   const edges = w.edges
     .map(e => [e.from, e.to] as const)
@@ -77,7 +85,7 @@ export function definitionProjection(w: Workflow) {
   // manual workflow keeps the digest it had.
   const documentation: Record<string, unknown> = { policy: w.documentation.policy }
   for (const k of ['plan', 'reports', 'final'] as const) if (w.documentation[k] !== undefined) documentation[k] = w.documentation[k]
-  return { kind: 'ag.workflow.v2/definition', intent: normalizeText(w.intent), documentation, ...execution, ...intake, repositories, nodes, edges }
+  return { kind: 'ag.workflow.v2/definition', intent: normalizeText(w.intent), documentation, ...execution, ...intake, repositories, nodes, edges, ...(Object.keys(groups).length ? { groups } : {}) }
 }
 
 export function projection(kind: ApprovalKind, w: Workflow) {

@@ -102,8 +102,9 @@ export const WORKFLOW_SHAPE = record({
   execution: record({ agent: scalar, profile: scalar, guides: list(scalar), session: scalar, node: scalar, lane: scalar }),
   intake: record({ zulip: { kind: 'scalar', absent: 'requests' } }),
   repositories: dict(record({ path: scalar, access: scalar, integrate: scalar }, true)),
-  nodes: dict(record({ type: scalar, name: scalar, confirms: scalar, activity: scalar, appearance: record({ icon: scalar, color: scalar }, true), description: scalar, repositories: list(scalar), workflow: scalar, project: scalar, accepts: scalar, template: record({ id: scalar, revision: scalar, expectation: scalar }) })),
+  nodes: dict(record({ type: scalar, name: scalar, confirms: scalar, activity: scalar, appearance: record({ icon: scalar, color: scalar }, true), description: scalar, repositories: list(scalar), workflow: scalar, project: scalar, accepts: scalar, template: record({ id: scalar, revision: scalar, expectation: scalar }), example: scalar, expectations: list(record({ key: scalar, strength: scalar, note: scalar })), specializes: record({ examples: list(scalar), revision: scalar }, true) })),
   edges: list(record({ from: scalar, to: scalar }, true)),
+  groups: dict(record({ name: scalar, kind: scalar, cardinality: scalar, description: scalar, members: list(scalar, true), appearance: record({ color: scalar }, true) })),
   approvals: record({ intent: approval, definition: approval }),
   layout: record({ nodes: dict(record({ x: scalar, y: scalar }, true)) }),
 })
@@ -263,6 +264,9 @@ export function workflowForWrite(w: Workflow): Record<string, unknown> {
       description: n.description,
       repositories: n.repositories, workflow: n.workflow || undefined, project: n.project || undefined, accepts: n.accepts || undefined,
       template: n.template ? { id: n.template.id, revision: n.template.revision, expectation: n.template.expectation } : undefined,
+      example: n.example ? true : undefined,
+      expectations: n.expectations?.length ? n.expectations.map(x => ({ key: x.key, strength: x.strength, note: x.note || undefined })) : undefined,
+      specializes: n.specializes ? { examples: n.specializes.examples, revision: n.specializes.revision } : undefined,
     }
   }
   const approvals: Record<string, unknown> = {}
@@ -270,6 +274,7 @@ export function workflowForWrite(w: Workflow): Record<string, unknown> {
   return {
     schema: w.schema, id: w.id, name: w.name, intent: w.intent,
     documentation: w.documentation, execution: { agent: w.execution.agent, profile: w.execution.profile, guides: w.execution.guides, session: w.execution.session || undefined, node: w.execution.node || undefined, lane: w.execution.lane || undefined }, intake: w.intake, repositories: Object.fromEntries(Object.entries(w.repositories).map(([k, b]) => [k, { path: b.path, access: b.access, integrate: b.integrate || undefined }])), nodes, edges: w.edges,
+    groups: w.groups && Object.keys(w.groups).length ? Object.fromEntries(Object.entries(w.groups).map(([k, g]) => [k, { name: g.name, kind: g.kind, cardinality: g.cardinality, description: g.description, members: g.members, appearance: g.appearance?.color ? { color: g.appearance.color } : undefined }])) : undefined,
     approvals, layout: w.layout,
   }
 }

@@ -112,7 +112,25 @@ export interface WorkflowNode {
   activity?: string // a discussion activity (argue p4): announce | ask | ponder | talk
   appearance?: Appearance // display only (p7)
   template?: TemplateRef // provenance (p7/ex1): the catalog template it was made from; outside digests and the compiled graph
+  // improve_wfnode p1 (docs/contract.md *Examples*, *Expectations*): a model for
+  // concrete work, not work itself; what the author expects of its result; and,
+  // on concrete work, the examples it was specialized from.
+  example?: boolean
+  expectations?: NodeExpectation[]
+  specializes?: Specializes
 }
+// What the author expects of a node's result. `strength` is plain text so a
+// wrong value is representable and reported; absent reads as `preferred`.
+export interface NodeExpectation { key: string; strength?: string; note?: string }
+// Provenance of a replacement: the example nodes and the definition revision
+// they were read from. A record, like the revision's reason.
+export interface Specializes { examples: string[]; revision: string }
+// A first-class group of nodes (docs/contract.md *Groups*). `members` is the
+// sole authority for membership and its order; it creates no edges. P1 has
+// flat, non-overlapping `list` groups of `variable` cardinality.
+export const GROUP_KINDS = ['list'] as const
+export const GROUP_CARDINALITIES = ['variable'] as const
+export interface WorkflowGroup { name: string; kind: string; cardinality: string; description: string; members: string[]; appearance?: { color: string } }
 // Where a node came from (p7/ex1, docs/catalog.md): the template's id and
 // revision, and its expectation at that revision.
 export interface TemplateRef { id: string; revision: number; expectation: string }
@@ -128,6 +146,7 @@ export interface Workflow {
   repositories: Record<string, RepositoryBinding>
   nodes: Record<string, WorkflowNode>
   edges: Edge[]
+  groups?: Record<string, WorkflowGroup> // improve_wfnode p1: absent = ordinary ungrouped nodes
   // The policy is plain text so that an unsupported or missing value is
   // representable and reported by validation ('' = the file declares none);
   // the three steps (p8/ex2) are booleans when the file has them.
@@ -274,6 +293,24 @@ export function workflowFromData(raw: unknown): { workflow: Workflow; issues: Sh
       if (typeof rev !== 'number' || !Number.isInteger(rev) || rev < 1) issues.push({ path: `${path}.template.revision`, message: 'expected a positive integer' })
       node.template = { id: text(t, 'id', `${path}.template`, issues), revision: typeof rev === 'number' ? rev : 0, expectation: text(t, 'expectation', `${path}.template`, issues) }
     }
+    if (value.example !== undefined && value.example !== null) {
+      if (typeof value.example === 'boolean') { if (value.example) node.example = true }
+      else issues.push({ path: `${path}.example`, message: 'expected true or false' })
+    }
+    if (value.expectations !== undefined && value.expectations !== null) {
+      node.expectations = list(value, 'expectations', path, issues).flatMap((x, i) => {
+        const p = `${path}.expectations[${i}]`
+        if (!isRecord(x)) { issues.push({ path: p, message: 'expected a mapping with key, and optionally strength and note' }); return [] }
+        const e: NodeExpectation = { key: text(x, 'key', p, issues) }
+        if (x.strength !== undefined && x.strength !== null) e.strength = text(x, 'strength', p, issues)
+        if (x.note !== undefined && x.note !== null) e.note = text(x, 'note', p, issues)
+        return [e]
+      })
+    }
+    if (value.specializes !== undefined && value.specializes !== null) {
+      const s = map(value, 'specializes', path, issues)
+      node.specializes = { examples: stringList(s, 'examples', `${path}.specializes`, issues), revision: text(s, 'revision', `${path}.specializes`, issues) }
+    }
     w.nodes[key] = node
   }
   list(raw, 'edges', '$', issues).forEach((value, i) => {
@@ -281,6 +318,16 @@ export function workflowFromData(raw: unknown): { workflow: Workflow; issues: Sh
     if (!isRecord(value)) { issues.push({ path, message: 'expected a mapping with from and to' }); return }
     w.edges.push({ from: text(value, 'from', path, issues), to: text(value, 'to', path, issues) })
   })
+  if (raw.groups !== undefined && raw.groups !== null) {
+    w.groups = {}
+    for (const [key, value] of Object.entries(map(raw, 'groups', '$', issues))) {
+      const path = `$.groups.${key}`
+      if (!isRecord(value)) { issues.push({ path, message: 'expected a mapping with name, kind, cardinality, description and members' }); continue }
+      const g: WorkflowGroup = { name: text(value, 'name', path, issues), kind: text(value, 'kind', path, issues), cardinality: text(value, 'cardinality', path, issues), description: text(value, 'description', path, issues), members: stringList(value, 'members', path, issues) }
+      if (value.appearance !== undefined && value.appearance !== null) g.appearance = { color: text(map(value, 'appearance', path, issues), 'color', `${path}.appearance`, issues) }
+      w.groups[key] = g
+    }
+  }
   const documentation = map(raw, 'documentation', '$', issues)
   w.documentation.policy = text(documentation, 'policy', '$.documentation', issues)
   for (const k of DOC_STEPS) {

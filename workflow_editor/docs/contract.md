@@ -458,6 +458,91 @@ question (`wfe run ask`, posted by WFE; conversations.md *Questions*). It is par
 digest, the compiled graph and an adjustment's executable change, like a
 delegate's target. The editor and the run view show it on the card.
 
+### Groups (improve_wfnode p1)
+
+A workflow owns a `groups` mapping keyed by stable group ids:
+
+```yaml
+groups:
+  scenes:
+    name: Landscape scenes
+    kind: list            # list
+    cardinality: variable # variable: the example count does not fix the item count
+    members:              # ordered; the sole authority for membership
+      - scene_example_1
+      - scene_example_2
+    description: >
+      Choose the landscapes required by the actual scene composition.
+    appearance: {color: teal} # display only, outside the digest and the compiled graph
+```
+
+Groups are flat and do not overlap. A node belongs to at most one group, and
+nodes name no group themselves. Members are authored nodes of this workflow, never
+generated documentation steps. A duplicate, overlapping or dangling member is a
+validation error. `members: []` is a list that needs no items.
+
+`members` order is list order. It is part of the definition digest and creates
+no edge, schedule or parallelism: edges alone express dependencies, and a member
+may have edges to nodes outside the group. Removing a group never removes its
+members. No minimum, maximum, nesting or loop is expressed in P1.
+
+### Examples (improve_wfnode p1)
+
+`example: true` marks a node of any type as a model for concrete work. It keeps
+its type, delegate target, description and expectations, with or without a group.
+An example is not executable work: a run specializes it through a revision and
+then performs the concrete nodes. See [adjustments.md](adjustments.md)
+*Specializing examples* and [runs.md](runs.md) *Examples*.
+
+A replacement names what it came from with `specializes: {examples: [<ids>],
+revision: <rN>}`: the example node ids and the definition revision they were read
+from. It is written on the concrete node in a run's revision.
+
+### Expectations (improve_wfnode p1)
+
+A node states what its author expects of the result. Example status and group
+membership have no strength: they describe the definition's structure.
+
+```yaml
+nodes:
+  show:
+    type: do
+    description: Show the scene.
+    expectations:
+      - key: webbrowser
+        strength: required       # preferred (default) | required
+      - key: native
+        note: Launchable on the person's review PC.
+```
+
+| Key | Says | Meaning |
+| --- | --- | --- |
+| `webbrowser` | use | The person can open and check the result in a web browser. |
+| `native` | use | The person can launch and try the result natively on their review PC, not implied to be the executing machine. |
+| `project` | audience | The result is shared with another project, in a form it can use. |
+| `human` | audience | The result is shared with a person, in a form they can receive and read. |
+| `nfs` | delivery | The result is delivered through an NFS share. |
+| `s3` | delivery | The result is delivered through S3-compatible storage such as MinIO. |
+
+Entries are cumulative, one per key, so browser and native can both be requested.
+An unknown key is kept and shown with its note; no capability or validator
+exists for it. There is no general attribute editor and no way to express
+alternatives.
+
+- **Preferred** means: prioritize this; explain a different choice and the actual result.
+- **Required** means: a condition of a satisfactory result. An unmet condition stays
+  visible as unmet, even when the agent has finished its available work.
+
+Strength is neither a permission gate nor proof of satisfaction: attaching a key
+establishes nothing. A run's records say whether each expectation was met
+([runs.md](runs.md) *Expectation assessments*). Hosts, credentials and storage
+endpoints stay environment facts, resolved through scoped context and configuration.
+A key provisions nothing: `native` starts no process and `s3` creates no bucket.
+
+The catalog's singular `expectation` text ([catalog.md](catalog.md)) is a different
+thing: it tells the designer of a workflow how the person expects an activity to
+appear.
+
 ### Graph semantics
 
 An edge means that its target waits for its source to complete. Several
@@ -501,6 +586,11 @@ fulfils its intent.
 | `activity-kind`, `activity-type` | error | `activity` other than announce / ask / ponder / talk, or on the wrong node type (argue p4) |
 | `review-repositories` | warning | a review node binds repositories (p17) |
 | `confirms-kind`, `confirms-type`, `confirms-duplicate` | error | `confirms` other than `result`, on a non-talk node, or on more than one node |
+| `group-id-invalid`, `group-name`, `group-kind`, `group-cardinality` | error | malformed group: an id, no name, a kind other than `list`, a cardinality other than `variable` (improve_wfnode p1) |
+| `group-member-unknown`, `group-member-duplicate`, `group-member-overlap` | error | a member that is not an authored node, listed twice, or in two groups |
+| `expectation-key`, `expectation-duplicate`, `expectation-strength` | error | a malformed key, a key listed twice, a strength other than `preferred` / `required` |
+| `expectation-unknown` | warning | a key outside the documented ones: kept and shown |
+| `specializes-revision`, `specializes-examples`, `specializes-example` | error | malformed provenance, or a node that is both an example and a replacement |
 
 Drafts with errors can be saved. They cannot be approved.
 

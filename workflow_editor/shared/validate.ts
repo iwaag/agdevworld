@@ -2,9 +2,10 @@
 // well-formed and that its references resolve; it never judges whether the
 // graph fulfils the intent. Errors block approval; drafts may still be saved.
 import {
-  ACCESS_LEVELS, ACTIVITIES, activityType, APPEARANCE_COLORS, APPEARANCE_ICONS, CONFIRMS, DELEGATE_ACCEPTS, DEVDOCS_MODES, DOC_POLICIES, DOC_STEPS, ID_PATTERN, INTAKE_MODES, NODE_TYPES, NODE_PATTERN, LANE_PATTERN, PROFILE_PATTERN, SESSION_POLICIES, PROJECT_SCHEMA, WORKFLOW_SCHEMA, INTEGRATE_MODES, guideKey, guideRef, normalizeRepoPath,
+  ACCESS_LEVELS, ACTIVITIES, activityType, APPEARANCE_COLORS, APPEARANCE_ICONS, CONFIRMS, GROUP_CARDINALITIES, GROUP_KINDS, DELEGATE_ACCEPTS, DEVDOCS_MODES, DOC_POLICIES, DOC_STEPS, ID_PATTERN, INTAKE_MODES, NODE_TYPES, NODE_PATTERN, LANE_PATTERN, PROFILE_PATTERN, SESSION_POLICIES, PROJECT_SCHEMA, WORKFLOW_SCHEMA, INTEGRATE_MODES, guideKey, guideRef, normalizeRepoPath,
   type Issue, type Project, type Workflow,
 } from './model.ts'
+import { EXPECTATION_KEYS, EXPECTATION_STRENGTHS } from './expectations.ts'
 
 // What the project offers to resolve references against. Supplied by the
 // service from .gitmodules, Git state and the workflow directory.
@@ -31,6 +32,7 @@ export interface ValidationContext {
   projects?: Record<string, WorkflowRef[]>
 }
 
+const REVISION = /^r[0-9]{1,4}$/
 const err = (code: string, message: string, extra: Partial<Issue> = {}): Issue => ({ severity: 'error', code, message, ...extra })
 const warn = (code: string, message: string, extra: Partial<Issue> = {}): Issue => ({ severity: 'warning', code, message, ...extra })
 
@@ -158,6 +160,40 @@ export function validateWorkflow(w: Workflow, ctx: ValidationContext = {}): Issu
     if (n.confirms) {
       if (!(CONFIRMS as readonly string[]).includes(n.confirms)) issues.push(err('confirms-kind', `Node "${id}" confirms "${n.confirms}"; expected ${CONFIRMS.join(' or ')}.`, { node: id }))
       else if (n.type !== 'talk') issues.push(err('confirms-type', `Node "${id}" confirms the result but is "${n.type}"; only a talk node asks the person.`, { node: id }))
+    }
+    // Expectations (improve_wfnode p1): cumulative entries, one per key. An
+    // unknown key is kept and shown with its note; nothing executes it.
+    const keys = new Set<string>()
+    ;(n.expectations ?? []).forEach((x, i) => {
+      if (!x.key || !ID_PATTERN.test(x.key)) issues.push(err('expectation-key', `Node "${id}" expectation ${i + 1} has key "${x.key}"; a key must match ${ID_PATTERN.source}.`, { node: id }))
+      else if (keys.has(x.key)) issues.push(err('expectation-duplicate', `Node "${id}" lists expectation "${x.key}" twice; keep one entry with its strength and note.`, { node: id }))
+      else if (!(x.key in EXPECTATION_KEYS)) issues.push(warn('expectation-unknown', `Node "${id}" has expectation "${x.key}", which is not one of ${Object.keys(EXPECTATION_KEYS).join(', ')}; it is kept and shown with its note, and nothing executes it.`, { node: id }))
+      keys.add(x.key)
+      if (x.strength !== undefined && !(EXPECTATION_STRENGTHS as readonly string[]).includes(x.strength)) issues.push(err('expectation-strength', `Node "${id}" expectation "${x.key}" has strength "${x.strength}"; expected ${EXPECTATION_STRENGTHS.join(' or ')} (leaving it out means preferred).`, { node: id }))
+    })
+    if (n.specializes) {
+      if (!REVISION.test(n.specializes.revision)) issues.push(err('specializes-revision', `Node "${id}" specializes examples of revision "${n.specializes.revision}"; expected a revision such as r1 (wfe run revisions).`, { node: id }))
+      if (!n.specializes.examples.length) issues.push(err('specializes-examples', `Node "${id}" declares specializes without the example node ids it replaces.`, { node: id }))
+      if (n.example) issues.push(err('specializes-example', `Node "${id}" is both an example and a replacement of examples; a replacement is concrete work.`, { node: id }))
+    }
+  }
+  // Groups (improve_wfnode p1): flat and non-overlapping; `members` is the
+  // sole authority for membership, an empty list is a list that needs no items.
+  const memberOf = new Map<string, string>()
+  for (const [id, g] of Object.entries(w.groups ?? {})) {
+    if (!ID_PATTERN.test(id)) issues.push(err('group-id-invalid', `Group id "${id}" must match ${ID_PATTERN.source}.`, { field: 'groups' }))
+    if (!g.name.trim()) issues.push(err('group-name', `Group "${id}" has no name; its boundary is drawn with it.`, { field: 'groups' }))
+    if (!(GROUP_KINDS as readonly string[]).includes(g.kind)) issues.push(err('group-kind', `Group "${id}" has kind "${g.kind}"; expected ${GROUP_KINDS.join(', ')}.`, { field: 'groups' }))
+    if (!(GROUP_CARDINALITIES as readonly string[]).includes(g.cardinality)) issues.push(err('group-cardinality', `Group "${id}" has cardinality "${g.cardinality}"; expected ${GROUP_CARDINALITIES.join(', ')}.`, { field: 'groups' }))
+    if (g.appearance?.color && !(APPEARANCE_COLORS as readonly string[]).includes(g.appearance.color)) issues.push(warn('appearance-color', `Group "${id}" has color "${g.appearance.color}", which is not a palette color (${APPEARANCE_COLORS.join(', ')}); the default is shown.`, { field: 'groups' }))
+    const inGroup = new Set<string>()
+    for (const m of g.members) {
+      if (inGroup.has(m)) { issues.push(err('group-member-duplicate', `Group "${id}" lists member "${m}" twice.`, { node: m, field: 'groups' })); continue }
+      inGroup.add(m)
+      if (!(m in w.nodes)) issues.push(err('group-member-unknown', m.startsWith('_') ? `Group "${id}" lists "${m}", a generated documentation step; only authored nodes are members.` : `Group "${id}" lists member "${m}", which is not a node of this workflow; remove it or add the node.`, { node: m, field: 'groups' }))
+      const other = memberOf.get(m)
+      if (other) issues.push(err('group-member-overlap', `Node "${m}" is a member of both "${other}" and "${id}"; a node belongs to at most one group.`, { node: m, field: 'groups' }))
+      else memberOf.set(m, id)
     }
   }
   const confirming = Object.entries(w.nodes).filter(([, n]) => n.confirms === 'result').map(([id]) => id)

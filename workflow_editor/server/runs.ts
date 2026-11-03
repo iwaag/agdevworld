@@ -1065,7 +1065,10 @@ export interface AdjustOptions {
   // why nothing is adjusted. `text`, `reason` and `source` are then ignored.
   derive?: (record: RunRecord, active: { text: string; workflow: Workflow }) => { text: string; reason: string; source: AdjustSource } | { skip: string }
 }
-export interface AuthoredDiff { added: string[]; removed: string[]; changed: { id: string; fields: string[] }[]; restyled: string[] }
+// `groups` (improve_wfnode p1), when any changed: `reordered` keeps the same
+// members in another order; a `changed` group names its fields, members included.
+export interface GroupsDiff { added: string[]; removed: string[]; changed: { id: string; fields: string[] }[]; reordered: string[] }
+export interface AuthoredDiff { added: string[]; removed: string[]; changed: { id: string; fields: string[] }[]; restyled: string[]; groups?: GroupsDiff }
 export interface AdjustResult {
   ok: boolean
   dryRun: boolean
@@ -1085,7 +1088,7 @@ export interface AdjustResult {
 
 // Node fields of the contract (docs/contract.md); anything else is kept in
 // the file and means nothing to a run.
-const KNOWN_NODE_FIELDS = new Set(['type', 'name', 'description', 'repositories', 'workflow', 'project', 'accepts', 'confirms', 'activity', 'appearance', 'template'])
+const KNOWN_NODE_FIELDS = new Set(['type', 'name', 'description', 'repositories', 'workflow', 'project', 'accepts', 'confirms', 'activity', 'appearance', 'template', 'example', 'expectations', 'specializes'])
 function adjustNotes(raw: unknown, active: Workflow, next: Workflow): string[] {
   const notes: string[] = []
   const nodes = (raw && typeof raw === 'object' ? (raw as { nodes?: Record<string, unknown> }).nodes : undefined) ?? {}
@@ -1100,7 +1103,21 @@ function adjustNotes(raw: unknown, active: Workflow, next: Workflow): string[] {
   return notes
 }
 
-const NODE_FIELDS = ['type', 'name', 'description', 'repositories', 'workflow', 'confirms', 'activity'] as const
+const NODE_FIELDS = ['type', 'name', 'description', 'repositories', 'workflow', 'confirms', 'activity', 'example', 'expectations', 'specializes'] as const
+const GROUP_FIELDS = ['name', 'kind', 'cardinality', 'description', 'members'] as const
+function groupsDiff(a: Workflow, b: Workflow): GroupsDiff | null {
+  const ga = a.groups ?? {}, gb = b.groups ?? {}
+  const shared = Object.keys(gb).filter(g => g in ga).sort()
+  const fields = (g: string) => GROUP_FIELDS.filter(f => canonicalJson(ga[g][f]) !== canonicalJson(gb[g][f]))
+  const same = (x: string[], y: string[]) => canonicalJson([...x].sort()) === canonicalJson([...y].sort())
+  const d: GroupsDiff = {
+    added: Object.keys(gb).filter(g => !(g in ga)).sort(),
+    removed: Object.keys(ga).filter(g => !(g in gb)).sort(),
+    changed: shared.filter(g => fields(g).some(f => f !== 'members' || !same(ga[g].members, gb[g].members))).map(id => ({ id, fields: fields(id) })),
+    reordered: shared.filter(g => fields(g).includes('members') && same(ga[g].members, gb[g].members)),
+  }
+  return d.added.length || d.removed.length || d.changed.length || d.reordered.length ? d : null
+}
 function authoredDiff(a: Workflow, b: Workflow): AuthoredDiff {
   const fields = (x: Workflow['nodes'][string], y: Workflow['nodes'][string]) => NODE_FIELDS.filter(f => canonicalJson(x[f] ?? null) !== canonicalJson(y[f] ?? null))
   return {
@@ -1108,6 +1125,7 @@ function authoredDiff(a: Workflow, b: Workflow): AuthoredDiff {
     removed: Object.keys(a.nodes).filter(n => !(n in b.nodes)).sort(),
     changed: Object.keys(b.nodes).filter(n => n in a.nodes && fields(a.nodes[n], b.nodes[n]).length).sort().map(id => ({ id, fields: fields(a.nodes[id], b.nodes[id]) })),
     restyled: Object.keys(b.nodes).filter(n => n in a.nodes && canonicalJson(a.nodes[n].appearance ?? null) !== canonicalJson(b.nodes[n].appearance ?? null)).sort(),
+    ...(groupsDiff(a, b) ? { groups: groupsDiff(a, b)! } : {}),
   }
 }
 

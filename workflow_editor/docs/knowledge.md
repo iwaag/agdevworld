@@ -269,6 +269,10 @@ one: an ordinary `wfe run adjust`. A selection and a decision are separate facts
 reference can be selected and then rejected, or used without being selected, and no
 report label changes the selection. Silence means no decision was recorded.
 
+The brief asks an agent to keep the node and its report current when it settles on a finding or
+finds one unfit. It asks and enforces nothing: wfrun-trial knowledge-choice/run-001 reasoned well in its
+report and left the node empty, and knowledge-contrast/run-001 never opened its selected finding and said nothing.
+
 ## Icons
 
 `src/knowledge-icons/` holds the artwork, mapped by its `manifest.json` from category

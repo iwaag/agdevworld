@@ -21,6 +21,8 @@ import type { RunOpResponse, RunResponse } from '../shared/api.ts'
 import { describeSteps, effectiveOf, holderOf, situation, type RunRecord } from '../shared/run.ts'
 import { api, ApiError, type AdjustView, type DelegationsView, type PresentationView, type RunExecView, type RunNotifyView, type RunStorageView } from './api.ts'
 import { Canvas, STATE_GLYPH } from './canvas.ts'
+import { openFindingReadonly, openKnowledgePicker } from './knowledgeUi.ts'
+import type { KnowledgeRef } from '../shared/knowledge.ts'
 import { assessmentWords, expectationStates } from '../shared/run.ts'
 import { docStepsOf, FINAL_STEP, hasDocSteps, splitCounts } from '../shared/compile.ts'
 import { h, when } from './dom.ts'
@@ -337,6 +339,7 @@ export function renderRunView(root: HTMLElement, wsId: string, workflow: string,
       case 'goto-resume': side.revealResume(); break
       case 'goto-section': if (d.section === 'context') { ctxCard.reveal(d.focus === 'instruct' ? 'instruct' : undefined); break } setDisplay('detail'); side.revealSection(d.section!, d.focus); break
       case 'more-details': setDisplay('detail'); side.revealSelected(); break
+      case 'knowledge-finding': openFindingReadonly(JSON.parse(d.ref!) as KnowledgeRef, shown?.record?.project); break
       case 'records': setDisplay('detail'); side.revealRecords(); break
       case 'present-start': void presentation(d.presentation!, 'start'); break
       case 'present-stop': void presentation(d.presentation!, 'stop'); break
@@ -579,6 +582,10 @@ export function renderRunView(root: HTMLElement, wsId: string, workflow: string,
     // Bindings resolve against the repositories recorded at creation.
     const repositories = rec.context.repositories.map(c => ({ path: c.path, name: c.path, kind: c.path === '.' ? 'root' as const : 'submodule' as const, category: 'other' as const, initialized: true, dirty: c.dirty ?? 0 }))
     canvas.render(wf, {
+      knowledge: {
+        category: (node, category) => openKnowledgePicker({ node, nodeName: wf.nodes[node]?.name || node, project: rec.project, category, list: wf.nodes[node]?.knowledge ?? [], readonly: true, inspect: ref => openFindingReadonly(ref, rec.project) }),
+        finding: (_node, ref) => openFindingReadonly(ref, rec.project),
+      },
       repositories, readonly: true, errorNodes: new Set(), run: status, effective: hasDocSteps(eff) ? eff : null, focus: focusOf(rec), assessed, meanings: eff?.meanings,
       workflows: Object.entries(r!.bundle).filter(([, b]) => b.workflow).map(([id, b]) => ({ file: b.file, id, name: b.workflow!.name, errors: 0, warnings: 0, delegates: [] })),
     }, sel)

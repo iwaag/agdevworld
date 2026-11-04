@@ -54,6 +54,15 @@ nodes, `groups.<id>.members` and edges atomically, and honors `--expect-revision
 The difference (`diff.groups`, and `authored.groups` in the answer) reports groups
 added, removed, changed and reordered.
 
+## Knowledge selections (improve_workflow p3)
+
+A node's `knowledge` ([knowledge.md](knowledge.md) *On a node*) changes through an ordinary
+revision (`wfe run help knowledge`), and `authored.changed` names the field. A concrete
+node carries or refines what the example it specializes pointed at, and the reason says why
+it differs. `knowledgeHistory` derives the original selection and each change from the revisions, so
+removing or replacing a reference never erases it. What the agent did with a finding is a
+decision in its report, not a selection, and neither changes the other.
+
 ## Recording work already done (workflow_editor fix5)
 
 `wfe run record-done <run> --template <t> --id <node> --after <node>

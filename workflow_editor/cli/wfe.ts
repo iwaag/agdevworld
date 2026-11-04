@@ -818,7 +818,7 @@ Projects and workspaces
   gitea whoami|repo|git     Gitea as a chosen principal (--as): who, its access, git with its auth
   dashboard               every project and shared repository, with where each fact was read
   projects <subcommand>     read any managed project: list, show, tree, read, search, runs, run
-  knowledge <subcommand>    findings projects keep from practice: collections, list, show, check, cite, decisions
+  knowledge <subcommand>    findings projects keep from practice: collections, list, show, check, cite, ref, decisions
                             (committed by default, at a revision, with provenance; docs/access.md)
   request <workflow> …      a person's request to the executor (autolab): a run of the published
                             workflow, queued (--editing: a trial of this checkout's file)

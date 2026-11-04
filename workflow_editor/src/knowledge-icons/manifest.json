@@ -1,0 +1,73 @@
+{
+  "schema": "ag.wfe-knowledge-icons.v1",
+  "family": "wfe-knowledge-icons",
+  "revision": 2,
+  "categories": {
+    "motion": {
+      "file": "categories/motion.svg",
+      "label": "Motion",
+      "depicts": "clean curved motion arrow with single trailing speed line"
+    },
+    "extraction": {
+      "file": "categories/extraction.svg",
+      "label": "Extraction",
+      "depicts": "crossed cutting blades separating a segment with finger loops"
+    },
+    "generation": {
+      "file": "categories/generation.svg",
+      "label": "Generation",
+      "depicts": "radiating four-point generative spark with companion satellite star"
+    },
+    "composition": {
+      "file": "categories/composition.svg",
+      "label": "Composition",
+      "depicts": "three stacked isometric layers assembling elements together"
+    },
+    "verification": {
+      "file": "categories/verification.svg",
+      "label": "Verification",
+      "depicts": "protective inspection shield containing a validation checkmark"
+    },
+    "process": {
+      "file": "categories/process.svg",
+      "label": "Process",
+      "depicts": "directed acyclic workflow graph branching from root to subsequent tasks"
+    },
+    "domain": {
+      "file": "categories/domain.svg",
+      "label": "Domain",
+      "depicts": "globe sphere with equator and meridian line depicting subject knowledge"
+    }
+  },
+  "findings": {
+    "gimmickimg:wedo#gimmickimg-f-0001": {
+      "file": "findings/cutout-flight.svg",
+      "label": "Cut-out flight",
+      "depicts": "wide looping flight trajectory with flying solid part dot"
+    },
+    "gimmickimg:wedo#gimmickimg-f-0002": {
+      "file": "findings/clean-cutout.svg",
+      "label": "Clean cut-out",
+      "depicts": "simple cut-out silhouette inside dashed segmentation boundary"
+    },
+    "gimmickimg:wedo#gimmickimg-f-0003": {
+      "file": "findings/clip-loop.svg",
+      "label": "Clip loop",
+      "depicts": "conflicting cycle loop showing opposing arrows and divergence flash"
+    },
+    "repo:developer/wedo-argue#argue-w-artifact-claims": {
+      "file": "findings/artifact-claims.svg",
+      "label": "Claims",
+      "depicts": "plain observation eye spaced beside a short commit mark"
+    },
+    "repo:developer/wedo-argue#argue-w-owed-work": {
+      "file": "findings/owed-work.svg",
+      "label": "Owed work",
+      "depicts": "checklist with completed task and active uncompleted pending obligation node"
+    }
+  },
+  "fallbacks": {
+    "category": "fallback-category.svg",
+    "finding": "fallback-finding.svg"
+  }
+}

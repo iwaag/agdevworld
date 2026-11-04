@@ -1260,3 +1260,73 @@ html[data-display="detail"] .dash-glance { max-width: none; padding: 0; }
 .expect-list { display: flex; flex-direction: column; gap: 6px; margin: 8px 0; }
 .focus-expectations { display: flex; flex-wrap: wrap; gap: 6px 10px; margin-top: 8px; }
 .run-status.state-example, .state-chip.state-example { color: #4c4f7a; border-color: #8d90c4; background: #ecedf8; }
+
+/* A node's knowledge (improve_workflow p3): category on the left, what is selected
+   under it on the right. Frames differ by shape, not only color: a rounded square
+   for a category, a circle for a finding, also for the built-in generic icons. */
+.k-strip { display: flex; flex-direction: column; gap: 3px; margin-top: 6px; padding-top: 5px; border-top: 1px dotted color-mix(in srgb, currentColor 28%, transparent); min-width: 0; }
+.k-row { display: flex; align-items: flex-start; gap: 2px 4px; min-width: 0; font-size: 11px; line-height: 1.2; }
+.k-cat { flex: none; max-width: 56%; }
+.k-findings { display: flex; flex-wrap: wrap; align-items: center; gap: 2px 4px; flex: 1 1 0; min-width: 0; }
+.k-cat, .k-finding, .k-more, .k-add { all: unset; box-sizing: border-box; display: inline-flex; align-items: center; gap: 3px; min-width: 0; max-width: 100%; padding: 1px 3px 1px 1px; border-radius: 4px; color: inherit; font-size: 11px; line-height: 1.2; cursor: pointer; }
+.k-cat { font-weight: 600; }
+.k-cat:hover, .k-finding:hover, .k-more:hover, .k-add:hover { background: color-mix(in srgb, currentColor 13%, transparent); }
+.k-cat:focus-visible, .k-finding:focus-visible, .k-more:focus-visible, .k-add:focus-visible, .k-add-first:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.k-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.k-wrap { white-space: normal; overflow-wrap: anywhere; }
+.k-row .k-name { max-width: 100%; }
+.k-sep { flex: none; align-self: stretch; width: 1px; min-height: 16px; margin: 2px 0; background: currentColor; opacity: .35; }
+.k-more { padding: 1px 4px; opacity: .8; font-variant-numeric: tabular-nums; }
+.k-add { padding: 1px 4px; opacity: .62; font-weight: 400; }
+.k-add-first { all: unset; position: absolute; top: 5px; right: 7px; padding: 1px 5px; border-radius: 4px; font-size: 11px; color: inherit; opacity: 0; cursor: pointer; background: color-mix(in srgb, currentColor 10%, transparent); }
+.node:hover .k-add-first, .node:focus-within .k-add-first, .node.selected .k-add-first, .k-add-first:focus-visible { opacity: .85; }
+.k-icon { flex: none; display: inline-flex; width: 18px; height: 18px; color: inherit; }
+.k-icon svg { display: block; width: 100%; height: 100%; }
+/* The built-in generic icons have no frame of their own. */
+.k-icon[data-art="builtin"] { padding: 2px; box-sizing: border-box; border: 1.3px solid currentColor; }
+.k-icon-category[data-art="builtin"] { border-radius: 4px; }
+.k-icon-finding[data-art="builtin"] { border-radius: 50%; }
+.k-strip.k-mini .k-icon { width: 16px; height: 16px; }
+
+.k-dialog { width: min(720px, calc(100vw - 24px)); max-height: calc(100dvh - 24px); padding: 0; border: 1px solid var(--line); border-radius: 10px; background: var(--card); color: var(--text); overflow: hidden; }
+.k-dialog[open] { display: flex; flex-direction: column; }
+.k-dialog::backdrop { background: rgb(20 24 30 / .45); }
+.k-dialog-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 12px 16px; border-bottom: 1px solid var(--line); }
+.k-dialog-head h3 { margin: 0; font-size: 15px; overflow-wrap: anywhere; }
+.k-dialog-body { padding: 12px 16px 16px; overflow: auto; min-height: 0; }
+.k-controls { display: flex; flex-wrap: wrap; gap: 8px 14px; align-items: end; margin: 8px 0; }
+.k-controls .field { margin: 0; }
+.k-search { flex: 1 1 220px; min-width: 0; }
+.k-lead { display: flex; flex-wrap: wrap; gap: 8px; margin: 6px 0; }
+.k-lead:empty { display: none; }
+.k-candidate { padding: 10px; margin: 8px 0; border: 1px solid var(--line); border-radius: 8px; }
+.k-candidate.is-chosen { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
+.k-candidate p { margin: 4px 0; overflow-wrap: anywhere; }
+.k-pick { display: flex; align-items: flex-start; gap: 6px; cursor: pointer; overflow-wrap: anywhere; }
+.k-facts { display: flex; flex-wrap: wrap; gap: 2px 10px; overflow-wrap: anywhere; }
+.k-status { font-weight: 600; }
+.k-limits-box, .k-body-box, .k-history { margin: 6px 0; }
+.k-limits strong { display: block; margin-top: 6px; }
+.k-text { white-space: pre-wrap; overflow-wrap: anywhere; margin: 2px 0; }
+.k-empty { padding: 14px 0; }
+.link-btn { all: unset; color: var(--accent); text-decoration: underline; cursor: pointer; }
+.link-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.k-detail-id { display: flex; align-items: center; gap: 6px; margin-bottom: 8px; overflow-wrap: anywhere; }
+.k-illustration { margin: 6px 0; overflow-wrap: anywhere; }
+.k-illustration video, .k-illustration img { display: block; max-width: 100%; max-height: 240px; margin-top: 4px; }
+.k-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+.k-panel-row { margin-bottom: 10px; }
+.k-panel-head { display: flex; align-items: center; gap: 6px; margin-bottom: 4px; }
+.k-panel-head strong { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.k-panel-row input { width: 100%; box-sizing: border-box; }
+.k-panel-list, .k-selection, .k-selection ul { list-style: none; margin: 4px 0; padding: 0; }
+.k-selection ul { padding-left: 21px; }
+.k-selection > li { display: block; margin-bottom: 4px; }
+.k-panel .k-finding, .k-run-selection .k-finding, .k-decision .k-finding { max-width: 100%; }
+.k-panel .k-name, .k-run-selection .k-name, .k-decision .k-name { white-space: normal; overflow-wrap: anywhere; }
+.k-decision { padding: 8px 0; border-top: 1px solid #eef0f3; overflow-wrap: anywhere; }
+.k-stated { display: inline-block; font-size: 11px; font-weight: 600; padding: 0 5px; border: 1px dashed currentColor; border-radius: 4px; }
+.k-change { margin: 6px 0; }
+@media (max-width: 640px) { .k-dialog { width: calc(100vw - 16px); } }
+.k-template-categories { display: flex; flex-wrap: wrap; gap: 4px 12px; }
+.knowledge-title .k-icon { vertical-align: -4px; }

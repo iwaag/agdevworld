@@ -1093,7 +1093,7 @@ export interface AdjustResult {
 
 // Node fields of the contract (docs/contract.md); anything else is kept in
 // the file and means nothing to a run.
-const KNOWN_NODE_FIELDS = new Set(['type', 'name', 'description', 'repositories', 'workflow', 'project', 'accepts', 'confirms', 'activity', 'appearance', 'template', 'example', 'expectations', 'specializes'])
+const KNOWN_NODE_FIELDS = new Set(['type', 'name', 'description', 'repositories', 'workflow', 'project', 'accepts', 'confirms', 'activity', 'appearance', 'template', 'example', 'expectations', 'specializes', 'knowledge'])
 function adjustNotes(raw: unknown, active: Workflow, next: Workflow): string[] {
   const notes: string[] = []
   const nodes = (raw && typeof raw === 'object' ? (raw as { nodes?: Record<string, unknown> }).nodes : undefined) ?? {}
@@ -1108,7 +1108,7 @@ function adjustNotes(raw: unknown, active: Workflow, next: Workflow): string[] {
   return notes
 }
 
-const NODE_FIELDS = ['type', 'name', 'description', 'repositories', 'workflow', 'confirms', 'activity', 'example', 'expectations', 'specializes'] as const
+const NODE_FIELDS = ['type', 'name', 'description', 'repositories', 'workflow', 'confirms', 'activity', 'example', 'expectations', 'specializes', 'knowledge'] as const
 const GROUP_FIELDS = ['name', 'kind', 'cardinality', 'description', 'members'] as const
 function groupsDiff(a: Workflow, b: Workflow): GroupsDiff | null {
   const ga = a.groups ?? {}, gb = b.groups ?? {}

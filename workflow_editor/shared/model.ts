@@ -1,6 +1,7 @@
 // Definition models shared by the service and the browser. The YAML files are
 // the authority; these are the editable projections of their supported fields.
 // See docs/contract.md for the file contract.
+import type { KnowledgeAttachment, KnowledgeRef } from './knowledge.ts'
 
 export const WORKFLOW_SCHEMA = 'ag.workflow.v2'
 export const PROJECT_SCHEMA = 'ag.project.v2'
@@ -118,6 +119,8 @@ export interface WorkflowNode {
   example?: boolean
   expectations?: NodeExpectation[]
   specializes?: Specializes
+  // improve_workflow p3 (docs/knowledge.md *On a node*): the knowledge the author points at.
+  knowledge?: KnowledgeAttachment[]
 }
 // What the author expects of a node's result. `strength` is plain text so a
 // wrong value is representable and reported; absent reads as `preferred`.
@@ -310,6 +313,28 @@ export function workflowFromData(raw: unknown): { workflow: Workflow; issues: Sh
     if (value.specializes !== undefined && value.specializes !== null) {
       const s = map(value, 'specializes', path, issues)
       node.specializes = { examples: stringList(s, 'examples', `${path}.specializes`, issues), revision: text(s, 'revision', `${path}.specializes`, issues) }
+    }
+    if (value.knowledge !== undefined && value.knowledge !== null) {
+      // Kept as written, so that validation can say what is wrong with it: a
+      // malformed reference must not silently lose the author's intent.
+      const str = (x: Record<string, unknown>, k: string) => (x[k] === undefined || x[k] === null ? undefined : String(x[k]))
+      node.knowledge = list(value, 'knowledge', path, issues).flatMap((x, i) => {
+        const p = `${path}.knowledge[${i}]`
+        if (!isRecord(x)) { issues.push({ path: p, message: 'expected a mapping with category, note and findings' }); return [] }
+        const a: KnowledgeAttachment = {}
+        if (str(x, 'category')) a.category = str(x, 'category')
+        if (str(x, 'note')) a.note = str(x, 'note')
+        if (x.findings !== undefined && x.findings !== null) {
+          const refs = list(x, 'findings', p, issues).flatMap((f, j) => {
+            if (!isRecord(f)) { issues.push({ path: `${p}.findings[${j}]`, message: 'expected a mapping with id, repository, commit, path and sha256 (wfe knowledge ref)' }); return [] }
+            const r: KnowledgeRef = { id: str(f, 'id') ?? '', repository: str(f, 'repository') ?? '', commit: str(f, 'commit') ?? '', path: str(f, 'path') ?? '', sha256: str(f, 'sha256') ?? '' }
+            for (const k of ['title', 'summary', 'status'] as const) if (str(f, k)) r[k] = str(f, k)
+            return [r]
+          })
+          if (refs.length) a.findings = refs
+        }
+        return [a]
+      })
     }
     w.nodes[key] = node
   }

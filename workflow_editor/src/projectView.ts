@@ -6,6 +6,7 @@ import { validateProject } from '../shared/validate.ts'
 import { api, ApiError, type KnowledgeView } from './api.ts'
 import { live, serial } from './live.ts'
 import { h, short } from './dom.ts'
+import { findingIcon } from './knowledgeIcons.ts'
 import { diagnosticList } from './homeView.ts'
 import { keepingFocus, workflowCreator } from './createWorkflow.ts'
 import { draftHash } from './draftPanels.ts'
@@ -143,7 +144,7 @@ export function renderProjectView(root: HTMLElement, wsId: string, opts: { conte
         const examples = f.references.filter(r => r.role === 'illustration')
         const link = atCommit(f, f.path)
         knowledgeCard.append(h('div.knowledge-finding', { dataset: { finding: f.qid } },
-          h('div.knowledge-title', link ? h('a', { href: link, target: '_blank', rel: 'noopener' }, f.title) : f.title),
+          h('div.knowledge-title', findingIcon(f.qid), ' ', link ? h('a', { href: link, target: '_blank', rel: 'noopener' }, f.title) : f.title),
           h('p.small', f.summary),
           h('p.muted.small', [...f.categories, ...f.tags].join(' · '), f.status ? ` · ${f.status}` : '', f.kind === 'study' ? ' · imported, not locally verified' : ''),
           h('p.muted.small.knowledge-id', f.qid),

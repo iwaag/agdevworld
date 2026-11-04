@@ -2,6 +2,7 @@
 // reusable findings by qualified id, at a stated revision. The same module the
 // service's GET /api/knowledge routes use (server/knowledge.ts).
 import type { AccessContext } from '../server/access.ts'
+import { stringify as stringifyYaml } from 'yaml'
 import type { CollectionRead, KnowledgeOptions } from '../server/knowledge.ts'
 
 export const KNOWLEDGE_HELP = `wfe knowledge collections [--project <p>]
@@ -9,7 +10,8 @@ wfe knowledge list [<collection>] [--project <p>] [--category <c>]… [--tag <t>
 wfe knowledge show <collection>#<id> [--as <project> | --rev <commit> | --upstream] [--source worktree [--workspace <id>]]
 wfe knowledge check <collection> [--as <project> | --rev <commit> | --upstream]
 wfe knowledge check --dir <folder of the collection>
-wfe knowledge cite <collection>#<id>… [--decision adopted|adapted|rejected] [--as … | --rev …]
+wfe knowledge cite <collection>#<id>… [--decision adopted|adapted|rejected] [--node <node>] [--as … | --rev …]
+wfe knowledge ref <collection>#<id>… [--category <c>] [--as … | --rev …]
 wfe knowledge decisions <project> <workflow>/<run>
 
 Findings are what a project learned, kept in its own study/wedo area as one
@@ -44,7 +46,11 @@ cite         the block to put in your report: the commit, path and sha256 you
              actually read, for your decision, reason, work and verification.
              It records a revision for you; it is your statement that you read
              the document at that revision. Citing what you only saw listed
-             says more than happened.
+             says more than happened. --node names the node of your run the
+             entry is about; without it, it is a record of the run as a whole.
+ref          the entry for a node's knowledge field (wfe run help knowledge):
+             the finding at the revision read now. Selecting one says the
+             node points at it; it does not say anyone read it.
 decisions    what a run recorded, each entry read back at its recorded
              revision, with whether the document has changed since. These are
              the agent's statements; compare them with the work.
@@ -138,8 +144,15 @@ export async function knowledgeCommand(c: KnowledgeCli): Promise<number> {
     case 'cite': {
       const ids = c.positional.slice(1)
       if (!ids.length) throw c.usage('cite needs <collection>#<id>')
-      const r = await x.citation(ctx, ids, o, c.opt('decision'))
+      const r = await x.citation(ctx, ids, o, c.opt('decision'), c.opt('node'))
       c.out(`${r.block}\n\nPut the block itself in this run's report.md or outcome.md, with the placeholders filled in; a sentence about it elsewhere cannot be read back: wfe knowledge decisions <project> <workflow>/<run> reads this block.`, r)
+      return 0
+    }
+    case 'ref': {
+      const ids = c.positional.slice(1)
+      if (!ids.length) throw c.usage('ref needs <collection>#<id>')
+      const a = await x.attachment(ctx, ids, o, c.opt('category'))
+      c.out(`${stringifyYaml([a]).trimEnd()}\n\nThis goes under a node's knowledge: (wfe run help knowledge). It says the node points at these revisions, not that anyone read them.`, a)
       return 0
     }
     case 'decisions': {
@@ -148,12 +161,12 @@ export async function knowledgeCommand(c: KnowledgeCli): Promise<number> {
       const lines = r.decisions.map(d => {
         const cur = d.current && 'changed' in d.current ? (d.current.changed ? `changed since: current ${short(d.current.commit)} ${d.current.path}` : `unchanged at ${short(d.current.commit)}`) : d.current ? `current: ${d.current.problem}` : ''
         const items = (name: string, v: DecisionItems) => v.length ? [`  ${name}: ${v.map(i => `${i.ref} [${i.state}]`).join(', ')}`] : [`  ${name}: none recorded`]
-        return [`${d.decision.toUpperCase() || '?'} ${d.finding || '(no finding)'} [${d.state}]`, ...(d.recorded?.commit ? [`  read at ${d.recorded.repository ?? '?'}@${short(d.recorded.commit)} ${d.recorded.path ?? ''}`] : []), ...(d.atRevision ? [`  title then: ${d.atRevision.title}`] : []), ...(d.detail ? [`  ${d.detail}`] : []), ...(cur ? [`  ${cur}`] : []), ...(d.reason ? [`  reason: ${d.reason}`] : []), ...items('work', d.work), ...items('verification', d.verification)].join('\n')
+        return [`${d.decision.toUpperCase() || '?'} ${d.finding || '(no finding)'} [${d.state}]${d.node ? ` on node ${d.node}${d.nodeState === 'known' ? '' : ` (${d.nodeState})`}` : ''}`, ...(d.recorded?.commit ? [`  read at ${d.recorded.repository ?? '?'}@${short(d.recorded.commit)} ${d.recorded.path ?? ''}`] : []), ...(d.atRevision ? [`  title then: ${d.atRevision.title}`] : []), ...(d.detail ? [`  ${d.detail}`] : []), ...(cur ? [`  ${cur}`] : []), ...(d.reason ? [`  reason: ${d.reason}`] : []), ...items('work', d.work), ...items('verification', d.verification)].join('\n')
       })
       c.out([`${r.run}: ${r.decisions.length ? `${r.decisions.length} decision(s) in ${r.files.join(', ')}. These are the agent's statements: compare them with the work.` : 'no knowledge decisions recorded (none is required).'}`, ...lines, ...r.problems.map(p => `PROBLEM: ${p}`)].join('\n'), r)
       return r.problems.length ? 1 : 0
     }
-    default: throw c.usage('wfe knowledge collections | list | show | check | cite | decisions (see: wfe help knowledge)')
+    default: throw c.usage('wfe knowledge collections | list | show | check | cite | ref | decisions (see: wfe help knowledge)')
   }
 }
 type DecisionItems = { ref: string; state: string }[]

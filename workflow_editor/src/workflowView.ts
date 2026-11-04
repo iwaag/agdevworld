@@ -25,6 +25,8 @@ import { Canvas, TYPE_LABEL, type Selection } from './canvas.ts'
 import { h, short, when } from './dom.ts'
 import { icon } from './icons.ts'
 import { renderInspector } from './inspector.ts'
+import { detailFor, pickFor, type KnowledgeHost } from './knowledgePanel.ts'
+import type { StripEvents } from './knowledgeUi.ts'
 import { displayToggle, isSimple, onDisplay, setDisplay } from './displayMode.ts'
 import { ContextSection, ListEditor } from './contextParts.ts'
 import { autoArrange, completeLayout, freeSlot, type DisplayMode } from '../shared/layout.ts'
@@ -930,7 +932,7 @@ export function renderWorkflowView(root: HTMLElement, wsId: string, fileName: st
     if (selection?.kind === 'edge' && !draft.edges[selection.index]) selection = null
     if (selection?.kind === 'step' && !effective?.nodes[selection.id]) selection = null
     if (selection?.kind === 'group' && !draft.groups?.[selection.id]) selection = null
-    canvas.render(draft, { repositories: resp?.repositories ?? [], workflows: resp?.workflows ?? [], project: resp?.project, peers: resp?.peers, errorNodes: new Set(errors.map(i => i.node).filter((n): n is string => !!n)), readonly: readonly(), effective }, selection)
+    canvas.render(draft, { knowledge: knowledgeEvents, repositories: resp?.repositories ?? [], workflows: resp?.workflows ?? [], project: resp?.project, peers: resp?.peers, errorNodes: new Set(errors.map(i => i.node).filter((n): n is string => !!n)), readonly: readonly(), effective }, selection)
     const open = inspectorOpen()
     if (inspector.hidden === open) { inspector.hidden = !open; body.classList.toggle('with-inspector', open) }
     // Workflow settings are Detail's: Simple keeps them open but out of sight (p8/ex1).
@@ -945,6 +947,16 @@ export function renderWorkflowView(root: HTMLElement, wsId: string, fileName: st
     renderApprovals()
     const snapshot = draft
     void approvalStates(snapshot).then(s => { if (draft === snapshot && !disposed) { approvals = s; renderApprovals() } })
+  }
+
+  // improve_workflow p3: the strip's controls edit the draft like the inspector does.
+  function knowledgeHost(node: string): KnowledgeHost {
+    const n = draft!.nodes[node]
+    return { node, nodeName: n.name || node, project: resp?.project, readonly: readonly(), list: () => n.knowledge ?? [], set: list => { if (list.length) n.knowledge = list; else delete n.knowledge; update(true) } }
+  }
+  const knowledgeEvents: StripEvents = {
+    category: (node, category) => { if (draft?.nodes[node]) pickFor(knowledgeHost(node), category) },
+    finding: (node, ref) => { if (draft?.nodes[node]) detailFor(knowledgeHost(node), ref) },
   }
 
   // ---- external changes ----------------------------------------------------

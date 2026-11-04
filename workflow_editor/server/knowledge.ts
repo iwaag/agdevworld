@@ -10,10 +10,11 @@ import { RequestError } from './workspace.ts'
 import { git } from './git.ts'
 import { loadRegistry } from './registry.ts'
 import { parseProject } from './yamlDoc.ts'
+import { KNOWLEDGE_CATEGORIES, type KnowledgeAttachment } from '../shared/knowledge.ts'
 
 export const KNOWLEDGE_SCHEMA = 'ag.wfe-knowledge.v1'
 export const REFERENCE_ROLES = ['evidence', 'acceptance', 'illustration', 'context', 'unchecked']
-export const CATEGORIES = ['motion', 'extraction', 'generation', 'composition', 'verification', 'process', 'domain']
+export const CATEGORIES = KNOWLEDGE_CATEGORIES
 export const DECISIONS = ['adopted', 'adapted', 'rejected', 'none']
 const ID = /^[A-Za-z0-9][A-Za-z0-9._-]*$/
 const SHA = /^[0-9a-f]{7,64}$/
@@ -196,10 +197,10 @@ export async function readCollection(ctx: AccessContext, c: CollectionRef, o: Kn
   return out
 }
 
-export interface ListFilter extends KnowledgeOptions { collection?: string; project?: string; category?: string[]; tag?: string[]; text?: string }
+export interface ListFilter extends KnowledgeOptions { collection?: string; project?: string; category?: string[]; tag?: string[]; text?: string; withBody?: boolean }
 export interface KnowledgeList {
   schema: typeof KNOWLEDGE_SCHEMA
-  findings: Omit<Finding, 'body' | 'metadata'>[]
+  findings: (Omit<Finding, 'body' | 'metadata'> & { body?: string })[] // bodies on request (a picker shows limits beside the choice)
   collections: Omit<CollectionRead, 'findings'>[]
   counts: Record<string, number>
   gitea?: string // base URL, for links to a document at its commit
@@ -211,7 +212,7 @@ export async function listFindings(ctx: AccessContext, f: ListFilter = {}): Prom
   const words = f.text?.toLowerCase()
   const pass = (x: Finding) => (f.category ?? []).every(k => x.categories.includes(k)) && (f.tag ?? []).every(k => x.tags.includes(k))
     && (!words || `${x.title}\n${x.summary}`.toLowerCase().includes(words))
-  const findings = reads.flatMap(r => r.findings).filter(pass).map(({ body: _b, metadata: _m, ...rest }) => rest)
+  const findings = reads.flatMap(r => r.findings).filter(pass).map(({ body, metadata: _m, ...rest }) => (f.withBody ? { ...rest, body } : rest))
   const counts: Record<string, number> = Object.fromEntries(reads.map(r => [r.id, r.findings.length]))
   return { schema: KNOWLEDGE_SCHEMA, findings, collections: reads.map(({ findings: _f, ...rest }) => rest), counts, ...(ctx.gitea ? { gitea: host(ctx).url } : {}) }
 }
@@ -353,14 +354,24 @@ export async function checkFolder(dir: string): Promise<{ dir: string; findings:
   return out
 }
 
+// A node's `knowledge` entry for what is read now (improve_workflow p3, docs/knowledge.md
+// *On a node*): the reference is stated once, with the revision it was read at.
+export async function attachment(ctx: AccessContext, qs: string[], o: KnowledgeOptions = {}, category?: string): Promise<KnowledgeAttachment> {
+  const findings = await Promise.all(qs.map(q => locateFinding(ctx, q, o).then(({ f }) => {
+    if (f.unpublished) throw new RequestError(400, `${q} has uncommitted changes in that working tree; a node selects a committed revision`)
+    return { id: f.qid, repository: f.repository, commit: f.commit, path: f.path, sha256: f.sha256, title: f.title, summary: f.summary, ...(f.status ? { status: f.status } : {}) }
+  })))
+  return { ...(category ? { category } : {}), ...(findings.length ? { findings } : {}) }
+}
+
 // The block a run puts in its report (docs/knowledge.md, Recording a decision).
-export async function citation(ctx: AccessContext, qs: string | string[], o: KnowledgeOptions = {}, decision?: string): Promise<{ block: string; entries: Record<string, unknown>[] }> {
+export async function citation(ctx: AccessContext, qs: string | string[], o: KnowledgeOptions = {}, decision?: string, node?: string): Promise<{ block: string; entries: Record<string, unknown>[] }> {
   if (decision !== undefined && !DECISIONS.includes(decision)) throw new RequestError(400, `--decision is ${DECISIONS.join(', ')}`)
   const entries: Record<string, unknown>[] = []
   for (const q of Array.isArray(qs) ? qs : [qs]) {
     const { f } = await locateFinding(ctx, q, o)
     entries.push({
-      finding: f.qid, title: f.title, repository: f.repository, commit: f.commit, path: f.path, sha256: f.sha256,
+      finding: f.qid, ...(node ? { node } : {}), title: f.title, repository: f.repository, commit: f.commit, path: f.path, sha256: f.sha256,
       ...(f.unpublished ? { unpublished: true, preserved: '<a copy of the document in this run folder>' } : {}),
       decision: decision ?? '<adopted|adapted|rejected>', reason: '<why, under this task\'s conditions>', work: ['<what was actually made: commit or path>'], verification: ['<how the outcome was checked: path>'],
     })
@@ -370,6 +381,10 @@ export async function citation(ctx: AccessContext, qs: string | string[], o: Kno
 
 export interface DecisionView {
   finding: string
+  // The node the entry says it is about (improve_workflow p3). Absent: a run-level
+  // record. `unknown` names no node of any revision of this run, and stays visible.
+  node?: string
+  nodeState?: 'known' | 'unknown' | 'unchecked'
   decision: string
   reason?: string
   state: 'resolved' | 'different' | 'missing' | 'unpublished' | 'unchecked' | 'none' | 'invalid'
@@ -388,6 +403,12 @@ export interface DecisionsResult { schema: typeof KNOWLEDGE_SCHEMA; run: string;
 export async function runDecisions(ctx: AccessContext, project: string, text: string): Promise<DecisionsResult> {
   const out: DecisionsResult = { schema: KNOWLEDGE_SCHEMA, run: `${project}/${text}`, files: [], decisions: [], problems: [] }
   const fileOf = async (path: string) => runFile(ctx, project, text, path).catch(() => runFile(ctx, project, text, path, { published: true }))
+  // Every node of every revision: an entry may be about an example since replaced.
+  let nodes: Set<string> | null | undefined
+  const runNodes = async () => fileOf('run.json').then(r => {
+    const d = (JSON.parse(r.text ?? '{}') as { definition?: { effective?: { nodes?: object }; revisions?: { effective?: { nodes?: object } }[] } }).definition
+    return new Set([d?.effective, ...(d?.revisions ?? []).map(x => x.effective)].flatMap(g => Object.keys(g?.nodes ?? {})))
+  }).catch(() => null)
   for (const name of ['report.md', 'outcome.md']) {
     const r = await fileOf(name).catch(() => null)
     if (!r?.text) continue
@@ -397,7 +418,17 @@ export async function runDecisions(ctx: AccessContext, project: string, text: st
       let parsed: unknown
       try { parsed = parseYaml(m[1], { schema: 'failsafe' }) } catch (e) { out.problems.push(`${name}: a knowledge-decisions block is not YAML: ${(e as Error).message.split('\n')[0]}`); continue }
       if (!Array.isArray(parsed)) { out.problems.push(`${name}: a knowledge-decisions block is not a list`); continue }
-      for (const e of parsed) out.decisions.push(await decisionView(ctx, project, e as Record<string, unknown>, fileOf))
+      for (const e of parsed) {
+        const v = await decisionView(ctx, project, e as Record<string, unknown>, fileOf)
+        const named = (e as Record<string, unknown>)?.node
+        if (named !== undefined) {
+          nodes ??= await runNodes()
+          v.node = String(named)
+          v.nodeState = typeof named !== 'string' ? 'unknown' : !nodes ? 'unchecked' : nodes.has(named) ? 'known' : 'unknown'
+          if (v.nodeState === 'unknown') out.problems.push(`${name}: an entry for ${v.finding || 'no finding'} names node "${v.node}", which no revision of this run has; it stays a run-level record`)
+        }
+        out.decisions.push(v)
+      }
     }
     if (any) out.files.push(name)
   }

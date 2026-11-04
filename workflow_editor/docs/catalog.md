@@ -76,6 +76,13 @@ resource system are not part of p7/ex1.
 Catalog fields: `generation` is +1 on every successful write. `initialized`
 records the one-time initialization (below). `deleted` lists retired ids.
 
+### Knowledge (improve_workflow p3)
+
+`knowledge` is optional, in a node's form ([knowledge.md](knowledge.md) *On a node*), and is
+copied into the node as expectations are. A template that names only a category lists what
+exists when it is used; a template that selects a finding stays at that revision until
+it is edited.
+
 ### Expectations and example status (improve_wfnode p1)
 
 `expectations` (a list of `{key, strength?, note?}`) and `example: true` are optional
@@ -154,7 +161,7 @@ nodes:
 
 - **Node id.** By default it is the template id, made unique in the workflow
   (`research`, `research-2`, …). An explicit id that is taken is refused.
-- **Copied content.** Type, name, description, appearance, expectations and
+- **Copied content.** Type, name, description, appearance, expectations, knowledge and
   example status are copied ([contract.md](contract.md) *Expectations*, *Examples*).
   Group membership is not: a template owns no workflow's group ids, and a node joins
   a list through that workflow's `groups`.

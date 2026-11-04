@@ -15,6 +15,8 @@ import { icon } from './icons.ts'
 import { setDisplay } from './displayMode.ts'
 import { docPolicyEditor } from './docPolicy.ts'
 import { expectationEditor, expectationText } from './nodeMeaning.ts'
+import { knowledgePanel, type KnowledgeHost } from './knowledgePanel.ts'
+import { categoryLabel } from '../shared/knowledge.ts'
 
 export interface InspectorContext {
   draft: Workflow
@@ -152,6 +154,11 @@ function nodePanel(ctx: InspectorContext, id: string, actions: InspectorActions)
   if (n.example) out.push(h('p.small.s-only', 'Example: a model for concrete work, specialized in a run.'))
   out.push(moreDetails('type, list, example, expectations, appearance, repositories, connections'))
   out.push(meaningField(ctx, id, ro, actions))
+  const knowledge: KnowledgeHost = {
+    node: id, nodeName: n.name || id, project: ctx.project, readonly: ro, list: () => n.knowledge ?? [],
+    set: list => { if (list.length) n.knowledge = list; else delete n.knowledge; actions.changed(true) },
+  }
+  out.push(group('knowledge', 'Knowledge', n.knowledge?.map(a => `${categoryLabel(a.category)}${a.findings?.length ? ` · ${a.findings.length}` : ''}`).join(', ') || 'none', !!n.knowledge?.length, knowledgePanel(knowledge)))
   out.push(appearanceField(n, ro, actions))
   // Repository bindings of this node
   const bindings = Object.entries(w.repositories)

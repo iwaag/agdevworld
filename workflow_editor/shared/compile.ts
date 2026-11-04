@@ -24,6 +24,7 @@
 // nodes themselves.
 import { DOC_POLICIES, docSteps, ID_PATTERN, type DocPolicy, type DocSteps, type Edge, type NodeExpectation, type Specializes, type Workflow } from './model.ts'
 import { EXPECTATION_KEYS, strengthOf } from './expectations.ts'
+import type { KnowledgeAttachment } from './knowledge.ts'
 import { findCycle } from './validate.ts'
 
 // Changes whenever the expansion, the identities or the step instructions
@@ -37,12 +38,14 @@ import { findCycle } from './validate.ts'
 // follows the work before it instead: the agent finishes its work and the
 // review waits for the person alone. Graphs without review nodes are node
 // for node and edge for edge what v4 made.
+// v7 (improve_workflow p3): authored nodes keep `knowledge`, each reference
+// at its revision with its display snapshot, frozen with the run.
 // v6 (improve_wfnode p1): authored nodes keep `example`, `expectations` and
 // `specializes`; the graph carries its `groups` and the `meanings` of the
 // expectation keys it uses, frozen with the run. An example gets no report
 // step. Graphs without any of them are node for node and edge for edge what
 // v5 made. A changed meaning (shared/expectations.ts) changes this version.
-export const COMPILER_VERSION = 'ag.wfe-compile.v6'
+export const COMPILER_VERSION = 'ag.wfe-compile.v7'
 
 // Generated identities start with "_", which an authored id never does
 // (ID_PATTERN), so the two can never collide.
@@ -68,7 +71,7 @@ export interface StepSpec {
   purpose: string // one line, for views and notifications
   instructions: string // what the executing agent is asked to write
 }
-export interface EffectiveNode { type: string; workflow?: string; project?: string; accepts?: string; confirms?: string; activity?: string; example?: boolean; expectations?: NodeExpectation[]; specializes?: Specializes; step?: StepSpec }
+export interface EffectiveNode { type: string; workflow?: string; project?: string; accepts?: string; confirms?: string; activity?: string; example?: boolean; expectations?: NodeExpectation[]; specializes?: Specializes; knowledge?: KnowledgeAttachment[]; step?: StepSpec }
 // A group as a run follows it: what it means, without its display color.
 export interface EffectiveGroup { name: string; kind: string; cardinality: string; description: string; members: string[] }
 // `documentation` (v3): the steps the policy generates; a v2 graph has none
@@ -103,12 +106,13 @@ const byEdge = (a: Edge, b: Edge) => (a.from < b.from ? -1 : a.from > b.from ? 1
 
 // An authored node as runs follow it: its type, a delegate's target, and
 // whether it is the result confirmation.
-export function authoredNode(n: Pick<Workflow['nodes'][string], 'type' | 'workflow' | 'project' | 'accepts' | 'confirms' | 'activity' | 'example' | 'expectations' | 'specializes'>): EffectiveNode {
+export function authoredNode(n: Pick<Workflow['nodes'][string], 'type' | 'workflow' | 'project' | 'accepts' | 'confirms' | 'activity' | 'example' | 'expectations' | 'specializes' | 'knowledge'>): EffectiveNode {
   return {
     type: n.type, ...(n.workflow ? { workflow: n.workflow } : {}), ...(n.project ? { project: n.project } : {}), ...(n.accepts ? { accepts: n.accepts } : {}), ...(n.confirms ? { confirms: n.confirms } : {}), ...(n.activity ? { activity: n.activity } : {}),
     ...(n.example ? { example: true } : {}),
     ...(n.expectations?.length ? { expectations: n.expectations.map(x => ({ key: x.key, strength: strengthOf(x), ...(x.note ? { note: x.note } : {}) })) } : {}),
     ...(n.specializes ? { specializes: { examples: [...n.specializes.examples], revision: n.specializes.revision } } : {}),
+    ...(n.knowledge?.length ? { knowledge: n.knowledge.map(a => ({ ...a, ...(a.findings ? { findings: a.findings.map(f => ({ ...f })) } : {}) })) } : {}),
   }
 }
 

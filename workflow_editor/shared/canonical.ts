@@ -1,6 +1,7 @@
 // Semantic digests for approvals. A digest covers only the content an approval
 // is about; approvals, layout, comments, key order and YAML formatting are
 // excluded. Changing this file changes every digest: bump the projection kind.
+import { knowledgeSemantic } from './knowledge.ts'
 import { guideKey, normalizeRepoPath, type ApprovalKind, type Workflow } from './model.ts'
 
 // Canonical JSON: object keys sorted by UTF-16 code unit, no whitespace,
@@ -60,6 +61,8 @@ export function definitionProjection(w: Workflow) {
       ...(n.example ? { example: true } : {}),
       ...(n.expectations?.length ? { expectations: [...n.expectations].map(x => ({ key: x.key, strength: x.strength ?? 'preferred', note: normalizeText(x.note ?? '') })).sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0)) } : {}),
       ...(n.specializes ? { specializes: { examples: [...n.specializes.examples].sort(), revision: n.specializes.revision } } : {}),
+      // improve_workflow p3: what is selected, not how it is displayed.
+      ...(n.knowledge?.length ? { knowledge: knowledgeSemantic(n.knowledge, normalizeText) } : {}),
     }
   }
   // Groups (improve_wfnode p1), when declared: member order is meaningful;

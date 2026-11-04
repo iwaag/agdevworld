@@ -3,6 +3,7 @@
 // Shared by the service, the CLI and the browser; it touches no files.
 // See docs/runs.md for the contract.
 import { canonicalJson } from './canonical.ts'
+import { knowledgeSemantic, type KnowledgeAttachment } from './knowledge.ts'
 import { contextChanges, changeWords, type AttemptContext, type ContextDelivery } from './context.ts'
 import { docStepsOf, type EffectiveGraph, type EffectiveGroup, type EffectiveNode, type StepSpec } from './compile.ts'
 import type { DocSteps } from './model.ts'
@@ -1139,7 +1140,46 @@ export function definitionMeaningBrief(r: { workflow: string; run: string; defin
   if (concrete.length || models.length) out.push('', `What the author expects of results. Preferred: prioritize it; explain a different choice and what you delivered instead. Required: a condition of a satisfactory result; when it is not met it stays visible as unmet. A key states an intent and establishes nothing: say what actually holds with wfe run expectation (wfe run help expectation); a statement left unmade reads as unverified. Hosts and storage endpoints are environment facts from your context.`,
     ...concrete.map(x => `- ${x.node}: ${says(x.key, x)} [${assessmentWords(x)}]`),
     ...models.flatMap(([id, n]) => (n.expectations ?? []).map(x => `- ${id} (example; carry it onto what replaces it): ${says(x.key, x)}`)))
+  const pointed = Object.entries(eff.nodes).filter(([, n]) => n.knowledge?.length)
+  if (pointed.length) out.push('', `Knowledge the author pointed at on nodes. A reference, not a requirement: use, adapt or reject it, or use something else (wfe run help knowledge). wfe knowledge show <id> --rev <commit> reads what was selected; wfe knowledge list --category <c> shows candidates for a category. Selecting does not show that anything was read.`,
+    ...pointed.flatMap(([id, n]) => n.knowledge!.map(a => `- ${id}${n.example ? ' (example; carry the intent onto what replaces it)' : ''}: ${a.category ?? 'no category'}${a.note ? ` (${a.note})` : ''}: ${a.findings?.length ? a.findings.map(f => `${f.id}@${f.commit.slice(0, 10)}${f.title ? ` "${f.title}"` : ''}`).join(', ') : 'nothing selected'}`)))
   return out
+}
+
+// How a node's selection developed (improve_workflow p3, docs/knowledge.md *On a
+// node*), derived from each revision's frozen graph and reason: there is no other
+// store. `origin` says what the node started from: its own first form, or the
+// examples it specializes, whose references stay readable in their revision.
+export interface KnowledgeChange { revision: string; reason: string; before: KnowledgeAttachment[]; after: KnowledgeAttachment[] }
+export interface KnowledgeHistory {
+  current: KnowledgeAttachment[]
+  origin: { revision: string; knowledge: KnowledgeAttachment[]; from?: { examples: string[]; revision: string } } | null
+  changes: KnowledgeChange[]
+}
+export function knowledgeHistory(s: { definition: DefinitionRef }, node: string): KnowledgeHistory {
+  const steps = [{ revision: 'r1', reason: '', graph: s.definition.effective as EffectiveGraph | undefined }, ...(s.definition.revisions ?? []).map(r => ({ revision: r.revision, reason: r.reason, graph: r.effective as EffectiveGraph | undefined }))]
+  const same = (a?: KnowledgeAttachment[], b?: KnowledgeAttachment[]) => canonicalJson(knowledgeSemantic(a)) === canonicalJson(knowledgeSemantic(b))
+  let origin: KnowledgeHistory['origin'] = null
+  let last: KnowledgeAttachment[] = []
+  let current: KnowledgeAttachment[] = []
+  const changes: KnowledgeChange[] = []
+  for (const st of steps) {
+    const n = st.graph?.nodes[node]
+    if (!n) { if (origin) last = []; current = []; continue } // removed in this revision: its record stays in the earlier ones
+    const here = n.knowledge ?? []
+    if (!origin) {
+      const made = n.specializes
+      if (made) {
+        const was = revisionGraph(s, made.revision)
+        const from = made.examples.flatMap(x => was?.nodes[x]?.knowledge ?? [])
+        origin = { revision: made.revision, knowledge: from, from: made }
+        if (!same(from, here)) changes.push({ revision: st.revision, reason: st.reason, before: from, after: here })
+      } else origin = { revision: st.revision, knowledge: here }
+    } else if (!same(last, here)) changes.push({ revision: st.revision, reason: st.reason, before: last, after: here })
+    last = here
+    current = here
+  }
+  return { current, origin, changes }
 }
 
 // Every expectation of the graph's concrete nodes as the records stand, for

@@ -1,0 +1,82 @@
+{
+  "format": "ag.wfe-knowledge-icons.delivery.v1",
+  "version": "1.0.0",
+  "identity": "wfe-knowledge-icons",
+  "revision": 2,
+  "producer": {
+    "agent": "forge-agent",
+    "model": "Gemini 3.8 Flash (agy execution profile)",
+    "commit": "106e301ba1a3b9a44b35931fb1101e0557ca4db6"
+  },
+  "files": {
+    "contact-sheet.html": {
+      "sha256": "f00a0405eea02b4d0f16072d2851b81a071a7cef67ba35fcff65a0f6560c0cf3",
+      "bytes": 129102
+    },
+    "contact-sheet.png": {
+      "sha256": "0941000a4019d0ece95f897b482f2195268e7f7308b212a1fe9f9d6f7cba7db6",
+      "bytes": 303130
+    },
+    "fallback-category.svg": {
+      "sha256": "a0dbb034772d73055eb3cc9d1c687fd3726511834d3995683979064aa4df6ed6",
+      "bytes": 402
+    },
+    "fallback-finding.svg": {
+      "sha256": "b665aa912aae49b08d4027d2df67a8216dff87981a3eeb3cc4c9945828bba84c",
+      "bytes": 750
+    },
+    "manifest.json": {
+      "sha256": "cfe82813b1c971a1ceb9f505d28dee753defd1c0202c3449af691646fc8ad28f",
+      "bytes": 2546
+    },
+    "findings/artifact-claims.svg": {
+      "sha256": "9b5e3bb1b8e6c1c309eb2c19dd8880dbaec03b236ccc4bcff9bae58ce7cf6299",
+      "bytes": 649
+    },
+    "findings/clean-cutout.svg": {
+      "sha256": "64a37c851dca8a70cd12de00a93086cf75c7c480e894aa62eb7eb11e9d5a43ce",
+      "bytes": 687
+    },
+    "findings/clip-loop.svg": {
+      "sha256": "41158ea2555e65ae81ef3364298d90eff23916f97535ef82e04199c96e9b03aa",
+      "bytes": 918
+    },
+    "findings/cutout-flight.svg": {
+      "sha256": "5777564fb9431ed0f068cf35c3e36718cae6c641342956cd37f34e6d96a13e3f",
+      "bytes": 463
+    },
+    "findings/owed-work.svg": {
+      "sha256": "64a20c3a1cf541eb50c542a851b6c22ba2142c31f93093f06274432cb63cdf3e",
+      "bytes": 702
+    },
+    "categories/composition.svg": {
+      "sha256": "9b0b72965108da55cccd9ee4f38bcca4b092b388c03fcb540dbc0dd35d720ad5",
+      "bytes": 691
+    },
+    "categories/domain.svg": {
+      "sha256": "f5651b946b302f4ec4c31ab902128aba5a2dc73841e54b8152292ba77c19a540",
+      "bytes": 641
+    },
+    "categories/extraction.svg": {
+      "sha256": "4176bb5400cb023bf34770805780939bbbe188f2b28e02b74a05fb7949220531",
+      "bytes": 798
+    },
+    "categories/generation.svg": {
+      "sha256": "f1e80847e29389d04aef8acc5b238770acc1b8e7050e71b5091f5adf3132ad15",
+      "bytes": 513
+    },
+    "categories/motion.svg": {
+      "sha256": "a3bb40491d7c6cbbc2ad1b3db90747fb3a54e447b8d0fe3b45905063ef155feb",
+      "bytes": 673
+    },
+    "categories/process.svg": {
+      "sha256": "96d94dd34198429371957b032b8760dda67fede3113a93c55f98ac53defe6d83",
+      "bytes": 938
+    },
+    "categories/verification.svg": {
+      "sha256": "d566377672f3207ba8002d263728765cf9a5f96adeeaeb067c64074f156d0947",
+      "bytes": 580
+    }
+  },
+  "how_to_use": "Inline SVG content directly into the DOM inside node strip element containers. Icons use viewBox='0 0 24 24' and render at 18px (standard 240px card) or 16px (compact 156px card). All paths and strokes are styled with currentColor, adapting seamlessly to light (#ffffff) and dark (#1e2229) themes. Categories use a rounded square frame [\u25a3]; findings use a circle frame (\u25c9) to ensure distinctness without color."
+}

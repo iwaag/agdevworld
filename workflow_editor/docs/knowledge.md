@@ -211,6 +211,74 @@ agent read it. partial-animation/run-007 recorded `adopted` for a finding whose
 document its log shows it never opened: it had seen only the title and summary.
 Only the attempt's log can show that.
 
+A decision can say which node it is about, with `node: <id>` (`wfe knowledge cite
+<id> --node <id>`). That id must name a node of some revision of the run, so an
+example since replaced can be named; `decisions` reports one that names none as a
+problem and keeps the entry as a record of the run. Without `node`, the entry
+belongs to the run as a whole. Nothing is guessed from a title or a selection,
+and one claim is not copied onto every node that selected the same finding.
+
+## On a node
+
+A definition's node can point at knowledge. It is a reference for whoever performs
+the node: it requires no reading, shows no use or success, and gates nothing. A
+preferred or required outcome is an expectation ([contract.md](contract.md)).
+
+```yaml
+nodes:
+  animate:
+    type: do
+    knowledge:
+      - category: extraction              # intent, with nothing selected
+      - category: motion
+        note: why this node points here   # optional
+        findings:                         # wfe knowledge ref <id> --category motion prints this
+          - id: gimmickimg:wedo#gimmickimg-f-0001
+            repository: developer/pj-gimmickimg
+            commit: 5581fdd1ed692a4cdeb5dfa11df08111142d78d4
+            path: wedo/findings/moving-cutout-part-across-still.md
+            sha256: 8ab96c3d…
+            title: Moving a cut-out part widely across a still
+            summary: A part of a still can be made to fly…
+            status: observed-repeatedly
+```
+
+- **One entry per category**, and a category alone is valid. `category` may be left
+  out for a finding chosen with no category in mind. An unknown category is a warning
+  and is kept.
+- **A finding is stored once on a node**, under whichever row chose it. Its identity
+  is its qualified id and revision, not a row or an icon. A finding's own `categories`
+  create no rows, and category membership is a discovery aid: any finding can be
+  selected under any category.
+- **The reference** has P2's meaning: `resolved` says the revision holds the document.
+  `title`, `summary` and `status` are a snapshot for reading it when its source is
+  unavailable. They are not in the digest, since the sha256 fixes the content. Category,
+  note, id, repository, commit, path and sha256 are, in no particular order.
+- **A malformed reference** is a validation error, and what was written stays in the
+  file. **An unavailable source** is a state a reader shows at read time. It is never a
+  validation issue and never holds a run.
+- **Frozen.** A published definition and a run snapshot hold the selected revision
+  (compiler v7). A newer revision of a finding is taken only by selecting it again:
+  an edit of the definition, or a run adjustment. Reading a category with nothing
+  selected lists what exists now, and stating that revision is the selection.
+
+In a run, `knowledgeHistory` (`shared/run.ts`) derives a node's original selection, or
+that of the example it specializes, and each change with its revision's reason, from
+the frozen revisions. There is no second store. `wfe run help knowledge` says how to change
+one: an ordinary `wfe run adjust`. A selection and a decision are separate facts: a
+reference can be selected and then rejected, or used without being selected, and no
+report label changes the selection. Silence means no decision was recorded.
+
+## Icons
+
+`src/knowledge-icons/` holds the artwork, mapped by its `manifest.json` from category
+key or qualified finding id. It is display only and travels with the release, so a
+node stores no artwork and a new icon cannot change which finding a node references,
+nor any digest. Anything without artwork gets the family's generic icon and its actual
+name. A category sits in a rounded square and a finding in a circle, so they differ
+without color. `PROVENANCE.md` there records who made them and at which revision.
+New findings need no new icon.
+
 ## For a person
 
 The project page in the editor lists its collections and findings: title,
@@ -218,9 +286,21 @@ summary, categories and tags, id, revision, and a link to the document on Gitea
 at that commit. `GET api/knowledge/finding?id=<qid>` gives the same detail,
 with `view` links for illustrations (`api/projects/<target>/raw?path=&rev=`).
 
+On a graph's node, the strip shows each category with what is selected under it. A
+category or its add control opens the candidate picker: `GET api/knowledge?body=1`,
+narrowed by category and text in the browser, with conditions and limits taken from
+the document's own sections, since bodies have no required form. A finding opens its
+detail at the selected revision beside the current one. The run view adds the node's
+original selection, its changes with their reasons, and what the agent stated. A
+statement is labelled as one, keeps its reason beside its label, and is not turned
+into a judgement. `current=<project>` on these routes reads a shared collection at that
+project's pin.
+
 ## Tests
 
 `test/knowledge.test.ts`: equal local ids in different collections; duplicates;
 filters and detail reads; title and path changes; a later edit against a recorded
 revision; a pin against the upstream tip; missing collections, unresolved evidence,
-unpublished content; a reader with no workspace; recorded decisions read back.
+unpublished content; a reader with no workspace; recorded decisions read back, with
+their node. `test/nodeKnowledge.test.ts`: the field, digest, freezing, specialization
+and derived history.

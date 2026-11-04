@@ -8,7 +8,7 @@ import { join } from 'node:path'
 import { AccessError, type AccessContext, type RepoHost } from '../server/access.ts'
 import { gitOk } from '../server/git.ts'
 import type { GiteaRepo } from '../server/gitea.ts'
-import { checkCollection, checkFolder, citation, collections, listFindings, parseFindingDocument, runDecisions, showFinding } from '../server/knowledge.ts'
+import { attachment, checkCollection, checkFolder, citation, collections, listFindings, parseFindingDocument, runDecisions, showFinding } from '../server/knowledge.ts'
 import { RequestError } from '../server/workspace.ts'
 
 let root = ''
@@ -245,6 +245,29 @@ test('a recorded decision reads back at its revision; a later edit does not rewr
   assert.ok(first.current && 'changed' in first.current && first.current.changed && first.current.commit === edited)
   assert.deepEqual(first.work, [{ ref: 'notes/run.md', state: 'found' }])
   assert.deepEqual(first.verification, [{ ref: 'devdocs/runs/w/run-001/nothing.md', state: 'missing' }])
+})
+
+test('a decision may name a node of any revision of its run; a wrong one stays visible, a missing one stays run-level', async () => {
+  const live = await showFinding(ctx, 'a:wedo#f-1')
+  const entry = (extra: string) => `- finding: a:wedo#f-1\n  commit: ${live.finding.commit}\n  decision: rejected\n  reason: did not fit\n${extra}`
+  const cite = await citation(ctx, 'a:wedo#f-1', {}, 'adapted', 'scene')
+  assert.equal(cite.entries[0].node, 'scene')
+  const report = `\`\`\`knowledge-decisions\n${entry('  node: scene\n')}${entry('  node: replaced\n')}${entry('  node: nowhere\n')}${entry('')}\`\`\`\n`
+  const run = { definition: { effective: { nodes: { replaced: {} } }, revisions: [{ effective: { nodes: { scene: {} } } }] } }
+  await change(a.src, { 'devdocs/runs/w/run-002/report.md': report, 'devdocs/runs/w/run-002/run.json': JSON.stringify(run) })
+  const r = await runDecisions(ctx, 'a', 'w/run-002')
+  assert.deepEqual(r.decisions.map(d => [d.node, d.nodeState]), [['scene', 'known'], ['replaced', 'known'], ['nowhere', 'unknown'], [undefined, undefined]])
+  assert.equal(r.problems.length, 1)
+  assert.match(r.problems[0], /nowhere/)
+  assert.equal(r.decisions[2].decision, 'rejected', 'the entry itself is not discarded')
+})
+
+test('a node reference states the revision read now, and refuses what does not exist', async () => {
+  const live = await showFinding(ctx, 'a:wedo#f-1')
+  const x = await attachment(ctx, ['a:wedo#f-1'], {}, 'motion')
+  assert.deepEqual(x, { category: 'motion', findings: [{ id: 'a:wedo#f-1', repository: live.finding.repository, commit: live.finding.commit, path: live.finding.path, sha256: live.finding.sha256, title: live.finding.title, summary: live.finding.summary, ...(live.finding.status ? { status: live.finding.status } : {}) }] })
+  await assert.rejects(() => attachment(ctx, ['a:wedo#never']), AccessError)
+  assert.deepEqual(await attachment(ctx, [], {}, 'motion'), { category: 'motion' })
 })
 
 test('check --dir reads a folder as it stands, before anything is published', async () => {

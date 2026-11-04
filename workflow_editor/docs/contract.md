@@ -543,6 +543,13 @@ The catalog's singular `expectation` text ([catalog.md](catalog.md)) is a differ
 thing: it tells the designer of a workflow how the person expects an activity to
 appear.
 
+### Knowledge (improve_workflow p3)
+
+`knowledge` on a node lists categories of knowledge and the findings selected under
+them, each at its revision: [knowledge.md](knowledge.md) *On a node*. It is a
+reference for whoever performs the node, and it gates nothing. It is part of the
+digest and the frozen graph, without its display snapshot.
+
 ### Graph semantics
 
 An edge means that its target waits for its source to complete. Several

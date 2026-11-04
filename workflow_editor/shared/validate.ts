@@ -6,6 +6,7 @@ import {
   type Issue, type Project, type Workflow,
 } from './model.ts'
 import { EXPECTATION_KEYS, EXPECTATION_STRENGTHS } from './expectations.ts'
+import { knowledgeProblems } from './knowledge.ts'
 
 // What the project offers to resolve references against. Supplied by the
 // service from .gitmodules, Git state and the workflow directory.
@@ -171,6 +172,10 @@ export function validateWorkflow(w: Workflow, ctx: ValidationContext = {}): Issu
       keys.add(x.key)
       if (x.strength !== undefined && !(EXPECTATION_STRENGTHS as readonly string[]).includes(x.strength)) issues.push(err('expectation-strength', `Node "${id}" expectation "${x.key}" has strength "${x.strength}"; expected ${EXPECTATION_STRENGTHS.join(' or ')} (leaving it out means preferred).`, { node: id }))
     })
+    // Knowledge (improve_workflow p3): a malformed reference is an authoring
+    // error; an unknown category is kept; an unavailable source is a read-time
+    // state, never an issue here, and nothing gates on any of it.
+    for (const p of knowledgeProblems(n.knowledge ?? [])) issues.push((p.severity === 'error' ? err : warn)(p.code, `Node "${id}": ${p.message}`, { node: id }))
     if (n.specializes) {
       if (!REVISION.test(n.specializes.revision)) issues.push(err('specializes-revision', `Node "${id}" specializes examples of revision "${n.specializes.revision}"; expected a revision such as r1 (wfe run revisions).`, { node: id }))
       if (!n.specializes.examples.length) issues.push(err('specializes-examples', `Node "${id}" declares specializes without the example node ids it replaces.`, { node: id }))

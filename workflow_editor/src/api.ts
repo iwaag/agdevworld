@@ -17,6 +17,13 @@ export interface KnowledgeView {
   collections: { id: string; kind: string; state: string; problem?: string; unstructured: string[]; problems: { path: string; message: string }[]; revision?: { repository: string; commit: string; resolvedBy: string } }[]
 }
 
+// improve_workflow p3: types of server/knowledge.ts, as the routes answer them.
+export type KnowledgeCandidate = import('../server/knowledge.ts').KnowledgeList['findings'][number]
+export type KnowledgeListing = import('../server/knowledge.ts').KnowledgeList
+export type KnowledgeDetail = import('../server/knowledge.ts').FindingDetail
+export type KnowledgeDecision = import('../server/knowledge.ts').DecisionView
+export type KnowledgeDecisions = import('../server/knowledge.ts').DecisionsResult
+
 // The run's working copy as a storage fact (improve_wfrun p2, server/retention.ts storageView).
 export interface RunStorageView {
   ref: string; managed: boolean; state: string; retained: string; action: 'retire' | 'restore' | null; eligible: boolean; reasons: string[]; problem: string | null; generation: number
@@ -129,6 +136,10 @@ export const api = {
   workflow: (id: string, file: string, refresh = false) => call<WorkflowResponse>('GET', `${wf(id, file)}${refresh ? '?refresh=1' : ''}`),
   runs: (id: string) => call<RunSummary[]>('GET', `${ws(id)}/runs`),
   knowledge: (project: string) => call<KnowledgeView>('GET', `api/knowledge?project=${encodeURIComponent(project)}`),
+  // improve_workflow p3: candidates with their bodies, for limits beside the choice; a shared collection at this project's pin.
+  knowledgeCandidates: (current?: string) => call<KnowledgeListing>('GET', `api/knowledge?body=1${current ? `&current=${encodeURIComponent(current)}` : ''}`),
+  knowledgeFinding: (id: string, o: { rev?: string; current?: string } = {}) => call<KnowledgeDetail>('GET', `api/knowledge/finding?id=${encodeURIComponent(id)}${o.rev ? `&rev=${encodeURIComponent(o.rev)}` : ''}${o.current ? `&current=${encodeURIComponent(o.current)}` : ''}`),
+  knowledgeDecisions: (project: string, run: string) => call<KnowledgeDecisions>('GET', `api/knowledge/decisions?project=${encodeURIComponent(project)}&run=${encodeURIComponent(run)}`),
   run: (id: string, workflow: string, run: string, rev?: string, signal?: AbortSignal) =>
     call<RunResponse>('GET', `${ws(id)}/runs/${encodeURIComponent(workflow)}/${encodeURIComponent(run)}${rev ? `?rev=${encodeURIComponent(rev)}` : ''}`, undefined, [], signal),
   runFile: (id: string, workflow: string, run: string, path: string, rev?: string, signal?: AbortSignal) =>

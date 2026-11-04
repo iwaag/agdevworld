@@ -120,6 +120,7 @@ export async function updateTemplate(area: string, id: string, content: Template
       if (!contentOf(content).target) delete t.target
       if (!contentOf(content).expectations) delete t.expectations
       if (!contentOf(content).example) delete t.example
+      if (!contentOf(content).knowledge) delete t.knowledge
       return t
     })
     return { catalog: r.catalog, template: r.result, changed: true }

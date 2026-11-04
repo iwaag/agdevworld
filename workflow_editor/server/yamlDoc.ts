@@ -102,7 +102,7 @@ export const WORKFLOW_SHAPE = record({
   execution: record({ agent: scalar, profile: scalar, guides: list(scalar), session: scalar, node: scalar, lane: scalar }),
   intake: record({ zulip: { kind: 'scalar', absent: 'requests' } }),
   repositories: dict(record({ path: scalar, access: scalar, integrate: scalar }, true)),
-  nodes: dict(record({ type: scalar, name: scalar, confirms: scalar, activity: scalar, appearance: record({ icon: scalar, color: scalar }, true), description: scalar, repositories: list(scalar), workflow: scalar, project: scalar, accepts: scalar, template: record({ id: scalar, revision: scalar, expectation: scalar }), example: scalar, expectations: list(record({ key: scalar, strength: scalar, note: scalar })), specializes: record({ examples: list(scalar), revision: scalar }, true) })),
+  nodes: dict(record({ type: scalar, name: scalar, confirms: scalar, activity: scalar, appearance: record({ icon: scalar, color: scalar }, true), description: scalar, repositories: list(scalar), workflow: scalar, project: scalar, accepts: scalar, template: record({ id: scalar, revision: scalar, expectation: scalar }), example: scalar, expectations: list(record({ key: scalar, strength: scalar, note: scalar })), specializes: record({ examples: list(scalar), revision: scalar }, true), knowledge: list(record({ category: scalar, note: scalar, findings: list(record({ id: scalar, repository: scalar, commit: scalar, path: scalar, sha256: scalar, title: scalar, summary: scalar, status: scalar })) })) })),
   edges: list(record({ from: scalar, to: scalar }, true)),
   groups: dict(record({ name: scalar, kind: scalar, cardinality: scalar, description: scalar, members: list(scalar, true), appearance: record({ color: scalar }, true) })),
   approvals: record({ intent: approval, definition: approval }),
@@ -267,6 +267,7 @@ export function workflowForWrite(w: Workflow): Record<string, unknown> {
       example: n.example ? true : undefined,
       expectations: n.expectations?.length ? n.expectations.map(x => ({ key: x.key, strength: x.strength, note: x.note || undefined })) : undefined,
       specializes: n.specializes ? { examples: n.specializes.examples, revision: n.specializes.revision } : undefined,
+      knowledge: n.knowledge?.length ? n.knowledge.map(a => ({ category: a.category || undefined, note: a.note || undefined, findings: a.findings?.length ? a.findings.map(f => ({ id: f.id, repository: f.repository, commit: f.commit, path: f.path, sha256: f.sha256, title: f.title || undefined, summary: f.summary || undefined, status: f.status || undefined })) : undefined })) : undefined,
     }
   }
   const approvals: Record<string, unknown> = {}

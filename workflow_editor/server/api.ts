@@ -659,8 +659,8 @@ export function createHandler(config: ServiceConfig) {
         const k = await import('./knowledge.ts')
         const ctx: import('./access.ts').AccessContext = { registryFile: config.registryFile, area, gitea: config.gitea, giteaProblem: config.giteaProblem, refresh: url.searchParams.get('refresh') === '1' }
         const q = (n: string) => url.searchParams.get(n) || undefined
-        const o = { rev: q('rev'), as: q('as'), upstream: q('upstream') === '1' }
-        if (!wsId) return send(res, 200, await k.listFindings(ctx, { ...o, collection: q('collection'), project: q('project'), category: url.searchParams.getAll('category'), tag: url.searchParams.getAll('tag'), text: q('text') }))
+        const o = { rev: q('rev'), as: q('as'), upstream: q('upstream') === '1', current: q('current') }
+        if (!wsId) return send(res, 200, await k.listFindings(ctx, { ...o, withBody: q('body') === '1', collection: q('collection'), project: q('project'), category: url.searchParams.getAll('category'), tag: url.searchParams.getAll('tag'), text: q('text') }))
         if (wsId === 'collections' && !b) return send(res, 200, await k.listFindings(ctx, { ...o, project: q('project') }))
         if (wsId === 'finding' && !b) return send(res, 200, await k.showFinding(ctx, str(q('id'), 'id'), o))
         if (wsId === 'check' && !b) return send(res, 200, await k.checkCollection(ctx, str(q('collection'), 'collection'), o))
@@ -748,6 +748,7 @@ export function createHandler(config: ServiceConfig) {
           ...(isObj(input.appearance) ? { appearance: { icon: String(input.appearance.icon ?? ''), color: String(input.appearance.color ?? '') } } : {}),
           ...(input.expectations !== undefined ? { expectations: input.expectations as never } : {}),
           ...(input.example === true ? { example: true } : {}),
+          ...(input.knowledge !== undefined ? { knowledge: input.knowledge as never } : {}),
         })
         if (!wsId && method === 'GET') {
           const r = await readCatalog(area)

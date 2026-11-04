@@ -16,8 +16,10 @@
 // runView.ts keeps the server snapshot and the operations; this module reads
 // the data it is given and asks the view to act.
 import type { RunOpResponse, RunResponse } from '../shared/api.ts'
-import { assessmentWords, effectiveOf, expectationStates, holderOf, isOpen, questionState, runKey, situation, type Because, type ExpectationState, type Question, type RunRecord } from '../shared/run.ts'
+import { assessmentWords, effectiveOf, expectationStates, holderOf, isOpen, knowledgeHistory, questionState, runKey, situation, type Because, type ExpectationState, type Question, type RunRecord } from '../shared/run.ts'
 import { expectationBadge } from './nodeMeaning.ts'
+import { knowledgeSelectionBlock, nodeDecisions, runDecisionsBlock } from './knowledgeUi.ts'
+import { api, type KnowledgeDecisions } from './api.ts'
 import { hostOwes, isAwaitingPerson, owedContinuation, reviewStateText } from '../shared/humanReview.ts'
 import { reportStep } from '../shared/compile.ts'
 import { sessionPolicyOf } from '../shared/model.ts'
@@ -200,6 +202,29 @@ export class RunSide {
   private readonly presentations = section('presentations', h('div.sec-body'))
   private readonly shared = section('shared', h('div.sec-body'))
   private readonly definition = section('definition', h('div.sec-body'))
+  private readonly knowledge = section('knowledge', h('div.sec-body'))
+  private decisions: { of: string; seq: number; at: number; data: KnowledgeDecisions | Error | null } = { of: '', seq: -1, at: 0, data: null }
+  // What the run's reports state (docs/knowledge.md, Recording a decision), read
+  // again when the record has moved, at most every 20 s: it reads Git each time.
+  private loadDecisions(rec: RunRecord) {
+    const of = `${rec.project}/${rec.workflow}/${rec.run}`
+    const now = Date.now()
+    if (this.decisions.of === of && (this.decisions.seq === rec.seq || now - this.decisions.at < 20_000)) return
+    const fresh = this.decisions.of !== of
+    this.decisions = { of, seq: rec.seq, at: now, data: fresh ? null : this.decisions.data }
+    void api.knowledgeDecisions(rec.project, `${rec.workflow}/${rec.run}`).catch((e: Error) => e).then(data => {
+      if (this.decisions.of !== of) return
+      this.decisions.data = data
+      const shown = this.data.shown?.record
+      if (shown) { this.renderKnowledge(shown); this.updateSelected(shown) }
+    })
+  }
+  private renderKnowledge(rec: RunRecord) {
+    this.loadDecisions(rec)
+    const all = this.decisions.data
+    setText(this.knowledge.title, all && !(all instanceof Error) && all.decisions.length ? `Knowledge decisions (${all.decisions.length} stated)` : 'Knowledge decisions')
+    patchContent(this.knowledge.content.children[0] as HTMLElement, runDecisionsBlock(all, new Set(Object.keys(effectiveOf(rec)?.nodes ?? {}))))
+  }
   private readonly adjust: { root: HTMLDetailsElement; ta: Owned; reason: Owned<HTMLInputElement>; preview: HTMLElement; previewButton: HTMLButtonElement; apply: HTMLButtonElement; base: string | null; result: Preview | null; busy: boolean }
   private readonly catalog = section('catalog', h('div.sec-body'))
   private readonly related = section('related', h('div.sec-body'))
@@ -294,7 +319,7 @@ export class RunSide {
     }, 'Cancel run')
     this.decide = { root: h('div.decide', evidence.el, h('div.row.tight', accept, reject, cancel), evidence.status), evidence, accept, reject, cancel, busy: false }
 
-    this.disclosures = [this.questions, this.instructions, this.delegations, this.presentations, this.shared, this.definition, this.catalog, this.related, this.files, this.execution, this.coordination, this.result, this.history]
+    this.disclosures = [this.questions, this.instructions, this.delegations, this.presentations, this.shared, this.definition, this.knowledge, this.catalog, this.related, this.files, this.execution, this.coordination, this.result, this.history]
     for (const sec of this.disclosures) {
       sec.root.classList.add('d-only')
       this.setOpen(sec, this.opened[sec.key] ?? false)
@@ -303,7 +328,7 @@ export class RunSide {
     this.focus.append(this.focusDisplay, this.focusQuestions, this.holdSlot, this.decideSlot, this.focusLinks)
     this.el.dataset.keepScroll = 'run-side'
     this.el.append(this.placeholder, this.actorRow, this.sideHint, this.fileCard,
-      ...[this.selected, this.questions, this.instructions, this.delegations, this.presentations, this.shared, this.definition, this.catalog, this.related, this.files, this.execution, this.coordination, this.result, this.history].map(s => s.root))
+      ...[this.selected, this.questions, this.instructions, this.delegations, this.presentations, this.shared, this.definition, this.knowledge, this.catalog, this.related, this.files, this.execution, this.coordination, this.result, this.history].map(s => s.root))
   }
 
   // ---- what the view reads --------------------------------------------------
@@ -433,7 +458,7 @@ export class RunSide {
     this.data = d
     const r = d.shown
     const rec = r?.record
-    const sections = [this.selected, this.questions, this.instructions, this.delegations, this.presentations, this.shared, this.definition, this.catalog, this.related, this.files, this.execution, this.coordination, this.result, this.history]
+    const sections = [this.selected, this.questions, this.instructions, this.delegations, this.presentations, this.shared, this.definition, this.knowledge, this.catalog, this.related, this.files, this.execution, this.coordination, this.result, this.history]
     if (!r || !rec) {
       setText(this.placeholder, d.resp?.problem ? 'No usable record.' : 'Loading…')
       show(this.placeholder, true)
@@ -448,7 +473,7 @@ export class RunSide {
     show(this.placeholder, false)
     show(this.actorRow, !d.rev)
     show(this.sideHint, !(d.selection && rec.nodes[d.selection]) && !d.viewing)
-    for (const s of [this.questions, this.definition, this.catalog, this.files, this.history]) show(s.root, true)
+    for (const s of [this.questions, this.definition, this.knowledge, this.catalog, this.files, this.history]) show(s.root, true)
     this.updateSelected(rec)
     this.updateQuestions(rec)
     this.updateInstructions(rec)
@@ -808,6 +833,11 @@ export class RunSide {
     if (listed) box.append(h('p.small.muted', `In list ${listed[1].name || listed[0]}, position ${listed[1].members.indexOf(id) + 1} of ${listed[1].members.length}.${listed[1].description.trim() ? ` ${listed[1].description.trim()}` : ''}`))
     const expected = expectationStates(rec).filter(x => x.node === id)
     if (expected.length) box.append(h('div.expect-list', ...expected.map(x => this.expectationRow(x))))
+    // improve_workflow p3: what the node points at and how that developed, then
+    // what the agent stated: separate facts, and neither says the other.
+    const known = knowledgeHistory(rec, id)
+    if (known.current.length || known.changes.length || known.origin?.knowledge.length) box.append(knowledgeSelectionBlock(known))
+    if (known.current.length || known.changes.length || known.origin?.knowledge.length || (this.decisions.data && !(this.decisions.data instanceof Error) && this.decisions.data.decisions.some(d => d.node === id))) box.append(nodeDecisions(this.decisions.data, id))
     if (eff?.nodes[id]?.example) for (const x of eff.nodes[id].expectations ?? []) box.append(h('div.expect-row-view', expectationBadge(x, undefined, eff.meanings?.[x.key]?.meaning), x.note ? h('span.small.muted', ` ${x.note}`) : null))
     // Work recorded as done afterwards (workflow_editor fix5): said as such.
     const rt = n.retrospective
@@ -1021,6 +1051,7 @@ export class RunSide {
   // source and difference, and the person's own adjustment of future work
   // (inspect first, then apply; the same operation as wfe run adjust).
   private updateDefinition(rec: RunRecord) {
+    this.renderKnowledge(rec)
     setText(this.definition.title, `Definition (${rec.definition.active ?? 'r1'} in force)`)
     const revs = rec.definition.revisions ?? []
     patchContent(this.definition.content.children[0] as HTMLElement,

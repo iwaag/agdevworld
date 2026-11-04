@@ -7,7 +7,7 @@ import type { RunResponse } from '../shared/api.ts'
 import { accessAt } from '../shared/access.ts'
 import { normalizeRepoPath, sessionPolicyOf } from '../shared/model.ts'
 import { docStepsOf, hasDocSteps, splitCounts } from '../shared/compile.ts'
-import { assessmentWords, describeSteps, effectiveOf, EXECUTOR_OPS, expectationStates, holderOf, hostOf, notableEvents, questionState, runKey, type BecauseRef, type Correction, type EntrustRef, type HistoryEntry, type Instruction, type OpInput, type RunRecord, type RunRef } from '../shared/run.ts'
+import { assessmentWords, describeSteps, effectiveOf, EXECUTOR_OPS, expectationStates, holderOf, knowledgeHistory, hostOf, notableEvents, questionState, runKey, type BecauseRef, type Correction, type EntrustRef, type HistoryEntry, type Instruction, type OpInput, type RunRecord, type RunRef } from '../shared/run.ts'
 import {
   adjustRun, checkRun, createRun, listRuns, readRun, recordDone, resolveRef, runDir, runOp, runResponse, usableRun, type AdjustResult, type CreateRunOptions,
 } from '../server/runs.ts'
@@ -425,7 +425,8 @@ An example (example: true) is a model for concrete work and cannot be started.
 Choose the concrete tasks and their count from the request and the group's
 description. Edit the definition in force (wfe run revisions <run> --show <r>),
 and in one revision:
-- add the concrete nodes, each with the type, target and expectations it needs,
+- add the concrete nodes, each with the type, target, expectations and knowledge it
+  needs (wfe run help knowledge; say in --reason why a selection differs from the example's),
   and specializes: {examples: [<example ids it replaces>], revision: <the revision
   they were read from>}. One example may become several nodes, several one, or none;
 - remove the examples, or drop example: true from one that becomes the work in place;
@@ -437,6 +438,31 @@ and in one revision:
 wfe run adjust <run> --definition <file> --reason <text> --dry-run shows the
 result; a node with execution history cannot become an example. Earlier revisions
 keep the original examples and membership.`,
+  knowledge: `Knowledge on a node: there is no separate command; it is one wfe run adjust.
+
+A node's knowledge field lists categories and the findings selected under them
+(docs/knowledge.md, On a node). It points at knowledge. It requires no reading, is
+no proof of use or success, and gates nothing: preferred or required outcomes are
+expectations. A category with nothing selected is valid, and a concrete node may
+refine what an example only intended.
+
+To change a selection, edit the definition in force (wfe run revisions <run> --show <r>):
+
+  knowledge:
+    - category: motion                  # intent, with or without findings
+      note: why this node points at it  # optional
+      findings:                         # wfe knowledge ref <id> --category motion prints this
+
+and apply it with wfe run adjust <run> --definition <file> --reason <text>, saying in
+--reason why the selection changed. Removing or replacing a reference leaves it in
+earlier revisions and the node's history; a newer revision of a finding is taken
+only by selecting it again. Candidates: wfe knowledge list --category <c>, or --text
+<words> when another category's technique is what you need.
+
+What you actually did with a finding is your report's knowledge-decisions block
+(wfe knowledge cite <id> --node <node>), read back by wfe knowledge decisions. It is
+separate from the selection: a reference may be selected and rejected, or used
+without having been selected, and adopted is not inferred from either.`,
   expectation: `wfe run expectation <run> <node> <key> met|unmet|unverified [--note <text>] [--artifact <path>]... [--commit-id <sha>[@<repository>]]... [--entry <seq>]... [--presentation <p>]... [--output <o>]... [--question <q>]...
 
 States whether a result met one of its node's expectations. Met needs evidence or
@@ -682,6 +708,16 @@ export function describeRun(r: RunResponse, opts: { history?: boolean; url?: str
   if (expected.length) {
     lines.push('Expectations:')
     for (const x of expected) lines.push(`  ${x.node}: ${x.label} · ${x.strength === 'required' ? 'Required' : 'Preferred'} · ${assessmentWords(x)}${x.assessment ? ` (reported by ${x.assessment.by}${x.assessment.reporter === 'agent' ? ', agent' : ''}${x.assessment.note ? `: ${first(x.assessment.note, 200)}` : ''}${x.assessment.evidence.length ? `; evidence: ${x.assessment.evidence.map(e => e.kind === 'artifact' ? e.path : e.kind === 'commit' ? e.commit.slice(0, 10) : e.kind === 'entry' ? `entry ${e.seq}` : `${e.kind} ${e.id}`).join(', ')}` : ''})` : ''}${x.note ? `\n${' '.repeat(33)}note: ${first(x.note, 200)}` : ''}`)
+  }
+  const pointed = Object.entries(eff?.nodes ?? {}).filter(([id, n]) => n.knowledge?.length || knowledgeHistory(rec, id).changes.length)
+  if (pointed.length) {
+    lines.push('Knowledge selected on nodes (a selection: not proof of reading, use or success; what the agent says it did: wfe knowledge decisions):')
+    for (const [id] of pointed) {
+      const k = knowledgeHistory(rec, id)
+      const words = (l: typeof k.current) => l.map(a => `${a.category ?? 'no category'}: ${a.findings?.length ? a.findings.map(f => `${f.id}@${f.commit.slice(0, 10)}`).join(', ') : 'nothing selected'}`).join('; ') || 'nothing'
+      lines.push(`  ${id}: ${words(k.current)}`)
+      for (const c of k.changes) lines.push(`    changed in ${c.revision} from ${words(c.before)}: ${c.reason}`)
+    }
   }
   const qs = Object.values(rec.questions)
   if (qs.length) {

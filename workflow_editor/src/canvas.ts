@@ -6,6 +6,7 @@ import { APPEARANCE_COLORS, APPEARANCE_ICONS, NODE_TYPES, normalizeRepoPath, typ
 import { h } from './dom.ts'
 import { icon } from './icons.ts'
 import { expectationBadge } from './nodeMeaning.ts'
+import { knowledgeAdd, knowledgeStrip, type StripEvents } from './knowledgeUi.ts'
 import { METRICS, PAD, positions, STEP_X, type DisplayMode, type Metrics } from '../shared/layout.ts'
 import { FINAL_STEP, PLAN_STEP, type EffectiveGraph } from '../shared/compile.ts'
 
@@ -60,6 +61,7 @@ export interface CanvasContext {
   // title.
   marks?: Record<string, { kind: 'added' | 'changed' | 'removed' | 'selected'; label: string }>
   edgeMarks?: Record<string, { kind: 'added' | 'removed'; label: string }> // key: `${from}\u0000${to}`
+  knowledge?: StripEvents // improve_workflow p3: the strip's controls; without it the strip is not drawn
 }
 
 const MARK_GLYPH: Record<string, string> = { added: '＋', changed: '～', removed: '－', selected: '◎' }
@@ -349,6 +351,13 @@ export class Canvas {
     if (node.example) card.classList.add('is-example')
     if (node.example || shown.length) card.append(h('div.node-meaning', node.example ? h('span.example-badge', { title: 'A model for concrete work: a run specializes it through a revision, and it is not performed itself.' }, 'Example') : null,
       ...shown.map(x => expectationBadge(x, assessed?.[x.key], this.ctx.meanings?.[x.key]?.meaning))))
+    // improve_workflow p3: category, then what is selected under it. Beside the
+    // node, not an edge; its controls never start a drag or change the graph.
+    if (this.ctx.knowledge) {
+      const strip = knowledgeStrip(id, node.knowledge, { iconsOnly: this.mode === 'mini', readonly: !!this.ctx.readonly, events: this.ctx.knowledge })
+      if (strip) card.append(strip)
+      if (!this.ctx.readonly && !node.knowledge?.length) card.append(knowledgeAdd(id, this.ctx.knowledge))
+    }
     card.append(foot)
     if (!this.ctx.readonly) card.append(h('span.port', { title: 'Drag to another node to connect', dataset: { port: id } }))
     this.installCardDrag(card, id)

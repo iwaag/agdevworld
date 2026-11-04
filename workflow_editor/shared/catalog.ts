@@ -7,6 +7,7 @@
 import { canonicalJson } from './canonical.ts'
 import { APPEARANCE_COLORS, APPEARANCE_ICONS, ID_PATTERN, type Appearance, type NodeExpectation, type Workflow, type WorkflowNode } from './model.ts'
 import { EXPECTATION_STRENGTHS } from './expectations.ts'
+import { knowledgeProblems, type KnowledgeAttachment } from './knowledge.ts'
 
 export const CATALOG_SCHEMA = 'ag.node-catalog.v1'
 export const SNAPSHOT_SCHEMA = 'ag.node-catalog-snapshot.v1'
@@ -34,6 +35,7 @@ export interface TemplateContent {
   // of the result, and whether it starts as an example. A template owns no group.
   expectations?: NodeExpectation[]
   example?: boolean
+  knowledge?: KnowledgeAttachment[] // improve_workflow p3: copied into the node, like expectations
 }
 export interface NodeTemplate extends TemplateContent {
   id: string
@@ -76,7 +78,7 @@ export function catalogBrief(c: RunCatalog, run: string): string[] {
   const t = c.snapshot.templates
   if (!t.length) return ['', 'The person\'s node catalog was empty when this run was created: they have named no activity they expect as a workflow node of its own.']
   return ['', `The person's node catalog, as it was when this run was created (wfe run nodes ${run} shows each template in full):`, CATALOG_MEANING,
-    ...t.map(x => `- ${x.id} "${x.name}" (${x.type}, revision ${x.revision}${x.example ? ', an example' : ''}${x.expectations?.length ? `, expecting ${x.expectations.map(e => `${e.key} ${e.strength ?? 'preferred'}`).join(', ')}` : ''}): ${x.expectation.trim().split('\n').join(' ')}`),
+    ...t.map(x => `- ${x.id} "${x.name}" (${x.type}, revision ${x.revision}${x.example ? ', an example' : ''}${x.knowledge?.length ? `, pointing at knowledge: ${x.knowledge.map(a => a.category ?? 'no category').join(', ')}` : ''}${x.expectations?.length ? `, expecting ${x.expectations.map(e => `${e.key} ${e.strength ?? 'preferred'}`).join(', ')}` : ''}): ${x.expectation.trim().split('\n').join(' ')}`),
     `A node from one of them goes into a draft of this run's definition with wfe nodes instantiate <template> --run ${run} --file <draft> (wfe nodes help); the draft becomes future work with wfe run adjust, with --source request when the request already asks for that work (wfe run help adjust).`]
 }
 
@@ -123,6 +125,10 @@ export function contentProblems(t: Partial<TemplateContent>): string[] {
     }
   }
   if (t.example !== undefined && typeof t.example !== 'boolean') out.push('example must be true or false')
+  if (t.knowledge !== undefined) {
+    if (!Array.isArray(t.knowledge) || t.knowledge.some(a => !isObj(a))) out.push('knowledge must be a list of {category?, note?, findings?}')
+    else for (const p of knowledgeProblems(t.knowledge as KnowledgeAttachment[])) if (p.severity === 'error') out.push(p.message)
+  }
   if (t.appearance !== undefined) {
     if (!isObj(t.appearance) || typeof t.appearance.icon !== 'string' || typeof t.appearance.color !== 'string') out.push('appearance must be {icon, color}')
     else {
@@ -137,9 +143,9 @@ export function contentProblems(t: Partial<TemplateContent>): string[] {
 export function normalizeContent(t: TemplateContent): TemplateContent {
   const a = t.appearance && (t.appearance.icon || t.appearance.color) ? { appearance: { icon: t.appearance.icon ?? '', color: t.appearance.color ?? '' } } : {}
   const g = t.type === 'delegate' && t.target ? Object.fromEntries((['project', 'workflow', 'accepts'] as const).filter(k => t.target![k]).map(k => [k, t.target![k]])) : {}
-  return { name: t.name.trim(), type: t.type, description: t.description, expectation: t.expectation, ...a, ...(Object.keys(g).length ? { target: g } : {}), ...(t.expectations?.length ? { expectations: t.expectations.map(x => ({ key: x.key, ...(x.strength ? { strength: x.strength } : {}), ...(x.note ? { note: x.note } : {}) })) } : {}), ...(t.example ? { example: true } : {}) }
+  return { name: t.name.trim(), type: t.type, description: t.description, expectation: t.expectation, ...a, ...(Object.keys(g).length ? { target: g } : {}), ...(t.expectations?.length ? { expectations: t.expectations.map(x => ({ key: x.key, ...(x.strength ? { strength: x.strength } : {}), ...(x.note ? { note: x.note } : {}) })) } : {}), ...(t.example ? { example: true } : {}), ...(t.knowledge?.length ? { knowledge: structuredClone(t.knowledge) } : {}) }
 }
-export const contentOf = (t: TemplateContent): TemplateContent => normalizeContent({ name: t.name, type: t.type, description: t.description, expectation: t.expectation, ...(t.appearance ? { appearance: t.appearance } : {}), ...(t.target ? { target: t.target } : {}), ...(t.expectations ? { expectations: t.expectations } : {}), ...(t.example ? { example: t.example } : {}) })
+export const contentOf = (t: TemplateContent): TemplateContent => normalizeContent({ name: t.name, type: t.type, description: t.description, expectation: t.expectation, ...(t.appearance ? { appearance: t.appearance } : {}), ...(t.target ? { target: t.target } : {}), ...(t.expectations ? { expectations: t.expectations } : {}), ...(t.example ? { example: t.example } : {}) , ...(t.knowledge ? { knowledge: t.knowledge } : {}) })
 export const sameContent = (a: TemplateContent, b: TemplateContent) => canonicalJson(contentOf(a)) === canonicalJson(contentOf(b))
 
 // Reads parsed JSON as a catalog; throws CatalogError('catalog-invalid')
@@ -161,7 +167,7 @@ export function parseCatalog(raw: unknown): Catalog {
     seen.add(id)
     if (typeof t.revision !== 'number' || !Number.isInteger(t.revision) || t.revision < 1) fail('catalog-invalid', `template ${id}: revision must be a positive integer`)
     for (const k of ['name', 'type', 'description', 'expectation', 'updated', 'by']) if (typeof t[k] !== 'string') fail('catalog-invalid', `template ${id}: ${k} must be text`)
-    const content = { name: t.name, type: t.type, description: t.description, expectation: t.expectation, ...(t.appearance !== undefined ? { appearance: t.appearance } : {}), ...(t.target !== undefined ? { target: t.target } : {}), ...(t.expectations !== undefined ? { expectations: t.expectations } : {}), ...(t.example !== undefined ? { example: t.example } : {}) } as TemplateContent
+    const content = { name: t.name, type: t.type, description: t.description, expectation: t.expectation, ...(t.appearance !== undefined ? { appearance: t.appearance } : {}), ...(t.target !== undefined ? { target: t.target } : {}), ...(t.expectations !== undefined ? { expectations: t.expectations } : {}), ...(t.example !== undefined ? { example: t.example } : {}), ...(t.knowledge !== undefined ? { knowledge: t.knowledge } : {}) } as TemplateContent
     const problems = contentProblems(content)
     if (problems.length) fail('catalog-invalid', `template ${id}: ${problems.join('; ')}`)
     return { id, revision: t.revision as number, ...contentOf(content), updated: t.updated as string, by: t.by as string }
@@ -273,6 +279,7 @@ export function instantiate(w: Workflow, t: Pick<NodeTemplate, 'id' | 'revision'
     template: { id: t.id, revision: t.revision, expectation: t.expectation },
     ...(t.expectations?.length ? { expectations: t.expectations.map(x => ({ ...x })) } : {}),
     ...(t.example ? { example: true } : {}),
+    ...(t.knowledge?.length ? { knowledge: structuredClone(t.knowledge) } : {}),
   }
   const next = structuredClone(w)
   next.nodes[id] = node

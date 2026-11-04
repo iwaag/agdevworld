@@ -8,6 +8,7 @@ import { contentProblems, TEMPLATE_TYPES, type NodeTemplate, type TemplateConten
 import { APPEARANCE_COLORS, APPEARANCE_ICONS, ID_PATTERN } from '../shared/model.ts'
 import { api, type CatalogView } from './api.ts'
 import { colorOf, iconOf, TYPE_LABEL } from './canvas.ts'
+import { categoryLabel, KNOWLEDGE_CATEGORIES, withCategory, withoutCategory } from '../shared/knowledge.ts'
 import { append, h, when } from './dom.ts'
 import { icon } from './icons.ts'
 import { expectationEditor } from './nodeMeaning.ts'
@@ -58,7 +59,7 @@ export function renderNodesView(root: HTMLElement): ViewHandle {
     }
     if (!disposed) render()
   }
-  const contentFrom = (t: TemplateContent): TemplateContent => ({ name: t.name, type: t.type, description: t.description, expectation: t.expectation, appearance: { icon: t.appearance?.icon ?? '', color: t.appearance?.color ?? '' }, ...(t.target ? { target: { ...t.target } } : {}), ...(t.expectations ? { expectations: t.expectations.map(x => ({ ...x })) } : {}), ...(t.example ? { example: true } : {}) })
+  const contentFrom = (t: TemplateContent): TemplateContent => ({ name: t.name, type: t.type, description: t.description, expectation: t.expectation, appearance: { icon: t.appearance?.icon ?? '', color: t.appearance?.color ?? '' }, ...(t.target ? { target: { ...t.target } } : {}), ...(t.expectations ? { expectations: t.expectations.map(x => ({ ...x })) } : {}), ...(t.example ? { example: true } : {}), ...(t.knowledge ? { knowledge: structuredClone(t.knowledge) } : {}) })
 
   function select(t: NodeTemplate | null) {
     if (dirty() && !confirm('Discard the unsaved changes to this template?')) return
@@ -119,6 +120,10 @@ export function renderNodesView(root: HTMLElement): ViewHandle {
         refresh()
         if (rebuild) render()
       })),
+      h('div.field', h('span', 'Knowledge the node points at — copied into the node'), h('div.k-template-categories', ...[...new Set([...KNOWLEDGE_CATEGORIES, ...(d.content.knowledge ?? []).map(a => a.category).filter((c): c is string => !!c)])].map(c => h('label.check', h('input', {
+        type: 'checkbox', checked: !!d.content.knowledge?.some(a => a.category === c), 'aria-label': `Points at ${categoryLabel(c)}`,
+        onchange: (e: Event) => { const list = (e.target as HTMLInputElement).checked ? withCategory(d.content.knowledge ?? [], c) : withoutCategory(d.content.knowledge ?? [], c); if (list.length) d.content.knowledge = list; else delete d.content.knowledge; refresh() },
+      }), h('span', categoryLabel(c)))))),
       h('label.check', h('input', { type: 'checkbox', checked: !!d.content.example, 'aria-label': 'Nodes start as examples', onchange: (e: Event) => { if ((e.target as HTMLInputElement).checked) d.content.example = true; else delete d.content.example; refresh() } }), h('span', 'Example: nodes made from this are models a run specializes')),
       h('div.field', h('span', 'Appearance (display only)'), h('div.appearance-row',
         h('select', { 'aria-label': 'Template icon', onchange: setA('icon') }, opt(APPEARANCE_ICONS, d.content.appearance?.icon ?? '', 'icon')),
